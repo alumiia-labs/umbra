@@ -1,7 +1,8 @@
 # UMBRA Protocol Specification — Part 2: Threat Model and Security Goals
 
 **Status:** Draft
-**Version:** 0.1.0-draft
+**Version:** 0.2.0-draft
+**Date:** 2026-09-11
 
 ---
 
@@ -149,6 +150,10 @@ and the task snapshot service. A7 reads each byte that the client gives to a
 platform interface. A7 cannot open the encrypted store of Part 15 §15.6.4, and
 A7 cannot decrypt a record in transit.
 
+Android is the v1 platform (Part 1 §1.1). This section keeps the abstract term
+*the platform*, because the rule below binds each platform that a later
+revision adds.
+
 **In scope, and partially mitigated.** **[THR-013]** A client MUST NOT write a
 plaintext record, a key, or a decrypted attachment to a platform store. Part 15
 §15.6.6 defines a platform store, and it gives the rule for each platform
@@ -190,7 +195,12 @@ realizes the goal.
 | G13 | **No compellable identity data** — infrastructure operators hold no data that identifies a user | A5 † | Parts 3, 10, 16 |
 
 > † This goal holds only to the limit that Part 16 states. For G7 and G11 the
-> limit is an active A2 or an active A3, and Part 16 §16.3 gives it. For G13 the
+> limit is an active A2 or an active A3, and Part 16 §16.3 gives it. For G11 the
+> group-queue relay also holds a bounded view. It learns the member count of a
+> group at each rotation, the count of reader sessions and writer sessions, and
+> the time and the bucket of each record. It learns no identity and no
+> membership list. Part 3 §3.11 states that view, and Part 16 §16.3 records it.
+> For G13 the
 > limit is the ingress relay, which sees a client IP address because it carries
 > the connection. Part 16 §16.1 holds that row, and Part 16 §16.3 records the
 > residual. No protocol removes that address from the party that carries the
@@ -244,8 +254,8 @@ implementation to them in the same manner.
 >
 > **U3 has two scopes, and Part 8 §8.3 is the cause.** Private mode wakes the
 > device on a fixed clock, and a message arrival does not change that clock.
-> Part 8 §8.3 gives the ceiling of Apple for a silent push as 2–3 in one hour,
-> thus the cadence does not go below 20 min. A 15 min invariant and a 20 min
+> Part 8 §8.3 derives the floor of the fixed clock from Doze and from U5, thus
+> the cadence does not go below 20 min. A 15 min invariant and a 20 min
 > floor do not hold together. Thus U3 scopes its targets to Instant
 > notifications and Balanced mode, and U5 uses the same method. Private mode
 > keeps a stated latency, and the U3 row gives it.
@@ -260,7 +270,7 @@ implementation to them in the same manner.
 > The idle background is 88.30 MB each month, and U4 moves to 100 MB.
 >
 > **U4b names no target in this draft.** A Private wake of Part 8 §8.3 opens
-> all 20 queue-relay sessions of the model, because the client cannot know
+> each queue-relay session of the model day, because the client cannot know
 > which queue holds a message. Part 3 §3.12 derives 350.31 MB and 468.96 MB
 > each month from that. A target above those figures binds nothing, and a
 > target below them fails under rule THR-008 with no rule that lets a client
@@ -301,7 +311,7 @@ adds a trade MUST add a row to this table.
 | A short `SYNC_MAX_AGE` makes a device reject each older sibling record, thus that device converges on a short window only | Part 7 §7.5.2 |
 | The sending device carries the convergence, thus a lost source device with no peer copy loses that range | Part 7 §7.5.3 |
 | An edit window of 24 hours lets a sender change a delivered message, and the recipient keeps no earlier text | Part 7 §7.5.6 |
-| Three retained sender-key generations are three live symmetric chain keys for each member on a seized device | Part 11 §11.3.2 |
+| A device keeps the slot key of the last `GROUP_SLOT_WINDOW` hours of the current group epoch, thus a seized device opens 24 h of the retained records of that group | Part 11 §11.3.2 |
 | A granting epoch is a signed and transferable statement, thus G10 does not cover the group administration | Part 11 §11.9.5 |
 | A moderator removal in a private group destroys a record on the device of each member | Part 11 §11.9.6 |
 | A community post is not fully verifiable until the next checkpoint arrives | Part 12 §12.4.1 |
@@ -312,9 +322,9 @@ adds a trade MUST add a row to this table.
 | Private mode holds a message for its fixed cadence, thus U3 covers Instant notifications and Balanced mode only | Part 8 §8.3 |
 | A hop 1 or hop 2 key set runs no per-cell update, thus a seized middle relay opens its layer of a recorded cell | Part 3 §3.4.4 |
 | The braid header carries the public seed and not the private seed, thus the default heal window rises from 18 records to 36 records | Part 5 §5.5.2 |
-| A group fan-out of *N* − 1 cells shows the size of one conversation to an ingress relay | Part 3 §3.11 |
+| A group-queue relay reads the member count of a group at each rotation, from the slot count of the epoch-key record | Part 11 §11.4.2 |
 | A skipped-message key lives 45 days, thus a seized device gives a wider key set | Part 5 §5.5.4 |
-| A re-broadcaster holds the queue set of a group, thus tier T3 gives up G11 against that party | Part 11 §11.6 |
+| A group-queue relay holds `GROUP_RETENTION` of the ciphertext of a group and the time and the bucket of each record, thus two replica operators see the activity of a group | Part 11 §11.5 |
 | An accepted key-change notice ends the post-compromise healing for that contact | Part 4 §4.5.1 |
 | A community roster carries a report key for each role, thus it moves from bucket `B2` to bucket `B3` | Part 12 §12.5.2 |
 | A backup write costs about 492 KB each day on the chunk path, and the earlier draft counted it as free | Part 3 §3.12 |
@@ -328,24 +338,23 @@ adds a trade MUST add a row to this table.
 | A poll count can differ between two members, because a group has no total order | Part 11 §11.11 |
 | A shared contact needs the consent of that contact, thus a share is three records and not one | Part 6 §6.6.7 |
 | A moderation epoch names no author, and a member folds each superseded epoch, thus the chain is not an audit log | Part 11 §11.9.6 |
-| A group join opens a channel with each member without a user action at that member | Part 11 §11.9.1 |
+| A group carries no delivery receipt, no read receipt, and no typing indicator, thus a sender in a group does not learn that a record arrived | Part 11 §11.6 |
+| A member that leaves a group reads the group until a member of role `admin` or above rotates the epoch | Part 11 §11.4.1 |
 | An absence claim moves each ratchet of an absent device in one record, thus a device that is offline for `OWNER_ABSENCE` loses its ownership with no notice | Part 7 §7.3.1 |
 | A catch-up object puts the backlog of an absence on the chunk path at once, thus a relay reads that backlog as one attachment | Part 7 §7.5.1 |
 | A save to the media store and a screenshot stay as user actions, thus one tap moves a plaintext out of the encrypted store | Part 15 §15.6.6 |
 | The accessibility tree stays whole, thus an enabled accessibility service reads each rendered message | Part 15 §15.6.6 |
-| The at-rest entanglement is an HMAC in StrongBox on Android and a P-256 ECDH in the Secure Enclave on iOS, thus the client carries two platform adapters | Part 15 §15.6.4 |
 | The ClientHello is the ClientHello of the rustls stack and not of a browser, thus a classifier tells an UMBRA client from a browser on the first flight | Part 3 §3.8.1 |
 | A relay under a legal order serves a signed operator removal beside the stub, thus the removal is attributable and it binds that relay only | Part 12 §12.4.4 |
 | A roster that removes an owner needs more than half of the owners, thus a lone hostile owner removes nobody and a community with two owners needs both | Part 12 §12.5.2 |
 | A published rendezvous queue rotates each 30 days, thus one relay holds the hello count of one period and the holder pays one queue and one write in each period | Part 9 §9.9 |
 | A record that no relay accepts in `SEND_GIVE_UP` fails, and the user resends it, thus no retransmission runs for the life of a session | Part 3 §3.7 |
-| A 1:1 conversation and a group at or below `T1_MAX` default to a notification for each record. Thus a small conversation alerts on each record, and a large one alerts on a mention only | Part 7 §7.5.9 |
+| A 1:1 conversation and a group at or below `GROUP_ALL_NOTIFY_MAX` default to a notification for each record. Thus a small conversation alerts on each record, and a large one alerts on a mention only | Part 7 §7.5.9 |
 | The manual verification is a six-digit code, thus an active adversary at the first contact passes one ceremony in 10⁶ | Part 4 §4.5.2 |
 | A delivery receipt and a read receipt are off by default. Thus a sender does not learn that a record arrived unless the peer opts in | Part 3 §3.5.4 |
 | A typing indicator is off by default, thus a peer does not learn that a user composes unless that user opts in | Part 6 §6.6.9 |
 | A community defaults to a digest, thus a subscriber learns of a post at `DIGEST_INTERVAL` and not at the post | Part 12 §12.6, Part 8 §8.5 |
 | A community defaults to `mentions` with a digest queue. Thus the device wakes at most `COMMUNITY_DIGEST_BUDGET` times a day for each community, and the community relay counts the registered queues | Part 8 §8.5.1, Part 12 §12.6.4 |
-| Private mode has no background carrier on iOS, thus an iOS user in Private mode drains in the foreground only | Part 8 §8.4.2 |
 | A message push lives 24 hours at the provider, thus a seizure there exposes one day of 69-byte blobs in place of one hour | Part 8 §8.4.3 |
 | A device that fails three consecutive blob opens shows a clock state. Thus a wrong clock is visible, and a preview stops until the root is fresh | Part 8 §8.2.3, Part 15 §15.9.2 |
 | A sender re-encodes each media object and removes its metadata fields. Thus a recipient gets a smaller file with no location, and the original needs one selection for each send | Part 13 §13.3 |
@@ -373,15 +382,15 @@ those rules has to check the goal again.
 | --- | --- | --- |
 | U1 | Part 3 §3.10 carriers, Part 4 §4.2.5 `IDN-015`, Part 4 §4.7.6 `IDN-054`, Part 14 §14.2.1 | A scripted first launch on a mid-tier Android device on 4G |
 | U2 | Part 3 §3.9 modes, Part 3 §3.5.2 pacing, Part 7 §7.5.1 `DEV-193`, Part 7 §7.5.4 | A two-party send, from the ratchet owner and from a peer device |
-| U3 | Part 8 §8.3 modes, Part 8 §8.4.1, Part 8 §8.4.2 | A locked and idle device, in Instant mode and in Private mode |
+| U3 | Part 8 §8.3 modes, Part 8 §8.4.1, Part 8 §8.4.3 | A locked and idle device, in Instant mode and in Private mode |
 | U4 | Part 3 §3.12 idle table, Part 3 §3.6.2 tier C, Part 3 §3.12 `NET-096` and `NET-097` and `NET-099` and `NET-100`, Part 4 §4.7.2 `IDN-080`, Part 6 §6.2.3 `WIR-361`, Part 8 §8.5 `WAKE_COALESCE_WINDOW` | A 24 h idle capture of the background bytes, in Instant mode, with the arrival count of the model day |
 | U4b | Part 3 §3.12 idle table and its Private notifications paragraph, Part 8 §8.3 modes | No target in this draft. A 24 h idle capture of the background bytes at each cadence of Private mode reports the figure |
 | U5 | Part 3 §3.12 battery, Part 8 §8.4.1, Part 8 §8.8 | A 24 h idle run with no arrival, and a run with a scripted arrival count, on stock Android **and** GrapheneOS, with a power monitor |
 | U6 | Part 3 §3.2.4 `MSG_TTL`, Part 3 §3.7 ARQ and `SEND_GIVE_UP`, Part 13 §13.4 replicas, Part 13 §13.7.1, Part 15 §15.9 | A recipient that returns inside the retention window |
 | U7 | Part 7 §7.4, Part 7 §7.6 `DEV-131` | A second device link, timed, with a contact that verified before it |
-| U8 | Part 15 §15.6.2 and §15.6.3 | A cold start on a 2021-class mid-range Android device, with the store unlocked |
+| U8 | Part 15 §15.6.2 | A cold start on a 2021-class mid-range Android device, with the store unlocked |
 | U8b | Part 15 §15.6.4 | A start after the auto-lock on the same device, timed from the passphrase confirmation |
-| U9 | Part 2 §2.4 `THR-009`, Part 5 §5.5.2 braid, Part 5 §5.5.4 `CRY-098`, Part 6 §6.6.11 `WIR-333`, Part 11 §11.3.2 `GRP-020`, Part 11 §11.3.3 `GRP-161` | A count of the undecryptable records against the delivered records, at one device over 30 days |
+| U9 | Part 2 §2.4 `THR-009`, Part 5 §5.5.2 braid, Part 5 §5.5.4 `CRY-098`, Part 6 §6.6.11 `WIR-333`, Part 11 §11.4.3 key supply | A count of the undecryptable records against the delivered records, at one device over 30 days |
 | U10 | Part 4 §4.7.1, Part 4 §4.7.2, Part 4 §4.7.3, Part 4 §4.8 | A restore from a fresh install, timed, at each of the three recovery paths, after a completed setup |
 | U10b | Part 4 §4.7.6 `IDN-051` to `IDN-054` | A scripted setup from the settings screen, with a tap count |
 | S1 | Part 4 §4.3.3 `IDN-129` to `IDN-132`, Part 9 §9.3.3, Part 9 §9.6, Part 8 §8.2.6, Part 14 §14.4 | A pasted address string at a fresh install, timed to the shown request at the addressee, in Instant mode and in Private mode |
@@ -502,9 +511,10 @@ drops a leak is the failure mode that this note prevents.
 | **Ingress Relay** | The client IP address, the connection time, the cell counts, the cell sizes, and that this client is an UMBRA client. In tier C it also reads the send times, because a backgrounded client makes no cover cell (Part 3 §3.6.2) | The destination queue, the recipient, the content, and how many conversations the client has |
 | **Chain Relay** | Two adjacent relay addresses, the time, and the cell size | The client IP address, the destination queue, the recipient, and the content |
 | **Queue Relay** | The queue identifiers, the delivery time, the cell size, and the ciphertext at rest. For a maximum of 8 queues at a time, that those queues share one transport session (Part 3 §3.2.5) | The client IP address, the sender identity, the recipient identity, the content, and which person owns the queue |
+| **Group-queue relay** | That a group queue exists, the count of its reader sessions and its writer sessions, the arrival time and the bucket of each record, the exact member count at each rotation from the slot count of the epoch-key record, the count of notify registrations, and the `relay_id` of each registered notify queue. It holds `GROUP_RETENTION` of ciphertext (Part 3 §3.2.7, Part 3 §3.11) | The identity of any member, the pairwise queue of any member, the sender of a record, the content, and the membership list |
 | **Two colluding relays (ingress and queue)** | That a client at IP address X delivered to queue Q at time T | The recipient identity and the content. But this condition is a real deanonymization risk. Refer to the path constraints in Part 10 |
 | **Notification Relay (NDR)** | An opaque and rotating push registration. That *some* queue that it monitors had activity. The platform push token | Which queue, which user, the content, and the contact graph |
-| **Apple and Google (platform push)** | The device push token, the application identity, and the wakeup time | The content, the queue, the contact, and the sender |
+| **Google (FCM), or no platform party under UnifiedPush** | The device push token, the application identity, and the wakeup time | The content, the queue, the contact, and the sender |
 | **The nonprofit** | The data that its own relays learn (above), and aggregate directory statistics | No more data than another operator gets. It holds no user database, because no user database exists |
 | **Directory Authority** | Relay descriptors and measurements | Nothing about users. Clients get the full directory, or they use a privacy-preserving mechanism (Part 10) |
 | **A contact** | All the data that you send to that contact, and that you are you | Your other contacts, your Pairwise Addresses with them, and your Public Address if you do not share it |

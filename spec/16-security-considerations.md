@@ -1,7 +1,8 @@
 # UMBRA Protocol Specification — Part 16: Security Considerations and Known Limitations
 
 **Status:** Draft
-**Version:** 0.1.0-draft
+**Version:** 0.2.0-draft
+**Date:** 2026-09-11
 
 ---
 
@@ -42,9 +43,10 @@ project tracks it as one.**
 | **Ingress relay** | The client IP address, the connection times, the cell counts, the cell sizes, and the hop 1 key set of each live circuit. That key set opens the hop 1 layer of a recorded cell, which gives the hop 2 ciphertext (Part 3 §3.4.4) | A conformant relay keeps the connection lifetime. A malicious or compelled relay can log for an unlimited period. A client pins two ingress relays, and each pin lasts 60 days confirmed and 120 days unconfirmed (Part 10 §10.6.1). Thus a prospective order against either operator captures that client for that period. | An IP address that ran UMBRA at the time T. Not the party, not the destination, and not the content. |
 | **Chain relay** | Two adjacent relay addresses, the cell times, and the hop 2 key set of each live circuit. That key set opens the hop 2 layer of a recorded cell, which gives the hop 3 ciphertext | In memory only | Nothing that identifies a user. |
 | **Queue relay** | Queue IDs, ciphertext, delivery times, a per-queue sequence counter, the last acknowledged sequence, and a maximum of 8 queues for each session. In Instant mode it holds the `(handle, k_tok, notifier_id)` triple of each registered queue. The hop 3 key set of a live circuit opens no recorded cell. Part 3 §3.4.4 rule `NET-208` erases each key set after its cell | `MSG_TTL` 45 d, `QUEUE_IDLE_TTL` 60 d. A relay destroys the sequence counter with the queue, and a `DEL` destroys the queue record (Part 6 §6.4.3). The triple rotates each 7 d under `NTF-007` | A set of random 32-byte identifiers, and ciphertext that the two endpoints of the channel alone can decrypt. In Instant mode, the `(handle, k_tok, notifier_id)` triple of each registered queue and its notification times (Part 8 §8.7). The triple names the notification handle of at most 8 queues, and with the NDR it gives the push token of that handle. A relay does not hold a device-set acknowledgment point. Part 7 §7.5.5 makes that acknowledgment an application record inside the L6 AEAD. Thus it is one `B0` cell on a sync queue. It reads as any other sync record. |
+| **Group-queue relay** | The `GroupQueueId`, the three public credentials of the group queue and the two superseded ones under grace, the retained records, the count of live reader sessions and writer sessions, and the notify registrations of Part 8 §8.5.2. No membership list, no member index, and no identity (Part 3 §3.2.7) | `GROUP_RETENTION` 30 d for a record, `GROUP_IDLE_TTL` 60 d for the queue, `GROUP_READ_GRACE` 30 d and `GROUP_WRITE_GRACE` 24 h for a superseded credential. A registration lives 7 d plus `CLOCK_SKEW` in memory, at most `GROUP_NOTIFIER_MAX` for each queue | 30 days of ciphertext that the members alone can decrypt, the session counts at the time of the order, the member count of the group at each retained rotation from the slot count of the epoch-key record, and the `relay_id` of each registered notify queue. No member, no sender, and no content |
 | **Community relay** | Post bodies, post hashes, per-author chain indexes, checkpoints, post stubs, community rosters, moderation epochs, encrypted metadata records, and pull volumes. It holds the notification queue registrations of Part 12 §12.6.4. A pull carries no client identifier (Part 12 §12.3.3), and a registration carries none. The moderation epoch chain is a **signed removal ledger** and a **signed ban ledger** (Part 12 §12.5.2) | `COMMUNITY_RETENTION` 90 d for a post, a stub, and a checkpoint (Part 12 §12.4.6). The control chain and the metadata stay while the relay serves the community. The chain is append-only by construction | The full public post history of a named pseudonym, and prospectively each future post of that pseudonym. A pull carries no pseudonym and no client identifier (Part 12 §12.3.3), thus no pull is attributable to that pseudonym. A community pseudonym does not rotate (Part 12 §12.9), thus this is the one durable identifier in the system. It also gives the signed removal ledger and the signed ban ledger, which name each removed post and each banned pseudonym under a signature |
 | **Attachment relay** | Opaque chunks of one fixed size, under a random credential for each chunk. Part 13 §13.7 gives `CHUNK_SIZE`. The same store holds the backup objects of Part 4 §4.7.2 under a rotating handle | `CHUNK_TTL` 45 d for a chunk, `CHUNK_LIFE_MAX` 90 d for a chunk that a reader renews, `BACKUP_TTL` 180 d for a backup object | Opaque chunks. It cannot link a chunk to a file or to a user. A backup object is ciphertext under a key that the two halves of the Recovery Code give |
-| **Notification relay (NDR)** | Stored `(handle, ct_token)` pairs. In Instant mode it holds `k_tok` and the token-to-handle mapping in memory at the dispatch | The stored handles rotate each 7 d. A malicious or compelled NDR can log the dispatch mappings prospectively. | A subpoena for "all push tokens" returns encrypted blobs. Prospective logging, a wiretap, or collusion with a relay recovers the token-to-queue mapping. |
+| **Notification relay (NDR)** | Stored `(handle, ct_token)` pairs. In Instant mode it holds `k_tok` and the token-to-handle mapping in memory at the dispatch. A deployment can operate its own NDR (Part 8 §8.7), thus no one NDR sees each dispatch | The stored handles rotate each 7 d. A malicious or compelled NDR can log the dispatch mappings prospectively. | A subpoena for "all push tokens" returns encrypted blobs. Prospective logging, a wiretap, or collusion with a relay recovers the token-to-queue mapping. |
 | **Directory authorities** | Relay descriptors, class measurements, aggregates with added noise, and the signed operator dossier of each relay (Part 10 §10.6) | The consensus history. The dossier while the relay is listed | Nothing about a user. The legal entity, the beneficial-control declaration, the ASN, the jurisdiction, and the legal-process contact of each relay operator. Part 3 §3.10.1 makes the dossier a public record |
 | **Handle directory**, which is the OPRF evaluator | Handle strings, rotatable handle keys, and rotatable rendezvous addresses. The blinded element of each OPRF evaluation, the token or the proof of work that paid for it, and the connection time of each lookup | The entries until a rotation. A conformant directory keeps no query log. A compelled directory can log each blinded query from the moment of the order | The handle list, which §9.3 makes worthless deliberately. A prospective log of blinded queries, which names no handle, because the directory never sees the plaintext (Part 9 §9.4) |
 | **Queue relay of a rendezvous queue** | The queue address of a published handle or address, which any party that resolves the entry can name. The arrival time and the count of each hello | Until the rotation of `RENDEZVOUS_ROTATE` (Part 9 §9.9) | That a published entry received hellos at the times T. Nothing about a sender, because a hello is a padded message under the key of the entry (Part 9 §9.6) |
@@ -54,7 +56,7 @@ project tracks it as one.**
 | **A platform-cloud item that holds `C_user`** | `C_user` only, and the user opts in (Part 4 §4.7.1) | The provider defines it | The user half of the Recovery Code. That half alone opens nothing, and `IDN-086` keeps a `C_social` share out of the same item |
 | **A moderator or an owner of a private group** | The group history on that device, the `GroupRosterKey_g` of that group, and the granting chain that Part 11 §11.9.3 bounds | Until a wipe | The power to publish a signed moderation epoch that hides or removes a message on the device of each member. **This party is a named natural person, and Part 11 §11.9.6 creates it deliberately.** That section gives the four mitigations and states the residual |
 | **The nonprofit** | The data that its own relays hold, from the rows above | As above | **No user database, because no user database exists.** There is no account, no registration, no phone number, no email address, and no global identifier. |
-| **Apple and Google** | The mapping from a device push token to an account. The wake times and the wake count | The provider defines it | Which accounts have UMBRA installed, and at what times UMBRA woke them. **Treat this mapping as adversarial.** |
+| **Google (FCM)** | The mapping from a device push token to an account. The wake times and the wake count. A device under UnifiedPush or under background polling (Part 8 §8.4.1) gives it nothing | The provider defines it | Which accounts have UMBRA installed under FCM, and at what times UMBRA woke them. **Treat this mapping as adversarial.** |
 | **Platform cloud services (backup and sync)** | No UMBRA data, under Part 15 §15.6.6. A file that the user saved to the media store, and a screenshot | The provider defines it | Part 2 §2.2 models this party as A7. The platform backup carries no container of the client, because `IMP-048` and `IMP-049` exclude it. A saved file is a user action, and `IMP-046` warns before the first one |
 | **Invitation host** | The time and the client address of each browser open of an invitation link, without the fragment | The nonprofit defines it | Part 4 §4.3.1. A device with the client opens no browser, thus the host sees an open by a party without the client only. The host cannot read the fragment, because a browser does not send it |
 | **App stores** | The legal identity of the developer and the registration of the signing key | Permanent | The power to remove or replace the application in a jurisdiction. Refer to §16.5. |
@@ -183,12 +185,9 @@ stop delivery (U6).
 
 ### 16.2.8 iOS notification delivery has one operator
 
-A third party can operate a queue relay. A third party cannot operate iOS
-notification delivery, because the APNs certificates are not public (Part 8
-§8.7.1). Private mode has no background carrier on iOS, thus an iOS user in
-Private mode drains in the foreground only (Part 8 §8.4.2). This limit is the
-sharpest tension between the infrastructure model and the
-no-single-trusted-party goal.
+This section is retired in 0.2.0-draft. Android is the v1 platform, and a
+deployment can operate its own NDR (Part 8 §8.7), thus notification delivery
+has no one operator.
 
 ### 16.2.9 Multi-device history exposure
 
@@ -198,13 +197,9 @@ limit the exposure, and they do not remove it.
 
 ### 16.2.10 iOS distribution has one gatekeeper
 
-Apple notarizes each iOS application, on the App Store and on an alternative
-marketplace under the EU DMA. Thus no iOS channel is outside the control of
-Apple, and `SEC-008` binds Android only. An order against Apple removes the
-application from each iOS channel in a jurisdiction. The controls that stay are
-the reproducible static library of Part 15 rule `IMP-070`, the published hash
-of `IMP-071`, and the transparency log of `SEC-006`. Those three make a
-modified iOS release detectable, and they do not make it deliverable.
+This section is retired in 0.2.0-draft. Android is the v1 platform, and
+`SEC-008` binds each v1 distribution channel, thus distribution has no one
+gatekeeper.
 
 ## 16.3 Residual leaks, enumerated
 
@@ -214,41 +209,33 @@ modified iOS release detectable, and they do not make it deliverable.
 | The cell sizes, from a ladder of 4 values | Each hop | Part 3 §3.3 bucketing |
 | A maximum of 8 queues share a session | The queue relay | Part 3 §3.2.5 isolation limit |
 | An approximate padded file size, from the chunk count | All the chunk relays in collusion | Part 13 §13.9 |
-| The group membership, from the fan-out times | Two colluding queue relays | Part 11 §11.3.0 jitter |
 | The list of the handles | Each party | Part 9 §9.3 — worthless deliberately |
-| A device has UMBRA installed, and the wake times | Apple and Google | Part 8 §8.7 |
+| A device has UMBRA installed, and the wake times | Google, under FCM | Part 8 §8.7. A device under UnifiedPush or under background polling gives Google nothing |
 | The community content | The community relays | Part 12 §12.1 — public by design |
 | A push token belongs to a party with a published handle or address | The Notification Delivery Relay and the queue relay of the rendezvous queue, in collusion | Part 8 §8.2.6. The rendezvous queue registers under a notification handle of its own, thus the pairwise queues stay apart. Private mode registers no rendezvous queue |
 | The name, the topic, the language, and the activity of a listed community | Each party | Part 12 §12.7.2 — a listing is opt-in and off by default |
 | The pseudonyms that reacted to a post, and the count | Each subscriber and each community relay | Part 12 §12.6.2 — a reaction is a chain record, and it is public in the same manner as a post |
 | The linkage of the queues of one transport session, from a delay probe on one queue | An active A2 or A3 | Part 3 §3.2.5 bounds the set at 8 queues. That isolation limit binds a passive recorder only. UMBRA accepts this residual |
-| The membership of a group, from a delay probe on one queue | An active A2 or A3 | Part 11 §11.3.0 jitter randomizes an emission time. It does not randomize a response to a probe. UMBRA accepts this residual |
+| The cursor of one reader session of a group, from a delay probe on that session | An active A2 at the group-queue relay | Part 3 §3.11.1. The relay already holds the session and its cursor, and the probe joins that session to no identity and to no pairwise queue. UMBRA accepts this residual |
 | The reconnect cadence of a recipient, from the boundary of a cumulative acknowledgment | The queue relay | Part 6 §6.4.3 rule 7. A cumulative acknowledgment gives one boundary for each batch, and not one for each message. UMBRA accepts this residual |
 | The send times of a user with the application in the background | The ingress relay, and a local observer | Nothing. Part 3 §3.6.2 makes no cover cell outside the foreground, thus a background outbound cell is a real event. UMBRA accepts this residual |
 | The send time of a Private-mode message on the client link | The ingress relay, and a local observer | Part 3 §3.9. A Private-mode send no longer waits for a cover slot. The per-hop delay and the inbound pacing stay. UMBRA accepts this residual |
 | The delivery tail of a Private-mode message | The recipient, and a local observer | Part 3 §3.9. A constant-rate inbound clock gives a tighter tail at the same cell rate. UMBRA gives it up, because a pacing shape that differs by mode names the mode in the inbound cell count. UMBRA accepts this residual |
 | The bucket of each inbound cell | A local observer | Part 3 §3.5.2. The inbound pacing cover cell is bucket `B0` at 560 B, and the modal text delivery is bucket `B1` at 2 096 B. Thus the cover does not conceal the bucket. Bucket-matched cover costs about 39.5 MB for each 2 h session against 4.03 MB. UMBRA accepts this residual |
 | The shape of a large reconnect drain | A local observer | Part 3 §3.5.2. A backlog above `DRAIN_THRESHOLD` leaves the relay in one unpaced response, and the observer reads it as one burst. A paced drain of that backlog would fail U6. UMBRA accepts this residual |
-| Up to `SENDER_KEY_GENERATIONS` live chain keys of each group member, on a seized device | A6 | Part 11 §11.3.2. `SENDER_KEY_GENERATIONS` is 3 and `SENDER_KEY_MAX_AGE` is 7 days. UMBRA accepts this residual |
 | The tombstone table on a seized device, which names each deletion inside the retention window | A6 | Part 7 §7.5.2 and §7.5.3. The source watermark bounds that table by the retention window. The table is not a permanent record of every deletion of the user |
 | A transferable proof of the current role grants of a group, on a seized device | A6 | Part 11 §11.9.3. A granting epoch is signed, and the retention rule keeps the authority path only. G10 does not cover the group administration after this change. UMBRA accepts this residual |
 | A signed statement that a named role acted on a named `msg_id`, on a seized device | A6 | Part 11 §11.9.6. The preimage names no author, and rule GRP-181 keeps the current statements only. UMBRA accepts this residual |
-| A recovered record in a group, whose sender key came from a key supply and not from an ordered chain | A6, a member that replays a supply | Part 6 §6.6.11 and Part 11 §11.3.3. Rule WIR-334 binds the supply to the channel of the request, and rule WIR-335 marks the record. UMBRA accepts this residual |
-| The channel of a joiner to one member, when the inviting admin opens the invitation of that member itself | A hostile admin | Part 11 §11.9.1. The first-access lock of Part 4 rule IDN-023 fails at the joiner, and rule GRP-178 names the admin. UMBRA accepts this residual |
 | The blinded subject list of the roster, on a seized device that holds `K_set` | A6 | Part 7 §7.3.1. Rule DEV-226 blinds each subject under `K_set`, and a seized device holds that key. The blinding protects the archive of Part 7 §7.6.1 and a roster that left the set. UMBRA accepts this residual |
-| The linkage of two queues to one group, from two `B2` cells inside the jitter window | Two colluding queue relays | Part 11 §11.9.4. `GRANT_RATE` bounds the frequency of a granting epoch. It does not conceal the event. UMBRA accepts this residual |
 | A delayed settlement of a community post, from a withheld checkpoint | One community relay, for as long as that relay serves the community | Nothing prevents the withholding. Part 2 §2.5 gives guaranteed availability as a non-goal. The detection is the cross-relay check of Part 12 §12.4.3.1, and the remedy is to drop the relay. UMBRA accepts this residual |
-| An edit that follows a group message, inside the same jitter window | Two colluding queue relays | Part 11 §11.3.0. The jitter randomizes each fan-out alone. It does not decorrelate two fan-outs that one user action couples in time. UMBRA accepts this residual |
 | An edit whose new text is above 145 bytes, because the cell steps from `B0` to `B1` | The queue relay | Part 6 §6.6.1 gives the band. **[SEC-003]** A client MAY split the text, and this specification does not require that split. UMBRA accepts this residual |
 | A permanent and public pointer at a withdrawn community post | Each community relay, and each subscriber | Part 12 §12.4.5. The pointer sits inside a checkpoint that publishes anyway, and the field has a fixed width. The feature does not work against a party that archived the community. UMBRA accepts this residual |
 | A selected profile picture, which is the same bytes at each party that resolves one Profile | Two parties that resolve one Profile | Part 4 §4.2.5. Those two parties hold one Public Address string already, thus they can already link. The concession stays inside one Profile, and a generated picture does not have it. UMBRA accepts this residual |
 | A rollback of the local database file to an earlier state, on a seized device | A6 | Nothing. Part 4 §4.6 gives a table MAC over a row count, a commit counter, and an accumulator of the record tag of each live row. That MAC detects a change to one row and a rollback of one row. A rollback of the full file restores each of the three together. The platforms give no monotonic counter that survives a device restore. UMBRA accepts this residual |
-| One `msg_id` at each member of a group, thus two members can prove that they hold one send from one member | Two colluding group members | Part 11 §11.2.1. A member holds the roster already, thus the two members know that they share the sender. The value stays inside the AEAD of a pairwise channel, and no party outside the group reads it. UMBRA accepts this residual |
+| One `msg_id` at each member of a group, thus two members can prove that they hold one send from one member | Two colluding group members | Part 11 §11.3. A member holds the roster already, thus the two members know that they share the sender. The value stays inside the AEAD of the group record, and no party outside the group reads it. UMBRA accepts this residual |
 | The signing device of each roster epoch, on a seized device of the same device set | A6 | Part 7 §7.3.1. The `signer_id` field and the ML-DSA-65 signature name one device of the user. The roster never leaves the device set, thus no relay and no contact reads it. UMBRA accepts this residual |
 | A split device set, when a hostile linked device revokes one honest device and not the other | A6, before the user revokes that device | Part 7 §7.3.1 rule DEV-177 and Part 7 §7.7 rule DEV-182. The two honest devices then disagree, and each one shows the fork at the next epoch. In a set of three devices the hostile device can revoke the two honest devices in two competing epochs. Rule DEV-178 makes each honest device show that fork. The fix is the full identity reset of Part 7 §7.7.1. UMBRA accepts this residual |
 | A change to the local database by a party with code execution before the auto-lock | A6 | Nothing. Part 4 §4.6 derives `K_tab` from `K_store`, which that party reads from RAM, thus that party computes a table MAC again. Part 16 §16.2.1 states this limit. UMBRA accepts this residual |
-| The size of one conversation, from a group fan-out of *N* − 1 cells | The ingress relay, and a local observer | Part 11 §11.3.0 randomizes the order inside the burst and it does not conceal the count. Part 2 §2.2 THR-002 covers the **count of conversations**, and Part 3 §3.11 states that this residual is the **size of one conversation**. UMBRA accepts this residual |
-| The queue set of a private group, at a tier T3 re-broadcaster | The re-broadcaster operator (A2), and A5 against it | Part 11 §11.6. G11 holds for tier T1 and tier T2. GRP-027 makes a re-broadcaster optional, GRP-028 requires more than one, and GRP-123 states the concession to each member. UMBRA accepts this residual |
 | A permanent channel takeover, when a user accepts a key-change notice that an attacker sent | A6, transient, and then permanent | Part 4 §4.5.1. The notice carries no signature, thus the ratchet is the only authentication. IDN-089 through IDN-092 put the weight on the prompt. G5 does not hold across an accepted notice. UMBRA accepts this residual |
 | A skipped-message key that lives 45 days in place of 14 | A6 | Part 5 §5.5.4. `SKIP_TTL` now equals `MSG_TTL`, because a shorter value made a delivered message undecryptable against U9. `MAX_SKIP`, `MAX_STORED`, `MAX_BYTES`, and `MAX_STORED_DEVICE` bound the count, and only the age changes. UMBRA accepts this residual |
 | A circuit that one injected cell tears down | An active A1, A2, or A3 | Part 3 §3.4.5. The chained construction makes any change fatal to the circuit, which is the property that defeats the tagging attack. The loop cover of Part 3 §3.6.1 measures the event and Part 10 §10.4.2 reports it. Part 2 §2.5 gives guaranteed availability as a non-goal |
@@ -256,7 +243,6 @@ modified iOS release detectable, and they do not make it deliverable.
 | A link preview that a sender made, which a hostile sender pairs with a true URL | The receiver | Part 3 §3.3.2. NET-142 keeps the receiver from a fetch, thus the linked site gets no address. NET-148 renders the host beside the preview. UMBRA accepts this residual |
 | A draft on a sync channel, which is text that no party sent | A peer device of the same set, and A6 against it | Part 7 §7.5.3. DEV-199 holds a draft under the record encryption and DEV-200 keeps it out of a backup. DEV-202 lets the user turn the sync off. UMBRA accepts this residual |
 | A live queue and an ordinary delivery receipt for a blocked contact | The blocked party, and the queue relay | Part 14 §14.12. The alternative is a `DEL` that names the moment of the block, and ABU-025 gives the cause. The cost is the bytes of a live queue. UMBRA accepts this residual |
-| A poll vote fan-out of *N* × (*N* − 1) cells | Two colluding queue relays | Part 11 §11.11. `POLL_GROUP_MAX` caps a poll at 100 members, which is 9 900 cells. §11.3.0 jitters each fan-out. UMBRA accepts this residual |
 | The mention list of a record, which reaches each member of a group | Each member of that group | Part 11 §11.11. GRP-141 keeps a client from rendering the list to a member that it does not name. The bytes still reach that member inside the AEAD. UMBRA accepts this residual |
 | The pulls of one transport session at a community relay | The community relay | Part 12 §12.3.3. A pull carries no client identifier, and COM-173 holds one community in each session. The relay links the pulls of one session to each other, and it links nothing across two sessions. UMBRA accepts this residual |
 | A renewal of a chunk at each fetch of a community attachment | The relay that holds the chunk | Part 13 §13.3.3 rule 8 and Part 12 §12.4.6. A `CRNW` follows a `CGET` in one session, thus it shows the relay nothing that the fetch did not show. UMBRA accepts this residual |
@@ -269,11 +255,10 @@ modified iOS release detectable, and they do not make it deliverable.
 | The bloc of hop 2 equals the bloc of hop 1 or of hop 3, under the relaxation of `NET-200` | The two relays that share the bloc, and the order that reaches both | Part 3 §3.4.6. Hop 1 and hop 3 stay in different blocs, thus no one order joins the client address to the queue. The client shows the relaxation under `NET-201`, and `NET-033` fails closed below it. Part 10 §10.6.3 sets the floor that ends the relaxation, and §16.6.1 sets the recruitment target that reaches the floor |
 | The client clock follows a stale but valid `DirectoryRoot` at the first launch | An ingress relay that serves the stale root, and each relay that the retired set names | Part 10 §10.5.2. `REL-046` bounds the staleness to the age of the build, and `REL-034` keeps the epochs monotone under it. `REL-044` takes a new correction at the first fresh root. A holder of the only path of a client can replay a sequence of roots at the true cadence for the age of the build. `REL-008` detects the divergence on the first other channel. UMBRA accepts this residual |
 | A relay outside the measured sample of a large cluster lends capacity to a relay inside it | The directory authority, as an inflated class of the sampled relay | Part 10 §10.3. `REL-102` shows the VRF selection after the epoch closes, thus the cluster feeds the lender blind. `REL-101` measures each relay inside `ceil(n / CLUSTER_SAMPLE)` slots, and `REL-001` limits the payoff to one class step in each epoch. UMBRA accepts this residual |
-| The typed text of each message, and the passphrase, at the input method | A7, as the input method | Part 15 §15.6.6. `IMP-057` sets the no-learning flag on Android, and iOS gives no flag. The input method is a process that the user selected, and UMBRA cannot replace it. UMBRA accepts this residual |
+| The typed text of each message, and the passphrase, at the input method | A7, as the input method | Part 15 §15.6.6. `IMP-057` sets the no-learning flag. The input method is a process that the user selected, and UMBRA cannot replace it. UMBRA accepts this residual |
 | Each rendered message, at an enabled accessibility service | A7, as an accessibility service | Part 15 §15.6.6. `IMP-060` keeps the accessibility tree whole, because a hidden message is a hidden conversation for a user that cannot see the screen. The user enables each such service. UMBRA accepts this residual |
 | A saved file and a screenshot, at each platform service | A7, as the platform cloud service | Part 15 §15.6.6. `IMP-045` makes the save an explicit action on one file, and `IMP-046` warns before the first one. `IMP-058` offers a screenshot block for one conversation on Android. UMBRA accepts this residual |
 | A page image below the file system, at the flash layer | A6, with the flash chips | Part 15 §15.6.4. `IMP-042` and `IMP-043` overwrite a freed page and truncate the log. The flash translation layer keeps an old page that no file system call reaches. The record key of that page is a value that `IMP-041` overwrote, thus the page opens under no key. UMBRA accepts this residual |
-| The notification keys of the current and the next epoch, and the alias map, in the after-first-unlock state | A6, with code execution on a locked device | Part 15 §15.6.6 and Part 8 rule `NTF-042`. The extension runs on a locked device, thus the two objects sit at the tier that the database refuses. The two keys open a wake payload of Part 8 §8.2.3 and no message. UMBRA accepts this residual |
 | The rebuild timing of a circuit, from a drop of each cell of that circuit | An active A2 or A3 | Part 3 §3.11.1. `CIRCUIT_MAX_AGE` of 4 hours makes a rebuild normal, and the loop cover of Part 3 §3.6.1 measures the drop. UMBRA accepts this residual |
 | The hello count and the hello times of a published handle or address | The queue relay of the rendezvous queue | Part 9 §9.6. The queue address is public by the choice of the holder. `RENDEZVOUS_ROTATE` of Part 9 §9.10 moves the queue on a schedule, thus one relay holds that count for one period. UMBRA accepts this residual |
 | The blinded element and the time of each lookup, at a compelled directory | The handle directory, under a prospective order | Part 9 §9.4. The directory never sees the plaintext handle, and the token of Part 14 §14.3.2 names no client. The log gives a lookup count and the lookup times, and no handle. UMBRA accepts this residual |
@@ -287,6 +272,15 @@ modified iOS release detectable, and they do not make it deliverable.
 | A match of two six-digit codes under an active adversary at the first contact, with a probability of one in 10⁶ for each ceremony | An active A3 at the first contact | Part 4 §4.5.2. The commit binds each nonce before the reveal, thus the adversary cannot select a nonce. The 60-digit safety number stays available for a comparison that needs more. UMBRA accepts this residual |
 | The count of the registered notification queues of a community, which is close to its Instant-mode subscriber count, and the queue relay of each one | The community relay | Part 12 §12.6.4. A registration carries no pseudonym and no pull identifier, thus the relay links a queue to nothing. `COM-369` holds a registration in memory for 7 days. UMBRA accepts this residual |
 | The invitation landing document, at a hostile invitation host | The invitation host, against a party without the client | Part 4 §4.3.1. `IDN-120` and `IDN-121` fix a static document with no script, and a host that serves a different document breaks that rule. The fragment never reaches the host. A fetch that the host makes from a link locks the queue under `IDN-023`, and the two parties detect it. UMBRA accepts this residual |
+| The member count of a group at each rotation, from the slot count | The group-queue relay | The count and no identity. UMBRA accepts this residual |
+| The activity timeline and the bucket of each record of a group | The group-queue relay, and A5 against it | Part 11 §11.2 replicates the queue on two relays under different operators; a reader alternates. UMBRA accepts this residual |
+| A reader circuit and the group it reads, joined to an IP address | The ingress relay and the group-queue relay in collusion | The same class as the two-ended collusion of Part 3 §3.11 |
+| The ciphertext of a group for `GROUP_READ_GRACE` after a removal | The removed member | It holds no slot key of the new epoch; it reads timing and buckets only |
+| The last `GROUP_SLOT_WINDOW` hours of retained records of the current epoch | A6, with the device and the relay's retained ciphertext | Part 11 §11.3.2; the slot chain is one-way |
+| A forged tag between two members, by an insider that holds a quantum computer | A quantum insider | Part 5 §5.4.4 posture; `sig_id` agility |
+| The group of a leaving member stays readable to it until an admin rotates | The leaving member | Part 11 §11.4.1 |
+| The slot chunk that one member fetched, at the chunk relay | The chunk relay | Part 13 §13.9; one anonymous fetch per member per rotation |
+| The `relay_id` of the notify queue of each reader, at the group-queue relay | The group-queue relay | Part 8 §8.5.2; the same view a community relay holds under Part 12 §12.6.4 |
 
 **[SEC-018]** A revision that adds a residual leak MUST add a row to this table.
 **[SEC-019]** A revision that removes a leak MUST remove its row in the same
@@ -299,14 +293,14 @@ commit. §16.8 makes this table a published promise.
 | Relay seizure and log correlation | Part 3 §3.2 — two unrelated queue IDs, and a key set for each queue |
 | A join of the sender and the recipient across two relays | Part 3 §3.4.6 — operator, jurisdiction, and ASN disjointness, enforced in code |
 | Latency-injection correlation (ToB #7, not corrected upstream) | Part 3 §3.5.3 — a randomized delivery delay, with named distributions |
-| A message-existence oracle from the packet counts (ToB #2) | Part 8 §8.4.2 — a fetch response with a constant size and a constant count |
+| A message-existence oracle from the packet counts (ToB #2) | Part 8 §8.4.3 — a fetch response with a constant size and a constant count |
 | Compulsion of a TLS key (Lavabit) | An inner transport encryption layer below TLS, shipped in v1, with short-lived relay identity keys |
 | Deanonymization of a sealed sender through delivery receipts | Part 3 §3.5.4 — a receipt is an ordinary padded message, and it is off by default. A receipt rides a cover slot, and it replaces the cover cell of that slot |
 | Bandwidth inflation (177×, 420×, 28×) | Part 10 §10.2 — discrete classes limit it to 4× in one 7-day epoch and to 64× over the ladder |
 | Sybil flooding (KAX17) | Part 10 §10.7 — staging with an automated sybilhunter |
 | Directory equivocation (IEEE S&P 2024) | Part 10 §10.5 — a 5-of-7 Byzantine broadcast with in-band gossip |
 | Performance-adaptive selection as an oracle (PETS 2011) | Part 10 §10.6.2 — **[SEC-004]** local performance MUST NOT replace a relay |
-| A group-membership beacon (the "flurry" attack) | Part 11 §11.3.0 |
+| A group-membership beacon (the "flurry" attack) | Part 11 §11.3.4 — a member posts one record for each message, thus no burst exists to observe. The timeline of the group-queue relay is the observable that remains, and §16.3 records it |
 | KEM re-encapsulation and key confusion (PQXDH) | Part 5 §5.3 and §5.11 — full transcript binding and domain separation |
 | A tagging attack on the onion layer | Part 3 §3.4.4 — rugged-PRP per-hop encryption, with the tag of the layer below in the left block |
 | A delivery beacon from a link preview fetch | Part 3 §3.3.2 — the receiver MUST NOT fetch a URL |
@@ -347,8 +341,7 @@ not address, and the problem becomes more difficult.
 - Keep **three or more independent distribution channels**. **[SEC-008]** **On
   Android, one or more of those channels MUST be outside the control of
   Google.** **[SEC-020]** That channel MUST serve a non-certified Android
-  device, which is a device without the Google services. On iOS each channel
-  sits under the notarization of Apple, and §16.2.10 states that limit.
+  device, which is a device without the Google services.
   **[SEC-009]** One or
   more channels MUST rebuild the release independently and verify it
   byte-for-byte against the published artifact. A second channel that rebuilds
@@ -358,8 +351,7 @@ not address, and the problem becomes more difficult.
   In 2026 the set below meets this requirement:
 
   - a platform store
-  - an alternative marketplace under the EU DMA, or web distribution under Apple
-    Notarization
+  - an alternative marketplace under the EU DMA
   - a free-software catalog that verifies reproducible builds, or a direct
     download
 
@@ -436,8 +428,8 @@ survives.
   proceedings are a UK OSA s.121 proportionality assessment, an EU CSAR
   risk-mitigation discussion, an Indian Rule 4(2) proceeding, and a TOLA
   systemic-weakness objection. It is worth more than a policy document.
-- **Obey App Store Guideline 1.2 without the nonprofit seeing the content.** The
-  method has five parts:
+- **Obey the user-generated-content policy of each platform store without the
+  nonprofit seeing the content.** The method has five parts:
 
   - client-side blocking and muting
   - an in-application report flow that makes a locally-signed bundle for the
@@ -445,9 +437,6 @@ survives.
   - a published moderation policy
   - published contact information
   - a documented expectation that a moderator responds in 24 hours
-
-  The guidelines of Apple now extend 1.2 to anonymous chat applications
-  explicitly.
 - **[SEC-013]** **The project MAY publish a warrant canary.** **[SEC-014]** **The
   project MUST NOT present a warrant canary as a control.** The canary of Riseup
   stopped in November 2016, after two sealed warrants with gag orders. Riseup
@@ -508,7 +497,7 @@ have no open problem is not finished. Such a specification is unexamined.
    in part on a *behavioral* rule. A relay can disobey that rule silently, and a
    client cannot detect that. UMBRA inherits this problem from SimpleX, and the
    problem has no solution today.
-5. **iOS notification delivery without one operator** (§16.2.8).
+5. Retired in 0.2.0-draft.
 6. **Ban evasion in a community**, without a return to identity (Part 12 §12.5).
 7. **Signature monoculture.** ML-DSA-65 alone signs the long-lived objects that
    a third party verifies. Those objects are the directory roots, the
