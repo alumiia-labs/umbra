@@ -1,7 +1,8 @@
 # UMBRA Protocol Specification — Part 5: Cryptographic Core
 
 **Status:** Draft
-**Version:** 0.1.0-draft
+**Version:** 0.2.0-draft
+**Date:** 2026-09-11
 
 ---
 
@@ -36,7 +37,7 @@ manner, and it carries a dependency cap of its own.
 | AUX-2 | **ristretto255 with SHA512** | RFC 9497 VOPRF | First-party token and blind directory lookup | Part 14 §14.3.2, Part 9 §9.4 |
 | AUX-3 | **ECVRF-Edwards25519-SHA512-TAI** | RFC 9381, classically secure only | Index blinding for handle key transparency, and the probe selection that a relay MUST NOT predict | Part 9 §9.5, Part 10 §10.4.1 |
 | AUX-4 | **Argon2id** | about 3 s for each try on a mid-range device | Human recovery code, and the at-rest passphrase | Part 15 §15.6.4 |
-| AUX-5 | **A keyed function inside the secure element** | HMAC-SHA256 in StrongBox, or P-256 ECDH in the Secure Enclave | Entanglement of the at-rest key with the secure element | Part 15 §15.6.4 |
+| AUX-5 | **A keyed function inside the secure element** | HMAC-SHA256 in StrongBox | Entanglement of the at-rest key with the secure element | Part 15 §15.6.4 |
 | AUX-6 | **HPKE under OHTTP** | RFC 9180 and RFC 9458, with `UMBRA-KEM` | The notification boundary, and the one-time `k_ntf_root` | Part 8 §8.2.3 |
 | AUX-7 | **XChaCha20-Poly1305** | 24-byte random nonce | Storage master key wrap, and each database record | Part 15 §15.6.4 |
 | AUX-8 | **Equi-X** | the `hashx` and `equix` crates, with the JIT off | Proof of work as a surge valve | Part 14 §14.8 |
@@ -203,7 +204,9 @@ directly from its CSPRNG.
   queue key from a long-term secret. Thus a seized relay cannot collect the
   queues of one user.
 - `CommunityIdentitySeed_g` (Part 12 §12.3.2), one for each community.
-- `GroupRosterSeed_g` (Part 11 §11.9.1), one for each group.
+- `GroupRosterSeed_g` (Part 11 §11.9.1), one for each group. The roster key,
+  the pair key, and the KEM key of Part 11 §11.3.3 derive from that seed under
+  the labels of §5.11.
 
 The client stores the last two classes in the **local identity table**, together
 with the pairwise salts of Part 4 §4.2.2. The recovery phrase restores the
@@ -453,7 +456,9 @@ key. The invitation link carried that key before the handshake.
 ### 5.4.4 Authentication is classical in v1, and that is deliberate
 
 Authentication uses X25519, with the tokens `es` and `se`. UMBRA does **not**
-give post-quantum authentication, and the threat model says so.
+give post-quantum authentication, and the threat model says so. The group pair
+key of Part 11 §11.3.3, which authenticates a group record to each member, is
+classical under the same posture.
 
 Signal and Apple reached the same conclusion in production. To forge the
 authentication, an attacker needs a *contemporaneous* quantum computer at the
@@ -1181,8 +1186,10 @@ can reach:
 | `SKIP_TTL` | **45 days**, which equals `MSG_TTL` |
 | `MAX_STORED_DEVICE` (global) | 200 000 keys / 8 MiB |
 
-The device-global limit exists to stop a 500-member group from an allocation of
-the per-session maximum by each of the 500 peers.
+The device-global limit exists to stop a device with many held sessions from
+an allocation of the per-session maximum by each of its peers. A group holds no
+pairwise session among its members (Part 11 §11.3), thus the contact count and
+the device-set size bound the session count.
 
 **[CRY-098]** `SKIP_TTL` MUST NOT be below the `MSG_TTL` of Part 3 §3.2.4.
 **[CRY-099]** A revision MUST hold the two values equal, and a revision MUST NOT
@@ -1242,7 +1249,9 @@ limit honestly and does not overclaim.
   commands use a deniable authenticator (Part 3 §3.2.3), thus the logs of a
   seized relay hold no proof of authorship. This property follows at no cost
   from implicit authentication with a KEM or a DH only, and with unsigned
-  prekeys.
+  prekeys. A group record of Part 11 §11.3 carries one pairwise MAC tag for
+  each member and no signature, thus each receiver can forge its own tag and
+  the record proves authorship to no third party.
 
 **What UMBRA does not give:**
 
@@ -1276,11 +1285,21 @@ traffic is the harvest-now-decrypt-later target with the highest value. The v1
 scope of UMBRA holds groups of 2 to 500 members. It also holds communities, and
 Part 12 gives the design target of 1000 members or more.
 
-The mechanism is cheap. A symmetric sender key moves over the PQ-protected
-pairwise channels. Group content keys and file-encryption keys then inherit
-post-quantum security **without a KEM header for each member**. The codebase
-holds one PQ ratchet implementation. Groups use that implementation through the
-pairwise channels, and the codebase does not hold a second copy.
+The mechanism is cheap. A group epoch key `K_e` travels to each member in an
+`UMBRA-KEM` slot of the epoch-key record (Part 11 §11.4), or at a join over the
+PQ-protected pairwise channel of the inviting admin. The slot chain of Part 11
+§11.3.1 derives the per-record key from `K_e`, thus each group record inherits
+post-quantum confidentiality **without a KEM header for each record**. The
+pair key and the tag vector of Part 11 §11.3.3 give attribution, and that
+authentication is classical under §5.4.4. The codebase holds one KEM and one
+AEAD for this, and it does not hold a second ratchet. A file-encryption key
+travels inside a group record, thus it inherits the same protection.
+
+> *Cause.* An earlier draft moved a symmetric sender key to each member over
+> the PQ ratchet of a pairwise channel, and a group of N members held N × (N −
+> 1) such channels. The group queue of Part 11 §11.2 holds no pairwise channel
+> among members, thus the epoch key needs a carrier of its own, and the
+> `UMBRA-KEM` of §5.3 is that carrier.
 
 ## 5.9 Randomness
 
@@ -1354,7 +1373,6 @@ names the object type and its lifetime:
 "umbra/v1/pq-epoch"
 "umbra/v1/cmd-auth"
 "umbra/v1/queue-e2e"
-"umbra/v1/sender-key"
 "umbra/v1/ntf"
 "umbra/v1/backup-handle"
 "umbra/v1/backup-write"
@@ -1370,7 +1388,17 @@ names the object type and its lifetime:
 "umbra/v1/device-claim"
 "umbra/v1/group-grant"
 "umbra/v1/group-moderation"
-"umbra/v1/group-member"
+"umbra/v1/group-slot"
+"umbra/v1/group-slot-next"
+"umbra/v1/group-record-key"
+"umbra/v1/group-record"
+"umbra/v1/group-read"
+"umbra/v1/group-write"
+"umbra/v1/group-pair"
+"umbra/v1/group-kem"
+"umbra/v1/group-tag"
+"umbra/v1/group-epoch-slot"
+"umbra/v1/group-epoch-tag"
 "umbra/v1/community-id"
 "umbra/v1/community-roster"
 "umbra/v1/community-chain"
@@ -1430,9 +1458,28 @@ primitive register in the same manner.
 > *The cause of the eleven labels that this revision adds.* Part 6 §6.6.5
 > derives a mention identifier under `"umbra/v1/mention"`, and Part 13 §13.3.4
 > derives a manifest key under `"umbra/v1/file-manifest"`. The nine labels below
-> came with the correction pass of the same revision. Part 11 §11.2 derives a
-> group-scoped member identifier under `"umbra/v1/group-member"`, in the same
-> manner as the mention identifier.
+> came with the correction pass of the same revision.
+>
+> *The cause of the eleven group-queue labels.* The 0.2.0-draft revision
+> replaces the sender key of a group with the group queue of Part 11, and it
+> removes `"umbra/v1/sender-key"` and `"umbra/v1/group-member"` (the member
+> identifier became a member index, which no KDF makes). Part 11 §11.3.1
+> derives the first slot key of an epoch from `K_e` under
+> `"umbra/v1/group-slot"`, each later slot key from the previous one under
+> `"umbra/v1/group-slot-next"`, and the record key of a slot under
+> `"umbra/v1/group-record-key"`; each of the three lives for one epoch or one
+> slot. `"umbra/v1/group-record"` is the associated data of a group record and
+> not a KDF label; it binds the ciphertext to the group, the epoch, and the
+> slot. Part 11 §11.3.1 derives the reader credential and the writer credential
+> of a group queue from `K_e` under `"umbra/v1/group-read"` and
+> `"umbra/v1/group-write"`, one pair for each epoch. Part 11 §11.3.3 derives
+> the pair key and the KEM key of a member from `GroupRosterSeed_g` under
+> `"umbra/v1/group-pair"` and `"umbra/v1/group-kem"`, for the life of the
+> membership, and it derives the pair MAC key of two members and computes each
+> tag under `"umbra/v1/group-tag"`. Part 11 §11.4.2 derives the slot key of an
+> epoch-key record under `"umbra/v1/group-epoch-slot"`, and it computes the
+> rotator's tag inside a slot under `"umbra/v1/group-epoch-tag"`; each lives
+> for one rotation. Each label names one object type, and CRY-031 holds.
 >
 > *The cause of the nine correction labels.* Part 5 §5.4.8 hashes a
 > one-time prekey under `"umbra/v1/prekey-id"`. Part 10 §10.5.4 computes the
@@ -1564,7 +1611,9 @@ their own. Those two group labels are not the community labels.
 used, and an implementation MUST NOT add them. Part 12 §12.3.2 makes
 `CommunityIdentitySeed_g` from the device CSPRNG, and Part 11 §11.9.1 makes
 `GroupRosterSeed_g` from the device CSPRNG. Neither value comes from a KDF, thus
-neither value needs a derivation label. **[CRY-066]** A group signature MUST use
+neither value needs a derivation label. The pair key and the KEM key that Part
+11 §11.3.3 derives from `GroupRosterSeed_g` use `"umbra/v1/group-pair"` and
+`"umbra/v1/group-kem"`. **[CRY-066]** A group signature MUST use
 `"umbra/v1/group-grant"` or `"umbra/v1/group-moderation"`, and it MUST NOT use a
 label that names a seed.
 

@@ -1,7 +1,8 @@
 # UMBRA Protocol Specification — Part 10: Relay Directory, Measurement, and Selection
 
 **Status:** Draft
-**Version:** 0.1.0-draft
+**Version:** 0.2.0-draft
+**Date:** 2026-09-11
 
 ---
 
@@ -659,7 +660,10 @@ The fixed width is **5 400 bytes**. An earlier draft carried a 1 184-byte
 static ML-KEM-768 key in this descriptor, and no handshake consumed it. Part 5
 §5.4.9 gives the cause of its removal. **[REL-127]** A relay MUST set
 `chunk_store_gib` to the store that it declares under Part 13 §13.7, in GiB. A
-relay without the attachment role sets the field to 0.
+relay without the attachment role sets the field to 0. The queue role (bit 0)
+covers the group queues of Part 3 §3.2.7 as well as the pairwise queues: a
+relay that serves queues serves group queues, and no separate role bit exists
+for them.
 
 **[REL-047]** A relay MUST publish its descriptor in the encoding above.
 **[REL-048]** A relay MUST sign the descriptor with `identity_pk` over this
@@ -1166,13 +1170,21 @@ runs out of egress capacity.
 
 ## 10.10 The Notification Delivery Relay is a separate track
 
-The NDR (Part 8) is **not** part of this reputation system. On iOS it
-necessarily has one operator. It holds a different kind of trust, and a
-different mechanism measures it. That mechanism is a transparency log of its
-software builds, a published no-logging policy, and a warrant canary.
+The NDR (Part 8) is **not** part of this reputation system. A deployment
+operates one NDR, and a reputation score over one party carries no information:
+a client has no second NDR to select instead. The NDR holds a different kind of
+trust, and a different mechanism measures it. That mechanism is a transparency
+log of its software builds, a published no-logging policy, and a warrant canary.
 
 A combination with the general relay reputation implies a substitutability that
-UMBRA does not have.
+UMBRA does not have. A later revision that lets a third party operate an NDR
+beside the NDR of the deployment enters that NDR in the relay reputation as a
+relay with the notification role, and this section then applies to it.
+
+> *Cause.* An earlier draft kept the NDR out of the reputation system because
+> one platform forced one operator on it. Part 8 §8.7 now lets a deployment
+> operate its own NDR, thus the cause above is the one that holds without a
+> platform.
 
 ## 10.11 Parameters
 
