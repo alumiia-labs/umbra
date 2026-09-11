@@ -480,7 +480,7 @@ side channel that the user selects, such as a QR code scan.
 | `JoinRecord` | Part 6 §6.6.3 | `GroupControl`, type `0x02`, on the pairwise channel of the invitee to the inviter | Client |
 | `GroupInvitation` | Part 6 §6.6.3 | `GroupControl`, type `0x07`, on the pairwise channel of the inviter to the invitee | Client |
 | `SnapshotNotice` | Part 6 §6.6.3 | `GroupQueueRecord`, as `GroupControl` type `0x08` | Client |
-| `RosterEntry` of a group, `RosterSnapshot` | Part 6 §6.6.3 | The chunk path of Part 13 §13.3.3, under a `FileDescriptor` in a `GroupInvitation` stage `0x02` or in a `SnapshotNotice` | Client |
+| `GroupMemberEntry`, `RosterSnapshot` | Part 6 §6.6.3 | The chunk path of Part 13 §13.3.3, under a `FileDescriptor` in a `GroupInvitation` stage `0x02` or in a `SnapshotNotice` | Client |
 | Plain epoch (Part 11 §11.9.2) | none | `GroupControl`, type `0x03` | Client |
 | Granting epoch (Part 11 §11.9.2) | none | `GroupControl`, type `0x04` | Client |
 | Group moderation epoch (Part 11 §11.9.6) | none | `GroupControl`, type `0x05` | Client |
@@ -508,10 +508,7 @@ side channel that the user selects, such as a QR code scan.
 | Cross-relay token, first-party token | The RFC of each type, Part 14 §14.3 | none | Issuer, Part 14 §14.9 |
 
 The table has 104 rows, and 21 of them hold at least one `none` cell.
-`Cell` has two definitions, and the two agree field for field. The name
-`RosterEntry` names two different objects, one of Part 6 §6.6.3 for a group
-and one of Part 12 §12.5.2 for a community, and the two rows above keep them
-apart.
+`Cell` has two definitions, and the two agree field for field.
 
 - **[SCP-011]** A revision MUST NOT add a requirement that names an artifact
   with no row in this table.

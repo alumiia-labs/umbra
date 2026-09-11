@@ -117,7 +117,7 @@ The modal text stays in `B1` up to N = 124.
 | Rotation, each member downloads (§11.4.2) | one `B2` record, 8 240 B | one `B3` record, 32 860 B | one `B3` chunk, 32 860 B | one `B3` chunk, 32 860 B |
 | Rotation, the rotator uploads (§11.4.2) | 2 × `B2` = 16 480 B | 2 × `B3` = 65 720 B | 5 chunks and a `B1` descriptor record, 168 492 B | 19 chunks and a `B2` descriptor record, 640 820 B |
 | A membership change, 0.1.0 (each member sends (N − 1) `B1` and reads (N − 1) `B1`) | 4 192 B up, 4 192 B down | 50 304 B up, 50 304 B down | 249 424 B up, 249 424 B down | 1 045 904 B up, 1 045 904 B down |
-| Join, the joiner downloads (§11.9.1: one `B2` offer, one `B3` admit, the snapshot chunks of §11.9.8) | 1 chunk, 73 960 B | 2 chunks, 106 820 B | 5 chunks, 205 400 B | 21 chunks, 731 160 B |
+| Join, the joiner downloads (§11.9.1: one `B2` offer, one `B1` or `B2` admit, the snapshot chunks of §11.9.8) | 1 chunk, 73 960 B | 2 chunks, 106 820 B | 5 chunks, 205 400 B | 21 chunks, 731 160 B |
 | Join, each member downloads (one add record of §11.9.2) | `B1`, 2 096 B | `B1`, 2 096 B | `B2`, 8 240 B | `B2`, 8 240 B |
 | Join, 0.1.0 | 2 pairwise channels | 24 pairwise channels | 119 pairwise channels | 499 pairwise channels, a 500-invitation bundle on the chunk path, 499 group requests |
 
@@ -720,8 +720,7 @@ the epoch the member lacks, and `index` is 0.
   while `GROUP_WRITE_GRACE` and `GROUP_EPOCH_GRACE` hold. **[GRP-290]**
   Outside those graces, the member MUST send that `KeyRequest` on a pairwise
   channel to any member of the group that it holds a channel with. Part 6
-  rule `WIR-333` adapts to a group: on the group queue inside the grace, else
-  on a pairwise channel.
+  rules `WIR-456` and `WIR-457` state the same carrier.
 - **[GRP-291]** A member of role `admin` or above that reads a `KeyRequest` of
   scope `0x02` MUST answer with a one-slot epoch-key record of the current
   epoch for that member, inline with `slot_count` 1, and then with a
@@ -1000,7 +999,7 @@ It adds the labels `"umbra/v1/group-pair"` and `"umbra/v1/group-kem"` to Part
 
 **The member index and the roster entry.** Every member holds a **member
 index**, a `u16` that the admin that adds it assigns. Part 6 §6.6.3 gives the
-99-byte `RosterEntry`: `index`, `role`, `pair_pk`, `roster_pk_hash` (the
+99-byte `GroupMemberEntry`: `index`, `role`, `pair_pk`, `roster_pk_hash` (the
 SHA3-256 of `GroupRosterKey_g.pk`), and `kem_pk_hash` (the SHA3-256 of
 `GroupKemKey_g.pk`).
 
@@ -1439,7 +1438,7 @@ made the joiner open 499 pairwise channels for the same admission.
 | `ROSTER_RATE_LIMIT` | 1 epoch for each member in each 60 s |
 | `GROUP_EPOCH_RATE` | 6 epochs for each group in each 60 s |
 | `GRANT_RATE` | 1 for each group in each 300 s, and 4 for each group in each 24 h |
-| `KEY_REQUEST_RATE` | 8 epoch requests for one group in each 24 h (§11.4.3, Part 6 §6.6.11) |
+| `KEY_REQUEST_RATE` | 8 in each 24 h: epoch requests for one group (§11.4.3), and pairwise requests to one peer (Part 6 §6.6.11 rule `WIR-337`) |
 | `POLL_GROUP_MAX` | 100 members (§11.11) |
 | `MENTION_MAX` | 16 mentions in one record, and Part 6 §6.6.5 gives the field |
 | `POLL_OPTION_MAX` | 12 options in one poll |

@@ -1473,7 +1473,7 @@ InvitationOffer {                 // 3 905 bytes and the name
     creator_roster_pk [1952]u8    // GroupRosterKey_g.pk of the creator
 }
 
-InvitationAdmit {                 // 187 bytes, the descriptor, and the path
+InvitationAdmit {                 // 185 bytes and the descriptor
     index             u16         // the member index that the admin gave the joiner
     epoch             u32         // the group epoch e at the admit
     t_join            u32         // the slot index at which the key of the joiner starts
@@ -1483,8 +1483,6 @@ InvitationAdmit {                 // 187 bytes, the descriptor, and the path
     replicas          [replica_count]ReplicaRef
     desc_len          u16
     descriptor        [desc_len]u8   // a FileDescriptor of Part 13 §13.3 that names a RosterSnapshot at roster_epoch
-    path_len          u16
-    path              [path_len]u8   // the authority path, or empty; see the rules below
 }
 
 ReplicaRef {                      // 68 bytes
@@ -1502,14 +1500,14 @@ holder, concatenated, as `GRP-068` keeps it.
 
 A `JoinRecord` is 1 345 bytes as an `AppMessage`, thus it uses bucket `B1`.
 An offer is 3 973 bytes and the name as an `AppMessage`, thus it uses bucket
-`B2`. An admit without a path is 512 bytes as an `AppMessage` at 3 members
-(a one-segment descriptor of 257 bytes), thus it uses bucket `B1`; at
-`GROUP_MAX` the descriptor of a 21-segment snapshot is 2 657 bytes, the admit
-is 2 912 bytes, and it uses bucket `B2`. A granting epoch carries an
-ML-DSA-65 signature of 3 309 bytes and a roster public key of 1 952 bytes,
-thus a path of five granting epochs is the most that the `B3` `AppMessage`
-row of §6.9 holds beside the admit, and a path at `ROLE_HOLDER_MAX` does not
-fit one cell.
+`B2`. An admit is 510 bytes as an `AppMessage` at 3 members (a one-segment
+descriptor of 257 bytes), thus it uses bucket `B1`; at `GROUP_MAX` the
+descriptor of a 21-segment snapshot is 2 657 bytes, the admit is 2 910
+bytes, and it uses bucket `B2`. A granting epoch carries an ML-DSA-65
+signature of 3 309 bytes and a roster public key of 1 952 bytes, thus a path
+at `ROLE_HOLDER_MAX` is about 86 KB and fits no cell. The authority path
+therefore travels in the `RosterSnapshot` in every case, under Part 11
+§11.9.8 rules `GRP-324` and `GRP-325`, and the admit carries none.
 
 - **[WIR-435]** A parser MUST reject a `JoinRecord` whose length is not
   1 313. **[WIR-436]** A parser MUST reject a `stage` that is not `0x01` or
@@ -1518,11 +1516,9 @@ fit one cell.
   that is not valid UTF-8.
 - **[WIR-439]** A parser MUST reject a `replica_count` that is not
   `GROUP_REPLICAS`. **[WIR-440]** A parser MUST reject an admit whose
-  `body_len` does not equal 187 plus `desc_len` plus `path_len`.
-- **[WIR-441]** An admin MUST put the authority path in `path` when the admit
-  fits the `B3` `AppMessage` row of §6.9. **[WIR-442]** Otherwise an admin
-  MUST set `path_len` to 0 and put the authority path in the `path` of the
-  `RosterSnapshot` below.
+  `body_len` does not equal 185 plus `desc_len`.
+- **[WIR-474]** A parser MUST reject an admit that carries a granting epoch.
+  The `RosterSnapshot` below carries the authority path.
 - **[WIR-443]** A client MUST send a `JoinRecord` and a `GroupInvitation` on
   the pairwise channel between the inviting admin and the joiner, and on no
   other channel. **[WIR-444]** A receiver MUST discard a `JoinRecord` or a
@@ -1551,7 +1547,7 @@ SnapshotNotice {                  // 39 bytes and the descriptor, control type 0
     descriptor        [desc_len]u8   // a FileDescriptor of Part 13 §13.3 that names a RosterSnapshot
 }
 
-RosterEntry {                     // 99 bytes
+GroupMemberEntry {                     // 99 bytes
     index             u16         // the member index, Part 11 §11.9.1
     role              u8          // 0x01 observer, 0x02 member, 0x03 moderator, 0x04 admin, 0x05 owner
     pair_pk           [32]u8      // GroupPairKey_g.pk
@@ -1565,11 +1561,11 @@ RosterSnapshot {                  // an object on the chunk path of Part 13 §13
     roster_epoch      u32
     chain_hash        [32]u8      // the hash of the roster epoch that it describes, Part 11 §11.9.2
     entry_count       u16
-    entries           [entry_count]RosterEntry    // index ascending
+    entries           [entry_count]GroupMemberEntry    // index ascending
     key_count         u16
     keys              [key_count]MemberKemKey     // every active member, index ascending
     path_len          u32
-    path              [path_len]u8   // the authority path, or empty when the admit carries it
+    path              [path_len]u8   // the authority path of Part 11 §11.9.3, in chain order
 }
 
 MemberKemKey {                    // 1 218 bytes
@@ -1724,7 +1720,7 @@ that member. Part 5 §5.11 holds the label.
 
 > *Cause of the pair key.* An earlier draft took `member_key` from the
 > ML-DSA-65 roster key of the member. In 0.2.0-draft the full roster key of a
-> plain member travels to no other member; a `RosterEntry` of §6.6.3 carries
+> plain member travels to no other member; a `GroupMemberEntry` of §6.6.3 carries
 > `pair_pk` and a hash of the roster key. The pair key is the value that each
 > member holds for each other member.
 
@@ -2108,8 +2104,8 @@ record.
 8. **[WIR-341]** A client that takes status `not held` MUST show the record as
    a delivery failure under Part 2 §2.4 U9.
 
-> *Cause.* Part 2 rule `THR-009`, Part 7 rule `DEV-098`, and Part 11 rule
-> `GRP-020` each named a key request. No part gave it a record, a carrier,
+> *Cause.* Part 2 rule `THR-009`, Part 7 rule `DEV-098`, and an earlier Part 11
+> rule each named a key request. No part gave it a record, a carrier,
 > or an acceptance rule. A supply that any party could send was a path to
 > plant a key. Thus rule 3 binds a pairwise supply to the channel of the
 > request, and a group answer to the acceptance rules of the epoch-key record,
@@ -2237,7 +2233,7 @@ cover these cases:
   of each of the seven control types. **[WIR-470]** The parser MUST reject a
   `control_type` of `0x00`, of `0x01`, and of `0x09`. The `GroupInvitation`
   vectors cover both stages.
-- The `RosterSnapshot` and the `RosterEntry` of §6.6.3. **[WIR-471]** The
+- The `RosterSnapshot` and the `GroupMemberEntry` of §6.6.3. **[WIR-471]** The
   vectors MUST cover a snapshot at 3 members in one segment, and the segment
   count of a snapshot at `GROUP_MAX`, which is 21.
 - The `KeyRequest` and the `KeySupply` of §6.6.11. **[WIR-342]** The vectors

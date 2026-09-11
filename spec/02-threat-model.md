@@ -224,8 +224,8 @@ implementation to them in the same manner.
 | U1 | **Time to first message** — from the first launch to the first message that a relay accepts, on a mid-tier Android device on 4G. The channel comes from an invitation that the same session scanned | p50 ≤ 90 s, p95 ≤ 180 s, ≤ 6 taps, and **no security decision before the inbox is reachable**. No account screen, no phone number, no email address, and no server picker. |
 | U2 | Message delivery latency, Balanced mode, the two parties online, and the sender holds the ratchet ownership of Part 7 §7.5.4 | **p50 ≤ 2.0 s, p95 ≤ 4.5 s.** Part 3 §3.12 models 1.6 s and 3.9 s against a measured propagation budget, thus the margin is 0.4 s and 0.6 s. **A send from a device that does not own the ratchet** adds the wake latency of the owner device (Part 8 §8.3). The target for that path is p50 ≤ 6 s and p95 ≤ 20 s in Instant mode |
 | U3 | **Notification latency, Instant notifications and Balanced mode** — from the moment the sender taps send to the moment a locked and idle device shows the notification | p50 ≤ 3 s, p95 ≤ 15 s, p99 ≤ 60 s. **Hard invariant:** no message stays invisible for more than 15 min while the device has network. **Private notifications:** the fixed cadence of Part 8 §8.3 gives the latency. That latency is a maximum of 20 min at the 20 min cadence, and a maximum of 30 min at the 30 min cadence |
-| U4 | Idle background data consumption, Balanced mode with Instant notifications, on the model day of Part 3 §3.12 | ≤ 100 MB/month. Part 3 §3.12 models 88.30 MB |
-| U4b | Idle background data consumption, Balanced mode with Private notifications | **No target in this draft.** Part 3 §3.12 models 350.31 MB at the 30 min cadence and 468.96 MB at the 20 min cadence of Part 8 §8.3. That section states the cause |
+| U4 | Idle background data consumption, Balanced mode with Instant notifications, on the model day of Part 3 §3.12 | ≤ 100 MB/month. Part 3 §3.12 models 77.95 MB |
+| U4b | Idle background data consumption, Balanced mode with Private notifications | **No target in this draft.** Part 3 §3.12 models 148.96 MB at the 30 min cadence and 196.42 MB at the 20 min cadence of Part 8 §8.3. That section states the cause |
 | U5 | Idle battery, Instant notifications on, application in the background | **Two terms.** With no background arrival, ≤ 2 % of a 4000 mAh battery in 24 h (≈ 80 mAh/day). The measured 1 % of Signal over 18 h 59 min is about 1.3 % in 24 h. Thus this target is about 1.6 times that figure. For each background arrival, ≤ 10 mWh. Part 3 §3.12 models 0 % and 9.1 mWh, which is 10.9 % on its model day of 184 arrivals. **Conformance test: a 24 h idle run with no arrival, and a run with a scripted arrival count, each on stock Android *and* on GrapheneOS.** |
 | U6 | Delivery reliability, the recipient returns in the retention window | ≥ 99.9 % delivered in 60 s after the recipient comes online. **No message is permanently undeliverable** in the window |
 | U7 | Addition of a second device | ≤ 60 s, one QR scan, and **no contact does the verification again** |
@@ -267,11 +267,11 @@ implementation to them in the same manner.
 > resubscription, and a drain. Part 3 §3.4.3 raises `CIRCUIT_MAX_AGE` to 4
 > hours, thus most wakes pay no build. The handshake row is the largest row,
 > because rule NET-023 of Part 3 §3.2.5 gives each queue relay its own session.
-> The idle background is 88.30 MB each month, and U4 moves to 100 MB.
+> The idle background is 77.95 MB each month, and U4 moves to 100 MB.
 >
 > **U4b names no target in this draft.** A Private wake of Part 8 §8.3 opens
 > each queue-relay session of the model day, because the client cannot know
-> which queue holds a message. Part 3 §3.12 derives 350.31 MB and 468.96 MB
+> which queue holds a message. Part 3 §3.12 derives 148.96 MB and 196.42 MB
 > each month from that. A target above those figures binds nothing, and a
 > target below them fails under rule THR-008 with no rule that lets a client
 > meet it. The cause is the session model of rule NET-023, and a revision of
@@ -364,7 +364,7 @@ adds a trade MUST add a row to this table.
 | A bulk circuit runs in the mode of its conversation, thus a Private-mode upload of 250 MiB takes about 80 minutes | Part 13 §13.7.2 |
 | A holder reads its own label at each tree head, thus a compelled insertion under that label raises the takeover warning at the holder, and each published label costs one metered lookup for each head | Part 9 §9.5.2 |
 | The invitation link names one invitation host, thus that host learns each browser open of a link by a party without the client | Part 4 §4.3.1 |
-| Private notifications wake the device on a fixed clock and open each queue-relay session. The idle background then rises to 350.31 MB or 468.96 MB each month. U4b names no target in this draft | Part 3 §3.12 |
+| Private notifications wake the device on a fixed clock and open each queue-relay session. The idle background then rises to 148.96 MB or 196.42 MB each month. U4b names no target in this draft | Part 3 §3.12 |
 | A published Public Address sits in a second directory index, thus a party that holds its 20-byte hash reaches its rendezvous queue | Part 9 §9.3.3 |
 | The addressee verifies the token or the proof of work of a hello, thus no relay limits a contact request. No limit for each sender exists at a Public Address, because the token is unlinkable | Part 14 §14.4 |
 | A rendezvous queue in Instant mode registers with the Notification Delivery Relay. That relay then learns that a push token belongs to a published handle or address | Part 8 §8.2.6 |
@@ -390,7 +390,7 @@ those rules has to check the goal again.
 | U7 | Part 7 §7.4, Part 7 §7.6 `DEV-131` | A second device link, timed, with a contact that verified before it |
 | U8 | Part 15 §15.6.2 | A cold start on a 2021-class mid-range Android device, with the store unlocked |
 | U8b | Part 15 §15.6.4 | A start after the auto-lock on the same device, timed from the passphrase confirmation |
-| U9 | Part 2 §2.4 `THR-009`, Part 5 §5.5.2 braid, Part 5 §5.5.4 `CRY-098`, Part 6 §6.6.11 `WIR-333`, Part 11 §11.4.3 key supply | A count of the undecryptable records against the delivered records, at one device over 30 days |
+| U9 | Part 2 §2.4 `THR-009`, Part 5 §5.5.2 braid, Part 5 §5.5.4 `CRY-098`, Part 6 §6.6.11 `WIR-456`, Part 11 §11.4.3 key supply | A count of the undecryptable records against the delivered records, at one device over 30 days |
 | U10 | Part 4 §4.7.1, Part 4 §4.7.2, Part 4 §4.7.3, Part 4 §4.8 | A restore from a fresh install, timed, at each of the three recovery paths, after a completed setup |
 | U10b | Part 4 §4.7.6 `IDN-051` to `IDN-054` | A scripted setup from the settings screen, with a tap count |
 | S1 | Part 4 §4.3.3 `IDN-129` to `IDN-132`, Part 9 §9.3.3, Part 9 §9.6, Part 8 §8.2.6, Part 14 §14.4 | A pasted address string at a fresh install, timed to the shown request at the addressee, in Instant mode and in Private mode |
