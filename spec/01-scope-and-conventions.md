@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 1: Scope, Conventions, and Terminology
 
 **Status:** Draft
-**Version:** 0.1.0-draft
-**Date:** 2026-08-23
+**Version:** 0.2.0-draft
+**Date:** 2026-09-11
 
 ---
 
@@ -27,6 +27,12 @@ design objectives.
 
 This specification is normative. It contains all the information to build an
 implementation. A developer does not have to read the reference implementation.
+
+**Platform scope of v1.** Android is the v1 client platform. An iOS client and
+a native desktop client are deferred to a later revision, and Part 15 §15.6.3
+records what such a revision must revisit. The core and its FFI stay
+platform-neutral, thus the deferral changes the scope of this text and not
+the design.
 
 ## 1.2 What this document is not
 
@@ -151,6 +157,13 @@ Channel uses a minimum of two queues, one for each direction. The two queues are
 usually on relays that different organizations operate in different
 jurisdictions.
 
+**Group Queue** — A relay-held, retained, many-reader mailbox that serves one
+group. A group queue has a *reader credential*, a *writer credential*, and an
+*owner credential*. Each member holds the first two. The relay holds the
+records, the live sessions, and the notify registrations, and it holds no
+membership list. A group holds one group queue on each of two relays, and the
+two are *replicas*. Refer to Part 3 §3.2.7.
+
 **Ingress Relay** — The relay that a client connects to directly. It sees the
 network address of the client. Part 3 §3.1 gives the full role table.
 
@@ -192,7 +205,14 @@ envelope has a fixed size from a set of buckets.
 **Message** — The end-to-end encrypted payload in an envelope.
 
 **Group** — A private conversation with hidden membership. A group has 2 to 500
-members.
+members, and one mechanism serves each size.
+
+**Group Record** — The end-to-end encrypted unit that a member posts to a group
+queue. One group record carries one message to each member. Refer to Part 11
+§11.3.
+
+**Epoch-Key Record** — A group record that gives each member the key of a new
+group epoch, in one slot for each member. Refer to Part 11 §11.4.2.
 
 **Community** — A public conversation that a party joins with a link. A community
 has no member limit, and Part 12 gives the design target of 1000 members or more.
@@ -251,10 +271,10 @@ term in this register is approved for this document.
 | --- | --- |
 | Cryptographic primitives | ML-KEM, ML-DSA, X25519, ChaCha20-Poly1305, SHA-3, SHAKE, HKDF, AEAD, KEM, KDF, MAC, nonce, ciphertext, plaintext, key, keypair, seed, salt, entropy, codeword, parity, prologue |
 | Cryptographic operations | encrypt, decrypt, sign, verify, hash, derive, encapsulate, decapsulate, ratchet, wrap, unwrap, pad, zeroize, commit |
-| Protocol objects | envelope, message, queue, session, channel, cell, chunk, epoch, handshake, header, payload, prekey, token, tag, credential, subscription, receipt, revision, tombstone, checkpoint, stub, artifact, carrier, layout, listing, reaction, repost, hello, moderator set, mute list, activity bucket, tally |
+| Protocol objects | envelope, message, queue, session, channel, cell, chunk, epoch, handshake, header, payload, prekey, token, tag, credential, subscription, receipt, revision, tombstone, checkpoint, stub, artifact, carrier, layout, listing, reaction, repost, hello, moderator set, mute list, activity bucket, tally, group queue, replica, slot, epoch-key record, tag vector, pair key, notify queue, roster snapshot |
 | Network entities | relay, directory, client, server, node, hop, chain, transport, endpoint, bucket, invitation host, landing document, TLS provider, reverse proxy |
-| Platform components | operating system, input method, accessibility service, accessibility tree, task snapshot, clipboard, media store, platform backup, platform store, cover view, App Group container, Keychain, keystore, high-risk configuration, background push, alert push |
-| Identity objects | identity, address, handle, device, roster, membership, group, community, Profile, pseudonym, petname, avatar, pet-avatar, identicon, member identifier, joiner, claimant, catch-up object, canonical handle |
+| Platform components | operating system, input method, accessibility service, accessibility tree, task snapshot, clipboard, media store, platform backup, platform store, cover view, keystore, high-risk configuration, background push, alert push |
+| Identity objects | identity, address, handle, device, roster, membership, group, community, Profile, pseudonym, petname, avatar, pet-avatar, identicon, member index, group sender owner, joiner, claimant, catch-up object, canonical handle |
 | Security concepts | adversary, threat, metadata, unlinkability, deniability, forward secrecy, replay, side channel, oracle |
 | Data and storage | byte, buffer, index, record, log, database, file, attachment, backup, manifest, write-ahead log, deletion batch |
 | Time | clock, duration, deadline, skew, monotonic source, clock movement |
@@ -275,22 +295,22 @@ examples. Without the table below a maintainer finds the dependents by hand.
 | `MSG_TTL` | Part 3 §3.2.4 | Part 5 §5.5.4, Part 7 §7.5.6, Part 13 §13.7.1, Part 16 §16.1 |
 | `QUEUE_IDLE_TTL` | Part 3 §3.2.4 | Part 7 §7.5.1, Part 16 §16.1 |
 | `MAX_QUEUES_PER_SESSION` | Part 3 §3.2.5 | Part 2 §2.7, Part 3 §3.11, Part 8 §8.2.1, Part 16 §16.3 |
-| The bucket ladder | Part 3 §3.3 | Part 5 §5.6, Part 6 §6.9, and each fan-out figure |
+| The bucket ladder | Part 3 §3.3 | Part 5 §5.6, Part 6 §6.9, Part 3 §3.12, Part 11 §11.3.3 |
 | `CIRCUIT_MAX_AGE`, `CIRCUIT_MAX_CELLS` | Part 3 §3.4.3 | Part 2 §2.4, Part 3 §3.4.4, Part 3 §3.11.1, Part 3 §3.12, Part 6 §6.2.2, Part 6 §6.2.3, Part 6 §6.8, Part 16 §16.3 |
 | `SESSION_RESUME_WINDOW` | Part 6 §6.2.3 | Part 3 §3.4.3, Part 3 §3.12, Part 16 §16.3 |
 | `PACING_MEAN` | Part 3 §3.9 | Part 3 §3.12, Part 8 §8.8, Part 10 §10.9.1 |
 | `RECEIPT_BATCH_MAX` | Part 3 §3.5.4 | Part 6 §6.6, Part 6 §6.6.9, Part 6 §6.8 |
 | The tier A cover rate | Part 3 §3.6.2 | Part 3 §3.12, Part 4 §4.7.2, Part 7 §7.5.1, Part 9 §9.5.3, Part 10 §10.4.2 |
-| The cell wire costs 560, 2 096, 8 240, 32 860 | Part 6 §6.9 | Part 3 §3.3.1, Part 3 §3.5.2, Part 3 §3.9, Part 3 §3.12, Part 7 §7.3.1, Part 7 §7.5.5, Part 10 §10.9.1, Part 11 §11.2, Part 11 §11.11, Part 12 §12.4.1, Part 13 §13.7.2, Part 16 §16.3 |
+| The cell wire costs 560, 2 096, 8 240, 32 860 | Part 6 §6.9 | Part 3 §3.3.1, Part 3 §3.5.2, Part 3 §3.9, Part 3 §3.12, Part 7 §7.3.1, Part 7 §7.5.5, Part 10 §10.9.1, Part 11 §11.3.3, Part 11 §11.9.5, Part 11 §11.11, Part 12 §12.4.1, Part 13 §13.7.2, Part 16 §16.3 |
 | `BACKUP_*` | Part 4 §4.8 | Part 3 §3.12, Part 7 §7.5.8, Part 9 §9.9.2, Part 13 §13.3.2, Part 13 §13.3.3, Part 13 §13.4.2, Part 13 §13.9, Part 16 §16.1 |
-| `SKIP_TTL` | Part 5 §5.5.4 | Part 11 §11.3.2 |
+| `SKIP_TTL` | Part 5 §5.5.4 | Part 1 §1.9 |
 | `MAX_DEVICES`, `OWNER_CLAIM_RATE`, `OWNER_ABSENCE_RATE` | Part 7 §7.8 | Part 3 §3.12 |
 | `OWNER_ABSENCE` | Part 7 §7.8 | Part 2 §2.4 |
 | `MAX_QUEUES_PER_HANDLE` | Part 8 §8.2.1 | Part 8 §8.7 |
 | `WAKE_COALESCE_WINDOW` | Part 8 §8.5 | Part 2 §2.4, Part 3 §3.12 |
 | The consensus epoch and `CONSENSUS_VALIDITY` | Part 10 §10.11 | Part 3 §3.2.6, Part 3 §3.12, Part 4 §4.7.2, Part 13 §13.3.2 |
 | `RECEIPT_WINDOW` | Part 10 §10.11 | Part 10 §10.9.1 |
-| `GROUP_MAX`, `FANOUT_JITTER`, `FANOUT_MAX_RATE` | Part 11 §11.10 | Part 3 §3.12, Part 11 §11.3.0, Part 11 §11.7.1 |
+| `GROUP_MAX` | Part 11 §11.10 | Part 1 §1.5.4, Part 3 §3.12, Part 11 §11.3.3, Part 11 §11.9.1 |
 | `MOD_ACTION_MAX`, `ROSTER_ENTRY_MAX` | Part 12 §12.9 | Part 12 §12.5.2, Part 11 §11.9.6 |
 | `MODERATOR_MAX`, `MOD_EPOCH_RATE`, `MOD_EPOCH_COMMUNITY_RATE`, `ROSTER_RATE`, `MOD_CHAIN_FETCH_MAX` | Part 12 §12.9 | Part 12 §12.5.2 |
 | `MUTE_LIST_MAX` | Part 12 §12.9 | Part 12 §12.5.4 |
@@ -311,18 +331,31 @@ examples. Without the table below a maintainer finds the dependents by hand.
 | `ACK_HOLE_TIMEOUT` | Part 3 §3.2.4 | Part 6 §6.4.3 |
 | `DRAIN_THRESHOLD` | Part 3 §3.5.2 | Part 16 §16.3 |
 | `RECEIPT_MAX_HOLD` | Part 3 §3.5.4 | Part 6 §6.6 |
-| `MAX_SKIP` | Part 5 §5.5.4 | Part 11 §11.10, Part 16 §16.3 |
-| `MAX_STORED` | Part 5 §5.5.4 | Part 11 §11.3, Part 14 §14.12, Part 16 §16.3 |
-| `MAX_BYTES`, `MAX_STORED_DEVICE` | Part 5 §5.5.4 | Part 11 §11.3, Part 16 §16.3 |
+| `MAX_SKIP` | Part 5 §5.5.4 | Part 16 §16.3 |
+| `MAX_STORED` | Part 5 §5.5.4 | Part 14 §14.12, Part 16 §16.3 |
+| `MAX_BYTES`, `MAX_STORED_DEVICE` | Part 5 §5.5.4 | Part 16 §16.3 |
 | `DELETE_BATCH_MAX` | Part 7 §7.5.6 | Part 6 §6.6.1, Part 6 §6.8 |
 | `SWEEP_SPREAD` | Part 7 §7.5.6 | Part 4 §4.5.1 |
 | `SYNC_MAX_AGE` | Part 7 §7.8 | Part 2 §2.4, Part 6 §6.6, Part 12 §12.3.2 |
 | `SYNC_MAX_BYTES` | Part 7 §7.8 | Part 12 §12.3.2 |
 | `SYNC_ACK_BATCH`, `SYNC_ACK_MAX_DELAY`, `OWNER_CLAIM_MAX` | Part 7 §7.8 | Part 3 §3.12 |
-| `SENDER_KEY_GENERATIONS`, `SENDER_KEY_MAX_AGE`, `GRANT_RATE` | Part 11 §11.10 | Part 16 §16.3 |
+| `ROSTER_RATE_LIMIT`, `GROUP_EPOCH_RATE`, `GRANT_RATE` | Part 11 §11.10 | none |
 | `KEY_REQUEST_RATE` | Part 11 §11.10 | Part 6 §6.6.11 |
-| `SENDER_KEY_MAX_SKIP` | Part 11 §11.10 | Part 6 §6.8 |
-| `T1_MAX` | Part 11 §11.10 | Part 7 §7.5.9 |
+| `GROUP_REPLICAS` | Part 11 §11.10 | Part 1 §1.5.3, Part 3 §3.2.7, Part 3 §3.12, Part 6 §6.4.6 |
+| `GROUP_SLOT`, `GROUP_SLOT_WINDOW`, `GROUP_SLOT_SKEW` | Part 11 §11.10 | Part 1 §1.9, Part 2 §2.4, Part 6 §6.4.6, Part 15 §15.9.2, Part 16 §16.3 |
+| `GROUP_EPOCH_MAX_AGE`, `GROUP_EPOCH_GRACE`, `GROUP_ROSTER_WAIT` | Part 11 §11.10 | Part 6 §6.6.11, Part 16 §16.3 |
+| `GROUP_GAP_TIMEOUT` | Part 11 §11.10 | Part 3 §3.2.7 |
+| `GROUP_TAG_LEN` | Part 11 §11.10 | Part 6 §6.4.6, Part 6 §6.9 |
+| `GROUP_INDEX_MAX`, `ROLE_HOLDER_MAX` | Part 11 §11.10 | Part 6 §6.6.3 |
+| `GROUP_ALL_NOTIFY_MAX` | Part 11 §11.10 | Part 2 §2.4, Part 7 §7.5.9, Part 8 §8.5 |
+| `GROUP_SILENT_EVICT`, `PRESENCE_INTERVAL` | Part 11 §11.10 | Part 3 §3.2.7, Part 3 §3.12 |
+| `HISTORY_WINDOW` | Part 11 §11.10 | Part 6 §6.6.3 |
+| `GROUP_RETENTION` | Part 3 §3.2.7 | Part 2 §2.4, Part 2 §2.7, Part 11 §11.2.3, Part 11 §11.8, Part 16 §16.1 |
+| `GROUP_QUEUE_QUOTA`, `GROUP_IDLE_TTL` | Part 3 §3.2.7 | Part 11 §11.2.3, Part 16 §16.1 |
+| `GROUP_POST_RATE` | Part 3 §3.2.7 | Part 6 §6.4.5, Part 11 §11.3.4, Part 14 §14.2 |
+| `GROUP_READ_GRACE`, `GROUP_WRITE_GRACE` | Part 3 §3.2.7 | Part 6 §6.4.5, Part 11 §11.4.3, Part 16 §16.1, Part 16 §16.3 |
+| `GROUP_NOTIFIER_MAX` | Part 3 §3.2.7 | Part 8 §8.5.2, Part 16 §16.1 |
+| `GROUP_DIGEST_MIN_GAP` | Part 8 §8.5.2 | none |
 | `COMMUNITY_MIN_RELAYS` | Part 12 §12.9 | Part 14 §14.4 |
 | `PULL_BATCH`, `COMMUNITY_RETENTION`, `COMMUNITY_RELAY_MAX` | Part 12 §12.9 | Part 12 §12.3.3, Part 12 §12.4.6, Part 12 §12.7, Part 13 §13.7, Part 16 §16.1 |
 | `CLOCK_SKEW` | Part 10 §10.11 | Part 1 §1.9, Part 9 §9.5.2, Part 10 §10.5.2 |
@@ -346,9 +379,10 @@ examples. Without the table below a maintainer finds the dependents by hand.
 - **[SCP-010]** A revision MUST NOT define one constant in two parts.
 
 > *Cause.* Two defects that this revision corrects came from a missing row.
-> Part 11 §11.7.1 quoted a U4 value of 15 MB after Part 2 §2.4 moved that goal to
-> 25 MB. Part 3 §3.12 counted a group fan-out as 8 × 25 after Part 11 §11.2
-> stated that a fan-out is the recipient count. Each of those figures sat in a
+> The receipt section of an earlier draft of Part 11 quoted a U4 value of 15 MB
+> after Part 2 §2.4 moved that goal to 25 MB. Part 3 §3.12 counted a group
+> fan-out as 8 × 25 after Part 11 §11.2 stated that a fan-out is the recipient
+> count. Each of those figures sat in a
 > part that does not own the constant.
 
 ## 1.8 The artifact register
@@ -383,7 +417,6 @@ side channel that the user selects, such as a QR code scan.
 | `ReceiptBody`, kinds `0x06` and `0x07` | Part 6 §6.6.9 | `AppMessage` | Client |
 | `TypingBody`, kind `0x08` | Part 6 §6.6.9 | `AppMessage` | Client |
 | `EditBody`, `DeleteBody` | Part 6 §6.6.1 | `AppMessage` | Client |
-| `GroupRecord` | Part 6 §6.6.2 and Part 11 §11.2.1 | `AppMessage` | Client |
 | `GroupControl` | Part 6 §6.6.3 | `AppMessage` | Client |
 | `DigestBody` | Part 6 §6.6.4 | `AppMessage` | Client |
 | `RichRecord` | Part 6 §6.6.5 | `AppMessage` | Client |
@@ -439,15 +472,19 @@ side channel that the user selects, such as a QR code scan.
 | Inclusion proof (Part 10 §10.5.3) | none | none | Directory authority |
 | `FamilyCert` | Part 10 §10.6.3 | The dossier of Part 10 §10.6 | Relay |
 | `BlocList`, `Bloc` | Part 10 §10.6.3 | The bootstrap carriers of Part 3 §3.10 | Directory authority |
-| `SenderKeyRecord` | Part 11 §11.3 | `QueueE2E`, record kind `0x02` | Client |
-| `SenderKeyDistribution` | Part 11 §11.3.2 | `GroupControl`, type `0x01` | Client |
-| `JoinRecord` | Part 11 §11.9.1 | `GroupControl`, type `0x02` | Client |
-| `GroupInvitation` | Part 11 §11.9.1 | `GroupControl`, type `0x07` | Client |
-| `GroupInvitationBundle`, `MemberEntry` | Part 11 §11.9.1 | The chunk path of Part 13 §13.3.3 | Client |
+| Group-queue commands `0x90` to `0x9A` | Part 6 §6.4.5 | `Cell` | Client and relay |
+| `GroupQueueRecord` | Part 6 §6.4.6 | `GPOST` and `GMSG`, Part 6 §6.4.5 | Client |
+| `ContentPlain` | Part 6 §6.4.6 | `GroupQueueRecord`, kind `0x01` | Client |
+| `EpochKeyBody`, `KemSlot`, `SlotPayload` | Part 6 §6.4.6 | `GroupQueueRecord`, kind `0x02`, or the chunk path of Part 13 §13.3.3 | Client |
+| `NotifyRegistration` for a group | Part 6 §6.4.5 | `GNREG` and `GNUNREG`, Part 6 §6.4.5 | Client |
+| `JoinRecord` | Part 6 §6.6.3 | `GroupControl`, type `0x02`, on the pairwise channel of the invitee to the inviter | Client |
+| `GroupInvitation` | Part 6 §6.6.3 | `GroupControl`, type `0x07`, on the pairwise channel of the inviter to the invitee | Client |
+| `SnapshotNotice` | Part 6 §6.6.3 | `GroupQueueRecord`, as `GroupControl` type `0x08` | Client |
+| `RosterEntry` of a group, `RosterSnapshot` | Part 6 §6.6.3 | The chunk path of Part 13 §13.3.3, under a `FileDescriptor` in a `GroupInvitation` stage `0x02` or in a `SnapshotNotice` | Client |
 | Plain epoch (Part 11 §11.9.2) | none | `GroupControl`, type `0x03` | Client |
 | Granting epoch (Part 11 §11.9.2) | none | `GroupControl`, type `0x04` | Client |
 | Group moderation epoch (Part 11 §11.9.6) | none | `GroupControl`, type `0x05` | Client |
-| `GroupPresence` | Part 11 §11.9.7 | `GroupControl`, type `0x06` | Client |
+| `GroupPresence` | Part 11 §11.9.7 | `GroupQueueRecord`, as `GroupControl` type `0x06` | Client |
 | `Checkpoint` | Part 12 §12.4.1 | `PUB` and `PAGE`, Part 12 §12.3.3 | Client |
 | `CommunityPost`, `PostStub` | Part 12 §12.4.4 | `PUB` and `PAGE`, Part 12 §12.3.3 | Client, and relay for a stub |
 | `OperatorRemoval` | Part 12 §12.4.4 | `PAGE`, Part 12 §12.3.3 | Relay |
@@ -470,9 +507,11 @@ side channel that the user selects, such as a QR code scan.
 | `PowSolution` | Part 14 §14.8 | `Admission` | Client |
 | Cross-relay token, first-party token | The RFC of each type, Part 14 §14.3 | none | Issuer, Part 14 §14.9 |
 
-The table has 98 rows, and 21 of them hold at least one `none` cell.
-`Cell` and `GroupRecord` each have two definitions, and the two definitions
-of each pair agree field for field.
+The table has 104 rows, and 21 of them hold at least one `none` cell.
+`Cell` has two definitions, and the two agree field for field. The name
+`RosterEntry` names two different objects, one of Part 6 §6.6.3 for a group
+and one of Part 12 §12.5.2 for a community, and the two rows above keep them
+apart.
 
 - **[SCP-011]** A revision MUST NOT add a requirement that names an artifact
   with no row in this table.
@@ -491,7 +530,7 @@ of each pair agree field for field.
 >
 > The table above found more. The handshake flights of Part 5 §5.4.2 have a
 > byte layout, and no command or kind carries them. Rule `SCP-015` follows rule
-> `SCP-010`, and the two duplicate pairs above are the debt that it stops from
+> `SCP-010`, and the duplicate pair above is the debt that it stops from
 > growing.
 
 ## 1.9 Time and the clock
@@ -516,6 +555,11 @@ differ by more than `CLOCK_SKEW`. Part 16 §16.3 records that no platform gives 
 monotonic counter that survives a restore. A party cannot detect a clock
 movement across a restart, thus a duration that spans a restart runs on the
 device clock. This specification accepts that residual.
+
+The group slot index of Part 11 §11.3.1 reads the device clock, thus a group
+record carries a clock comparison between two members. `GROUP_SLOT_SKEW` of
+Part 11 §11.10 is its skew tolerance under `SCP-020`, and a record outside the
+slot window is a `clock` event of Part 15 §15.9.2.
 
 - **[SCP-016]** A revision that adds a duration MUST name the party that
   measures it. **[SCP-017]** A revision that adds a duration MUST name the
