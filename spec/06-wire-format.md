@@ -1,7 +1,8 @@
 # UMBRA Protocol Specification — Part 6: Wire Format and Encoding
 
 **Status:** Draft
-**Version:** 0.1.0-draft
+**Version:** 0.2.0-draft
+**Date:** 2026-09-11
 
 ---
 
@@ -56,9 +57,10 @@ intended incentive.
    parser returns an error. There are no panics, no unbounded allocations, and
    no recursion.
 7. **Each byte value in this specification is in one namespace.** Part 6 gives
-   five namespaces. These are the cell command (§6.3), the queue command (§6.4),
-   the L6 record kind (§6.4.2), the `PqFrame` kind (§6.5), and the application
-   kind (§6.6). A byte value has a meaning only inside its own namespace. **[WIR-007]** A part
+   seven namespaces. These are the cell command (§6.3), the queue command
+   (§6.4), the L6 record kind (§6.4.2), the group queue record kind (§6.4.6),
+   the `PqFrame` kind (§6.5), the application kind (§6.6), and the group
+   control type (§6.6.3). A byte value has a meaning only inside its own namespace. **[WIR-007]** A part
    outside Part 6 MAY declare a namespace of its own. Part 12 §12.4.4 declares
    the community record type, and Part 7 §7.5.5 declares the device-set control
    type.
@@ -351,8 +353,9 @@ endpoints of the measurement.
 
 > **These byte values are cell commands.** The value `0x01` is `RELAY` here,
 > `NEW` in §6.4, an L6 ratchet record in §6.4.2, `hdr` in §6.5, and Text in
-> §6.6. The value `0x02` is `DATA` here, `IDS` in §6.4, an L6 sender-key record
-> in §6.4.2, `ek` in §6.5, and an attachment descriptor in §6.6. The value
+> §6.6. The value `0x02` is `DATA` here, `IDS` in §6.4, a retired L6 kind in
+> §6.4.2, an epoch-key record in §6.4.6, `ek` in §6.5, and an attachment
+> descriptor in §6.6. The value
 > `0x04` is `EXTENDED` here, `ct2` in §6.5, and Edit in §6.6. The value `0x05`
 > is `DESTROY` here, `mac` in §6.5, and Delete in §6.6. The value `0x07` is
 > `MEAS_ECHO` here, and §6.4 gives it no queue command. Rule 7 of §6.1.1 keeps
@@ -375,7 +378,7 @@ Command {
     version         u8            // 0x01
     cmd             u8            // see table
     corr_id         [16]u8        // random, unique for each command
-    queue_id        [32]u8        // RecipientId, SenderId, ChunkId, or community_id, by cmd
+    queue_id        [32]u8        // RecipientId, SenderId, ChunkId, community_id, or GroupQueueId, by cmd
     auth            [32]u8        // deniable authenticator (Part 3 §3.2.3)
     payload_len     u16
     payload         [payload_len]u8
@@ -401,11 +404,13 @@ party MUST NOT compute `auth` as an AEAD ciphertext.
 | `0x51` | `NACK` | Relay | `NackPayload`, 17 B, §6.4.4 |
 | `0x60` | `COVER` | Sender or recipient | zero-filled, indistinguishable from `SEND` and `MSG` |
 | `0x70`–`0x7B` | Attachment commands | Uploader, downloader, or relay | Part 13 §13.3.3 gives the twelve commands and their payloads |
-| `0x80`–`0x83` | Community commands | Subscriber, publisher, or relay | Part 12 §12.3.3 gives the four commands and their payloads |
+| `0x80`–`0x85` | Community commands | Subscriber, publisher, or relay | Part 12 §12.3.3 gives the six commands and their payloads |
+| `0x90`–`0x9A` | Group-queue commands | Member, admin, or relay | §6.4.5 gives the eleven commands and their payloads |
 
 **[WIR-015]** `COVER` MUST be bit-indistinguishable from a real command after the L4
 encryption. A relay that makes inbound pacing cover (Part 3 §3.5.2) emits cells
-with the shape of `MSG`.
+with the shape of `MSG` in a queue session, and with the shape of `GMSG` in a
+group-queue session (§6.4.5).
 
 Part 13 §13.3.3 gives the attachment commands. Those commands put a `chunk_id`
 in `queue_id`. **[WIR-107]** An attachment command MUST travel on the separate connection of
@@ -424,6 +429,21 @@ NOT batch a community command with a command of another range.
 > command in the same session would give the relay one, because a queue names
 > its recipient. The batch rule keeps a `Cell` inside one range. Thus a relay
 > that serves a queue and a community reads no pull beside a queue command.
+
+§6.4.5 gives the group-queue commands. Those commands put a `GroupQueueId` in
+`queue_id`. **[WIR-363]** A group-queue command MUST travel on a transport
+session that carries no command of another range. **[WIR-364]** A client MUST
+NOT batch a group-queue command with a command of another range.
+**[WIR-365]** One transport session MUST carry the commands of one group queue
+only. **[WIR-366]** A party MAY send a `COVER` in a group-queue session.
+**[WIR-367]** A `COVER` in a group-queue session MUST have the shape of a
+`GMSG`. The inbound pacing of Part 3 §3.5.2 applies to a group-queue session
+exactly as to a queue session.
+
+> *Cause.* A group queue names no member, and a pairwise queue names its
+> recipient. A session that carried both would give the relay the link that
+> Part 11 §11.5 forbids. One group queue for each session keeps two groups of
+> one member apart at the relay in the same way.
 
 - **[WIR-211]** A relay MUST send a `CRPUT` on a direct transport session to
   the target relay. **[WIR-212]** A relay MUST NOT send a `CRPUT` over a client
@@ -449,8 +469,9 @@ command when a second ready command fits the command area of that cell.
 data budget. Part 12 §12.4.1 rule 4 depends on this rule.
 
 A `SEND` and a `MSG` each take the command area of the bucket (§6.4.2 rule 6). A
-`MSG` fills that area exactly, and a `SEND` leaves 4 bytes. Thus a client packs
-only a command that carries a small payload or no payload.
+`MSG` fills that area exactly, and a `SEND` leaves 4 bytes. A `GPOST` and a
+`GMSG` of §6.4.5 take the same two lengths. Thus a client packs only a command
+that carries a small payload or no payload.
 
 ### 6.4.2 Queue end-to-end record (L6)
 
@@ -485,9 +506,9 @@ QueueE2E {
    repeat a nonce under one `K_QE`.
 4. **[WIR-022]** A party MUST bind `version || SenderId` as the associated data.
 5. The plaintext starts with a `u16` true length and then a `u8` L6 record kind.
-   The value `0x01` names a ratchet record (§6.5), and the value `0x02` names a
-   sender-key record (Part 11 §11.3). The value `0x03` names a report record
-   (Part 12 §12.5.3). The value `0x04` names a `NotifyDigest` (Part 12 §12.6.4).
+   The value `0x01` names a ratchet record (§6.5). The value `0x02` named a
+   sender-key record in an earlier draft, and it is retired. The value `0x03`
+   names a report record (Part 12 §12.5.3). The value `0x04` names a `NotifyDigest` (Part 12 §12.6.4).
    **[WIR-023]** A receiver MUST reject an unknown kind.
 6. **[WIR-024]** **A sender MUST fill the L6 record to a fixed length for the bucket.** That
    length is the "L6 record on a `MSG`" row of §6.9. That row gives 390 bytes at
@@ -507,25 +528,29 @@ QueueE2E {
    `SEND` reaches 84 + 390 = 474 and leaves 4 bytes. The cell padding of §6.3
    covers those 4 bytes.
 
-> *Cause.* A relay parses `payload_len` in the clear. A sender-key record skips
-> L7. Thus without this rule a relay reads the exact plaintext length. A relay
-> then separates a group record from a pairwise record by that length alone.
-> Part 11 §11.5 and G11 do not permit that result. The cell is padded to the
-> bucket in any case, thus this rule costs no wire byte and no cell.
+> *Cause.* A relay parses `payload_len` in the clear. Without this rule a
+> relay reads the exact plaintext length of each record. That length separates
+> a receipt from a reaction, and a short text from a long one, and G11 does
+> not permit that result. The cell is padded to the bucket in any case, thus
+> this rule costs no wire byte and no cell. An earlier draft gave this rule a
+> second cause: a sender-key record skipped L7, and its length alone separated
+> a group record from a pairwise record. In 0.2.0-draft no group record
+> travels on a pairwise queue (§6.4.5), and the rule stays for its pairwise
+> cause.
 
-7. A relay reads the version, the nonce, and the bucket only. Thus a relay
-   cannot tell a group record from a pairwise record. This rule is the wire half
-   of Part 11 §11.5.
+7. A relay reads the version, the nonce, and the bucket only. A group record
+   travels on a group queue (§6.4.5) and never on a pairwise queue, thus a
+   relay that serves a pairwise queue holds no group record. §6.4.6 gives the
+   fields that a group-queue relay reads, and Part 11 §11.5 gives what that
+   relay learns.
 8. **[WIR-030]** A receiver MUST reject a record with an unknown version.
    **[WIR-031]** A receiver MUST reject a record whose tag does not verify.
    **[WIR-032]** A receiver MUST NOT report which check failed.
 9. **[WIR-033]** A sender MUST make a new queue before the message count of that queue reaches
    `ROTATE_AFTER` (Part 3 §3.2.4).
-10. **[WIR-034]** On a group send, a sender MUST draw a fresh nonce for each recipient. **[WIR-035]** The
-    test vectors of §6.8 MUST hold a group send to 3 recipients. **[WIR-036]** Those vectors
-    MUST assert that the three records differ. **[WIR-037]** Those vectors MUST assert that
-    the three plaintexts are equal. **[WIR-038]** Those vectors MUST also assert that a
-    20-byte group text and a 20-byte pairwise text give one `payload_len`.
+10. This rule is retired in 0.2.0-draft. A group send is one `GPOST` of
+    §6.4.5 to each replica of the group queue, and no per-recipient record
+    exists.
 
 ### 6.4.3 Queue teardown, acknowledgment, and the absence of a sender withdrawal
 
@@ -596,7 +621,7 @@ QueueE2E {
 
 8. **[WIR-050]** A recipient MUST store a record that it cannot decrypt before it acknowledges
    a later record. Thus a decryption retry after a ratchet repair stays possible,
-   and Part 11 §11.3.2 can request a missing sender-key generation.
+   and the key request of §6.6.11 can recover the record.
 9. **[WIR-051]** A recipient MAY use a hole in the sequence to find that a relay did not
    deliver a message. **[WIR-052]** A recipient MUST NOT treat the sequence as proof of a
    loss, because the relay assigns the sequence.
@@ -643,7 +668,7 @@ NackPayload {                     // 17 bytes
 
 **The list above is closed.** A rejection rule of this specification maps onto
 one row. A rule that names no row maps onto `REJECTED`. The object of
-`queue_id` is a queue, a chunk, or a community.
+`queue_id` is a queue, a chunk, a community, or a group queue.
 
 1. **[WIR-313]** A relay MUST answer a command that it rejects with one `NACK`.
    **[WIR-314]** That `NACK` MUST carry the `corr_id` of the rejected command.
@@ -681,6 +706,363 @@ one row. A rule that names no row maps onto `REJECTED`. The object of
 > the signal that client waits for a delivery that never comes. Five reasons
 > are few by design. SMP defines a wider taxonomy, and each extra value that
 > separates a state of the relay from another is one more oracle.
+
+### 6.4.5 Group-queue commands
+
+A group queue is the relay-held, retained, many-reader mailbox of Part 3
+§3.2.7, and Part 11 §11.2 gives its use. This section gives the eleven
+commands of the range `0x90` to `0x9A` and their payloads. Part 3 §3.2.7 owns
+the behavior rules and the constants `GROUP_RETENTION`, `GROUP_QUEUE_QUOTA`,
+`GROUP_POST_RATE`, `GROUP_READ_GRACE`, `GROUP_WRITE_GRACE`, `GROUP_IDLE_TTL`,
+and `GROUP_NOTIFIER_MAX`. Part 11 §11.3 gives the record that the queue
+carries, and §6.4.6 gives its layout.
+
+A group-queue command uses the 84-byte `Command` header of §6.4, and it puts
+the 32-byte `GroupQueueId` in `queue_id`. It keys the deniable authenticator
+of Part 3 §3.2.3 with `read_sk`, `write_sk`, or `own_sk` in the place of
+`Q*_auth_sk`. Part 11 §11.3.1 derives the first two from the group epoch, and
+the creator draws `own_sk` from its CSPRNG. `NET-015` holds: no group-queue
+command carries a signature.
+
+| `cmd` | Name | Sent by | Auth key | Payload |
+| --- | --- | --- | --- | --- |
+| `0x90` | `GNEW` | Creator | none, as `NEW` | `GnewPayload`, 99 bytes and the `Admission` body |
+| `0x91` | `GIDS` | Relay | — | `GroupQueueId`, 32 bytes |
+| `0x92` | `GPOST` | Member | `write_sk` | one `GroupQueueRecord` of §6.4.6, at the "record on a `GMSG`" row of §6.9 |
+| `0x93` | `GSEQ` | Relay | — | `GseqPayload`, 20 bytes |
+| `0x94` | `GSUB` | Member | `read_sk` | `from_seq` `u32`, 4 bytes |
+| `0x95` | `GMSG` | Relay | — | `seq` `u32`, then one `GroupQueueRecord`; the L5 payload row of §6.9 |
+| `0x96` | `GUNSUB` | Member | `read_sk` | empty |
+| `0x97` | `GKEY` | Admin | `own_sk` | `GkeyPayload`, 64 bytes |
+| `0x98` | `GDEL` | Admin | `own_sk` | empty |
+| `0x99` | `GNREG` | Member | `read_sk` | `GroupNotifyRegistration`, 130 bytes |
+| `0x9A` | `GNUNREG` | Member | `read_sk` | `GroupNotifyRegistration`, 130 bytes |
+
+```
+GnewPayload {                     // the payload of GNEW, 99 bytes at an Admission of kind 0x00
+    read_pk         [32]u8        // the reader credential of epoch 1, X25519
+    write_pk        [32]u8        // the writer credential of epoch 1, X25519
+    own_pk          [32]u8        // the owner credential, X25519
+    admission       Admission     // Part 14 §14.2, 3 bytes and the body
+}
+
+GseqPayload {                     // the payload of GSEQ, 20 bytes
+    corr_id         [16]u8        // the corr_id of the GPOST that it acknowledges
+    seq             u32           // the sequence number that the relay gave the record
+}
+
+GsubPayload {                     // the payload of GSUB, 4 bytes
+    from_seq        u32           // the relay emits each retained record with a seq above this value
+}
+
+GkeyPayload {                     // the payload of GKEY, 64 bytes
+    read_pk         [32]u8        // the reader credential of the new epoch
+    write_pk        [32]u8        // the writer credential of the new epoch
+}
+
+GroupNotifyRegistration {         // the payload of GNREG and of GNUNREG, 130 bytes
+    version         u8            // 0x01
+    queue           QueueAddress  // 129 bytes, §6.6.10; a notify queue that the reader made for this group
+}
+```
+
+A `GroupNotifyRegistration` has the shape of the `NotifyRegistration` of Part
+12 §12.6.4 without `community_id`, because `queue_id` names the group queue.
+Part 8 §8.5.2 gives the notify queue of a group and the digest that the relay
+writes into it.
+
+**The parser.**
+
+- **[WIR-368]** A party MUST reject a command whose `cmd` is between `0x9B`
+  and `0x9F`. **[WIR-369]** A party MUST reject a group-queue command whose
+  `payload_len` differs from the length that the table above gives for its
+  `cmd`.
+- **[WIR-370]** A `GPOST` MUST carry a `payload_len` equal to the "record on
+  a `GMSG`" row of the group-queue capacity table of §6.9. **[WIR-371]** A
+  `GMSG` MUST carry a `payload_len` equal to the L5 payload row of §6.9. Thus
+  a `GMSG` fills the command area exactly, and a `GPOST` leaves 4 bytes, as a
+  `MSG` and a `SEND` do under §6.4.2 rule 6. **[WIR-372]** A relay MUST NOT
+  move a record to a different bucket between the `GPOST` and the `GMSG`.
+
+**Creation and admission.**
+
+- **[WIR-373]** A relay MUST apply the admission control of Part 14 §14.2 to
+  a `GNEW`. Part 14 §14.2 gives that path a row, and the fallback is the proof
+  of work of Part 14 §14.8. **[WIR-374]** A relay MUST NOT apply an admission
+  gate to a `GPOST`. **[WIR-375]** A relay MUST answer a `GPOST` above
+  `GROUP_POST_RATE` with a `NACK` of reason `LIMIT`.
+- **[WIR-376]** A relay MUST make `GroupQueueId` from its CSPRNG at each
+  accepted `GNEW`. **[WIR-377]** A relay MUST answer an accepted `GNEW` with
+  one `GIDS` in the same session.
+
+**The sequence number.** The relay gives each accepted record a `seq`, in the
+manner of §6.4.3 rule 5.
+
+- **[WIR-378]** A relay MUST start `seq` at 1 on a new group queue.
+  **[WIR-379]** A relay MUST give each accepted record a `seq` above each
+  earlier `seq` of that group queue. **[WIR-380]** A relay MUST NOT give the
+  `seq` of an erased record to a second record. **[WIR-381]** A relay MUST NOT
+  derive `seq` from the record bytes, because §6.1.1 rule 5 forbids that
+  derivation.
+- `seq` is relay-local. The two replicas of one group give two unrelated
+  sequences. **[WIR-382]** A client MUST NOT use `seq` as a message
+  identifier. **[WIR-383]** A client MUST NOT use `seq` as an order across
+  replicas. A reader holds one cursor for each replica, and Part 3 §3.2.7
+  gives that rule. Part 7 §7.5.3 gives the class of the cursor.
+
+**The post and its acknowledgment.**
+
+- **[WIR-384]** A relay MUST answer an accepted `GPOST` with one `GSEQ` that
+  carries the `corr_id` of that `GPOST`. The `GSEQ` sits in the place that
+  Part 3 §3.7 gives the acknowledgment of a `SEND`.
+- **[WIR-385]** If a relay holds a record whose bytes equal the
+  `GroupQueueRecord` of a `GPOST`, it MUST answer with the `seq` that it
+  holds. **[WIR-386]** That relay MUST NOT store a second copy. A sender under
+  the ARQ of Part 3 §3.7 sends one record to a replica again in a later
+  session, and this rule makes that send idempotent, in the manner of Part 12
+  rule `COM-203`. The comparison selects nothing but a stored `seq`, and
+  `WIR-382` keeps that value out of the three functions of `WIR-004`. A
+  comparison that fails stores a second record, and the `msg_id` rule
+  `WIR-065` removes the duplicate at each reader.
+
+**The subscription.** There is no acknowledgment from a reader.
+
+- **[WIR-387]** On a `GSUB`, a relay MUST emit each retained record of the
+  group queue with a `seq` above `from_seq`, in `seq` order. **[WIR-388]**
+  While the session lives, a relay MUST emit each record that it accepts
+  after the `GSUB` to that session. A backlog above `DRAIN_THRESHOLD` follows
+  `NET-037`.
+- **[WIR-389]** A relay MUST NOT erase a record on an action of a reader.
+  Part 3 §3.2.7 retains by `GROUP_RETENTION` and by `GROUP_QUEUE_QUOTA`.
+
+**The rotation of the credentials.**
+
+- **[WIR-390]** On a `GKEY`, a relay MUST replace `read_pk` and `write_pk`
+  with the two values of the payload. **[WIR-391]** A relay MUST keep the
+  previous `read_pk` for `GROUP_READ_GRACE` after the `GKEY`. **[WIR-392]** A
+  relay MUST keep the previous `write_pk` for `GROUP_WRITE_GRACE` after the
+  `GKEY`.
+- **[WIR-393]** Inside `GROUP_READ_GRACE`, a relay MUST accept a `GSUB`, a
+  `GUNSUB`, a `GNREG`, or a `GNUNREG` under either read key. **[WIR-394]**
+  Inside `GROUP_WRITE_GRACE`, a relay MUST accept a `GPOST` under either
+  write key.
+- **[WIR-395]** When a grace ends, a relay MUST erase the previous key.
+  **[WIR-396]** A relay MUST reject a command under an erased key with a
+  `NACK` of reason `REJECTED`. **[WIR-397]** A relay MUST hold one previous
+  read key and one previous write key only, thus a second `GKEY` inside a
+  grace replaces the previous key. Part 11 §11.4.1 bounds the rotation rate.
+
+**The deletion.**
+
+- **[WIR-398]** On a `GDEL`, a relay MUST erase the group queue, each record,
+  each notify registration, and each key that it holds for the queue.
+  **[WIR-399]** A relay MUST NOT retain an identifier of a deleted group
+  queue. **[WIR-400]** A relay MUST NOT keep a record that a group queue
+  existed. A later command that names it gets `REJECTED` (§6.4.4), as
+  `WIR-317` gives.
+
+**The notify registration.**
+
+- **[WIR-401]** A parser MUST reject a `GroupNotifyRegistration` whose
+  `version` is not `0x01`. **[WIR-402]** A relay MUST answer a `GNREG` above
+  `GROUP_NOTIFIER_MAX` registrations with a `NACK` of reason `LIMIT`. Part 3
+  §3.2.7 gives the retention of a registration, and Part 8 §8.5.2 gives the
+  client rules.
+
+Part 11 §11.3.4 and §11.3.5 give the sending and the receiving rules of a
+member, including the records that a reader stores for a later retry.
+
+> *Cause.* An earlier draft carried a group message as one pairwise `SEND`
+> for each member under a sender key, with a jitter across the sends, and it
+> gave a large group a re-broadcaster. A message to 500 members then cost 499
+> sends, and a membership change cost each member 499 sends more. The group
+> queue puts one record at a relay that holds no membership list, and §6.4.6
+> gives the tag vector that keeps the attribution the pairwise channel gave.
+> Part 11 §11.1 gives the argument, and Part 11 §11.5 gives what the
+> group-queue relay learns.
+
+### 6.4.6 The group queue record
+
+The payload of a `GPOST`, and the payload of a `GMSG` after `seq`, carry one
+group queue record. It is the L6 record of a group queue, and it sits in the
+place of the `QueueE2E` record of §6.4.2. There is no L7 under it. The record
+is the AEAD layer, and its `body` carries the application record directly.
+The record carries no `group_id`, because the queue names the group; the
+associated data binds `group_id` instead.
+
+```
+GroupQueueRecord {                // the L6 record of a group queue
+    version         u8            // 0x01
+    kind            u8            // 0x01 a content record, 0x02 an epoch-key record
+    epoch           u32           // the group epoch e of Part 11 §11.3.1
+    slot            u32           // kind 0x01: the slot index t; kind 0x02: the start slot t_e of the epoch
+    nonce           [12]u8        // kind 0x01: from the device CSPRNG, fresh for each record
+                                  // kind 0x02: 12 zero bytes
+    body_len        u16
+    body            [body_len]u8  // kind 0x01: the AEAD output over a ContentPlain
+                                  // kind 0x02: an EpochKeyBody, then the fill
+}
+```
+
+The fixed part is 24 bytes.
+
+> **These byte values are group queue record kinds.** §6.1.1 rule 7 gives the
+> namespace rule. This namespace holds two values, and the six other namespaces
+> of this part use the same byte values with different meanings.
+
+**The content record.** For kind `0x01`:
+
+```
+body = ChaCha20-Poly1305( key = K_rec(e, t), nonce, plaintext = ContentPlain, ad )
+ad   = "umbra/v1/group-record" || group_id || BE32(e) || BE32(t)
+```
+
+Part 11 §11.3.1 derives `K_rec(e, t)` from the slot chain of the epoch, and
+Part 5 §5.11 holds the label. The 16-byte tag sits at the end of `body`.
+
+```
+ContentPlain {
+    sender_index    u16           // the member index of the sender, Part 11 §11.9.1
+    counter         u32           // strictly increasing for each (member, epoch); 1 on the first record of an epoch
+    roster_epoch    u32           // the roster epoch whose active-member order gives the tag order
+    tag_mode        u8            // 0x01 dense, 0x02 sparse
+    tag_count       u16           // dense: the active member count at roster_epoch, the sender included
+                                  // sparse: the count of SparseTag entries
+    tags            [..]u8        // dense: [tag_count][12]u8, in member-index order ascending;
+                                  //   the position of the sender holds 12 zero bytes
+                                  // sparse: [tag_count]SparseTag, in index order ascending, no repeat
+    app_len         u16
+    app             [app_len]u8   // one AppMessage of §6.6
+    fill            [..]u8        // zero bytes to the fixed length of the bucket
+}
+
+SparseTag {                       // 14 bytes
+    index           u16           // the member index that the tag serves
+    tag             [12]u8
+}
+```
+
+The fixed fields of `ContentPlain` are 15 bytes. A dense vector costs
+`GROUP_TAG_LEN`, which is 12 bytes, for each active member, and a sparse entry
+costs 14 bytes. Part 11 §11.3.3 derives each tag from the pair key of the
+sender and the receiver. Part 11 §11.3.4 gives the sending rules, and Part 11
+§11.3.5 gives the receiving rules and the acceptance of a record.
+
+**The fill.**
+
+- **[WIR-403]** A sender MUST fill a `GroupQueueRecord` to the "record on a
+  `GMSG`" row of the group-queue capacity table of §6.9 for its bucket.
+  **[WIR-404]** For kind `0x01`, a sender MUST put the fill inside
+  `ContentPlain` after `app`, thus the AEAD covers it. **[WIR-405]** For kind
+  `0x02`, a sender MUST put the fill inside `body` after the `EpochKeyBody`.
+  **[WIR-406]** `body_len` MUST equal that row minus 24. **[WIR-407]** A
+  receiver MUST verify that each fill byte is zero.
+- **[WIR-408]** A relay MUST read `version`, `kind`, `epoch`, `slot`, and the
+  bucket of a `GroupQueueRecord`, and no other field. **[WIR-409]** A relay
+  MUST reject a `GPOST` whose `version` or `kind` the table above does not
+  hold.
+
+**The parser at a receiver.**
+
+- **[WIR-410]** A receiver MUST reject a record whose `version` is not
+  `0x01`. **[WIR-411]** A receiver MUST reject a record whose `kind` is not
+  `0x01` or `0x02`. **[WIR-412]** A receiver MUST reject a content record
+  whose tag does not verify, and `WIR-032` applies to that rejection.
+- **[WIR-413]** A parser MUST reject a `tag_mode` that is not `0x01` or
+  `0x02`. **[WIR-414]** In dense mode, a parser MUST reject a `tag_count` that
+  does not equal the active member count of the receiver's roster at
+  `roster_epoch`. The receiver knows that count from its roster, and no field
+  of the record states it. **[WIR-415]** In sparse mode, a parser MUST reject
+  a list that is not in strictly increasing `index` order. **[WIR-416]** A
+  parser MUST reject a repeated `index` in a sparse list. **[WIR-417]** A
+  parser MUST reject a `ContentPlain` whose fields end after the plaintext
+  ends.
+- **[WIR-418]** A sender MUST use dense mode for each `AppMessage` but a
+  `GroupControl` of type `0x06`. **[WIR-419]** A sender MUST use sparse mode
+  for a `GroupControl` of type `0x06`, with one entry for each member of role
+  `admin` or above. **[WIR-420]** A receiver that finds no entry for its own
+  index in a sparse record MUST discard that record.
+- **[WIR-421]** A sender MUST draw `nonce` from the device CSPRNG for each
+  content record. **[WIR-422]** A sender MUST set `nonce` to 12 zero bytes on
+  an epoch-key record. An epoch-key record has no AEAD layer at the record
+  level, and each slot carries its own.
+
+**The epoch-key record.** For kind `0x02`, `body` is an `EpochKeyBody`. It
+carries the secret of a new epoch to each member under that member's KEM
+key, and Part 11 §11.4.2 gives the rotation. The body has no slot-key layer,
+because a member that missed the previous epoch has to open its slot. The
+relay therefore reads `slot_count` when it reads the bucket, and Part 11 §11.5
+states that leak.
+
+```
+EpochKeyBody {
+    roster_epoch    u32           // the roster epoch whose active members hold slots
+    carrier         u8            // 0x01 inline, 0x02 chunked
+    slot_count      u16           // the active member count at roster_epoch, less the members that the rotation excludes
+    // carrier 0x01:
+    slots           [slot_count]KemSlot   // in member-index order ascending
+    // carrier 0x02:
+    slots_per_chunk u16
+    desc_len        u16
+    descriptor      [desc_len]u8  // a FileDescriptor of Part 13 §13.3 that names the slot object
+}
+
+KemSlot {                         // 1 185 bytes at own_count 0; 1 249 bytes at own_count 2
+    index           u16           // the member index that the slot serves
+    kem_ct          [1120]u8      // UMBRA-KEM.Encap( GroupKemKey_g.pk of that member ), Part 5 §5.2
+    ct              [n]u8         // ChaCha20-Poly1305( K_slot, 12 zero bytes, SlotPayload, ad )
+                                  // n = 47 + 32 × own_count + 16
+}
+
+SlotPayload {                     // 47 bytes at own_count 0; 111 bytes at own_count 2
+    rotator         u16           // the member index of the rotator
+    k_e             [32]u8        // the epoch secret K_e of Part 11 §11.3.1
+    tag             [12]u8        // HMAC-SHA3-256( K_{rotator,index}, "umbra/v1/group-epoch-tag" || group_id
+                                  //   || BE32(e) || BE32(t_e) || BE32(roster_epoch) || k_e )[0..12]
+    own_count       u8            // 0 for a member below admin; GROUP_REPLICAS for a member at admin or above
+    own_sks         [own_count][32]u8   // own_sk of each replica, in the order of the roster snapshot
+}
+
+K_slot = HKDF-SHA3-256( salt = "", ikm = ss, info = "umbra/v1/group-epoch-slot" || group_id || BE32(e) || BE16(index), L = 32 )
+ad     = "umbra/v1/group-epoch-slot" || group_id || BE32(e) || BE16(index)
+```
+
+The fixed part of an `EpochKeyBody` is 7 bytes, and the chunked carrier adds
+4 bytes and the descriptor. The value `ss` is the shared secret of the
+decapsulation. Part 11 §11.3.3 gives `K_{i,j}`, Part 11 §11.4.2 gives the
+acceptance of a slot, and Part 5 §5.11 holds the two labels.
+
+**The carrier.** An inline record holds 27 plain-member slots at bucket `B3`
+(7 + 27 × 1 185 = 32 002 bytes, and the `B3` record `body` row of §6.9 is
+32 622). A one-slot record is 1 256 bytes of body, and it fits bucket `B1`.
+The chunked carrier names a slot object on the chunk path of Part 13
+§13.3.3, of class `CNEW`, under `ATT-142`. The object is a sequence of
+segments of `SEGMENT_SIZE` (Part 13 §13.7). Segment `k` holds the slots at
+ranks `k × slots_per_chunk` to `(k + 1) × slots_per_chunk − 1`, in
+member-index order, and then zero bytes to `SEGMENT_SIZE`. The rank of a slot
+is its position among the included members, counted from 0. At 500
+plain-member slots the object is 592 500 bytes of slots in 19 segments, and a
+member downloads one `B3` chunk, which is 32 860 bytes on the wire (§6.9).
+
+- **[WIR-423]** A rotator MUST use the inline carrier when 7 plus the sum of
+  the slot sizes fits the record `body` row of §6.9 at bucket `B3`.
+  **[WIR-424]** Otherwise a rotator MUST use the chunked carrier.
+  **[WIR-425]** A rotator MUST set `slots_per_chunk` to the greatest value at
+  which the slots of each segment fit `SEGMENT_SIZE`. **[WIR-426]** A parser
+  MUST reject a `slots_per_chunk` of 0. A member fetches the one segment that
+  holds its slot, and Part 11 §11.4.2 gives that rule.
+- **[WIR-427]** A parser MUST reject a `carrier` that is not `0x01` or
+  `0x02`. **[WIR-428]** A parser MUST reject an inline body whose length
+  before the fill does not equal 7 plus the sum of the slot sizes. The
+  receiver knows `own_count` of each index from the roles of its roster.
+  **[WIR-429]** A parser MUST reject a slot list that is not in strictly
+  increasing `index` order. **[WIR-430]** A parser MUST reject a repeated
+  `index` in a slot list. **[WIR-431]** A parser MUST reject an `own_count`
+  that is not 0 or `GROUP_REPLICAS`.
+
+Part 11 §11.3 and §11.4 give the key derivations and the acceptance rules of
+the two record kinds. Part 11 §11.10 owns `GROUP_REPLICAS` and
+`GROUP_TAG_LEN`.
 
 ## 6.5 Ratchet record (L7)
 
@@ -783,13 +1165,12 @@ does not change at L1, at L4, at L6, or at L7.
 One logical message carries one `msg_id` at the sender and at each device of
 the sender. That message carries the same `msg_id` at each recipient and at each
 device of each recipient. The value is the same on each sync channel of Part 7
-§7.5.1. The L6 ciphertexts still differ for each recipient, as Part 11 §11.3
-requires.
+§7.5.1. On a pairwise channel the L6 ciphertexts differ for each recipient. In
+a group one `GroupQueueRecord` of §6.4.6 carries the message to every member.
 
-Each tier of Part 11 §11.2 carries `msg_id`. Tier T1 has no group cryptography,
-and tier T1 carries an `AppMessage` on each pairwise channel. Thus tier T1 has a
-message identifier. Part 11 §11.2.1 wraps each group record in a `GroupRecord`
-of kind `0x12`, and §6.6.2 gives that structure.
+A group message carries `msg_id` in the `AppMessage` that is the `app` of a
+`GroupQueueRecord`. No wrapper names the group, because the group queue names
+it, and §6.6.2 records the retired wrapper.
 
 **[WIR-056]** A sender MUST draw `msg_id` from the device CSPRNG. **[WIR-057]** A sender MUST NOT derive
 `msg_id` from the content or from a counter. **[WIR-058]** A sender MUST NOT use a value that
@@ -797,17 +1178,18 @@ a different conversation also holds.
 
 **[WIR-059]** A sender MUST draw a new `msg_id` for each message and for each conversation.
 **A group is one conversation.** **[WIR-060]** A group send MUST carry one `msg_id` to each
-member. That rule applies to tier T1, to tier T2, and to tier T3 of Part 11
-§11.2. **[WIR-061]** An edit or a tombstone MUST name the `msg_id` of the target.
+member. One `GPOST` of §6.4.5 carries that one value to each replica of the
+group queue of Part 11 §11.2. **[WIR-061]** An edit or a tombstone MUST name the `msg_id` of the target.
 
 > *Cause.* A moderation epoch of Part 11 §11.9.6 names one `msg_id` for a
-> target. A per-recipient value in tier T1 matched the history of one recipient
-> only, thus a moderator could not act on a tier T1 post.
+> target. An earlier draft carried a small group on pairwise channels with a
+> per-recipient value. That value matched the history of one recipient only,
+> thus a moderator could not act on such a post.
 >
 > The G9 cost of one shared value is zero inside a group. Part 11 §11.5 states
 > that a member learns the roster, thus two members already know that they share
-> the sender. The value travels inside the AEAD of a pairwise channel, thus no
-> party outside the group reads it. Part 11 §11.2.1 gives the full statement.
+> the sender. The value travels inside the AEAD of the group record, thus no
+> party outside the group reads it. Part 11 §11.3 gives the full statement.
 >
 > The rule against a shared value across two **different** conversations stays.
 > WIR-058 forbids one value in two conversations, and WIR-062 makes a forward
@@ -868,7 +1250,7 @@ client MUST NOT copy that raw value into a different row.
 | `0x0E` | Community contact (Part 12 §12.6.3), inside a `CommunityPost` only | Insertion |
 | `0x10` | Group control (§6.6.3, Part 11) | Control |
 | `0x11` | Community record (Part 12 §12.4.4), inside a report record only | Control |
-| `0x12` | Group record (§6.6.2, Part 11 §11.2.1) | The class of `inner_kind` |
+| `0x12` | Retired; it was the group record wrapper (§6.6.2) | — |
 | `0x20` | Device-set sync (Part 7) | Mutable state or control, by the sub-kind |
 | `0x30` | Key-change notice (Part 4 §4.5.1) | Control |
 | `0x31` | Transparency digest (§6.6.4, Part 9 §9.5.3) | Control |
@@ -902,9 +1284,9 @@ For kind `0x33` the body is a `QueueAddress`, and §6.6.10 gives that structure.
 community record type of Part 12 §12.4.4, and the body starts with the
 `version` and `type` bytes of that namespace. One carrier holds that kind,
 which is the report record of Part 12 §12.5.3. **[WIR-144]** A parser MUST
-reject a body of kind `0x11` whose `type` is not `0x07`. **[WIR-145]** A parser
+reject a body of kind `0x11` whose `type` is not `0x07`. **[WIR-432]** A parser
 MUST reject an `AppMessage` of kind `0x11` that arrives in a ratchet record or
-in a sender-key record.
+in a group queue record.
 
 > *Cause.* An earlier draft reserved this kind, and `WIR-144` required a type
 > namespace before an object used it. The report record is that object, and
@@ -914,8 +1296,8 @@ in a sender-key record.
 **Kinds `0x0D` and `0x0E` travel inside a community post only.** For kind
 `0x0D` the body is a `RepostBody`, and Part 12 §12.6.2 gives that structure.
 For kind `0x0E` the body is a `CommunityContact`, and Part 12 §12.6.3 gives
-that structure. **[WIR-359]** A parser MUST reject an `inner_kind` of `0x0D`
-or of `0x0E` in a ratchet record or in a sender-key record.
+that structure. **[WIR-433]** A parser MUST reject an `inner_kind` of `0x0D`
+or of `0x0E` in a ratchet record or in a group queue record.
 
 For kind `0x04` the body is an `EditBody`, and for kind `0x05` the body is a
 `DeleteBody`. §6.6.1 gives the two structures. Part 7 §7.5.6 gives the edit
@@ -956,17 +1338,18 @@ DeleteBody {
 
 **The edit body.** There is no inner length field, because `body_len` gives the
 size. **[WIR-078]** A parser MUST reject a `body_len` below 18. **[WIR-079]** A parser MUST reject a
-`new_body` that is not valid UTF-8. **[WIR-080]** A receiver MUST resolve the
-target of an edit through each `GroupRecord` wrapper and each `RichRecord`
-wrapper. **[WIR-260]** A receiver MUST apply an edit only when the innermost
+`new_body` that is not valid UTF-8. **[WIR-434]** A receiver MUST resolve the
+target of an edit through each `RichRecord` wrapper. **[WIR-260]** A receiver
+MUST apply an edit only when the innermost
 kind of the target is `0x01`. **[WIR-081]** A receiver MUST reject an edit that names an attachment
 descriptor, a reaction, or a control kind.
 
 **[WIR-261]** A receiver MUST replace the innermost text of the target only.
 **[WIR-262]** A receiver MUST NOT change the `reply_target`, the `thread_root`,
-or the mention list of the target. A group text is a `GroupRecord` around a
-text, and a reply is a `RichRecord` around a text. Part 7 §7.5.6 and
-Part 11 §11.11 apply an edit to both, and this rule makes that possible.
+or the mention list of the target. A group text is the `app` of a
+`GroupQueueRecord` (§6.4.6), and a reply is a `RichRecord` around a text.
+Part 7 §7.5.6 and Part 11 §11.11 apply an edit to both, and this rule makes
+that possible.
 
 **[WIR-082]** A receiver MUST accept an edit only from the sender of the target. **[WIR-083]** The ratchet
 direction gives that authorization, and a client MUST NOT sign an edit.
@@ -978,10 +1361,11 @@ above that size uses bucket `B1`. Part 16 §16.3 records the consequence of that
 step.
 
 > *Cause of the resolution rule.* An earlier draft applied an edit to a message
-> of kind `0x01` only. A group text is kind `0x12`, and a reply is kind `0x09`.
-> Thus that draft rejected every edit of a group message and every edit of a
-> reply. Part 7 §7.5.6 states that its rules apply to a private group, and this
-> rule makes the two parts agree.
+> of kind `0x01` only. A reply is kind `0x09`, and a group text of that draft
+> was a wrapper of kind `0x12`. Thus that draft rejected every edit of a group
+> message and every edit of a reply. Part 7 §7.5.6 states that its rules apply
+> to a private group, and this rule makes the two parts agree. 0.2.0-draft
+> retires the wrapper, and the rule stays for the reply.
 
 **The delete body.** The value `0x01` of `scope` names a deletion for the
 devices of one user, and the value `0x02` names a deletion for the other party.
@@ -1012,39 +1396,17 @@ wait, the client MUST split them across two records.
 
 ### 6.6.2 The group record
 
-Kind `0x12` carries a group record. Part 11 §11.2.1 gives the rules.
-
-```
-GroupRecord {
-    version      u8         // 0x01
-    group_id     [32]u8
-    inner_kind   u8         // an application kind of §6.6
-    inner_len    u32
-    inner_body   [inner_len]u8
-}
-```
-
-The fixed part is 38 bytes. **[WIR-119]** A parser MUST reject a `body_len` below 39. **[WIR-120]** A
-parser MUST reject a record where `body_len` does not equal 38 plus `inner_len`.
-**[WIR-121]** A parser MUST reject an `inner_kind` of `0x12` or of `0x10`. **[WIR-122]** A parser MUST
-reject an `inner_kind` that this specification does not define. Part 11 §11.2.1
-rule 3 gives the cause of the `0x10` rejection.
-
-At bucket `B0` an `inner_body` holds a maximum of **117 bytes**. §6.9 gives 155
-bytes to the body of an `AppMessage` at `B0`, and the fixed part takes 38 bytes.
-A group text above that size uses bucket `B1`. Part 3 §3.12 puts the modal text
-in bucket `B1` already, thus this wrapper moves no cell of the model. A
-sender-key record of Part 11 §11.3 uses the same row (§6.9), thus the figure
-holds at each of the three tiers.
-
-**[WIR-123]** A client MUST take the class of a group record from `inner_kind`. Part 7
-§7.5.3 gives that class. **[WIR-124]** A client MUST NOT treat a group record as a class of
-its own.
+This section is retired in 0.2.0-draft. Kind `0x12` is retired; a group
+content record is the `app` of a `GroupQueueRecord` (§6.4.6), and it needs no
+wrapper because the queue names the group.
 
 ### 6.6.3 The group control record
 
 Kind `0x10` carries a group control record. Part 11 gives seven such objects,
-and this structure gives the type byte that names each one.
+and this structure gives the type byte that names each one. A group control
+record travels as the `app` of a `GroupQueueRecord` (§6.4.6), except a
+`JoinRecord` and a `GroupInvitation`, which travel on the pairwise channel
+between the inviting admin and the joiner.
 
 ```
 GroupControl {
@@ -1055,17 +1417,18 @@ GroupControl {
 ```
 
 > **These byte values are group control types.** §6.1.1 rule 7 gives the
-> namespace rule. This namespace holds seven values.
+> namespace rule. This namespace holds seven values and one retired value.
 >
-> - `0x01` names a `SenderKeyDistribution` (Part 11 §11.3.2).
-> - `0x02` names a `JoinRecord` (Part 11 §11.9.1).
+> - `0x01` is retired. It named a `SenderKeyDistribution` in an earlier draft.
+> - `0x02` names a `JoinRecord` (below, and Part 11 §11.9.1).
 > - `0x03` names a plain epoch (Part 11 §11.9.2).
 > - `0x04` names a granting epoch (Part 11 §11.9.2).
 > - `0x05` names a moderation epoch (Part 11 §11.9.6).
 > - `0x06` names a `GroupPresence` record (Part 11 §11.9.7).
-> - `0x07` names a `GroupInvitation` (Part 11 §11.9.1).
+> - `0x07` names a `GroupInvitation` (below, and Part 11 §11.9.1).
+> - `0x08` names a `SnapshotNotice` (below, and Part 11 §11.9.8).
 >
-> The five other namespaces of this part use the same byte values with different
+> The six other namespaces of this part use the same byte values with different
 > meanings.
 
 The fixed part is 2 bytes. **[WIR-146]** A sender MUST wrap each group control
@@ -1079,6 +1442,161 @@ convert that type into another type.
 > granting epoch by its length, and §6.1.1 rule 4 permits one canonical form
 > only. Part 7 §7.5.5 already carries this shape for the device-set control
 > record, and this section takes it.
+
+**The join record and the invitation.** Part 11 §11.9.1 gives the join flow.
+The inviting admin sends an offer, the joiner answers with a `JoinRecord`, the
+admin posts the plain epoch that adds the joiner, and the admin sends an
+admit. The three records travel on the pairwise channel between the two
+parties, and the plain epoch travels as a group record.
+
+```
+JoinRecord {                      // 1 313 bytes, control type 0x02
+    version           u8          // 0x01
+    group_id          [32]u8
+    pair_pk           [32]u8      // GroupPairKey_g.pk of the joiner, Part 11 §11.3.3
+    roster_pk_hash    [32]u8      // SHA3-256( GroupRosterKey_g.pk ) of the joiner
+    kem_pk            [1216]u8    // GroupKemKey_g.pk of the joiner, Part 11 §11.3.3
+}
+
+GroupInvitation {                 // control type 0x07; the fixed part is 36 bytes
+    version           u8          // 0x01
+    group_id          [32]u8
+    stage             u8          // 0x01 an offer, 0x02 an admit
+    body_len          u16
+    body              [body_len]u8   // an InvitationOffer, or an InvitationAdmit
+}
+
+InvitationOffer {                 // 3 905 bytes and the name
+    name_len          u8
+    name              [name_len]u8   // UTF-8, the display name of the group
+    admin_roster_pk   [1952]u8    // GroupRosterKey_g.pk of the inviting admin
+    creator_roster_pk [1952]u8    // GroupRosterKey_g.pk of the creator
+}
+
+InvitationAdmit {                 // 187 bytes, the descriptor, and the path
+    index             u16         // the member index that the admin gave the joiner
+    epoch             u32         // the group epoch e at the admit
+    t_join            u32         // the slot index at which the key of the joiner starts
+    slot_key          [32]u8      // K_{e,t_join}, or the history-window key of Part 11 §11.3.1
+    roster_epoch      u32         // the roster epoch of the snapshot
+    replica_count     u8          // GROUP_REPLICAS
+    replicas          [replica_count]ReplicaRef
+    desc_len          u16
+    descriptor        [desc_len]u8   // a FileDescriptor of Part 13 §13.3 that names a RosterSnapshot at roster_epoch
+    path_len          u16
+    path              [path_len]u8   // the authority path, or empty; see the rules below
+}
+
+ReplicaRef {                      // 68 bytes
+    relay_id          [32]u8      // Part 10 §10.5.3
+    group_queue_id    [32]u8      // the GroupQueueId at that relay
+    seq_of_add        u32         // the seq of the plain epoch that added the joiner, at that relay
+}
+```
+
+The plain epoch of type `0x03` that adds a member carries the `pair_pk`, the
+`roster_pk_hash`, and the `kem_pk` of the `JoinRecord`, and the `index` of the
+new member as a `u16`. Part 11 §11.9.2 gives that layout. The authority path
+is each granting epoch of Part 11 §11.9.2 on the path of every current role
+holder, concatenated, as `GRP-068` keeps it.
+
+A `JoinRecord` is 1 345 bytes as an `AppMessage`, thus it uses bucket `B1`.
+An offer is 3 973 bytes and the name as an `AppMessage`, thus it uses bucket
+`B2`. An admit without a path is 512 bytes as an `AppMessage` at 3 members
+(a one-segment descriptor of 257 bytes), thus it uses bucket `B1`; at
+`GROUP_MAX` the descriptor of a 21-segment snapshot is 2 657 bytes, the admit
+is 2 912 bytes, and it uses bucket `B2`. A granting epoch carries an
+ML-DSA-65 signature of 3 309 bytes and a roster public key of 1 952 bytes,
+thus a path of five granting epochs is the most that the `B3` `AppMessage`
+row of §6.9 holds beside the admit, and a path at `ROLE_HOLDER_MAX` does not
+fit one cell.
+
+- **[WIR-435]** A parser MUST reject a `JoinRecord` whose length is not
+  1 313. **[WIR-436]** A parser MUST reject a `stage` that is not `0x01` or
+  `0x02`. **[WIR-437]** A parser MUST reject an offer whose `body_len` does
+  not equal 3 905 plus `name_len`. **[WIR-438]** A parser MUST reject a `name`
+  that is not valid UTF-8.
+- **[WIR-439]** A parser MUST reject a `replica_count` that is not
+  `GROUP_REPLICAS`. **[WIR-440]** A parser MUST reject an admit whose
+  `body_len` does not equal 187 plus `desc_len` plus `path_len`.
+- **[WIR-441]** An admin MUST put the authority path in `path` when the admit
+  fits the `B3` `AppMessage` row of §6.9. **[WIR-442]** Otherwise an admin
+  MUST set `path_len` to 0 and put the authority path in the `path` of the
+  `RosterSnapshot` below.
+- **[WIR-443]** A client MUST send a `JoinRecord` and a `GroupInvitation` on
+  the pairwise channel between the inviting admin and the joiner, and on no
+  other channel. **[WIR-444]** A receiver MUST discard a `JoinRecord` or a
+  `GroupInvitation` that arrives as a group record.
+- **[WIR-445]** A client MUST send a group control record of type `0x03`,
+  `0x04`, `0x05`, `0x06`, or `0x08` as the `app` of a `GroupQueueRecord`, and
+  on no pairwise channel. **[WIR-446]** A receiver MUST discard a group
+  control record of one of those types that arrives on a pairwise channel.
+
+> *Cause.* An earlier draft gave the invitation a bundle of one-time
+> invitations, one for each member, and the joiner opened a pairwise channel
+> to each of them. A join at `GROUP_MAX` then cost 499 channels and 499
+> first-access locks. The group queue of §6.4.5 needs no channel between two
+> members, thus the admit carries the queue, the epoch key, and a snapshot of
+> the roster, and nothing else.
+
+**The roster snapshot and its notice.** Part 11 §11.9.8 gives the writer, the
+reader, and the acceptance rules of a snapshot.
+
+```
+SnapshotNotice {                  // 39 bytes and the descriptor, control type 0x08
+    version           u8          // 0x01
+    group_id          [32]u8
+    roster_epoch      u32         // the roster epoch that the snapshot describes
+    desc_len          u16
+    descriptor        [desc_len]u8   // a FileDescriptor of Part 13 §13.3 that names a RosterSnapshot
+}
+
+RosterEntry {                     // 99 bytes
+    index             u16         // the member index, Part 11 §11.9.1
+    role              u8          // 0x01 observer, 0x02 member, 0x03 moderator, 0x04 admin, 0x05 owner
+    pair_pk           [32]u8      // GroupPairKey_g.pk
+    roster_pk_hash    [32]u8      // SHA3-256( GroupRosterKey_g.pk )
+    kem_pk_hash       [32]u8      // SHA3-256( GroupKemKey_g.pk )
+}
+
+RosterSnapshot {                  // an object on the chunk path of Part 13 §13.3.3, class CNEW
+    version           u8          // 0x01
+    group_id          [32]u8
+    roster_epoch      u32
+    chain_hash        [32]u8      // the hash of the roster epoch that it describes, Part 11 §11.9.2
+    entry_count       u16
+    entries           [entry_count]RosterEntry    // index ascending
+    key_count         u16
+    keys              [key_count]MemberKemKey     // every active member, index ascending
+    path_len          u32
+    path              [path_len]u8   // the authority path, or empty when the admit carries it
+}
+
+MemberKemKey {                    // 1 218 bytes
+    index             u16
+    kem_pk            [1216]u8    // GroupKemKey_g.pk
+}
+```
+
+The fixed part of a `RosterSnapshot` is 75 bytes. At `GROUP_MAX` the object
+is 49 500 bytes of entries and 609 000 bytes of KEM keys, thus 658 577 bytes
+without a path, in 21 segments of `SEGMENT_SIZE`. At 3 members it is 4 028
+bytes, in one segment. A `SnapshotNotice` that names a one-segment snapshot
+is 328 bytes as an `AppMessage`, and it uses bucket `B1` of the group-queue
+capacity table of §6.9 at 3 members. A notice that names a 21-segment
+snapshot is 2 728 bytes, and it uses bucket `B3` at `GROUP_MAX`.
+
+- **[WIR-447]** A parser MUST reject a `SnapshotNotice` whose length does not
+  equal 39 plus `desc_len`.
+- **[WIR-448]** A parser MUST reject a `role` that the table above does not
+  hold. **[WIR-449]** A parser MUST reject an `entries` list that is not in
+  strictly increasing `index` order. **[WIR-450]** A parser MUST reject a
+  `keys` list that is not in strictly increasing `index` order.
+  **[WIR-451]** A parser MUST reject a `keys` entry whose `index` names no
+  entry of `entries`. **[WIR-452]** A parser MUST reject a `kem_pk` whose
+  SHA3-256 differs from the `kem_pk_hash` of its entry. **[WIR-453]** A
+  parser MUST reject a `RosterSnapshot` whose length does not equal the sum
+  of its fields.
 
 ### 6.6.4 The transparency digest
 
@@ -1160,8 +1678,8 @@ values.
   `mention_count` times 16 plus `inner_len`. **[WIR-265]** A parser MUST reject
   a `version` that is not `0x02`.
 - **[WIR-163]** A parser MUST reject an `inner_kind` of `0x09`, of `0x10`, or
-  of `0x12`. There is no nested rich record, and a rich record does not carry a
-  control record or a group record.
+  of `0x12`. There is no nested rich record, a rich record does not carry a
+  control record, and the value `0x12` is retired.
 - **[WIR-164]** A parser MUST reject a `mention_count` above `MENTION_MAX`.
   **[WIR-165]** A parser MUST reject a repeated mention value. **[WIR-166]** A
   parser MUST reject a mention list that is not in strictly increasing byte
@@ -1199,10 +1717,16 @@ community, and it never names a party of a pairwise conversation.
 mention_id = SHA3-256( "umbra/v1/mention" || scope_id || member_key )[0..16]
 ```
 
-The value `scope_id` is the `group_id` of Part 11 §11.2.1 or the `community_id`
-of Part 12 §12.2. The value `member_key` is the ML-DSA-65 public key of the
-`GroupRosterKey_g` of that member, or the community pseudonym of that member.
-Part 5 §5.11 holds the label.
+The value `scope_id` is the `group_id` of Part 11 §11.2 or the `community_id`
+of Part 12 §12.2. The value `member_key` is the 32-byte `GroupPairKey_g`
+public key of that member (Part 11 §11.3.3), or the community pseudonym of
+that member. Part 5 §5.11 holds the label.
+
+> *Cause of the pair key.* An earlier draft took `member_key` from the
+> ML-DSA-65 roster key of the member. In 0.2.0-draft the full roster key of a
+> plain member travels to no other member; a `RosterEntry` of §6.6.3 carries
+> `pair_pk` and a hash of the roster key. The pair key is the value that each
+> member holds for each other member.
 
 - **[WIR-174]** A sender MUST compute a mention identifier with the derivation
   above. **[WIR-175]** A sender MUST set `mention_count` to zero on a pairwise
@@ -1256,9 +1780,11 @@ PollVote {
 
 A poll at `POLL_QUESTION_MAX`, at `POLL_OPTION_MAX`, and at
 `POLL_OPTION_TEXT_MAX` is 8 + 200 + 12 × 101 = 1 420 bytes. Inside a
-`GroupRecord` and a `RichRecord` it is 1 498 bytes, thus each poll fits bucket
-`B1` (§6.9). A vote at `POLL_OPTION_MAX` is 30 bytes, thus each vote fits
-bucket `B0`.
+`RichRecord` it is 1 460 bytes, thus each poll fits bucket `B1` on a pairwise
+channel (§6.9). In a group at `POLL_GROUP_MAX` the dense tag vector of §6.4.6
+adds 1 200 bytes, and the poll takes bucket `B2` of the group-queue capacity
+table. A vote at `POLL_OPTION_MAX` is 30 bytes, thus each vote fits bucket
+`B0` on a pairwise channel and bucket `B1` in a group at `POLL_GROUP_MAX`.
 
 - **[WIR-180]** A parser MUST reject an `option_count` below 2 or above
   `POLL_OPTION_MAX`. **[WIR-181]** A parser MUST reject a `question` or an
@@ -1293,14 +1819,12 @@ flow that asks Bob first.
 ```
 ContactShare {
     version    u8        // 0x01
-    type       u8        // 0x01 request, 0x02 grant, 0x03 offer,
-                         // 0x04 group request
+    type       u8        // 0x01 request, 0x02 grant, 0x03 offer; 0x04 retired
     name_len   u8
     name       [name_len]u8    // UTF-8, the petname that the sender uses
     body_len   u16
     body       [body_len]u8    // empty for a request, a one-time invitation
-                               // of Part 4 §4.3.1 for a grant and for an offer,
-                               // group_id || roster_pk_hash for a group request
+                               // of Part 4 §4.3.1 for a grant and for an offer
 }
 ```
 
@@ -1329,24 +1853,17 @@ Carol.
 - **[WIR-199]** A client MUST make a fresh invitation for each `grant`.
   **[WIR-200]** A client MUST NOT reuse one invitation across two grants.
 
-**The group request.** A record of type `0x04` asks a member of a private
-group for a channel to a joiner, and Part 11 §11.9.1 gives the flow. The body
-is the 32-byte `group_id` and the 32-byte SHA3-256 hash of the roster public
-key of the joiner.
+**The value `0x04` is retired.** An earlier draft used a record of type
+`0x04`, the group request, to open a pairwise channel between a joiner and
+each member of a private group without a user action at that member. In
+0.2.0-draft a joiner holds a pairwise channel with the inviting admin only
+(Part 11 §11.9.1), thus the request has no use. **[WIR-454]** A parser MUST
+reject a `type` that is not `0x01`, `0x02`, or `0x03`.
 
-- **[WIR-343]** A parser MUST reject a `body_len` that is not 64 on a record of
-  type `0x04`.
-- **[WIR-344]** If the two conditions below hold, a client MUST answer a group
-  request with a `grant` without a user action. The local roster of that group
-  holds the named roster entry. The sender holds the `admin` role or a higher
-  role in that group. **[WIR-345]** In each other case a client MUST discard a
-  group request, and it MUST NOT show it. Part 11 rule `GRP-174` binds the
-  channel that the grant opens to that roster entry.
-
-> *Cause.* The user consented to the joiner when the plain epoch of Part 11
-> §11.9.2 arrived, and the roster is the record of that consent. A second
-> approval at each of 499 members made a join at `GROUP_MAX` cost 499 user
-> actions.
+> *Cause.* The group request served the all-pairs join of the earlier draft,
+> in which a join at `GROUP_MAX` opened 499 pairwise channels. The group queue
+> of §6.4.5 needs none of them, and the rules `WIR-343` to `WIR-345` retire
+> with the request.
 
 > *Cause.* Part 4 §4.2.2 gives each contact relation its own identity, and Part
 > 2 §2.3 goal G9 says that two contacts cannot show that they share a
@@ -1496,15 +2013,17 @@ resolves `relay_id` in the consensus that it holds, under Part 10 rule
 
 Part 2 rule `THR-009` makes a receiver classify a failure alone and then ask
 the sender. This section gives that request and its answer. A request names
-one pairwise session or one group sender key.
+one pairwise session, one group epoch, or one roster snapshot.
 
 ```
 KeyRequest {                      // kind 0x34
     version   u8        // 0x01
-    scope     u8        // 0x01 a pairwise session, 0x02 a group sender key
+    scope     u8        // 0x01 a pairwise session, 0x02 the group epoch, 0x03 the roster snapshot
     id        [32]u8    // the session identifier, or the group_id
-    epoch     u32       // the ratchet epoch, or the sender-key generation
-    index     u32       // the send_index of the record, or 0 for scope 0x02
+    epoch     u32       // scope 0x01: the ratchet epoch
+                        // scope 0x02: the group epoch that the requester lacks
+                        // scope 0x03: the roster epoch that the requester holds
+    index     u32       // the send_index of the record, or 0 for scope 0x02 and 0x03
 }
 
 KeySupply {                       // kind 0x35
@@ -1513,58 +2032,92 @@ KeySupply {                       // kind 0x35
     id        [32]u8    // as in the request
     epoch     u32       // as in the request
     index     u32       // as in the request
-    status    u8        // 0x01 supplied, 0x02 not held, 0x03 resent
+    status    u8        // 0x01 posted, 0x02 not held, 0x03 resent
     body_len  u16
-    body      [body_len]u8    // a SenderKeyDistribution for status 0x01, or empty
+    body      [body_len]u8    // empty in each scope of this draft
 }
 ```
 
 A `KeyRequest` is 42 bytes and a `KeySupply` without a body is 45 bytes, thus
-each one fits bucket `B0`. A key request travels on the pairwise channel
-between the two parties, in each scope.
+each one fits bucket `B0` on a pairwise channel. In a group the dense tag
+vector of §6.4.6 sets the bucket: `B1` at 25 members and `B2` at `GROUP_MAX`,
+by the group-queue capacity table of §6.9.
 
-**The two scopes answer two different failures.** In a pairwise session a
+**The three scopes answer three different failures.** In a pairwise session a
 receiver derives each skipped key itself, and the braid of Part 5 §5.5.3 heals
 a lost frame. A record that the receiver still cannot open is a record that
 the sender chain never carried in a form the receiver can reach. The answer to
-a request of scope `0x01` is therefore a re-send and not a key. In a group the
-receiver derives nothing, and the answer to a request of scope `0x02` is the
-`SenderKeyDistribution` of the named generation.
+a request of scope `0x01` is therefore a re-send and not a key. In a group a
+member that holds no slot in the current epoch derives nothing, and the answer
+to a request of scope `0x02` is a one-slot epoch-key record of §6.4.6 for
+that member, posted on the group queue (Part 11 §11.4.3). A member that lacks
+the KEM keys of the roster, after a restore from a backup, asks for the
+snapshot, and the answer to a request of scope `0x03` is a `SnapshotNotice`
+of §6.6.3 with a fresh descriptor, posted on the group queue (Part 11
+§11.9.8). In scope `0x02` and in scope `0x03` the `body` of the `KeySupply`
+is empty, and status `0x01` means that the answering member posted the
+record.
 
 1. **[WIR-332]** A parser MUST reject a `scope` value or a `status` value that
    this section does not name.
-2. **[WIR-333]** A client MUST send a key request on the pairwise channel with
-   the party that sent the record. **[WIR-346]** A client MUST NOT send a key
-   request on a group channel or on a community channel.
-3. **[WIR-334]** A receiver MUST accept a key supply only on the channel on
-   which it sent the request. **[WIR-347]** A receiver MUST discard a key
-   supply that matches no outstanding request of its own. A request is
-   outstanding while the receiver awaits an answer for that `scope`, `id`,
-   `epoch`, and `index`. The L6 QueueE2E key of that channel names the peer,
-   and no field of the supply does.
-4. **[WIR-335]** A client MUST mark each record that a supplied sender key
-   opens as recovered. **[WIR-336]** The interface MUST NOT show a recovered
-   record as a record whose sender chain the client verified in order. Part 11
-   §11.3.1 gives the ordinary attribution.
+2. **[WIR-455]** A client MUST send a key request of scope `0x01` on the
+   pairwise channel with the party that sent the record. **[WIR-456]** A
+   client MUST send a key request of scope `0x02` or `0x03` as a group record
+   on the group queue when it holds a write credential inside
+   `GROUP_WRITE_GRACE` and an epoch inside `GROUP_EPOCH_GRACE`. **[WIR-457]**
+   Otherwise a client MUST send that request on a pairwise channel with a
+   member of the group. **[WIR-458]** A client MUST NOT send a key request on
+   a community channel. A member below `admin` that receives a request of
+   scope `0x02` or `0x03` on a pairwise channel posts it again as a group
+   record, and Part 11 §11.4.3 gives that rule. A member that holds no path
+   shows the group as lapsed, under the same section.
+3. **[WIR-459]** A receiver MUST accept a key supply of scope `0x01` only on
+   the channel on which it sent the request. **[WIR-347]** A receiver MUST
+   discard a key supply that matches no outstanding request of its own. A
+   request is outstanding while the receiver awaits an answer for that
+   `scope`, `id`, `epoch`, and `index`. The L6 QueueE2E key of that channel
+   names the peer, and no field of the supply does. **[WIR-460]** A receiver
+   MUST accept the answer to a request of scope `0x02` or `0x03` under the
+   rules of Part 11 §11.4.2 and §11.9.8, and not by the channel that carried
+   the request. The answer is a group record, and the group queue carries it
+   to every member. **[WIR-461]** A member that answers a request of scope
+   `0x02` or `0x03` MAY send a `KeySupply` of status `0x01` on the channel
+   that carried the request, and the requester takes nothing from it but the
+   report.
+4. **[WIR-462]** A client MUST mark each record that it opens under an epoch
+   secret from a one-slot epoch-key record as recovered. **[WIR-463]** The
+   interface MUST NOT show a recovered record as a record whose `counter` the
+   client tracked without a gap. Part 11 §11.3.5 gives the ordinary
+   attribution.
 5. **[WIR-337]** A client MUST NOT send more than `KEY_REQUEST_RATE` key
    requests to one peer in each 24 hours. Part 11 §11.10 gives that value.
-   **[WIR-338]** A receiver MUST discard a key request above that rate.
+   **[WIR-464]** A client MUST NOT post more than `KEY_REQUEST_RATE` key
+   requests to one group queue in each 24 hours. **[WIR-338]** A receiver
+   MUST discard a key request above that rate.
 6. For scope `0x01`: **[WIR-339]** If a sender holds the logical message that
    `index` names, it MUST send that message again. **[WIR-348]** That re-send
    MUST carry the original `msg_id` under the current ratchet state. The
    supply then carries status `resent`.
    **[WIR-340]** A sender that does not hold it MUST answer with status `not
    held`. WIR-065 discards the copy if the first send arrives later.
-7. For scope `0x02`: Part 11 §11.3.3 gives the answer and the acceptance rule.
+7. For scope `0x02`: Part 11 §11.4.3 gives the answer, which is a one-slot
+   epoch-key record of §6.4.6 on the group queue, and the acceptance rule.
+   The same record carries the owner credentials to a member that a granting
+   epoch promoted. For scope `0x03`: Part 11 §11.9.8 gives the answer, which
+   is a `SnapshotNotice` of §6.6.3 on the group queue.
 8. **[WIR-341]** A client that takes status `not held` MUST show the record as
    a delivery failure under Part 2 §2.4 U9.
 
 > *Cause.* Part 2 rule `THR-009`, Part 7 rule `DEV-098`, and Part 11 rule
 > `GRP-020` each named a key request. No part gave it a record, a carrier,
 > or an acceptance rule. A supply that any party could send was a path to
-> plant a sender key. Thus rule 3 binds the supply to the channel of the
-> request. Rule 4 keeps a supplied key from lending a record the attribution
-> of an ordered chain.
+> plant a key. Thus rule 3 binds a pairwise supply to the channel of the
+> request, and a group answer to the acceptance rules of the epoch-key record,
+> which verify the rotator's tag and role. Rule 4 keeps a supplied key from
+> lending a record the attribution of a gap-free counter. An earlier draft
+> gave scope `0x02` to a sender-key generation and carried the key in the
+> supply body; 0.2.0-draft posts the key on the group queue, thus one answer
+> serves every member that lacks it.
 
 ## 6.7 Version negotiation
 
@@ -1593,7 +2146,7 @@ cover these cases:
 - Each bucket boundary, for the padding and for the unpadding.
 - Each rejection case, which is a non-minimal length, trailing bytes, a nonzero
   reserved field, malformed padding, an unknown version, and an unknown command.
-- An unknown value in each of the five namespaces, with the rejection of each
+- An unknown value in each of the seven namespaces, with the rejection of each
   one. **[WIR-096]** A vector MUST cover a cell body that carries an application kind value at
   the command offset. **[WIR-097]** The parser MUST reject that cell.
 - The capsule of §6.2.1. **[WIR-294]** The vectors MUST cover one
@@ -1620,22 +2173,19 @@ cover these cases:
   - A `version` of `0x01`.
   - A `kind` of `0x05`.
 - The queue end-to-end record of §6.4.2, with one boundary vector for each row
-  of the capacity table of §6.9. **[WIR-300]** The vectors MUST cover a
-  sender-key record at each `AppMessage` row, and one record one byte above
-  each row.
+  of the capacity table of §6.9.
 - The length pair of §6.4.2 rule 6, at each of the four buckets. **[WIR-098]** A vector MUST
   hold a `SEND` and the `MSG` that a relay makes from that `SEND`. **[WIR-099]** The vector
   MUST assert both `payload_len` values. **[WIR-100]** The vector MUST assert one bucket for
   the two commands.
-- A group send to 3 recipients, as §6.4.2 rule 10 states.
 - The `EditBody` and the `DeleteBody` of §6.6.1. **[WIR-101]** The vectors MUST cover the
   four cases below.
   - The minimum length and the maximum length of each variable field.
   - The bucket boundary at 138 bytes of `new_body`.
   - The bucket boundary at `DELETE_BATCH_MAX` targets.
-  - An edit of a group text, and an edit of a reply. **[WIR-301]** The vectors
-    MUST assert that the `group_id`, the `reply_target`, the `thread_root`, and
-    the mention list do not change.
+  - An edit of a group text, and an edit of a reply. **[WIR-465]** The vectors
+    MUST assert that the `reply_target`, the `thread_root`, and the mention
+    list do not change.
 - Each rejection case of §6.6.1. **[WIR-102]** The parser MUST reject each case below.
   - A `body_len` below 18.
   - A `new_body` that is not valid UTF-8.
@@ -1645,16 +2195,30 @@ cover these cases:
   - A target list that is not in strictly increasing byte order.
   - A repeated target.
   - A scope byte that does not match the channel.
-- The `GroupRecord` of §6.6.2. **[WIR-125]** The vectors MUST cover the four cases below.
-  **[WIR-126]** The parser MUST reject each of the four.
-  - A `body_len` below 39.
-  - A `body_len` that does not equal 38 plus `inner_len`.
-  - An `inner_kind` of `0x12`.
-  - An `inner_kind` of `0x10`.
-- The `SenderKeyRecord` of Part 11 §11.3. **[WIR-127]** The vectors MUST cover a record at
-  `counter` 0, a record that skips 3 positions, and a record above
-  `SENDER_KEY_MAX_SKIP`. **[WIR-128]** The vectors MUST also cover a record whose
-  `generation` names a key that the receiver does not hold.
+- The `GroupQueueRecord` of §6.4.6, with one boundary vector for each row of
+  the group-queue capacity table of §6.9. **[WIR-466]** The vectors MUST cover
+  the six cases below. **[WIR-467]** The named receiver MUST reject the two
+  cases that follow them.
+  - The slot chain of Part 11 §11.3.1: three consecutive slot keys from one
+    `K_e`, and the assertion that `K_{e,t}` does not give `K_{e,t-1}`.
+  - One dense content record at 3 members with a 350-byte text, in bucket
+    `B1`.
+  - One dense content record at 500 members with a 350-byte text, in bucket
+    `B2`.
+  - One sparse record that carries a `GroupPresence`.
+  - One inline epoch-key record at 3 members.
+  - The segment of the slot at rank 299 in a chunked epoch-key record of 500
+    plain-member slots, which is segment 11 at a `slots_per_chunk` of 27.
+  - A content record in which one byte of the tag of the named receiver
+    changes.
+  - A content record whose `sender_index` names no member of the current
+    roster of the receiver.
+- The group-queue commands of §6.4.5. **[WIR-468]** The vectors MUST cover one
+  `GKEY`, one `GSUB` under the previous read key inside `GROUP_READ_GRACE`,
+  and one `GPOST` under the previous write key inside `GROUP_WRITE_GRACE`.
+  **[WIR-469]** The relay MUST reject a `GSUB` under the previous read key
+  after `GROUP_READ_GRACE`, and a `GPOST` under the previous write key after
+  `GROUP_WRITE_GRACE`.
 - The `Roster` of Part 7 §7.3.1. **[WIR-129]** The vectors MUST cover the three cases below.
   **[WIR-130]** The parser MUST reject the second case and the third case.
   - An epoch that a device of the previous epoch signed.
@@ -1670,8 +2234,12 @@ cover these cases:
   `commit` value and an incorrect `commit` value. **[WIR-134]** The vectors MUST cover the
   13-chunk boundary at bucket `B1`.
 - The `GroupControl` of §6.6.3. **[WIR-154]** The vectors MUST cover one record
-  of each of the seven control types. **[WIR-155]** The parser MUST reject a
-  `control_type` of `0x00` and a `control_type` of `0x08`.
+  of each of the seven control types. **[WIR-470]** The parser MUST reject a
+  `control_type` of `0x00`, of `0x01`, and of `0x09`. The `GroupInvitation`
+  vectors cover both stages.
+- The `RosterSnapshot` and the `RosterEntry` of §6.6.3. **[WIR-471]** The
+  vectors MUST cover a snapshot at 3 members in one segment, and the segment
+  count of a snapshot at `GROUP_MAX`, which is 21.
 - The `KeyRequest` and the `KeySupply` of §6.6.11. **[WIR-342]** The vectors
   MUST cover one request and one supply in each scope, and one supply of each
   status.
@@ -1789,7 +2357,7 @@ the two directions.
 
 **The wire cost of one `B0` cell is 560 bytes.** A `B1` cell costs 2 096
 bytes, a `B2` cell costs 8 240 bytes, and a `B3` cell costs 32 860 bytes.
-Seven other parts give each fan-out figure and each session figure with these
+Seven other parts give each group figure and each session figure with these
 four constants. Part 1 §1.7 lists the quoting sections. A `B3` frame needs three records, because 32 794 bytes exceed
 the 2¹⁴-byte record cap two times.
 
@@ -1805,7 +2373,6 @@ the layer above it.
 | L6 record on a `MSG` | 390 | 1 926 | 8 070 | 32 646 |
 | L7 record | 358 | 1 894 | 8 038 | 32 614 |
 | `AppMessage`, default chunk | 185 | 1 721 | 7 865 | 32 441 |
-| `AppMessage` in a sender-key record | 185 | 1 721 | 7 865 | 32 441 |
 | Text, default chunk | 155 | 1 691 | 7 835 | 32 411 |
 | Text, no chunk | 226 | 1 762 | 7 906 | 32 482 |
 
@@ -1816,23 +2383,62 @@ Each row below the `L5 payload` row comes from the row above it by a subtraction
 | `L5 payload` to `L6 record on a MSG` | 4 | The `u32` sequence number of a `MSG` (§6.4.2 rule 6) |
 | `L6 record on a MSG` to `L7 record` | 32 | The L6 overhead of §6.4.2 rule 2, which holds the 2-byte true length |
 | `L7 record` to `AppMessage`, default chunk | 173 | 86 bytes of ratchet record, a 71-byte PQ braid frame, and the 16-byte body tag (Part 5 §5.6) |
-| `L7 record` to `AppMessage` in a sender-key record | 173 | 37 bytes of sender-key record (Part 11 §11.3), and 136 bytes of fill under `WIR-305` |
 | `AppMessage`, default chunk to `Text`, default chunk | 30 | The `AppMessage` header of §6.6 |
 | `Text`, default chunk to `Text`, no chunk | −71 | The record carries no PQ braid frame |
 
-**The sender-key row.** A sender-key record (§6.4.2 rule 5) skips L7, and its
-own overhead is 37 bytes. Thus 321 bytes of `AppMessage` would fit that record
-at `B0`. **[WIR-305]** A sender MUST compute the bucket of a sender-key record
-from the `AppMessage` rows of a ratchet record. **[WIR-306]** A sender MUST fill
-the 136-byte difference with zero bytes inside the sender-key ciphertext, after
-the `AppMessage`. **[WIR-307]** A receiver MUST take the `AppMessage` length
-from `body_len` and ignore the fill.
+**The group-queue capacity.** The table below counts the bytes that a
+`GroupQueueRecord` of §6.4.6 leaves for the tag vector and for the
+`AppMessage` at each bucket. A group record has no L7, thus its subtraction
+differs from the pairwise table above. A `GMSG` carries the L5 payload row,
+and a `GPOST` carries the "record on a `GMSG`" row (§6.4.5).
 
-> *Cause of the sender-key row.* A relay cannot tell a group record from a
-> pairwise record (§6.4.2 rule 7, Part 11 §11.5). A larger group capacity would
-> put a 200-byte group text in `B0` and the same pairwise text in `B1`. Thus
-> the bucket would name the path. An earlier draft gave the table no row for
-> the sender-key path, and Part 11 §11.5 quoted the ratchet figure for it.
+| Value | `B0` | `B1` | `B2` | `B3` |
+| --- | --- | --- | --- | --- |
+| L5 payload, which is the `GMSG` payload | 394 | 1 930 | 8 074 | 32 650 |
+| Record on a `GMSG`, which is the `GPOST` payload | 390 | 1 926 | 8 070 | 32 646 |
+| Record `body` | 366 | 1 902 | 8 046 | 32 622 |
+| `ContentPlain` | 350 | 1 886 | 8 030 | 32 606 |
+| Tags and `app` | 335 | 1 871 | 8 015 | 32 591 |
+| `app` at 3 members | 299 | 1 835 | 7 979 | 32 555 |
+| `app` at 25 members | 35 | 1 571 | 7 715 | 32 291 |
+| `app` at 120 members | — | 431 | 6 575 | 31 151 |
+| `app` at 500 members | — | — | 2 015 | 26 591 |
+| Text at 3 members | 269 | 1 805 | 7 949 | 32 525 |
+| Text at 25 members | 5 | 1 541 | 7 685 | 32 261 |
+| Text at 120 members | — | 401 | 6 545 | 31 121 |
+| Text at 500 members | — | — | 1 985 | 26 561 |
+
+Each row below the `L5 payload` row comes from the row above it by a
+subtraction:
+
+| Step | Bytes | Cause |
+| --- | --- | --- |
+| `L5 payload` to `Record on a GMSG` | 4 | The `u32` `seq` of a `GMSG` (§6.4.5) |
+| `Record on a GMSG` to `Record body` | 24 | The fixed part of `GroupQueueRecord` (§6.4.6) |
+| `Record body` to `ContentPlain` | 16 | The AEAD tag of a content record |
+| `ContentPlain` to `Tags and app` | 15 | `sender_index` 2, `counter` 4, `roster_epoch` 4, `tag_mode` 1, `tag_count` 2, and `app_len` 2 |
+| `Tags and app` to `app` at N members | 12 × N | The dense tag vector, `GROUP_TAG_LEN` for each active member, the sender included |
+| `app` to `Text` | 30 | The `AppMessage` header of §6.6 |
+
+A dash marks a bucket that holds no record at that member count. The modal
+350-byte text of Part 3 §3.12 takes bucket `B1` at 3 members, at 25 members,
+and at 120 members, and bucket `B2` at 500 members. Bucket `B1` holds that
+text up to 124 members. An epoch-key record of §6.4.6 uses the `Record body`
+row: the inline carrier holds 27 plain-member slots at `B3`, and a one-slot
+record fits `B1`.
+
+**[WIR-472]** A sender MUST compute the bucket of a group record from the
+group-queue capacity table. **[WIR-473]** A revision that changes the fixed
+part of `GroupQueueRecord`, the fixed fields of `ContentPlain`, or
+`GROUP_TAG_LEN` MUST derive this table again.
+
+> *Cause.* An earlier draft gave the pairwise table a sender-key row that
+> equalled the ratchet row, because a relay could not tell a group record from
+> a pairwise record, and a larger group capacity would have named the path by
+> the bucket. A group record now travels on a group queue only (§6.4.5), the
+> relay knows the queue kind from the command, and the table gives the group
+> record its own capacity. The rules `WIR-305` to `WIR-307` retire with that
+> row.
 
 **[WIR-103]** A client MUST compute the bucket from the capacity table. **[WIR-104]** A client MUST NOT put a
 message in a bucket that does not hold it. The capacity of this table is a
