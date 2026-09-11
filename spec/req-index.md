@@ -75,13 +75,13 @@ each column when a crate implements the requirement and a test covers it.
 | `NTF` | 63 | 28 | 0 | 0 | 2 | **93** |
 | `DIS` | 104 | 34 | 0 | 0 | 1 | **139** |
 | `REL` | 112 | 27 | 1 | 0 | 2 | **142** |
-| `GRP` | 194 | 56 | 0 | 0 | 4 | **254** |
+| `GRP` | 201 | 56 | 0 | 0 | 4 | **261** |
 | `COM` | 275 | 95 | 0 | 0 | 5 | **375** |
 | `ATT` | 128 | 46 | 1 | 0 | 2 | **177** |
 | `ABU` | 54 | 31 | 0 | 0 | 0 | **85** |
 | `IMP` | 58 | 24 | 0 | 0 | 0 | **82** |
 | `SEC` | 12 | 5 | 1 | 0 | 2 | **20** |
-| **All** | 1944 | 663 | 6 | 0 | 48 | **2661** |
+| **All** | 1951 | 663 | 6 | 0 | 48 | **2668** |
 
 ## SCP — Scope and Conventions
 
@@ -1150,13 +1150,13 @@ Source: `spec/06-wire-format.md`
 | `WIR-472` | §6.9 | MUST | A sender | A sender MUST compute the bucket of a group record from the group-queue capacity table. |  |  |
 | `WIR-473` | §6.9 | MUST | (unstated) | A revision that changes the fixed part of `GroupQueueRecord`, the fixed fields of `ContentPlain`, or `GROUP_TAG_LEN` MUST derive this table again. |  |  |
 | `WIR-474` | §6.6.3 | MUST | A parser | A parser MUST reject an admit that carries a granting epoch. |  |  |
-| `WIR-475` | §6.6.3 | MUST | A parser | A parser MUST reject a `RekeyRecord` whose length is not 6 576. |  |  |
-| `WIR-476` | §6.6.3 | MUST | A client | A client MUST send a `RekeyRecord` on a pairwise channel to a member of role `admin` or above, and on no other channel. |  |  |
-| `WIR-477` | §6.6.3 | MUST | A receiver | A receiver MUST discard a `RekeyRecord` that arrives as a group record. |  |  |
 | `WIR-478` | §6.6.3 | MUST | A receiver | A receiver MUST verify `sig` against `old_roster_pk`, and `SHA3-256(old_roster_pk)` against the `roster_pk_hash` of `old_index` in its roster, before it acts on the record. |  |  |
 | `WIR-479` | §6.8 | MUST | The vectors | The vectors MUST cover one record of each of the eight control types. |  |  |
 | `WIR-480` | §6.8 | MUST | The parser | The parser MUST reject a `control_type` of `0x00`, of `0x01`, and of `0x0A`. |  |  |
 | `WIR-481` | §6.8 | MUST | The vectors | The vectors MUST hold one `RekeyRecord` with a correct signature and one with a changed `old_index`, and the parser MUST reject the second. |  |  |
+| `WIR-482` | §6.6.3 | MUST | A parser | A parser MUST reject a `RekeyRecord` whose length is not 6 614. |  |  |
+| `WIR-483` | §6.6.3 | MUST | A client | A client MUST send a `RekeyRecord` as a group record, or on a pairwise channel to a member of role `admin` or above with `epoch_index` and `previous_epoch_hash` zero, and on no other channel. |  |  |
+| `WIR-484` | §6.6.3 | MUST | A receiver | A receiver MUST discard a `RekeyRecord` on a pairwise channel whose chain fields are not zero, and a `RekeyRecord` in a group record whose chain fields are zero. |  |  |
 
 ## DEV — Device Sets
 
@@ -1991,17 +1991,10 @@ Source: `spec/11-private-groups.md`
 | `GRP-262` | §11.3.5 | MUST | A receiver | A receiver MUST hold a roster record whose predecessor it does not hold, under the same wait as a held content record, together with each content record that names an epoch at or above it. |  |  |
 | `GRP-263` | §11.3.5 | MUST | A receiver | A receiver MUST keep the active-member set of each roster epoch from its own admission epoch onward, for `GROUP_RETENTION` after that epoch. |  |  |
 | `GRP-264` | §11.4.1 | MUST | An admin that removes a member | An admin that removes a member MUST rotate in the same action, directly after the roster record that removes it. |  |  |
-| `GRP-265` | §11.4.1 | MUST | (unstated) | The first member of role `admin` or above that reads a self-removal (`GRP-067`) MUST rotate. |  |  |
-| `GRP-266` | §11.4.1 | MUST | An admin | An admin MUST rotate when `GROUP_EPOCH_MAX_AGE` passes after `t_e` and no epoch-key record of a later epoch has arrived. |  |  |
 | `GRP-267` | §11.4.1 | MUST NOT | A member | A member MUST NOT rotate at a join. |  |  |
 | `GRP-268` | §11.4.1 | MUST NOT | A member | A member MUST NOT rotate at a promotion. |  |  |
-| `GRP-269` | §11.4.1 | MAY | Only a member of role `admin` or above | Only a member of role `admin` or above MAY rotate. |  |  |
-| `GRP-270` | §11.4.1 | MUST | A receiver | A receiver MUST reject an epoch-key record whose rotator held a role below `admin` at the `roster_epoch` of that record. |  |  |
-| `GRP-271` | §11.4.1 | MUST | (unstated) | After each replica returned `GSEQ` for the epoch-key record, the rotator MUST send `GKEY` with `read_pk_{e+1}` and `write_pk_{e+1}` to each replica, under `own_sk` of that replica. |  |  |
-| `GRP-272` | §11.4.1 | MUST NOT | A rotator | A rotator MUST NOT send `GKEY` to a replica before that replica accepted the epoch-key record. |  |  |
 | `GRP-273` | §11.4.1 | MUST | A member that verifies two epoch-key records for one epoch | A member that verifies two epoch-key records for one epoch MUST install the secret of the record whose rotator has the lower member index, and it MUST keep the other secret as an alternate for `GROUP_EPOCH_GRACE`. |  |  |
 | `GRP-274` | §11.4.1 | MUST | A receiver | A receiver MUST try the alternate secret of an epoch when the record key of that epoch fails to open a record. |  |  |
-| `GRP-275` | §11.4.1 | MUST | (unstated) | A rotator that reads an epoch-key record for the epoch it posted, from a lower member index, MUST switch to that secret and send `GKEY` with the credentials of that secret to each replica. |  |  |
 | `GRP-276` | §11.4.2 | MUST | A rotator | A rotator MUST build one slot for each member the new roster holds, in index order, and no slot for a member it removes. |  |  |
 | `GRP-277` | §11.4.2 | MUST | A rotator | A rotator MUST set `own_count` to `GROUP_REPLICAS` for a member of role `admin` or above and to 0 for each other member. |  |  |
 | `GRP-278` | §11.4.2 | MUST | A rotator | A rotator MUST put `own_sk` of replica 1 and then of replica 2 in `own_sks`, in the replica order of the roster snapshot (§11.9.8). |  |  |
@@ -2017,12 +2010,7 @@ Source: `spec/11-private-groups.md`
 | `GRP-288` | §11.4.2 | MUST NOT | A member | A member MUST NOT install an epoch secret from an epoch-key record whose `epoch` is below its current epoch, or equal to it other than under the two-rotator rule of §11.4.1 and the one-slot record of §11.4.3. |  |  |
 | `GRP-289` | §11.4.3 | MUST | A member that lacks the current epoch secret | A member that lacks the current epoch secret MUST send a `KeyRequest` of scope `0x02` as a group record under the previous epoch, while `GROUP_WRITE_GRACE` and `GROUP_EPOCH_GRACE` hold. |  |  |
 | `GRP-290` | §11.4.3 | MUST | Outside those graces, the member | Outside those graces, the member MUST send that `KeyRequest` on a pairwise channel to any member of the group that it holds a channel with. |  |  |
-| `GRP-291` | §11.4.3 | MUST | (unstated) | A member of role `admin` or above that reads a `KeyRequest` of scope `0x02` MUST answer with a one-slot epoch-key record of the current epoch for that member, inline with `slot_count` 1, and then with a `KeySupply` of status `0x01` on the path that carried the request. |  |  |
-| `GRP-292` | §11.4.3 | MUST | (unstated) | A member below `admin` that receives a `KeyRequest` of scope `0x02` on a pairwise channel MUST post it again as a group record. |  |  |
-| `GRP-293` | §11.4.3 | MUST NOT | A member below `admin` | A member below `admin` MUST NOT answer a `KeyRequest` of scope `0x02`. |  |  |
-| `GRP-294` | §11.4.3 | MUST NOT | An admin | An admin MUST NOT answer a `KeyRequest` from an index that the current roster does not hold. |  |  |
 | `GRP-295` | §11.4.3 | MUST NOT | A member | A member MUST NOT send more than `KEY_REQUEST_RATE` epoch requests for one group in each 24 h. |  |  |
-| `GRP-296` | §11.4.3 | MUST | An admin | An admin MUST discard an epoch request above that rate. |  |  |
 | `GRP-297` | §11.4.3 | MUST | If no path exists, the member | If no path exists, the member MUST show the group as "membership lapsed", and it needs a new invitation. |  |  |
 | `GRP-298` | §11.4.3 | MUST | An admin that promotes a member to `admin` or above | An admin that promotes a member to `admin` or above MUST post a one-slot epoch-key record of the current epoch for that member with `own_count` = `GROUP_REPLICAS`, directly after the granting epoch. |  |  |
 | `GRP-299` | §11.6 | MUST NOT | A member | A member MUST NOT send a receipt of Part 6 §6.6.9 kind `0x06` or kind `0x07` in a group. |  |  |
@@ -2072,15 +2060,34 @@ Source: `spec/11-private-groups.md`
 | `GRP-343` | §11.12 | MUST | Every device of a member | Every device of a member MUST subscribe to a replica on its own circuit with its own cursor, under §11.2.2. |  |  |
 | `GRP-344` | §11.12 | MUST | Every device of a member | Every device of a member MUST open its own slot of each epoch-key record. |  |  |
 | `GRP-345` | §11.12 | MUST | (unstated) | At a device revocation of Part 7 §7.7 and at a full identity reset of Part 7 §7.7.1, a remaining device MUST make a new `GroupRosterSeed_g` for each group that the user holds, and it MUST derive the three keys of §11.9.1 from it. |  |  |
-| `GRP-346` | §11.12 | MUST | For each such group, that device | For each such group, that device MUST send a `RekeyRecord` of Part 6 §6.6.3 on a pairwise channel to one member of role `admin` or above that it holds a channel with. |  |  |
-| `GRP-347` | §11.12 | MUST NOT | A device | A device MUST NOT send a `RekeyRecord` as a group record. |  |  |
 | `GRP-348` | §11.12 | MUST | An admin that receives a `RekeyRecord` | An admin that receives a `RekeyRecord` MUST verify it under Part 6 rule `WIR-478`. |  |  |
 | `GRP-349` | §11.12 | MUST NOT | (unstated) | The admin MUST discard a record that fails that check, and it MUST NOT act on it. |  |  |
-| `GRP-350` | §11.12 | MUST | The admin | The admin MUST then, in this order: post a plain epoch that removes `old_index`; rotate under §11.4.1 with no slot for `old_index`; post a plain epoch that adds the new keys under a new index; and send the admit of §11.9.1 step 4 on the same pairwise channel. |  |  |
 | `GRP-351` | §11.12 | MUST NOT | The admin | The admin MUST NOT reuse `old_index`. |  |  |
-| `GRP-352` | §11.12 | MUST | The member | The member MUST zeroize the old seed and the old three keys when the admit arrives. |  |  |
-| `GRP-353` | §11.12 | MUST | The interface | The interface MUST show each group whose re-key waits for an admit. |  |  |
-| `GRP-354` | §11.12 | MUST | The interface | The interface MUST name each group in which the user holds no pairwise channel with an admin, and it MUST state that the group needs a new invitation. |  |  |
+| `GRP-355` | §11.4.1 | MAY | Any active member | Any active member MAY rotate at a trigger. |  |  |
+| `GRP-356` | §11.4.1 | MUST | A receiver | A receiver MUST reject an epoch-key record whose rotator is the index that the trigger excludes, or whose rotator is not active at the `roster_epoch` of that record. |  |  |
+| `GRP-357` | §11.4.1 | MUST | A receiver | A receiver MUST reject an epoch-key record for which the roster chain holds no trigger since the epoch-key record of the epoch before it. |  |  |
+| `GRP-358` | §11.4.1 | MUST | A member that reads a trigger it did not cause | A member that reads a trigger it did not cause MUST draw a delay from an exponential distribution with mean `ROTATE_BACKOFF_ROLE` if it holds a role at `moderator` or above, and with mean `ROTATE_BACKOFF_MEMBER` otherwise. |  |  |
+| `GRP-359` | §11.4.1 | MUST NOT | (unstated) | That member MUST rotate at the end of the delay if no epoch-key record that answers the trigger arrived before it, and it MUST NOT rotate if one did. |  |  |
+| `GRP-360` | §11.4.1 | MUST | Any member | Any member MUST rotate, under the same backoff, when `GROUP_EPOCH_MAX_AGE` passes after `t_e` and no epoch-key record of a later epoch has arrived. |  |  |
+| `GRP-361` | §11.4.1 | MUST | A rotator that holds `own_sk` | A rotator that holds `own_sk` MUST send `GKEY` with `read_pk_{e+1}` and `write_pk_{e+1}` to each replica after that replica returned `GSEQ` for the epoch-key record. |  |  |
+| `GRP-362` | §11.4.1 | MUST NOT | A rotator | A rotator MUST NOT send `GKEY` to a replica before that replica accepted the epoch-key record. |  |  |
+| `GRP-363` | §11.4.1 | MUST | (unstated) | A member of role `admin` or above that installs an epoch it did not credential MUST send `GKEY` for that epoch to each replica at once. |  |  |
+| `GRP-364` | §11.4.1 | MUST | (unstated) | A rotator that reads an epoch-key record for the epoch it posted, from a lower member index, MUST switch to that secret, and if it holds `own_sk` it MUST send `GKEY` with the credentials of that secret to each replica. |  |  |
+| `GRP-365` | §11.12 | MUST | For each such group, that device | For each such group, that device MUST post a `RekeyRecord` of Part 6 §6.6.3 as a group record. |  |  |
+| `GRP-366` | §11.12 | MUST | A receiver | A receiver MUST verify a `RekeyRecord` under Part 6 rule `WIR-478`, and it MUST reject a `new_index` that breaks `GRP-320`. |  |  |
+| `GRP-367` | §11.12 | MUST | A receiver | A receiver MUST then apply the record as a roster record: `old_index` leaves the active set, and `new_index` enters it with the new keys and the role of `old_index`. |  |  |
+| `GRP-368` | §11.12 | MUST | (unstated) | A `RekeyRecord` is a rotation trigger of §11.4.1, and the index it excludes is `old_index`. |  |  |
+| `GRP-369` | §11.12 | MUST | (unstated) | A member that verifies two `RekeyRecord`s for one `old_index` with one `previous_epoch_hash` MUST apply the record whose SHA3-256 is lower, and it MUST show the fork under `GRP-070`, because one member made two successors. |  |  |
+| `GRP-370` | §11.12 | MUST NOT | (unstated) | The device whose record lost MUST send its `RekeyRecord` on a pairwise channel to a member of role `admin` or above that it holds a channel with, with `epoch_index` and `previous_epoch_hash` set to zero, and it MUST NOT post a second `RekeyRecord` as a group record. |  |  |
+| `GRP-371` | §11.12 | MUST | The admin | The admin MUST then post a plain epoch that removes the index that the record names as its current index, post a plain epoch that adds the new keys under a new index, and send the admit of §11.9.1 step 4 on the same pairwise channel. |  |  |
+| `GRP-372` | §11.12 | MUST | The member | The member MUST zeroize the old seed and the old three keys when an epoch-key record with a slot for its new index arrives. |  |  |
+| `GRP-373` | §11.12 | MUST | The interface | The interface MUST show each group whose re-key waits for a rotation or for an admit. |  |  |
+| `GRP-374` | §11.12 | MUST | (unstated) | If the record of the user lost under `GRP-369` and the user holds no pairwise channel with an admin of that group, the interface MUST state that the group needs a new invitation, and the client MUST send a self-removal of its current index under `GRP-067`, which is a rotation trigger. |  |  |
+| `GRP-375` | §11.4.3 | MUST | (unstated) | Any active member that reads a `KeyRequest` of scope `0x02` from an index that the current roster holds MUST answer, after the backoff of §11.4.1 and only if no one-slot epoch-key record for that index arrived first, with a one-slot epoch-key record of the current epoch for that member, inline with `slot_count` 1 and `own_count` 0, and then with a `KeySupply` of status `0x01` on the path that carried the request. |  |  |
+| `GRP-376` | §11.4.3 | MUST | (unstated) | A member that receives a `KeyRequest` of scope `0x02` on a pairwise channel MUST post it again as a group record, thus every member reads it and the backoff applies. |  |  |
+| `GRP-377` | §11.4.3 | MUST NOT | A member | A member MUST NOT answer a `KeyRequest` from an index that the current roster does not hold. |  |  |
+| `GRP-378` | §11.4.3 | MUST | A member | A member MUST discard an epoch request above that rate. |  |  |
+| `GRP-379` | §11.4.3 | MUST | A receiver | A receiver MUST reject a slot whose `own_count` is above 0 when the rotator held a role below `admin` at the `roster_epoch` of the record, because only an admin holds `own_sk`. |  |  |
 
 ## COM — Public Communities
 

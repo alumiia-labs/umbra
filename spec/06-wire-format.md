@@ -1597,15 +1597,19 @@ snapshot is 2 728 bytes, and it uses bucket `B3` at `GROUP_MAX`.
 
 **The re-key record.** Part 11 §11.12 makes a member replace its three group
 keys after a device revocation or a full identity reset. The record carries
-the old index, the old roster public key, the three new public values, and a
-signature under the old roster key.
+the chain fields of a roster record, the old index, the old roster public key,
+the three new public values, the new index, and a signature under the old
+roster key.
 
 ```
-RekeyRecord {                     // 6 576 bytes, control type 0x09
+RekeyRecord {                     // 6 614 bytes, control type 0x09
     version           u8          // 0x01
     group_id          [32]u8
+    epoch_index       u32         // the roster epoch of this record; zero on a pairwise channel
+    previous_epoch_hash [32]u8    // Part 11 §11.9.2; zero on a pairwise channel
     old_index         u16         // the member index that the member holds
     old_roster_pk     [1952]u8    // GroupRosterKey_g.pk of that index
+    new_index         u16         // the lowest index above every index the roster used
     pair_pk           [32]u8      // the new GroupPairKey_g.pk
     roster_pk_hash    [32]u8      // SHA3-256 of the new GroupRosterKey_g.pk
     kem_pk            [1216]u8    // the new GroupKemKey_g.pk
@@ -1614,25 +1618,27 @@ RekeyRecord {                     // 6 576 bytes, control type 0x09
 ```
 
 The signature covers the preimage `"umbra/v1/group-rekey" || group_id ||
-old_index || old_roster_pk || pair_pk || roster_pk_hash || kem_pk`, and Part 5
-§5.11 holds the label. As an `AppMessage` the record is 6 608 bytes, thus it
-uses bucket `B2`.
+epoch_index || previous_epoch_hash || old_index || old_roster_pk || new_index
+|| pair_pk || roster_pk_hash || kem_pk`, and Part 5 §5.11 holds the label. As
+an `AppMessage` the record is 6 646 bytes, thus it uses bucket `B2`.
 
-- **[WIR-475]** A parser MUST reject a `RekeyRecord` whose length is not
-  6 576. **[WIR-476]** A client MUST send a `RekeyRecord` on a pairwise
-  channel to a member of role `admin` or above, and on no other channel.
-  **[WIR-477]** A receiver MUST discard a `RekeyRecord` that arrives as a
-  group record. **[WIR-478]** A receiver MUST verify `sig` against
-  `old_roster_pk`, and `SHA3-256(old_roster_pk)` against the `roster_pk_hash`
-  of `old_index` in its roster, before it acts on the record. Part 11 §11.12
-  gives the action.
+- **[WIR-482]** A parser MUST reject a `RekeyRecord` whose length is not
+  6 614. **[WIR-483]** A client MUST send a `RekeyRecord` as a group record,
+  or on a pairwise channel to a member of role `admin` or above with
+  `epoch_index` and `previous_epoch_hash` zero, and on no other channel.
+  **[WIR-484]** A receiver MUST discard a `RekeyRecord` on a pairwise channel
+  whose chain fields are not zero, and a `RekeyRecord` in a group record
+  whose chain fields are zero. **[WIR-478]** A receiver MUST verify `sig`
+  against `old_roster_pk`, and `SHA3-256(old_roster_pk)` against the
+  `roster_pk_hash` of `old_index` in its roster, before it acts on the
+  record. Part 11 §11.12 gives the action on each carrier.
 
 > *Cause.* A device in hostile hands holds every group key of the member,
-> thus a record on the group queue proves nothing about which device sent it.
-> The pairwise channel is the one channel that the revocation of Part 7 §7.7
-> heals, and the old roster key binds the request to the index that the
-> member holds. A member that holds no pairwise channel with an admin has no
-> path, and Part 11 §11.12 makes the interface say so.
+> thus it can post the same record. Part 11 §11.12 resolves two records for
+> one index by a hash, and it keeps the pairwise channel to an admin as the
+> path of the device that lost, because that channel is the one the
+> revocation of Part 7 §7.7 heals. The old roster key binds the request to
+> the index that the member holds.
 
 ### 6.6.4 The transparency digest
 

@@ -567,63 +567,87 @@ roster no longer holds.
 
 ### 11.4.1 The rotation trigger
 
+A **rotation trigger** is a fact on the roster chain that every member reads:
+a roster record that removes an index (a plain epoch that removes a member, a
+granting epoch that removes a role and the member, an eviction under §11.9.7,
+or a self-removal under `GRP-067`), a `RekeyRecord` that moves a member to new
+keys (§11.12), or the age of the epoch. Any member acts on a trigger. The
+authority to change the roster stays where §11.9 puts it; the authority to
+rotate does not, because a rotation needs no secret that a plain member lacks.
+
 - **[GRP-264]** An admin that removes a member MUST rotate in the same action,
   directly after the roster record that removes it. That rule holds for a
   plain epoch that removes a member, for a granting epoch that removes a role
   and the member, and for an eviction under §11.9.7.
-- **[GRP-265]** The first member of role `admin` or above that reads a
-  self-removal (`GRP-067`) MUST rotate. Until then the leaver holds `K_e` and
-  reads, and §11.5 states that residual.
-- **[GRP-266]** An admin MUST rotate when `GROUP_EPOCH_MAX_AGE` passes after
-  `t_e` and no epoch-key record of a later epoch has arrived. §11.10 gives 30
-  days, and `GROUP_EPOCH_RATE` bounds a race between two admins.
+- **[GRP-355]** Any active member MAY rotate at a trigger. **[GRP-356]** A
+  receiver MUST reject an epoch-key record whose rotator is the index that the
+  trigger excludes, or whose rotator is not active at the `roster_epoch` of
+  that record. **[GRP-357]** A receiver MUST reject an epoch-key record for
+  which the roster chain holds no trigger since the epoch-key record of the
+  epoch before it.
+- **[GRP-358]** A member that reads a trigger it did not cause MUST draw a
+  delay from an exponential distribution with mean `ROTATE_BACKOFF_ROLE` if
+  it holds a role at `moderator` or above, and with mean
+  `ROTATE_BACKOFF_MEMBER` otherwise. **[GRP-359]** That member MUST rotate at
+  the end of the delay if no epoch-key record that answers the trigger arrived
+  before it, and it MUST NOT rotate if one did. The admin that causes a
+  trigger draws no delay, under `GRP-264`.
+- **[GRP-360]** Any member MUST rotate, under the same backoff, when
+  `GROUP_EPOCH_MAX_AGE` passes after `t_e` and no epoch-key record of a later
+  epoch has arrived. §11.10 gives 30 days.
 - **[GRP-267]** A member MUST NOT rotate at a join. §11.3.1 gives the cause:
   the slot chain is one-way, and the joiner receives the slot key of its join
   slot. **[GRP-268]** A member MUST NOT rotate at a promotion. A promotion
   delivers the owner credentials to the promotee by a one-slot epoch-key
   record of the current epoch (§11.4.3).
-- **[GRP-269]** Only a member of role `admin` or above MAY rotate.
-  **[GRP-270]** A receiver MUST reject an epoch-key record whose rotator held
-  a role below `admin` at the `roster_epoch` of that record.
 
-**The order of operations** at a rotation by admin A:
+**The order of operations** at a rotation by member R:
 
-1. Post the roster record, if any, that causes the rotation, and take `GSEQ`
-   from each replica.
+1. If R is the acting admin, post the roster record that causes the rotation,
+   and take `GSEQ` from each replica.
 2. Draw `K_{e+1}`, set `t_{e+1} = t_now`, build one slot for every member the
    new roster holds, and post the epoch-key record (or its descriptor record)
    to each replica.
-3. **[GRP-271]** After each replica returned `GSEQ` for the epoch-key record,
-   the rotator MUST send `GKEY` with `read_pk_{e+1}` and `write_pk_{e+1}` to
-   each replica, under `own_sk` of that replica. **[GRP-272]** A rotator MUST
-   NOT send `GKEY` to a replica before that replica accepted the epoch-key
-   record.
+3. **[GRP-361]** A rotator that holds `own_sk` MUST send `GKEY` with
+   `read_pk_{e+1}` and `write_pk_{e+1}` to each replica after that replica
+   returned `GSEQ` for the epoch-key record. **[GRP-362]** A rotator MUST NOT
+   send `GKEY` to a replica before that replica accepted the epoch-key record.
+   **[GRP-363]** A member of role `admin` or above that installs an epoch it
+   did not credential MUST send `GKEY` for that epoch to each replica at once.
+   A second `GKEY` with the same keys changes nothing at the relay.
 4. Switch its own sending to `e + 1`.
 
 The relay keeps the previous `read_pk` for `GROUP_READ_GRACE` and the previous
 `write_pk` for `GROUP_WRITE_GRACE`, thus a member that has not yet read the
-epoch-key record still reads and still writes inside the grace.
+epoch-key record still reads and still writes inside the grace. Until an admin
+sends `GKEY`, the excluded party keeps the relay credentials of the old epoch:
+it fetches ciphertext that it cannot open, and it posts records that every
+receiver rejects under §11.3.5. Part 16 §16.3 records that residual.
 
-**Two rotators at once.** Two admins can post two epoch-key records for one
+**Two rotators at once.** Two members can post two epoch-key records for one
 epoch `e + 1` before either reads the other. **[GRP-273]** A member that
 verifies two epoch-key records for one epoch MUST install the secret of the
 record whose rotator has the lower member index, and it MUST keep the other
 secret as an alternate for `GROUP_EPOCH_GRACE`. **[GRP-274]** A receiver MUST
 try the alternate secret of an epoch when the record key of that epoch fails
-to open a record. **[GRP-275]** A rotator that reads an epoch-key record for
-the epoch it posted, from a lower member index, MUST switch to that secret and
-send `GKEY` with the credentials of that secret to each replica.
+to open a record. **[GRP-364]** A rotator that reads an epoch-key record for
+the epoch it posted, from a lower member index, MUST switch to that secret,
+and if it holds `own_sk` it MUST send `GKEY` with the credentials of that
+secret to each replica.
 
 > *Cause.* Draft 0.1.0 rotated a sender key at each membership change, lazily
-> at the next send of each sender, and it put the removal in the interface as
-> "removed — will stop receiving messages shortly". One rotation by the acting
-> admin closes the removal at once for every sender. A rotation at a join is
-> not needed, because the joiner's slot key opens nothing before its join
-> slot. A rotation at each 30 days bounds the life of one `K_e` to
-> `GROUP_RETENTION`. Two rotators at once are a race that `GROUP_EPOCH_RATE`
-> makes rare and does not exclude; the index rule makes every member select
-> one secret, and the losing rotator repairs the relay credentials because it
-> holds `own_sk`.
+> at the next send of each sender. An earlier form of this section let only an
+> admin rotate, because the rotator also sent `GKEY`. That put the exclusion
+> of a leaver, and of a device in hostile hands, behind the presence of one
+> role holder, and a group whose admins sleep kept an excluded party inside
+> for hours. The two acts are separate. Every member holds every KEM key of
+> the roster, thus any member makes the secret that excludes a party. Only the
+> excluded party cannot, because it would know the secret it made, and
+> `GRP-356` keeps it out. `GKEY` needs `own_sk`, and it buys relay hygiene
+> only, thus it waits for an admin at no cost to confidentiality. The backoff
+> keeps a 500-member group from 500 rotations at one trigger, and the index
+> rule of `GRP-273` makes the few that race resolve the same way at every
+> member.
 
 ### 11.4.2 The epoch-key record
 
@@ -721,19 +745,20 @@ the epoch the member lacks, and `index` is 0.
   Outside those graces, the member MUST send that `KeyRequest` on a pairwise
   channel to any member of the group that it holds a channel with. Part 6
   rules `WIR-456` and `WIR-457` state the same carrier.
-- **[GRP-291]** A member of role `admin` or above that reads a `KeyRequest` of
-  scope `0x02` MUST answer with a one-slot epoch-key record of the current
-  epoch for that member, inline with `slot_count` 1, and then with a
+- **[GRP-375]** Any active member that reads a `KeyRequest` of scope `0x02`
+  from an index that the current roster holds MUST answer, after the backoff
+  of §11.4.1 and only if no one-slot epoch-key record for that index arrived
+  first, with a one-slot epoch-key record of the current epoch for that
+  member, inline with `slot_count` 1 and `own_count` 0, and then with a
   `KeySupply` of status `0x01` on the path that carried the request. For scope
   `0x02` the `body` of a `KeySupply` is empty, and status `0x01` means "a
-  one-slot epoch-key record was posted". **[GRP-292]** A member below `admin`
-  that receives a `KeyRequest` of scope `0x02` on a pairwise channel MUST post
-  it again as a group record. **[GRP-293]** A member below `admin` MUST NOT
-  answer a `KeyRequest` of scope `0x02`.
-- **[GRP-294]** An admin MUST NOT answer a `KeyRequest` from an index that the
+  one-slot epoch-key record was posted". **[GRP-376]** A member that receives
+  a `KeyRequest` of scope `0x02` on a pairwise channel MUST post it again as a
+  group record, thus every member reads it and the backoff applies.
+- **[GRP-377]** A member MUST NOT answer a `KeyRequest` from an index that the
   current roster does not hold. **[GRP-295]** A member MUST NOT send more than
-  `KEY_REQUEST_RATE` epoch requests for one group in each 24 h. **[GRP-296]**
-  An admin MUST discard an epoch request above that rate. §11.10 gives 8.
+  `KEY_REQUEST_RATE` epoch requests for one group in each 24 h. **[GRP-378]**
+  A member MUST discard an epoch request above that rate. §11.10 gives 8.
 - **[GRP-297]** If no path exists, the member MUST show the group as
   "membership lapsed", and it needs a new invitation.
 
@@ -741,12 +766,16 @@ The same one-slot record delivers the owner credentials to a newly promoted
 admin. **[GRP-298]** An admin that promotes a member to `admin` or above MUST
 post a one-slot epoch-key record of the current epoch for that member with
 `own_count` = `GROUP_REPLICAS`, directly after the granting epoch.
+**[GRP-379]** A receiver MUST reject a slot whose `own_count` is above 0 when
+the rotator held a role below `admin` at the `roster_epoch` of the record,
+because only an admin holds `own_sk`.
 
 > *Cause.* Draft 0.1.0 answered a key request with the sender key of one
 > member on the pairwise channel of the two parties, and the rate bounded the
 > requests to one peer. A group now has one secret for each epoch, held by
-> every member, thus any admin can answer, and the rate bounds the requests
-> for one group. The one-slot record reuses the epoch-key layout, thus the
+> every member, thus any member can answer under the backoff of §11.4.1, and
+> no repair waits for a role holder. The rate bounds the requests for one
+> group. The one-slot record reuses the epoch-key layout, thus the
 > promotion path and the repair path are one code path.
 
 ## 11.5 Membership privacy, and what the relay learns
@@ -817,10 +846,12 @@ post a one-slot epoch-key record of the current epoch for that member with
 > migration path. UMBRA accepts this residual.
 
 > **This is a trade, and Part 2 §2.4 requires the text to state it.** A member
-> that leaves keeps reading the group until a member of role `admin` or above
-> reads its self-removal and rotates (§11.4.1). A leaver cannot rotate,
-> because a rotation needs `own_sk`, and `GRP-051` keeps two owners in every
-> group so that one is present. UMBRA accepts this residual.
+> that leaves keeps reading the group until any other member reads its
+> self-removal and rotates (§11.4.1), which is one backoff after the first
+> member comes online. A leaver cannot rotate, because it would know the
+> secret it made. Until an admin sends `GKEY`, the leaver also keeps the relay
+> credentials of the old epoch, and it fetches ciphertext it cannot open.
+> UMBRA accepts this residual.
 
 > **This is a trade, and Part 2 §2.4 requires the text to state it.** The chunk
 > relay that holds a chunked epoch-key object sees one anonymous fetch for
@@ -1428,6 +1459,8 @@ made the joiner open 499 pairwise channels for the same admission.
 | `GROUP_EPOCH_GRACE` | 24 h from the installation of the next epoch, measured by the receiver (§11.3.2) |
 | `GROUP_ROSTER_WAIT` | 24 h from the arrival of the held record, measured by the receiver (§11.3.5) |
 | `GROUP_GAP_TIMEOUT` | 60 s from the first record above the gap, measured by the reader (§11.2.2) |
+| `ROTATE_BACKOFF_ROLE` | exponential, mean 10 s, drawn by a member at `moderator` or above at a trigger it did not cause (§11.4.1) |
+| `ROTATE_BACKOFF_MEMBER` | exponential, mean 60 s, drawn by a member below `moderator` at a trigger (§11.4.1) |
 | `GROUP_TAG_LEN` | 12 bytes (§11.3.3) |
 | `GROUP_INDEX_MAX` | 65 535 (§11.9.1) |
 | `ROLE_HOLDER_MAX` | 16 members at `moderator` or above (§11.9) |
@@ -1568,52 +1601,82 @@ heals each pairwise channel at a revocation with a ratchet step that the
 revoked device cannot follow. No such step exists for a group key, because
 every device of the member holds the same seed. Thus a revoked device that an
 attacker holds reads the group, and it opens its slot of each later epoch-key
-record, until the member replaces its keys and an admin rotates the old ones
-out. The re-key below is that replacement.
+record, until the member moves to new keys and the old index is rotated out.
+The re-key below is that move, and it needs no admin.
 
 - **[GRP-345]** At a device revocation of Part 7 §7.7 and at a full identity
   reset of Part 7 §7.7.1, a remaining device MUST make a new
   `GroupRosterSeed_g` for each group that the user holds, and it MUST derive
   the three keys of §11.9.1 from it.
-- **[GRP-346]** For each such group, that device MUST send a `RekeyRecord` of
-  Part 6 §6.6.3 on a pairwise channel to one member of role `admin` or above
-  that it holds a channel with. **[GRP-347]** A device MUST NOT send a
-  `RekeyRecord` as a group record.
-- **[GRP-348]** An admin that receives a `RekeyRecord` MUST verify it under
-  Part 6 rule `WIR-478`. **[GRP-349]** The admin MUST discard a record that
-  fails that check, and it MUST NOT act on it.
-- **[GRP-350]** The admin MUST then, in this order: post a plain epoch that
-  removes `old_index`; rotate under §11.4.1 with no slot for `old_index`; post
-  a plain epoch that adds the new keys under a new index; and send the admit
-  of §11.9.1 step 4 on the same pairwise channel. **[GRP-351]** The admin
-  MUST NOT reuse `old_index`.
-- **[GRP-352]** The member MUST zeroize the old seed and the old three keys
-  when the admit arrives. Until then the old keys stay, because the member
-  still reads the group with them.
-- **[GRP-353]** The interface MUST show each group whose re-key waits for an
-  admit. **[GRP-354]** The interface MUST name each group in which the user
-  holds no pairwise channel with an admin, and it MUST state that the group
-  needs a new invitation. In that group the member MUST send a self-removal
-  under §11.9.2, and the leaving member is the attacker's device as much as
-  its own.
+- **[GRP-365]** For each such group, that device MUST post a `RekeyRecord` of
+  Part 6 §6.6.3 as a group record. The record chains the roster: it carries
+  `epoch_index` and `previous_epoch_hash` under `GRP-314` and `GRP-315`, the
+  old index, the old roster public key, the three new public values, the new
+  index, and a signature under the old roster key.
+- **[GRP-366]** A receiver MUST verify a `RekeyRecord` under Part 6 rule
+  `WIR-478`, and it MUST reject a `new_index` that breaks `GRP-320`.
+  **[GRP-367]** A receiver MUST then apply the record as a roster record:
+  `old_index` leaves the active set, and `new_index` enters it with the new
+  keys and the role of `old_index`. **[GRP-368]** A `RekeyRecord` is a
+  rotation trigger of §11.4.1, and the index it excludes is `old_index`.
+- **[GRP-369]** A member that verifies two `RekeyRecord`s for one `old_index`
+  with one `previous_epoch_hash` MUST apply the record whose SHA3-256 is
+  lower, and it MUST show the fork under `GRP-070`, because one member made
+  two successors. **[GRP-370]** The device whose record lost MUST send its
+  `RekeyRecord` on a pairwise channel to a member of role `admin` or above
+  that it holds a channel with, with `epoch_index` and `previous_epoch_hash`
+  set to zero, and it MUST NOT post a second `RekeyRecord` as a group record.
+- **[GRP-348]** An admin that receives a `RekeyRecord` on a pairwise channel
+  MUST verify it under Part 6 rule `WIR-478`. **[GRP-349]** The admin MUST
+  discard a record that fails that check, and it MUST NOT act on it.
+  **[GRP-371]** The admin MUST then post a plain epoch that removes the index
+  that the record names as its current index, post a plain epoch that adds
+  the new keys under a new index, and send the admit of §11.9.1 step 4 on the
+  same pairwise channel. The removal is a rotation trigger of §11.4.1.
+  **[GRP-351]** The admin MUST NOT reuse the removed index.
+- **[GRP-372]** The member MUST zeroize the old seed and the old three keys
+  when an epoch-key record with a slot for its new index arrives. Until then
+  the old keys stay, because the member still reads the group with them.
+- **[GRP-373]** The interface MUST show each group whose re-key waits for a
+  rotation or for an admit. **[GRP-374]** If the record of the user lost
+  under `GRP-369` and the user holds no pairwise channel with an admin of
+  that group, the interface MUST state that the group needs a new invitation,
+  and the client MUST send a self-removal of its current index under
+  `GRP-067`, which is a rotation trigger. The leaving member is the attacker's
+  device as much as its own.
 - The new seed reaches the other devices of the member through the local
   identity table of Part 7 §7.5.1, as any group seed does.
 
+**A single device.** A user with one phone restores onto a new phone from the
+recovery phrase and the backup of Part 4 §4.7.2. That backup carries the group
+seeds, thus the new phone posts the same `RekeyRecord`. Without a backup the
+new phone holds no group key, and the user tells an admin out of band; the
+admin posts a plain epoch that removes the index, any member rotates, and the
+user joins again under §11.9.1. In each case the exclusion of the old keys
+waits for no role holder.
+
 **This is a trade, and Part 2 §2.4 requires the text to state it.** From the
-moment an attacker holds a device until the admit of GRP-350 arrives, that
-device reads every group of the member, and no key of this part shortens
-that window. The window is the time to one admin action, and it needs one
-admin that the member holds a pairwise channel with. Part 16 §16.3 records
-the residual.
+moment an attacker holds a device until the first other member rotates after
+the `RekeyRecord`, that device reads every group of the member. The window is
+one backoff after the first other member comes online. The attacker's device
+holds the same old roster key, thus it can post a `RekeyRecord` of its own; if
+its record wins under `GRP-369`, the user is out of that group until an admin
+acts on the pairwise path, and the attacker's device is in until the user's
+self-removal or the admin's removal is rotated. The attacker must unlock the
+device first, at the cost that Part 15 §15.6.4 gives one passphrase attempt,
+while the user revokes at once. Part 16 §16.3 records the residual.
 
 > *Cause.* Draft 0.1.0 said that a full identity reset does not change a
 > group roster key, and it gave no rule for a group after a revocation. Under
 > the group queue that silence is a hole: the KEM key of a member seals every
 > later epoch to that member, thus a rotation alone excludes nothing that the
-> revoked device holds. A record on the group queue cannot carry the request,
-> because the revoked device forges it. The pairwise channel to an admin is
-> the one path that the revocation closed to that device, and the old roster
-> key binds the request to the index.
+> revoked device holds. An earlier form of this section sent the re-key to an
+> admin over a pairwise channel and let only the admin act, thus the exclusion
+> waited for one role holder. The record now travels on the group queue, any
+> member rotates, and the pairwise path stays for the device that lost the
+> race, because that path is the one channel the revocation closed to the
+> attacker's device. The race itself is the race that Part 7 §7.7 already
+> accepts for a device revocation.
 
 > *Cause.* Draft 0.1.0 had no group sender owner, because a group send was
 > N − 1 pairwise sends and each pairwise ratchet already had an owner. The

@@ -345,6 +345,7 @@ examples. Without the table below a maintainer finds the dependents by hand.
 | `GROUP_SLOT`, `GROUP_SLOT_WINDOW`, `GROUP_SLOT_SKEW` | Part 11 §11.10 | Part 1 §1.9, Part 2 §2.4, Part 6 §6.4.6, Part 15 §15.9.2, Part 16 §16.3 |
 | `GROUP_EPOCH_MAX_AGE`, `GROUP_EPOCH_GRACE`, `GROUP_ROSTER_WAIT` | Part 11 §11.10 | Part 6 §6.6.11, Part 16 §16.3 |
 | `GROUP_GAP_TIMEOUT` | Part 11 §11.10 | Part 3 §3.2.7 |
+| `ROTATE_BACKOFF_ROLE`, `ROTATE_BACKOFF_MEMBER` | Part 11 §11.10 | none |
 | `GROUP_TAG_LEN` | Part 11 §11.10 | Part 6 §6.4.6, Part 6 §6.9 |
 | `GROUP_INDEX_MAX`, `ROLE_HOLDER_MAX` | Part 11 §11.10 | Part 6 §6.6.3 |
 | `GROUP_ALL_NOTIFY_MAX` | Part 11 §11.10 | Part 2 §2.4, Part 7 §7.5.9, Part 8 §8.5 |

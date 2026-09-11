@@ -339,7 +339,7 @@ adds a trade MUST add a row to this table.
 | A shared contact needs the consent of that contact, thus a share is three records and not one | Part 6 §6.6.7 |
 | A moderation epoch names no author, and a member folds each superseded epoch, thus the chain is not an audit log | Part 11 §11.9.6 |
 | A group carries no delivery receipt, no read receipt, and no typing indicator, thus a sender in a group does not learn that a record arrived | Part 11 §11.6 |
-| A member that leaves a group reads the group until a member of role `admin` or above rotates the epoch | Part 11 §11.4.1 |
+| A member that leaves a group reads the group until any other member rotates the epoch, one backoff after the first member comes online | Part 11 §11.4.1 |
 | An absence claim moves each ratchet of an absent device in one record, thus a device that is offline for `OWNER_ABSENCE` loses its ownership with no notice | Part 7 §7.3.1 |
 | A catch-up object puts the backlog of an absence on the chunk path at once, thus a relay reads that backlog as one attachment | Part 7 §7.5.1 |
 | A save to the media store and a screenshot stay as user actions, thus one tap moves a plaintext out of the encrypted store | Part 15 §15.6.6 |

@@ -277,9 +277,11 @@ gatekeeper.
 | A reader circuit and the group it reads, joined to an IP address | The ingress relay and the group-queue relay in collusion | The same class as the two-ended collusion of Part 3 §3.11 |
 | The ciphertext of a group for `GROUP_READ_GRACE` after a removal | The removed member | It holds no slot key of the new epoch; it reads timing and buckets only |
 | The last `GROUP_SLOT_WINDOW` hours of retained records of the current epoch | A6, with the device and the relay's retained ciphertext | Part 11 §11.3.2; the slot chain is one-way |
-| Every record of every group of a member, at a device in hostile hands, from the seizure until an admin re-keys that member | A6 | Part 11 §11.12. A revocation heals a pairwise channel and no group key, thus the re-key is a second step, and it needs one admin that the member holds a pairwise channel with. Part 7 rule `DEV-262` starts it. UMBRA accepts this residual |
+| Every record of every group of a member, at a device in hostile hands, from the seizure until the first other member rotates after the `RekeyRecord` | A6 | Part 11 §11.12. A revocation heals a pairwise channel and no group key, thus the re-key is a second step; any member rotates it, one backoff after the first member comes online. Part 7 rule `DEV-262` starts it. UMBRA accepts this residual |
+| The membership of a user in a group, when the attacker's device posts a `RekeyRecord` first and wins the hash of `GRP-369` | A6, until an admin acts on the pairwise path | Part 11 §11.12. The attacker must unlock the device first, at the cost of Part 15 §15.6.4 for each passphrase attempt. The user's self-removal rotates the attacker's keys out at once. UMBRA accepts this residual |
+| The relay credentials of the old epoch, at an excluded party, until an admin sends `GKEY` | The excluded party | Part 11 §11.4.1. It fetches ciphertext it cannot open, and every receiver rejects its posts under §11.3.5. UMBRA accepts this residual |
 | A forged tag between two members, by an insider that holds a quantum computer | A quantum insider | Part 5 §5.4.4 posture; `sig_id` agility |
-| The group of a leaving member stays readable to it until an admin rotates | The leaving member | Part 11 §11.4.1 |
+| The group of a leaving member stays readable to it until any other member rotates | The leaving member | Part 11 §11.4.1; one backoff after the first other member comes online |
 | The slot chunk that one member fetched, at the chunk relay | The chunk relay | Part 13 §13.9; one anonymous fetch per member per rotation |
 | The `relay_id` of the notify queue of each reader, at the group-queue relay | The group-queue relay | Part 8 §8.5.2; the same view a community relay holds under Part 12 §12.6.4 |
 
