@@ -1,23 +1,22 @@
 # UMBRA Protocol Specification — Part 8: Notifications and Mobile Delivery
 
 **Status:** Draft
-**Version:** 0.1.0-draft
+**Version:** 0.2.0-draft
+**Date:** 2026-09-11
 
 ---
 
 ## 8.1 The honest framing
 
-On iOS there is **no lawful alternative to APNs**. The Legal Process Guidelines
-of Apple (October 2025) confirm that "the Apple ID associated with a registered
-APNs token and associated records may be obtained with an order under 18 U.S.C.
-§2703(d) or a search warrant". Before the disclosure of Senator Wyden on 6
-December 2023, a subpoena alone was sufficient. The push-token transparency
-numbers of Apple increase monotonically. In 2022 H2 there were 70 requests for
-794 tokens. In 2025 H1 there were 393 requests for 966 tokens, and Apple gave
-278.
+Android is the v1 client platform (Part 1 §1.1). An Android client receives a
+push through Firebase Cloud Messaging (FCM), through UnifiedPush, or through a
+persistent socket of its own, and §8.4.1 gives the three carriers. A build that
+carries FCM puts Google on the path of each push, and a legal process against
+Google can obtain the account behind a registration token. A build that carries
+UnifiedPush puts no platform party on that path.
 
-Thus the design goal of UMBRA is **not** to hide from APNs, which is impossible.
-The goal is this:
+Thus the design goal of UMBRA is **not** to hide from the push provider that a
+build carries. The goal is this:
 
 > **[NTF-001]** **One infrastructure party MUST NOT hold a passive database of push-token
 > bindings.** That prohibition covers a binding to a queue, to a contact, and to
@@ -44,7 +43,7 @@ The NDR is a **protocol entity that differs from a queue relay**. It has its own
 threat model and its own trust boundary.
 
 ```
-  Queue Relay R                NDR                     APNs/FCM        Device
+  Queue Relay R                NDR               FCM or UnifiedPush     Device
        │                        │                          │              │
        │  (handle_i, k_tok_i,   │                          │              │
        │   69-byte blob)        │                          │              │
@@ -55,8 +54,10 @@ threat model and its own trust boundary.
        │                        │ ────────────────────────▶│─────────────▶│
 ```
 
-- The NDR holds the APNs JWT signing key and the FCM service account. **A queue
-  relay does not touch a provider credential.**
+- The NDR holds the FCM service account. On a UnifiedPush build the push token
+  is the endpoint of the distributor of the user, and the NDR posts to that
+  endpoint with no provider credential. **A queue relay does not touch a
+  provider credential.**
 - The NDR stores `(handle, ct_token)` pairs only. It does not hold `k_tok`.
 - **[NTF-002]** The hop from the queue relay to the NDR MUST use Oblivious HTTP (RFC 9458) or
   a second mix hop. Thus the NDR cannot learn which relay holds a given handle.
@@ -69,7 +70,7 @@ The device makes a fresh 32-byte `k_tok` **for each group of at most
 `MAX_QUEUES_PER_HANDLE` queues that it subscribes from on one relay**:
 
 ```
-ct_token_i = XChaCha20-Poly1305(k_tok_i, nonce, apns_or_fcm_token)
+ct_token_i = XChaCha20-Poly1305(k_tok_i, nonce, push_token)
 handle_i   = 16 random bytes
 ```
 
@@ -120,7 +121,7 @@ nonce       24 B
 ciphertext  24 B    XChaCha20-Poly1305
 tag         16 B
 ────────────────
-            69 B      → base64url = 92 chars; APNs JSON < 400 B of a 4096 B ceiling
+            69 B      → base64url = 92 chars; the FCM data message < 400 B of the 4 096 B data limit
 
 plaintext (24 B):
     relay_idx      2 B
@@ -149,8 +150,9 @@ receiver MUST reject a blob whose reserved bits are not zero.
 > **Deviation note.** An earlier draft gave `flags` a decoy bit and said that the
 > blob is 69 bytes "also for a decoy". No section named the party that makes a
 > decoy, the rate of a decoy, or the mode that uses one. §8.3 gives Instant mode
-> one push for each event, and a decoy in that mode costs a radio promotion and
-> a share of the Apple ceiling of 2 to 3 silent pushes in one hour. This
+> one push for each event, and a decoy in that mode costs a radio promotion
+> against the U5 term of Part 2 §2.4. An earlier draft also counted a decoy
+> against the silent-push ceiling of a platform that this revision defers. This
 > document withdraws the decoy. Private mode gives the same property with a
 > fixed clock and no extra push, and §8.3 states it. The bit is now reserved.
 
@@ -191,16 +193,6 @@ or after the one that the device computes.
 > "New message" at each wake, and no party learned why. Three failures inside
 > the window point at a lost root or a moved clock, and a fresh root repairs
 > both. Part 1 §1.9 gives the clock rules.
-
-**[NTF-042]** An iOS client MUST give the notification extension the keys of
-the current epoch and of the next epoch only. Part 15 §15.6.6
-gives the Keychain class of that item. A wake under an older key shows the
-"New message" fallback of §8.4.2.
-
-> *Cause.* The extension reads the item on a locked device, thus the item sits
-> at the after-first-unlock tier. One key bounds what that tier gives. The next
-> key is there because the application does not run at midnight. Without it, a
-> wake in a new epoch would show the "New message" fallback each morning.
 
 The device establishes `k_ntf_root` one time at the subscription, with
 `UMBRA-KEM` in HPKE. The KEM ciphertext of about 1.1 KB is a one-time cost. The
@@ -282,22 +274,48 @@ UMBRA ships the three modes. The user selects one for each profile.
 | Mechanism | One push for each event | Constant-rate wakes | Drain when the user opens the application |
 | Cadence | On arrival | Fixed 20 or 30 min | — |
 | Latency | ~1 s | up to the interval | until the user opens the application |
-| Apple and Google learn | The wake time for each event | Nothing beyond a fixed clock | The application is installed |
+| Google learns (FCM), or no platform party (UnifiedPush) | The wake time for each event | Nothing beyond a fixed clock | The application is installed |
 | Default | The shipped default | The high-risk configuration | A build with no carrier |
 
 **Private mode is the interesting mode.** §8.4.1 gives its Android carrier, and
 NTF-039 keeps it off high-priority FCM. The wakes fire on a fixed schedule,
 and the arrival of a message does not change that schedule. Thus the wake time
-carries **no information** about a message arrival. The documented ceiling of
-Apple for a silent push is 2–3 in one hour. Thus a constant cadence of 20
-minutes stays in that ceiling.
+carries **no information** about a message arrival.
+
+**The floor of the cadence.** Two bounds set the floor of the cadence, and no
+platform push ceiling is one of them. The first bound is Doze. §8.4.1 states
+that Doze limits `setExactAndAllowWhileIdle` to one call in each 9 min, thus a
+fixed clock shorter than 9 min needs a foreground service that the user can
+see. The second bound is the U5 battery row of Part 3 §3.12. Part 3 §3.6.2
+derives about 9.1 mWh for each radio promotion, and the fixed term of U5 in
+Part 2 §2.4 permits 0.308 Wh in each day with no arrival. A 20 min cadence
+makes 72 wakes in each day. If each wake promoted the radio, the cost is
+72 × 9.1 mWh, which is about 0.655 Wh, and that is more than twice the U5 fixed
+term. A 30 min cadence makes 48 wakes, which is about 0.437 Wh under the same
+model. Thus the cadence rests on the carrier. A persistent socket or a
+UnifiedPush connection keeps the radio in a low state between wakes, and a wake
+on an open connection does not promote the radio. **The figure of 0.655 Wh is a
+model and not a measurement.** Part 3 §3.12 states the same figure as the
+Private row of its battery table, and §8.8 repeats it as the upper bound. Part
+2 §2.4 scopes U5 to Instant mode, thus U5 does not measure the Private column.
+
+**[NTF-087]** An implementation MUST measure the wake cost of the fixed clock
+on a mid-range Android device, with a power monitor, before a revision re-tunes
+the cadence of Private mode.
 
 **Private mode has its own U3 latency, and the cadence above gives it.** A
 message stays invisible for a maximum of 20 min at the 20 min cadence. A message
 stays invisible for a maximum of 30 min at the 30 min cadence. The 15 min
-invariant of U3 does not hold in this mode, because the ceiling of Apple sets a
-floor of 20 min under the cadence. Part 2 §2.4 scopes U3 to Instant
-notifications and Balanced mode, and it states that trade.
+invariant of U3 does not hold in this mode, because a cadence at or below 15
+min makes 96 wakes or more in each day, and the model above prices those wakes
+above the U5 fixed term. Part 2 §2.4 scopes U3 to Instant notifications and
+Balanced mode, and it states that trade.
+
+> *Cause.* An earlier draft derived the 20 min floor from the silent-push
+> ceiling of a platform that this revision defers. The two values stay. The
+> derivation above rests on Doze and on U5, which are the bounds that an
+> Android client meets, and `NTF-087` puts a measurement before the next
+> change.
 
 **[NTF-052]** A client in Private mode MUST draw the phase of its fixed clock
 from the CSPRNG at each network change. **[NTF-053]** The client MUST draw it
@@ -322,8 +340,8 @@ that holds a carrier of §8.4.1.
 
 The high-risk configuration also explains the cost of Instant mode. Instant mode
 gives a better latency. But Instant mode shows the wake time of each event to
-Apple and Google. Instant mode also gives a live token-to-handle mapping to the
-NDR.
+Google on an FCM build. Instant mode also gives a live token-to-handle mapping
+to the NDR.
 
 ## 8.4 Platform specifics
 
@@ -376,6 +394,20 @@ clock of 20 or 30 minutes, and a message arrival does not change that clock.
 > that gives Private mode its property. A carrier that UMBRA controls has
 > neither problem, and §8.4.1 already ships two of them.
 
+**Grouping and collapse.**
+
+- **[NTF-088]** A party that dispatches a push MUST NOT set a collapse key on
+  a message push. **[NTF-089]** An Android client MUST group the tray by the
+  conversation of `queue_alias` after the AEAD open, with a notification group
+  of the platform. Thus the tray groups the alerts of one conversation, and the
+  provider sees one push kind.
+
+> *Cause.* A collapse key for each push kind is a fingerprint that the provider
+> can see, and a collapse key for each conversation is a conversation count that
+> the provider can see. The group on the device does the grouping after the
+> open, thus the provider sees nothing. An earlier draft stated this rule for
+> the notification extension of a platform that this revision defers.
+
 > Note: Doze ignores a partial wake lock and suspends the network access. Doze
 > also limits `setExactAndAllowWhileIdle` to one call in 9 minutes. App Standby
 > gives an idle application the network about one time each day. A cover-polling
@@ -386,89 +418,23 @@ clock of 20 or 30 minutes, and a message arrival does not change that clock.
 
 ### 8.4.2 iOS
 
-iOS gives an application two wake paths. An alert push starts the Notification
-Service Extension, which renders the alert and holds no network stack. A
-background push starts the application for about 30 seconds, and Apple defers
-that push at its own discretion. UMBRA uses the two paths for two jobs.
+This section is retired in 0.2.0-draft. iOS leaves the v1 scope under Part 15
+§15.6.3, and rule `NTF-017` of this section moved to §8.4.3 with its number.
 
-**The extension renders and does nothing else.**
-
-- **[NTF-015]** The Notification Service Extension MUST NOT link one of the four
-  stacks below. The four are the onion stack of Part 3, the TLS stack of Part 15
-  §15.2.8, SQLite, and the directory logic of Part 10. **[NTF-054]** The
-  extension MUST NOT open a socket.
-- **[NTF-016]** Implementations MUST NOT try to fetch and decrypt the message
-  in the extension. SimpleX has spent more than two years on that problem, and
-  it describes its iOS notification reliability as insufficient today.
-
-Ship `umbra-nse` as a separate minimal Rust crate:
-
-```
-keychain read → one AEAD open of ≤ 128 B → look up queue_alias in a small
-read-only alias map in the shared App Group → render
-```
-
-The target is less than 4 MB RSS and less than 20 ms, against the ceiling of
-about 24 MB and 30 s. Part 15 §15.6.6 gives the protection class of the Keychain
-item and of the App Group container. Rule `NTF-042` of §8.2.3 bounds the keys
-in that item.
-
-> *Cause of the narrowing.* An earlier draft forbade each network I/O in the
-> extension. That rule was wider than its cause. The cause is that the onion
-> stack, the TLS stack, the database, and the directory logic each carry state
-> and code that the extension cannot hold inside 24 MB and 30 s. The four named
-> prohibitions state that cause, and `NTF-054` keeps the socket out on the same
-> ground.
-
-**The application fetches on a background push.** The content preview is an
-opt-in feature, and it is best-effort. When the user opts in, the queue relay
-hands a background push beside the alert push, and the application makes one
-fetch.
-
-- **[NTF-055]** On a background push, an iOS client MUST resume the session of
-  the pushed queue under Part 6 rule `WIR-361`. **[NTF-085]** The client MUST
-  fetch that one queue in that wake. **[NTF-056]** The client MUST NOT open a
-  session to another relay in that wake. **[NTF-057]** The fetch MUST take the
-  fixed-count response of `NTF-017`.
-- **[NTF-058]** If the fetch does not complete inside 10 seconds, the client
-  MUST leave the "New message" alert in place. **[NTF-059]** The client MUST
-  NOT show a partial content preview.
+### 8.4.3 Padding, expiry, the re-push, and the peek
 
 **Padding requirement.** **[NTF-017]** The response path for a message fetch
 MUST carry padding to a constant number of fixed cells. This rule applies for
 each state of the server. Trail of Bits found that the iOS `GET` of SimpleX
 gives a different packet count when the relay holds a message. That behavior is
 a message-existence oracle for a network observer. The finding got a low
-rating, and SimpleX argued it away. UMBRA corrects it.
-
-**Private mode on iOS.** A fixed cadence needs a carrier that UMBRA controls,
-and iOS gives none in the background. UnifiedPush does not exist there, and the
-platform ends a background socket.
-
-- **[NTF-060]** An iOS client MUST show that Private mode has no background
-  delivery on iOS. **[NTF-061]** An iOS client in Private mode MUST drain on the
-  fixed clock of §8.3 in the foreground. **[NTF-062]** An iOS client in Private
-  mode MUST NOT register a queue with the Notification Delivery Relay. Rule
-  `NTF-040` gives the line that the client shows, and Part 16 §16.2.8 states the
-  limit.
-
-**Grouping and collapse.**
-
-- **[NTF-063]** A queue relay MUST NOT set `apns-collapse-id` on a message
-  push. **[NTF-064]** The extension MUST set `threadIdentifier` from the
-  conversation of `queue_alias` after the AEAD open. Thus the tray groups the
-  alerts of one conversation, and APNs sees one push kind.
-
-> *Cause.* A collapse identifier for each push kind is a fingerprint that APNs
-> can see, and a collapse identifier for each conversation is a conversation
-> count that APNs can see. The thread identifier does the grouping on the
-> device, after the open, thus APNs sees nothing.
-
-### 8.4.3 Expiry, the re-push, and the peek
+rating, and SimpleX argued it away. UMBRA corrects it. The rule names no
+platform, and an earlier draft housed it in §8.4.2.
 
 - **[NTF-065]** A queue relay MUST set the push expiry to `PUSH_TTL_MESSAGE` for
   a message push. **[NTF-086]** A queue relay MUST set it to `PUSH_TTL_DIGEST`
-  for a digest push. The expiry is `apns-expiration` and the FCM TTL.
+  for a digest push. The expiry is the FCM `ttl`, or the `TTL` header of a
+  UnifiedPush push.
   **[NTF-066]** If no drain of a handle follows a message push inside
   `REPUSH_INTERVAL`, the queue relay MUST hand one more push. **[NTF-067]** A
   queue relay MUST NOT hand more than `REPUSH_MAX` re-pushes for one message.
@@ -493,9 +459,8 @@ platform ends a background socket.
 
 ## 8.5 Coalescing, groups, and communities
 
-FCM permits 5 000 messages in one hour to one device. The iOS silent push has a
-limit near 3 in one hour. A conversation that makes one push for each record
-uses that budget. A busy one breaks the notifications of each other conversation
+FCM permits 5 000 messages in one hour to one device. A conversation that makes
+one push for each record uses that budget. A busy one breaks the notifications of each other conversation
 on the device.
 
 **The coalescing applies to each handle.** A queue relay sees queues and
@@ -514,17 +479,19 @@ digest alike.
   `WAKE_COALESCE_WINDOW` MUST derive the U3 target and the idle table of Part 3
   §3.12 again.
 - **[NTF-019]** A queue relay MUST apply the window to each handle, whatever
-  the class of the conversation behind it. **[NTF-018]** A group above `T1_MAX`
-  members MUST NOT make one alert for each record at the device. Part 7 rule
-  `DEV-221` defaults such a group to `mentions`, and the setting acts after the
-  drain.
+  the class of the conversation behind it. **[NTF-018]** A group above
+  `GROUP_ALL_NOTIFY_MAX` members MUST NOT make one alert for each record at the
+  device. Part 7 rule `DEV-221` defaults such a group to `mentions`, and the
+  setting acts after the drain. Part 11 §11.10 owns `GROUP_ALL_NOTIFY_MAX`.
 
 > *Cause.* An earlier draft let a small group stay at one push for each
 > message, and it keyed the digest threshold on 1000 community members. A relay
 > cannot tell a group from a 1:1 conversation, thus the first rule bound
-> nothing that the relay could apply. `T1_MAX` of Part 11 §11.10 is the bound
-> at which a group leaves the pairwise fan-out, and the notification setting of
-> Part 7 §7.5.9 already changes at that bound.
+> nothing that the relay could apply. `GROUP_ALL_NOTIFY_MAX` of Part 11 §11.10
+> is the member count above which one alert for each record floods the tray,
+> and the notification setting of Part 7 §7.5.9 already changes at that bound.
+> An earlier draft keyed the bound on `T1_MAX`, the tier bound of a fan-out
+> that this revision removes.
 
 > *The derivation of the 10 s.* U3 of Part 2 §2.4 gives a p95 of 15 s, and §8.8
 > gives the alert a p95 of about 4 s. Thus the window can hold a coalesced event
@@ -580,6 +547,81 @@ states that residual.
 > wake. A digest names no post, thus a device that wakes on a digest pulls
 > under Part 12 §12.3.3 and renders a mention only.
 
+### 8.5.2 The notify queue of a group
+
+A group queue of Part 3 §3.2.7 holds no membership list and no `k_tok`. Thus a
+group-queue relay cannot push. The wake path of a group takes the shape of
+§8.5.1. A member device in Instant mode gives each group one notify queue of
+its own at a queue relay, and it registers that queue with each replica of the
+group queue. The group-queue relay writes a digest into the notify queue, and
+the queue relay of the notify queue pushes as for any queue. Part 6 §6.4.5
+gives the commands `GNREG` and `GNUNREG`, and Part 12 §12.6.4 gives the
+`NotifyDigest` record that a community relay and a group-queue relay share.
+
+- **[NTF-090]** A client in Instant mode MUST make one notify queue for each
+  group at `mentions` or `all`, on each device. Part 7 §7.5.9 gives the
+  setting. **[NTF-091]** A client MUST put a group notify queue under a
+  notification handle that holds no pairwise queue and no rendezvous queue.
+  **[NTF-092]** A client MAY put a group notify queue and a community notify
+  queue under one handle.
+- **[NTF-093]** A client MUST register the `QueueAddress` of the notify queue
+  with each replica of the group queue by `GNREG`. **[NTF-094]** A
+  registration MUST NOT carry a member index, a pseudonym, or a device
+  identifier. **[NTF-095]** A group-queue relay MUST NOT link a registration
+  to a reader session or to a writer session.
+- **[NTF-096]** A group-queue relay MUST write one `NotifyDigest` as a `SEND`
+  into each registered notify queue when it accepts a `GPOST`. **[NTF-097]**
+  A group-queue relay MUST NOT write a second digest to one registration
+  inside `GROUP_DIGEST_MIN_GAP`. **[NTF-098]** If a record arrives inside the
+  gap, the group-queue relay MUST write one digest at the end of the gap.
+  **[NTF-099]** A group-queue relay MUST NOT write a digest that names a
+  record, a member index, or a sequence number. The relay writes its
+  `GroupQueueId` in the 32-byte identifier field of the digest, and it writes
+  the count of records since the previous digest in `post_count`.
+- **[NTF-100]** A group-queue relay MUST hold a registration in memory only.
+  **[NTF-101]** A group-queue relay MUST NOT hold more than
+  `GROUP_NOTIFIER_MAX` registrations for one group queue. Part 3 §3.2.7 owns
+  that constant. **[NTF-102]** A group-queue relay MUST discard a registration
+  7 days plus `CLOCK_SKEW` after the `GNREG` that made it. **[NTF-103]** A
+  group-queue relay MUST discard a registration at a `GNUNREG` that names its
+  queue.
+- **[NTF-104]** A client MUST rotate a group notify queue with the triple of
+  `NTF-007`. **[NTF-105]** A client MUST register the new queue before it
+  drops the old one.
+- **[NTF-106]** A client in Private mode or in Off mode MUST NOT register a
+  group notify queue. Those modes find a record at the next drain of the group
+  queue.
+- **[NTF-107]** On a wake, a client MUST drain the notify queue under Part 6
+  §6.4.3. **[NTF-108]** The client MUST then open a session to one replica of
+  the group queue with `GSUB` from its cursor. Part 11 §11.2.2 gives the
+  cursor.
+
+| Parameter | Value |
+| --- | --- |
+| `GROUP_DIGEST_MIN_GAP` | 10 s. The group-queue relay measures it from the moment that it writes a digest to one registration |
+
+A group has no daily digest budget. A group defaults to `all` under Part 7
+rule `DEV-259`, and a community defaults to `mentions` under `DEV-222` with the
+budget of §8.5.1. The gap bounds the digests at one in each 10 s for each
+registration, and the window of §8.5 then bounds the pushes at one in each 10 s
+for each handle at the queue relay of the notify queue. A digest is one push
+wake, and Part 3 §3.12 prices a wake at about 19.7 KB with its drain.
+
+**Which party learns what.** The group-queue relay learns the count of the
+registrations, which is close to the count of the member devices in Instant
+mode, and the `relay_id` of each notify queue. It learns no handle, no push
+token, and no `k_tok`. It cannot link a registration to a member index or to a
+reader session, because a registration carries neither. Part 16 §16.3 states
+that residual, and Part 11 §11.5 gives the full list of what a group-queue
+relay learns.
+
+> *Cause.* An earlier draft gave a group no wake path of its own, because each
+> group record traveled on a pairwise queue that the queue relay pushed as for
+> any queue. The group queue of Part 3 §3.2.7 holds the records of a group at
+> a relay that cannot push, thus a group needs the carrier that a community
+> already has. The gap is the value of `WAKE_COALESCE_WINDOW`, thus a busy
+> group costs no more pushes than a busy pairwise queue.
+
 ## 8.6 Web Push (PWA target only)
 
 Part 15 §15.7 says today that a browser target does not ship. **[NTF-020]** If
@@ -591,19 +633,17 @@ that identifies no party. **[NTF-023]** Web Push MUST set `exp` well below the
 header. **[NTF-025]** Web Push MUST pad the payloads to a constant length under
 the RFC 8291 encryption. The content encoding is the `aes128gcm` of RFC 8188.
 
-**[NTF-026]** The client MUST tell the user plainly that on iOS the endpoint resolves to
-`web.push.apple.com`. Web Push removes the token from the servers of UMBRA, and
-it does not remove Apple from the path.
-
 ## 8.7 Residual leak — normative statement
 
 **[NTF-027]** This text is normative, and it MUST appear in the security documentation that
 the user reads:
 
-> Apple learns that a given Apple ID has UMBRA installed. On the Play build,
-> Google learns that a given Google account has UMBRA installed. Apple and
-> Google also learn the exact time and the count of each notification that they
-> deliver to that account.
+> On a build that carries FCM, Google learns that a given Google account has
+> UMBRA installed, and Google learns the exact time and the count of each
+> notification that it delivers to that account. On a build that carries
+> UnifiedPush, no platform party learns either fact, and the operator of the
+> UnifiedPush server of the user learns the time and the count of each push in
+> its place.
 >
 > In Instant mode, the Notification Delivery Relay of UMBRA learns the mapping
 > token↔handle↔arrival time. It learns this mapping transiently and in memory
@@ -613,9 +653,9 @@ the user reads:
 > under one handle. Part 3 §3.2.5 gives a transport session the same bound.
 > **No stored database at one party holds token↔queue.**
 >
-> Three events recover token↔queue, and thus Apple-ID↔queue. The events are a
-> live wiretap on the NDR, a prospective logging order against the NDR, and
-> collusion between the NDR and a queue relay.
+> Three events recover token↔queue, and thus account↔queue on an FCM build. The
+> events are a live wiretap on the NDR, a prospective logging order against the
+> NDR, and collusion between the NDR and a queue relay.
 
 **The policy requirements that follow:**
 
@@ -625,18 +665,24 @@ the user reads:
   user.
 - **[NTF-030]** The NDR MUST publish a no-logging policy, a warrant canary, and a transparency
   log of its software builds.
+- **[NTF-109]** A deployment MAY operate its own Notification Delivery Relay.
+  The NDR of the nonprofit is one such deployment, and a self-hosted build that
+  operates no NDR points at it.
+
+> *Cause.* An earlier draft stated in §8.7.1 that a third party cannot operate
+> the notification delivery of a platform whose push certificates are not
+> public, thus the NDR was a chokepoint with one operator. This revision defers
+> that platform. FCM gives a service account to each registered project, and
+> UnifiedPush gives a server to each operator, thus a deployment can operate
+> the full notification path. The NDR stays a separate trust role with its own
+> attestation track, and Part 10 §10.10 gives the cause that keeps it out of
+> the relay reputation.
 
 ### 8.7.1 Self-hosting is partially untenable here — say so
 
-A third party can operate an UMBRA queue relay. **A third party cannot operate
-iOS notification delivery**, because the APNs certificates are not public. The
-whitepaper of Threema states this limit directly. On iOS the NDR is necessarily
-a chokepoint with one operator. That limit is the sharpest tension between the
-infrastructure model of UMBRA and its "no single trusted party" goal.
-
-This tension is the cause that the NDR is a separate trust role with its own
-attestation track (Part 10 §10.10). UMBRA does not put the NDR into the general
-relay reputation.
+This section is retired in 0.2.0-draft. The one-operator limit that it stated
+came from a platform that this revision defers, and `NTF-109` of §8.7 lets a
+deployment operate its own NDR.
 
 ## 8.8 Estimated cost
 
@@ -645,7 +691,6 @@ relay reputation.
 | Median notification latency | 0.8–2.0 s | ≤ the interval |
 | p95, the alert | ~4 s | ≤ the interval |
 | p95, the message content, Android | ~7 s | ≤ the interval, and ~3 s more |
-| p95, the message content, iOS | No figure. The content arrives at the background fetch of §8.4.2, and Apple defers a background push at its own discretion | No background delivery, §8.4.2 |
 | Radio promotions each day | One for each background arrival, which is 184 on the model day | 48 at 30 min, 72 at 20 min |
 | Battery with no arrival | 0 %/day | 2.8 %/day at 30 min, 4.3 %/day at 20 min |
 | Battery for each arrival | 9.1 mWh, which is 10.9 %/day on the model day | 0 |
@@ -664,7 +709,9 @@ day of Part 3 §3.12 holds 184 arrivals, which is 1.67 Wh and 10.9 % of that
 battery. With no arrival Instant mode makes no wake. Private mode makes one
 wake for each interval of §8.3. At a 30 min interval that count is 48 wakes,
 which is 0.44 Wh and 2.8 %. At a 20 min interval that count is 72 wakes, which
-is 0.66 Wh and 4.3 %.
+is 0.66 Wh and 4.3 %. The two Private figures count one promotion for each
+wake, which is the upper bound of §8.3, and `NTF-087` puts a measurement
+before a revision re-tunes the cadence.
 
 **The cheaper mode depends on the arrival count, and this table states that
 plainly.** Private mode at 30 min costs less battery than Instant mode above 48

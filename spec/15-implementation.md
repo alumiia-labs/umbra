@@ -1,7 +1,8 @@
 # UMBRA Protocol Specification — Part 15: Implementation Requirements and Assurance
 
 **Status:** Draft
-**Version:** 0.1.0-draft
+**Version:** 0.2.0-draft
+**Date:** 2026-09-11
 
 ---
 
@@ -18,7 +19,6 @@ umbra/
 │   ├── umbra-core/       orchestration, state machine, storage       → all above
 │   ├── umbra-ffi/        UniFFI surface, coarse-grained only         → umbra-core
 │   ├── umbra-relay/      relay server binary                         → queue, onion
-│   ├── umbra-nse/        iOS notification extension, <4 MB RSS       → umbra-crypto only
 │   └── umbra-simd/       the ONLY crate permitted `unsafe`           → nothing
 ├── spec/
 ├── tests/vectors/        vendored KATs + PROVENANCE.md
@@ -27,9 +27,9 @@ umbra/
 
 The dependency direction is strictly downward. A cycle is a build failure.
 
-`umbra-nse` depends on `umbra-crypto` **only**. It has no SQLite, no TLS stack,
-and no onion code. **[IMP-001]** That crate MUST stay below 4 MB RSS. The Notification Service
-Extension ceiling on iOS is about 24 MB (Part 8 §8.4.2).
+> *Cause.* An earlier draft held an `umbra-nse` crate for the notification
+> extension of a platform that this revision defers, and §15.6.3 records what
+> an iOS revision revisits.
 
 ## 15.2 Dependency policy
 
@@ -55,8 +55,8 @@ that register too.
 
 ### 15.2.1 Register R1: the message core
 
-The trial figure is **37 crates** on `aarch64-linux-android` and on
-`aarch64-apple-ios`. It is 35 crates on `no_std` and on `wasm32`. That graph is
+The trial figure is **37 crates** on `aarch64-linux-android`. It is 35 crates
+on `no_std` and on `wasm32`. That graph is
 about 65k LOC, and it has no open OSV or RustSec advisory at the pinned
 versions.
 
@@ -90,7 +90,7 @@ one time.
 | AUX-2 | ristretto255 with SHA512 | `curve25519-dalek`, which R1 holds already, plus `sha2` | **1–3** |
 | AUX-3 | ECVRF-Edwards25519-SHA512-TAI | a vendored module, and no crate (Part 9 §9.11) | **0–1** |
 | AUX-4 | Argon2id | `argon2`, `blake2`, `base64ct` | **3–5** |
-| AUX-5 | A keyed function in the secure element | a platform adapter, and no crate. iOS uses CryptoKit for the software point | **0** |
+| AUX-5 | A keyed function in the secure element | a platform adapter, and no crate. Android uses the HMAC-SHA256 key of StrongBox | **0** |
 | AUX-6 | HPKE under OHTTP | in-workspace, over `UMBRA-KEM` | **0–2** |
 | AUX-7 | XChaCha20-Poly1305 | `chacha20poly1305`, which R1 holds already | **0** |
 | AUX-8 | Equi-X | `equix` and `hashx`, with the JIT feature off | **4–6** |
@@ -162,7 +162,7 @@ build script generates that file, and no person maintains it by hand.
 4. The commit hash and the date of the measurement.
 5. The `rustc` version that §15.5.1 pins, and the exact `cargo` version.
 
-The four target triples are `aarch64-linux-android`, `aarch64-apple-ios`,
+The three target triples are `aarch64-linux-android`,
 `x86_64-unknown-linux-gnu`, and `wasm32-unknown-unknown`.
 
 **[IMP-012]** The maintainers MUST publish `DEPENDENCIES.md` before the first tagged release.
@@ -183,7 +183,7 @@ its removal.
 | **AUX-8** Equi-X | 4–6 crates | Part 14 §14.8 loses the surge valve at a relay under queue pressure. Argon2id (AUX-4) holds the puzzle in place of Equi-X. But Argon2id gives no asymmetry against an ASIC and against a GPU. It also costs more RAM on the slowest supported phone |
 | **AUX-4** Argon2id | 3–5 crates | §15.6.4 loses the memory-hard step of the at-rest construction. The secure-element entanglement stays, thus a brute force attack still runs on the seized device. But the cost for each try falls from about 3 s to the cost of one secure-element operation. Of the three primitive removals with a real saving, this one costs the most protection |
 | **AUX-3** ECVRF | 0–1 crate | Part 9 §9.11 vendors the module already, thus the saving is close to zero. The removal costs the blind directory index of Part 9 §9.5. This candidate gives no saving that pays for its cost |
-| Runtime SIMD detection | 2 crates | This is not a primitive. §15.3 gives the full analysis. The removal drops `cpufeatures` and `libc`. It gives a uniform R1 graph of 35 crates on the four target triples |
+| Runtime SIMD detection | 2 crates | This is not a primitive. §15.3 gives the full analysis. The removal drops `cpufeatures` and `libc`. It gives a uniform R1 graph of 35 crates on the three target triples |
 
 An estimated **10 to 18 crates** come off R2 with no primitive removal. That
 saving needs the four decisions of §15.2.2. Take those four decisions first, and
@@ -194,7 +194,7 @@ examine a primitive removal after them.
 - **`libcrux`** — its formal-verification claim does not cover the ARM64 and
   NEON backend. That backend is 792 LOC, and it is 100 % admitted. It "needs
   proofs" for the runtime safety and for the correctness. UMBRA ships Android
-  first and then iOS, thus the target is 100 % ARM64. If a deployment needs a
+  first, thus the target is ARM64. If a deployment needs a
   verified ML-KEM later, that deployment forces the portable backend on mobile.
 - **`liboqs-rust`** — the maintainers state that it is not for production use.
   Its only public audit excluded the algorithm implementations deliberately.
@@ -203,8 +203,8 @@ examine a primitive removal after them.
   draft called the crate unmaintained under RUSTSEC-2025-0007. That advisory
   is withdrawn, and the cause above stands alone.
 - **`boring` and `boring2`** — BoringSSL shapes a ClientHello as Chrome, and
-  Part 3 §3.8 does not need that shape. The cost is a C++ toolchain across the
-  Android NDK and iOS, above the C toolchain of `aws-lc-rs`.
+  Part 3 §3.8 does not need that shape. The cost is a C++ toolchain in the
+  Android NDK, above the C toolchain of `aws-lc-rs`.
 - **`openssl`** — it links a C library that UMBRA holds for no other function.
   §15.6.4 rejects the SQLCipher build on the same cause.
 - **`akd`** — Part 9 §9.11 takes the ECVRF module of that crate, and not the
@@ -252,8 +252,8 @@ names the crates, thus an implementer can build the L1 layer of Part 3 §3.8.
   **[IMP-067]** An implementation MUST NOT use the `ring` provider for L1.
   **[IMP-068]** The `rustls` build MUST turn the `tls12` feature off.
 - **[IMP-069]** A build MUST pin an `aws-lc-rs` version that ships the
-  bindings for `aarch64-linux-android` and for `aarch64-apple-ios`. Thus the
-  build needs no bindgen on the two v1 targets, and CMake stays.
+  bindings for `aarch64-linux-android`. Thus the build needs no bindgen on the
+  v1 mobile target, and CMake stays.
 - The transport stack has no wasm32 build. A browser client is out of scope
   for v1, and a browser gives its own TLS.
 
@@ -280,7 +280,7 @@ client build does not.
   the portable path.
 - Examine a full removal of runtime SIMD detection on mobile. That removal drops
   `cpufeatures` and `libc`. It removes 672 `unsafe` tokens, and it gives a
-  uniform graph of 35 crates across the four targets. Keep the detection only if
+  uniform graph of 35 crates across the three targets. Keep the detection only if
   a benchmark on a mid-range Android device shows that the portable ML-KEM-768
   is too slow. That benchmark does not show this, because ML-KEM-768 takes
   71–104 µs on a Cortex-A76.
@@ -300,10 +300,9 @@ client build does not.
   of UMBRA is the exact shape where such a mismatch is easy to write.
 - `encapsulate` consumes `self`.
 - **[IMP-017]** **Key material, a passphrase, and message plaintext MUST NOT be a Kotlin
-  `String` or `ByteArray`. [IMP-018] Those values MUST NOT be a Swift `String` or
-  `Data`.** Each of these is an opaque UniFFI handle. The one exception is
-  passphrase entry. On Android, take a `CharArray` and not a `String`, because a
-  `String` is immutable and the JVM can intern it. Copy the array into Rust
+  `String` or `ByteArray`.** Each of these is an opaque UniFFI handle. The one
+  exception is passphrase entry. Take a `CharArray` and not a `String`, because
+  a `String` is immutable and the JVM can intern it. Copy the array into Rust
   immediately, and then overwrite the array.
 
 ## 15.5 Assurance
@@ -397,8 +396,8 @@ UMBRA uses **UniFFI 0.32.x**, with a deliberately narrow surface:
 ```
 init(config) -> Handle
 
-// Plaintext never crosses as ByteArray or Data. The platform builds a
-// Draft on the Rust side, writes into it, and sends the handle.
+// Plaintext never crosses as ByteArray. The platform builds a Draft on the
+// Rust side, writes into it, and sends the handle.
 new_draft(handle, conv) -> Draft
 draft_set_text(draft, CharArray)          // Android: CharArray, not String
 draft_attach(draft, FileRef)
@@ -417,20 +416,18 @@ unlock(CharArray)                         // 15.4 gives the passphrase exception
 Each network, ratchet, queue, and onion function stays on the Rust side.
 
 **[IMP-037]** The FFI surface MUST NOT carry message plaintext, key material, or
-a passphrase as a Kotlin `ByteArray`, a Kotlin `String`, a Swift `Data`, or a
-Swift `String`. §15.4 rules `IMP-017` and `IMP-018` give that rule, and this
-section gives the surface that obeys it.
+a passphrase as a Kotlin `ByteArray` or a Kotlin `String`. §15.4 rule `IMP-017`
+gives that rule, and this section gives the surface that obeys it.
 
 **[IMP-038]** `Draft` and `MsgRef` MUST be opaque UniFFI object handles.
 **[IMP-039]** An implementation MUST zeroize the buffer behind a `Draft` when
 that draft is dropped, and it MUST do that whether the send succeeded or failed.
 
 > *Cause.* An earlier draft of this section gave `send(handle, conv, bytes)`.
-> UniFFI maps a `bytes` parameter onto a Kotlin `ByteArray` and a Swift `Data`,
-> thus that one signature broke `IMP-017` and `IMP-018` at the one point where
-> each message passes. A `ByteArray` on the JVM heap moves under a compacting
-> collector, thus no party overwrites each copy of it. `Data` in Swift is
-> copy-on-write with the same result.
+> UniFFI maps a `bytes` parameter onto a Kotlin `ByteArray`, thus that one
+> signature broke `IMP-017` at the one point where each message passes. A
+> `ByteArray` on the JVM heap moves under a compacting collector, thus no party
+> overwrites each copy of it.
 >
 > The passphrase keeps its stated exception, because a keyboard gives characters
 > and no platform lets Rust own that buffer. `CharArray` is mutable, thus the
@@ -444,8 +441,7 @@ detaches a JVM thread at each callback, and the documentation of UniFFI itself
 calls that "a heavy operation."
 
 Pin the exact UniFFI version. Treat an increment as a change that blocks a
-release. Run a full Kotlin regression and a full Swift regression after an
-increment. UniFFI is before 1.0, and it shipped breaking changes across 0.29 to
+release. Run a full Kotlin regression after an increment. UniFFI is before 1.0, and it shipped breaking changes across 0.29 to
 0.32.
 
 ### 15.6.2 Android
@@ -459,36 +455,27 @@ increment. UniFFI is before 1.0, and it shipped breaking changes across 0.29 to
   not do this for you.
 - The UI uses Kotlin with Jetpack Compose.
 
-### 15.6.3 iOS
+### 15.6.3 Deferred platforms
 
-- Assemble the XCFramework by hand. It holds a Rust staticlib, a
-  `module.modulemap`, and the Swift code that UniFFI generates. This method
-  follows the megazord pattern of Mozilla.
-- Pin the Xcode version in CI. A hand-built xcframework can diverge if Apple
-  changes the format.
-- The UI uses Swift with SwiftUI.
-- **The background contract.** Part 8 §8.4.2 gives iOS two wake paths. The
-  extension renders an alert from one AEAD open and holds no network stack,
-  under `NTF-015` and `NTF-054`. The application fetches one queue on a
-  background push, inside the budget of about 30 seconds that Apple gives, under
-  `NTF-055` to `NTF-059`. **[IMP-094]** An iOS client MUST end the background
-  fetch and close the connection before the platform budget ends.
-  **[IMP-095]** An iOS client MUST NOT start a circuit build in a background
-  fetch. The resumed session of Part 6 rule `WIR-361` holds one. Private mode
-  has no background carrier on iOS, and `NTF-060` shows that.
+iOS and desktop are outside the v1 scope, and Android is the one v1 client
+platform. The core keeps the UniFFI annotations and holds no platform
+assumption, thus a later platform adds a shell and no core change. An iOS
+revision has to revisit four items: the notification extension of Part 8, the
+secure-element entanglement of §15.6.4, the file protection and the backup
+exclusion of §15.6.6, and the reproducible-build attestation of a static
+library under §15.8. §15.7 gives the desktop target and the browser argument.
 
 ### 15.6.4 Storage and keys
 
 **At rest**, UMBRA follows the shipped construction of Molly with three
-changes. The secure element computes a keyed function that each platform
-supports. The AEAD is **XChaCha20-Poly1305**, and not CBC with HMAC. The
+changes. The secure element computes a keyed function. The AEAD is
+**XChaCha20-Poly1305**, and not CBC with HMAC. The
 record layer below encrypts each record on its own.
 
 - Argon2id, calibrated to **about 3 s for each try** on a mid-range device,
   turns the passphrase into the 32-byte value `a`.
 - The secure element entangles `a` with a key that it holds. The device makes
-  that key **in StrongBox or in the Secure Enclave**, and the key never leaves
-  it. Thus a brute force attack has to run on the seized device, at the speed
+  that key **in StrongBox**, and the key never leaves it. Thus a brute force attack has to run on the seized device, at the speed
   of the secure element.
 - The result wraps the storage master key `K_store` of Part 5 §5.2.
 - The client holds `K_store` in RAM after the unlock. Thus the client pays the
@@ -496,18 +483,14 @@ record layer below encrypts each record on its own.
 - The client wipes `K_store` from RAM at a lock. The auto-lock default is 15 to
   30 minutes of idle time.
 
-**The entanglement.** StrongBox holds an HMAC-SHA256 key, and the Secure
-Enclave holds a P-256 key only. Thus the platform adapter computes the
-secure-element step in two ways, and the core reads one 32-byte secret `S`.
+**The entanglement.** StrongBox holds an HMAC-SHA256 key. The platform adapter
+computes the secure-element step, and the core reads one 32-byte secret `S`.
 
 ```
 a        <- Argon2id( passphrase, salt_pw )                 // 32 bytes
 
-Android: S <- HMAC-SHA256( k_se, "umbra/v1/at-rest-wrap" || a )
+S        <- HMAC-SHA256( k_se, "umbra/v1/at-rest-wrap" || a )
                                                             // k_se in StrongBox
-iOS:     sk_a <- a, as a P-256 scalar                    // software, CryptoKit
-         pk_a <- sk_a · G                                // software, CryptoKit
-         S    <- ECDH( sk_se, pk_a )                     // in the Secure Enclave
 
 K_wrap   <- HKDF-SHA3-256( salt = a, ikm = S,
                            info = "umbra/v1/at-rest-wrap", L = 32 )
@@ -517,25 +500,18 @@ wrapped  <- XChaCha20-Poly1305( K_wrap, nonce_w, K_store,
 ```
 
 Each try of a passphrase needs one secure-element operation, because `S` is a
-function of `a` and of a key that the attacker cannot read. The ECDH is
-deterministic, and an ECDSA signature is not, thus the iOS step is an ECDH.
-Part 5 §5.11 holds the label.
+function of `a` and of a key that the attacker cannot read. Part 5 §5.11 holds
+the label.
 
 - **[IMP-061]** A client MUST derive `K_wrap` with the block above, and with no
   other input. **[IMP-062]** A client MUST make the secure-element key with no
   export path.
-- **[IMP-063]** On iOS, a client MUST compute `pk_a` in software and the ECDH
-  in the Secure Enclave. **[IMP-064]** If `a` is not a valid P-256 scalar, the
-  client MUST replace it with `SHA3-256(a)` and test again.
 - **[IMP-065]** A client MUST NOT demand a user authentication for each use of
   the secure-element key. The passphrase is the authentication of this step.
 
-> *Cause.* An earlier draft entangled `a` with an HMAC-SHA256 key in the
-> Secure Enclave. The same section stated that the Secure Enclave holds a
-> P-256 key only, thus no iOS client could make that key. A P-256 ECDH with a
-> software point that `a` derives gives the same property, and CryptoKit
-> computes both halves. An ECIES decryption of a stored value does not give
-> that property, because one decryption serves each later try.
+> *Cause.* An earlier draft gave this block a second branch for the secure
+> element of a platform that this revision defers, and §15.6.3 records that an
+> iOS revision revisits this step.
 
 **The database** uses `rusqlite` with the `bundled` feature, which is plain
 SQLite. The application adds XChaCha20-Poly1305 for each record, with a key for
@@ -592,27 +568,22 @@ MUST NOT store the raw value. Part 6 §6.6 gives the derivation and the cause.
 
 **A hardware keystore is a wrapping oracle and a keyed-function oracle. It is
 not a home for the keys of UMBRA.** StrongBox supports RSA-2048, AES, ECDSA and
-ECDH P-256, HMAC-SHA256, and 3DES only. It has no X25519 and no ML-KEM. The
-Secure Enclave supports NIST P-256 only, thus the construction above asks it
-for an ECDH and not for an HMAC.
+ECDH P-256, HMAC-SHA256, and 3DES only. It has no X25519 and no ML-KEM.
 
 **Set the file protection explicitly:**
 
-- iOS: set `NSFileProtectionComplete` on the database and on the attachment
-  store. The default is `CompleteUntilFirstUserAuthentication`, and a party can
-  read that in the AFU state. Set `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`
-  with `privateKeyUsage` on each local wrapping-key item. Thus a storage key
-  does not sync to the iCloud Keychain and does not go into an escrow keybag.
-
-  The user can opt in separately to a cloud backup of the Recovery Code (Part 4
-  §4.7.1). **[IMP-026]** That item MUST use a different label and a different access-control
-  policy. **[IMP-027]** An implementation MUST let the user export it and delete it from the
-  UMBRA settings. **[IMP-028]** That operation MUST NOT change a local storage key.
-- Android: set `setUnlockedDeviceRequired(true)` and
+- Set `setUnlockedDeviceRequired(true)` and
   `setUserAuthenticationParameters(0, AUTH_BIOMETRIC_STRONG |
   AUTH_DEVICE_CREDENTIAL)` on the wrapping key. Set `setIsStrongBoxBacked(true)`
   when `android.hardware.strongbox_keystore` is present. If it is not present,
-  fall back to the TEE gracefully.
+  fall back to the TEE gracefully. A wrapping key in the keystore has no export
+  path, thus it does not go into the platform backup of §15.6.6.
+- The user can opt in separately to a cloud backup of the Recovery Code (Part 4
+  §4.7.1) through the Block Store of the platform, with its end-to-end
+  encryption on. **[IMP-026]** That item MUST sit under a Block Store key of
+  its own, apart from each local wrapping key. **[IMP-027]** An implementation
+  MUST let the user export it and delete it from the UMBRA settings.
+  **[IMP-028]** That operation MUST NOT change a local storage key.
 
 > The dominant forensic variable is the **AFU state against the BFU state**.
 > Amnesty documented a Cellebrite chain of CVE-2024-53104, CVE-2024-53197, and
@@ -663,13 +634,6 @@ removes one. Part 2 rule `THR-013` names those actions as its one exception.
 - **[IMP-048]** An Android client MUST set `android:allowBackup="false"` on the
   `<application>` element, with `tools:replace="android:allowBackup"`. Thus a
   merged library manifest cannot set it again.
-- **[IMP-049]** An iOS client MUST set `isExcludedFromBackup` on each of the
-  five locations below.
-  - The Documents directory.
-  - The Application Support directory.
-  - The database.
-  - The attachment store.
-  - The App Group container.
 - **[IMP-050]** The settings of a client MUST state that the platform backup
   carries no UMBRA data. The backup of Part 4 §4.7.2 carries that data.
 
@@ -680,21 +644,6 @@ removes one. Part 2 rule `THR-013` names those actions as its one exception.
 > backup gives a copy to a party that Part 16 §16.1 did not list, and it gives
 > the user nothing.
 
-**The notification extension.** Part 8 §8.4.2 gives the iOS extension one
-Keychain read, one AEAD open, and one lookup in the alias map. The device is locked at that moment, thus the two objects need the
-after-first-unlock tier that §15.6.4 refuses to the database.
-
-- **[IMP-051]** An iOS client MUST hold the notification keys of Part 8 rule
-  `NTF-042` in a Keychain item with
-  `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`. That rule gives the
-  extension the key of the current epoch and of the next epoch, and no other.
-- **[IMP-052]** An iOS client MUST set
-  `NSFileProtectionCompleteUntilFirstUserAuthentication` on the App Group
-  container. **[IMP-053]** The App Group container MUST hold the alias map of
-  Part 8 §8.4.2 and no other object.
-- **[IMP-054]** A client MUST NOT put the database, the attachment store, or a
-  wrapping key in the App Group container.
-
 **The task snapshot.**
 
 - **[IMP-055]** A client MUST draw a cover view over each conversation surface
@@ -704,19 +653,16 @@ after-first-unlock tier that §15.6.4 refuses to the database.
 
 **The clipboard and the input method.**
 
-- **[IMP-056]** A client MUST mark a copied message as sensitive. On Android
-  that mark is `ClipDescription.EXTRA_IS_SENSITIVE`. On iOS the client sets
-  `localOnly` and `expirationDate` on the pasteboard item.
+- **[IMP-056]** An Android client MUST mark a copied message as sensitive with
+  `ClipDescription.EXTRA_IS_SENSITIVE`.
 - **[IMP-057]** An Android client MUST set `IME_FLAG_NO_PERSONALIZED_LEARNING`
-  on each composer and on the passphrase field. iOS gives no such flag, and
-  Part 16 §16.3 records the residual.
+  on each composer and on the passphrase field.
 
 **The screenshot and the accessibility tree.**
 
 - **[IMP-058]** A client MUST offer a screenshot block as a setting of one
   conversation, and not as a global setting. On Android that block is
-  `FLAG_SECURE` on the window of that conversation. iOS gives no block, and
-  the client shows the setting as not available.
+  `FLAG_SECURE` on the window of that conversation.
 - **[IMP-059]** A client MUST NOT block a screenshot in a conversation by
   default. Part 14 §14.10 makes a report about a private conversation a
   screenshot.
@@ -782,12 +728,9 @@ becomes void.
 
 - The Rust core and the Android application binary use reproducible builds.
   **[IMP-032]** Two independent builds of the Rust core and of the Android
-  application MUST give the same hash. **[IMP-070]** Two independent builds of
-  the iOS static library MUST give the same hash. **[IMP-071]** An iOS release
-  MUST publish the hash of that library in its release metadata. Apple signs
-  and encrypts the application bundle, thus no party reproduces the bundle, and
-  the library is the unit that a party checks. Part 16 §16.2.10 states that
-  limit.
+  application MUST give the same hash. §15.6.3 records that a platform with a
+  signed and encrypted bundle needs a rule for the static library, and this
+  revision defers that platform.
 - The project runs a binary transparency log with Sigstore support. The
   application holds a verification path.
 - **Two or more independent rebuilders** rebuild each release from the source.
@@ -889,7 +832,7 @@ of Part 2 §2.6 rests on the source below that hardening. This section names
 the platform half.
 
 - **[IMP-090]** A client MUST take each CSPRNG output from the platform source,
-  which is `getrandom` on Android and `SecRandomCopyBytes` on iOS.
+  which is `getrandom` on Android.
   **[IMP-091]** A client MUST NOT hold a userspace generator that it seeds one
   time. **[IMP-092]** A relay MUST take each CSPRNG output from `getrandom` of
   its kernel.
