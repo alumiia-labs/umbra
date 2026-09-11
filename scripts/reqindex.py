@@ -75,7 +75,7 @@ def paragraphs(lines):
 
 def extract_sentence(text_after: str) -> str:
     """The requirement sentence that follows a marker."""
-    t = text_after.lstrip()
+    t = re.sub(r"^(?:\*\*|\s)+", "", text_after)
     # stop at the next marker
     nxt = MARKER_RE.search(t)
     if nxt:
