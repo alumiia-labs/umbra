@@ -1,0 +1,1092 @@
+# UMBRA Protocol Specification — Part 13: Attachments and Large Objects
+
+**Status:** Draft
+**Version:** 0.1.0-draft
+
+---
+
+## 13.1 Requirements
+
+**[ATT-001]** An attachment mechanism MUST meet the three requirements below. A
+naive design does not meet them.
+
+1. **[ATT-002]** **The mechanism MUST NOT make the sender stay online** until
+   each recipient fetches the file.
+2. **[ATT-003]** **The mechanism MUST NOT make the sender upload the file again
+   for each group member.** With an incorrect design, a 20 MB file to a
+   500-member group costs 10 GB of upload.
+3. **[ATT-004]** **A relay MUST NOT be able to tell that two chunks belong to
+   one file. [ATT-005] A relay MUST NOT be able to tell that two chunks belong
+   to one user.**
+
+## 13.2 Structure
+
+The client divides an attachment into **fixed-size chunks of `CHUNK_SIZE`**
+(bucket `B3`, Part 3 §3.3). The value of `CHUNK_SIZE` is 32 650 bytes, and §13.7
+derives it from Part 6 §6.9. Only the last chunk carries padding, and §13.2.3
+gives the scheme for that padding. The client
+distributes the chunks across **more than one relay, and different
+organizations operate those relays**. Each chunk carries an independent random
+credential.
+
+```
+File ──▶ pad and segment (§13.2.3) ──▶ seal each one (§13.3.1) ──▶ N chunks
+                                                              │
+      ┌───────────────────────────────────────────────────────┤
+      ▼                    ▼                    ▼             ▼
+   Relay A             Relay B             Relay C        Relay A
+   chunk 0             chunk 1             chunk 2        chunk 3
+   cred_0 (random)     cred_1 (random)     cred_2         cred_3
+   ↑ each chunk has its own fresh X25519 credential —
+     a relay cannot link two chunks to one file or one user
+```
+
+### 13.2.1 Why one chunk size, not four
+
+The XFTP of SimpleX gives four chunk sizes, which are 64 KB, 256 KB, 1 MB, and 4
+MB. XFTP tells a sender to mix two sizes in one file, to balance the upload
+count against the metadata. UMBRA uses **one** size, because the mix of chunk
+sizes is itself a fingerprint. The multiset of the sizes decreases the plausible
+range of the file size. A strategy with mixed sizes decreases that range more
+than one size does.
+
+One size costs more requests for a large file. That cost is the correct trade
+under the adversary model of Part 2. One size also reduces the bucket ladder to
+one attachment class.
+
+### 13.2.2 Per-chunk anonymous credentials
+
+The client registers each chunk under an **independent random X25519
+credential**, and it makes a new credential for each chunk. Thus a relay cannot
+find these three facts:
+
+- that two chunks belong to the same file
+- that the same user uploaded two chunks
+- how many recipients a chunk has
+
+A command carries the deniable authenticator of Part 3 §3.2.3 for its
+authorization. A command does not carry a signature.
+
+### 13.2.3 The segments and the padding of the last one
+
+An attachment is a sequence of **segments**. Each segment is `SEGMENT_SIZE`
+bytes of plaintext, and §13.3.1 seals each one on its own with a 16-byte tag.
+Thus one sealed segment is exactly one chunk of `CHUNK_SIZE` bytes, and a
+receiver verifies each chunk with the bytes that the chunk carries.
+
+The descriptor carries no true size, and §13.3 keeps it that way deliberately.
+Thus the padding itself carries the boundary, and only the last segment
+carries it.
+
+```
+padded  = plaintext || 0x80 || 0x00 × k    // a whole multiple of SEGMENT_SIZE
+plain_i = padded[ i × SEGMENT_SIZE .. (i + 1) × SEGMENT_SIZE )
+```
+
+**[ATT-059]** A sender MUST pad `plaintext` with one marker byte of `0x80` and
+then zero bytes. This is the ISO/IEC 7816-4 style, and Part 6 §6.9 rule
+`WIR-011` uses the same style for a cell body.
+
+**[ATT-060]** A sender MUST select the smallest *k* that makes the length of
+`padded` a whole multiple of `SEGMENT_SIZE`. **[ATT-061]** A sender MUST append
+the marker byte even when the length of `plaintext` is already a whole multiple
+of `SEGMENT_SIZE`. That case adds one more segment, which holds the marker byte
+and then zero bytes.
+
+**[ATT-062]** A receiver MUST read the last segment from its last byte toward
+its first byte. **[ATT-177]** A receiver MUST pass over each `0x00` byte of that
+read. **[ATT-063]** The first byte that is not `0x00` MUST be `0x80`, and a
+receiver MUST reject the file when that byte holds a different value.
+**[ATT-064]** A receiver MUST remove that marker byte and each zero byte after
+it. The result is the tail of `plaintext`.
+
+**[ATT-065]** A receiver MUST NOT read the padding of a segment whose tag
+failed under §13.3.1. A failed tag rejects the chunk, and the padding of a
+rejected chunk states nothing.
+
+Then `chunk_count` is the length of `padded` divided by `SEGMENT_SIZE`, and
+`padded_size` of §13.3 equals `chunk_count` times `CHUNK_SIZE`.
+
+**The handle-addressed chunk.** A backup root of Part 4 §4.7.2 and a
+dead-channel blob of Part 3 §3.2.6 are one chunk each. Their writers seal them
+under keys of their own. **[ATT-147]** The writer of a handle-addressed chunk
+MUST pad its sealed object under the scheme above. The unit is `CHUNK_SIZE` in
+place of `SEGMENT_SIZE`. **[ATT-148]** A reader of such a chunk MUST reject a
+sealed object shorter than 16 bytes. That object holds a tag at the minimum.
+
+> *Cause.* An earlier draft sealed the full file under one AEAD, and the one
+> tag sat at the end of the last chunk. A receiver then verified nothing before
+> it held each chunk, thus no progressive render was possible, and a 250 MiB
+> object fetched for seven minutes before its first check. A segment carries
+> its own tag inside the same `CHUNK_SIZE`, and the marker byte moves from the
+> ciphertext to the plaintext. `SEGMENT_SIZE` is 16 bytes below `CHUNK_SIZE`,
+> and §13.7 states both.
+>
+> `ATT-061` is the rule that a padding implementation usually gets wrong.
+> Without it a `plaintext` that ends in `0x00` is indistinguishable from a
+> `plaintext` that ends earlier and carries zero padding.
+
+## 13.3 The file descriptor
+
+The client delivers the descriptor **in** the pairwise channel or the group
+channel. The client does not give the descriptor to a relay:
+
+```
+FileDescriptor {
+    version        u8
+    level          u8          // 0x00 the refs address data chunks
+                               // 0x01 the refs address manifest chunks (§13.3.4)
+    file_key       [32]u8      // XChaCha20-Poly1305 key
+    file_nonce     [24]u8
+    commit         [32]u8      // the key commitment of §13.3.1
+    digest         [32]u8      // SHA3-256 of the plaintext
+    media_seconds  u16         // the duration of an audio or a video object,
+                               // and 0 when the class carries no duration
+    ref_count      u32         // the ChunkRef count in this descriptor
+    padded_size    u32         // the data chunk count times CHUNK_SIZE. TRUE size
+                               // not carried: the 13.2.3 padding gives the boundary
+    mime_class     u8          // image, video, audio, voice, doc, or other
+    pixel_w        u16         // the width of an image or a video, else 0
+    pixel_h        u16         // the height of an image or a video, else 0
+    refs           [ref_count]ChunkRef
+}
+
+ChunkRef {                     // 120 B
+    relay_id       [32]u8
+    chunk_id       [32]u8
+    cred_pk        [32]u8
+    replicas       [2]RelayRef  // MANDATORY redundancy, see 13.4
+}
+
+RelayRef {                     // 12 B, see 13.3.2
+    relay_hint     [12]u8
+}
+```
+
+The fixed part of `FileDescriptor` is **137 bytes**, and one `ChunkRef` is **120
+bytes**. Thus a descriptor of *n* refs is 137 + 120*n* bytes. §13.3.2 derives
+the width of `RelayRef`, §13.3.4 gives the manifest level, and §13.7 gives the
+ref count that each bucket holds.
+
+The data chunk count is `padded_size` divided by `CHUNK_SIZE`. **[ATT-067]** A
+receiver MUST take the data chunk count from that division. **[ATT-068]** A
+parser MUST reject a `padded_size` that `CHUNK_SIZE` does not divide.
+
+**[ATT-069]** A sender MUST set `media_seconds` for a `mime_class` of audio,
+of voice, or of video. **[ATT-070]** A sender MUST set `media_seconds` to zero
+for each other class. **[ATT-071]** A sender MUST NOT send a voice object above
+`VOICE_MAX_SECONDS`. §13.7 gives that value. The voice class is a recording
+that the client made in the conversation, and the audio class is a file that
+the user selected.
+
+- **[ATT-153]** A sender MUST set `pixel_w` and `pixel_h` for an image and for a
+  video, after the re-encode of `ATT-155`. **[ATT-154]** A receiver MUST size
+  the placeholder of an image or a video from those two fields. It needs no
+  chunk for that.
+
+**The metadata and the re-encode.** A photograph carries a location, a device
+model, and a time in its metadata fields. A recipient that saves the file gives
+those fields to each platform service.
+
+- **[ATT-155]** A sender MUST re-encode an image, an audio, a voice, or a video
+  object before the encryption. The re-encode follows Part 9 rules `DIS-001` and
+  `DIS-002`, thus the object carries no metadata field. **[ATT-156]** A sender
+  MUST re-encode an image above `IMAGE_REENCODE_BYTES` to at most that size.
+  **[ATT-157]** If the user selects the original for one send, the sender MUST
+  skip both re-encodes for that send and MUST state that the original carries
+  its metadata fields.
+- **[ATT-158]** A client MUST NOT reuse a `file_key`, a `file_nonce`, or a
+  `ChunkRef` across two conversations. A forward is a new upload under a fresh
+  key and fresh chunks.
+
+> *Cause.* An earlier draft removed no metadata field from an attachment, and
+> Part 16 §16.3 stated that omission. A profile picture lost its fields under
+> Part 9, and a photograph in a conversation kept them. The original stays
+> available for one send, because a document scan or a print needs its
+> resolution. A shared `ChunkRef` across two conversations gives one relay a
+> download count that joins the two, and it gives a recipient of the first
+> conversation a `read_sk` for the second.
+
+The descriptor deliberately **omits the original filename and the exact size**.
+The encrypted message body carries the filename, if the message carries the
+filename at all. No field that a relay sees carries the filename. The field
+`mime_class` is coarse, because a MIME type with full detail is a fingerprint.
+
+### 13.3.1 Key-committing AEAD is mandatory
+
+**[ATT-006]** The attachment AEAD MUST be key-committing. Plain
+ChaCha20-Poly1305 and AES-GCM are **not** key-committing. **[ATT-007]** The test
+suite of this specification MUST include a negative vector that fails on the
+construction that does not commit.
+
+UMBRA reaches that property with one SHA3-256 pass over the key and the nonce.
+The construction is this:
+
+```
+commit  = SHA3-256( "umbra/v1/file-commit" || file_key || file_nonce )   // 32 B
+nonce_i = file_nonce[0..20] || BE32(i)
+chunk_i = XChaCha20-Poly1305( file_key, nonce_i, plain_i,
+                              ad = BE32(i) || last_i )        // CHUNK_SIZE
+```
+
+The value `file_nonce` is 24 bytes and the device CSPRNG gives it. §13.2.3
+gives `plain_i`, which is segment *i*. The value `last_i` is `0x01` for the
+last segment and `0x00` for each other one. Part 5 §5.11 holds the label
+`"umbra/v1/file-commit"`.
+
+1. **[ATT-025]** A sender MUST put `commit` in the `FileDescriptor` of §13.3.
+2. **[ATT-026]** A receiver MUST compute `commit` again from `file_key` and
+   `file_nonce`. **[ATT-027]** A receiver MUST compare the two values in
+   constant time.
+3. **[ATT-028]** If the two values differ, a receiver MUST reject the
+   descriptor. **[ATT-029]** A receiver MUST NOT fetch a chunk of a descriptor
+   that it rejected.
+4. **[ATT-030]** A receiver MUST make that comparison before it decrypts a
+   chunk.
+5. **[ATT-149]** A sender MUST seal each segment under `nonce_i` and the
+   associated data above. **[ATT-150]** A receiver MUST reject a chunk whose
+   tag fails. **[ATT-151]** A receiver MUST reject a file whose last chunk
+   under `padded_size` carries `last_i` of `0x00`. **[ATT-159]** A receiver
+   MUST reject a file in which a chunk before the last one carries `last_i` of
+   `0x01`. Thus a truncated or an extended file fails at the chunk that shows
+   it.
+6. **[ATT-031]** A receiver MUST verify `digest` against the full plaintext
+   after the decryption. **[ATT-032]** A receiver MUST NOT present a file as
+   complete, save it, or forward it before that check succeeds. **[ATT-152]** A
+   receiver MAY render the verified segments of a media object in chunk order
+   before that check completes. A media object is an image, an audio, a voice,
+   or a video object. Part 15 rule `IMP-044` gives the destination of the
+   plaintext.
+
+   > *Cause of the render.* Each chunk carries its own tag under `ATT-149`,
+   > and `ATT-150` rejects a chunk that fails. Thus a verified prefix is
+   > authentic bytes of the object, and a player that starts on it shows the
+   > user nothing that the sender did not seal. The digest still closes the
+   > file, because it binds the segments to one plaintext under one value that
+   > the descriptor carries. An earlier draft sealed the whole file under one
+   > tag, and a receiver verified nothing before the last chunk.
+
+The pair (`file_key`, `file_nonce`) binds to one 32-byte value. Thus a party
+that wants one ciphertext to open under two keys has to find a SHA3-256
+collision. The check also costs nothing at the moment it counts most, because a
+receiver rejects an incorrect key before it downloads the chunks.
+
+> Facebook shipped message franking that did not frank, because AES-GCM is not
+> key-committing (the invisible salamanders result, CRYPTO 2018). The correction
+> is one more SHA3-256 pass over the key and the nonce. UMBRA v1 ships
+> attachments, thus this risk is real.
+
+### 13.3.2 `RelayRef` is a compact directory reference
+
+`RelayRef` is **12 bytes**, and the width is fixed. Part 1 §1.4 gives each byte
+string a fixed width or a length prefix. An undefined width makes
+`FileDescriptor` unencodable, thus this section states the width.
+
+```
+RelayRef {
+    relay_hint     [12]u8   // the first 12 bytes of
+                            // SHA3-256("umbra/v1/relayref" || relay_id)
+}
+```
+
+The value is a directory reference, and it is not a relay key. A client resolves
+`relay_hint` against the relay set of the current consensus (Part 10 §10.5). The
+client holds that consensus already, thus a resolution needs no fetch. The full
+32-byte `relay_id` stays in `ChunkRef`, thus the first replica of a chunk needs
+no directory lookup at all.
+
+**The width derivation.** Part 6 §6.9 gives the `B1` `L5 payload` row 1 930
+bytes. The fixed part of `FileDescriptor` is 133 bytes, and each `ChunkRef` is
+96 bytes plus two `RelayRef` values. The model file of Part 3 §3.12 is 400 KB,
+which is 13 chunks. A second row of §6.9 is tighter, and that row decides the
+width. The client sends the descriptor as the body of an `AppMessage`, and §6.9
+gives that body 1 691 bytes at `B1` with the default chunk. Part 5 §5.5.2 gives
+the same body 1 723 bytes at `B1` with the 32-byte chunk:
+
+```
+133 + 13 × (96 + 2R) ≤ 1 930    L5 payload at B1                     gives  R ≤ 21
+133 + 13 × (96 + 2R) ≤ 1 723    AppMessage body at B1, 32-byte chunk gives  R ≤ 13
+
+R = 12  →  ChunkRef = 120 B  →  13 chunks = 133 + 1 560 = 1 693 B
+```
+
+UMBRA sets *R* to 12, because 12 gives a `ChunkRef` of 120 bytes and 120 is a
+multiple of 8. The margin against the 1 723-byte row is 30 bytes. A 13-chunk
+descriptor is 2 bytes above the 1 691-byte default-chunk row. Thus the client
+sends it with the 32-byte chunk under Part 5 §5.5.2 rule `CRY-018`. A 12-byte
+hint gives 96 bits against a second preimage on the identity of a relay. A
+relay that wants the traffic of another relay has to find that preimage first.
+**[ATT-049]** A revision that adds a field to `FileDescriptor` or to `ChunkRef`
+MUST derive `R` again from Part 6 §6.9.
+
+**A rotation of the directory epoch does not break a stored descriptor.** Part
+10 §10.11 gives the consensus epoch as 1 hour, and §13.7 gives `CHUNK_TTL` as 45
+days. Thus a stored descriptor outlives 1 080 consensus epochs. `RelayRef` names
+the identity of a relay, and it does not name a position in a consensus. Thus a
+rotation of the epoch changes no byte of a stored descriptor. A reference that
+named a directory index would break at the first rotation.
+
+The four rules below hold at a retrieval.
+
+1. **[ATT-008]** A client MUST resolve `relay_hint` against the current
+   consensus. **[ATT-009]** A client MUST NOT fetch an older consensus to
+   resolve a reference, because Part 10 §10.5 forbids a session for the only
+   purpose of a directory diff.
+2. **[ATT-010]** If `relay_hint` matches no relay in the current consensus, the
+   client MUST treat that replica as unreachable. **[ATT-011]** The client MUST
+   then try another replica under §13.4.
+3. **[ATT-012]** If `relay_hint` matches two or more relays in the current
+   consensus, the client MUST treat that replica as unresolvable. **[ATT-013]**
+   The client MUST then try another replica under §13.4.
+4. If no replica of a chunk resolves, the transfer fails. **[ATT-014]** The
+   client MUST report that failure to the user, and **[ATT-015]** the client
+   MUST NOT show a partial file.
+
+**The residual.** A chunk lives for `CHUNK_TTL`, which is 45 days. A relay that
+leaves the directory inside that window removes one replica. §13.4 gives three
+replicas under three operators, thus two replicas remain. **[ATT-016]** A
+revision MUST measure the relay churn rate over 45 days before it lowers
+`REPLICAS`.
+
+**The null reference.** A `RelayRef` of 12 zero bytes names no relay. A backup
+object of Part 4 §4.7.2 lives at `BACKUP_REPLICAS` relays, which is 2, thus the
+second `RelayRef` of each of its refs is null. **[ATT-141]** A client MUST set a
+`RelayRef` that names no relay to 12 zero bytes. **[ATT-142]** A receiver MUST
+reject a `FileDescriptor` with a null `RelayRef` on a pairwise, group, or
+community channel. `ATT-018` requires three references on those channels.
+### 13.3.3 The chunk commands
+
+Part 6 §6.4 gives the command header. An attachment command uses that header,
+and it puts the `chunk_id` in the `queue_id` field. Four of the twelve commands
+belong to the replication of §13.4.1, and one registers a backup-class chunk.
+Part 3 §3.2.3 gives the deniable authenticator that the `auth` field carries.
+**[ATT-033]** An attachment command MUST NOT carry a signature.
+
+| `cmd` | Name | Sent by | Payload |
+| --- | --- | --- | --- |
+| `0x70` | `CNEW` | Uploader | `cred_pk` 32 B, `read_pk` 32 B, then an `Admission` of Part 14 §14.2 |
+| `0x71` | `CID` | Relay | `storage_token` 32 B |
+| `0x72` | `CPUT` | Uploader | the chunk, exactly `CHUNK_SIZE` bytes |
+| `0x73` | `CGET` | Downloader | empty |
+| `0x74` | `CDAT` | Relay | the chunk, exactly `CHUNK_SIZE` bytes |
+| `0x75` | `CDEL` | Uploader | empty |
+| `0x76` | `CREP` | Uploader | the replica targets of §13.4.1 |
+| `0x77` | `CRPUT` | Relay | `storage_token` 32 B and the chunk, exactly `CHUNK_SIZE` bytes |
+| `0x78` | `CVFY` | Uploader | `nonce` 16 B |
+| `0x79` | `CPRF` | Relay | `proof` 32 B |
+| `0x7A` | `CRNW` | Downloader | empty |
+| `0x7B` | `BNEW` | Uploader | `cred_pk` 32 B, `read_pk` 32 B, then an `Admission` of Part 14 §14.2 |
+
+Each chunk carries two independent X25519 credentials.
+
+```
+cred_sk    := 256 bits from the device CSPRNG, one for each chunk
+read_sk    := HKDF-SHA3-256("umbra/v1/chunk-read", file_key, chunk_index_be32)
+```
+
+1. **[ATT-034]** An uploader MUST make `cred_sk` from the device CSPRNG for each
+   chunk. **[ATT-035]** An uploader MUST NOT derive `cred_sk` from `file_key`.
+   **[ATT-036]** An uploader MUST NOT use one `cred_sk` for two chunks.
+   **[ATT-160]** An uploader MUST retain the `cred_sk` of each chunk until the
+   chunk is erased. `CHUNK_LIFE_MAX` after the `CNEW` ends that retention too.
+   **[ATT-161]** When a client applies a deletion to a record with a descriptor
+   it uploaded, it MUST send `CDEL` for each `ChunkRef`. A deletion is a
+   tombstone of Part 7 §7.5.6 or a timer expiry of Part 7 §7.5.8. The `CDEL`
+   goes to each relay of the ref. A recipient holds no `cred_sk`, thus a
+   deletion by a recipient erases nothing at a relay, and Part 7 §7.5.6 states
+   that limit.
+2. **[ATT-037]** A client MUST derive `read_sk` of a file chunk from `file_key`
+   and the index of the chunk. A handle-addressed chunk of §13.4.2 takes
+   `read_sk` from its writer, under Part 4 rule `IDN-093` and Part 3 rule
+   `NET-183`.
+   Thus each party that holds the descriptor authorizes a `CGET`, and the
+   descriptor carries no extra byte. Part 5 §5.11 holds the label
+   `"umbra/v1/chunk-read"`.
+3. **[ATT-038]** A relay MUST select `storage_token` from its own CSPRNG.
+   **[ATT-039]** A relay MUST NOT derive `storage_token` from `cred_pk`, from
+   `read_pk`, or from the chunk bytes. **[ATT-055]** An uploader MUST select
+   `chunk_id` from the device CSPRNG, and it MUST select one value for each
+   chunk. **[ATT-056]** An uploader MUST NOT derive `chunk_id` from `file_key`,
+   from `cred_pk`, from `read_pk`, or from the chunk bytes. **[ATT-057]** An
+   uploader MUST use the same `chunk_id` at each of the `REPLICAS` relays that
+   hold one chunk. **[ATT-058]** A relay MUST reject a `CNEW` whose `chunk_id`
+   names a chunk that the relay holds.
+
+   > *Cause.* §13.4 makes `REPLICAS` copies of each chunk mandatory, and §13.3
+   > gives a replica 12 bytes of `RelayRef` and no chunk identifier of its own.
+   > An earlier draft let each relay select its own `chunk_id`. A downloader
+   > then resolved which relay held a replica and had no identifier to request
+   > from it, thus the mandatory redundancy was unreachable at the one moment
+   > that needs it. One client-selected value addresses each replica, and it
+   > keeps `ChunkRef` at 120 bytes.
+   >
+   > One shared `chunk_id` gives two colluding replica relays nothing new. Those
+   > two relays hold **byte-identical ciphertext** already, thus a comparison of
+   > the stored bytes links the two copies with no identifier at all. The value
+   > comes from the client CSPRNG, thus it carries no relation to `file_key`, to
+   > the file content, or to a different chunk of the same file. §13.2.2 keeps
+   > each of its three properties.
+   >
+   > `ATT-058` stops a squat. Without it a hostile client registers a
+   > `chunk_id` that an honest upload later picks, and the honest upload then
+   > fails or overwrites. The registration is first-come, and `CHUNK_TTL`
+   > releases it.
+4. **[ATT-040]** A relay MUST authorize `CPUT` and `CDEL` against `cred_pk`
+   only. **[ATT-041]** A relay MUST authorize `CGET` and `CRNW` against
+   `read_pk` only.
+5. **[ATT-042]** The authorized bytes of a `CPUT` MUST hold `storage_token`.
+   Thus a relay binds the upload to the registration that gave the token. Part 3
+   §3.2.3 rule `NET-120` gives the encoding, which puts `storage_token` in the
+   `bind` field of the authorized bytes.
+6. **[ATT-043]** A `CPUT` and a `CDAT` MUST carry exactly `CHUNK_SIZE` bytes.
+   **[ATT-044]** A relay MUST reject a `CPUT` of a different length. §13.2 pads
+   the last chunk of a file to that length.
+7. **[ATT-045]** A relay MUST apply the admission control of Part 14 to a
+   `CNEW`. A `CNEW` names no earlier state, in the same manner as the `NEW` of
+   Part 6 §6.4.
+8. **[ATT-046]** A relay MUST erase a chunk at `CDEL`, and at `CHUNK_TTL` after
+   the `CPUT` or after the last accepted `CRNW`. **[ATT-047]** A relay MUST NOT
+   retain the identifier of an erased chunk. **[ATT-125]** A relay MUST NOT set
+   the erase time of a chunk later than `CHUNK_LIFE_MAX` after the `CNEW`.
+   **[ATT-126]** A relay MUST NOT answer a `CRNW`. A client that needs the chunk
+   fetches it, and the fetch shows the state.
+
+   > *Cause.* Part 12 §12.4.6 keeps a community post for `COMMUNITY_RETENTION`,
+   > which is 90 days, and a chunk lives 45 days. A `CRNW` at each fetch keeps
+   > the attachment of a post that a party still reads. `CHUNK_LIFE_MAX` equals
+   > `COMMUNITY_RETENTION`, thus a renewal cannot keep a chunk past the post
+   > that names it. An uploader that wants a chunk gone sends `CDEL`, and a
+   > renewal does not override that command.
+9. **[ATT-048]** A client MUST send an attachment command on the separate
+   connection of §13.8.
+10. **The backup class.** A `BNEW` registers a **backup-class chunk**, and a
+    `CNEW` registers an attachment chunk. The two classes differ in the erase
+    time and in nothing else. Part 4 §4.7.2 writes each backup object and the
+    backup root in this class, and Part 3 §3.2.6 writes the dead-channel blob
+    in it. **[ATT-127]** A relay MUST hold a backup-class chunk for `BACKUP_TTL`
+    after the `CPUT` or the `CRPUT` that gave the bytes. Part 4 §4.8 gives that
+    value. **[ATT-128]** A relay MUST reject a `CRNW` on a backup-class chunk.
+    **[ATT-129]** A relay MUST apply each other rule of this section to a
+    backup-class chunk as to an attachment chunk. The bound of `ATT-125` does
+    not apply to that class. **[ATT-130]** A relay MUST apply the admission
+    control of Part 14 to a `BNEW` as to a `CNEW`. **[ATT-131]** A client MUST
+    NOT register a backup object under `CNEW`, and it MUST NOT register an
+    attachment under `BNEW`. **[ATT-132]** A client MUST register a
+    backup-class chunk at `BACKUP_REPLICAS` relays under different operators.
+    `ATT-017` does not apply to that class.
+
+    > *Cause.* Part 4 rule `IDN-073` held a backup object for `BACKUP_TTL`, and
+    > rule `IDN-075` sent it under the commands of this section. Those commands
+    > erased it at `CHUNK_TTL`, which is 45 days. No relay could tell the two
+    > retentions apart, because no command carried the class. One extra
+    > registration command carries it, and a relay that holds no `BNEW` for a
+    > `chunk_id` applies `CHUNK_TTL`. No `BGET` exists, because a `CGET` against
+    > `read_pk` reads a chunk of each class.
+
+### 13.3.4 The manifest level
+
+A descriptor of *n* refs is 137 + 120*n* bytes, and §13.7 gives one cell 269
+refs at bucket `B3`. A direct descriptor therefore stops at 269 data chunks,
+which is 8.78 MB. `MAX_FILE_SIZE` is far above that value.
+
+**The answer is one level of indirection, and the manifest is itself a file.**
+
+```
+level 0x00   the refs address data chunks            up to 269 chunks
+level 0x01   the refs address manifest chunks        up to 72 899 data chunks
+```
+
+At level `0x01` the client builds the **manifest**, which is the concatenation
+of the `ChunkRef` of each data chunk, in chunk order. The client then treats
+that manifest exactly as a file.
+
+```
+manifest       = ChunkRef_0 || ChunkRef_1 || … || ChunkRef_{n-1}
+K_manifest     = HKDF-SHA3-256( "umbra/v1/file-manifest", file_key, file_nonce )
+```
+
+The client segments the manifest under §13.2.3, and it seals each segment under
+§13.3.1 with `K_manifest` in place of `file_key`. It uploads those chunks under
+§13.3.3 with `REPLICAS` copies. The descriptor then carries a `ChunkRef` for
+each manifest chunk.
+
+- **[ATT-072]** A client MUST use level `0x00` when the data chunk count is at
+  or below the ref count that the descriptor bucket holds. **[ATT-073]** A
+  client MUST use level `0x01` above that count. **[ATT-074]** A parser MUST
+  reject a `level` above `0x01`.
+- **[ATT-075]** A client MUST derive `K_manifest` with the label above, and Part
+  5 §5.11 holds that label. **[ATT-076]** A client MUST NOT encrypt a manifest
+  under `file_key` itself.
+- **[ATT-077]** A client MUST order the `ChunkRef` values of a manifest by the
+  chunk index, from the lowest index to the highest index. **[ATT-078]** A
+  receiver MUST reject a manifest whose length is not a whole multiple of 120
+  bytes after the padding is removed.
+- **[ATT-079]** A receiver MUST rebuild the full manifest before it fetches a
+  data chunk. **[ATT-080]** A receiver MUST NOT present a file as complete
+  before it verifies `digest` under `ATT-031`.
+- **[ATT-081]** A relay MUST NOT tell a manifest chunk from a data chunk. Each
+  one is `CHUNK_SIZE` bytes under an independent random credential, thus §13.2.2
+  holds without a change.
+
+**The ceiling that this gives.** One manifest chunk holds 271 refs, because
+`SEGMENT_SIZE` of 32 634 divided by 120 is 271 with 114 bytes left. A `B3`
+descriptor holds 269 manifest refs. Thus one level addresses 269 × 271 = 72 899
+data chunks, which is about **2.22 GiB**. `MAX_FILE_SIZE` of §13.7 is the policy
+limit below that structural ceiling. **[ATT-082]** A revision MUST define a
+second manifest level before it raises `MAX_FILE_SIZE` above 2.22 GiB.
+
+> *Cause.* `ATT-023` said that a revision MUST define a descriptor that spans
+> more than one cell before it raises the chunk bound. A multi-cell descriptor
+> is one answer. It is the worse answer, because the descriptor travels in the
+> pairwise channel, which is the metered path, and a 250 MiB file needs about
+> 964 KB of descriptor. The manifest moves those bytes onto the attachment path
+> of §13.8, where they cost 30 chunks and no message cell. The descriptor then
+> stays at 3 737 bytes and one `B2` cell.
+
+## 13.4 Redundancy is mandatory
+
+Each chunk lives at `REPLICAS` relays under **different operators**. §13.4.1
+gives the flow that puts it there, and the client uploads one copy.
+
+**[ATT-017]** A client MUST register each chunk at **three or more relays under
+different `operator_id` values** of Part 10 §10.5.3. **[ATT-018]** The
+descriptor MUST carry the three references. **[ATT-123]** A client MUST NOT
+upload more than one copy of a chunk, and §13.4.1 makes the relay push the
+others.
+
+> The XFTP specification of SimpleX defines multi-relay chunk redundancy with a
+> recipient fallback. The client of SimpleX **omits that feature**. The
+> consequence is that one relay outage breaks a transfer. Ordinary users do not
+> accept that reliability failure, and such a failure makes a user delete a
+> messenger. UMBRA implements what it specifies.
+
+At a retrieval, the client tries the replicas in an order that the client
+randomizes. **[ATT-019]** The client MUST NOT use a fixed order. Thus the relay
+load does not encode the order of the replicas.
+
+### 13.4.1 The relay makes the copies, and the client does not
+
+**A client uploads one copy of a chunk. The relay that takes that copy pushes
+the other `REPLICAS` − 1 copies.**
+
+```
+client ──CNEW──▶ relay A     client ──CNEW──▶ relay B     client ──CNEW──▶ relay C
+       ◀─CID───              ◀─CID───                     ◀─CID───
+                                                     (three small commands,
+                                                      three storage tokens)
+
+client ──CPUT───────────▶ relay A        one chunk, CHUNK_SIZE bytes
+client ──CREP───────────▶ relay A        the refs and tokens of B and C
+
+                          relay A ──CRPUT──▶ relay B
+                          relay A ──CRPUT──▶ relay C
+
+client ──CVFY──▶ relay B                 a sampled proof of possession
+       ◀─CPRF──
+```
+
+**The registration stays with the client.** The client sends `CNEW` to each of
+the `REPLICAS` relays and it keeps the `storage_token` of each one. That token
+is what stops a relay from pushing bytes into a relay that no client named.
+
+- **[ATT-096]** A client MUST send `CNEW` to each of the `REPLICAS` relays of a
+  chunk before it sends `CPUT`. **[ATT-097]** A client MUST send `CPUT` to one
+  of those relays only.
+- **[ATT-098]** A client MUST send `CREP` to the relay that took the `CPUT`.
+  **[ATT-099]** A client MUST send `CREP` after that `CPUT` succeeds.
+
+**The `CREP` payload.**
+
+```
+CrepPayload {
+    version        u8        // 0x01
+    target_count   u8        // 1 to REPLICAS - 1
+    targets        [target_count]ReplicaTarget
+}
+
+ReplicaTarget {
+    relay_id       [32]u8    // the relay that takes the copy
+    storage_token  [32]u8    // the token that the CID of that relay gave
+}
+```
+
+A `ReplicaTarget` is 64 bytes, thus a `CREP` at `REPLICAS` of 3 carries 130
+bytes and it fits bucket `B0`. `ATT-057` makes the `chunk_id` one value at each
+replica, thus the `queue_id` field of the command names the chunk at each
+target and a target needs no identifier of its own.
+
+- **[ATT-100]** A client MUST put the `storage_token` that each target issued in
+  the target of that relay. **[ATT-101]** A client MUST NOT put a token of one
+  relay in the target of another relay.
+- **[ATT-102]** A relay MUST send one `CRPUT` to each target of a `CREP`.
+  **[ATT-103]** A relay MUST put the `storage_token` of that target in the
+  `CRPUT` payload. **[ATT-104]** A relay MUST send the bytes that the `CPUT`
+  gave it, without a change.
+- **[ATT-105]** A relay MUST NOT send a `CRPUT` to a relay that a `CREP` did not
+  name. **[ATT-106]** A relay MUST NOT keep a `storage_token` of another relay
+  after it sends the `CRPUT` that uses it.
+
+**The target authorizes on the token, and not on the credential.**
+
+- **[ATT-107]** A relay MUST authorize a `CRPUT` against the `storage_token`
+  that its own `CID` issued for that `chunk_id`. **[ATT-108]** A relay MUST NOT
+  authorize a `CRPUT` against `cred_pk`. The pushing relay holds no `cred_sk`,
+  and Part 3 §3.2.3 keys the deniable authenticator on that secret.
+- **[ATT-109]** A relay MUST accept one `CRPUT` for each registration.
+  **[ATT-110]** A relay MUST reject a second `CRPUT` for a `chunk_id` that it
+  holds. `ATT-058` states the same rule for a `CNEW`.
+- **[ATT-111]** A relay MUST reject a `CRPUT` whose payload is not 32 682 bytes.
+  **[ATT-112]** A relay MUST erase the `storage_token` of a registration when it
+  accepts the chunk.
+
+**The client verifies a sample, because a relay can drop a push in silence.**
+
+```
+proof = SHA3-256( nonce || chunk )
+```
+
+- **[ATT-113]** A client MUST send a `CVFY` to each replica relay for a sample
+  of the chunks that the relay holds. **[ATT-114]** A client MUST draw `nonce`
+  from the device CSPRNG for each `CVFY`.
+- **[ATT-115]** A relay MUST answer a `CVFY` with a `CPRF` that carries the
+  value above. **[ATT-116]** A relay MUST answer with an unknown-chunk response
+  when it holds no chunk at that `chunk_id`.
+- **[ATT-117]** A client MUST compare `proof` against the value that it computes
+  from its own copy. **[ATT-118]** If the two values differ, or if the relay
+  answers unknown-chunk, the client MUST send `CNEW` and `CPUT` to a fresh relay
+  for that chunk. **[ATT-119]** The client MUST report the relay that failed as
+  a link fault under Part 10 §10.4.2.
+
+**The sample size.** `REPLICA_VERIFY_SAMPLE` is the greater of 4 and one 32nd of
+the chunks that the relay holds for that file, and it is at most 64.
+**[ATT-120]** A client MUST select the sampled chunks at random. **[ATT-121]** A
+client MUST NOT use a fixed sample position, because a relay that predicts the
+sample replicates that chunk and drops the others.
+
+**What this costs and what it saves.**
+
+| | Client uplink for a 250 MiB object | Chain traffic at 3 hops | Direct relay to relay |
+| --- | --- | --- | --- |
+| A client that uploads 3 copies | 762.0 MiB | 2.23 GiB | 0 |
+| **The rule above** | **259.4 MiB** | **778 MiB** | **504 MiB** |
+
+§13.7.2 derives each figure. The saving is 2.94 times on the uplink of the
+device, and the relay carries the difference on a mains-power link with
+flat-rate bandwidth. Part 3 §3.6.3 applies the same principle to the cover
+traffic, and Part 10 §10.2 already ranks a relay by its capacity class.
+
+**The residual, stated.**
+
+> **This is a trade, and Part 2 §2.4 requires the text to state it.** The relay
+> that takes the `CPUT` learns the `relay_id` of the other `REPLICAS` − 1
+> relays for that chunk. A client that uploads each copy itself gives no relay
+> that fact.
+>
+> The bound is that §13.3.3 already concedes the linkage. The three replicas
+> hold **byte-identical ciphertext**, thus a comparison of the stored bytes
+> links the three copies with no identifier at all. The rule above removes the
+> collusion step and it adds no new capability. Part 16 §16.3 records the
+> residual.
+>
+> **[ATT-122]** A client MUST select the `REPLICAS` relays of one chunk
+> independently of the relays of each other chunk. Thus no relay learns the
+> replica set of a second chunk of the same file, and §13.2.2 holds without a
+> change.
+
+### 13.4.2 The handle-addressed chunk
+
+A **handle-addressed chunk** is a backup-class chunk whose `chunk_id` is a value
+that the reader derives without the writer. The backup root of Part 4 §4.7.2 and
+the dead-channel blob of Part 3 §3.2.6 are the two such chunks. Each of the two
+gives the reader a secret from which it derives the `chunk_id`, the `read_sk`,
+and the content key. That reader holds no descriptor, thus it needs a rule that
+names the relays without one. The rule is a rank over the relay set that each
+party holds.
+
+```
+rank(h, r) = SHA3-256( "umbra/v1/chunk-place" || h || relay_id_r )
+```
+
+The value `h` is the `chunk_id`. The value `r` ranges over the relays of the
+current consensus that declare the attachment role (Part 10 §10.5.3, `roles`
+bit 3). The **placement list** of `h` is that set in ascending order of
+`rank`. The list drops each relay whose `family_id` an earlier relay of the
+list holds. Part 5 §5.11 holds the label.
+
+1. **[ATT-133]** A writer MUST select the first `BACKUP_REPLICAS` relays of the
+   placement list of `h`. **[ATT-134]** If a `BNEW` at a selected relay fails,
+   the writer MUST replace that relay with the next of the list. **[ATT-135]**
+   A writer MUST send `CPUT` to the selected relay of the lowest rank and
+   `CREP` for the others, under §13.4.1.
+2. **[ATT-136]** A reader MUST send `CGET` to the relays of the placement list
+   in list order, until it holds the chunk. **[ATT-137]** A reader MUST NOT
+   ask more than `PLACE_PROBE` relays for one `h`. §13.7 sets that value to 4.
+3. **[ATT-138]** Before a writer replaces the chunk under one `h`, it MUST send
+   `CDEL` to each relay that holds it. `ATT-058` rejects a registration under
+   a held identifier, and that rule applies to each class.
+4. **[ATT-139]** A party MUST compute the placement list from the consensus
+   that it holds. **[ATT-143]** A party MUST NOT fetch a consensus for that
+   computation. Part 10 §10.5 forbids a session for the only purpose of a
+   directory diff.
+5. **[ATT-140]** If a handle-addressed chunk has no named write credential, the
+   writer MUST use a random `cred_sk` of `ATT-034`. Part 4 §4.7.2 names one
+   for the backup root, and Part 3 §3.2.6 names none for the dead-channel
+   blob.
+
+A handle-addressed chunk is one exception to `ATT-055` and `ATT-056`. The
+identifier comes from a secret that the two readers share and that no relay
+holds. Thus the three properties of §13.2.2 hold under the same argument.
+
+> *Cause.* Part 4 §4.7.2 derived `backup_handle_epoch` and gave no rule that
+> named the relay that held it. A restore then needed a stored relay list,
+> which the lost device held. A rank over the consensus gives the reader and
+> the writer one list from public data and one secret. In the common case, two
+> relays that join between the write and the read take at most two places at
+> the list head. `PLACE_PROBE` of 4 covers that drift for `BACKUP_REPLICAS` of
+> 2. A `CGET` of a missing chunk costs one `B0` command and one `NACK`.
+
+## 13.5 Post-quantum protection
+
+The file key moves in the PQ-protected channel, which is the pairwise channel or
+the group channel. Thus the attachment inherits post-quantum confidentiality
+**at no cost**. There is no KEM for each chunk, and there is no KEM header on a
+chunk.
+
+This design closes a gap in the reference system. The XFTP of SimpleX encrypts a
+file with the NaCl `secret_box` and has **no KEM**. Its group channel also has
+no PQ layer. Thus an archived attachment to a group is fully exposed
+harvest-now-decrypt-later material. Part 5 §5.8 makes group PQ protection
+mandatory in UMBRA, and that rule is the cause that this inheritance operates.
+
+## 13.6 Group and community attachments
+
+The sender uploads the file **one time for the group**. §13.4 makes that upload
+`REPLICAS` copies of each chunk, and that factor does not follow the group size.
+The sender key of the group distributes the descriptor. Thus three properties
+hold:
+
+- The upload cost is O(1) in the group size, and it is not O(N).
+- The descriptor cost is O(N), and the descriptor is small. A 1-chunk descriptor
+  is 253 bytes and a 13-chunk descriptor is 1 693 bytes, and bucket `B1` holds
+  both. Part 6 §6.9 gives 155 bytes of `B0` text at the default chunk and 226
+  bytes with no chunk. Thus no descriptor fits `B0`.
+- A relay that holds a chunk learns a download count and nothing else. That
+  relay does not learn the group, the membership, or the file.
+- A community post carries a descriptor in the open, under Part 12 §12.4.7.
+  Each party with the community link reads `file_key`, thus that attachment is
+  public at publication. A relay that holds its chunk still learns the count
+  and nothing else, because the descriptor does not reach that relay.
+
+## 13.7 Parameters
+
+| Parameter | Value |
+| --- | --- |
+| `CHUNK_SIZE` | 32 650 B |
+| `SEGMENT_SIZE` | 32 634 B, which is `CHUNK_SIZE` less the 16-byte tag (§13.2.3) |
+| `MAX_FILE_SIZE` | **250 MiB** (§13.7.2) |
+| `CHUNK_TTL` | 45 days, which equals `MSG_TTL` |
+| `CHUNK_LIFE_MAX` | 90 days, which equals `COMMUNITY_RETENTION` of Part 12 §12.9. §13.3.3 rule 8 bounds a renewed chunk |
+| `REPLICAS` | 3, on different operators |
+| `MAX_CONCURRENT_CHUNKS` | 8 up, 32 down, and §13.7.2 derives both from the bandwidth-delay product |
+| `RELAYREF_WIDTH` | 12 B (§13.3.2) |
+| `MAX_DESCRIPTOR_REFS` | 269, which is one `B3` cell |
+| `MANIFEST_REFS_PER_CHUNK` | 271, which is `SEGMENT_SIZE` divided by 120 |
+| `MAX_DATA_CHUNKS` | 72 899, which is about 2.22 GiB (§13.3.4) |
+| `VOICE_MAX_SECONDS` | 900, which is 15 minutes |
+| `UPLOAD_QUOTA_DAY` | 512 MiB for each credential holder each day, before the replicas |
+| `CHUNK_STORE_MIN` | 100 GiB for a relay that declares the attachment role (§13.10) |
+| `CHUNK_STORE_TARGET` | 200 GiB (§13.10) |
+| `LARGE_FILE_WARN` | 25 MiB (§13.7.2) |
+| `REPLICA_VERIFY_SAMPLE` | the greater of 4 and one 32nd of the chunks, at most 64 (§13.4.1) |
+| `PLACE_PROBE` | 4 relays for one handle (§13.4.2) |
+| `IMAGE_REENCODE_BYTES` | 2 MiB (§13.3) |
+| `CHUNK_EGRESS_BUDGET_DAY` | 4 × `CHUNK_STORE_TARGET` of egress in one day, measured by the relay from midnight UTC (§13.11) |
+| `CHUNK_FETCH_RATE` | 60 `CGET` for one chunk in one hour, measured by the relay from the first fetch of the hour (§13.11) |
+| `HOT_REPLICAS` | 6 replicas for a community attachment at the top activity bucket (§13.11) |
+
+> *The derivation of `CHUNK_SIZE`.* A chunk travels as the whole payload of one
+> command at bucket `B3`. Part 6 §6.9 gives the `L5 payload` row 32 650 bytes at
+> `B3`. Thus `CHUNK_SIZE` is 32 650 bytes.
+>
+> The `B3` cell is 32 768 bytes, and 118 bytes of that cell carry the layers
+> below the payload. Those 118 bytes are 32 bytes of `circ_id` and cell tag, 2
+> bytes of cell command and padding marker, and the 84-byte command header.
+> **[ATT-020]** If the bucket ladder or the command header changes, a revision
+> MUST derive this value again.
+
+> *The descriptor ceiling.* A descriptor of *n* refs is 137 + 120*n* bytes
+> (§13.3.2). Part 6 §6.9 gives the body of an `AppMessage` with no PQ chunk 226,
+> 1 762, 7 906, and 32 482 bytes at the four buckets. Thus one cell holds no ref
+> at `B0`, 13 refs at `B1`, 64 refs at `B2`, and 269 refs at `B3`. Part 5 §5.5.2
+> rule `CRY-018` selects the chunk width that fits the bucket. **[ATT-021]** A
+> client MUST select the bucket of a descriptor from those four values.
+>
+> §13.3.4 makes a ref address a manifest chunk above 269 data chunks, thus the
+> structural ceiling is 72 899 data chunks and about 2.22 GiB. **[ATT-022]** A
+> client MUST NOT send an attachment above `MAX_FILE_SIZE`. **[ATT-023]** A
+> revision MUST derive §13.7.2 again before it raises that value.
+
+### 13.7.1 `CHUNK_TTL` equals `MSG_TTL`
+
+**[ATT-050]** `CHUNK_TTL` MUST NOT be below the `MSG_TTL` of Part 3 §3.2.4. Part
+3 §3.2.4 sets `MSG_TTL` to 45 days, thus `CHUNK_TTL` is 45 days.
+
+A relay holds an undelivered message for `MSG_TTL`. A descriptor is the body of
+such a message. Thus a recipient that returns on day 40 gets the descriptor on
+day 40. **[ATT-051]** A revision MUST hold the two values equal, and a revision
+MUST NOT raise `MSG_TTL` alone.
+
+> *Cause.* An earlier draft set `CHUNK_TTL` to 14 days against a `MSG_TTL` of 45
+> days. A recipient that returned between day 15 and day 45 then took the
+> descriptor and found each chunk gone. §13.1 requirement 1 says that the sender
+> does not stay online, thus no party re-uploads the chunks. That failure is a
+> U6 reliability failure, and it happens on the ordinary path and not on an edge
+> case.
+
+**[ATT-162]** A revision MUST hold `BACKUP_TTL` of Part 4 §4.8 at or above
+`BACKUP_LOOKBACK` weekly epochs less one epoch. **[ATT-163]** A revision MUST
+hold `BACKUP_TTL` above `BACKUP_FULL_INTERVAL` plus `BACKUP_HISTORY_DAYS`. The
+first bound keeps each epoch of a restore inside the retention of a
+backup-class chunk, and Part 4 rule `IDN-074` gives the other direction. The
+second bound keeps the newest full object and its 45 days of deltas alive
+together.
+
+The cost of the change is relay storage and nothing else. A chunk is 32 650
+bytes of ciphertext under a key that no relay holds. Part 3 §3.2.4 states the
+same trade for `MSG_TTL`, which is that stored ciphertext is a storage cost and
+not an exposure. The `CHUNK_TTL` of 45 days is much longer than the 48 hours of
+SimpleX. The message "the file expired" is a worse user experience than a
+storage bill that is a little larger.
+
+Three rules bound the failure that stays.
+
+1. **[ATT-052]** If each replica of a chunk is gone, the client MUST report the
+   failure to the user and MUST name the file.
+2. **[ATT-053]** The client MUST NOT show a partial file. §13.3.2 rule 4 states
+   the same rule for an unresolvable reference.
+3. **[ATT-054]** The client MUST offer the sender a re-send of the file. A
+   re-send is a new upload with new credentials, and it is not a lease
+   extension.
+
+### 13.7.2 What a 250 MiB attachment costs, stated
+
+`MAX_FILE_SIZE` is 250 MiB, which is 262 144 000 bytes.
+
+| Quantity | Value |
+| --- | --- |
+| Data chunks | 8 034, which is 262 144 000 divided by `SEGMENT_SIZE` of 32 634, rounded up |
+| Manifest chunks | 30, and §13.3.4 derives them |
+| Chunks in total | 8 064 |
+| Descriptor | 137 + 30 × 120 = 3 737 bytes, thus one `B2` cell |
+| `CNEW` and `CID`, 3 for each chunk | 24 192 commands, batched 3 to a `B0` cell under Part 6 §6.4.1, which is 8 064 cells and 4.31 MiB |
+| `CPUT`, 1 for each chunk | 8 064 `B3` cells at 32 860 bytes, which is **252.7 MiB** |
+| `CREP`, 1 for each chunk | 8 064 commands, batched 2 to a `B0` cell, which is 4 032 cells and 2.15 MiB |
+| `CVFY`, a sample of 64 for each replica relay | about 504 `B0` cells and 0.27 MiB |
+| **Client uplink** | **about 259.4 MiB** |
+| `CDEL` at a deletion, 3 for each chunk | 24 192 commands, batched 3 to a `B0` cell, which is 8 064 cells and 4.31 MiB |
+| Direct relay to relay, 2 `CRPUT` for each chunk | 16 128 × 32 766 = about 504.0 MiB |
+| Download at one replica | 8 064 × 32 860 = about 252.7 MiB |
+| Upload time, Fast mode, 5 Mbit/s uplink | about **7 minutes**, and the link binds it |
+| Upload time, Balanced mode | about **23 minutes**, and the round trip binds it |
+| Upload time, Private mode | about **80 minutes**, and the round trip binds it |
+| Download time at 20 Mbit/s, Fast, Balanced, Private | about 2, 6, and 19 minutes |
+
+**The round-trip model.** A chain of Part 3 §3.12 costs about 210 ms of
+propagation in each direction. Thus a round trip is about 0.42 s in Fast mode.
+Balanced mode adds an Erlang(3) delay of mean 0.45 s in each direction under
+Part 3 §3.9. Private mode adds 2.1 s in each direction. Thus a round trip is
+about 1.32 s in Balanced mode and about 4.62 s in Private mode. The window of
+`MAX_CONCURRENT_CHUNKS` holds 8 chunks up, which is 262 880 bytes in flight, and
+32 chunks down, which is 1 051 520 bytes. A window divided by a round trip gives
+the throughput, and the smaller of that figure and the link rate gives the time.
+
+- **[ATT-164]** A client MUST NOT hold more than 8 `CPUT` in flight.
+  **[ATT-165]** A client MUST NOT hold more than 32 `CGET` in flight.
+  **[ATT-166]** A client MUST send the `CREP` of a chunk while the `CPUT` of the
+  next chunk is in flight. **[ATT-178]** A client MUST NOT wait for the `CRPUT`
+  of a replica before the next `CPUT`. **[ATT-167]** A client MUST build the
+  attachment circuit of §13.8 in the privacy mode of the conversation that
+  carries the descriptor.
+
+> *Cause.* An earlier draft gave `MAX_CONCURRENT_CHUNKS` no rule and no
+> derivation, and it stated one upload time at one link rate. A window of 8
+> fills a 5 Mbit/s uplink at a 0.42 s round trip, and a window of 32 fills a
+> 20 Mbit/s downlink. Under Balanced mode the round trip triples and the link
+> stays idle, thus the mode and not the link sets the time. A bulk circuit in
+> a faster mode than its conversation shows the mode of that conversation to
+> the ingress relay, which Part 3 §3.9.1 forbids.
+
+**A 250 MiB attachment costs about 259.4 MiB of the uplink of the device.**
+§13.4.1 makes the relay carry the copies, thus the device pays about 1.04 times
+the object and not 3.0 times it. The remaining 4 percent is the `CNEW` traffic,
+the `CREP` traffic, and the padding of the `B3` bucket.
+
+No usability goal of Part 2 §2.4 caps an attachment upload. A client that sends
+such an object on a metered plan still spends about 259 MiB of that plan, and
+this section states that plainly. A deletion of the same object costs 4.31 MiB
+more, under `ATT-161`.
+
+**[ATT-083]** A client MUST show the uplink cost of an attachment above
+`LARGE_FILE_WARN` before it starts the upload. **[ATT-084]** A client MUST let
+the user cancel at that point. **[ATT-085]** A client MUST NOT start an upload
+above that size on a metered network without a user action.
+
+> **Erasure coding, examined and rejected.** A systematic Reed-Solomon code
+> lowers the storage factor from 3.0 to 1.5. Part 5 §5.5.2 already specifies
+> such a code over GF(2¹⁶), thus the code itself adds no primitive and no crate.
+> At *k* of 8 and *r* of 4 the twelve fragments of one group sit four on each of
+> three operators, and any eight rebuild the group.
+>
+> **The code is not compatible with §13.4.1.** A systematic code needs one party
+> to hold each of the *k* data chunks of a group at one moment, because the
+> parity is a function of all of them. That party is a client or a relay, and
+> neither works.
+>
+> - A relay that computes the parity holds 8 chunks of one file. §13.2.2 states
+>   that a relay cannot find that two chunks belong to the same file, thus this
+>   path gives up a stated property.
+> - A client that computes the parity uploads 12 fragments for each 8 chunks,
+>   which is a factor of 1.5 on the link of the device. §13.4.1 gives that link
+>   a factor of 1.04. Thus the code costs the device 44 percent more upload to
+>   save relay storage, and §13.10 already sizes that storage.
+>
+> Two more costs stand against it. A file below *k* chunks needs padding to a
+> whole group, thus a 30 KB object costs 12 chunks and about 392 KB. A rule that
+> applies the code above a size threshold makes two classes of object, and
+> §13.2.1 rejects exactly that shape for the chunk size, because the variation
+> is itself a fingerprint. A single operator outage also needs 8 fragment reads
+> to rebuild one chunk, against 1 read under a replica.
+>
+> `ATT-016` gates any change to `REPLICAS` on a measurement of the relay churn
+> over 45 days. No party has that measurement. **[ATT-124]** A revision that
+> takes the code above MUST make that measurement first, and it MUST state the
+> §13.2.2 concession or the device cost in the Part 2 §2.4 table.
+
+## 13.8 Transport separation
+
+**[ATT-024]** An attachment transfer MUST use a **separate connection**, or
+separate QUIC streams, from the interactive messaging. Head-of-line blocking on
+the retransmit of one chunk stalls the chat delivery. That stall occurs on the
+lossy mobile links where UMBRA has to operate.
+
+A mix of the two traffic types also makes the composite flow shape more
+distinctive. A1 reads the timing and the volume of the interactive messages
+inside that composite flow. Part 3 §3.2.5 and Part 3 §3.5.2 protect the same
+property, which is G8. This rule makes no claim of flow-level undetectability
+(Part 3 §3.8.1).
+
+## 13.9 What relays learn
+
+| Party | Learns | Does not learn |
+| --- | --- | --- |
+| **Chunk relay** | That a client uploaded a blob of `CHUNK_SIZE` bytes under a random credential. The download count and the times | The file identity and the other chunks of the same file. The uploader identity and the recipient identity. The filename, the size before the padding, and the content |
+| **Chunk relay that holds a backup object** | The same items. Part 4 §4.7.2 writes a backup under the rotating handle of that section, thus the relay reads a random 32-byte handle and ciphertext | Which user owns the backup, and the Recovery Code that opens it. Part 4 §4.7.1 splits that code, and Part 16 §16.1 holds the two rows |
+| **The three replica operators in collusion** | That one chunk is in three locations | Nothing that links that chunk to a different chunk or to a user |
+| **Each relay that holds a chunk of one file, in collusion** | The chunk count, and thus an approximate padded file size | The content, the participants, and the filename |
+| **Chunk relay that holds a chunk of a community attachment (Part 12 §12.4.7)** | The same items as the first row, and a download count that follows the pull volume of the community | The community, because the descriptor travels in the community record and not to the chunk relay |
+
+The last row is the residual leak, and Part 16 states it. **[ATT-066]** A
+revision that adds a client of the chunk path MUST add a row to this table.
+Part 4 §4.7.2 and Part 12 §12.4.7 are the second and third clients of that
+path today.
+
+## 13.10 The relay storage budget
+
+`MAX_FILE_SIZE` of 250 MiB moves the storage cost of an attachment relay from a
+detail to a deployment constraint. Part 10 §10.9.1 sizes the outbound budget of
+a queue relay, and this section sizes the store of an attachment relay.
+
+**The steady-state formula.** A relay holds each chunk for `CHUNK_TTL`, thus the
+store reaches a steady state at that period.
+
+```
+stored_bytes = users × upload_bytes_each_day × REPLICAS × CHUNK_TTL
+             ÷ attachment_relay_count
+```
+
+Part 3 §3.12 models a moderate user at 2 files each day. The media mix of those
+files is 80 percent images at about 400 KB after the re-encode of `ATT-156`. The
+rest is 15 percent voice notes at about 200 KB and 5 percent documents at about
+2 MB. The mean is about 452 KB, thus the day is about 904 KB. That user costs
+904 KB × 3 × 45 = **122 MB** of network storage at the steady state. A `CRNW` of
+§13.3.3 extends a chunk to `CHUNK_LIFE_MAX` at the most, thus a chunk that a
+party renews costs two times that figure.
+
+| Store | Moderate users that it holds |
+| --- | --- |
+| `CHUNK_STORE_MIN`, 100 GiB | about 880 |
+| `CHUNK_STORE_TARGET`, 200 GiB | about 1 760 |
+
+- **[ATT-086]** A relay that declares the attachment role MUST hold
+  `CHUNK_STORE_MIN` of free storage. **[ATT-087]** A relay MUST publish the
+  declared store in `chunk_store_gib` of its descriptor of Part 10 §10.5.3.
+  **[ATT-088]** A directory authority MUST reject an attachment role from a
+  relay whose `chunk_store_gib` is below `CHUNK_STORE_MIN`.
+- The `RelaySetDiff` of Part 10 §10.5.3 carries a two-bit store level for each
+  relay. **[ATT-144]** A writer SHOULD prefer a relay at store level 2 or 3 for
+  a `CNEW` or a `BNEW`. The level is advisory, and a false level costs the
+  writer one failed registration.
+- **[ATT-089]** A relay MUST reject a `CNEW` when its store holds less free
+  space than `CHUNK_SIZE`. **[ATT-090]** A relay below `CHUNK_STORE_TARGET` of
+  stored bytes MUST NOT erase a chunk before `CHUNK_TTL` to make space.
+  **[ATT-168]** A relay above `CHUNK_STORE_TARGET` MAY erase attachment chunks
+  before `CHUNK_TTL`, oldest renewal first. **[ATT-179]** Such a relay MUST NOT
+  erase a backup-class chunk. **[ATT-091]** A relay MUST signal that condition
+  to the directory as a capacity fault.
+
+  > *Cause of the conditional.* A relay that declared the target and filled
+  > it held two rules that a full store cannot both obey, which are the reject
+  > of `ATT-089` and the hold of `ATT-090`. The target is the store that the
+  > relay promised, and an erase above it costs a chunk that a `CGET` then
+  > finds at a replica. The client reports the loss under `ATT-052` when each
+  > replica is gone.
+
+**One uploader must not fill a relay.** Part 14 §14.2 gates the allocation of
+attachment storage with a token, and this section gives that gate a number.
+
+- **[ATT-092]** A relay MUST apply `UPLOAD_QUOTA_DAY` for each credential that
+  presents a token. **[ATT-093]** A relay MUST reject a `CNEW` above that quota.
+  **[ATT-094]** A relay MUST NOT hold a quota counter after 24 hours.
+
+At `UPLOAD_QUOTA_DAY` of 512 MiB, one holder costs 512 MiB × 3 × 45 = **67.5
+GiB** of network storage at the steady state, spread across the attachment relay
+population. **[ATT-095]** A revision that raises `MAX_FILE_SIZE`,
+`UPLOAD_QUOTA_DAY`, `REPLICAS`, `CHUNK_TTL`, or `CHUNK_LIFE_MAX` MUST derive
+this section again.
+
+> *Why the quota counter is not an identifier.* §13.2.2 gives each chunk an
+> independent random credential, thus a relay cannot join two chunks to one
+> uploader. The quota therefore binds to the **token** of Part 14 §14.3 and not
+> to a party. Part 14 §14.7 keeps the spend set relay-local and epoch-scoped,
+> and `ATT-094` gives the counter the same lifetime. Part 16 §16.1 holds the
+> attachment relay row without a change.
+
+## 13.11 The relay egress budget
+
+A store bounds what a relay holds, and this section bounds what it serves. A
+popular community attachment fetches many times from one chunk. A relay without
+a bound serves it until its link fails for each other client.
+
+- **[ATT-169]** A relay MUST NOT serve more than `CHUNK_EGRESS_BUDGET_DAY` of
+  chunk bytes in one day. **[ATT-170]** Above that budget, a relay MUST answer
+  a `CGET` with a `NACK` of reason `BUSY`, and Part 6 §6.4.4 gives the reason.
+- **[ATT-171]** A relay MUST NOT serve one chunk more than `CHUNK_FETCH_RATE`
+  times in one hour. **[ATT-172]** Above that rate, a relay MUST answer a
+  `CGET` of that chunk with a `NACK` of reason `LIMIT`.
+- **[ATT-173]** A client that receives `BUSY` or `LIMIT` for a chunk MUST fetch
+  the next replica of the `ChunkRef`. **[ATT-174]** A client MUST NOT send the
+  same `CGET` to the same relay again inside one hour.
+- **[ATT-175]** An author of a community attachment MUST register
+  `HOT_REPLICAS` copies of each chunk when the activity bucket of the
+  community is at its top level, under Part 9 §9.12. The `ChunkRef` holds two
+  replica hints, thus the author puts the extra copies in the manifest of
+  §13.3.4 as further refs of the same chunk. **[ATT-176]** A receiver MUST
+  treat two refs with one `chunk_id` as replicas of one chunk.
+
+> *Cause.* `CHUNK_EGRESS_BUDGET_DAY` is four times the store, thus a relay
+> serves each stored byte about four times a day at most, and Part 10 §10.9.1
+> sizes the outbound link that carries it. `CHUNK_FETCH_RATE` of 60 caps one
+> chunk at one fetch a minute, which a community of 1 000 readers exceeds at a
+> popular post. `HOT_REPLICAS` moves that load to six relays, and the author
+> pays the copies, because the author chose to publish. A relay that shed a
+> fetch under an earlier draft did so in silence, and the client waited.
