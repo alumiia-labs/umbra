@@ -1,7 +1,8 @@
 # UMBRA Protocol Specification — Part 3: Network Architecture
 
 **Status:** Draft
-**Version:** 0.1.0-draft
+**Version:** 0.2.0-draft
+**Date:** 2026-09-11
 
 ---
 
@@ -40,7 +41,7 @@ Thus UMBRA spends seconds and does not spend gigabytes.
 
 | Role | Operated by | Sees | Does not see |
 | --- | --- | --- | --- |
-| **Queue Relay** | Nonprofit or third party | Queue IDs, ciphertext, delivery time | Client IP address (when chained), identities, content |
+| **Queue Relay** | Nonprofit or third party | Queue IDs, ciphertext, delivery time. For a group queue (§3.2.7): that the queue exists, the count of reader sessions and of writer sessions, the arrival time and the bucket of each record, the member count at each rotation from the slot count of the epoch-key record, and the notifier count | Client IP address (when chained), identities, content. For a group queue: the membership list, the identity or the pairwise queue of any member, the sender of a record, and the content of a record |
 | **Chain Relay** | Nonprofit or third party | Adjacent hop addresses, cell time | Queue IDs, content, endpoints |
 | **Ingress Relay** | Nonprofit or third party | Client IP address, cell time, cell sizes | Destination queue, content, contact graph |
 | **Notification Relay (NDR)** | Nonprofit only (refer to Part 8) | Push handles, blinded tokens in transit | Queue-to-token binding, content |
@@ -55,7 +56,9 @@ client.
 
 A **queue** is a one-direction, anonymous mailbox on a server. It is the
 smallest unit of the network layer of UMBRA. It is also the cause that the
-seizure of a relay gives nothing of use.
+seizure of a relay gives nothing of use. §3.2.1 to §3.2.6 give the pairwise
+queue, which has one reader. §3.2.7 gives the group queue, which has many
+readers and which the same relays serve.
 
 ### 3.2.1 Queue identifiers
 
@@ -340,6 +343,158 @@ the derivation.
 > Rule `NET-189` keeps the fetch off a live contact, thus a relay sees a
 > dead-channel handle only when a pair has lost its channel.
 
+### 3.2.7 Group queues
+
+A **group queue** is a relay-held, retained, many-reader mailbox. It is a queue
+kind beside the pairwise queue of §3.2.1 to §3.2.6, and one group of Part 11
+holds one group queue on each of two relays. A member uploads one record for
+each message, and each reader fetches that record. No relay receives a
+recipient list. **[NET-223]** A relay that serves queues MUST serve group
+queues. No new relay role exists, and the role table of §3.1 gives what such a
+relay sees. Part 6 §6.4.5 gives the commands of a group queue, Part 6 §6.4.6
+gives the record, and Part 11 gives the member-side rules.
+
+**Identifiers and credentials.**
+
+```
+GroupQueueId        [32]u8   made by the relay from its CSPRNG at a GNEW
+read_pk / read_sk   X25519   the reader credential, one pair for each group epoch
+write_pk / write_sk X25519   the writer credential, one pair for each group epoch
+own_pk / own_sk     X25519   the owner credential, made by the creator from its
+                             CSPRNG, held by each member of role admin or above
+```
+
+**[NET-224]** A relay MUST make `GroupQueueId` from its CSPRNG at a `GNEW`.
+**[NET-225]** A party MUST NOT be able to derive `GroupQueueId` from a key or
+from an earlier queue. **[NET-226]** A relay MUST hold, for a group queue,
+`GroupQueueId`, the three public keys, the previous `read_pk` and `write_pk`
+under the grace below, the records, and the notifier set of Part 8 §8.5.2.
+**[NET-227]** A relay MUST NOT hold per-reader state of a group queue other than
+the live sessions and the notifiers. **[NET-228]** A relay MUST NOT hold a list
+of the members of a group queue, and no command of Part 6 §6.4.5 carries a
+member identifier.
+
+**[NET-229]** A party MUST authorize a group-queue command with the
+authenticator of §3.2.3, with `read_sk`, `write_sk`, or `own_sk` in the place
+of `Q*_auth_sk` and with `GroupQueueId` in `queue_id`. Part 6 §6.4.5 gives the
+key of each command. `NET-015` holds, thus no group-queue command carries a
+signature.
+
+**The credential exception.** **[NET-230]** A member MUST derive `read_sk` and
+`write_sk` of a group queue from the group epoch secret `K_e` under Part 11
+§11.3.1. That derivation is the one exception to `NET-009` to `NET-014`.
+**[NET-231]** A creator MUST make `own_sk` from the device CSPRNG, and a party
+MUST NOT derive it.
+
+> *Cause.* `NET-009` to `NET-014` exist against a seized relay that collects
+> the queues of one user by repeated key material. The writer set and the
+> reader set of a group queue are the membership, and the membership holds
+> `K_e` by definition. A credential that each member derives from `K_e`
+> repeats no material of any one user, and it rotates with the epoch. A
+> credential from the device CSPRNG would need a distribution to each member
+> at each rotation, which the epoch-key record of Part 11 §11.4.2 already
+> carries for `K_e`.
+
+**The sequence.** **[NET-232]** A relay MUST assign `seq` for each group queue
+as a `u32` that starts at 1, that increases strictly, and that it never
+reissues. `seq` is relay-local, thus the two replicas of one group give two
+unrelated sequences. **[NET-233]** A client MUST NOT use `seq` as a message
+identifier or as an order across replicas. Part 11 §11.7 gives the order of a
+group.
+
+**No reader acknowledgment.** **[NET-234]** A relay MUST retain a record of a
+group queue by time and by quota only, under the table below. **[NET-235]** A
+relay MUST NOT erase a record because a reader read it. **[NET-236]** A reader
+MUST hold its own cursor for each replica, as mutable state of Part 7 §7.5.3,
+for each device. **[NET-237]** If a `GSUB` names a backlog above
+`DRAIN_THRESHOLD` of §3.5.2, the relay MUST answer it in one unpaced response,
+as `NET-037` gives for a pairwise queue.
+
+**The acknowledgment of a post.** **[NET-238]** A relay MUST answer an accepted
+`GPOST` with a `GSEQ`. §3.7 makes that `GSEQ` the relay acknowledgment of the
+ARQ. **[NET-239]** If a `GPOST` carries record bytes that the relay already
+holds, the relay MUST answer with the `seq` that it holds for those bytes.
+**[NET-240]** A relay MUST apply `GROUP_POST_RATE` for each group queue.
+**[NET-241]** A relay MUST answer a `GPOST` above that rate with a `NACK` of
+reason `LIMIT` (Part 6 §6.4.4). A `GNEW` carries an `Admission` of Part 14
+§14.2, and a `GPOST` carries none.
+
+**The rotation of the credentials.** **[NET-242]** After a `GKEY`, a relay
+MUST keep the previous `read_pk` for `GROUP_READ_GRACE` and the previous
+`write_pk` for `GROUP_WRITE_GRACE`. **[NET-243]** Inside that grace, a relay
+MUST accept a `GSUB`, a `GUNSUB`, a `GNREG`, or a `GNUNREG` under either read
+key, and a `GPOST` under either write key. **[NET-244]** At a `GDEL`, a relay
+MUST erase the group queue, each record, and each notifier. **[NET-245]** A
+relay MUST NOT retain an identifier of a deleted group queue.
+
+**Retention and quota.**
+
+| Parameter | Value | Note |
+| --- | --- | --- |
+| `GROUP_RETENTION` | 30 days from acceptance | **[NET-246]** A relay MUST erase a record `GROUP_RETENTION` after its acceptance. The value equals `GROUP_SILENT_EVICT` of Part 11 §11.10: a member silent for 30 days is evicted, thus no member needs a record older than the retention |
+| `GROUP_QUEUE_QUOTA` | 32 MiB of records for each group queue | **[NET-247]** If the records of a group queue exceed this quota, the relay MUST erase the oldest record first. **[NET-248]** A relay MUST NOT erase a record below `GROUP_RETENTION` for a cause other than this quota or a `GDEL` |
+| `GROUP_POST_RATE` | 60 records in each 60 s for each group queue, relay-local | `NET-240` and `NET-241` apply it |
+| `GROUP_READ_GRACE` | 30 days | `NET-242` keeps the previous `read_pk` for this period |
+| `GROUP_WRITE_GRACE` | 24 h | `NET-242` keeps the previous `write_pk` for this period |
+| `GROUP_IDLE_TTL` | 60 days without an accepted `GPOST` or a `GSUB` | **[NET-249]** A relay MUST delete a group queue with no activity for this period. **[NET-250]** A relay MUST count an accepted `GPOST` and a `GSUB` as activity. **[NET-251]** A relay MUST NOT count a `COVER` as activity |
+| `GROUP_NOTIFIER_MAX` | 4 096 notifiers for each group queue | **[NET-252]** A relay MUST reject a `GNREG` that would exceed this count. Part 8 §8.5.2 gives the notifier |
+
+A member that was offline for longer than `GROUP_RETENTION` has missed records,
+and Part 11 §11.8 makes the client show that gap.
+
+**Replicas.** Part 11 §11.10 sets `GROUP_REPLICAS` to 2.
+
+- **[NET-253]** A creator MUST make one group queue on each of `GROUP_REPLICAS`
+  relays. **[NET-254]** The entries of those relays MUST carry different
+  `operator_id` values and different jurisdiction blocs, under invariant 1 and
+  invariant 2 of §3.4.6. Part 10 §10.5.3 gives `operator_id`, and Part 10
+  §10.6.3 gives the bloc list. **[NET-255]** A creator MUST NOT apply the
+  relaxation of `NET-200` to the two replicas.
+- **[NET-256]** A sender MUST send the same record bytes to each replica, each
+  under the ARQ of §3.7. **[NET-257]** A client MUST put a record in the
+  `accepted` state of Part 15 §15.9.1 when the first replica returns a `GSEQ`.
+  **[NET-258]** The client MUST continue the ARQ to the other replica in the
+  background. **[NET-259]** If the ARQ to one replica ends under `NET-220` after
+  the other replica accepted, the client MUST report that replica as a link
+  fault under Part 10 §10.4.2.
+- **[NET-260]** A reader MUST subscribe to one replica in each session, and it
+  MUST select that replica at random. **[NET-261]** A reader MUST alternate
+  replicas across sessions. **[NET-262]** If a reader observes a gap in the
+  `counter` of one sender for longer than `GROUP_GAP_TIMEOUT` of Part 11
+  §11.10, it MUST open a session to the other replica and fetch from its cursor
+  there. Part 11 §11.2.2 gives the gap repair, and a duplicate across replicas
+  falls to the `msg_id` rule of Part 6 §6.6 (`WIR-065`).
+
+**Transport isolation.** The rules below are the analog of `NET-022` and
+`NET-023` for a group-queue session.
+
+- **[NET-263]** A client MUST NOT carry more than one group queue on one
+  transport session. **[NET-264]** A client MUST NOT carry a command of a range
+  other than Part 6 §6.4.5 on a session that carries a group-queue command.
+  **[NET-265]** A client MAY send a `COVER` of Part 6 §6.3 on a group-queue
+  session. **[NET-266]** A client MUST put each group-queue session on its own
+  relay chain, under the invariants of §3.4.6.
+- **[NET-267]** For each cell of a group-queue session, a client MUST treat the
+  group-queue relay as the queue relay of `NET-124`. Thus hop 3 of that chain
+  is the group-queue relay, and the innermost layer ends there.
+
+> *Cause.* `NET-022` and `NET-023` exist because a relay that sees two queues
+> on one session learns that they belong to one client. A group-queue relay
+> that sees a group queue and a pairwise queue on one session learns that one
+> member of the group holds that pairwise queue, which §3.11 does not permit
+> it to learn. One group queue for each session keeps the two apart, and the
+> two replicas of one group sit on two chains for the same cause.
+
+> *Cause of the group queue.* An earlier draft gave a group of up to 500
+> members a pairwise fan-out, thus a member of six 25-member groups held 144
+> inbound group queues over 18 sessions, and one text to a 500-member group
+> cost 499 `B1` cells of uplink. The ingress relay then read the recipient
+> count of a group from the size of the burst. This draft gives the group one
+> relay-held record for each message. The group-queue relay reads the member
+> count from the slot count of an epoch-key record in the place of that burst,
+> and §3.11 states that trade. The transport session count of the model user
+> of §3.12 falls from 20 to 9.
+
 ## 3.3 The cell — fixed-size units on the wire
 
 Each unit that a relay can see is a **cell**. UMBRA pads a cell to one of four
@@ -348,9 +503,9 @@ sizes:
 | Bucket | Size | Carries |
 | --- | --- | --- |
 | `B0` | 512 B | Text up to 155 B, receipts, control, ratchet headers, cover, loops |
-| `B1` | 2 KiB | Text above 155 B, PQ ratchet chunks, handshake flights, small media metadata |
-| `B2` | 8 KiB | Thumbnails, link previews, small attachments |
-| `B3` | 32 KiB | Attachment chunks (the only attachment size) |
+| `B1` | 2 KiB | Text above 155 B, PQ ratchet chunks, handshake flights, small media metadata, group records of a group up to about 120 members (Part 11 §11.3.3) |
+| `B2` | 8 KiB | Thumbnails, link previews, small attachments, group records of a group above about 120 members |
+| `B3` | 32 KiB | Attachment chunks (the only attachment size), inline epoch-key records (Part 11 §11.4.2) |
 
 Part 6 §6.9 gives bucket `B0` a text capacity of 155 bytes. A text above that
 capacity needs bucket `B1`. §3.3.1 and §3.12 put the modal text of about 350
@@ -377,13 +532,16 @@ are three measured causes:
    necessary. PoPETs 2026(2):436–451 quantifies this cost for Nym. Packets of 2
    413 bytes make each cover packet 4.7 times more expensive than a Tor cell of
    514 bytes.
-3. **Group fan-out.** One text message to a 500-member group reaches 499
-   recipients, and it costs 499 × 2 096 B = **1.05 MB** with the ladder. Part 6
-   §6.9 gives 2 096 B as the wire cost of one `B1` cell. The same message costs
-   499 × 16 454 B = **8.21 MB** with a uniform block. The wire cost of a 16 KiB
-   block is the block and 70 B of framing across two TLS records (Part 6
-   §6.2.1). This difference decides if the group feature operates on mobile
-   data.
+3. **Group posts.** A group record carries one 12-byte tag for each member
+   (Part 11 §11.3.3). A text record of a 500-member group is **8 240 B** at
+   `B2` with the ladder, against **16 454 B** with a uniform block. A text
+   record of a 25-member group carries a 300-byte tag vector, thus it stays in
+   `B1` at **2 096 B**, against the same 16 454 B with a uniform block. The
+   wire cost of a 16 KiB block is the block and 70 B of framing across two TLS
+   records (Part 6 §6.2.1). Each reader of a group downloads each record, thus
+   the 120 group receives of the §3.12 day cost 252 KB with the ladder and
+   1.97 MB with a uniform block. This difference decides if the group feature
+   operates on mobile data.
 
 **[NET-026]** An attachment MUST use chunks of `CHUNK_SIZE` (Part 13 §13.7). That chunk fills
 the payload of one command at bucket `B3`. Only the last chunk carries padding.
@@ -597,8 +755,9 @@ causes does not occur.
 
 > *Cause of the 4 hours.* An earlier draft set `CIRCUIT_MAX_AGE` to 10 minutes,
 > and each push wake then paid a fresh build. §3.12 puts the background
-> arrivals at one queue relay about 91 minutes apart, thus a circuit of 4 hours
-> serves most of them. Part 6 §6.2.3 sets `SESSION_RESUME_WINDOW` to the same
+> arrivals at one group-queue relay about 48 minutes apart and at one pairwise
+> queue relay about 21 minutes apart, thus a circuit of 4 hours serves almost
+> all of them. Part 6 §6.2.3 sets `SESSION_RESUME_WINDOW` to the same
 > 4 hours, because a circuit does not outlive its session. The cost is a longer
 > window for a seized hop 1 or hop 2 key set, and Part 16 §16.3 records it.
 > Part 2 §2.4 states the trade.
@@ -889,6 +1048,16 @@ thus the clock runs during it. The one exception is the reconnect drain of §3.7
 item 4. **[NET-037]** If that batched peek finds more than `DRAIN_THRESHOLD` messages, the
 relay MUST answer it in one unpaced response. `DRAIN_THRESHOLD` is 60 messages.
 
+**A group-queue session is a held session.** The `GSUB` of Part 6 §6.4.5 is
+the subscription of that session, and the relay pushes each new record on it.
+**[NET-268]** A relay MUST run the clock of `NET-035` and `NET-036` on a
+group-queue session of §3.2.7 as on a pairwise session. **[NET-269]** The cover
+cell of a group-queue session MUST have the shape of a `GMSG`, thus it is
+bit-indistinguishable from a real `B0` delivery on that session. `NET-037` and
+`DRAIN_THRESHOLD` apply to a `GSUB` under `NET-237`. The push wake of Part 8
+§8.5.2 opens a group-queue session, and that session is a held session of this
+rule.
+
 > *The derivation of `DRAIN_THRESHOLD`.* One tick delivers one cell. At a
 > `PACING_MEAN` of 1 s a paced session delivers about 60 messages in 60 s. U6
 > needs 99.9 % of a backlog in 60 s after the recipient comes online. Thus a
@@ -1014,12 +1183,17 @@ MUST erase a receipt when it emits or discards it.
 across two opportunities. **[NET-057]** A client MUST NOT select a larger bucket to carry more
 receipts, because the bucket then names the count.
 
-**Fan-out.** **[NET-058]** If a receipt goes to more than one peer, the client MUST apply the
-fan-out jitter of Part 11 §11.3.0.
+**A group and a community.** A group carries no delivery receipt, no read
+receipt, and no typing indicator, and Part 11 §11.6 gives the cause. Each such
+signal is a record that every reader of the group queue downloads, thus the
+aggregate cost is quadratic in the member count. Part 12 §12.3.1 prohibits a
+receipt in a community. Thus a receipt goes to one peer, and this section
+needs no fan-out rule.
 
-**A group and a community.** Part 11 §11.7.1 gives the receipt topology of a
-private group and the group setting. Part 12 §12.3.1 prohibits a receipt in a
-community.
+> *Cause.* An earlier draft made a client apply the fan-out jitter of the
+> group tier to a receipt that went to more than one peer. That draft gave a
+> group a receipt to the sender only. This draft removes the group receipt and
+> the fan-out, thus the rule has no case.
 
 **Defaults.** **[NET-059]** Delivery receipts and read receipts MUST be off by default for a
 new contact.
@@ -1194,6 +1368,17 @@ The interface rule of Part 15 §15.9 shows it to the user. `SEND_GIVE_UP` equals
 `DEAD_CHANNEL_SILENCE` of §3.2.6, because a channel that accepts nothing for 7
 days is a channel that the dead-channel probe examines.
 
+**A post to a group queue.** A `GPOST` of §3.2.7 travels to two replicas, and
+the rules above apply to each replica.
+
+- **[NET-270]** A client MUST take a `GSEQ` as the relay acknowledgment of a
+  `GPOST` under this section. **[NET-271]** A client MUST count
+  `SEND_MAX_ATTEMPTS` and `SEND_GIVE_UP` for each replica of a `GPOST`
+  separately. **[NET-272]** A client MUST put a `GPOST` in the `failed` state
+  only when no replica returned a `GSEQ` before `SEND_GIVE_UP`. A `GPOST` that
+  one replica accepted is `accepted` under `NET-257`, and `NET-259` reports
+  the other replica.
+
 > *Cause.* An earlier draft gave the ARQ no end. A record to a deleted queue
 > got a `REJECTED`, and the client sent it again at the next cover slot for
 > the life of the session. Each try was a real outbound cell, and §3.11 counts
@@ -1259,7 +1444,7 @@ networks.
   has to operate.
 - **No OS VPN mode.** **[NET-075]** UMBRA MUST open userspace sockets in the application
   process. **[NET-076]** UMBRA MUST NOT capture the device traffic with the Android
-  `VpnService` or with the iOS `NetworkExtension`. Tolley and others (2026)
+  `VpnService`. Tolley and others (2026)
   tested six tools on Android 16. All six leak internal IP addresses and accept
   injected TCP resets through the OS tunnel semantics, and payload encryption
   does not prevent this.
@@ -1391,9 +1576,9 @@ manifest. The carriers are:
    also removes a step from the first launch, which U1 measures.*
 2. **Push-notification wake.** The platform push path is already open for a
    resident application. A push wakes a client that has no current relay, and
-   that client then fetches a fresh manifest over another carrier. Apple and
-   Google already learn that the application is installed (Part 8 §8.7), thus
-   this carrier adds no new party.
+   that client then fetches a fresh manifest over another carrier. Google
+   already learns that the application is installed (Part 8 §8.7), thus this
+   carrier adds no new party.
 3. **DoH TXT and HTTPS-RR** lookups at large resolvers.
 4. **Serverless HTTPS endpoint (optional).** **[NET-083]** A deployment MAY use a function URL
    at a large cloud provider. This carrier needs no dedicated host, thus an
@@ -1456,15 +1641,6 @@ the recipient, the content, or how many conversations the client has.
 C the client makes no cover cell (§3.6.2), thus each background outbound cell is
 a real event. UMBRA accepts this loss, and Part 16 §16.3 records it.
 
-**One Ingress Relay also reads the size of a group fan-out.** A tier T2 send of
-Part 11 §11.2 makes *N* − 1 cells inside a few seconds, against a foreground
-cover rate of 0.05 cells each second. Thus the relay reads the recipient count
-of one conversation. Part 2 §2.2 THR-002 covers the **count of conversations**,
-and it does not cover the **size of one conversation**. Part 11 §11.3.0 gives the
-jitter that randomizes the order inside that burst, and no measure of this
-specification conceals the count. UMBRA accepts this loss, and Part 16 §16.3
-records it.
-
 **One Chain Relay** learns two adjacent relay addresses and the cell times. It
 learns nothing else.
 
@@ -1473,8 +1649,31 @@ the delivery time, which UMBRA randomizes. For a maximum of 8 queues at a time,
 it also learns that those queues share a transport session. It does not learn a
 client IP address, an identity, or content.
 
+**One group-queue relay learns** that the group queue exists, the count of its
+reader sessions and of its writer sessions, the arrival time and the bucket of
+each record, the exact member count at each rotation, and the notifier count.
+The member count comes from the slot count of the epoch-key record of Part 11
+§11.4.2, which the relay reads. The notifier count comes from the `GNREG` set
+of Part 8 §8.5.2, and each notifier names a queue relay and no handle. It does
+**not** learn an identity, a pairwise queue of any member, content, the sender
+of a record, or a membership list, because no command of §3.2.7 carries one.
+Part 11 §11.5 states the same bound from the side of the group. Part 2 §2.2
+THR-002 covers the **count of conversations**, and it does not cover the
+**size of one conversation**. UMBRA accepts this loss, and Part 16 §16.3
+records it.
+
+> *Cause.* An earlier draft let the ingress relay read the recipient count of
+> a group from the burst of a pairwise fan-out, and no measure of that draft
+> concealed the count. This draft moves that leak from the ingress relay to
+> the group-queue relay, which reads a count and no address. Part 11 §11.2
+> replicates the queue on two relays under different operators, and a reader
+> alternates replicas under `NET-261`, thus one relay holds half of the
+> reader timeline.
+
 **Two colluding relays at the ends of the chain** recover this fact: *a client
-at IP address X delivered to queue Q at time T*. This fact is a real
+at IP address X delivered to queue Q at time T*. The ingress relay of a reader
+and its group-queue relay are one such pair, and together they recover that
+*a client at IP address X reads group queue G*. This fact is a real
 deanonymization risk, and it is the cause of the path invariants in §3.4.6.
 UMBRA does not claim security against an adversary that controls the majority of
 the relay capacity.
@@ -1502,7 +1701,7 @@ collects what those powers add. Part 16 §16.3 holds the same rows as residuals.
 | The probe | What the relay learns | The bound |
 | --- | --- | --- |
 | Delay one queue and watch the other queues of one transport session | That those queues belong to one client | §3.2.5 caps a session at 8 queues |
-| Delay one queue of a group and watch the fan-out of the next send | That two queues belong to one group | §11.3.0 randomizes an emission time and it does not randomize a response to a probe |
+| Delay one reader session of a group queue and watch the other sessions | Nothing beyond the reader count that it already holds (§3.11) | A reader's cursor is local under `NET-236`, thus no session answers for another |
 | Drop each cell of one circuit | That the client rebuilds, and the timing of that rebuild | §3.4.3 gives `CIRCUIT_MAX_AGE` of 4 hours, thus a rebuild is normal |
 | Inject one cell on one link | The circuit dies (§3.4.5), and the loop cover of §3.6.1 measures the death | §10.4 feeds the loop-failure rate to the relay reputation |
 | Withhold a `MSG` and watch the acknowledgment point | The reconnect cadence of the recipient | Part 6 §6.4.3 rule 7 gives one boundary for each batch |
@@ -1537,33 +1736,47 @@ The modeled device is the phone. The phone holds the ratchet ownership of Part 7
 §7.5.4 for each contact. Thus each record of the mix enters the device set at
 the phone, and the phone sends that record on each of its sync channels.
 
-**The model user holds 160 inbound queues over 20 sessions.** The user has 16
-direct contacts, and each contact holds one pairwise queue. Part 11 §11.2 gives
-a member one pairwise channel with each other member, thus the 6 groups add
-6 × 24 = 144 queues. `MAX_QUEUES_PER_SESSION` of §3.2.5 puts 8 queues in one
-session, thus the 160 queues need 20 sessions. NET-023 puts each session on its
-own chain, and NET-124 puts hop 3 at the queue relay of the queue. The model
-spreads the 160 queues over 20 queue relays, with one session for each relay.
-The recipients of the day sit on 32 other queue relays.
+**The model user holds 16 pairwise queues and 6 group queues over 9 sessions.**
+The user has 16 direct contacts, and each contact holds one pairwise queue.
+`MAX_QUEUES_PER_SESSION` of §3.2.5 puts 8 queues in one session, thus the 16
+queues need 2 sessions. Each of the 6 groups holds one group queue of §3.2.7
+on 2 replicas, and the user reads one replica of each group in one session
+under `NET-263`, which is 6 group-queue sessions. In Instant mode the user
+holds one notify queue for each group under one handle (Part 8 §8.5.2), and
+that handle holds no pairwise queue, thus the 6 notify queues take one more
+session. That is 9 sessions. `NET-023` and `NET-266` put each session on its
+own chain, and `NET-124` and `NET-267` put hop 3 at the relay of the queue. The
+model spreads the 9 sessions over 9 relays: 2 queue relays hold the pairwise
+queues, 6 group-queue relays each hold the replica that the user reads, and 1
+queue relay holds the notify queues. The recipients of the day sit on 22 other
+relays, which are the 16 queue relays of the direct contacts and the 6 relays
+that hold the second replica of each group. An earlier draft gave a member one
+pairwise queue with each other member, thus the user held 160 queues over 20
+sessions.
 
-**Those two relay counts are a model and not a measurement.** **[NET-212]** An
+**Those relay counts are a model and not a measurement.** **[NET-212]** An
 implementation MUST measure the queue-relay spread of a real deployment before a
-revision re-tunes this table. The session count sets the handshake row, the
-circuit-build row, and the entry row below. Thus the spread is the largest
-unverified figure of this section.
+revision re-tunes this table. **[NET-273]** An implementation MUST measure the
+group-queue relay spread of a real deployment before a revision re-tunes this
+table. The session count sets the handshake row, the circuit-build row, and
+the entry row below. Thus the spread is the largest unverified figure of this
+section.
 
-**The foreground holds one paced session.** That session carries the 8 most
-active queues of the user, and the 26 foreground receives arrive on them. A
-message on another queue arrives as a push, and the client drains it as a wake
-of the kind below. The inbound cover row grows with the held-session count, and
-the cover derivation below states that dependency.
+**The foreground holds one paced session at a time.** That session is the
+session of the conversation that the user reads, and the 26 foreground
+receives arrive on it. The user moves between conversations, and the model
+opens each of the 8 conversation sessions one time in the 2 h. A message on
+another session arrives as a push, and the client drains it as a wake of the
+kind below. The inbound cover row grows with the held-session count, and the
+cover derivation below states that dependency.
 
 **The background holds 184 arrivals.** Of the 210 receives, 184 arrive in the
-14 h of background. The model spreads those arrivals as a Poisson process with
-a mean gap of 274 s, which is 50 400 s / 184. In Instant mode each arrival
-wakes the device one time. `WAKE_COALESCE_WINDOW` of Part 8 §8.5 is 10 s, and
-about 4 % of the gaps are shorter than that window. The table uses the ceiling
-of 184 wakes, and it takes no credit for that window. An earlier draft asserted
+14 h of background, which is 79 of the 90 direct receives and 105 of the 120
+group receives. The model spreads those arrivals as a Poisson process with a
+mean gap of 274 s, which is 50 400 s / 184. In Instant mode each arrival wakes
+the device one time. `WAKE_COALESCE_WINDOW` of Part 8 §8.5 is 10 s, and about
+4 % of the gaps are shorter than that window. The table uses the ceiling of
+184 wakes, and it takes no credit for that window. An earlier draft asserted
 30 wakes each day, and no arithmetic supported that count.
 
 **A wake in Instant mode costs one transport handshake.** The push names the
@@ -1574,21 +1787,39 @@ Upgrade under §3.8. The model prices that handshake at 6 000 bytes, which is
 2 400 bytes up and 3 600 bytes down. The `X25519MLKEM768` key share and the
 certificate chain set most of that figure.
 
+**A group wake opens two sessions.** The push of a group record names the
+notify session, and Part 8 §8.5.2 gives that path. The client resumes the
+notify session, drains the `NotifyDigest`, and acknowledges it. It then opens
+the group-queue session of that group with a `GSUB` from its cursor, and the
+record arrives on it. The two circuits share one connection to one ingress,
+as the handshake derivation below permits, thus a group wake pays one
+handshake and two session opens. The 184 wakes open 79 + 2 × 105 = 289
+sessions.
+
 **That handshake figure is unverified.** **[NET-213]** An implementation MUST
 measure the handshake cost of the L1 stack of §3.8 before a revision re-tunes
-this table. The client then resubscribes the 8 queues of the session in one
-`B0` cell, under §3.7 item 4. The session holds about 3 s, which is 3 pacing
-ticks at `PACING_MEAN` of 1 s. One tick carries the real `B1` drain, and 2
-ticks carry `B0` cover. The client sends one `B0` acknowledgment, and it closes
-the connection under rule `WIR-360`. NET-100 below caps the wake at 6 s.
+this table. The client then resubscribes the queues of the session in one
+`B0` cell, under §3.7 item 4, and on a group-queue session that cell is the
+`GSUB`. Each session holds about 3 s, which is 3 pacing ticks at
+`PACING_MEAN` of 1 s. One tick carries the real drain, which is a `B1` record
+on a pairwise or a group-queue session and a `B0` digest on the notify
+session, and 2 ticks carry `B0` cover. The client sends one `B0`
+acknowledgment for the queue that it drained, and it closes the connection
+under rule `WIR-360`. A group queue takes no reader acknowledgment under
+`NET-235`. NET-100 below caps each session at 6 s.
 
 **A circuit lives from one wake to the next.** §3.4.3 sets `CIRCUIT_MAX_AGE` to
 4 hours, and Part 6 §6.2.3 sets `SESSION_RESUME_WINDOW` to the same value. Each
-queue relay takes 184 / 20 = 9.2 background arrivals each day, which is 0.66
-arrivals each hour over 14 h. The chance that one gap exceeds 4 hours is
-e^(−2.63) = 0.072. Thus each relay pays one build at the first arrival of the
-day. It pays 9.2 × 0.072 = 0.66 more builds at a lapsed circuit. The 20 relays
-pay 20 × 1.66 = 33 builds each day. An earlier draft set `CIRCUIT_MAX_AGE` to 10
+of the 2 pairwise queue relays takes 79 / 2 = 39.5 background arrivals each
+day, which is 2.8 arrivals each hour over 14 h. The chance that one gap
+exceeds 4 hours is e^(−11.3), which is 0 to three places, thus each pays one
+build at the first arrival of the day. The notify relay takes 105 arrivals,
+and it pays one build for the same cause. Each of the 6 group-queue relays
+takes 105 / 6 = 17.5 arrivals each day, which is 1.25 arrivals each hour. The
+chance that one gap exceeds 4 hours is e^(−5.0) = 0.0067. Thus each one pays
+one build at the first arrival and 17.5 × 0.0067 = 0.12 more at a lapsed
+circuit, and the 6 pay 6.7. The background pays 2 + 1 + 6.7 = 9.7 builds each
+day, and the table uses 10. An earlier draft set `CIRCUIT_MAX_AGE` to 10
 minutes, and each wake then paid a build.
 
 A build is 3 `EXTEND` cells and 3 `EXTENDED` cells under NET-150 and NET-151.
@@ -1615,27 +1846,58 @@ costs **32 860 B**. Each row below uses those four figures.
 | Uplink | |
 | --- | --- |
 | 1:1 sends (60 `B1` cells) | 126 KB |
-| Group fan-out (8 × 24 `B1` cells) | 402 KB |
+| Group posts (8 × 2 replicas × `B1` cells) | 34 KB |
+| Epoch rotations as a member (6 groups × 1 `B3` cell each day) | 0 KB, an admin uploads the record |
+| Presence records (6 groups × 1 `B0` × 2 replicas in each 7 days) | 1 KB |
 | Attachment upload (2 files, 13 chunks each, 1 copy, §13.4.1) | 885 KB |
 | Device-set sync records (1 channel, 278 `B1` cells) | 583 KB |
 | Device-set sync acknowledgments (1 channel, 0 cells) | 0 KB, §7.5.5 of Part 7 forbids one here |
 | Ownership claims (1 channel, 4 `B2` cells) | 33 KB |
 | Backup writes (Part 4 §4.7.2, 9 `B3` cells) | 493 KB |
-| Circuit builds, the `EXTEND` cells (71 builds × 3 `B1` cells) | 446 KB |
-| Transport handshakes, the client half (222 × 2 400 B) | 533 KB |
-| Session resubscriptions (185 `B0` cells) | 104 KB |
+| Circuit builds, the `EXTEND` cells (45 builds × 3 `B1` cells) | 283 KB |
+| Transport handshakes, the client half (219 × 2 400 B) | 526 KB |
+| Session resubscriptions (297 `B0` cells) | 166 KB |
 | Community pulls (2 communities, 138 `B0` cells) | 77 KB |
 | Tier A cover (2 h at 0.05/s, 360 `B0` cells) | 202 KB |
 | Foreground receipts and acknowledgments | 0 KB, carried in the cover slots above (§3.5.4) |
 | Background acknowledgments of the drains (184 `B0` cells) | 103 KB |
-| Notifier rotation, the client half (Part 8 §8.2.5) | 16 KB |
+| Notifier rotation, the client half (Part 8 §8.2.5) | 3 KB |
 | Directory requests, measurement, token refill | 80 KB |
-| **Total up** | **≈ 4.08 MB** |
+| **Total up** | **≈ 3.59 MB** |
 
-> *The derivation of the group fan-out row.* Part 11 §11.2 counts a fan-out as
-> the recipient count, which is *N* − 1. The 8 group sends reach 24 recipients
-> each, which is 192 cells and 192 × 2 096 = 402 432 bytes. An earlier draft
-> counted 8 × 25 and thus counted a copy to the sender.
+> *The derivation of the group rows.* A group post is one `GPOST` of the same
+> record to each of the 2 replicas under `NET-256`. A 25-member group carries
+> a 300-byte tag vector (Part 11 §11.3.3), thus a 350-byte text stays in
+> bucket `B1`. The 8 posts are 16 cells and 16 × 2 096 = 33 536 bytes. An
+> earlier draft sent one cell to each of the 24 recipients, which was 192
+> cells and 402 432 bytes.
+>
+> The 120 group receives arrive on the 6 group-queue sessions as `GMSG` cells
+> of bucket `B1`, which is 120 × 2 096 = 251 520 bytes. The relay of each
+> group queue writes one `NotifyDigest` of Part 8 §8.5.2 into the notify queue
+> of the reader at each accepted `GPOST`, and the reader drains it as a `B0`
+> cell, which is 120 × 560 = 67 200 bytes. The 15 foreground receives arrive
+> on the held session, and their digests drain at the next open of the notify
+> session.
+>
+> Part 11 §11.4.1 rotates the epoch of a group at a removal and at
+> `GROUP_EPOCH_MAX_AGE`. The model gives each group one rotation each day as
+> an upper figure. At 25 members the epoch-key record of Part 11 §11.4.2 is
+> inline, and it is one `B3` record on the group-queue session. Above about
+> 27 members the member fetches one `B3` chunk on the chunk path of Part 13
+> §13.3.3. Each carrier costs 32 860 bytes, thus the downlink row is
+> 6 × 32 860 = 197 160 bytes. A member of role `admin` uploads the record, and
+> the model user holds no such role, thus the uplink row is 0 bytes. The model
+> counts the record among the 120 group receives for the wake arithmetic.
+>
+> Part 11 §11.9.7 makes a member post one `GroupPresence` record in each
+> `PRESENCE_INTERVAL` of 7 days of silence. It is a sparse record with at most
+> `ROLE_HOLDER_MAX` tags, thus it fits bucket `B0`. The model takes one record
+> for each group each week as the ceiling, which is 6 records to each of 2
+> replicas, 12 × 560 = 6 720 bytes each week, and 960 bytes each day.
+> **[NET-274]** A revision that changes `GROUP_MAX`, `GROUP_REPLICAS`,
+> `PRESENCE_INTERVAL`, or the group-record layout of Part 11 §11.3 MUST derive
+> these rows again.
 
 > *The derivation of the ownership claim row.* Part 7 §7.3.1 gives an
 > `OwnerClaimRecord` 3 763 bytes at `OWNER_CLAIM_MAX`, thus it uses bucket `B2`
@@ -1684,26 +1946,29 @@ implementation MUST measure the text length distribution of a real deployment
 before a revision re-tunes the bucket ladder. The padding overhead of 40.8 %
 below rests on the same unverified figure, and it carries the same mark.
 
-> *The derivation of the circuit-build rows.* The background pays 33 builds, and
+> *The derivation of the circuit-build rows.* The background pays 10 builds, and
 > the model paragraphs above derive that count. The 2 h foreground pays one
 > build for each circuit that it opens, because `CIRCUIT_MAX_AGE` of 4 hours
-> exceeds the foreground period. The foreground opens 38 circuits. Those are the
-> held session, its 2 spare circuits of §3.4.3, and one send circuit to each of
-> the 32 recipient relays. The 2 community circuits and one attachment circuit
-> complete the count. The day holds 71 builds. The 213 `EXTEND` cells cost
-> 446 448 bytes on the uplink, and the 213 `EXTENDED` cells cost the same on the
-> downlink.
+> exceeds the foreground period. The foreground opens 35 circuits. Those are
+> the 8 conversation sessions, 2 spare circuits of §3.4.3, and one send
+> circuit to each of the 22 recipient relays. The 2 community circuits and one
+> attachment circuit complete the count. A `GPOST` to the replica that the
+> user reads travels on the group-queue session, thus it opens no circuit of
+> its own. The day holds 45 builds. The 135 `EXTEND` cells cost 282 960 bytes
+> on the uplink, and the 135 `EXTENDED` cells cost the same on the downlink.
 
-> *The derivation of the two handshake rows.* Each session of the day opens one
-> transport connection, and each connection pays one handshake. The 184 wakes
-> pay 184 handshakes. The 38 foreground circuits pay at most 38 handshakes,
-> because two circuits to one ingress can share a connection. The day holds
-> 222 handshakes. The client half is 222 × 2 400 = 532 800 bytes, and the relay
-> half is 222 × 3 600 = 799 200 bytes.
+> *The derivation of the two handshake rows.* Each connection of the day pays
+> one handshake. The 184 wakes pay 184 handshakes, and a group wake carries
+> its two sessions on one connection. The 35 foreground circuits pay at most
+> 35 handshakes, because two circuits to one ingress can share a connection.
+> The day holds 219 handshakes. The client half is 219 × 2 400 = 525 600
+> bytes, and the relay half is 219 × 3 600 = 788 400 bytes.
 >
-> A resubscription follows each of the 184 wakes and the open of the held
-> session, which is 185 `B0` cells and 103 600 bytes. A send session, a
-> community session, and an attachment session carry no subscription.
+> A resubscription follows each session open. The 184 wakes open 289 sessions,
+> and the foreground opens the 8 conversation sessions, which is 297 `B0`
+> cells and 166 320 bytes. On a group-queue session the cell is the `GSUB`. A
+> send session, a community session, and an attachment session carry no
+> subscription.
 
 > *The derivation of the two community rows.* Part 12 §12.3.1 pulls through the
 > ordinary chain, and `COM-173` holds one community in each session. The
@@ -1715,12 +1980,16 @@ below rests on the same unverified figure, and it carries the same mark.
 > pull. The downlink row is 138 × 2 096 = 289 248 bytes.
 
 > *The derivation of the two rotation rows.* Rule `NTF-007` of Part 8 §8.2.5
-> rotates the notifier triple of each queue each 7 days. The 160 queues send
-> at most 160 `NKEY` cells and take 160 `NID` cells, which is 89 600 bytes in
-> each direction. The 20 handles register again at the Notification Delivery
-> Relay, at about 1 000 bytes each. The week costs 109 600 bytes up and 89 600
-> bytes down. Each day the client half is 15 657 bytes and the relay half is
-> 12 800 bytes.
+> rotates the notifier triple of each queue each 7 days. The 16 pairwise
+> queues and the 6 group notify queues send at most 22 `NKEY` cells and take
+> 22 `NID` cells, which is 12 320 bytes in each direction. The 3 handles
+> register again at the Notification Delivery Relay, at about 1 000 bytes
+> each. The client registers the new notify queue of each group with each of
+> the 2 replicas by a `GNREG` before it drops the old one (Part 8 §8.5.2),
+> which is 12 `B0` cells and 6 720 bytes. The week costs 22 040 bytes up and
+> 12 320 bytes down. Each day the client half is 3 149 bytes and the relay
+> half is 1 760 bytes. A group queue holds no notifier triple of its own, and
+> the notify queue holds it.
 
 > *The derivation of the attachment rows.* Part 13 §13.7 sets `CHUNK_SIZE` to
 > 32 650 bytes. A file of 400 KB needs 13 chunks, because 12 chunks hold
@@ -1803,8 +2072,9 @@ below rests on the same unverified figure, and it carries the same mark.
 >
 > A background acknowledgment is a `B0` cell at 560 bytes. §3.6.2 gives tier C
 > no cover cell, thus no cover cell absorbs it. Each wake drains one queue,
-> thus each wake sends one acknowledgment. The uplink row is 184 × 560 =
-> 103 040 bytes. A wake that drains two queues of one session sends two, and
+> thus each wake sends one acknowledgment. In a group wake that queue is the
+> notify queue, because a group queue takes no reader acknowledgment under
+> `NET-235`. The uplink row is 184 × 560 = 103 040 bytes. A wake that drains two queues of one session sends two, and
 > `WAKE_COALESCE_WINDOW` makes such a wake rare.
 >
 > **That cell count is unverified.** **[NET-094]** An implementation MUST measure the queue
@@ -1824,27 +2094,29 @@ below rests on the same unverified figure, and it carries the same mark.
 > 7 × 12 × 560 = 47 040 bytes. The ownership claim rows also grow with *d* − 1.
 > The phone sends 4 claims on each of its 7 channels, which is 28 × 8 240 =
 > 230 720 bytes, and it takes 4 from each of its 7 peers for the same figure.
-> The uplink total is then about 7.78 MB, and the downlink total is about
-> 9.23 MB.
+> The uplink total is then about 7.29 MB, and the downlink total is about
+> 9.12 MB.
 
 | Downlink | |
 | --- | --- |
 | 1:1 receives (90 `B1` cells) | 189 KB |
-| Group receives (120 `B1` cells) | 252 KB |
+| Group receives (120 `B1` cells, on the group-queue sessions) | 252 KB |
+| Group notify digests (120 `B0` cells, Part 8 §8.5.2) | 67 KB |
+| Epoch rotations as a member (6 groups × 1 `B3` cell each day) | 197 KB |
 | Attachment download (4 files, 52 chunks) | 1 709 KB |
 | Device-set sync acknowledgments (1 channel, 12 cells) | 7 KB |
 | Attachment registration and verify responses (36 cells) | 20 KB |
 | Ownership claims (1 channel, 4 `B2` cells) | 33 KB |
 | Loop returns (72 `B0` cells) | 40 KB |
-| Relay-paced inbound cover (7 542 `B0` cells) | 4 224 KB |
-| Circuit builds, the `EXTENDED` cells (71 builds × 3 `B1` cells) | 446 KB |
-| Transport handshakes, the relay half (222 × 3 600 B) | 799 KB |
-| Relay entries with proofs (142 × 5 818 B) | 826 KB |
+| Relay-paced inbound cover (7 752 `B0` cells) | 4 341 KB |
+| Circuit builds, the `EXTENDED` cells (45 builds × 3 `B1` cells) | 283 KB |
+| Transport handshakes, the relay half (219 × 3 600 B) | 788 KB |
+| Relay entries with proofs (90 × 5 818 B) | 524 KB |
 | Directory (8 `DirectoryRoot` objects and 8 `RelaySetDiff` objects) | 142 KB |
 | Community pages (138 `B1` cells) | 289 KB |
-| Notifier rotation, the relay half (Part 8 §8.2.5) | 13 KB |
+| Notifier rotation, the relay half (Part 8 §8.2.5) | 2 KB |
 | Family certificates (Part 10 rule `REL-138`) | 0 KB |
-| **Total down** | **≈ 8.99 MB** |
+| **Total down** | **≈ 8.88 MB** |
 
 > *The derivation of the two cover rows.* §3.6.2 makes about 20 % of the 360
 > tier A cover cells loops. That count is 72 cells, which is 40 320 B.
@@ -1853,21 +2125,22 @@ below rests on the same unverified figure, and it carries the same mark.
 > ticks. Of those ticks 26 carry a real message, which is the 210 daily receives
 > scaled by 2 h of 16 waking hours. The other 7 174 ticks carry cover.
 >
-> The 184 wakes hold a session for about 3 s each, which is 552 more ticks.
-> Of those ticks 184 carry the remaining real receives, and 368 carry cover. The
-> two cover counts total 7 542 cells, which is 4 223 520 B.
+> The 184 wakes open 289 sessions, and each session holds about 3 s, which is
+> 867 more ticks. Of those ticks 289 carry a real delivery, which is the 184
+> remaining receives and the 105 digests, and 578 carry cover. The two cover
+> counts total 7 752 cells, which is 4 341 120 B.
 >
-> The foreground count holds one held session. A client that holds each of its
-> 20 sessions in the foreground takes 20 × 7 200 ticks, which is 80.6 MB each
-> day. No rule of this specification makes a client hold each session, and the
-> model holds one. A revision that holds more sessions in the foreground has to
-> derive this row again.
+> The foreground count holds one held session at a time. A client that holds
+> each of its 9 sessions in the foreground takes 9 × 7 200 ticks, which is
+> 36.3 MB each day. No rule of this specification makes a client hold each
+> session, and the model holds one. A revision that holds more sessions in the
+> foreground has to derive this row again.
 
 > *The derivation of the entry row.* The model paragraphs above give 2 entries
-> for each build in Instant mode. The 33 background builds fetch 66 entries. The
-> 38 foreground builds fetch 76 entries. Each foreground circuit selects a fresh
+> for each build in Instant mode. The 10 background builds fetch 20 entries. The
+> 35 foreground builds fetch 70 entries. Each foreground circuit selects a fresh
 > hop 2, and it reaches a hop 3 whose entry the client verifies against the root
-> of that period. The day holds 142 entries, which is 142 × 5 818 = 826 156
+> of that period. The day holds 90 entries, which is 90 × 5 818 = 523 620
 > bytes. Part 10 rule `REL-059` names this row.
 
 > *The derivation of the directory row.* Part 10 §10.11 gives the consensus a
@@ -1881,18 +2154,19 @@ below rests on the same unverified figure, and it carries the same mark.
 > row above. **[NET-105]** A revision that changes the signature count, the
 > validity, or the diff width MUST derive this row again.
 
-**The grand total is about 13.07 MB each day and about 392 MB each month. For
-text only, the total is about 10.46 MB each day and about 314 MB each month.**
-The grand total is 4.08 MB up and 8.99 MB down. The text-only total removes the
+**The grand total is about 12.48 MB each day and about 374 MB each month. For
+text only, the total is about 9.86 MB each day and about 296 MB each month.**
+The grand total is 3.59 MB up and 8.88 MB down. The text-only total removes the
 885 KB of attachment upload, the 1 709 KB of attachment download, and the 20 KB
-of attachment responses. An earlier draft gave 9.46 MB and 6.87 MB each day.
-The handshake rows, the entry row, the cell-priced builds, and the 184 wakes
-are the cause of the rise.
+of attachment responses. An earlier draft gave 13.07 MB each day, of which
+4.08 MB was uplink. The group queue of §3.2.7 removes the 402 KB fan-out row
+and 11 of the 20 sessions, and it adds the digest row, the rotation row, and
+the presence row. The day falls by about 0.6 MB.
 
-At `MAX_DEVICES` of 8 the grand total is about 17.00 MB each day and about
-510 MB each month. **A device set at `MAX_DEVICES` is not affordable on a
+At `MAX_DEVICES` of 8 the grand total is about 16.41 MB each day and about
+492 MB each month. **A device set at `MAX_DEVICES` is not affordable on a
 metered mobile plan, and this section states that plainly.** The sync record row
-alone is 4.08 MB each day. That row is about 1.3 times the 3.20 MB text-only
+alone is 4.08 MB each day. That row is about 1.5 times the 2.71 MB text-only
 uplink of the 2-device day. No usability goal of Part 2 §2.4 caps a monthly
 total, thus no goal forbids that figure. This specification states the cost, and
 it does not claim that a user can pay it. The cost grows with *d − 1*. Thus a
@@ -1919,58 +2193,67 @@ family certificates. Part 4 §4.7.2 makes a backup write a foreground
 operation, thus no backup row is in this table.
 
 The table gives three columns, one for each wake count of Part 8 §8.3. Instant
-mode wakes at each of the 184 background arrivals, and each wake opens the one
-session that the push names. Private mode wakes on a fixed clock, and the push
-names no session, thus each wake opens each of the 20 sessions. At the 30 min
-cadence that is 48 × 20 = 960 session opens, and at the 20 min cadence it is
-72 × 20 = 1 440. Each session open costs one handshake, one resubscription, and
-3 pacing ticks. The 184 drains do not change, because an arrival does not depend
-on the cadence. Private mode renews each of the 20 circuits at each
-`CIRCUIT_MAX_AGE` of 4 hours, which is 120 builds each day. It fetches 120 hop 2
-entries and 8 × 20 = 160 hop 3 entries.
+mode wakes at each of the 184 background arrivals, and each wake opens the
+session that the push names, and after a digest the group-queue session too.
+Private mode wakes on a fixed clock, and the push names no session. A client in
+Private mode registers no notify queue (Part 8 §8.5.2), thus each wake opens
+each of the 8 conversation sessions, and the digest row is 0. At the 30 min
+cadence that is 48 × 8 = 384 session opens, and at the 20 min cadence it is
+72 × 8 = 576. Each session open costs one handshake, one resubscription, and 3
+pacing ticks. The 184 drains do not change, because an arrival does not depend
+on the cadence. In Private mode the client acknowledges the 79 pairwise drains
+only, because a group queue takes no reader acknowledgment. Private mode
+renews each of the 8 circuits at each `CIRCUIT_MAX_AGE` of 4 hours, which is
+48 builds each day. It fetches 48 hop 2 entries and 8 × 8 = 64 hop 3 entries.
 
 | Idle background component, bytes each day | Instant, 184 wakes | Private, 48 wakes | Private, 72 wakes |
 | --- | --- | --- | --- |
-| Transport handshakes (6 000 B each) | 184 × 6 000 = 1 104 000 | 960 × 6 000 = 5 760 000 | 1 440 × 6 000 = 8 640 000 |
-| Session resubscriptions (`B0`) | 184 × 560 = 103 040 | 960 × 560 = 537 600 | 1 440 × 560 = 806 400 |
-| Circuit builds (6 `B1` cells each, §3.4.3) | 33 × 12 576 = 415 008 | 120 × 12 576 = 1 509 120 | 120 × 12 576 = 1 509 120 |
-| Relay entries with proofs (Part 10 §10.5.3) | 66 × 5 818 = 383 988 | 280 × 5 818 = 1 629 040 | 280 × 5 818 = 1 629 040 |
+| Transport handshakes (6 000 B each) | 184 × 6 000 = 1 104 000 | 384 × 6 000 = 2 304 000 | 576 × 6 000 = 3 456 000 |
+| Session resubscriptions (`B0`) | 289 × 560 = 161 840 | 384 × 560 = 215 040 | 576 × 560 = 322 560 |
+| Circuit builds (6 `B1` cells each, §3.4.3) | 10 × 12 576 = 125 760 | 48 × 12 576 = 603 648 | 48 × 12 576 = 603 648 |
+| Relay entries with proofs (Part 10 §10.5.3) | 20 × 5 818 = 116 360 | 112 × 5 818 = 651 616 | 112 × 5 818 = 651 616 |
 | Push-wake drains (`B1`) | 184 × 2 096 = 385 664 | 184 × 2 096 = 385 664 | 184 × 2 096 = 385 664 |
-| Pacing cover in the wake sessions (`B0`) | 368 × 560 = 206 080 | 2 696 × 560 = 1 509 760 | 4 136 × 560 = 2 316 160 |
+| Group notify digests (`B0`, Part 8 §8.5.2) | 105 × 560 = 58 800 | 0 | 0 |
+| Pacing cover in the wake sessions (`B0`) | 578 × 560 = 323 680 | 968 × 560 = 542 080 | 1 544 × 560 = 864 640 |
 | Sync acknowledgments (Part 7 §7.5.5) | 12 × 560 = 6 720 | 6 720 | 6 720 |
-| Acknowledgments of the drains (§3.5.4) | 184 × 560 = 103 040 | 103 040 | 103 040 |
+| Acknowledgments of the drains (§3.5.4) | 184 × 560 = 103 040 | 79 × 560 = 44 240 | 79 × 560 = 44 240 |
 | Ownership claims, sent and taken (Part 7 §7.3.1) | 8 × 8 240 = 65 920 | 65 920 | 65 920 |
 | Directory, 8 roots and 8 diffs (Part 10 §10.5) | 141 552 | 141 552 | 141 552 |
-| Notifier rotation (Part 8 §8.2.5) | 28 457 | 28 457 | 28 457 |
+| Notifier rotation (Part 8 §8.2.5) | 4 909 | 4 909 | 4 909 |
 | Family certificates (Part 10 rule `REL-138`) | 0 | 0 | 0 |
-| **Total each day** | **2 943 469** | **11 676 873** | **15 632 073** |
-| **Total each month** | **88.30 MB** | **350.31 MB** | **468.96 MB** |
+| **Total each day** | **2 598 245** | **4 965 389** | **6 547 469** |
+| **Total each month** | **77.95 MB** | **148.96 MB** | **196.42 MB** |
 
-The Instant month is 2 943 469 × 30 = 88 304 070 bytes, which is about
-**88.30 MB**. That figure is inside the U4 limit of 100 MB each month, and the
-margin is about 11.7 percent. The transport handshake row is 38 percent of the
-Instant day, and the six wake rows together are 88 percent of it. **The
-per-relay session of NET-023 is the cause of that limit of 100 MB, and Part 2
-§2.4 states the trade.** An earlier draft modeled 22.88 MB against a limit of
-25 MB. That draft asserted 30 wakes, priced a build at 7 104 bytes, and held no
-handshake row and no entry row.
+The Instant month is 2 598 245 × 30 = 77 947 350 bytes, which is about
+**77.95 MB**. That figure is inside the U4 limit of 100 MB each month, and the
+margin is about 22 percent. The transport handshake row is 42 percent of the
+Instant day, and the seven wake rows together are 88 percent of it. **The
+per-relay session of NET-023 and NET-266 is the cause of that limit of 100 MB,
+and Part 2 §2.4 states the trade.** An earlier draft of this table modeled
+88.30 MB over 20 sessions, and the group queue of §3.2.7 removes 11 of them. A
+draft before that modeled 22.88 MB against a limit of 25 MB. That draft
+asserted 30 wakes, priced a build at 7 104 bytes, and held no handshake row
+and no entry row.
 
 **[NET-096]** A revision that changes one of the inputs below MUST derive this
 table again. The model inputs are the background arrival count, the queue-relay
-count, the wake session length, the queue spread, and the transport handshake
-figure. The constant inputs are `WAKE_COALESCE_WINDOW`, `CIRCUIT_MAX_AGE`,
-`SESSION_RESUME_WINDOW`, `PACING_MEAN`, `CONSENSUS_VALIDITY`, the signature
-count of a `DirectoryRoot`, the `RelayEntry` width, and `OWNER_CLAIM_RATE`.
+count, the group-queue relay count, the session count of a wake, the wake
+session length, the queue spread, and the transport handshake figure. The
+constant inputs are `WAKE_COALESCE_WINDOW`, `CIRCUIT_MAX_AGE`,
+`SESSION_RESUME_WINDOW`, `PACING_MEAN`, `CONSENSUS_VALIDITY`, `GROUP_REPLICAS`,
+the signature count of a `DirectoryRoot`, the `RelayEntry` width, and
+`OWNER_CLAIM_RATE`.
 
-**Private notifications.** The two Private columns are about **350.31 MB** at
-30 min and about **468.96 MB** at 20 min. Goal U4b of Part 2 §2.4 sets no target
+**Private notifications.** The two Private columns are about **148.96 MB** at
+30 min and about **196.42 MB** at 20 min. Goal U4b of Part 2 §2.4 sets no target
 for that mode in this draft, and it states those two figures. The cause is the
-session model of NET-023. A fixed-clock push names no queue, thus a Private wake
-opens each of the 20 sessions. The handshake row alone is then 5.76 MB or
-8.64 MB each day. A revision that lets one wake reach each queue of the client
-over one session changes that row, and that revision sets the U4b target. Part 8
-§8.2.6 adds a rendezvous drain for a published handle, and that drain is outside
-this table.
+session model of NET-023 and NET-266. A fixed-clock push names no queue, thus a
+Private wake opens each of the 8 sessions. The handshake row alone is then
+2.30 MB or 3.46 MB each day. An earlier draft of this table gave 350.31 MB and
+468.96 MB over 20 sessions. A revision that lets one wake reach each queue of
+the client over one session changes that row, and that revision sets the U4b
+target. Part 8 §8.2.6 adds a rendezvous drain for a published handle, and that
+drain is outside this table.
 
 The sync record row is not in that count, and a schedule rule is the cause. Part
 7 §7.5.1 paces a sync record from the cover clock. §3.6.2 gives tier C no cover
@@ -1994,15 +2277,15 @@ session, and `REL-107` bounds it to one.
 The arithmetic below gives the loss that the rule prevents. Of the 210 daily
 receives, 184 arrive in the push wakes. If a client carried those records at 2
 devices, they cost 184 × 1 × 2 096 = 385 664 bytes each day. The idle background
-then reaches 2 943 469 + 385 664 = 3 329 133 bytes each day. That is about
-**99.87 MB each month**, which leaves a margin of 0.1 percent. At 3 devices the
-records cost 771 328 bytes each day, and the month is about **111.44 MB**, which
-is 1.11 times the U4 limit. **Thus a client that syncs in the background fails
-U4 at 3 devices, and it holds U4 with no margin at 2 devices.**
+then reaches 2 598 245 + 385 664 = 2 983 909 bytes each day. That is about
+**89.52 MB each month**, which leaves a margin of 10.5 percent. At 3 devices
+the records cost 771 328 bytes each day, and the month is about **101.09 MB**,
+which is 1.01 times the U4 limit. **Thus a client that syncs in the background
+fails U4 at 3 devices, and it holds U4 at 2 devices with half of its margin.**
 
 At `MAX_DEVICES` of 8 the same records cost 184 × 7 × 2 096 = 2 699 648 bytes
-each day. The idle background then reaches 2 943 469 + 2 699 648 = 5 643 117
-bytes each day. That is about **169.29 MB each month**, which is 1.7 times the
+each day. The idle background then reaches 2 598 245 + 2 699 648 = 5 297 893
+bytes each day. That is about **158.94 MB each month**, which is 1.6 times the
 U4 limit. **U4 keeps its margin at each device count only because the rule above
 keeps the sync records in the foreground.**
 
@@ -2016,34 +2299,43 @@ delay.
 carries a drain and an acknowledgment, and no interactive send waits on a
 rotation. Thus one circuit is sufficient for a wake.
 
-The arithmetic below gives the failure that this rule prevents. With 2 spares at
-each build the circuit-build row is 99 × 12 576 = 1 245 024 bytes each day. The
-entry row is 198 × 5 818 = 1 151 964 bytes. The idle background then reaches
-4 541 461 bytes each day and about **136.24 MB each month**, which is 1.36 times
-the U4 limit.
+The arithmetic below gives the cost that this rule prevents. With 2 spares at
+each build the circuit-build row is 30 × 12 576 = 377 280 bytes each day. The
+entry row is 60 × 5 818 = 349 080 bytes. The idle background then reaches
+3 082 485 bytes each day and about **92.47 MB each month**, which leaves U4 a
+margin of 7.5 percent in the place of 22 percent. Under the earlier table of
+20 sessions the same spares took the month to 136.24 MB, which failed U4. The
+group queue of §3.2.7 lowers the build count, and the rule stays, because a
+spare circuit buys a wake nothing.
 
 **[NET-100]** **A client MUST NOT hold a push-wake session longer than 6 s,
 because U4 then fails.** U4 permits 100 000 000 bytes each month, which is about
-3 333 333 bytes each day. At a wake length *W* the 184 wakes give 184 × *W*
-pacing ticks. Of those ticks 184 carry a real `B1` message, and each other tick
-carries a `B0` cover cell.
+3 333 333 bytes each day. At a session length *W* the 289 session opens of the
+184 wakes give 289 × *W* pacing ticks. Of those ticks 289 carry a real
+delivery, and each other tick carries a `B0` cover cell.
 
-Eleven rows of the Instant column do not change with *W*. Those rows are each
-row above except the pacing cover, and their total is 2 737 389 bytes each
+Twelve rows of the Instant column do not change with *W*. Those rows are each
+row above except the pacing cover, and their total is 2 274 565 bytes each
 day:
 
 ```
-2 737 389 + (W − 1) × 184 × 560 ≤ 3 333 333     gives   W ≤ 6.78 s
+2 274 565 + (W − 1) × 289 × 560 ≤ 3 333 333     gives   W ≤ 7.54 s
 
-W = 6 s → 920 cover cells → 3 252 589 bytes each day →  97.58 MB each month   holds
-W = 7 s → 1 104 cover cells → 3 355 629 bytes each day → 100.67 MB each month   fails
+W = 6 s → 1 445 cover cells → 3 083 765 bytes each day →  92.51 MB each month   holds
+W = 7 s → 1 734 cover cells → 3 245 605 bytes each day →  97.37 MB each month   holds
+W = 8 s → 2 023 cover cells → 3 407 445 bytes each day → 102.22 MB each month   fails
 ```
 
-Part 8 §8.4.1 gives the same bound for the Android service.
+The rule keeps the 6 s of the earlier table, which derived a bound of 6.78 s
+over 20 sessions. The session-open count of a wake is an unverified input
+under `NET-096` and `NET-273`, and the 1.5 s between the rule and the bound is
+the margin that such an input needs. Part 8 §8.4.1 gives the same 6 s for the
+Android service. A group wake holds its two sessions on one connection, and
+the rule bounds each session.
 
 That test counts each row of the table above. Thus 6 s is a ceiling, and it is
-not the operating point. The model above uses a wake of 3 s, and the table
-above measures that wake. The push blob of Part 8 §8.2.2 carries
+not the operating point. The model above uses a session of 3 s, and the table
+above measures that session. The push blob of Part 8 §8.2.2 carries
 `waiting_count`, thus a client can close the wake after the last expected
 drain and its acknowledgment. The test also uses the 184 wakes of Instant mode,
 and the two Private columns give their own figures.
@@ -2071,11 +2363,13 @@ ladder mean is 0.80 × 2 048 + 0.05 × 2 048 + 0.05 × 8 192 + 0.10 × 32 768 =
 1 500 + 0.05 × 6 000 + 0.10 × 32 000 = 3 855 B. The two overhead figures are
 5 427 / 3 855 and 18 022 / 3 855.
 
-For a 500-member group, one text message costs **1.05 MB** with the ladder and
-**8.21 MB** with a uniform block. The ladder figure is 499 × 2 096 B, and the
-uniform figure is 499 × 16 454 B (§3.3.1). Part 11 §11.2 counts the same 499
-recipients. This difference decides if the group
-feature operates on mobile data.
+For a group, one text record costs each reader one download, and the tag
+vector of Part 11 §11.3.3 sets its bucket. A 500-member record is **8 240 B**
+at `B2` with the ladder and **16 454 B** with a uniform block. A 25-member
+record is **2 096 B** at `B1` with the ladder and the same 16 454 B with a
+uniform block (§3.3.1). The 120 group receives of the model day cost 252 KB
+with the ladder and 1.97 MB with a uniform block. This difference decides if
+the group feature operates on mobile data.
 
 ### Latency
 
@@ -2188,9 +2482,11 @@ each day. Private mode at 20 min costs less above 72. The model day of 184
 arrivals is above both counts, thus Private mode is the cheaper mode on that
 day. The user who receives 20 messages each day sees the opposite order.
 
-**Client compute.** The compute row holds the 71 circuit builds at less than 2
-ms each and the ratchet steps of the 278 records. It holds the signature
-verifications of the 8 roots and the 142 entries. It holds about 10 Argon2id
+**Client compute.** The compute row holds the 45 circuit builds at less than 2
+ms each, the ratchet steps of the 278 records, the tag checks of the 120 group
+records, and the 6 decapsulations of the rotation slots (Part 11 §11.4.2). It
+holds the signature verifications of the 8 roots and the 90 entries. It holds
+about 10 Argon2id
 unlocks of Part 15 §15.6.4 at about 3 s each. That work is under 1 minute of CPU
 each day. At about 1 W of CPU draw it is about 0.02 Wh, which is 0.1 % of the
 battery. That figure is a model, and the measure rule below covers it.
@@ -2210,14 +2506,17 @@ figure. Each figure is a model and not a measurement.
 | --- | --- | --- |
 | Message records | 278 records each day at about 1 KB with the index, over 365 days | about 100 MB each year |
 | Attachments | 6 files each day at about 400 KB, over 365 days | about 880 MB each year |
-| Ratchet state | 160 pairwise channels and 1 sync channel at about 3 KB each | about 0.5 MB |
-| Relay entries | The entries of the 20 queue relays, the 32 recipient relays, and the ingress pins | about 0.3 MB |
+| Ratchet state | 16 pairwise channels and 1 sync channel at about 3 KB each | under 0.1 MB |
+| Group state | 6 groups of 25 members: the roster entry, the pair key, and the KEM key of each member at about 1.4 KB (Part 11 §11.9.1), and the slot-chain state of each group | about 0.2 MB |
+| Relay entries | The entries of the 9 session relays, the 6 second replicas, the 16 recipient relays, and the ingress pins | about 0.2 MB |
 | Directory objects | One `DirectoryRoot`, one `RelaySetDiff`, and the tree of 3 000 leaves | about 0.2 MB |
-| Skipped keys and cursors | `SKIP_TTL` of Part 5 §5.5.4 and one cursor for each queue | under 0.1 MB |
+| Skipped keys and cursors | `SKIP_TTL` of Part 5 §5.5.4, one cursor for each queue, and one cursor for each replica of each group queue | under 0.1 MB |
 
 The message store grows with the record count, and the attachment store grows
 with the file count. A record holds the 350-byte text, the ratchet metadata,
 the read marker, and the index entry. Part 4 §4.8 keeps 45 days in the backup,
 and the local store keeps each record until the user deletes it. A client that
 keeps one year of the model day holds about 1 GB, and the attachments are about
-90 % of that figure.
+90 % of that figure. The retained records of a group queue are a relay cost and
+not a client cost, and §3.2.7 bounds them at `GROUP_QUEUE_QUOTA` for each
+group queue and at `GROUP_RETENTION` in time.
