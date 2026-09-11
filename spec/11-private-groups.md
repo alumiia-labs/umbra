@@ -1562,6 +1562,59 @@ identity table. Each device reads the group on its own, and one device writes.
   to `GroupKemKey_g`, which every device of the member holds.
 - A record carries no device identifier, and Part 7 rule `DEV-132` holds.
 
+**A device in hostile hands, and the re-key.** Every device of a member holds
+the three group keys of §11.9.1 and the current epoch secret. Part 7 §7.7
+heals each pairwise channel at a revocation with a ratchet step that the
+revoked device cannot follow. No such step exists for a group key, because
+every device of the member holds the same seed. Thus a revoked device that an
+attacker holds reads the group, and it opens its slot of each later epoch-key
+record, until the member replaces its keys and an admin rotates the old ones
+out. The re-key below is that replacement.
+
+- **[GRP-345]** At a device revocation of Part 7 §7.7 and at a full identity
+  reset of Part 7 §7.7.1, a remaining device MUST make a new
+  `GroupRosterSeed_g` for each group that the user holds, and it MUST derive
+  the three keys of §11.9.1 from it.
+- **[GRP-346]** For each such group, that device MUST send a `RekeyRecord` of
+  Part 6 §6.6.3 on a pairwise channel to one member of role `admin` or above
+  that it holds a channel with. **[GRP-347]** A device MUST NOT send a
+  `RekeyRecord` as a group record.
+- **[GRP-348]** An admin that receives a `RekeyRecord` MUST verify it under
+  Part 6 rule `WIR-478`. **[GRP-349]** The admin MUST discard a record that
+  fails that check, and it MUST NOT act on it.
+- **[GRP-350]** The admin MUST then, in this order: post a plain epoch that
+  removes `old_index`; rotate under §11.4.1 with no slot for `old_index`; post
+  a plain epoch that adds the new keys under a new index; and send the admit
+  of §11.9.1 step 4 on the same pairwise channel. **[GRP-351]** The admin
+  MUST NOT reuse `old_index`.
+- **[GRP-352]** The member MUST zeroize the old seed and the old three keys
+  when the admit arrives. Until then the old keys stay, because the member
+  still reads the group with them.
+- **[GRP-353]** The interface MUST show each group whose re-key waits for an
+  admit. **[GRP-354]** The interface MUST name each group in which the user
+  holds no pairwise channel with an admin, and it MUST state that the group
+  needs a new invitation. In that group the member MUST send a self-removal
+  under §11.9.2, and the leaving member is the attacker's device as much as
+  its own.
+- The new seed reaches the other devices of the member through the local
+  identity table of Part 7 §7.5.1, as any group seed does.
+
+**This is a trade, and Part 2 §2.4 requires the text to state it.** From the
+moment an attacker holds a device until the admit of GRP-350 arrives, that
+device reads every group of the member, and no key of this part shortens
+that window. The window is the time to one admin action, and it needs one
+admin that the member holds a pairwise channel with. Part 16 §16.3 records
+the residual.
+
+> *Cause.* Draft 0.1.0 said that a full identity reset does not change a
+> group roster key, and it gave no rule for a group after a revocation. Under
+> the group queue that silence is a hole: the KEM key of a member seals every
+> later epoch to that member, thus a rotation alone excludes nothing that the
+> revoked device holds. A record on the group queue cannot carry the request,
+> because the revoked device forges it. The pairwise channel to an admin is
+> the one path that the revocation closed to that device, and the old roster
+> key binds the request to the index.
+
 > *Cause.* Draft 0.1.0 had no group sender owner, because a group send was
 > N − 1 pairwise sends and each pairwise ratchet already had an owner. The
 > `counter` of §11.3 is one value for each member in each epoch, and two

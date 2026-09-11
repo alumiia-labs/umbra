@@ -1360,7 +1360,8 @@ has to be fast and complete.
      a. deletes the sync channels to the revoked device;
      b. performs an immediate DH ratchet step on every pairwise channel it owns;
      c. rotates every queue the revoked device knew;
-     d. derives the sync channel seed of epoch n+1 from the seed update.
+     d. derives the sync channel seed of epoch n+1 from the seed update;
+     e. starts the group re-key of Part 11 §11.12 for each group of the user.
 3. Ratchet ownership held by the revoked device is claimed per §7.5.4.
 ```
 
@@ -1395,6 +1396,10 @@ SyncSeedUpdate {
   **[DEV-256]** A device MUST reject a sync channel from a revoked device.
   **[DEV-257]** After a device applies the epoch that revokes a device, it MUST
   NOT accept a sync record from that device.
+- **[DEV-262]** A device that applies an epoch with a new `revoked` entry MUST
+  start the group re-key of Part 11 §11.12 for each group of the user. The
+  ratchet step of step 2b heals a pairwise channel and no group key, and Part
+  11 §11.12 gives the cause.
 
 A `SyncSeedUpdate` is 40 bytes. With the sub-kind, the version, and the
 `control_type` the body is 43 bytes, and it fits bucket `B0` of Part 6 §6.9.
@@ -1455,8 +1460,10 @@ The old roster chain has no authority over the new one, and §7.3.1 rule 4 makes
 the new epoch 0 the trust anchor.
 
 A full identity reset does not change a community identity or a group roster
-key. Part 12 §12.3.2 and Part 11 §11.9.1 do not derive those keys from the
-`RootIdentity`. An attacker can hold a device of the user. **[DEV-139]** In that case the user
+key by derivation. Part 12 §12.3.2 and Part 11 §11.9.1 do not derive those keys
+from the `RootIdentity`. An attacker can hold a device of the user.
+**[DEV-263]** A full identity reset MUST also start the group re-key of Part
+11 §11.12 in each group of the user. **[DEV-139]** In that case the user
 SHOULD also make a new community identity. **[DEV-140]** The user SHOULD do that in each
 community that matters.
 

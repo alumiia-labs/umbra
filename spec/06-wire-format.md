@@ -1417,7 +1417,7 @@ GroupControl {
 ```
 
 > **These byte values are group control types.** §6.1.1 rule 7 gives the
-> namespace rule. This namespace holds seven values and one retired value.
+> namespace rule. This namespace holds eight values and one retired value.
 >
 > - `0x01` is retired. It named a `SenderKeyDistribution` in an earlier draft.
 > - `0x02` names a `JoinRecord` (below, and Part 11 §11.9.1).
@@ -1427,6 +1427,7 @@ GroupControl {
 > - `0x06` names a `GroupPresence` record (Part 11 §11.9.7).
 > - `0x07` names a `GroupInvitation` (below, and Part 11 §11.9.1).
 > - `0x08` names a `SnapshotNotice` (below, and Part 11 §11.9.8).
+> - `0x09` names a `RekeyRecord` (below, and Part 11 §11.12).
 >
 > The six other namespaces of this part use the same byte values with different
 > meanings.
@@ -1593,6 +1594,45 @@ snapshot is 2 728 bytes, and it uses bucket `B3` at `GROUP_MAX`.
   SHA3-256 differs from the `kem_pk_hash` of its entry. **[WIR-453]** A
   parser MUST reject a `RosterSnapshot` whose length does not equal the sum
   of its fields.
+
+**The re-key record.** Part 11 §11.12 makes a member replace its three group
+keys after a device revocation or a full identity reset. The record carries
+the old index, the old roster public key, the three new public values, and a
+signature under the old roster key.
+
+```
+RekeyRecord {                     // 6 576 bytes, control type 0x09
+    version           u8          // 0x01
+    group_id          [32]u8
+    old_index         u16         // the member index that the member holds
+    old_roster_pk     [1952]u8    // GroupRosterKey_g.pk of that index
+    pair_pk           [32]u8      // the new GroupPairKey_g.pk
+    roster_pk_hash    [32]u8      // SHA3-256 of the new GroupRosterKey_g.pk
+    kem_pk            [1216]u8    // the new GroupKemKey_g.pk
+    sig               [3309]u8    // ML-DSA-65 under the old roster key
+}
+```
+
+The signature covers the preimage `"umbra/v1/group-rekey" || group_id ||
+old_index || old_roster_pk || pair_pk || roster_pk_hash || kem_pk`, and Part 5
+§5.11 holds the label. As an `AppMessage` the record is 6 608 bytes, thus it
+uses bucket `B2`.
+
+- **[WIR-475]** A parser MUST reject a `RekeyRecord` whose length is not
+  6 576. **[WIR-476]** A client MUST send a `RekeyRecord` on a pairwise
+  channel to a member of role `admin` or above, and on no other channel.
+  **[WIR-477]** A receiver MUST discard a `RekeyRecord` that arrives as a
+  group record. **[WIR-478]** A receiver MUST verify `sig` against
+  `old_roster_pk`, and `SHA3-256(old_roster_pk)` against the `roster_pk_hash`
+  of `old_index` in its roster, before it acts on the record. Part 11 §11.12
+  gives the action.
+
+> *Cause.* A device in hostile hands holds every group key of the member,
+> thus a record on the group queue proves nothing about which device sent it.
+> The pairwise channel is the one channel that the revocation of Part 7 §7.7
+> heals, and the old roster key binds the request to the index that the
+> member holds. A member that holds no pairwise channel with an admin has no
+> path, and Part 11 §11.12 makes the interface say so.
 
 ### 6.6.4 The transparency digest
 
@@ -2229,9 +2269,11 @@ cover these cases:
 - The `FileDescriptor` of Part 13 §13.3. **[WIR-133]** The vectors MUST cover a correct
   `commit` value and an incorrect `commit` value. **[WIR-134]** The vectors MUST cover the
   13-chunk boundary at bucket `B1`.
-- The `GroupControl` of §6.6.3. **[WIR-154]** The vectors MUST cover one record
-  of each of the seven control types. **[WIR-470]** The parser MUST reject a
-  `control_type` of `0x00`, of `0x01`, and of `0x09`. The `GroupInvitation`
+- The `GroupControl` of §6.6.3. **[WIR-479]** The vectors MUST cover one record
+  of each of the eight control types. **[WIR-480]** The parser MUST reject a
+  `control_type` of `0x00`, of `0x01`, and of `0x0A`. **[WIR-481]** The vectors
+  MUST hold one `RekeyRecord` with a correct signature and one with a changed
+  `old_index`, and the parser MUST reject the second. The `GroupInvitation`
   vectors cover both stages.
 - The `RosterSnapshot` and the `GroupMemberEntry` of §6.6.3. **[WIR-471]** The
   vectors MUST cover a snapshot at 3 members in one segment, and the segment

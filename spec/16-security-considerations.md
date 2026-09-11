@@ -277,6 +277,7 @@ gatekeeper.
 | A reader circuit and the group it reads, joined to an IP address | The ingress relay and the group-queue relay in collusion | The same class as the two-ended collusion of Part 3 §3.11 |
 | The ciphertext of a group for `GROUP_READ_GRACE` after a removal | The removed member | It holds no slot key of the new epoch; it reads timing and buckets only |
 | The last `GROUP_SLOT_WINDOW` hours of retained records of the current epoch | A6, with the device and the relay's retained ciphertext | Part 11 §11.3.2; the slot chain is one-way |
+| Every record of every group of a member, at a device in hostile hands, from the seizure until an admin re-keys that member | A6 | Part 11 §11.12. A revocation heals a pairwise channel and no group key, thus the re-key is a second step, and it needs one admin that the member holds a pairwise channel with. Part 7 rule `DEV-262` starts it. UMBRA accepts this residual |
 | A forged tag between two members, by an insider that holds a quantum computer | A quantum insider | Part 5 §5.4.4 posture; `sig_id` agility |
 | The group of a leaving member stays readable to it until an admin rotates | The leaving member | Part 11 §11.4.1 |
 | The slot chunk that one member fetched, at the chunk relay | The chunk relay | Part 13 §13.9; one anonymous fetch per member per rotation |

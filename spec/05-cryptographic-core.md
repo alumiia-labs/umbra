@@ -1399,6 +1399,7 @@ names the object type and its lifetime:
 "umbra/v1/group-tag"
 "umbra/v1/group-epoch-slot"
 "umbra/v1/group-epoch-tag"
+"umbra/v1/group-rekey"
 "umbra/v1/community-id"
 "umbra/v1/community-roster"
 "umbra/v1/community-chain"
@@ -1479,7 +1480,9 @@ primitive register in the same manner.
 > tag under `"umbra/v1/group-tag"`. Part 11 §11.4.2 derives the slot key of an
 > epoch-key record under `"umbra/v1/group-epoch-slot"`, and it computes the
 > rotator's tag inside a slot under `"umbra/v1/group-epoch-tag"`; each lives
-> for one rotation. Each label names one object type, and CRY-031 holds.
+> for one rotation. Part 11 §11.12 signs a `RekeyRecord` under
+> `"umbra/v1/group-rekey"`, and it lives for one re-key. Each label names one
+> object type, and CRY-031 holds.
 >
 > *The cause of the nine correction labels.* Part 5 §5.4.8 hashes a
 > one-time prekey under `"umbra/v1/prekey-id"`. Part 10 §10.5.4 computes the

@@ -70,18 +70,18 @@ each column when a crate implements the requirement and a test covers it.
 | `NET` | 189 | 76 | 0 | 0 | 8 | **273** |
 | `IDN` | 103 | 40 | 1 | 0 | 5 | **149** |
 | `CRY` | 103 | 27 | 0 | 0 | 1 | **131** |
-| `WIR` | 354 | 80 | 0 | 0 | 6 | **440** |
-| `DEV` | 165 | 86 | 2 | 0 | 6 | **259** |
+| `WIR` | 359 | 80 | 0 | 0 | 6 | **445** |
+| `DEV` | 167 | 86 | 2 | 0 | 6 | **261** |
 | `NTF` | 63 | 28 | 0 | 0 | 2 | **93** |
 | `DIS` | 104 | 34 | 0 | 0 | 1 | **139** |
 | `REL` | 112 | 27 | 1 | 0 | 2 | **142** |
-| `GRP` | 187 | 53 | 0 | 0 | 4 | **244** |
+| `GRP` | 194 | 56 | 0 | 0 | 4 | **254** |
 | `COM` | 275 | 95 | 0 | 0 | 5 | **375** |
 | `ATT` | 128 | 46 | 1 | 0 | 2 | **177** |
 | `ABU` | 54 | 31 | 0 | 0 | 0 | **85** |
 | `IMP` | 58 | 24 | 0 | 0 | 0 | **82** |
 | `SEC` | 12 | 5 | 1 | 0 | 2 | **20** |
-| **All** | 1930 | 660 | 6 | 0 | 48 | **2644** |
+| **All** | 1944 | 663 | 6 | 0 | 48 | **2661** |
 
 ## SCP — Scope and Conventions
 
@@ -848,7 +848,6 @@ Source: `spec/06-wire-format.md`
 | `WIR-151` | §6.6.4 | MUST | A parser | A parser MUST reject a `body_len` that is not 42. |  |  |
 | `WIR-152` | §6.6.4 | MUST | A parser | A parser MUST reject a `source` that the table above does not hold. |  |  |
 | `WIR-153` | §6.6.4 | MUST NOT | A client | A client MUST NOT emit a cell whose only content is a transparency digest. |  |  |
-| `WIR-154` | §6.8 | MUST | The vectors | The vectors MUST cover one record of each of the seven control types. |  |  |
 | `WIR-156` | §6.8 | MUST | The vectors | The vectors MUST cover one record of each of the three sources. |  |  |
 | `WIR-157` | §6.8 | MUST | The parser | The parser MUST reject a `body_len` that is not 42 and a `source` of `0x04`. |  |  |
 | `WIR-158` | §6.8 | MUST | The vectors | The vectors MUST cover one forward cell and one backward cell across three hops, at each of the four buckets. |  |  |
@@ -1147,11 +1146,17 @@ Source: `spec/06-wire-format.md`
 | `WIR-467` | §6.8 | MUST | The named receiver | The named receiver MUST reject the two cases that follow them. |  |  |
 | `WIR-468` | §6.8 | MUST | The vectors | The vectors MUST cover one `GKEY`, one `GSUB` under the previous read key inside `GROUP_READ_GRACE`, and one `GPOST` under the previous write key inside `GROUP_WRITE_GRACE`. |  |  |
 | `WIR-469` | §6.8 | MUST | The relay | The relay MUST reject a `GSUB` under the previous read key after `GROUP_READ_GRACE`, and a `GPOST` under the previous write key after `GROUP_WRITE_GRACE`. |  |  |
-| `WIR-470` | §6.8 | MUST | The parser | The parser MUST reject a `control_type` of `0x00`, of `0x01`, and of `0x09`. |  |  |
 | `WIR-471` | §6.8 | MUST | The vectors | The vectors MUST cover a snapshot at 3 members in one segment, and the segment count of a snapshot at `GROUP_MAX`, which is 21. |  |  |
 | `WIR-472` | §6.9 | MUST | A sender | A sender MUST compute the bucket of a group record from the group-queue capacity table. |  |  |
 | `WIR-473` | §6.9 | MUST | (unstated) | A revision that changes the fixed part of `GroupQueueRecord`, the fixed fields of `ContentPlain`, or `GROUP_TAG_LEN` MUST derive this table again. |  |  |
 | `WIR-474` | §6.6.3 | MUST | A parser | A parser MUST reject an admit that carries a granting epoch. |  |  |
+| `WIR-475` | §6.6.3 | MUST | A parser | A parser MUST reject a `RekeyRecord` whose length is not 6 576. |  |  |
+| `WIR-476` | §6.6.3 | MUST | A client | A client MUST send a `RekeyRecord` on a pairwise channel to a member of role `admin` or above, and on no other channel. |  |  |
+| `WIR-477` | §6.6.3 | MUST | A receiver | A receiver MUST discard a `RekeyRecord` that arrives as a group record. |  |  |
+| `WIR-478` | §6.6.3 | MUST | A receiver | A receiver MUST verify `sig` against `old_roster_pk`, and `SHA3-256(old_roster_pk)` against the `roster_pk_hash` of `old_index` in its roster, before it acts on the record. |  |  |
+| `WIR-479` | §6.8 | MUST | The vectors | The vectors MUST cover one record of each of the eight control types. |  |  |
+| `WIR-480` | §6.8 | MUST | The parser | The parser MUST reject a `control_type` of `0x00`, of `0x01`, and of `0x0A`. |  |  |
+| `WIR-481` | §6.8 | MUST | The vectors | The vectors MUST hold one `RekeyRecord` with a correct signature and one with a changed `old_index`, and the parser MUST reject the second. |  |  |
 
 ## DEV — Device Sets
 
@@ -1418,6 +1423,8 @@ Source: `spec/07-device-sets.md`
 | `DEV-259` | §7.5.9 | MUST | A client | A client MUST default a new group at or below `T1_MAX` members to `all`. |  |  |
 | `DEV-260` | §7.3.1 | MUST | A device | A device MUST count a claim record that holds a claim of scope `0x04` under `OWNER_CLAIM_RATE` in the same manner as a record of scope `0x01`. |  |  |
 | `DEV-261` | §7.5.3 | MUST NOT | (unstated) | A client MUST hold the group-queue cursor of each replica as per-device state, and it MUST NOT put that cursor on a sync channel. |  |  |
+| `DEV-262` | §7.7 | MUST | A device that applies an epoch with a new `revoked` entry | A device that applies an epoch with a new `revoked` entry MUST start the group re-key of Part 11 §11.12 for each group of the user. |  |  |
+| `DEV-263` | §7.7.1 | MUST | A full identity reset | A full identity reset MUST also start the group re-key of Part 11 §11.12 in each group of the user. |  |  |
 
 ## NTF — Notifications
 
@@ -2064,6 +2071,16 @@ Source: `spec/11-private-groups.md`
 | `GRP-342` | §11.12 | MUST | At a change, the new owner | At a change, the new owner MUST continue `counter` from the synced value. |  |  |
 | `GRP-343` | §11.12 | MUST | Every device of a member | Every device of a member MUST subscribe to a replica on its own circuit with its own cursor, under §11.2.2. |  |  |
 | `GRP-344` | §11.12 | MUST | Every device of a member | Every device of a member MUST open its own slot of each epoch-key record. |  |  |
+| `GRP-345` | §11.12 | MUST | (unstated) | At a device revocation of Part 7 §7.7 and at a full identity reset of Part 7 §7.7.1, a remaining device MUST make a new `GroupRosterSeed_g` for each group that the user holds, and it MUST derive the three keys of §11.9.1 from it. |  |  |
+| `GRP-346` | §11.12 | MUST | For each such group, that device | For each such group, that device MUST send a `RekeyRecord` of Part 6 §6.6.3 on a pairwise channel to one member of role `admin` or above that it holds a channel with. |  |  |
+| `GRP-347` | §11.12 | MUST NOT | A device | A device MUST NOT send a `RekeyRecord` as a group record. |  |  |
+| `GRP-348` | §11.12 | MUST | An admin that receives a `RekeyRecord` | An admin that receives a `RekeyRecord` MUST verify it under Part 6 rule `WIR-478`. |  |  |
+| `GRP-349` | §11.12 | MUST NOT | (unstated) | The admin MUST discard a record that fails that check, and it MUST NOT act on it. |  |  |
+| `GRP-350` | §11.12 | MUST | The admin | The admin MUST then, in this order: post a plain epoch that removes `old_index`; rotate under §11.4.1 with no slot for `old_index`; post a plain epoch that adds the new keys under a new index; and send the admit of §11.9.1 step 4 on the same pairwise channel. |  |  |
+| `GRP-351` | §11.12 | MUST NOT | The admin | The admin MUST NOT reuse `old_index`. |  |  |
+| `GRP-352` | §11.12 | MUST | The member | The member MUST zeroize the old seed and the old three keys when the admit arrives. |  |  |
+| `GRP-353` | §11.12 | MUST | The interface | The interface MUST show each group whose re-key waits for an admit. |  |  |
+| `GRP-354` | §11.12 | MUST | The interface | The interface MUST name each group in which the user holds no pairwise channel with an admin, and it MUST state that the group needs a new invitation. |  |  |
 
 ## COM — Public Communities
 
