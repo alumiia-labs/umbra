@@ -1,7 +1,8 @@
 # UMBRA Protocol Specification — Part 12: Public Communities (1000+)
 
 **Status:** Draft
-**Version:** 0.1.0-draft
+**Version:** 0.2.0-draft
+**Date:** 2026-09-11
 
 ---
 
@@ -355,7 +356,8 @@ pseudonym_g             := SHA3-256(CommunityIdentityKey_g.pk)      // 32 B
 
 A subscriber reads a community with a **pull**. An author or an owner writes to
 a community with a **publication**. Each one travels as a command of Part 6
-§6.4, in the community range `0x80` to `0x89`. A community command puts
+§6.4, in the community range `0x80` to `0x85`, which holds the six commands
+of the table below. A community command puts
 `community_id` in the `queue_id` field, in the manner that an attachment command
 puts `chunk_id` there. Part 6 §6.4 rules `WIR-309` and `WIR-310` keep a
 community command out of a session and out of a cell that carries a queue
@@ -1631,7 +1633,7 @@ changes `REPORT_NOTE_MAX` or adds a field.
 > a report over the group channel to each owner and moderator, and each of
 > them reads each report. UMBRA sends a report to one role holder. A report to
 > each of 19 queues costs 19 `B1` cells, and it gives 19 parties one claim. A
-> shared sender key on the report queue lets each member write. The admission
+> shared write credential on the report queue lets each member write. The admission
 > control of Part 14 bounds a flood as it bounds a `SEND` to any queue.
 > `COM-278` exempts the report queue from the rotation of Part 3
 > §3.2.4, because that rotation protects one pairwise link and a roster
@@ -1673,9 +1675,11 @@ device learns of a post from a digest. §12.6.4 gives the carrier of that
 digest, and Part 8 §8.5.1 gives its budget.
 
 The budget is not only a UX preference. FCM permits 5 000 messages in one hour
-to one device. The iOS silent push has a limit near 3 in one hour. A busy
-community that makes one push for each message uses the full platform budget. It
-then breaks the notifications for *each* conversation on the device.
+to one device, and each push that wakes the device costs one radio promotion
+against the U5 battery budget that Part 8 §8.3 derives from Doze and from Part
+2 §2.4. A busy community that makes one push for each message spends that
+budget on one conversation. It then breaks the notifications for *each*
+conversation on the device.
 
 ### 12.6.1 A mention and a reply in a community
 

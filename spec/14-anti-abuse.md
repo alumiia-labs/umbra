@@ -1,7 +1,8 @@
 # UMBRA Protocol Specification — Part 14: Anti-Abuse Without Identifiers
 
 **Status:** Draft
-**Version:** 0.1.0-draft
+**Version:** 0.2.0-draft
+**Date:** 2026-09-11
 
 ---
 
@@ -25,6 +26,7 @@ client that holds no credential. The carrier is where the credential travels.
 | Gated path | Verifier | Credential | Issuer | Fallback | Carrier |
 | --- | --- | --- | --- | --- | --- |
 | A queue creation, `NEW` of Part 6 §6.4 | Any relay | A token of §14.3, of the type that the relay advertises | The issuer of §14.9 | The proof of work of §14.8 | The `Admission` at the end of the payload |
+| A group-queue creation, `GNEW` of Part 6 §6.4.5 | Any relay | A token of §14.3, of the type that the relay advertises | The issuer of §14.9 | The proof of work of §14.8 | The `Admission` at the end of the payload |
 | An allocation of attachment storage, `CNEW` and `BNEW` of Part 13 §13.3.3 | An attachment relay | A token of §14.3 | The issuer of §14.9 | The proof of work of §14.8 | The `Admission` at the end of the payload |
 | A community creation, the `PUB` of a roster with `epoch_index` 0, Part 12 §12.3.3 | A community relay | A token of §14.3 | The issuer of §14.9 | The proof of work of §14.8 | The `Admission` at the end of the payload |
 | A community post above `POST_RATE_LIMIT`, Part 12 §12.3.2 | A community relay | None, the limit is relay-local for each pseudonym | None | The proof of work of §14.8 | The `Admission` at the end of the payload |
@@ -39,16 +41,20 @@ layout in this draft.
 
 **Not gated:**
 
-- **An ordinary message send.** The pairwise sender key authorizes such a send.
-  A gate on a send puts a token cost on the fast path and damages the latency
-  budget. It gives no security.
+- **An ordinary message send.** The write credential of the queue (Part 3
+  §3.2.2) authorizes such a send. A gate on a send puts a token cost on the
+  fast path and damages the latency budget. It gives no security.
+- **A group post.** A `GPOST` of Part 6 §6.4.5 is not gated, for the same
+  cause. The relay applies `GROUP_POST_RATE` of Part 3 §3.2.7 for each group
+  queue, and it answers a post above that rate with a `NACK` of reason
+  `LIMIT`.
 - **A community pull.** Part 12 rule `COM-172` forbids a value that binds a
   pull to a client, and a credential is such a value.
 
 This design keeps the anti-abuse system fully off the critical path. Thus the
 anti-abuse system does not change the chat latency.
 
-**The carrier.** Four commands and the hello of Part 9 §9.6 end with one
+**The carrier.** Five commands and the hello of Part 9 §9.6 end with one
 `Admission`.
 
 ```
@@ -66,13 +72,13 @@ The body of kind `0x01` is 354 bytes or 162 bytes, by the token type. The body
 of kind `0x03` is 69 bytes. The body of kind `0x00` is empty, thus the trailer
 costs 3 bytes in the steady state.
 
-- **[ABU-044]** A client MUST end the payload of a `NEW`, a `CNEW`, a `BNEW`,
-  and a `PUB` with one `Admission`. **[ABU-045]** A parser MUST reject a `kind`
+- **[ABU-044]** A client MUST end the payload of a `NEW`, a `GNEW`, a `CNEW`,
+  a `BNEW`, and a `PUB` with one `Admission`. **[ABU-045]** A parser MUST reject a `kind`
   that the table above does not hold. **[ABU-046]** A parser MUST reject a `len`
   that differs from the body length of its `kind`. **[ABU-089]** A parser MUST
   reject kind `0x02`, which an earlier draft gave to an ARC presentation.
 - **[ABU-047]** A relay whose newest `PowChallenge` holds `effort` 0 MUST
-  accept an `Admission` of kind `0x00` on `NEW`, `CNEW`, and `BNEW`.
+  accept an `Admission` of kind `0x00` on `NEW`, `GNEW`, `CNEW`, and `BNEW`.
   **[ABU-048]** If that `effort` is above 0, the relay MUST answer such a
   command with a `NACK` of reason `ADMISSION`. Part 6 §6.4.4 gives the reason.
   The client then fetches the challenge and sends the command again, thus a
@@ -566,7 +572,10 @@ section gives one. The answer is local, and it needs no relay and no report.
   ABU-027 to the user at an unblock.
 
 **A block inside a group.** A member blocks another member, and that block does
-not remove the blocked member from the group.
+not remove the blocked member from the group. The group records of the blocked
+member still arrive on the group queue of Part 11 §11.2, because every member
+reads the same queue; the client applies ABU-027 to ABU-029 to them after the
+tag check of Part 11 §11.3.5, and no relay learns the block.
 
 - **[ABU-036]** A client MUST discard a record of a blocked member of a group.
   **[ABU-037]** A client MUST NOT emit a group record that names the block.

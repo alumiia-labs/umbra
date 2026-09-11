@@ -1,7 +1,8 @@
 # UMBRA Protocol Specification — Part 7: Device Sets, History Sync, and Revocation
 
 **Status:** Draft
-**Version:** 0.1.0-draft
+**Version:** 0.2.0-draft
+**Date:** 2026-09-11
 
 ---
 
@@ -136,7 +137,8 @@ DeviceEntry {
 
 OwnerClaim {
     scope          u8           // 0x01 a pairwise identity, 0x02 a community identity,
-                                // 0x03 each subject of an absent device
+                                // 0x03 each subject of an absent device,
+                                // 0x04 the group sender owner
     subject        [32]u8       // a blinded subject, see below
     owner          [16]u8       // the DeviceId that takes the ownership
 }
@@ -147,7 +149,9 @@ Part 6 §6.6 uses it in the same manner for `msg_ref`. **[DEV-226]** A device
 MUST compute `subject` as `SHA3-256(K_set || scope || value)`. For scope `0x01`
 the value is the pairwise identity public key. For scope `0x02` the value is
 the `community_id` of Part 12 §12.2. For scope `0x03` the value is the
-`device_id` of the absent device, and §7.5.4 gives that claim.
+`device_id` of the absent device, and §7.5.4 gives that claim. For scope
+`0x04` the value is 32 zero bytes, thus one claim names the group sender owner
+of Part 11 §11.12 for every group of the user, and §7.5.4 gives that claim.
 
 > *Cause.* A roster that named each subject in the clear was a list of each
 > contact and each community of the user. That list was signed, and each
@@ -311,6 +315,9 @@ A claim record travels as a device-set control record of §7.5.5, with the
   `roster_epoch`.
 - **[DEV-191]** A device MUST NOT send more than `OWNER_CLAIM_RATE` claim
   records of scope `0x01` or scope `0x02` each day. §7.8 gives that value.
+  **[DEV-260]** A device MUST count a claim record that holds a claim of scope
+  `0x04` under `OWNER_CLAIM_RATE` in the same manner as a record of scope
+  `0x01`.
 - **[DEV-192]** A device MUST NOT put a claim of scope `0x01` and a claim of
   scope `0x02` for one subject in one record. **[DEV-234]** A device MUST NOT
   put a claim of scope `0x03` together with a claim of a different scope in
@@ -569,7 +576,7 @@ class in Part 6 §6.6. **[DEV-022]** A client MUST NOT process a kind that decla
 | Mutable state | `0x20` sub-kind `0x01` | The last writer wins |
 | Ephemeral | `0x08` | The client does not store it |
 | Control | `0x10`, `0x11`, `0x20` sub-kind `0x02`, `0x30`, `0x31`, `0x32`, `0x33`, `0x34`, `0x35` | Part 11 gives `0x10`. Part 12 gives `0x11`. §7.5.5 gives `0x20` sub-kind `0x02`, which is the sync acknowledgment. Part 4 §4.5.1 gives `0x30`. Part 9 §9.5.3 gives `0x31`. §7.5.8 gives `0x32`. Part 6 §6.6.10 gives `0x33`. Part 6 §6.6.11 gives `0x34` and `0x35` |
-| Wrapper | `0x09`, `0x12` | Part 6 §6.6.2 gives the group record and Part 6 §6.6.5 gives the rich record. **[DEV-174]** A client MUST take the class from `inner_kind`. **[DEV-175]** A client MUST NOT give a wrapper a class of its own |
+| Wrapper | `0x09` | Part 6 §6.6.5 gives the rich record. Kind `0x12` of Part 6 §6.6.2 is retired; a group content record is the `app` of a group record of Part 11 §11.3, and its own kind gives its class. **[DEV-174]** A client MUST take the class from `inner_kind`. **[DEV-175]** A client MUST NOT give a wrapper a class of its own |
 
 - **Insertion** is commutative. **[DEV-024]** A client MUST identify each message by the
   triple (conversation, sender, `msg_ref`) of Part 6 §6.6. **[DEV-025]** A client MUST remove
@@ -583,8 +590,9 @@ class in Part 6 §6.6. **[DEV-022]** A client MUST NOT process a kind that decla
   different conversation. **[DEV-030]** A receiver MUST NOT change a record before it
   completes this check.
 - The order of two records from **one sender** comes from the sender-chain
-  position. That position is the lexicographic pair (`chain_epoch`, `counter`)
-  of Part 11 §11.7. The order of two records from **two different senders**
+  position. For a group that position is the lexicographic pair (`epoch`,
+  `counter`) of Part 11 §11.7, and for a pairwise conversation it is the
+  ratchet position of Part 6 §6.5. The order of two records from **two different senders**
   comes from the local insertion sequence. That sequence belongs to the device
   that first put the record in the synced history. If those two rules do not
   resolve two records, the byte order of `msg_ref` applies. **[DEV-031]** A client MUST NOT use
@@ -619,6 +627,7 @@ class in Part 6 §6.6. **[DEV-022]** A client MUST NOT process a kind that decla
   | The verification state of Part 4 §4.5 | Each pairwise identity |
   | The delivery state and the read state | Each message |
   | The local insertion sequence of Part 11 §11.7 | Each conversation |
+  | The group `counter` of the group sender owner, Part 11 §11.3.4 and §7.5.4 | Each group |
   | The block state of Part 14 §14.12 | Each contact |
   | The mute list of Part 12 §12.5.4 | Each community |
   | The archive flag, the pin flag, and the folder label | Each conversation |
@@ -627,6 +636,14 @@ class in Part 6 §6.6. **[DEV-022]** A client MUST NOT process a kind that decla
 
   **[DEV-197]** A client MUST converge each item of that table across the device
   set. **[DEV-198]** A revision that adds a chat-list item MUST add a row.
+
+  **One item of group state does not converge.** Each device reads a group
+  queue on its own circuit, and it holds its own cursor for each replica of
+  that queue (Part 11 §11.2.2). **[DEV-261]** A client MUST hold the
+  group-queue cursor of each replica as per-device state, and it MUST NOT put
+  that cursor on a sync channel. A device that learns the cursor of a peer
+  device gains nothing, because the `seq` of a replica is relay-local, and the
+  `msg_id` rule of Part 6 §6.6 removes a duplicate that two cursors give.
 
   > **The draft is the one item that carries content.** A draft is unsent text,
   > thus a peer device holds a message that no party sent. **[DEV-199]** A
@@ -693,6 +710,19 @@ ratchet state for the contact *c*. If the two devices send, the ratchet forks.
   immediately**. Thus a stale former owner cannot decrypt the traffic that
   follows.
 
+**The group sender owner.** A group has no ratchet, and a group record carries
+a per-sender `counter` that Part 11 §11.3.4 keeps strictly increasing in each
+epoch. Thus the same resolution applies: one device, the **group sender owner**
+of Part 11 §11.12, posts each group record for every group of the user, and a
+claim of scope `0x04` of §7.3.1 names it with one subject for all groups. A
+device that is not the owner composes and hands the plaintext to the owner as an
+interactive sync record, in the same manner as a pairwise send, and DEV-047,
+DEV-048, and DEV-193 to DEV-196 apply. The `counter` of each group is mutable
+state of §7.5.3, and the new owner continues it from the synced value; a
+collision that a race causes is a reorder at each receiver and not a security
+event (Part 11 §11.3.5). Every device of the set reads each group on its own
+circuit with its own cursor, and DEV-261 gives that cursor.
+
 **What this design costs a send from a device that is not the owner.** The
 composing device sends an interactive sync record under DEV-193, thus it adds no
 pacing wait. The owner device then takes that record and sends the message. If
@@ -706,7 +736,8 @@ bug is the cause that the multi-device proposal of SimpleX has not shipped. The
 alternative is the Sesame-style per-device session mesh of Signal. That
 alternative is also correct, but it multiplies the pairwise sessions by the
 device count at the two ends. For two users with 8 devices each, the count
-reaches 64 sessions, which is too expensive under the fan-out model of UMBRA.
+reaches 64 sessions, which is too expensive under the session budget of Part 3
+§3.12.
 
 ### 7.5.5 Convergence after an absence
 
@@ -890,7 +921,7 @@ a new sync queue is rare.
    the counter survives that queue.
 4. **[DEV-073]** A device MUST pace a resend at the ordinary send rate of that sync channel. **[DEV-074]** A
    device MUST NOT resend in one burst. A burst at a reconnect is a device-set
-   beacon, in the same manner as the fan-out burst of Part 11 §11.3.0. A resend
+   beacon. A resend
    carries ordinary sync records, and it is not the reconciliation traffic that
    §7.5.6 forbids.
 5. **[DEV-075]** A device MUST NOT retain a record for the resend after `SYNC_MAX_AGE`.
@@ -1056,9 +1087,14 @@ burst.**
 > that each see a deletion arrive inside a few seconds get a large likelihood
 > ratio that they share a correspondent. G9 holds against colluding contacts.
 
-An edit and a deletion are each a send under Part 11 §11.3.0. **[DEV-110]** A client MUST
-dispatch each one to the members with an independent randomized delay for each
-member. **[DEV-111]** A client MUST draw that delay again at each send.
+An edit or a deletion in a group is one group record of Part 11 §11.3, and the
+group sender owner of §7.5.4 posts it as any group send. The group is one
+destination under DEV-107.
+
+> *Cause.* An earlier draft sent an edit and a deletion to each member on a
+> pairwise channel, with an independent delay for each member, because a burst
+> to the member set was a membership beacon. A group record reaches every
+> member through one group queue, thus there is no set of sends to spread.
 
 **[DEV-112]** A client MUST send an edit and a deletion under the ordinary ARQ of Part 3 §3.7.
 **[DEV-113]** A client MUST NOT run a retry loop that a relay quota signal paces. **[DEV-114]** If a relay
@@ -1071,8 +1107,8 @@ signals the quota, the client MUST show a delivery failure to the user.
 2. **[DEV-115]** A history transfer MUST carry the tombstone set for the same window. A
    history transfer happens at a device link, at a scope change, and at a backup
    restore. It also happens at the re-establishment of a sync channel that a
-   relay deleted under `QUEUE_IDLE_TTL`. The history window that an admin
-   turns on under Part 11 rule `GRP-049` is also a history transfer.
+   relay deleted under `QUEUE_IDLE_TTL`. The history window of Part 11 §11.8
+   that an admin turns on is also a history transfer.
 3. **[DEV-116]** A restore MUST apply the tombstone set that the backup or the archive
    carries. Part 4 §4.7.2 gives the backup, and §7.6.1 gives the archive. The
    client can hold tombstones that postdate that epoch. **[DEV-117]** In that case the client
@@ -1214,8 +1250,7 @@ A conversation timer removes a message from each device after a period. Part 6
   other than the local database of the device. The backup of Part 4 §4.7.2, the
   archive of §7.6.1, and an export are such stores.
 - **[DEV-216]** A client MUST NOT put such a record in a history transfer of
-  §7.5.6 rule 2. The history window of Part 11 rule `GRP-049` is one such
-  transfer.
+  §7.5.6 rule 2. The history window of Part 11 §11.8 is one such transfer.
 
 > *Cause.* A backup that held a timed record would return that record at a
 > restore, after the period ended. Part 4 §4.7.2 holds a full object for
@@ -1226,7 +1261,7 @@ A conversation timer removes a message from each device after a period. Part 6
 > names the two permitted paths, and each other path is out.
 
 **The timer in a group.** Each rule of this section binds a private group in
-the same manner as a pairwise conversation. A `GroupRecord` of Part 11 §11.2.1
+the same manner as a pairwise conversation. A group record of Part 11 §11.3
 is the target. **[DEV-248]** A member below the `admin` role of Part 11
 §11.9 MUST NOT set the timer of a private group. **[DEV-249]** A member MUST
 reject a timer record from a member below that role.
@@ -1258,9 +1293,10 @@ setting that decides **what the device shows**, and it is per conversation.
   §7.5.3. **[DEV-220]** A client MUST converge that setting across the device
   set.
 - **[DEV-258]** A client MUST default a 1:1 conversation to `all`.
-  **[DEV-259]** A client MUST default a new group at or below `T1_MAX` members
-  to `all`. **[DEV-221]** A client MUST default a new group above `T1_MAX`
-  members to `mentions`. **[DEV-222]** A client MUST default a community to
+  **[DEV-259]** A client MUST default a new group at or below
+  `GROUP_ALL_NOTIFY_MAX` members to `all`. **[DEV-221]** A client MUST default
+  a new group above `GROUP_ALL_NOTIFY_MAX` members to `mentions`. Part 11
+  §11.10 gives that value. **[DEV-222]** A client MUST default a community to
   `mentions`, and Part 12 §12.6 states the same default. Part 8 §8.5.1 bounds
   the wakes that the digest of a community costs.
 - **[DEV-223]** A client MUST NOT let the setting change the wake behavior of

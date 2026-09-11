@@ -1,7 +1,8 @@
 # UMBRA Protocol Specification — Part 13: Attachments and Large Objects
 
 **Status:** Draft
-**Version:** 0.1.0-draft
+**Version:** 0.2.0-draft
+**Date:** 2026-09-11
 
 ---
 
@@ -296,7 +297,7 @@ client holds that consensus already, thus a resolution needs no fetch. The full
 no directory lookup at all.
 
 **The width derivation.** Part 6 §6.9 gives the `B1` `L5 payload` row 1 930
-bytes. The fixed part of `FileDescriptor` is 133 bytes, and each `ChunkRef` is
+bytes. The fixed part of `FileDescriptor` is 137 bytes, and each `ChunkRef` is
 96 bytes plus two `RelayRef` values. The model file of Part 3 §3.12 is 400 KB,
 which is 13 chunks. A second row of §6.9 is tighter, and that row decides the
 width. The client sends the descriptor as the body of an `AppMessage`, and §6.9
@@ -304,16 +305,18 @@ gives that body 1 691 bytes at `B1` with the default chunk. Part 5 §5.5.2 gives
 the same body 1 723 bytes at `B1` with the 32-byte chunk:
 
 ```
-133 + 13 × (96 + 2R) ≤ 1 930    L5 payload at B1                     gives  R ≤ 21
-133 + 13 × (96 + 2R) ≤ 1 723    AppMessage body at B1, 32-byte chunk gives  R ≤ 13
+137 + 13 × (96 + 2R) ≤ 1 930    L5 payload at B1                     gives  R ≤ 20
+137 + 13 × (96 + 2R) ≤ 1 723    AppMessage body at B1, 32-byte chunk gives  R ≤ 13
 
-R = 12  →  ChunkRef = 120 B  →  13 chunks = 133 + 1 560 = 1 693 B
+R = 12  →  ChunkRef = 120 B  →  13 chunks = 137 + 1 560 = 1 697 B
 ```
 
 UMBRA sets *R* to 12, because 12 gives a `ChunkRef` of 120 bytes and 120 is a
-multiple of 8. The margin against the 1 723-byte row is 30 bytes. A 13-chunk
-descriptor is 2 bytes above the 1 691-byte default-chunk row. Thus the client
-sends it with the 32-byte chunk under Part 5 §5.5.2 rule `CRY-018`. A 12-byte
+multiple of 8. The margin against the 1 723-byte row is 26 bytes. A 13-chunk
+descriptor is 6 bytes above the 1 691-byte default-chunk row. Thus the client
+sends it with the 32-byte chunk under Part 5 §5.5.2 rule `CRY-018`. The ref
+ceilings of §13.7 hold at the 137-byte fixed part: 13 refs at `B1`, 64 refs at
+`B2`, and 269 refs at `B3`. A 12-byte
 hint gives 96 bits against a second preimage on the identity of a relay. A
 relay that wants the traffic of another relay has to find that preimage first.
 **[ATT-049]** A revision that adds a field to `FileDescriptor` or to `ChunkRef`
@@ -762,14 +765,14 @@ mandatory in UMBRA, and that rule is the cause that this inheritance operates.
 
 The sender uploads the file **one time for the group**. §13.4 makes that upload
 `REPLICAS` copies of each chunk, and that factor does not follow the group size.
-The sender key of the group distributes the descriptor. Thus three properties
-hold:
+One group record of Part 11 §11.3 carries the descriptor to each member. Thus
+three properties hold:
 
 - The upload cost is O(1) in the group size, and it is not O(N).
-- The descriptor cost is O(N), and the descriptor is small. A 1-chunk descriptor
-  is 253 bytes and a 13-chunk descriptor is 1 693 bytes, and bucket `B1` holds
-  both. Part 6 §6.9 gives 155 bytes of `B0` text at the default chunk and 226
-  bytes with no chunk. Thus no descriptor fits `B0`.
+- The descriptor cost is one group record, and the descriptor is small. A
+  1-chunk descriptor is 257 bytes and a 13-chunk descriptor is 1 697 bytes, and
+  bucket `B1` holds both. Part 6 §6.9 gives 155 bytes of `B0` text at the
+  default chunk and 226 bytes with no chunk. Thus no descriptor fits `B0`.
 - A relay that holds a chunk learns a download count and nothing else. That
   relay does not learn the group, the membership, or the file.
 - A community post carries a descriptor in the open, under Part 12 §12.4.7.
@@ -984,11 +987,17 @@ property, which is G8. This rule makes no claim of flow-level undetectability
 | **The three replica operators in collusion** | That one chunk is in three locations | Nothing that links that chunk to a different chunk or to a user |
 | **Each relay that holds a chunk of one file, in collusion** | The chunk count, and thus an approximate padded file size | The content, the participants, and the filename |
 | **Chunk relay that holds a chunk of a community attachment (Part 12 §12.4.7)** | The same items as the first row, and a download count that follows the pull volume of the community | The community, because the descriptor travels in the community record and not to the chunk relay |
+| **Chunk relay that holds the catch-up object of Part 7 §7.5.1** | The same items as the first row, under the random credential of that object | The device set, and which device of the set wrote or read it |
+| **Chunk relay that holds the dead-channel blob of Part 3 §3.2.6** | The same items as the second row, under the handle of that section | The two parties of the channel, because the handle is a derived value that neither party publishes |
+| **Chunk relay that holds a chunk of the epoch-key object of Part 11 §11.4.2** | That one member fetched one chunk of an object of the size the member count gives, and the download count of each chunk, which is the number of members whose slot sits in that chunk | The member index of the fetcher and the group. The relay does not learn a group identifier, because the descriptor travels in a group record and not to the chunk relay |
+| **Chunk relay that holds a chunk of a roster snapshot of Part 11 §11.9.8** | The same items as the first row, and a download count of one for each joiner that the same snapshot served | The group, the roster, and the joiner, because the descriptor travels in the admit stage of the invitation on a pairwise channel |
 
-The last row is the residual leak, and Part 16 states it. **[ATT-066]** A
+The community row is the residual leak, and Part 16 states it. **[ATT-066]** A
 revision that adds a client of the chunk path MUST add a row to this table.
-Part 4 §4.7.2 and Part 12 §12.4.7 are the second and third clients of that
-path today.
+The clients of that path today are the attachment of §13.3, the backup of Part
+4 §4.7.2, the community attachment of Part 12 §12.4.7, the catch-up object of
+Part 7 §7.5.1, the dead-channel blob of Part 3 §3.2.6, the epoch-key object of
+Part 11 §11.4.2, and the roster snapshot of Part 11 §11.9.8.
 
 ## 13.10 The relay storage budget
 

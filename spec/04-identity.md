@@ -1,7 +1,8 @@
 # UMBRA Protocol Specification — Part 4: Identity
 
 **Status:** Draft
-**Version:** 0.1.0-draft
+**Version:** 0.2.0-draft
+**Date:** 2026-09-11
 
 ---
 
@@ -368,12 +369,11 @@ learns the open and not the invitation.
 
 - **[IDN-120]** The landing document MUST hold no script. **[IDN-121]** The
   landing document MUST NOT reference a resource on a second host.
-- **[IDN-122]** The invitation host MUST serve `/.well-known/assetlinks.json`
-  and `/.well-known/apple-app-site-association`. Each file names the client
-  package and the path `/i`.
-- **[IDN-123]** A client MUST register the link as an Android App Link and as
-  an iOS Universal Link. Thus a tap on a device with the client opens the
-  client, and no browser sees the link.
+- **[IDN-122]** The invitation host MUST serve `/.well-known/assetlinks.json`.
+  That file names the client package and the path `/i`.
+- **[IDN-123]** A client MUST register the link as an Android App Link. Thus a
+  tap on a device with the client opens the client, and no browser sees the
+  link.
 - **[IDN-124]** A client MUST NOT open the landing document. **[IDN-125]** A
   client MUST NOT put the fragment in a request to any host.
 - **[IDN-126]** A relay MUST delete a blob that no party fetched within
@@ -389,9 +389,9 @@ read. The blob key comes from
 holds that label. That key is different from the link ID
 that the relay knows, thus a seized relay gives only ciphertext.
 
-> *Cause.* An earlier draft put the relay host in the link. An App Link and a
-> Universal Link need a host list that the client package states in advance,
-> and a relay set changes. Thus the link opened a browser on each device, and
+> *Cause.* An earlier draft put the relay host in the link. An App Link needs
+> a host list that the client package states in advance, and a relay set
+> changes. Thus the link opened a browser on each device, and
 > the relay served a page that UMBRA did not specify. One host with a static
 > document gives the platform a list of one. The `RelayRef` in the fragment
 > names the relay to the client, and no host sees it. A hostile invitation host
@@ -665,10 +665,12 @@ Thus five rules apply, and they apply to each table.
    > cannot cancel one term against another.
    >
    > *Cause of the derivation.* An earlier draft held `K_tab` in the platform
-   > keystore as an HMAC-SHA256 key with no user authentication. The Secure
-   > Enclave holds a P-256 key only, and Part 15 §15.6.4 states that limit,
-   > thus no iOS client could make that key. A client changes a table only
-   > while it holds `K_store`, because each record key derives from `K_store`.
+   > keystore as an HMAC-SHA256 key with no user authentication, and it
+   > entangled `K_tab` with a secure-element key; the keystore of every v1
+   > platform does not hold an HMAC key that the table needs without a
+   > platform limit, thus the key moved into software. A client changes a
+   > table only while it holds `K_store`, because each record key derives from
+   > `K_store`.
    > Thus a key that derives from `K_store` gives the same detection against
    > a party without the unlocked store. The MAC moves to HMAC-SHA3-256, which
    > is the MAC of Part 5, because a software key has no keystore limit on the
@@ -751,10 +753,10 @@ export the code as 64 hexadecimal characters. That format has the worst
 measured results for human transcription.
 
 **[IDN-042]** Mainstream builds MAY give platform-cloud backup of the Recovery
-Code through Android Block Store or iCloud Keychain. **[IDN-043]** Such backup
+Code through Android Block Store. **[IDN-043]** Such backup
 MUST be an explicit opt-in with a plain warning. **[IDN-044]** The warning MUST
 state that the backup makes a recovery dependency. That dependency is on the
-Google account or on the Apple account of the user. **[IDN-045]** The warning
+Google account of the user. **[IDN-045]** The warning
 MUST also name the legal process of that platform. **[IDN-046]** De-Googled
 builds, F-Droid builds, direct-download builds, and the high-risk configuration
 MUST default to local self-custody recovery only.
@@ -773,7 +775,9 @@ as opaque blobs**. The backup holds these items:
 
 The **local identity table** holds the pairwise salts of §4.2.2 and the
 community identity seeds of Part 12 §12.3.2. That table also holds the group
-roster seeds of Part 11 §11.9.1. The client makes each of these values from the
+roster seed `GroupRosterSeed_g` of each group, and the three group keys of
+Part 11 §11.9.1 (the roster key, the pair key, and the KEM key) derive from
+that seed. The client makes each of these values from the
 device CSPRNG, thus the recovery phrase alone does not rebuild them. The local
 identity table is not history. **[IDN-047]** A retention limit MUST NOT remove an entry from
 that table.
@@ -936,7 +940,7 @@ share. **[IDN-085]** A client MUST NOT put a value from which a party derives
 
 **Where `C_user` lives.** The user holds `C_user` as the `RecoveryDigits` of
 §4.7.7. §4.7.1 IDN-042 also lets a mainstream build put `C_user` in
-Android Block Store or in the iCloud Keychain. **[IDN-086]** If a client puts
+Android Block Store. **[IDN-086]** If a client puts
 `C_user` in a platform-cloud item, that client MUST NOT put a share of
 `C_social` in that same item.
 
