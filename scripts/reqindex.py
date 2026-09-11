@@ -205,7 +205,7 @@ def main(argv):
     if removed:
         print("removed:", ", ".join(removed))
     if not dry:
-        (SPEC / "req-index.md").write_text("\n".join(out) + "\n", encoding="utf-8")
+        (SPEC / "req-index.md").write_text("\n".join(out) + "\n", encoding="utf-8", newline="\n")
         print("wrote spec/req-index.md")
     return 0
 
