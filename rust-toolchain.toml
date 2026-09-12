@@ -1,4 +1,4 @@
 # The compiler is inside the cryptographic trust boundary (Part 15 §15.5.1).
 [toolchain]
-channel = "1.93.1"
+channel = "1.98.1"
 components = ["rustfmt", "clippy"]
