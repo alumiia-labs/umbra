@@ -10,6 +10,10 @@
 #![forbid(unsafe_code)]
 #![no_std]
 
+// The skipped-key store of the ratchet lives on the heap, as Part 15 §15.4
+// prefers for a secret.
+extern crate alloc;
+
 pub mod handshake;
 pub mod hierarchy;
 pub mod kem;
@@ -40,6 +44,8 @@ pub enum Error {
     Rng,
     /// A handshake aborted. One value covers every cause (Part 5 §5.4).
     Handshake,
+    /// A ratchet record does not open, or a limit of Part 5 §5.5.4 holds.
+    Ratchet,
 }
 
 impl core::fmt::Display for Error {
@@ -51,6 +57,7 @@ impl core::fmt::Display for Error {
             Error::Signature => "invalid signature",
             Error::Rng => "random generator failed",
             Error::Handshake => "handshake aborted",
+            Error::Ratchet => "ratchet record rejected",
         };
         f.write_str(s)
     }

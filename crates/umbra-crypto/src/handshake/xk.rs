@@ -101,6 +101,34 @@ pub struct SessionKeys {
     pub hk_r2i: Secret<32>,
     /// The transcript hash at the split, for Part 7 §7.4 step 3.
     pub transcript: [u8; 32],
+    /// The responder's flight-2 ephemeral, which is its first ratchet key.
+    pub dh_initial: InitialDh,
+}
+
+/// The responder's first ratchet key, as each side holds it.
+pub enum InitialDh {
+    /// At the initiator: the public key `er` of flight 2.
+    Peer([u8; 32]),
+    /// At the responder: the private key of `er`.
+    Own(StaticSecret),
+}
+
+impl InitialDh {
+    /// The peer's public key, at the initiator.
+    pub fn peer_public(&self) -> Option<[u8; 32]> {
+        match self {
+            Self::Peer(pk) => Some(*pk),
+            Self::Own(_) => None,
+        }
+    }
+
+    /// The own private key, at the responder.
+    pub fn into_own_secret(self) -> Option<StaticSecret> {
+        match self {
+            Self::Own(sk) => Some(sk),
+            Self::Peer(_) => None,
+        }
+    }
 }
 
 /// The fields the initiator holds before flight 1, from the invitation.
@@ -149,12 +177,13 @@ fn init(
     st
 }
 
-fn split(st: &State) -> SessionKeys {
+fn split(st: &State, dh_initial: InitialDh) -> SessionKeys {
     SessionKeys {
         rk: st.derive(&[labels::RATCHET_ROOT]),
         hk_i2r: st.derive(&[labels::HEADER_KEY, &[0x01]]),
         hk_r2i: st.derive(&[labels::HEADER_KEY, &[0x02]]),
         transcript: *st.h(),
+        dh_initial,
     }
 }
 
@@ -347,7 +376,7 @@ impl Initiator {
         tag.copy_from_slice(&st.seal(pt)?);
         st.trace(trace, "3.4 payload3");
         // 5. split
-        let keys = split(st);
+        let keys = split(st, InitialDh::Peer(*er));
         st.trace(trace, "3.5 split");
         Ok((keys, total))
     }
@@ -554,7 +583,7 @@ impl Responder {
         st.open(app_out, tag)?;
         st.trace(trace, "3.4 payload3");
         // 5. split
-        let keys = split(st);
+        let keys = split(st, InitialDh::Own(er_sk));
         st.trace(trace, "3.5 split");
         Ok((keys, s_i, app_len))
     }
