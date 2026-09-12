@@ -15,6 +15,7 @@ pub mod kem;
 pub mod labels;
 pub mod rng;
 pub mod secret;
+pub mod sign;
 
 #[cfg(test)]
 pub(crate) mod test_rng;
@@ -31,6 +32,10 @@ pub enum Error {
     Key,
     /// A decapsulation failed.
     Kem,
+    /// A signature does not verify, or does not decode.
+    Signature,
+    /// The random generator failed.
+    Rng,
 }
 
 impl core::fmt::Display for Error {
@@ -39,6 +44,8 @@ impl core::fmt::Display for Error {
             Error::Length => "wrong length",
             Error::Key => "invalid key",
             Error::Kem => "decapsulation failed",
+            Error::Signature => "invalid signature",
+            Error::Rng => "random generator failed",
         };
         f.write_str(s)
     }
