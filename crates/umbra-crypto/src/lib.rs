@@ -14,6 +14,7 @@ pub mod handshake;
 pub mod hierarchy;
 pub mod kem;
 pub mod labels;
+pub mod ratchet;
 pub mod rng;
 pub mod secret;
 pub mod sign;
