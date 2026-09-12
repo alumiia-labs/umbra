@@ -1,0 +1,81 @@
+# Dependency policy of Part 15 §15.2.7.
+# Each allow entry names its register. A transitive crate that is not on the
+# list fails the build. A skip entry carries a date and a cause, and CI fails
+# on one older than 90 days.
+
+[graph]
+all-features = false
+targets = [
+  { triple = "aarch64-linux-android" },
+  { triple = "x86_64-unknown-linux-gnu" },
+  { triple = "wasm32-unknown-unknown" },
+]
+
+[advisories]
+version = 2
+yanked = "deny"
+unmaintained = "workspace"
+
+[licenses]
+version = 2
+allow = ["MIT", "Apache-2.0", "BSD-3-Clause", "Unicode-3.0", "AGPL-3.0-only"]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = false
+skip = []
+# The allow list closes the graph. Register R1 is the message core of Part 5
+# §5.1. An entry marked `build` is a proc-macro, a build script, or a crate
+# that only those reach; no binary links it, thus it charges no register cap
+# (Part 15 §15.2.3), and DEPENDENCIES.md lists it apart.
+allow = [
+  { crate = "aead" },                    # R1
+  { crate = "block-buffer" },            # R1
+  { crate = "cfg-if" },                  # R1
+  { crate = "chacha20" },                # R1
+  { crate = "chacha20poly1305" },        # R1
+  { crate = "cipher" },                  # R1
+  { crate = "cmov" },                    # R1
+  { crate = "cpufeatures" },             # R1
+  { crate = "crypto-common" },           # R1
+  { crate = "ctutils" },                 # R1
+  { crate = "curve25519-dalek" },        # R1
+  { crate = "curve25519-dalek-derive" }, # build
+  { crate = "digest" },                  # R1
+  { crate = "hkdf" },                    # R1
+  { crate = "hmac" },                    # R1
+  { crate = "hybrid-array" },            # R1
+  { crate = "inout" },                   # R1
+  { crate = "keccak" },                  # R1
+  { crate = "kem" },                     # R1
+  { crate = "libc" },                    # R1, aarch64-linux-android only, under cpufeatures
+  { crate = "ml-dsa" },                  # R1
+  { crate = "ml-kem" },                  # R1
+  { crate = "module-lattice" },          # R1
+  { crate = "num-traits" },              # R1
+  { crate = "poly1305" },                # R1
+  { crate = "proc-macro2" },             # build
+  { crate = "quote" },                   # build
+  { crate = "rand_core" },               # R1
+  { crate = "sha3" },                    # R1
+  { crate = "shake" },                   # R1
+  { crate = "signature" },               # R1
+  { crate = "sponge-cursor" },           # R1
+  { crate = "subtle" },                  # R1
+  { crate = "syn" },                     # build
+  { crate = "typenum" },                 # R1
+  { crate = "unicode-ident" },           # build
+  { crate = "universal-hash" },          # R1
+  { crate = "x25519-dalek" },            # R1
+  { crate = "zeroize" },                 # R1
+  { crate = "zeroize_derive" },          # build
+  { crate = "autocfg" },                 # build
+  { crate = "rustc_version" },           # build
+  { crate = "semver" },                  # build
+  { crate = "umbra-crypto" },            # workspace
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

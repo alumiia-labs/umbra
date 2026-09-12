@@ -1,0 +1,23 @@
+[package]
+name = "umbra-crypto"
+description = "Primitives, UMBRA-KEM, handshake, and ratchet of the UMBRA protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Register R1 of Part 15 §15.2.1. Each line names its configuration there.
+ml-kem = { version = "0.3.2", default-features = false }
+ml-dsa = { version = "0.1.1", default-features = false, features = ["rand_core"] }
+x25519-dalek = { version = "3.0.0", default-features = false, features = ["static_secrets"] }
+chacha20poly1305 = { version = "0.11.0", default-features = false }
+sha3 = { version = "0.11", default-features = false }
+hkdf = { version = "0.13.0", default-features = false }
+hmac = { version = "0.13.0", default-features = false }
+subtle = { version = "2", default-features = false }
+zeroize = { version = "1", default-features = false, features = ["derive"] }
