@@ -100,6 +100,17 @@ impl KeyPair {
         &self.pk
     }
 
+    /// The X25519 half of the secret key, for the handshake tokens `es`
+    /// and `se` of Part 5 §5.4.
+    pub(crate) fn x25519_secret(&self) -> &StaticSecret {
+        &self.x_sk
+    }
+
+    /// The X25519 half of the public key, `pk_X`.
+    pub fn x25519_public(&self) -> [u8; 32] {
+        *self.pk.x.as_bytes()
+    }
+
     /// Recovers `ss` from `ct` (`UMBRA-KEM.Decap`).
     ///
     /// The classical half aborts on an all-zero output (`CRY-040`). The

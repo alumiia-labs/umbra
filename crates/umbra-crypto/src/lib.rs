@@ -10,6 +10,7 @@
 #![forbid(unsafe_code)]
 #![no_std]
 
+pub mod handshake;
 pub mod hierarchy;
 pub mod kem;
 pub mod labels;
@@ -36,6 +37,8 @@ pub enum Error {
     Signature,
     /// The random generator failed.
     Rng,
+    /// A handshake aborted. One value covers every cause (Part 5 §5.4).
+    Handshake,
 }
 
 impl core::fmt::Display for Error {
@@ -46,6 +49,7 @@ impl core::fmt::Display for Error {
             Error::Kem => "decapsulation failed",
             Error::Signature => "invalid signature",
             Error::Rng => "random generator failed",
+            Error::Handshake => "handshake aborted",
         };
         f.write_str(s)
     }
