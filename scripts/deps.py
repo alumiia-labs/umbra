@@ -115,8 +115,8 @@ def main(argv: list[str]) -> int:
     path = ROOT / "DEPENDENCIES.md"
     if "--check" in argv:
         current = path.read_text(encoding="utf-8") if path.exists() else ""
-        # the date line changes each day; compare everything else
-        strip = lambda s: re.sub(r"^- Date: .*$", "", s, flags=re.M)
+        # the date and the commit change at each commit; compare the rest
+        strip = lambda s: re.sub(r"^- (Date|Commit): .*$", "", s, flags=re.M)
         if strip(current) != strip(text):
             print("DEPENDENCIES.md is stale; run scripts/deps.py")
             return 1

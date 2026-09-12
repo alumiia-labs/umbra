@@ -21,3 +21,6 @@ hkdf = { version = "0.13.0", default-features = false }
 hmac = { version = "0.13.0", default-features = false }
 subtle = { version = "2", default-features = false }
 zeroize = { version = "1", default-features = false, features = ["derive"] }
+# Trait crates that the R1 graph holds already; a direct edge names them.
+kem = { version = "0.3.0", default-features = false }
+rand_core = { version = "0.10.1", default-features = false }
