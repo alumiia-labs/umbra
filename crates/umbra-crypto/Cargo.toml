@@ -24,3 +24,8 @@ zeroize = { version = "1", default-features = false, features = ["derive"] }
 # Trait crates that the R1 graph holds already; a direct edge names them.
 kem = { version = "0.3.0", default-features = false }
 rand_core = { version = "0.10.1", default-features = false }
+
+[dev-dependencies]
+# The known-answer harness reads the vendored ACVP JSON. A dev-dependency
+# links into no shipped binary, thus it charges no register.
+serde_json = "1"

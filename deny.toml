@@ -73,6 +73,12 @@ allow = [
   { crate = "autocfg" },                 # build
   { crate = "rustc_version" },           # build
   { crate = "semver" },                  # build
+  # dev-dependencies of the known-answer harness; no shipped binary links them
+  { crate = "itoa" },                    # dev
+  { crate = "memchr" },                  # dev
+  { crate = "serde_core" },              # dev
+  { crate = "serde_json" },              # dev
+  { crate = "zmij" },                    # dev
   { crate = "umbra-crypto" },            # workspace
 ]
 
