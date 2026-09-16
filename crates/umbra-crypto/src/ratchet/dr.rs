@@ -95,6 +95,7 @@ pub struct Session {
     send_index: u16,
     session_tag: [u8; 2],
     skipped: Vec<Skipped>,
+    mixed: u32,
 }
 
 /// A parsed record header.
@@ -131,6 +132,51 @@ pub struct Received<'a> {
 
 /// `KDF_RK`: one HKDF call gives the next root key, the chain key, and the
 /// next header key, in that order (`CRY-063`).
+/// The two points of a ratchet step at which the braid of §5.5.2 mixes a
+/// post-quantum secret into the root key. A step derives the receiving chain
+/// first and the sending chain second; the peer derives the same two chains
+/// in the mirror order, thus a mix before one of them lands on one root key
+/// at both parties.
+pub trait StepHooks {
+    /// The generator of the new ratchet key of the step.
+    type Rng: CryptoRng + ?Sized;
+
+    /// The generator.
+    fn rng(&mut self) -> &mut Self::Rng;
+
+    /// Before the receiving chain of the step derives. `frame` is the braid
+    /// frame of the record that carried the new ratchet key. Returns an
+    /// epoch and its secret to mix, or nothing.
+    fn before_receive_chain(
+        &mut self,
+        header: &Header,
+        frame: Option<&[u8]>,
+    ) -> Option<(u32, Secret<32>)>;
+
+    /// Before the sending chain of the step derives. Returns an epoch and its
+    /// secret to mix, or nothing.
+    fn before_send_chain(&mut self) -> Option<(u32, Secret<32>)>;
+}
+
+/// The hooks of a session with no braid: nothing is mixed.
+pub struct NoBraid<'a, R: ?Sized> {
+    /// The generator of the new ratchet key.
+    pub rng: &'a mut R,
+}
+
+impl<R: CryptoRng + ?Sized> StepHooks for NoBraid<'_, R> {
+    type Rng = R;
+    fn rng(&mut self) -> &mut R {
+        self.rng
+    }
+    fn before_receive_chain(&mut self, _: &Header, _: Option<&[u8]>) -> Option<(u32, Secret<32>)> {
+        None
+    }
+    fn before_send_chain(&mut self) -> Option<(u32, Secret<32>)> {
+        None
+    }
+}
+
 fn kdf_rk(root_key: &Secret<32>, dh_output: &[u8; 32]) -> (Secret<32>, Secret<32>, Secret<32>) {
     let kdf = Hkdf::<Sha3_256>::new(Some(root_key.expose()), dh_output);
     let mut output = Secret::<96>::zeroed();
@@ -240,6 +286,7 @@ impl Session {
                     send_index: 0,
                     session_tag,
                     skipped: Vec::new(),
+                    mixed: 0,
                 }
             }
             Role::Responder => {
@@ -260,6 +307,7 @@ impl Session {
                     send_index: 0,
                     session_tag,
                     skipped: Vec::new(),
+                    mixed: 0,
                 }
             }
         };
@@ -378,6 +426,18 @@ impl Session {
         rng: &mut R,
         out: &mut [u8],
     ) -> Result<Received<'a>, Error> {
+        self.receive_with(record, now, out, &mut NoBraid { rng })
+    }
+
+    /// [`Session::receive`] with the braid hooks of a ratchet step. The
+    /// generator of a new ratchet key comes from the hooks.
+    pub fn receive_with<'a, H: StepHooks>(
+        &mut self,
+        record: &'a [u8],
+        now: u64,
+        out: &mut [u8],
+        hooks: &mut H,
+    ) -> Result<Received<'a>, Error> {
         let ctx = Self::peek_ctx(record)?;
         let (head, rest) = record.split_at(5);
         let (hdr_nonce, rest) = rest.split_at(12);
@@ -411,7 +471,8 @@ impl Session {
         let (header, ratchet) = self.decrypt_header(&hdr_nonce, head, hdr_ct)?;
         if ratchet {
             self.skip(header.pn, now)?;
-            self.dh_ratchet(&header, rng)?;
+            let frame_of_step = (frame_len > 0).then_some(frame);
+            self.dh_ratchet(&header, frame_of_step, hooks)?;
         }
         self.skip(header.n, now)?;
         let ck = self.ck_r.take().ok_or(Error::Ratchet)?;
@@ -513,10 +574,11 @@ impl Session {
         Ok(())
     }
 
-    fn dh_ratchet<R: CryptoRng + ?Sized>(
+    fn dh_ratchet<H: StepHooks>(
         &mut self,
         header: &Header,
-        rng: &mut R,
+        frame: Option<&[u8]>,
+        hooks: &mut H,
     ) -> Result<(), Error> {
         self.pn = self.n_s;
         self.n_s = 0;
@@ -524,16 +586,45 @@ impl Session {
         self.hk_s = Some(take_secret(&mut self.nhk_s));
         self.hk_r = Some(take_secret(&mut self.nhk_r));
         self.dh_r = Some(header.dh_pk);
-        let (rk, ck_r, nhk_r) = kdf_rk(&self.rk, &dh(&self.dh_s, &header.dh_pk)?);
-        self.rk = rk;
+
+        if let Some((epoch, secret)) = hooks.before_receive_chain(header, frame) {
+            self.mix_root(epoch, &secret);
+        }
+        let (root_key, ck_r, nhk_r) = kdf_rk(&self.rk, &dh(&self.dh_s, &header.dh_pk)?);
+        self.rk = root_key;
         self.ck_r = Some(ck_r);
         self.nhk_r = nhk_r;
-        self.dh_s = StaticSecret::random_from_rng(rng);
-        let (rk, ck_s, nhk_s) = kdf_rk(&self.rk, &dh(&self.dh_s, &header.dh_pk)?);
-        self.rk = rk;
+
+        if let Some((epoch, secret)) = hooks.before_send_chain() {
+            self.mix_root(epoch, &secret);
+        }
+        self.dh_s = StaticSecret::random_from_rng(hooks.rng());
+        let (root_key, ck_s, nhk_s) = kdf_rk(&self.rk, &dh(&self.dh_s, &header.dh_pk)?);
+        self.rk = root_key;
         self.ck_s = Some(ck_s);
         self.nhk_s = nhk_s;
         Ok(())
+    }
+
+    /// `RK <- HKDF(salt = RK, ikm = ss_pq, info = "umbra/v1/pq-epoch" || BE32(epoch))`
+    /// (`CRY-064`).
+    fn mix_root(&mut self, epoch: u32, secret: &Secret<32>) {
+        let kdf = Hkdf::<Sha3_256>::new(Some(self.rk.expose()), secret.expose());
+        let mut next = Secret::<32>::zeroed();
+        let _ = kdf.expand_multi_info(&[labels::PQ_EPOCH, &epoch.to_be_bytes()], next.expose_mut());
+        self.rk = next;
+        self.mixed = self.mixed.saturating_add(1);
+    }
+
+    /// The count of post-quantum secrets mixed into the root key so far.
+    pub fn mixed(&self) -> u32 {
+        self.mixed
+    }
+
+    /// The position of the next record in the sending chain; zero at a
+    /// chain start.
+    pub fn sending_position(&self) -> u32 {
+        self.n_s
     }
 }
 

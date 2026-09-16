@@ -58,4 +58,5 @@ the files, and run the script again.
 | `umbra/handshake.json` | 53987 | `abdf59b4e42e8ca686035ce27862adc9e603cba31ec61b60fa0f5bd421bc93a2` |
 | `umbra/hierarchy.json` | 13058 | `5f3417a0b4860a8db82186c261a5c6792a14678625af6a2096dbbf2ce7587f28` |
 | `umbra/kem.json` | 7553 | `378f33f22f375a7f29580e6d56bb4b88a4255f7592539f4015974f77b21d143c` |
+| `umbra/schedule.json` | 88172 | `a6d3b1b5c4f8093294a5895715e79dbb077b87ac476b2e9200d78caf089c2b36` |
 
