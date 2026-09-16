@@ -43,7 +43,7 @@ Thus UMBRA spends seconds and does not spend gigabytes.
 | --- | --- | --- | --- |
 | **Queue Relay** | Nonprofit or third party | Queue IDs, ciphertext, delivery time. For a group queue (§3.2.7): that the queue exists, the count of reader sessions and of writer sessions, the arrival time and the bucket of each record, the member count at each rotation from the slot count of the epoch-key record, and the notifier count | Client IP address (when chained), identities, content. For a group queue: the membership list, the identity or the pairwise queue of any member, the sender of a record, and the content of a record |
 | **Chain Relay** | Nonprofit or third party | Adjacent hop addresses, cell time | Queue IDs, content, endpoints |
-| **Ingress Relay** | Nonprofit or third party | Client IP address, cell time, cell sizes | Destination queue, content, contact graph |
+| **Ingress Relay** | Nonprofit or third party | Client IP address, cell time, cell sizes, and the client class of §3.8.1, which is web or native | Destination queue, content, contact graph |
 | **Notification Relay (NDR)** | Nonprofit only (refer to Part 8) | Push handles, blinded tokens in transit | Queue-to-token binding, content |
 | **Directory Authority** | Seven legal persons under separate control (Part 10 §10.5.1) | Relay descriptors, measurements | Nothing about users |
 
@@ -1391,7 +1391,7 @@ independently:
 
 | Layer | Content |
 | --- | --- |
-| **L1 Wire** | TLS 1.3 over TCP/443 by default. The ClientHello is the ClientHello of the rustls stack that Part 15 §15.2.8 names, with an `X25519MLKEM768` (RFC 10024) key share first and GREASE ECH. Each client sends the same ClientHello. The frame is an HTTP/1.1 Upgrade to a WebSocket-shaped stream, co-tenant with a real website behind a reverse proxy. The stream carries RFC 9297 capsules, used identically over TCP and QUIC, thus one parser serves the two transports (Part 6 §6.2.1) |
+| **L1 Wire** | TLS 1.3 over TCP/443 by default. The ClientHello is the ClientHello of the rustls stack that Part 15 §15.2.8 names, with an `X25519MLKEM768` (RFC 10024) key share first and GREASE ECH. Each client sends the same ClientHello. The frame is an HTTP/1.1 Upgrade to a WebSocket-shaped stream, co-tenant with a real website behind a reverse proxy. The stream carries RFC 9297 capsules, used identically over TCP and QUIC, thus one parser serves the two transports (Part 6 §6.2.1). The web client of Part 15 §15.7 sends the same stream through the WebSocket API of its browser, and §3.8.1 states what that changes |
 | **L2 Session** | Connection-independent session (64-bit session ID, monotonic sequence, and resend window). A TCP RST, a middlebox timeout, a QUIC migration, or a Wi-Fi-to-cellular handover rotates the connection **without a drop of the session**. Part 6 §6.2.3 gives the open, the resume, and the close |
 | **L3 Cell** | Fixed-size cells (§3.3) over the 3-hop chain into queues |
 
@@ -1434,6 +1434,15 @@ networks.
   a proxy build that holds the group. The second group keeps a client
   connected to a relay whose proxy fails that rule. The inner layer of Part 6
   §6.2.3 carries G2 in that case.
+- **The web client.** **[NET-275]** A web client MUST send the L1 stream
+  through the WebSocket API of its browser, over TLS to port 443, and it MUST
+  NOT use WebTransport in v1. The browser owns the ClientHello, thus `NET-214`
+  and `NET-215` bind the native client only, and the second group of `NET-216`
+  carries G2 for a browser that offers no post-quantum share. **[NET-276]** A
+  relay MUST NOT accept TLS early data on its L1 listener. Thus the property
+  of `NET-073` holds for a web client whose browser offers early data, because
+  the relay refuses it. **[NET-277]** A web client MUST NOT race QUIC, because
+  the browser gives it no QUIC stream in v1.
 - **[NET-073]** **Implementations MUST disable 0-RTT** in TLS and in QUIC. A replayed `SEND`
   duplicates a message, and a replayed `ACK` deletes one. Resumption tickets are
   also a linkability vector across networks. To recover the round trip, pipeline
@@ -1468,6 +1477,13 @@ opens it again in silence.
 The ClientHello of §3.8 is the ClientHello of the rustls stack, and not the
 ClientHello of a browser. A classifier tells an UMBRA client from a browser on
 that flight alone, and this document accepts that under the same trade.
+
+The web client of Part 15 §15.7 sends the ClientHello of its browser. Thus a
+classifier tells a web client from a native client on that flight, and it
+tells a web client from a page load of the co-tenant site by the WebSocket
+upgrade and by the cell sizes. The two classes send the same cells above L1,
+and the class names no user. The web client is a second class under §3.9.1,
+and this document accepts that under the same trade.
 
 Two properties of the deployment limit the damage from a lost relay. Each relay
 shares its IP address and port 443 with a genuine website, thus one IP address

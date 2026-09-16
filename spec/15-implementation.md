@@ -18,6 +18,7 @@ umbra/
 │   ├── umbra-transport/  TLS/QUIC, session layer, pluggable wire     → umbra-wire
 │   ├── umbra-core/       orchestration, state machine, storage       → all above
 │   ├── umbra-ffi/        UniFFI surface, coarse-grained only         → umbra-core
+│   ├── umbra-web/        wasm-bindgen surface, browser socket, store → umbra-core
 │   ├── umbra-relay/      relay server binary                         → queue, onion
 │   └── umbra-simd/       the ONLY crate permitted `unsafe`           → nothing
 ├── spec/
@@ -138,6 +139,7 @@ measures the subsystem, and `IMP-009` sets the measured cap.
 | Storage, §15.6.4 | 25 |
 | Async runtime | 20 |
 | UniFFI surface, §15.6.1 | 15 |
+| Web surface, §15.7 | 15 |
 | Build tooling | No cap, because a build tool is not linked |
 
 **[IMP-008]** At the first measurement, the maintainers MUST publish the R3 count. **[IMP-009]** Those
@@ -254,8 +256,11 @@ names the crates, thus an implementer can build the L1 layer of Part 3 §3.8.
 - **[IMP-069]** A build MUST pin an `aws-lc-rs` version that ships the
   bindings for `aarch64-linux-android`. Thus the build needs no bindgen on the
   v1 mobile target, and CMake stays.
-- The transport stack has no wasm32 build. A browser client is out of scope
-  for v1, and a browser gives its own TLS.
+- The transport stack of this table has no wasm32 build, and the web client
+  of §15.7 needs none. The browser gives the TLS stack and the WebSocket
+  frame, and the `umbra-web` crate puts that socket behind the transport
+  trait. `tokio` does not build for the browser, thus the web surface runs
+  the core on the event loop of the browser through `wasm-bindgen-futures`.
 
 The count of this table is an estimate until §15.2.4 measures it, and
 `IMP-007` bounds it at 40 transitive crates. A relay operator with a FIPS
@@ -320,6 +325,10 @@ the `dudect` results were not reproducible across machines.
    function that touches key material. This layer finds the KyberSlash class,
    which is a variable-time instruction that layer 1 provably does not find.
 3. **`dudect-bencher` each night. It is a signal, and it is not a gate.**
+
+The web client of §15.7 runs code that the browser compiles, thus layer 1 and
+layer 3 measure the native binary only, and layer 2 is the one layer that
+binds the web client. Part 16 §16.3 holds the row.
 
 **The toolchain is part of the cryptographic TCB.** Pin the exact `rustc`
 version, the target triples, the opt-level, and the codegen-units for the
@@ -415,6 +424,12 @@ unlock(CharArray)                         // 15.4 gives the passphrase exception
 
 Each network, ratchet, queue, and onion function stays on the Rust side.
 
+The web client of §15.7 crosses no UniFFI surface. The `umbra-web` crate gives
+it a `wasm-bindgen` surface of the same shape, and `IMP-037` to `IMP-039`
+bind that surface in the same manner, with a JavaScript string and an
+`ArrayBuffer` in the place of the Kotlin types, and with the passphrase
+exception of §15.4.
+
 **[IMP-037]** The FFI surface MUST NOT carry message plaintext, key material, or
 a passphrase as a Kotlin `ByteArray` or a Kotlin `String`. §15.4 rule `IMP-017`
 gives that rule, and this section gives the surface that obeys it.
@@ -457,13 +472,15 @@ release. Run a full Kotlin regression after an increment. UniFFI is before 1.0, 
 
 ### 15.6.3 Deferred platforms
 
-iOS and desktop are outside the v1 scope, and Android is the one v1 client
-platform. The core keeps the UniFFI annotations and holds no platform
+iOS and a native desktop shell are outside the v1 scope. Android and the web
+client of §15.7 are the v1 client platforms, and the web client serves the
+desktop in v1. The core keeps the UniFFI annotations and holds no platform
 assumption, thus a later platform adds a shell and no core change. An iOS
 revision has to revisit four items: the notification extension of Part 8, the
 secure-element entanglement of §15.6.4, the file protection and the backup
 exclusion of §15.6.6, and the reproducible-build attestation of a static
-library under §15.8. §15.7 gives the desktop target and the browser argument.
+library under §15.8. A native desktop shell reuses the extension bundle of
+§15.7 in a thin native window, with a code signature of its platform.
 
 ### 15.6.4 Storage and keys
 
@@ -679,45 +696,163 @@ removes one. Part 2 rule `THR-013` names those actions as its one exception.
 > is cheaper than a lost feature. Thus each social affordance stays, and each
 > rule names an interface.
 
-## 15.7 WASM in the browser: **no-go for v1**
+## 15.7 The web client
 
-The performance question is a distraction. The measured mean slowdown of WASM is
-1.45–1.55 times. That slowdown does not matter when ML-KEM-768 encapsulation
-takes 29 µs natively.
+The web client is the second v1 client platform (Part 1 §1.1). It is the same
+Rust core, compiled to `wasm32-unknown-unknown`, in a browser extension. This
+section gives its form, its role in the device set, its transport, its
+storage, its randomness and notifications, and its build. Each rule of this
+specification binds the web client, except where a rule below names an
+exemption and its cause. The performance question is not a cause: the measured
+mean slowdown of WebAssembly is 1.45 to 1.55 times, and ML-KEM-768
+encapsulation takes 29 µs natively.
 
-The blocking causes are structural:
+### 15.7.1 The form: an extension, and not a hosted page
 
-1. **Code-delivery integrity has no correction today.** The browser fetches a
-   page again at each load. Thus the server can give a different build to one
-   user. Source Code Transparency and Isolated Web Apps are proposals, and no
-   party has shipped them. This limit makes browser E2EE fundamentally weaker,
-   and no quantity of engineering corrects it.
-2. **Safari deletes all script-writable storage**, which is IndexedDB and OPFS,
-   after 7 days with no user interaction. That deletion destroys the identity
-   key of a user silently.
-3. **There are no raw sockets.** A browser has WebSocket, WebTransport, and
-   fetch only. Thus a browser client necessarily terminates at a relay that a CA
-   authenticates.
+Three properties of the browser shape the web client. An earlier draft named
+them as the causes that kept the browser out of v1, and this revision gives
+each one a form that holds, or it states the residual.
 
-**In place of a browser target:**
+1. **Code delivery.** A browser fetches a hosted page again at each load, thus
+   the host can give one user a different build, and no party can check trust
+   assumption 4 of Part 2 §2.6 for that user. An extension is a signed and
+   versioned bundle. The browser installs it one time, and it fetches no code
+   at a page load. **[IMP-094]** The web client MUST ship as a browser
+   extension bundle. **[IMP-095]** A deployment MUST NOT serve the web client
+   as a hosted page, as a progressive web application, or as a script that a
+   page loads. **[IMP-096]** The bundle MUST hold each byte of code that the
+   web client runs, and the web client MUST NOT load a script, a module, or a
+   WebAssembly binary from a network location.
+2. **Storage eviction.** A browser can delete the script-writable storage of an
+   origin, and one browser does that after 7 days with no interaction. §15.7.2
+   makes the web client a linked device, thus an eviction costs one link and
+   no identity.
+3. **Sockets.** A browser gives WebSocket, WebTransport, and `fetch` only.
+   §15.7.3 gives the transport, and it states what the ingress relay learns.
 
-- The third target is a **native desktop application**. It uses the same Rust
-  cdylib in a thin native shell. The build uses Developer ID code signing for
-  each embedded dylib, a hardened runtime, `notarytool submit`, and `stapler
-  staple`. This method gives desktop users the same code-integrity property that
-  an app store gives on mobile.
-- If a deployment needs browser reach later, ship a **browser extension** and
-  not a PWA. An extension is a signed and versioned bundle, and the store
-  reviews it. The browser does not fetch it again at each page load, thus it
-  solves the code-delivery problem that a PWA structurally cannot solve. Its
-  storage is also exempt from the 7-day purge of Safari.
+**This is a trade, and Part 2 §2.4 requires the text to state it.** Each
+browser vendor operates the one store that its browser installs from, thus
+each vendor is a gatekeeper of the web client, and Part 16 §16.2.11 records
+that. A user without the extension has no web client, and a link in a message
+does not give one.
 
-**Keep the door open at almost no cost.** Keep the annotations of UniFFI on the
-core. Keep the cryptography and the state machine free of assumptions about
-multi-thread `tokio`. Keep the same code free of assumptions about OS sockets,
-behind a transport trait. Build a `wasm32-unknown-unknown` target in CI, to
-prevent bit rot. Do **not** turn on
-the `wasm-unstable-single-threaded` feature of UniFFI in shipping code.
+> *Cause.* An earlier draft ruled the browser out of v1 on the three causes
+> above, and it named an extension as the form for a later revision. The owner
+> put the web in the v1 scope. The core builds for `wasm32` under §15.2.4
+> already, the extension form holds trust assumption 4, and the linked-device
+> role removes the identity from the evictable store. The third cause stays as
+> a property of the transport, and §15.7.3 states it.
+
+### 15.7.2 The role: a linked device
+
+- **[IMP-097]** A web client MUST be a linked device of a device set under
+  Part 7, and it MUST NOT make a `RootIdentity`. **[IMP-098]** A web client
+  MUST NOT hold a Recovery Code of Part 4 §4.7.1, a `C_social` share, or a
+  backup key of Part 4 §4.7.2. Part 7 rule `DEV-264` states the same role from
+  the device set, and rule `DEV-266` lets the web client show the link QR
+  code.
+- **[IMP-099]** A web client that finds its store absent or unreadable at
+  start MUST return to the link flow of Part 7 §7.4, and it MUST show the
+  line "This browser is no longer linked. Link it again from your phone."
+  **[IMP-100]** The existing device MUST revoke the old entry under Part 7
+  §7.7 before it links the same browser again, and Part 7 rule `DEV-265`
+  gives that step.
+
+Thus an eviction of the store costs one link and the history that the owner
+device does not hold. A linked device accepts that cost under Part 7 §7.2
+already.
+
+### 15.7.3 The transport
+
+The web client sends the L1 stream of Part 3 §3.8 through the WebSocket API of
+its browser, over the TLS 1.3 stack of its browser, to port 443 of a pinned
+ingress relay. Each layer from L2 up is the Rust core, unchanged.
+
+- **[IMP-101]** A web client MUST use the WebSocket API of the browser over
+  TLS to port 443, and it MUST NOT use WebTransport or `fetch` for the L1
+  stream in v1. Part 3 rule `NET-275` states the same rule from the transport.
+- The browser owns the ClientHello, the key share, the TLS record layout, and
+  the WebSocket mask. Thus Part 3 rules `NET-214`, `NET-215`, and `NET-073`,
+  and Part 6 rules `WIR-225` to `WIR-228`, bind the native client and the
+  relay, and not the web client. Part 3 rule `NET-276` makes the relay refuse
+  early data, and Part 6 rule `WIR-485` makes it refuse compression. Thus the
+  properties that those client rules give hold at the relay for a web client.
+- **[IMP-102]** A web client MUST NOT open a connection to a host other than
+  its two pinned ingress relays of Part 10 §10.6.1 and the bootstrap carriers
+  of Part 3 §3.10. **[IMP-103]** The extension manifest MUST request no host
+  permission on any site, no content script, and no access to the browsing
+  data of the user.
+
+What the ingress relay learns changes in one way. The ClientHello of a web
+client is the ClientHello of its browser, thus a classifier tells a web client
+from a native client. Part 3 §3.8.1 states that trade, and Part 16 §16.3 holds
+the row.
+
+### 15.7.4 Storage and keys
+
+The web client holds its store in the IndexedDB of the extension origin, under
+the record construction of §15.6.4.
+
+- **[IMP-104]** A web client MUST encrypt each record with the record key of
+  §15.6.4, and it MUST keep each metadata-sensitive column inside the encrypted
+  blob. **[IMP-105]** A web client MUST store in the IndexedDB of the extension
+  origin only, and it MUST NOT use the sync storage area of the browser, the
+  local storage area, or a cookie. A sync storage area copies to the account of
+  the user at the browser vendor.
+- **The wrap.** A browser has no secure element. **[IMP-106]** A web client
+  MUST make `k_se` of §15.6.4 as a non-extractable HMAC-SHA256 key of the Web
+  Cryptography API, and it MUST compute `S` with that key. The key has no
+  export path, thus a copy of the store opens with the passphrase and that
+  browser profile only. The key gives no rate limit against a party that runs
+  script inside the profile, and Part 16 §16.3 holds the row.
+- **[IMP-107]** A web client MUST calibrate Argon2id to about 3 s for each try
+  in the browser, in the manner of §15.6.4.
+- **Deletion.** IndexedDB has no `secure_delete`. **[IMP-108]** A web client
+  that applies a deletion batch of §15.6.4 MUST overwrite `record_salt` and the
+  ciphertext of each record with zero bytes, and then delete the record. The
+  storage engine of the browser can hold the earlier bytes until it compacts,
+  and Part 16 §16.3 holds the row. Rules `IMP-042` and `IMP-043` bind the
+  SQLite store of the Android client only.
+- **[IMP-109]** A web client MUST call `navigator.storage.persist()` at the
+  first launch, and it MUST treat a refusal as no error.
+
+### 15.7.5 Randomness, notifications, and the interface
+
+- Rule `IMP-090` names `crypto.getRandomValues` as the platform source of the
+  web client, and rule `IMP-093` applies the hardening of Part 5 §5.9 to it.
+- The web client holds a live session while the browser runs, and it registers
+  no push token. Part 8 §8.6 gives that rule. A message that arrives while the
+  browser does not run waits at the queue relay, and the phone of the user
+  gets its notification under Part 8. **[IMP-110]** The settings of a web
+  client MUST state that the browser receives messages while it runs, and that
+  the phone receives each notification.
+- The platform egress rules of §15.6.6 name Android interfaces. On the web
+  client the platform stores are the clipboard, the download location, and the
+  browser profile. **[IMP-111]** A web client MUST apply `IMP-044` to
+  `IMP-047` with the download location as the platform media store.
+  **[IMP-112]** A web client MUST state that the screenshot block of `IMP-058`
+  is not available in the browser, because a browser gives no equivalent of
+  `FLAG_SECURE`.
+- Part 2 §2.4 goals U5 and U8 name an Android device, and they do not measure
+  the web client. §15.9 binds the web client in full.
+
+### 15.7.6 The build and the crate
+
+- The web surface is the `umbra-web` crate of §15.1. It holds the
+  `wasm-bindgen` bindings, the WebSocket transport behind the transport trait,
+  and the IndexedDB adapter behind the storage trait. It uses no UniFFI, and
+  the `wasm-unstable-single-threaded` feature of UniFFI stays off.
+  **[IMP-113]** The `umbra-web` crate MUST NOT add more transitive crates than
+  its row in §15.2.3.
+- **[IMP-114]** The extension bundle MUST be reproducible under §15.8, and
+  Part 16 rule `SEC-005` names it. **[IMP-115]** The web client MUST verify
+  the inclusion proof of Part 16 rule `SEC-006` for its own bundle at each
+  start, and it MUST refuse to unlock the store while that proof is absent.
+  The browser applies an extension update before the client runs, thus the
+  check at start is the one point where the client sees the new bundle.
+- **Constant time.** The browser compiles the WebAssembly binary, thus layer 1
+  of §15.5.1 does not run against the code that executes, and layer 2 is the
+  one layer under the control of the project. Part 16 §16.3 holds the row.
 
 ## 15.8 Build reproducibility and binary transparency
 
@@ -726,9 +861,10 @@ runs is the binary that the auditor examined*. Without this section, no party
 can check that assumption. If that assumption fails, each other guarantee
 becomes void.
 
-- The Rust core and the Android application binary use reproducible builds.
-  **[IMP-032]** Two independent builds of the Rust core and of the Android
-  application MUST give the same hash. §15.6.3 records that a platform with a
+- The Rust core, the Android application binary, and the web extension
+  bundle use reproducible builds. **[IMP-032]** Two independent builds of the
+  Rust core, of the Android application, and of the extension bundle MUST
+  give the same hash. §15.6.3 records that a platform with a
   signed and encrypted bundle needs a rule for the static library, and this
   revision defers that platform.
 - The project runs a binary transparency log with Sigstore support. The
@@ -832,7 +968,8 @@ of Part 2 §2.6 rests on the source below that hardening. This section names
 the platform half.
 
 - **[IMP-090]** A client MUST take each CSPRNG output from the platform source,
-  which is `getrandom` on Android.
+  which is `getrandom` on Android and `crypto.getRandomValues` on the web
+  client of §15.7.
   **[IMP-091]** A client MUST NOT hold a userspace generator that it seeds one
   time. **[IMP-092]** A relay MUST take each CSPRNG output from `getrandom` of
   its kernel.

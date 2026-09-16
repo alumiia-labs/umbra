@@ -66,22 +66,22 @@ each column when a crate implements the requirement and a test covers it.
 | Prefix | MUST | MUST NOT | SHOULD | SHOULD NOT | MAY | Total |
 | --- | --- | --- | --- | --- | --- | --- |
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
-| `THR` | 11 | 3 | 0 | 0 | 0 | **14** |
-| `NET` | 189 | 76 | 0 | 0 | 8 | **273** |
+| `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
+| `NET` | 189 | 79 | 0 | 0 | 8 | **276** |
 | `IDN` | 103 | 40 | 1 | 0 | 5 | **149** |
 | `CRY` | 116 | 27 | 0 | 0 | 1 | **144** |
-| `WIR` | 359 | 80 | 0 | 0 | 6 | **445** |
-| `DEV` | 167 | 86 | 2 | 0 | 6 | **261** |
-| `NTF` | 63 | 28 | 0 | 0 | 2 | **93** |
+| `WIR` | 360 | 81 | 0 | 0 | 6 | **447** |
+| `DEV` | 169 | 87 | 2 | 0 | 7 | **265** |
+| `NTF` | 59 | 28 | 0 | 0 | 2 | **89** |
 | `DIS` | 104 | 34 | 0 | 0 | 1 | **139** |
 | `REL` | 112 | 27 | 1 | 0 | 2 | **142** |
 | `GRP` | 201 | 56 | 0 | 0 | 4 | **261** |
 | `COM` | 275 | 95 | 0 | 0 | 5 | **375** |
 | `ATT` | 128 | 46 | 1 | 0 | 2 | **177** |
 | `ABU` | 54 | 31 | 0 | 0 | 0 | **85** |
-| `IMP` | 58 | 24 | 0 | 0 | 0 | **82** |
-| `SEC` | 12 | 5 | 1 | 0 | 2 | **20** |
-| **All** | 1964 | 663 | 6 | 0 | 48 | **2681** |
+| `IMP` | 72 | 32 | 0 | 0 | 0 | **104** |
+| `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
+| **All** | 1978 | 677 | 6 | 0 | 49 | **2710** |
 
 ## SCP — Scope and Conventions
 
@@ -131,6 +131,7 @@ Source: `spec/02-threat-model.md`
 | `THR-012` | §2.4.1 | MUST | A revision that changes a rule of a row | A revision that changes a rule of a row MUST measure that goal again. |  |  |
 | `THR-013` | §2.2 | MUST NOT | A client | A client MUST NOT write a plaintext record, a key, or a decrypted attachment to a platform store. |  |  |
 | `THR-014` | §2.4.2 | MUST | A conformant implementation | A conformant implementation MUST meet each goal of the table above. |  |  |
+| `THR-015` | §2.2 | MUST NOT | A web client | A web client MUST NOT run as a page that a host serves, because trust assumption 4 of §2.6 fails for such a page at each load. |  |  |
 
 ## NET — Network Architecture
 
@@ -411,6 +412,9 @@ Source: `spec/03-network-architecture.md`
 | `NET-272` | §3.7 | MUST | A client | A client MUST put a `GPOST` in the `failed` state only when no replica returned a `GSEQ` before `SEND_GIVE_UP`. |  |  |
 | `NET-273` | §3.12 | MUST | An implementation | An implementation MUST measure the group-queue relay spread of a real deployment before a revision re-tunes this table. |  |  |
 | `NET-274` | §3.12 | MUST | (unstated) | A revision that changes `GROUP_MAX`, `GROUP_REPLICAS`, `PRESENCE_INTERVAL`, or the group-record layout of Part 11 §11.3 MUST derive these rows again. |  |  |
+| `NET-275` | §3.8 | MUST NOT | (unstated) | A web client MUST send the L1 stream through the WebSocket API of its browser, over TLS to port 443, and it MUST NOT use WebTransport in v1. |  |  |
+| `NET-276` | §3.8 | MUST NOT | A relay | A relay MUST NOT accept TLS early data on its L1 listener. |  |  |
+| `NET-277` | §3.8 | MUST NOT | A web client | A web client MUST NOT race QUIC, because the browser gives it no QUIC stream in v1. |  |  |
 
 ## IDN — Identity
 
@@ -1170,6 +1174,8 @@ Source: `spec/06-wire-format.md`
 | `WIR-482` | §6.6.3 | MUST | A parser | A parser MUST reject a `RekeyRecord` whose length is not 6 614. |  |  |
 | `WIR-483` | §6.6.3 | MUST | A client | A client MUST send a `RekeyRecord` as a group record, or on a pairwise channel to a member of role `admin` or above with `epoch_index` and `previous_epoch_hash` zero, and on no other channel. |  |  |
 | `WIR-484` | §6.6.3 | MUST | A receiver | A receiver MUST discard a `RekeyRecord` on a pairwise channel whose chain fields are not zero, and a `RekeyRecord` in a group record whose chain fields are zero. |  |  |
+| `WIR-485` | §6.2.1 | MUST NOT | A relay | A relay MUST NOT negotiate the `permessage-deflate` extension of RFC 7692, or any other WebSocket extension, on an L1 connection. |  |  |
+| `WIR-486` | §6.2.1 | MUST | (unstated) | A web client sends each capsule through the WebSocket API of its browser, thus rules `WIR-225` to `WIR-228` bind the native client and the relay, and the browser decides the record layout of the client. |  |  |
 
 ## DEV — Device Sets
 
@@ -1438,6 +1444,10 @@ Source: `spec/07-device-sets.md`
 | `DEV-261` | §7.5.3 | MUST NOT | (unstated) | A client MUST hold the group-queue cursor of each replica as per-device state, and it MUST NOT put that cursor on a sync channel. |  |  |
 | `DEV-262` | §7.7 | MUST | A device that applies an epoch with a new `revoked` entry | A device that applies an epoch with a new `revoked` entry MUST start the group re-key of Part 11 §11.12 for each group of the user. |  |  |
 | `DEV-263` | §7.7.1 | MUST | A full identity reset | A full identity reset MUST also start the group re-key of Part 11 §11.12 in each group of the user. |  |  |
+| `DEV-264` | §7.4 | MUST NOT | (unstated) | A web client of Part 15 §15.7 MUST link as a device of this section, and it MUST NOT make a `RootIdentity`. |  |  |
+| `DEV-265` | §7.4 | MUST | (unstated) | When a web client returns to this flow after it lost its store, the existing device MUST revoke the old entry under §7.7 before step |  |  |
+| `DEV-266` | §7.4 | MAY | The new device | The new device MAY show the QR code of step 1 in the place of the existing device. |  |  |
+| `DEV-267` | §7.4 | MUST | In that direction the existing device | In that direction the existing device MUST show the label of the new device, and it MUST get an explicit confirmation from the user, before step 4. |  |  |
 
 ## NTF — Notifications
 
@@ -1462,12 +1472,6 @@ Source: `spec/08-notifications.md`
 | `NTF-017` | §8.4.3 | MUST | (unstated) | The response path for a message fetch MUST carry padding to a constant number of fixed cells. |  |  |
 | `NTF-018` | §8.5 | MUST NOT | (unstated) | A busy community of 1000 members or more MUST NOT make one push for each message. |  |  |
 | `NTF-019` | §8.5 | MUST | A queue relay | A queue relay MUST apply the window to each handle, whatever the class of the conversation behind it. |  |  |
-| `NTF-020` | §8.6 | MUST | (unstated) | If such a target ships later, Web Push MUST obey the five rules below. |  |  |
-| `NTF-021` | §8.6 | MUST | Web Push | Web Push MUST use a **fresh VAPID P-256 keypair for each subscription**. |  |  |
-| `NTF-022` | §8.6 | MUST | Web Push | Web Push MUST set `sub` to one constant HTTPS URI that identifies no party. |  |  |
-| `NTF-023` | §8.6 | MUST | Web Push | Web Push MUST set `exp` well below the 24-hour ceiling of RFC 8292. |  |  |
-| `NTF-024` | §8.6 | MUST NOT | Web Push | Web Push MUST NOT send a `Topic` header. |  |  |
-| `NTF-025` | §8.6 | MUST | Web Push | Web Push MUST pad the payloads to a constant length under the RFC 8291 encryption. |  |  |
 | `NTF-027` | §8.7 | MUST | This text is normative, and it | The text of §8.7 is normative, and it MUST appear in the security documentation that the user reads. |  |  |
 | `NTF-028` | §8.7 | MUST | (unstated) | The NDR of the nonprofit and its core queue relays MUST be in different legal jurisdictions. |  |  |
 | `NTF-029` | §8.7 | MUST | The client | The client MUST let the user pin an NDR independently of the relays of that user. |  |  |
@@ -1538,6 +1542,8 @@ Source: `spec/08-notifications.md`
 | `NTF-107` | §8.5.2 | MUST | On a wake, a client | On a wake, a client MUST drain the notify queue under Part 6 §6.4.3. |  |  |
 | `NTF-108` | §8.5.2 | MUST | The client | The client MUST then open a session to one replica of the group queue with `GSUB` from its cursor. |  |  |
 | `NTF-109` | §8.7 | MAY | A deployment | A deployment MAY operate its own Notification Delivery Relay. |  |  |
+| `NTF-110` | §8.6 | MUST NOT | A web client | A web client MUST NOT register a push token with the NDR, and it MUST NOT hold a registration of §8.5.1 or §8.5.2 of its own. |  |  |
+| `NTF-111` | §8.6 | MUST | A web client | A web client MUST take each arrival from its live session, and it MUST show an alert through the notification API of the browser while the browser runs. |  |  |
 
 ## DIS — Discovery, Handles, and Key Transparency
 
@@ -2848,6 +2854,28 @@ Source: `spec/15-implementation.md`
 | `IMP-091` | §15.10 | MUST NOT | A client | A client MUST NOT hold a userspace generator that it seeds one time. |  |  |
 | `IMP-092` | §15.10 | MUST | A relay | A relay MUST take each CSPRNG output from `getrandom` of its kernel. |  |  |
 | `IMP-093` | §15.10 | MUST | A client | A client MUST apply the hardening of Part 5 §5.9 to each value that the platform source gives. |  |  |
+| `IMP-094` | §15.7.1 | MUST | The web client | The web client MUST ship as a browser extension bundle. |  |  |
+| `IMP-095` | §15.7.1 | MUST NOT | A deployment | A deployment MUST NOT serve the web client as a hosted page, as a progressive web application, or as a script that a page loads. |  |  |
+| `IMP-096` | §15.7.1 | MUST NOT | (unstated) | The bundle MUST hold each byte of code that the web client runs, and the web client MUST NOT load a script, a module, or a WebAssembly binary from a network location. |  |  |
+| `IMP-097` | §15.7.2 | MUST NOT | (unstated) | A web client MUST be a linked device of a device set under Part 7, and it MUST NOT make a `RootIdentity`. |  |  |
+| `IMP-098` | §15.7.2 | MUST NOT | A web client | A web client MUST NOT hold a Recovery Code of Part 4 §4.7.1, a `C_social` share, or a backup key of Part 4 §4.7.2. |  |  |
+| `IMP-099` | §15.7.2 | MUST | (unstated) | A web client that finds its store absent or unreadable at start MUST return to the link flow of Part 7 §7.4, and it MUST show the line "This browser is no longer linked. |  |  |
+| `IMP-100` | §15.7.2 | MUST | The existing device | The existing device MUST revoke the old entry under Part 7 §7.7 before it links the same browser again, and Part 7 rule `DEV-265` gives that step. |  |  |
+| `IMP-101` | §15.7.3 | MUST NOT | (unstated) | A web client MUST use the WebSocket API of the browser over TLS to port 443, and it MUST NOT use WebTransport or `fetch` for the L1 stream in v1. |  |  |
+| `IMP-102` | §15.7.3 | MUST NOT | A web client | A web client MUST NOT open a connection to a host other than its two pinned ingress relays of Part 10 §10.6.1 and the bootstrap carriers of Part 3 §3.10. |  |  |
+| `IMP-103` | §15.7.3 | MUST | The extension manifest | The extension manifest MUST request no host permission on any site, no content script, and no access to the browsing data of the user. |  |  |
+| `IMP-104` | §15.7.4 | MUST | A web client | A web client MUST encrypt each record with the record key of §15.6.4, and it MUST keep each metadata-sensitive column inside the encrypted blob. |  |  |
+| `IMP-105` | §15.7.4 | MUST NOT | (unstated) | A web client MUST store in the IndexedDB of the extension origin only, and it MUST NOT use the sync storage area of the browser, the local storage area, or a cookie. |  |  |
+| `IMP-106` | §15.7.4 | MUST | A web client | A web client MUST make `k_se` of §15.6.4 as a non-extractable HMAC-SHA256 key of the Web Cryptography API, and it MUST compute `S` with that key. |  |  |
+| `IMP-107` | §15.7.4 | MUST | A web client | A web client MUST calibrate Argon2id to about 3 s for each try in the browser, in the manner of §15.6.4. |  |  |
+| `IMP-108` | §15.7.4 | MUST | A web client that applies a deletion batch of §15.6.4 | A web client that applies a deletion batch of §15.6.4 MUST overwrite `record_salt` and the ciphertext of each record with zero bytes, and then delete the record. |  |  |
+| `IMP-109` | §15.7.4 | MUST | A web client | A web client MUST call `navigator.storage.persist()` at the first launch, and it MUST treat a refusal as no error. |  |  |
+| `IMP-110` | §15.7.5 | MUST | The settings of a web client | The settings of a web client MUST state that the browser receives messages while it runs, and that the phone receives each notification. |  |  |
+| `IMP-111` | §15.7.5 | MUST | A web client | A web client MUST apply `IMP-044` to `IMP-047` with the download location as the platform media store. |  |  |
+| `IMP-112` | §15.7.5 | MUST | A web client | A web client MUST state that the screenshot block of `IMP-058` is not available in the browser, because a browser gives no equivalent of `FLAG_SECURE`. |  |  |
+| `IMP-113` | §15.7.6 | MUST NOT | The `umbra-web` crate | The `umbra-web` crate MUST NOT add more transitive crates than its row in §15.2.3. |  |  |
+| `IMP-114` | §15.7.6 | MUST | The extension bundle | The extension bundle MUST be reproducible under §15.8, and Part 16 rule `SEC-005` names it. |  |  |
+| `IMP-115` | §15.7.6 | MUST | The web client | The web client MUST verify the inclusion proof of Part 16 rule `SEC-006` for its own bundle at each start, and it MUST refuse to unlock the store while that proof is absent. |  |  |
 
 ## SEC — Security Considerations
 
@@ -2875,4 +2903,5 @@ Source: `spec/16-security-considerations.md`
 | `SEC-018` | §16.3 | MUST | A revision that adds a residual leak | A revision that adds a residual leak MUST add a row to this table. |  |  |
 | `SEC-019` | §16.3 | MUST | A revision that removes a leak | A revision that removes a leak MUST remove its row in the same commit. |  |  |
 | `SEC-020` | §16.5 | MUST | That channel | That channel MUST serve a non-certified Android device, which is a device without the Google services. |  |  |
+| `SEC-021` | §16.5 | MUST | A rebuilder of `SEC-009` | A rebuilder of `SEC-009` MUST fetch the extension bundle from each listed store and verify it against the published artifact, because the store and not the nonprofit serves that bundle. |  |  |
 

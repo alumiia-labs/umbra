@@ -40,7 +40,7 @@ project tracks it as one.**
 | Party | Holds | Retention | Gives under EPO / s.121 / TCN / RIPA s.49 / grand-jury subpoena |
 | --- | --- | --- | --- |
 | **Client device** | All the data: the root identity, the contacts, the history, the keys, and the spent-nonce set of the hellos of Part 14 §14.4 | Until a wipe | All the data, if the device is unlocked. Under RIPA s.49, or under French art. 434-15-2, a court can compel the **user** to decrypt. **UMBRA cannot help here.** |
-| **Ingress relay** | The client IP address, the connection times, the cell counts, the cell sizes, and the hop 1 key set of each live circuit. That key set opens the hop 1 layer of a recorded cell, which gives the hop 2 ciphertext (Part 3 §3.4.4) | A conformant relay keeps the connection lifetime. A malicious or compelled relay can log for an unlimited period. A client pins two ingress relays, and each pin lasts 60 days confirmed and 120 days unconfirmed (Part 10 §10.6.1). Thus a prospective order against either operator captures that client for that period. | An IP address that ran UMBRA at the time T. Not the party, not the destination, and not the content. |
+| **Ingress relay** | The client IP address, the connection times, the cell counts, the cell sizes, the client class of Part 3 §3.8.1, and the hop 1 key set of each live circuit. That key set opens the hop 1 layer of a recorded cell, which gives the hop 2 ciphertext (Part 3 §3.4.4) | A conformant relay keeps the connection lifetime. A malicious or compelled relay can log for an unlimited period. A client pins two ingress relays, and each pin lasts 60 days confirmed and 120 days unconfirmed (Part 10 §10.6.1). Thus a prospective order against either operator captures that client for that period. | An IP address that ran UMBRA at the time T. Not the party, not the destination, and not the content. |
 | **Chain relay** | Two adjacent relay addresses, the cell times, and the hop 2 key set of each live circuit. That key set opens the hop 2 layer of a recorded cell, which gives the hop 3 ciphertext | In memory only | Nothing that identifies a user. |
 | **Queue relay** | Queue IDs, ciphertext, delivery times, a per-queue sequence counter, the last acknowledged sequence, and a maximum of 8 queues for each session. In Instant mode it holds the `(handle, k_tok, notifier_id)` triple of each registered queue. The hop 3 key set of a live circuit opens no recorded cell. Part 3 §3.4.4 rule `NET-208` erases each key set after its cell | `MSG_TTL` 45 d, `QUEUE_IDLE_TTL` 60 d. A relay destroys the sequence counter with the queue, and a `DEL` destroys the queue record (Part 6 §6.4.3). The triple rotates each 7 d under `NTF-007` | A set of random 32-byte identifiers, and ciphertext that the two endpoints of the channel alone can decrypt. In Instant mode, the `(handle, k_tok, notifier_id)` triple of each registered queue and its notification times (Part 8 §8.7). The triple names the notification handle of at most 8 queues, and with the NDR it gives the push token of that handle. A relay does not hold a device-set acknowledgment point. Part 7 §7.5.5 makes that acknowledgment an application record inside the L6 AEAD. Thus it is one `B0` cell on a sync queue. It reads as any other sync record. |
 | **Group-queue relay** | The `GroupQueueId`, the three public credentials of the group queue and the two superseded ones under grace, the retained records, the count of live reader sessions and writer sessions, and the notify registrations of Part 8 §8.5.2. No membership list, no member index, and no identity (Part 3 §3.2.7) | `GROUP_RETENTION` 30 d for a record, `GROUP_IDLE_TTL` 60 d for the queue, `GROUP_READ_GRACE` 30 d and `GROUP_WRITE_GRACE` 24 h for a superseded credential. A registration lives 7 d plus `CLOCK_SKEW` in memory, at most `GROUP_NOTIFIER_MAX` for each queue | 30 days of ciphertext that the members alone can decrypt, the session counts at the time of the order, the member count of the group at each retained rotation from the slot count of the epoch-key record, and the `relay_id` of each registered notify queue. No member, no sender, and no content |
@@ -59,7 +59,7 @@ project tracks it as one.**
 | **Google (FCM)** | The mapping from a device push token to an account. The wake times and the wake count. A device under UnifiedPush or under background polling (Part 8 §8.4.1) gives it nothing | The provider defines it | Which accounts have UMBRA installed under FCM, and at what times UMBRA woke them. **Treat this mapping as adversarial.** |
 | **Platform cloud services (backup and sync)** | No UMBRA data, under Part 15 §15.6.6. A file that the user saved to the media store, and a screenshot | The provider defines it | Part 2 §2.2 models this party as A7. The platform backup carries no container of the client, because `IMP-048` excludes it. A saved file is a user action, and `IMP-046` warns before the first one |
 | **Invitation host** | The time and the client address of each browser open of an invitation link, without the fragment | The nonprofit defines it | Part 4 §4.3.1. A device with the client opens no browser, thus the host sees an open by a party without the client only. The host cannot read the fragment, because a browser does not send it |
-| **App stores** | The legal identity of the developer and the registration of the signing key | Permanent | The power to remove or replace the application in a jurisdiction. Refer to §16.5. |
+| **App stores and extension stores** | The legal identity of the developer, the registration of the signing key, and the listing of the web extension | Permanent | The power to remove or replace the application, or the extension, in a jurisdiction. Refer to §16.5 and §16.2.11. |
 | **Build infrastructure** | The release signing authority | Permanent | **The power to ship a malicious update.** This is the target with the highest value in the system. |
 
 ### 16.1.1 "We keep no logs" is not a defense
@@ -174,8 +174,10 @@ practical PQ VRF today.
 
 A top-tier network classifier detects UMBRA at the flow level. Part 3 §3.8.1
 makes this an explicit trade. The ClientHello of Part 3 §3.8 is the ClientHello
-of the rustls stack, and not the ClientHello of a browser. UMBRA does not claim
-to be unblockable. Refer to the non-goals in Part 2 §2.5.
+of the rustls stack, and not the ClientHello of a browser. The web client of
+Part 15 §15.7 sends the ClientHello of its browser, thus the ingress relay
+tells the two client classes apart, and the class names no user. UMBRA does
+not claim to be unblockable. Refer to the non-goals in Part 2 §2.5.
 
 Two properties of the design limit the damage from a lost relay. First, a relay
 shares its IP address and port 443 with a genuine website. Thus a destination
@@ -200,6 +202,15 @@ limit the exposure, and they do not remove it.
 This section is retired in 0.2.0-draft. Android is the v1 platform, and
 `SEC-008` binds each v1 distribution channel, thus distribution has no one
 gatekeeper.
+
+### 16.2.11 Web distribution has one gatekeeper for each browser
+
+The web client of Part 15 §15.7 is a browser extension, and each browser
+vendor operates the one store that its browser installs from without a policy
+change. A vendor can remove or replace the extension for each user of that
+browser. Rule `SEC-021` makes a rebuilder check the listed bundle, and Part 15
+rule `IMP-115` makes a replaced bundle that the transparency log does not hold
+fail at the next start. UMBRA accepts this residual, and §16.3 holds the row.
 
 ## 16.3 Residual leaks, enumerated
 
@@ -284,6 +295,11 @@ gatekeeper.
 | The group of a leaving member stays readable to it until any other member rotates | The leaving member | Part 11 §11.4.1; one backoff after the first other member comes online |
 | The slot chunk that one member fetched, at the chunk relay | The chunk relay | Part 13 §13.9; one anonymous fetch per member per rotation |
 | The `relay_id` of the notify queue of each reader, at the group-queue relay | The group-queue relay | Part 8 §8.5.2; the same view a community relay holds under Part 12 §12.6.4 |
+| The class of a client, web or native, at the ingress relay from the ClientHello | A1, A2, as the ingress relay | Part 3 §3.8.1. The two classes send the same cells, and the class names no user. UMBRA accepts this residual |
+| The bytes of a deleted record in the storage engine of the browser, until that engine compacts | A6, with the browser profile | Part 15 §15.7.4. `IMP-108` overwrites the salt and the ciphertext before the delete, and no rule of the engine bounds the compaction. UMBRA accepts this residual |
+| The passphrase rate of a web client, against a party that runs script inside the browser profile | A6, A7 | Part 15 §15.7.4. `IMP-106` binds the wrap to a non-extractable key, which stops a copied store and not a script in the profile. UMBRA accepts this residual |
+| The constant-time property of the web client, at the compiler of the browser | A6 | Part 15 §15.7.6. Layer 2 of Part 15 §15.5.1 holds at the source, and no layer runs against the code that the browser executes. UMBRA accepts this residual |
+| The extension listing, at each browser vendor | The browser vendor | §16.2.11 and §16.5. `SEC-021` checks the listed bundle, and `IMP-115` fails a bundle that the log does not hold |
 
 **[SEC-018]** A revision that adds a residual leak MUST add a row to this table.
 **[SEC-019]** A revision that removes a leak MUST remove its row in the same
@@ -324,7 +340,10 @@ not address, and the problem becomes more difficult.
 **Requirements, all for v1:**
 
 - **Reproducible builds** with a pinned toolchain. **[SEC-005]** The rebuild of the Rust core,
-  the Android application, and the relay MUST be byte-identical.
+  the Android application, the web extension bundle, and the relay MUST be
+  byte-identical. **[SEC-021]** A rebuilder of `SEC-009` MUST fetch the
+  extension bundle from each listed store and verify it against the published
+  artifact, because the store and not the nonprofit serves that bundle.
 - **Release metadata in the TUF format**, with a root threshold of **3-of-5 or
   more**. Individuals in **three or more jurisdictions** hold those keys
   offline.

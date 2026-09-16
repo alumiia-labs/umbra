@@ -28,9 +28,11 @@ design objectives.
 This specification is normative. It contains all the information to build an
 implementation. A developer does not have to read the reference implementation.
 
-**Platform scope of v1.** Android is the v1 client platform. An iOS client and
-a native desktop client are deferred to a later revision, and Part 15 §15.6.3
-records what such a revision must revisit. The core and its FFI stay
+**Platform scope of v1.** Android and the web are the v1 client platforms.
+The web client is the same core in a browser extension, and it is a linked
+device of a device set; Part 15 §15.7 gives its form and its limits. An iOS
+client and a native desktop shell are deferred to a later revision, and Part
+15 §15.6.3 records what such a revision must revisit. The core stays
 platform-neutral, thus the deferral changes the scope of this text and not
 the design.
 

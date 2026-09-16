@@ -622,16 +622,24 @@ relay learns.
 > already has. The gap is the value of `WAKE_COALESCE_WINDOW`, thus a busy
 > group costs no more pushes than a busy pairwise queue.
 
-## 8.6 Web Push (PWA target only)
+## 8.6 The web client
 
-Part 15 §15.7 says today that a browser target does not ship. **[NTF-020]** If
-such a target ships later, Web Push MUST obey the five rules below.
-**[NTF-021]** Web Push MUST use a **fresh VAPID P-256 keypair for each
-subscription**. **[NTF-022]** Web Push MUST set `sub` to one constant HTTPS URI
-that identifies no party. **[NTF-023]** Web Push MUST set `exp` well below the
-24-hour ceiling of RFC 8292. **[NTF-024]** Web Push MUST NOT send a `Topic`
-header. **[NTF-025]** Web Push MUST pad the payloads to a constant length under
-the RFC 8291 encryption. The content encoding is the `aes128gcm` of RFC 8188.
+The web client of Part 15 §15.7 holds a live session while its browser runs,
+and that session carries each arrival. **[NTF-110]** A web client MUST NOT
+register a push token with the NDR, and it MUST NOT hold a registration of
+§8.5.1 or §8.5.2 of its own. **[NTF-111]** A web client MUST take each arrival
+from its live session, and it MUST show an alert through the notification API
+of the browser while the browser runs. The phone of the user carries the
+notification of the device set at each other time, under §8.4.1.
+
+Rules `NTF-020` to `NTF-025` are retired in 0.2.0-draft. They bound a Web
+Push path of a hosted page that Part 15 §15.7 does not ship, and a retired
+number does not return.
+
+> *Cause.* Web Push needs a push service that the browser vendor operates, and
+> a subscription there is a durable identifier at a party that Part 16 §16.1
+> would have to list. A linked device with an open socket needs no such party,
+> and the phone already wakes for the device set.
 
 ## 8.7 Residual leak — normative statement
 

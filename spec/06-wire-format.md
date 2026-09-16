@@ -143,6 +143,14 @@ split a capsule across two frames. RFC 6455 §5.3 masks each client frame with a
 126 and 65 535 bytes, thus the frame header is 4 bytes at each bucket. A client
 frame therefore adds 8 bytes, and a relay frame adds 4 bytes.
 
+**[WIR-485]** A relay MUST NOT negotiate the `permessage-deflate` extension of
+RFC 7692, or any other WebSocket extension, on an L1 connection. A browser
+offers that extension without a choice of the web client of Part 15 §15.7,
+and a compressed cell has a length that its plaintext shapes. **[WIR-486]** A
+web client sends each capsule through the WebSocket API of its browser, thus
+rules `WIR-225` to `WIR-228` bind the native client and the relay, and the
+browser decides the record layout of the client.
+
 **The TLS record.** RFC 8446 §5.1 caps a record at 2¹⁴ bytes of plaintext.
 **[WIR-225]** If a WebSocket frame fits one TLS record, the sender MUST put that
 frame in one record. **[WIR-226]** If the frame does not fit one record, the
@@ -2388,7 +2396,9 @@ supply-chain dependency at verification time.
 TCP transport of §6.2.1, from the client to the relay. A relay-to-client cell
 carries no WebSocket mask, thus it costs 4 bytes less at each bucket. Each
 budget of this specification uses the client-to-relay figure as the bound for
-the two directions.
+the two directions. A web client of Part 15 §15.7 sends the same frames
+through the stack of its browser, and that stack decides the record count;
+each budget uses the figure of this table for it.
 
 | Value | `B0` | `B1` | `B2` | `B3` |
 | --- | --- | --- | --- | --- |

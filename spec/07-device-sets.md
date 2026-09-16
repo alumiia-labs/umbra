@@ -422,6 +422,22 @@ channel. The target is 60 seconds or less and one QR scan (usability goal U7).
   link QR code MUST operate one time only.
 - **[DEV-007]** A device that has a provision MUST refuse a link into a second device set. **[DEV-008]** The
   client MUST make the user do an explicit local wipe before a second link.
+- **The web client.** **[DEV-264]** A web client of Part 15 §15.7 MUST link
+  as a device of this section, and it MUST NOT make a `RootIdentity`.
+  **[DEV-265]** When a web client returns to this flow after it lost its
+  store, the existing device MUST revoke the old entry under §7.7 before step
+  5. **[DEV-266]** The new device MAY show the QR code of step 1 in the place
+  of the existing device. The device that scans is then the initiator of step
+  2, and the code of step 3 shows on the new device. **[DEV-267]** In that
+  direction the existing device MUST show the label of the new device, and it
+  MUST get an explicit confirmation from the user, before step 4.
+
+> *Cause.* A browser has no camera that a user trusts for a scan, and a phone
+> has one. A QR code that the new device shows moves the scan to the phone.
+> That direction is the one that a device-linking attack uses, because a page
+> can show such a code to a victim. The code of step 3 and the confirmation of
+> `DEV-267` name the device on the phone before any secret moves, thus the
+> user sees what the scan links.
 
 ## 7.5 History sync
 

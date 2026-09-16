@@ -150,9 +150,16 @@ and the task snapshot service. A7 reads each byte that the client gives to a
 platform interface. A7 cannot open the encrypted store of Part 15 §15.6.4, and
 A7 cannot decrypt a record in transit.
 
-Android is the v1 platform (Part 1 §1.1). This section keeps the abstract term
-*the platform*, because the rule below binds each platform that a later
-revision adds.
+Android and the web are the v1 platforms (Part 1 §1.1). On the web client of
+Part 15 §15.7, A7 is the browser, the browser profile and its sync to the
+account of the user at the browser vendor, each other extension that the user
+installed, and the download location. This section keeps the abstract term
+*the platform*, because the rule below binds each platform, and each platform
+that a later revision adds.
+
+**[THR-015]** A web client MUST NOT run as a page that a host serves, because
+trust assumption 4 of §2.6 fails for such a page at each load. Part 15 §15.7
+gives the form that holds that assumption.
 
 **In scope, and partially mitigated.** **[THR-013]** A client MUST NOT write a
 plaintext record, a key, or a decrypted attachment to a platform store. Part 15
@@ -345,6 +352,9 @@ adds a trade MUST add a row to this table.
 | A save to the media store and a screenshot stay as user actions, thus one tap moves a plaintext out of the encrypted store | Part 15 §15.6.6 |
 | The accessibility tree stays whole, thus an enabled accessibility service reads each rendered message | Part 15 §15.6.6 |
 | The ClientHello is the ClientHello of the rustls stack and not of a browser, thus a classifier tells an UMBRA client from a browser on the first flight | Part 3 §3.8.1 |
+| A web client sends the ClientHello of its browser, thus a classifier tells a web client from a native client on the first flight | Part 3 §3.8.1 |
+| A web client receives a message while its browser runs, and the phone of the user carries each notification at another time | Part 8 §8.6 |
+| The web client is a browser extension, thus each browser vendor is a gatekeeper of that client, and a user without the extension has no web client | Part 15 §15.7 |
 | A relay under a legal order serves a signed operator removal beside the stub, thus the removal is attributable and it binds that relay only | Part 12 §12.4.4 |
 | A roster that removes an owner needs more than half of the owners, thus a lone hostile owner removes nobody and a community with two owners needs both | Part 12 §12.5.2 |
 | A published rendezvous queue rotates each 30 days, thus one relay holds the hello count of one period and the holder pays one queue and one write in each period | Part 9 §9.9 |
@@ -486,7 +496,9 @@ lists them, thus a reader can check them and does not have to find them.
 4. **The client binary that the user runs is the binary that the auditor
    examined.** Part 15 gives reproducible builds and binary transparency.
    Without these two controls, no party can check this assumption, and all the
-   other guarantees become void.
+   other guarantees become void. A web page that a host serves fails this
+   assumption at each load, and Part 15 §15.7 gives the web client a form
+   that holds it.
 5. **The user verifies a contact out-of-band a minimum of one time** for a
    conversation with serious consequences after a compromise. Part 4 §4.5.2
    makes the ceremony one QR scan or one six-digit code, and UMBRA cannot make
@@ -508,7 +520,7 @@ drops a leak is the failure mode that this note prevents.
 
 | Party | Learns | Does not learn |
 | --- | --- | --- |
-| **Ingress Relay** | The client IP address, the connection time, the cell counts, the cell sizes, and that this client is an UMBRA client. In tier C it also reads the send times, because a backgrounded client makes no cover cell (Part 3 §3.6.2) | The destination queue, the recipient, the content, and how many conversations the client has |
+| **Ingress Relay** | The client IP address, the connection time, the cell counts, the cell sizes, that this client is an UMBRA client, and whether it is a web client or a native client (Part 3 §3.8.1). In tier C it also reads the send times, because a backgrounded client makes no cover cell (Part 3 §3.6.2) | The destination queue, the recipient, the content, and how many conversations the client has |
 | **Chain Relay** | Two adjacent relay addresses, the time, and the cell size | The client IP address, the destination queue, the recipient, and the content |
 | **Queue Relay** | The queue identifiers, the delivery time, the cell size, and the ciphertext at rest. For a maximum of 8 queues at a time, that those queues share one transport session (Part 3 §3.2.5) | The client IP address, the sender identity, the recipient identity, the content, and which person owns the queue |
 | **Group-queue relay** | That a group queue exists, the count of its reader sessions and its writer sessions, the arrival time and the bucket of each record, the exact member count at each rotation from the slot count of the epoch-key record, the count of notify registrations, and the `relay_id` of each registered notify queue. It holds `GROUP_RETENTION` of ciphertext (Part 3 §3.2.7, Part 3 §3.11) | The identity of any member, the pairwise queue of any member, the sender of a record, the content, and the membership list |
