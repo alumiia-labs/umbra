@@ -108,8 +108,10 @@ impl Cmd {
         match self {
             Cmd::Send => Some(bucket.l6_record()),
             Cmd::Msg | Cmd::Cover => Some(bucket.l5_payload()),
-            Cmd::Ack => Some(4),
+            Cmd::Ack | Cmd::Quota => Some(4),
             Cmd::Sub | Cmd::Unsub | Cmd::Del => Some(0),
+            Cmd::Nkey | Cmd::Nid => Some(32),
+            Cmd::Ids => Some(IDS_LEN),
             Cmd::Nack => Some(crate::nack::LEN),
             Cmd::Group(g) => g.fixed_payload_len(bucket),
             _ => None,
@@ -235,6 +237,82 @@ impl<'a> Command<'a> {
     }
 }
 
+/// The length of an `IDS` payload.
+pub const IDS_LEN: usize = 96;
+/// The length of a `NEW` payload at an empty admission.
+pub const NEW_NONE_LEN: usize = 67;
+
+/// The payload of `NEW` (§6.4).
+pub struct NewPayload<'a> {
+    /// `QR_auth` of Part 3 §3.2.2.
+    pub qr_auth_pk: [u8; 32],
+    /// `QS_auth` of Part 3 §3.2.2.
+    pub qs_auth_pk: [u8; 32],
+    /// The admission trailer.
+    pub admission: crate::admission::Admission<'a>,
+}
+
+impl<'a> NewPayload<'a> {
+    /// Writes the payload.
+    pub fn encode(&self, out: &mut [u8]) -> Result<usize, Error> {
+        let mut w = Writer::new(out);
+        w.put(&self.qr_auth_pk)?;
+        w.put(&self.qs_auth_pk)?;
+        let n = self.admission.encode(w.tail())?;
+        Ok(w.position().saturating_add(n))
+    }
+
+    /// Reads the payload (`WIR-488`).
+    pub fn parse(bytes: &'a [u8]) -> Result<Self, Error> {
+        let mut r = Reader::new(bytes);
+        let qr_auth_pk = r.array()?;
+        let qs_auth_pk = r.array()?;
+        let (admission, used) = crate::admission::Admission::parse(r.rest())?;
+        if used != bytes.len().saturating_sub(64) {
+            return Err(Error::Malformed);
+        }
+        Ok(NewPayload {
+            qr_auth_pk,
+            qs_auth_pk,
+            admission,
+        })
+    }
+}
+
+/// The payload of `IDS` (§6.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdsPayload {
+    /// `RecipientId`.
+    pub recipient_id: [u8; 32],
+    /// `SenderId`.
+    pub sender_id: [u8; 32],
+    /// `RelaySession_pk` of Part 3 §3.2.3.
+    pub relay_session_pk: [u8; 32],
+}
+
+impl IdsPayload {
+    /// Writes the payload.
+    pub fn encode(&self, out: &mut [u8]) -> Result<usize, Error> {
+        let mut w = Writer::new(out);
+        w.put(&self.recipient_id)?;
+        w.put(&self.sender_id)?;
+        w.put(&self.relay_session_pk)?;
+        Ok(w.position())
+    }
+
+    /// Reads the payload (`WIR-488`).
+    pub fn parse(bytes: &[u8]) -> Result<Self, Error> {
+        let mut r = Reader::new(bytes);
+        let out = IdsPayload {
+            recipient_id: r.array()?,
+            sender_id: r.array()?,
+            relay_session_pk: r.array()?,
+        };
+        r.finish()?;
+        Ok(out)
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::expect_used,
@@ -308,6 +386,28 @@ mod tests {
             let wrong = Bucket::ALL.into_iter().find(|b| *b != bucket).unwrap();
             assert!(Command::parse(&out, wrong).is_err());
         }
+    }
+
+    #[test]
+    fn the_new_and_ids_payloads_hold_their_lengths() {
+        let mut out = [0u8; 100];
+        let new = NewPayload {
+            qr_auth_pk: [1; 32],
+            qs_auth_pk: [2; 32],
+            admission: crate::admission::Admission::NONE,
+        };
+        assert_eq!(new.encode(&mut out).unwrap(), NEW_NONE_LEN);
+        assert_eq!(NewPayload::parse(&out[..67]).unwrap().qs_auth_pk, [2; 32]);
+        assert!(NewPayload::parse(&out[..68]).is_err());
+        let ids = IdsPayload {
+            recipient_id: [3; 32],
+            sender_id: [4; 32],
+            relay_session_pk: [5; 32],
+        };
+        assert_eq!(ids.encode(&mut out).unwrap(), IDS_LEN);
+        assert_eq!(IdsPayload::parse(&out[..96]).unwrap(), ids);
+        assert_eq!(Cmd::Quota.fixed_payload_len(Bucket::B0), Some(4));
+        assert_eq!(Cmd::Nkey.fixed_payload_len(Bucket::B0), Some(32));
     }
 
     #[test]

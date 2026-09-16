@@ -67,10 +67,10 @@ each column when a crate implements the requirement and a test covers it.
 | --- | --- | --- | --- | --- | --- | --- |
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
-| `NET` | 189 | 79 | 0 | 0 | 8 | **276** |
+| `NET` | 190 | 79 | 0 | 0 | 8 | **277** |
 | `IDN` | 103 | 40 | 1 | 0 | 5 | **149** |
 | `CRY` | 116 | 27 | 0 | 0 | 1 | **144** |
-| `WIR` | 360 | 81 | 0 | 0 | 6 | **447** |
+| `WIR` | 366 | 81 | 0 | 0 | 6 | **453** |
 | `DEV` | 169 | 87 | 2 | 0 | 7 | **265** |
 | `NTF` | 59 | 28 | 0 | 0 | 2 | **89** |
 | `DIS` | 104 | 34 | 0 | 0 | 1 | **139** |
@@ -81,7 +81,7 @@ each column when a crate implements the requirement and a test covers it.
 | `ABU` | 54 | 31 | 0 | 0 | 0 | **85** |
 | `IMP` | 72 | 32 | 0 | 0 | 0 | **104** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 1978 | 677 | 6 | 0 | 49 | **2710** |
+| **All** | 1985 | 677 | 6 | 0 | 49 | **2717** |
 
 ## SCP — Scope and Conventions
 
@@ -415,6 +415,7 @@ Source: `spec/03-network-architecture.md`
 | `NET-275` | §3.8 | MUST NOT | (unstated) | A web client MUST send the L1 stream through the WebSocket API of its browser, over TLS to port 443, and it MUST NOT use WebTransport in v1. |  |  |
 | `NET-276` | §3.8 | MUST NOT | A relay | A relay MUST NOT accept TLS early data on its L1 listener. |  |  |
 | `NET-277` | §3.8 | MUST NOT | A web client | A web client MUST NOT race QUIC, because the browser gives it no QUIC stream in v1. |  |  |
+| `NET-278` | §3.2.3 | MUST | A party | A party MUST derive `k` as `HKDF-SHA3-256(salt = "", ikm = X25519(Q*_auth_sk, RelaySession_pk), info = "umbra/v1/cmd-auth", L = 32)`, and it MUST abort on a non-contributory Diffie-Hellman output, as Part 5 rule `CRY-040` does. |  |  |
 
 ## IDN — Identity
 
@@ -1176,6 +1177,12 @@ Source: `spec/06-wire-format.md`
 | `WIR-484` | §6.6.3 | MUST | A receiver | A receiver MUST discard a `RekeyRecord` on a pairwise channel whose chain fields are not zero, and a `RekeyRecord` in a group record whose chain fields are zero. |  |  |
 | `WIR-485` | §6.2.1 | MUST NOT | A relay | A relay MUST NOT negotiate the `permessage-deflate` extension of RFC 7692, or any other WebSocket extension, on an L1 connection. |  |  |
 | `WIR-486` | §6.2.1 | MUST | (unstated) | A web client sends each capsule through the WebSocket API of its browser, thus rules `WIR-225` to `WIR-228` bind the native client and the relay, and the browser decides the record layout of the client. |  |  |
+| `WIR-487` | §6.4 | MUST | A party | A party MUST reject a command of `ACK`, `NKEY`, `NID`, `QUOTA`, `NACK`, `SUB`, `UNSUB`, or `DEL` whose `payload_len` differs from the length that the table above gives. |  |  |
+| `WIR-488` | §6.4 | MUST | A party | A party MUST reject a `NEW` whose `payload_len` differs from 64 plus the length of its `Admission`, and an `IDS` whose `payload_len` is not 96. |  |  |
+| `WIR-489` | §6.6.3 | MUST | A parser | A parser MUST reject an `op` of a `PlainEpoch` that the layout above does not hold, and a `PlainEpoch` whose length does not equal the sum of the fields of its `op`. |  |  |
+| `WIR-490` | §6.6.3 | MUST | A parser | A parser MUST reject a `GrantingEpoch` that carries `grantee_roster_pk` at a `role` below `0x03`, or that omits it at a `role` of `0x03` or above. |  |  |
+| `WIR-491` | §6.6.3 | MUST | A parser | A parser MUST reject an `action_count` of 0 or above `MOD_ACTION_MAX`, and an `action` that the layout above does not hold. |  |  |
+| `WIR-492` | §6.6.3 | MUST | A parser | A parser MUST reject a `GroupPresence` whose length is not 1. |  |  |
 
 ## DEV — Device Sets
 

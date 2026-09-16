@@ -1431,7 +1431,7 @@ in chain order.
   MUST answer with a `SnapshotNotice` (type `0x08`) as a group record that
   carries a fresh descriptor at the current `roster_epoch`.
 
-**What a snapshot costs.** A snapshot at N members is 73 + 1 317N bytes plus
+**What a snapshot costs.** A snapshot at N members is 77 + 1 317N bytes plus
 the path. At 500 members that is 50 KB of entries and 609 KB of KEM keys, 21
 chunks with two owners on the path, and at most 23 chunks at
 `ROLE_HOLDER_MAX`. The joiner fetches the chunks under Part 13 §13.3.3, which

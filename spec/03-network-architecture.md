@@ -128,7 +128,10 @@ auth = HMAC-SHA3-256(k, corr_id || authorized_bytes)
 
 **The authorized bytes.** Part 6 §6.4 gives the command header. The
 authenticator covers each field of that header but `auth` itself, and it covers
-the payload.
+the payload. **[NET-278]** A party MUST derive `k` as
+`HKDF-SHA3-256(salt = "", ikm = X25519(Q*_auth_sk, RelaySession_pk),
+info = "umbra/v1/cmd-auth", L = 32)`, and it MUST abort on a
+non-contributory Diffie-Hellman output, as Part 5 rule `CRY-040` does.
 
 **[NET-118]** A party MUST compute `authorized_bytes` as the concatenation
 below:

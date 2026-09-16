@@ -398,22 +398,49 @@ party MUST NOT compute `auth` as an AEAD ciphertext.
 
 | `cmd` | Name | Sent by | Payload |
 | --- | --- | --- | --- |
-| `0x01` | `NEW` | Recipient | 2 public keys, requested params, then an `Admission` of Part 14 §14.2 |
-| `0x02` | `IDS` | Relay | `RecipientId`, `SenderId`, relay DH pk |
+| `0x01` | `NEW` | Recipient | `NewPayload`, 64 bytes and an `Admission` of Part 14 §14.2 |
+| `0x02` | `IDS` | Relay | `IdsPayload`, 96 bytes |
 | `0x10` | `SEND` | Sender | L6 record |
 | `0x11` | `MSG` | Relay | `seq` `u32`, L6 record |
 | `0x12` | `ACK` | Recipient | `seq` `u32`, cumulative |
 | `0x20` | `SUB` | Recipient | — |
 | `0x21` | `UNSUB` | Recipient | — |
-| `0x30` | `NKEY` | Recipient | notifier public key |
-| `0x31` | `NID` | Relay | `notifier_id` |
+| `0x30` | `NKEY` | Recipient | the notifier public key of Part 8 §8.2.4, 32 bytes |
+| `0x31` | `NID` | Relay | `notifier_id`, 32 bytes |
 | `0x40` | `DEL` | Recipient | — |
-| `0x50` | `QUOTA` | Relay | remaining capacity |
+| `0x50` | `QUOTA` | Relay | the remaining record count of the queue, `u32`, 4 bytes |
 | `0x51` | `NACK` | Relay | `NackPayload`, 17 B, §6.4.4 |
 | `0x60` | `COVER` | Sender or recipient | zero-filled, indistinguishable from `SEND` and `MSG` |
 | `0x70`–`0x7B` | Attachment commands | Uploader, downloader, or relay | Part 13 §13.3.3 gives the twelve commands and their payloads |
 | `0x80`–`0x85` | Community commands | Subscriber, publisher, or relay | Part 12 §12.3.3 gives the six commands and their payloads |
 | `0x90`–`0x9A` | Group-queue commands | Member, admin, or relay | §6.4.5 gives the eleven commands and their payloads |
+
+```
+NewPayload {                      // the payload of NEW, 67 bytes at an Admission of kind 0x00
+    qr_auth_pk      [32]u8        // QR_auth of Part 3 §3.2.2, X25519
+    qs_auth_pk      [32]u8        // QS_auth of Part 3 §3.2.2, X25519
+    admission       Admission     // Part 14 §14.2, 3 bytes and the body
+}
+
+IdsPayload {                      // the payload of IDS, 96 bytes
+    recipient_id    [32]u8        // RecipientId of Part 3 §3.2.1
+    sender_id       [32]u8        // SenderId of Part 3 §3.2.1
+    relay_session_pk [32]u8       // RelaySession_pk of Part 3 §3.2.3, X25519
+}
+```
+
+A `NEW` requests no parameter. The relay applies its own quota of Part 3
+§3.2.4, and `QUOTA` reports it. **[WIR-487]** A party MUST reject a command
+of `ACK`, `NKEY`, `NID`, `QUOTA`, `NACK`, `SUB`, `UNSUB`, or `DEL` whose
+`payload_len` differs from the length that the table above gives.
+**[WIR-488]** A party MUST reject a `NEW` whose `payload_len` differs from 64
+plus the length of its `Admission`, and an `IDS` whose `payload_len` is not
+96.
+
+> *Cause.* An earlier draft named "requested params" in the payload of a
+> `NEW` and gave them no field. No section of this specification defines a
+> parameter that a recipient requests, thus the field does not exist, and a
+> parser needs one canonical length under §6.1.1 rule 4.
 
 **[WIR-015]** `COVER` MUST be bit-indistinguishable from a real command after the L4
 encryption. A relay that makes inbound pacing cover (Part 3 §3.5.2) emits cells
@@ -495,8 +522,9 @@ QueueE2E {
 ```
 
 1. **[WIR-017]** A party MUST key the record with `K_QE`. The derivation is
-   `K_QE = HKDF-SHA3-256("umbra/v1/queue-e2e", QE, SenderId)`. The
-   value `QE` is the 32-byte per-queue secret of Part 3 §3.2.2.
+   `K_QE = HKDF-SHA3-256(salt = "", ikm = QE, info = "umbra/v1/queue-e2e"
+   || SenderId, L = 32)`. The value `QE` is the 32-byte per-queue secret of
+   Part 3 §3.2.2.
 
    > *Cause.* An earlier draft put `RecipientId || SenderId` in the info string.
    > A sender has to compute `K_QE` to seal a `SEND`, thus that draft made the
@@ -1501,11 +1529,87 @@ ReplicaRef {                      // 68 bytes
 }
 ```
 
-The plain epoch of type `0x03` that adds a member carries the `pair_pk`, the
-`roster_pk_hash`, and the `kem_pk` of the `JoinRecord`, and the `index` of the
-new member as a `u16`. Part 11 §11.9.2 gives that layout. The authority path
-is each granting epoch of Part 11 §11.9.2 on the path of every current role
-holder, concatenated, as `GRP-068` keeps it.
+**The roster objects.** Part 11 §11.9.2, §11.9.6, and §11.9.7 give the
+fields and the signature preimages of the plain epoch, the granting epoch, the
+moderation epoch, and the presence record. The four layouts below carry those
+fields in the order of the preimages.
+
+```
+PlainEpoch {                      // control type 0x03; no signature (GRP-064)
+    version           u8          // 0x01
+    group_id          [32]u8
+    epoch_index       u32         // Part 11 §11.9.2
+    previous_epoch_hash [32]u8    // Part 11 §11.9.2
+    op                u8          // 0x01 add, 0x02 remove, 0x03 self-removal
+    // op 0x01:
+    index             u16         // the new index, GRP-320
+    pair_pk           [32]u8      // the JoinRecord fields of the joiner
+    roster_pk_hash    [32]u8
+    kem_pk            [1216]u8
+    // op 0x02:
+    index             u16         // the index removed
+    // op 0x03: no field; the tag vector names the member that leaves
+}
+
+GrantingEpoch {                   // control type 0x04; GRP-060 signs it
+    version           u8          // 0x01
+    group_id          [32]u8
+    epoch_index       u32
+    previous_epoch_hash [32]u8
+    granter_index     u16
+    grantee_index     u16
+    grantee_roster_pk_hash [32]u8
+    role              u8          // the role after the epoch, in the set of GroupMemberEntry
+    grantee_roster_pk [1952]u8    // present when role is 0x03 or above (GRP-316), else absent
+    sig               [3309]u8    // ML-DSA-65 over the preimage of GRP-061
+}
+
+ModerationEpoch {                 // control type 0x05; GRP-077 signs it
+    version           u8          // 0x01
+    group_id          [32]u8
+    epoch_index       u32
+    previous_epoch_hash [32]u8
+    actor_index       u16
+    actor_role        u8
+    action_count      u8          // 1 to MOD_ACTION_MAX
+    actions           [action_count]ModAction
+    sig               [3309]u8    // ML-DSA-65 over the preimage of GRP-078
+}
+
+ModAction {                       // 19 bytes
+    action            u8          // 0x01 hide, 0x02 remove, 0x03 unhide
+    target            [16]u8      // the msg_id of the target
+    author_hint       u16         // a rendering hint, or 0xFFFF; not in the preimage (GRP-179)
+}
+
+GroupPresence {                   // control type 0x06, 1 byte
+    version           u8          // 0x01
+}
+```
+
+The preimage of a granting epoch takes `group_id || BE32(epoch_index) ||
+previous_epoch_hash || BE16(granter_index) || BE16(grantee_index) ||
+grantee_roster_pk_hash || role` after its label. The preimage of a moderation
+epoch takes `group_id || BE32(epoch_index) || previous_epoch_hash ||
+BE16(actor_index) || actor_role || action_count || (action || target)` for
+each action after its label, and `author_hint` stays out of it.
+
+- **[WIR-489]** A parser MUST reject an `op` of a `PlainEpoch` that the
+  layout above does not hold, and a `PlainEpoch` whose length does not equal
+  the sum of the fields of its `op`. **[WIR-490]** A parser MUST reject a
+  `GrantingEpoch` that carries `grantee_roster_pk` at a `role` below `0x03`,
+  or that omits it at a `role` of `0x03` or above. **[WIR-491]** A parser
+  MUST reject an `action_count` of 0 or above `MOD_ACTION_MAX`, and an
+  `action` that the layout above does not hold. **[WIR-492]** A parser MUST
+  reject a `GroupPresence` whose length is not 1.
+
+> *Cause.* An earlier draft named the four objects, gave their preimages,
+> and gave them no layout. Two implementations then chose two byte orders,
+> and no vector of `WIR-479` could exist. The layouts follow the preimages,
+> thus a verifier reads the signed bytes from the record in one pass.
+
+The authority path is each granting epoch of Part 11 §11.9.2 on the path of
+every current role holder, concatenated, as `GRP-068` keeps it.
 
 A `JoinRecord` is 1 345 bytes as an `AppMessage`, thus it uses bucket `B1`.
 An offer is 3 973 bytes and the name as an `AppMessage`, thus it uses bucket
@@ -1583,7 +1687,7 @@ MemberKemKey {                    // 1 218 bytes
 }
 ```
 
-The fixed part of a `RosterSnapshot` is 75 bytes. At `GROUP_MAX` the object
+The fixed part of a `RosterSnapshot` is 77 bytes. At `GROUP_MAX` the object
 is 49 500 bytes of entries and 609 000 bytes of KEM keys, thus 658 577 bytes
 without a path, in 21 segments of `SEGMENT_SIZE`. At 3 members it is 4 028
 bytes, in one segment. A `SnapshotNotice` that names a one-segment snapshot
