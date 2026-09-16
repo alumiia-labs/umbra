@@ -628,8 +628,11 @@ prologue = suite_version || handshake_mode
 
 §5.10 gives the five suite identifiers. The value `handshake_mode` is one byte.
 Version 1 defines the one value `0x01`, which is `UMBRA-XKhfs` with a one-time
-prekey. Part 6 §6.7 gives the two version ranges. The address type is the value
-pairwise or the value published.
+prekey. Part 6 §6.7 gives the two version ranges. The address type is one
+byte: `0x01` for a pairwise identity of Part 4 §4.2.2, and `0x02` for a
+published address of Part 4 §4.2.3. **[CRY-135]** A party MUST put that byte
+in the prologue, and it MUST abort a handshake whose peer holds the other
+value, because the two prologues then differ and each flight tag fails.
 
 **Flight 1, from the initiator to the responder.** The initiator writes
 `range_i` as the first two bytes of the flight, and `mode` as the third byte.
@@ -732,9 +735,24 @@ Split():
 
 The value `RK` is the initial root key of §5.5.1. The two header keys protect
 the `hdr_ct` field of Part 6 §6.5, one for each direction. **[CRY-059]** An implementation
-MUST erase `ck`, `h`, `k`, and each ephemeral private key after the split. Part
-15 §15.4 gives the erasure rule. Part 7 §7.4 step 3 takes its 6-digit
-confirmation code from `h`, and it takes that code before the erasure.
+MUST erase `ck`, `h`, `k`, and each ephemeral private key after the split, with
+the one exception of the next rule. Part 15 §15.4 gives the erasure rule. Part
+7 §7.4 step 3 takes its 6-digit confirmation code from `h`, and it takes that
+code before the erasure.
+
+**The first ratchet key.** The ephemeral `er` of flight 2 is the first DH
+ratchet key of the responder in §5.5.1. The initiator holds its public half
+from flight 2, and the responder holds its private half. **[CRY-136]** The
+responder MUST keep `er_sk` as its first DH ratchet private key until the
+first DH ratchet step of §5.5.1 replaces it, and it MUST erase it at that
+step. **[CRY-137]** The initiator MUST use `er` as the ratchet public key of
+the responder at the start of the session.
+
+> *Cause.* An earlier draft gave `RK` and the two header keys and named no
+> initial DH key. The Double Ratchet needs one, and the two candidates were
+> the responder static key, which gives the first chain no forward secrecy,
+> and a fresh key in a payload that no rule defined. The flight-2 ephemeral
+> is fresh, both parties hold it, and the first ratchet step erases it.
 
 **The transcript binding of CRY-009 maps onto this schedule as follows.**
 
@@ -906,7 +924,9 @@ UMBRA uses three ratchets together, and mixes them through one KDF.
 
 ### 5.5.1 Classical Double Ratchet, header-encrypted
 
-- DH ratchet: X25519. §5.4.8 gives the initial `RK`, `HK_i2r`, and `HK_r2i`.
+- DH ratchet: X25519. §5.4.8 gives the initial `RK`, `HK_i2r`, and `HK_r2i`,
+  and rules `CRY-136` and `CRY-137` give the first ratchet key of the
+  responder.
 - `KDF_RK`: HKDF-SHA3-256. A DH ratchet step runs this derivation:
 
   ```
@@ -975,9 +995,9 @@ The coin is secret, and §5.9 gives it.
 
 **[CRY-093]** A sender MUST make the seed `d` of its encapsulation key with the
 randomness function of §5.9. **[CRY-128]** A sender MUST NOT put `d`, `z`, or
-the decapsulation key in a field of the codeword. **[CRY-094]** A sender MUST
-make the ciphertext of an epoch against the encapsulation key that the last
-completed epoch of the peer gave.
+the decapsulation key in a field of the codeword. **[CRY-138]** A sender MUST
+make the ciphertext of an epoch against the encapsulation key that §5.5.5
+names for that epoch, and against no other key. No field names the target.
 
 **[CRY-091]** A receiver that rebuilt the material MUST compare
 `SHA3-256(ek_vector || rho)` against the hash in `header`. **[CRY-092]** That
@@ -1000,7 +1020,7 @@ receiver MUST reject the braid epoch when the two values differ.
 > the peer key and of the secret coin. The party that can compute `c1` from a
 > header is the peer, as the encapsulator of its own next epoch. FIPS 203
 > derives the coin from `m` and `H(ek)`. This revision does not use that
-> property, because CRY-094 targets a completed epoch. A later revision can add
+> property, because §5.5.5 fixes each target by epoch number. A later revision can add
 > it as a pipelining step.
 
 At the close of a PQ epoch, the two parties mix the ML-KEM shared secret into
@@ -1041,7 +1061,11 @@ chunk. Thus symbol *j* of each chunk makes one codeword, and a lost chunk costs
 one symbol of each codeword.
 
 **[CRY-073]** An implementation MUST use a Vandermonde generator matrix in
-systematic form.
+systematic form. **[CRY-139]** An implementation MUST take the evaluation
+points `x_i = g^i` for `i` in `0..n`, where `g` is the generator element of
+`CRY-068`, build `V[i][j] = x_i^j`, and use `G = V · (V[0..k])⁻¹`. Two
+implementations that take other points give two different parity chunks,
+and `CRY-075` then fails.
 
 **The codeword and the redundancy schedule.**
 
@@ -1144,7 +1168,7 @@ healing through a withholding of the delivery.
 
 **The incomplete epoch.** An epoch of a sender is **incomplete** from its first
 chunk. It becomes **complete** when the sender holds a ciphertext of the peer
-against the encapsulation key of that epoch. CRY-094 uses the word complete in
+against the encapsulation key of that epoch. §5.5.5 uses the word complete in
 the same sense. Five rules govern the incomplete epoch.
 
 1. **[CRY-130]** A sender MUST carry one chunk of its incomplete epoch on each
@@ -1154,9 +1178,9 @@ the same sense. Five rules govern the incomplete epoch.
    CRY-097 lets the receiver discard a duplicate.
 3. **[CRY-132]** A client MUST NOT start a new epoch while an epoch of its own
    is incomplete.
-4. **[CRY-133]** If a limit occurs during an incomplete epoch, the client MUST
-   start the next epoch at completion. That start is the first record after
-   the epoch is complete.
+4. **[CRY-140]** If a limit occurs during an incomplete epoch, the client MUST
+   start the next epoch at the first DH chain start of §5.5.1 after the epoch
+   is complete. §5.5.5 gives the cause.
 5. **[CRY-134]** The test vectors of Part 6 §6.8 MUST hold a schedule in which
    `T` occurs during an incomplete epoch. In that schedule the epoch continues
    under one epoch number.
@@ -1213,6 +1237,55 @@ raise `MSG_TTL` alone.
 The specification records that these keys are a long-tailed hole in the forward
 secrecy. An attacker that recorded the dropped ciphertexts, and later
 compromises the device, decrypts those ciphertexts.
+
+### 5.5.5 The interlock of the two strands
+
+Each party runs one strand of epochs. The two strands interlock under the
+four rules below, thus the two parties derive one root key sequence with no
+field that names a target, an epoch, or a mix.
+
+1. **The target is implicit.** **[CRY-141]** The initiator's epoch `e` MUST
+   encapsulate to the responder's key of epoch `e − 1`. **[CRY-142]** The
+   responder's epoch `e` MUST encapsulate to the initiator's key of epoch `e`.
+   Thus the strands alternate: the initiator's epoch 1, the responder's epoch
+   1, the initiator's epoch 2, and so on, and each epoch needs the one before
+   it.
+2. **The first epoch.** **[CRY-143]** The initiator's epoch 1 MUST carry
+   1 088 zero bytes in the place of `ct1 || ct2`, because no responder key
+   exists yet. **[CRY-144]** The responder MUST start its epoch 1 at the first
+   chain start after it rebuilt the initiator's epoch 1, and it MUST carry no
+   braid frame before that.
+3. **An epoch advances at a chain start only.** **[CRY-145]** A party MUST
+   start an epoch at the first record of a DH sending chain and at no other
+   record. Thus every record of one chain carries one epoch number, and any
+   record of the chain shows it. **[CRY-146]** The first record of a chain
+   MUST carry a braid frame; rule `CRY-019` does not apply to that record, and
+   a client selects a bucket that holds the frame.
+4. **The mix.** Let party P own epoch `e`, and let `ss_e` be the shared secret
+   of the ciphertext that the peer made against the key of that epoch.
+   **[CRY-147]** P MUST apply the mix of `CRY-064` for epoch `e` immediately
+   before it derives the sending chain of its first DH ratchet step whose
+   chain carries an epoch above `e`. **[CRY-148]** The peer MUST apply the
+   same mix immediately before it derives the receiving chain of the step that
+   the same chain starts, which it recognizes by the epoch number in the
+   frame of any record of that chain. **[CRY-149]** A party MUST retain
+   `ss_e` from the moment it computes it, by encapsulation or by
+   decapsulation, until the mix consumes it.
+
+An epoch of P is **complete** when P rebuilt the peer's codeword that carries
+the ciphertext against the key of that epoch (§5.5.3). Under rule 1 that
+codeword also carries the peer's next key, thus a party that completed an
+epoch holds the target of its next one.
+
+> *Cause.* An earlier draft fixed the codeword to the byte and left open which
+> key a ciphertext targets, when a shared secret enters the root key, and how
+> the first epoch starts with no peer key. A receiver that guessed a target
+> ran implicit rejection on the wrong key and desynchronized the root key
+> without an error. The rules above make the target a function of the epoch
+> number, tie every advance to a DH chain start so that one record reveals
+> the epoch, and bind each mix to a DH step that both parties identify from
+> the same chain. The test vectors of Part 6 §6.8 hold the schedule of
+> `CRY-134` under these rules.
 
 ## 5.6 Steady-state overhead budget
 
@@ -1360,6 +1433,7 @@ names the object type and its lifetime:
 "umbra/v1/device-set"
 "umbra/v1/pairwise"
 "umbra/v1/public-address"
+"umbra/v1/handle-key"
 "umbra/v1/invite-blob"
 "umbra/v1/profile-blob"
 "umbra/v1/kem-combine"

@@ -69,7 +69,7 @@ each column when a crate implements the requirement and a test covers it.
 | `THR` | 11 | 3 | 0 | 0 | 0 | **14** |
 | `NET` | 189 | 76 | 0 | 0 | 8 | **273** |
 | `IDN` | 103 | 40 | 1 | 0 | 5 | **149** |
-| `CRY` | 103 | 27 | 0 | 0 | 1 | **131** |
+| `CRY` | 116 | 27 | 0 | 0 | 1 | **144** |
 | `WIR` | 359 | 80 | 0 | 0 | 6 | **445** |
 | `DEV` | 167 | 86 | 2 | 0 | 6 | **261** |
 | `NTF` | 63 | 28 | 0 | 0 | 2 | **93** |
@@ -81,7 +81,7 @@ each column when a crate implements the requirement and a test covers it.
 | `ABU` | 54 | 31 | 0 | 0 | 0 | **85** |
 | `IMP` | 58 | 24 | 0 | 0 | 0 | **82** |
 | `SEC` | 12 | 5 | 1 | 0 | 2 | **20** |
-| **All** | 1951 | 663 | 6 | 0 | 48 | **2668** |
+| **All** | 1964 | 663 | 6 | 0 | 48 | **2681** |
 
 ## SCP — Scope and Conventions
 
@@ -666,7 +666,6 @@ Source: `spec/05-cryptographic-core.md`
 | `CRY-091` | §5.5.2 | MUST | A receiver that rebuilt the material | A receiver that rebuilt the material MUST compare `SHA3-256(ek_vector \|\| rho)` against the hash in `header`. |  |  |
 | `CRY-092` | §5.5.2 | MUST | That receiver | That receiver MUST reject the braid epoch when the two values differ. |  |  |
 | `CRY-093` | §5.5.2 | MUST | A sender | A sender MUST make the seed `d` of its encapsulation key with the randomness function of §5.9. |  |  |
-| `CRY-094` | §5.5.2 | MUST | A sender | A sender MUST make the ciphertext of an epoch against the encapsulation key that the last completed epoch of the peer gave. |  |  |
 | `CRY-097` | §5.5.2 | MAY | A receiver | A receiver MAY discard a later chunk of a position that it holds. |  |  |
 | `CRY-098` | §5.5.4 | MUST NOT | `SKIP_TTL` | `SKIP_TTL` MUST NOT be below the `MSG_TTL` of Part 3 §3.2.4. |  |  |
 | `CRY-099` | §5.5.4 | MUST | A revision | A revision MUST hold the two values equal, and a revision MUST NOT raise `MSG_TTL` alone. |  |  |
@@ -703,8 +702,22 @@ Source: `spec/05-cryptographic-core.md`
 | `CRY-130` | §5.5.3 | MUST | A sender | A sender MUST carry one chunk of its incomplete epoch on each `RatchetRecord`, except where CRY-019 applies. |  |  |
 | `CRY-131` | §5.5.3 | MUST | A sender | After the chunk at index *n* − 1, a sender MUST continue with the chunk at index 0. |  |  |
 | `CRY-132` | §5.5.3 | MUST NOT | A client | A client MUST NOT start a new epoch while an epoch of its own is incomplete. |  |  |
-| `CRY-133` | §5.5.3 | MUST | The client | If a limit occurs during an incomplete epoch, the client MUST start the next epoch at completion. |  |  |
 | `CRY-134` | §5.5.3 | MUST | The test vectors of Part 6 §6.8 | The test vectors of Part 6 §6.8 MUST hold a schedule in which `T` occurs during an incomplete epoch. |  |  |
+| `CRY-135` | §5.4.8 | MUST | A party | A party MUST put that byte in the prologue, and it MUST abort a handshake whose peer holds the other value, because the two prologues then differ and each flight tag fails. |  |  |
+| `CRY-136` | §5.4.8 | MUST | The responder | The responder MUST keep `er_sk` as its first DH ratchet private key until the first DH ratchet step of §5.5.1 replaces it, and it MUST erase it at that step. |  |  |
+| `CRY-137` | §5.4.8 | MUST | The initiator | The initiator MUST use `er` as the ratchet public key of the responder at the start of the session. |  |  |
+| `CRY-138` | §5.5.2 | MUST | A sender | A sender MUST make the ciphertext of an epoch against the encapsulation key that §5.5.5 names for that epoch, and against no other key. |  |  |
+| `CRY-139` | §5.5.2 | MUST | An implementation | An implementation MUST take the evaluation points `x_i = g^i` for `i` in `0..n`, where `g` is the generator element of `CRY-068`, build `V[i][j] = x_i^j`, and use `G = V · (V[0..k])⁻¹`. |  |  |
+| `CRY-140` | §5.5.3 | MUST | If a limit occurs during an incomplete epoch, the client | If a limit occurs during an incomplete epoch, the client MUST start the next epoch at the first DH chain start of §5.5.1 after the epoch is complete. |  |  |
+| `CRY-141` | §5.5.5 | MUST | The initiator's epoch `e` | The initiator's epoch `e` MUST encapsulate to the responder's key of epoch `e − 1`. |  |  |
+| `CRY-142` | §5.5.5 | MUST | The responder's epoch `e` | The responder's epoch `e` MUST encapsulate to the initiator's key of epoch `e`. |  |  |
+| `CRY-143` | §5.5.5 | MUST | The initiator's epoch 1 | The initiator's epoch 1 MUST carry 1 088 zero bytes in the place of `ct1 || ct2`, because no responder key exists yet. |  |  |
+| `CRY-144` | §5.5.5 | MUST | The responder | The responder MUST start its epoch 1 at the first chain start after it rebuilt the initiator's epoch 1, and it MUST carry no braid frame before that. |  |  |
+| `CRY-145` | §5.5.5 | MUST | A party | A party MUST start an epoch at the first record of a DH sending chain and at no other record. |  |  |
+| `CRY-146` | §5.5.5 | MUST | The first record of a chain | The first record of a chain MUST carry a braid frame; rule `CRY-019` does not apply to that record, and a client selects a bucket that holds the frame. |  |  |
+| `CRY-147` | §5.5.5 | MUST | P | P MUST apply the mix of `CRY-064` for epoch `e` immediately before it derives the sending chain of its first DH ratchet step whose chain carries an epoch above `e`. |  |  |
+| `CRY-148` | §5.5.5 | MUST | The peer | The peer MUST apply the same mix immediately before it derives the receiving chain of the step that the same chain starts, which it recognizes by the epoch number in the frame of any record of that chain. |  |  |
+| `CRY-149` | §5.5.5 | MUST | A party | A party MUST retain `ss_e` from the moment it computes it, by encapsulation or by decapsulation, until the mix consumes it. |  |  |
 
 ## WIR — Wire Format
 
