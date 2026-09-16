@@ -1,8 +1,8 @@
 //! Cryptographic core of the UMBRA protocol.
 //!
 //! This crate holds the six primitives of Part 5 §5.1, the `UMBRA-KEM`
-//! combiner of §5.3, the key hierarchy of §5.2, and the randomness hardening
-//! of §5.9. It has no dependency inside the workspace and no `std`.
+//! combiner of §5.3, the key hierarchy of §5.2, the group keys of §5.8, and
+//! the randomness hardening of §5.9. It has no dependency inside the workspace and no `std`.
 //!
 //! Each secret is a newtype that zeroizes on drop and has no `Debug`, no
 //! `Clone`, and no `Serialize` (Part 15 §15.4). A keypair is one type, never
@@ -14,6 +14,7 @@
 // prefers for a secret.
 extern crate alloc;
 
+pub mod group;
 pub mod handshake;
 pub mod hierarchy;
 pub mod kem;
@@ -46,6 +47,9 @@ pub enum Error {
     Handshake,
     /// A ratchet record does not open, or a limit of Part 5 §5.5.4 holds.
     Ratchet,
+    /// A group record, a tag, or an epoch-key slot does not verify, or the
+    /// slot chain would run backward (Part 11 §11.3).
+    Group,
 }
 
 impl core::fmt::Display for Error {
@@ -58,6 +62,7 @@ impl core::fmt::Display for Error {
             Error::Rng => "random generator failed",
             Error::Handshake => "handshake aborted",
             Error::Ratchet => "ratchet record rejected",
+            Error::Group => "group record rejected",
         };
         f.write_str(s)
     }
