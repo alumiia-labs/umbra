@@ -14,15 +14,21 @@
 // prefers for a secret.
 extern crate alloc;
 
+pub mod auth;
 pub mod group;
 pub mod handshake;
 pub mod hierarchy;
 pub mod kem;
 pub mod labels;
+pub mod queue;
 pub mod ratchet;
 pub mod rng;
 pub mod secret;
 pub mod sign;
+
+/// The X25519 crate, for a caller that holds a queue or a group
+/// credential and links no primitive of its own.
+pub use x25519_dalek as x25519;
 
 #[cfg(test)]
 pub(crate) mod test_rng;
@@ -50,6 +56,10 @@ pub enum Error {
     /// A group record, a tag, or an epoch-key slot does not verify, or the
     /// slot chain would run backward (Part 11 §11.3).
     Group,
+    /// A command authenticator or a session authenticator does not verify.
+    Auth,
+    /// A queue end-to-end record does not open.
+    Queue,
 }
 
 impl core::fmt::Display for Error {
@@ -63,6 +73,8 @@ impl core::fmt::Display for Error {
             Error::Handshake => "handshake aborted",
             Error::Ratchet => "ratchet record rejected",
             Error::Group => "group record rejected",
+            Error::Auth => "authenticator rejected",
+            Error::Queue => "queue record rejected",
         };
         f.write_str(s)
     }

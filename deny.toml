@@ -80,6 +80,7 @@ allow = [
   { crate = "serde_json" },              # dev
   { crate = "zmij" },                    # dev
   { crate = "umbra-crypto" },            # workspace
+  { crate = "umbra-wire" },              # workspace
 ]
 
 [sources]
