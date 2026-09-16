@@ -15,14 +15,17 @@ extern crate alloc;
 
 pub mod address;
 pub mod admission;
+pub mod app;
 pub mod bucket;
 pub mod capsule;
 pub mod cell;
 pub mod codec;
 pub mod command;
+pub mod descriptor;
 pub mod group;
 pub mod nack;
 pub mod queue;
+pub mod ratchet;
 pub mod session;
 
 /// The one error of this crate.

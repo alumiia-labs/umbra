@@ -1,6 +1,7 @@
 //! The group-queue commands of Part 6 §6.4.5 and the group queue record of
 //! §6.4.6.
 
+pub mod control;
 pub mod record;
 
 use crate::{

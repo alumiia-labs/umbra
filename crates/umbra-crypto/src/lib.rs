@@ -17,6 +17,7 @@ extern crate alloc;
 pub mod auth;
 pub mod group;
 pub mod handshake;
+pub mod hash;
 pub mod hierarchy;
 pub mod kem;
 pub mod labels;
@@ -26,6 +27,8 @@ pub mod rng;
 pub mod secret;
 pub mod sign;
 
+/// The random-generator traits, for a caller that signs or draws a key.
+pub use rand_core;
 /// The X25519 crate, for a caller that holds a queue or a group
 /// credential and links no primitive of its own.
 pub use x25519_dalek as x25519;
