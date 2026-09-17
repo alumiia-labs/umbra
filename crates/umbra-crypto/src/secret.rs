@@ -26,7 +26,7 @@ impl<const N: usize> Secret<N> {
     }
 
     /// The bytes, for a KDF that writes into them.
-    pub(crate) fn expose_mut(&mut self) -> &mut [u8; N] {
+    pub fn expose_mut(&mut self) -> &mut [u8; N] {
         &mut self.0
     }
 }

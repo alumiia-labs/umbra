@@ -31,14 +31,17 @@ skip = []
 # (Part 15 §15.2.3), and DEPENDENCIES.md lists it apart.
 allow = [
   { crate = "aead" },                    # R1
+  { crate = "aes" },                     # R1, the onion layer only
   { crate = "block-buffer" },            # R1
   { crate = "cfg-if" },                  # R1
   { crate = "chacha20" },                # R1
   { crate = "chacha20poly1305" },        # R1
   { crate = "cipher" },                  # R1
   { crate = "cmov" },                    # R1
+  { crate = "cpubits" },                 # R1, under polyval
   { crate = "cpufeatures" },             # R1
   { crate = "crypto-common" },           # R1
+  { crate = "ctr" },                     # R1, the onion layer only
   { crate = "ctutils" },                 # R1
   { crate = "curve25519-dalek" },        # R1
   { crate = "curve25519-dalek-derive" }, # build
@@ -55,6 +58,7 @@ allow = [
   { crate = "module-lattice" },          # R1
   { crate = "num-traits" },              # R1
   { crate = "poly1305" },                # R1
+  { crate = "polyval" },                 # R1, the onion layer only
   { crate = "proc-macro2" },             # build
   { crate = "quote" },                   # build
   { crate = "rand_core" },               # R1
@@ -81,6 +85,7 @@ allow = [
   { crate = "zmij" },                    # dev
   { crate = "umbra-crypto" },            # workspace
   { crate = "umbra-wire" },              # workspace
+  { crate = "umbra-onion" },             # workspace
 ]
 
 [sources]

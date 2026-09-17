@@ -793,7 +793,7 @@ derivation follows.
 ```
 t              <- HKDF-SHA3-256( salt = ss_hop, ikm = "",
                                  info = "umbra/v1/onion-hop" || BE32(hop_index),
-                                 L = 192 )
+                                 L = 208 )
 K_prp_fwd      <- t[0..32]      // AES-256, the left block, client to relay
 K_str_fwd      <- t[32..64]     // AES-256-CTR, the right part
 K_hash_fwd     <- t[64..80]     // POLYVAL
@@ -802,6 +802,7 @@ K_prp_bwd      <- t[96..128]    // relay to client
 K_str_bwd      <- t[128..160]
 K_hash_bwd     <- t[160..176]
 C_bwd          <- t[176..192]
+T              <- t[192..208]   // the tweak of the layer, both directions
 ```
 
 The value `hop_index` is the layer of the relay under §3.4.1, from 1 to 3.
@@ -816,7 +817,7 @@ and a right part `Y_R` of *L* bytes. The two widths do not change. Each body
 length is a whole multiple of 16 bytes, thus no step needs padding.
 
 **[NET-108]** A sender MUST encipher one layer with the steps below, where `T`
-is `circ_id` and `C` is the chaining value of that direction:
+is the tweak of the layer and `C` is the chaining value of that direction:
 
 ```
 S    = AES-256-Enc( K_prp, X_L XOR C XOR T )
@@ -831,6 +832,17 @@ S    = Y_L XOR POLYVAL( K_hash, Y_R )
 X_R  = Y_R XOR AES-256-CTR( K_str, counter = S )
 X_L  = AES-256-Dec( K_prp, S ) XOR C XOR T
 ```
+
+**[NET-279]** A party MUST take `T` from the derivation of `NET-106`, and it
+MUST NOT take `T` from `circ_id`. The key update below keeps `T`.
+
+> *Cause.* An earlier draft made `T` the `circ_id` of the cell. `NET-109`
+> makes each hop rewrite that value, and `NET-154` makes the relay before hop
+> *n* draw the value on its link to hop *n*. Thus the client never held the
+> `circ_id` of the links to hop 2 and hop 3, and it could not compute those
+> two layers. A tweak from the hop derivation is a value that both parties of
+> the hop hold, and it differs for each hop and each circuit, which is what
+> the tweak of the construction of `NET-030` needs.
 
 **The nesting.** The left block carries the tag of the layer below it. Thus the
 three layers fit one cell and the width stays constant.
