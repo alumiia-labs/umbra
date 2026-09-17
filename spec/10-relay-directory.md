@@ -645,6 +645,7 @@ RelayDescriptor {
     addr_v4          [4]u8       // 0.0.0.0 when the relay has no IPv4 address
     addr_v6          [16]u8      // all zero when the relay has no IPv6 address
     port             u16
+    host             [64]u8      // the co-tenant host name of Part 3 §3.8, ASCII, zero-padded
     asn              u32
     jurisdiction     [2]u8       // ISO 3166-1 alpha-2
     family_id        [32]u8      // SHA3-256 over the family certificate of 10.6
@@ -656,7 +657,7 @@ RelayDescriptor {
 }
 ```
 
-The fixed width is **5 400 bytes**. An earlier draft carried a 1 184-byte
+The fixed width is **5 464 bytes**. An earlier draft carried a 1 184-byte
 static ML-KEM-768 key in this descriptor, and no handshake consumed it. Part 5
 §5.4.9 gives the cause of its removal. **[REL-127]** A relay MUST set
 `chunk_store_gib` to the store that it declares under Part 13 §13.7, in GiB. A
@@ -672,6 +673,19 @@ preimage, and Part 5 §5.11 holds the label:
 ```
 "umbra/v1/relay-descriptor" || the descriptor bytes up to and not including sig
 ```
+
+**[REL-143]** A relay MUST set `host` to the DNS name that the TLS
+certificate of its co-tenant site names, in ASCII, with zero bytes after the
+name. **[REL-144]** A client MUST reject a descriptor whose `host` is empty,
+holds a byte outside the DNS name characters, or holds a non-zero byte after
+a zero byte. Part 3 rule `NET-282` verifies the certificate against that
+name.
+
+> *Cause.* An earlier draft gave the descriptor an address and a port and no
+> name. Part 3 §3.8 puts the relay behind the reverse proxy of a real site
+> under a public CA certificate, and a client that verifies that certificate
+> needs the name it carries. Without the field a client either skipped the
+> check or held a name from outside the signed descriptor.
 
 **[REL-049]** A relay MUST set `relay_id` to `SHA3-256(identity_pk)`.
 **[REL-050]** A client MUST reject a descriptor whose `relay_id` differs from
@@ -697,8 +711,8 @@ RelayEntry {
 }
 ```
 
-The entry is **5 434 bytes**. Part 6 §6.9 gives the `B3` `L5 payload` row
-32 650 bytes, thus one `B3` cell carries 6 entries. The relay signs the
+The entry is **5 498 bytes**. Part 6 §6.9 gives the `B3` `L5 payload` row
+32 650 bytes, thus one `B3` cell carries 5 entries. The relay signs the
 descriptor, and the directory authority sets the three fields after it. The
 signed root covers the entry, thus the three fields carry the 5-of-7
 multi-signature.
@@ -1204,7 +1218,7 @@ relay with the notification role, and this section then applies to it.
 | Directory authorities | 7, and a consensus needs 5 of 7 ML-DSA-65 signatures (§10.5.2) |
 | `AUTHORITY_FLOOR` | 5 authorities under different beneficial control (§10.5.1) |
 | `DirectoryRoot` size | 16 665 B at 5 signatures, 23 285 B at 7, and 16 B more for each revocation (§10.5.2) |
-| `RelayEntry` width | 5 434 B, and 6 entries in one `B3` cell (§10.5.3) |
+| `RelayEntry` width | 5 498 B, and 5 entries in one `B3` cell (§10.5.3) |
 | Consensus epoch / `CONSENSUS_VALIDITY` | 1 h / 3 h, and epoch `E` starts at `E × 3 600` Unix seconds (§10.5.2) |
 | `CLOCK_SKEW` | 1 h, and §10.5.2 rules REL-035 and REL-044 use it |
 | Ingress relays | 2, pinned |

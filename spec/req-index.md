@@ -67,21 +67,21 @@ each column when a crate implements the requirement and a test covers it.
 | --- | --- | --- | --- | --- | --- | --- |
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
-| `NET` | 190 | 80 | 0 | 0 | 8 | **278** |
+| `NET` | 192 | 82 | 0 | 0 | 8 | **282** |
 | `IDN` | 103 | 40 | 1 | 0 | 5 | **149** |
 | `CRY` | 116 | 27 | 0 | 0 | 1 | **144** |
 | `WIR` | 366 | 81 | 0 | 0 | 6 | **453** |
 | `DEV` | 169 | 87 | 2 | 0 | 7 | **265** |
 | `NTF` | 59 | 28 | 0 | 0 | 2 | **89** |
 | `DIS` | 104 | 34 | 0 | 0 | 1 | **139** |
-| `REL` | 112 | 27 | 1 | 0 | 2 | **142** |
+| `REL` | 114 | 27 | 1 | 0 | 2 | **144** |
 | `GRP` | 201 | 56 | 0 | 0 | 4 | **261** |
 | `COM` | 275 | 95 | 0 | 0 | 5 | **375** |
 | `ATT` | 128 | 46 | 1 | 0 | 2 | **177** |
 | `ABU` | 54 | 31 | 0 | 0 | 0 | **85** |
 | `IMP` | 72 | 32 | 0 | 0 | 0 | **104** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 1985 | 678 | 6 | 0 | 49 | **2718** |
+| **All** | 1989 | 680 | 6 | 0 | 49 | **2724** |
 
 ## SCP — Scope and Conventions
 
@@ -417,6 +417,10 @@ Source: `spec/03-network-architecture.md`
 | `NET-277` | §3.8 | MUST NOT | A web client | A web client MUST NOT race QUIC, because the browser gives it no QUIC stream in v1. |  |  |
 | `NET-278` | §3.2.3 | MUST | A party | A party MUST derive `k` as `HKDF-SHA3-256(salt = "", ikm = X25519(Q*_auth_sk, RelaySession_pk), info = "umbra/v1/cmd-auth", L = 32)`, and it MUST abort on a non-contributory Diffie-Hellman output, as Part 5 rule `CRY-040` does. |  |  |
 | `NET-279` | §3.4.4 | MUST NOT | (unstated) | A party MUST take `T` from the derivation of `NET-106`, and it MUST NOT take `T` from `circ_id`. |  |  |
+| `NET-280` | §3.8 | MUST | A client | A client MUST open the WebSocket-shaped stream with `GET /umbra HTTP/1.1`, a `Host` header that carries the `host` of the descriptor of Part 10 §10.5.3, `Upgrade: websocket`, `Connection: Upgrade`, a `Sec-WebSocket-Key` of 16 bytes from the CSPRNG in base64, `Sec-WebSocket-Version: 13`, and `Sec-WebSocket-Protocol: umbra.v1`, and no extension header. |  |  |
+| `NET-281` | §3.8 | MUST NOT | (unstated) | A relay MUST answer an upgrade it accepts with status `101`, the `Sec-WebSocket-Accept` of RFC 6455 §4.2.2, and the same subprotocol, and it MUST NOT accept an extension. |  |  |
+| `NET-282` | §3.8 | MUST NOT | (unstated) | A client MUST verify the TLS certificate of a relay against the `host` of its descriptor under the public CA roots, and it MUST NOT accept a connection without that check. |  |  |
+| `NET-283` | §3.8 | MUST | A QUIC connection | A QUIC connection MUST negotiate the ALPN `umbra.v1`, and the TCP connection negotiates none. |  |  |
 
 ## IDN — Identity
 
@@ -1847,6 +1851,8 @@ Source: `spec/10-relay-directory.md`
 | `REL-140` | §10.6 | MUST NOT | A directory authority | A directory authority MUST NOT list an ASN above 10 % of one population of one bloc. |  |  |
 | `REL-141` | §10.6.3 | MUST | A client | A client MUST verify that the SHA3-256 of the `BlocList` equals `bloc_hash` of the accepted `DirectoryRoot` before it applies `REL-092`. |  |  |
 | `REL-142` | §10.6.3 | MUST NOT | A directory authority | A directory authority MUST NOT publish a `BlocList` under which the current relay set does not reach the floor. |  |  |
+| `REL-143` | §10.5.3 | MUST | A relay | A relay MUST set `host` to the DNS name that the TLS certificate of its co-tenant site names, in ASCII, with zero bytes after the name. |  |  |
+| `REL-144` | §10.5.3 | MUST | A client | A client MUST reject a descriptor whose `host` is empty, holds a byte outside the DNS name characters, or holds a non-zero byte after a zero byte. |  |  |
 
 ## GRP — Private Groups
 

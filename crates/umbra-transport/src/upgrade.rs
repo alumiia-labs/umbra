@@ -1,10 +1,10 @@
 //! The HTTP/1.1 upgrade of Part 3 §3.8 that opens the WebSocket-shaped
 //! stream on the TCP transport.
 //!
-//! The specification names the upgrade and no request line, thus this
-//! module fixes one: `GET /umbra HTTP/1.1` with the RFC 6455 headers and
-//! the subprotocol `umbra.v1`. Every client sends the same bytes but the
-//! host and the key, thus the request carries no fingerprint of its own.
+//! The request is `GET /umbra HTTP/1.1` with the RFC 6455 headers and the
+//! subprotocol `umbra.v1` (`NET-280`, `NET-281`). Every client sends the
+//! same bytes but the host and the key, thus the request carries no
+//! fingerprint of its own.
 
 use alloc::{format, string::String, vec::Vec};
 

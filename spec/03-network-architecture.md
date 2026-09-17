@@ -1458,6 +1458,22 @@ networks.
   of `NET-073` holds for a web client whose browser offers early data, because
   the relay refuses it. **[NET-277]** A web client MUST NOT race QUIC, because
   the browser gives it no QUIC stream in v1.
+- **The upgrade and the name.** **[NET-280]** A client MUST open the
+  WebSocket-shaped stream with `GET /umbra HTTP/1.1`, a `Host` header that
+  carries the `host` of the descriptor of Part 10 §10.5.3, `Upgrade:
+  websocket`, `Connection: Upgrade`, a `Sec-WebSocket-Key` of 16 bytes from
+  the CSPRNG in base64, `Sec-WebSocket-Version: 13`, and
+  `Sec-WebSocket-Protocol: umbra.v1`, and no extension header. **[NET-281]**
+  A relay MUST answer an upgrade it accepts with status `101`, the
+  `Sec-WebSocket-Accept` of RFC 6455 §4.2.2, and the same subprotocol, and
+  it MUST NOT accept an extension. The accept token uses SHA-1 as RFC 6455
+  gives it. The token proves that the relay read the key and it carries no
+  secret, thus it is not a primitive of Part 5 §5.1, and the browser of the
+  web client of Part 15 §15.7 checks it under that rule. **[NET-282]** A
+  client MUST verify the TLS certificate of a relay against the `host` of
+  its descriptor under the public CA roots, and it MUST NOT accept a
+  connection without that check. **[NET-283]** A QUIC connection MUST
+  negotiate the ALPN `umbra.v1`, and the TCP connection negotiates none.
 - **[NET-073]** **Implementations MUST disable 0-RTT** in TLS and in QUIC. A replayed `SEND`
   duplicates a message, and a replayed `ACK` deletes one. Resumption tickets are
   also a linkability vector across networks. To recover the round trip, pipeline
@@ -1858,8 +1874,8 @@ Each cell is a `B1` cell, thus a build costs 6 × 2 096 = 12 576 bytes on the
 wire. That is 6 288 bytes in each direction. An earlier draft priced a build at
 7 104 bytes of handshake material, and it did not count the cells.
 
-**A build fetches relay entries.** Part 10 §10.5.3 gives a `RelayEntry` 5 434
-bytes and its proof 384 bytes, which is 5 818 bytes. A build selects a fresh hop
+**A build fetches relay entries.** Part 10 §10.5.3 gives a `RelayEntry` 5 498
+bytes and its proof 384 bytes, which is 5 882 bytes. A build selects a fresh hop
 2, thus it fetches that entry. Hop 3 needs a fresh entry when the accepted
 `DirectoryRoot` is newer than the entry that the client holds.
 `CONSENSUS_VALIDITY` is 3 hours, thus that fetch occurs at most one time for
