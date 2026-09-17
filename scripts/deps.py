@@ -31,7 +31,7 @@ TARGETS = [
     "wasm32-unknown-unknown",
 ]
 CAPS = {"R1": 40, "R2": 30}
-WORKSPACE = {"umbra-crypto", "umbra-wire", "umbra-onion", "umbra-queue"}
+WORKSPACE = {"umbra-crypto", "umbra-wire", "umbra-onion", "umbra-queue", "umbra-transport"}
 
 
 def run(*args: str) -> str:

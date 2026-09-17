@@ -16,6 +16,12 @@ cargo clippy --workspace --all-targets -- -D warnings
 step "tests, host"
 cargo test --workspace
 
+step "native transport, host only"
+# The native stack builds a C library, thus the cross builds below leave it
+# off and this host step turns it on.
+cargo clippy -p umbra-transport --features native --all-targets -- -D warnings
+cargo test -p umbra-transport --features native
+
 step "build, wasm32-unknown-unknown"
 cargo build --workspace --target wasm32-unknown-unknown
 

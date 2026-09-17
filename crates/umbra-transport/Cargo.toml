@@ -1,0 +1,28 @@
+[package]
+name = "umbra-transport"
+description = "The L1 wire and the L2 session layer of the UMBRA protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# The native stack of Part 15 §15.2.8: rustls on aws-lc-rs, quinn, tokio.
+# It builds a C library, thus it is off by default and CI turns it on
+# where the toolchain exists. The web client of §15.7 uses no stack here.
+native = ["dep:rustls", "dep:quinn", "dep:tokio", "dep:tokio-rustls", "dep:webpki-roots"]
+
+[dependencies]
+umbra-crypto = { version = "0.1.0", path = "../umbra-crypto" }
+umbra-wire = { version = "0.1.0", path = "../umbra-wire" }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"], optional = true }
+quinn = { version = "0.11", default-features = false, features = ["rustls-aws-lc-rs", "runtime-tokio"], optional = true }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "time", "sync", "io-util", "macros"], optional = true }
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs"], optional = true }
+webpki-roots = { version = "1", optional = true }
