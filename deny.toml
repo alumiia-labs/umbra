@@ -86,6 +86,7 @@ allow = [
   { crate = "umbra-crypto" },            # workspace
   { crate = "umbra-wire" },              # workspace
   { crate = "umbra-onion" },             # workspace
+  { crate = "umbra-queue" },             # workspace
 ]
 
 [sources]

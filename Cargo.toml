@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/umbra-crypto", "crates/umbra-wire", "crates/umbra-onion"]
+members = ["crates/umbra-crypto", "crates/umbra-wire", "crates/umbra-onion", "crates/umbra-queue"]
 
 [workspace.package]
 version = "0.1.0"

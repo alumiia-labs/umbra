@@ -1,0 +1,15 @@
+[package]
+name = "umbra-queue"
+description = "Queue commands, subscriptions, and the ARQ of the UMBRA protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+umbra-crypto = { version = "0.1.0", path = "../umbra-crypto" }
+umbra-wire = { version = "0.1.0", path = "../umbra-wire" }
