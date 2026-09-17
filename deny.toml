@@ -88,6 +88,7 @@ allow = [
   { crate = "umbra-onion" },             # workspace
   { crate = "umbra-queue" },             # workspace
   { crate = "umbra-transport" },         # workspace
+  { crate = "umbra-core" },              # workspace
 ]
 
 [sources]

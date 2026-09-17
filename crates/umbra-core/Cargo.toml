@@ -1,0 +1,18 @@
+[package]
+name = "umbra-core"
+description = "Orchestration, state machines, and the objects of Parts 4, 7, 9, 10, 13, and 14 of the UMBRA protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+umbra-crypto = { version = "0.1.0", path = "../umbra-crypto" }
+umbra-wire = { version = "0.1.0", path = "../umbra-wire" }
+umbra-onion = { version = "0.1.0", path = "../umbra-onion" }
+umbra-queue = { version = "0.1.0", path = "../umbra-queue" }
+umbra-transport = { version = "0.1.0", path = "../umbra-transport" }

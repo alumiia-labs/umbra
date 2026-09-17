@@ -905,6 +905,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
+name = "umbra-core"
+version = "0.1.0"
+dependencies = [
+ "umbra-crypto",
+ "umbra-onion",
+ "umbra-queue",
+ "umbra-transport",
+ "umbra-wire",
+]
+
+[[package]]
 name = "umbra-crypto"
 version = "0.1.0"
 dependencies = [
