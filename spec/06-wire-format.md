@@ -1683,6 +1683,14 @@ RosterSnapshot {                  // an object on the chunk path of Part 13 §13
     path_len          u32
     path              [path_len]u8   // the authority path of Part 11 §11.9.3, in chain order
 }
+```
+
+**[WIR-493]** The `path` MUST be a sequence of `BE16(len) || GroupControl`
+entries, each a granting epoch of Part 11 §11.9.2 under its wrapper, in
+chain order; a parser MUST reject a `path` that ends inside an entry or that
+holds a `control_type` other than `0x04`.
+
+```
 
 MemberKemKey {                    // 1 218 bytes
     index             u16

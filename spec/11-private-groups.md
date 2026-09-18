@@ -588,7 +588,11 @@ rotate does not, because a rotation needs no secret that a plain member lacks.
 - **[GRP-358]** A member that reads a trigger it did not cause MUST draw a
   delay from an exponential distribution with mean `ROTATE_BACKOFF_ROLE` if
   it holds a role at `moderator` or above, and with mean
-  `ROTATE_BACKOFF_MEMBER` otherwise. **[GRP-359]** That member MUST rotate at
+  `ROTATE_BACKOFF_MEMBER` otherwise. **[GRP-380]** An implementation MAY
+  draw that delay as `mean × ln(2^32 / (u + 1))` from one uniform 32-bit
+  `u`, with a logarithm from the bit length and a sixteen-entry table of
+  the fraction; the shape of the distribution is what the backoff needs,
+  and not its precision. **[GRP-359]** That member MUST rotate at
   the end of the delay if no epoch-key record that answers the trigger arrived
   before it, and it MUST NOT rotate if one did. The admin that causes a
   trigger draws no delay, under `GRP-264`.
@@ -708,7 +712,9 @@ member of role `admin` or above (`own_count` = `GROUP_REPLICAS`).
 MUST decapsulate its slot, verify `tag` under `K_{rotator,self}`, verify the
 rotator's role, install `(e + 1, t_{e+1}, K_{e+1,t_{e+1}})`, derive the queue
 credentials of `e + 1`, and keep the state of epoch `e` for
-`GROUP_EPOCH_GRACE`. **[GRP-287]** A member MUST NOT install an epoch secret
+`GROUP_EPOCH_GRACE`. **[GRP-383]** The `slot` field of the epoch-key record
+header MUST carry `t_{e+1}`, and a member MUST take `t_e` of `GRP-224` from
+that field. **[GRP-287]** A member MUST NOT install an epoch secret
 whose `tag` fails. **[GRP-288]** A member MUST NOT install an epoch secret from
 an epoch-key record whose `epoch` is below its current epoch, or equal to it
 other than under the two-rotator rule of §11.4.1 and the one-slot record of
@@ -1137,7 +1143,10 @@ a member, or it takes that role away.
 A **plain epoch** adds a member, removes a member that holds the `member` or
 the `observer` role, or records a self-removal.
 
-- **[GRP-064]** A plain epoch MUST NOT carry a signature.
+- **[GRP-064]** A plain epoch MUST NOT carry a signature. **[GRP-382]** A
+  plain epoch that adds or removes a member MUST come from a member at
+  `admin` or above, and a self-removal from the member that leaves; a
+  verifier MUST discard each other plain epoch under `GRP-066`.
 - **[GRP-318]** A verifier MUST take the authority of a plain epoch from the
   tag vector of the record that carried it. The verified tag names one
   member, and §11.3.3 gives that attribution.
@@ -1146,7 +1155,10 @@ the `observer` role, or records a self-removal.
 - **[GRP-319]** A plain epoch that adds a member MUST carry the `JoinRecord`
   fields of that member and its new `index`. **[GRP-320]** A verifier MUST
   reject an add whose `index` is not the lowest index above every index the
-  roster ever used.
+  roster ever used. **[GRP-381]** A verifier MUST run every check of an
+  epoch before it records that epoch as a successor of its predecessor,
+  thus a rejected epoch never counts as one of the two successors of
+  `GRP-070`.
 
 **[GRP-067]** A member client MUST offer a self-removal. A self-removal is a
 plain epoch, and the tag vector names the member that leaves.

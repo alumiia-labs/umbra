@@ -70,18 +70,18 @@ each column when a crate implements the requirement and a test covers it.
 | `NET` | 192 | 82 | 0 | 0 | 8 | **282** |
 | `IDN` | 108 | 40 | 1 | 0 | 5 | **154** |
 | `CRY` | 118 | 27 | 0 | 0 | 1 | **146** |
-| `WIR` | 366 | 81 | 0 | 0 | 6 | **453** |
+| `WIR` | 367 | 81 | 0 | 0 | 6 | **454** |
 | `DEV` | 172 | 87 | 2 | 0 | 7 | **268** |
 | `NTF` | 62 | 29 | 0 | 0 | 2 | **93** |
 | `DIS` | 108 | 35 | 0 | 0 | 1 | **144** |
 | `REL` | 114 | 27 | 1 | 0 | 2 | **144** |
-| `GRP` | 201 | 56 | 0 | 0 | 4 | **261** |
+| `GRP` | 204 | 56 | 0 | 0 | 5 | **265** |
 | `COM` | 275 | 95 | 0 | 0 | 5 | **375** |
 | `ATT` | 134 | 46 | 1 | 0 | 2 | **183** |
 | `ABU` | 60 | 31 | 0 | 0 | 0 | **91** |
 | `IMP` | 72 | 32 | 0 | 0 | 0 | **104** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2018 | 682 | 6 | 0 | 49 | **2755** |
+| **All** | 2022 | 682 | 6 | 0 | 50 | **2760** |
 
 ## SCP — Scope and Conventions
 
@@ -1195,6 +1195,7 @@ Source: `spec/06-wire-format.md`
 | `WIR-490` | §6.6.3 | MUST | A parser | A parser MUST reject a `GrantingEpoch` that carries `grantee_roster_pk` at a `role` below `0x03`, or that omits it at a `role` of `0x03` or above. |  |  |
 | `WIR-491` | §6.6.3 | MUST | A parser | A parser MUST reject an `action_count` of 0 or above `MOD_ACTION_MAX`, and an `action` that the layout above does not hold. |  |  |
 | `WIR-492` | §6.6.3 | MUST | A parser | A parser MUST reject a `GroupPresence` whose length is not 1. |  |  |
+| `WIR-493` | §6.6.3 | MUST | The `path` | The `path` MUST be a sequence of `BE16(len) || GroupControl` entries, each a granting epoch of Part 11 §11.9.2 under its wrapper, in chain order; a parser MUST reject a `path` that ends inside an entry or that holds a `control_type` other than `0x04`. |  |  |
 
 ## DEV — Device Sets
 
@@ -2140,6 +2141,10 @@ Source: `spec/11-private-groups.md`
 | `GRP-377` | §11.4.3 | MUST NOT | A member | A member MUST NOT answer a `KeyRequest` from an index that the current roster does not hold. |  |  |
 | `GRP-378` | §11.4.3 | MUST | A member | A member MUST discard an epoch request above that rate. |  |  |
 | `GRP-379` | §11.4.3 | MUST | A receiver | A receiver MUST reject a slot whose `own_count` is above 0 when the rotator held a role below `admin` at the `roster_epoch` of the record, because only an admin holds `own_sk`. |  |  |
+| `GRP-380` | §11.4.1 | MAY | An implementation | An implementation MAY draw that delay as `mean × ln(2^32 / (u + 1))` from one uniform 32-bit `u`, with a logarithm from the bit length and a sixteen-entry table of the fraction; the shape of the distribution is what the backoff needs, and not its precision. |  |  |
+| `GRP-381` | §11.9.2 | MUST | A verifier | A verifier MUST run every check of an epoch before it records that epoch as a successor of its predecessor, thus a rejected epoch never counts as one of the two successors of `GRP-070`. |  |  |
+| `GRP-382` | §11.9.2 | MUST | A plain epoch that adds or removes a member | A plain epoch that adds or removes a member MUST come from a member at `admin` or above, and a self-removal from the member that leaves; a verifier MUST discard each other plain epoch under `GRP-066`. |  |  |
+| `GRP-383` | §11.4.2 | MUST | The `slot` field of the epoch-key record header | The `slot` field of the epoch-key record header MUST carry `t_{e+1}`, and a member MUST take `t_e` of `GRP-224` from that field. |  |  |
 
 ## COM — Public Communities
 
