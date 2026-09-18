@@ -23,9 +23,12 @@ pub mod hierarchy;
 pub mod kdf;
 pub mod kem;
 pub mod labels;
+#[cfg(feature = "pow")]
+pub mod pow;
 pub mod queue;
 pub mod ratchet;
 pub mod rng;
+pub mod rsabssa;
 pub mod secret;
 pub mod sign;
 pub mod voprf;

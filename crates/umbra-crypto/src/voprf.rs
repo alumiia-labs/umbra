@@ -82,9 +82,9 @@ fn len_prefix(part: &[u8]) -> [u8; 2] {
     u16::try_from(part.len()).unwrap_or(u16::MAX).to_be_bytes()
 }
 
-/// `ComputeComposites` for one element, which is the only batch size
-/// this crate uses.
-fn composites(pk: &[u8; 32], c: &[u8; 32], d: &[u8; 32]) -> (Scalar, RistrettoPoint) {
+/// `ComputeComposites`: the scalar `d_i` of each element of a batch, from
+/// one seed over the public key.
+fn composite_scalars(pk: &[u8; 32], c: &[[u8; 32]], d: &[[u8; 32]]) -> Vec<Scalar> {
     let seed_dst: &[u8] = b"Seed-";
     let mut h = Sha512::new();
     h.update(len_prefix(pk));
@@ -93,20 +93,26 @@ fn composites(pk: &[u8; 32], c: &[u8; 32], d: &[u8; 32]) -> (Scalar, RistrettoPo
     h.update(seed_dst);
     h.update(CONTEXT);
     let seed: [u8; 64] = h.finalize().into();
-    let di = hash_to_scalar(
-        &[
-            &len_prefix(&seed),
-            &seed,
-            &[0u8, 0],
-            &len_prefix(c),
-            c,
-            &len_prefix(d),
-            d,
-            b"Composite",
-        ],
-        &[b"HashToScalar-", CONTEXT],
-    );
-    (di, RistrettoPoint::default())
+    c.iter()
+        .zip(d)
+        .enumerate()
+        .map(|(i, (ci, di))| {
+            let index = u16::try_from(i).unwrap_or(u16::MAX).to_be_bytes();
+            hash_to_scalar(
+                &[
+                    &len_prefix(&seed),
+                    &seed,
+                    &index,
+                    &len_prefix(ci),
+                    ci,
+                    &len_prefix(di),
+                    di,
+                    b"Composite",
+                ],
+                &[b"HashToScalar-", CONTEXT],
+            )
+        })
+        .collect()
 }
 
 fn challenge(
@@ -222,11 +228,50 @@ impl ServerKey {
         blinded: &[u8; ELEMENT_LEN],
         r: Scalar,
     ) -> Result<Evaluation, Error> {
-        let blinded_point = element_from_bytes(blinded)?;
-        let evaluated_point = self.secret * blinded_point;
-        let element = evaluated_point.compress().to_bytes();
-        let (di, _) = composites(&self.public, blinded, &element);
-        let m = di * blinded_point;
+        let batch = self.evaluate_batch_with(core::slice::from_ref(blinded), r)?;
+        let element = batch.elements.first().copied().ok_or(Error::Length)?;
+        Ok(Evaluation {
+            element,
+            proof: batch.proof,
+        })
+    }
+
+    /// `BlindEvaluate` over a batch, with one proof for every element, and
+    /// the proof scalar from `rng` (RFC 9497 §3.3.2, batched).
+    pub fn evaluate_batch<R: TryCryptoRng + ?Sized>(
+        &self,
+        blinded: &[[u8; ELEMENT_LEN]],
+        rng: &mut R,
+    ) -> Result<BatchEvaluation, Error> {
+        let mut wide = [0u8; 64];
+        rng.try_fill_bytes(&mut wide).map_err(|_| Error::Rng)?;
+        let r = Scalar::from_bytes_mod_order_wide(&wide);
+        wide.zeroize();
+        self.evaluate_batch_with(blinded, r)
+    }
+
+    /// `BlindEvaluate` over a batch with a given proof scalar.
+    pub fn evaluate_batch_with(
+        &self,
+        blinded: &[[u8; ELEMENT_LEN]],
+        r: Scalar,
+    ) -> Result<BatchEvaluation, Error> {
+        if blinded.is_empty() {
+            return Err(Error::Length);
+        }
+        let blinded_points = blinded
+            .iter()
+            .map(element_from_bytes)
+            .collect::<Result<Vec<_>, _>>()?;
+        let elements: Vec<[u8; 32]> = blinded_points
+            .iter()
+            .map(|p| (self.secret * p).compress().to_bytes())
+            .collect();
+        let scalars = composite_scalars(&self.public, blinded, &elements);
+        let m = scalars
+            .iter()
+            .zip(&blinded_points)
+            .fold(RistrettoPoint::default(), |acc, (di, ci)| acc + di * ci);
         let z = self.secret * m;
         let t2 = r * G;
         let t3 = r * m;
@@ -239,7 +284,7 @@ impl ServerKey {
         if let Some(tail) = proof.get_mut(32..) {
             tail.copy_from_slice(&s.to_bytes());
         }
-        Ok(Evaluation { element, proof })
+        Ok(BatchEvaluation { elements, proof })
     }
 
     /// `Evaluate`: the output for `input` at the server itself, which the
@@ -256,6 +301,15 @@ pub struct Evaluation {
     /// The evaluated element.
     pub element: [u8; ELEMENT_LEN],
     /// The DLEQ proof.
+    pub proof: [u8; PROOF_LEN],
+}
+
+/// The answer of a server over a batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchEvaluation {
+    /// The evaluated elements, in the order of the blinded elements.
+    pub elements: Vec<[u8; ELEMENT_LEN]>,
+    /// The one DLEQ proof over the batch.
     pub proof: [u8; PROOF_LEN],
 }
 
@@ -315,8 +369,19 @@ impl BlindState {
         pk: &[u8; ELEMENT_LEN],
     ) -> Result<[u8; OUTPUT_LEN], Error> {
         let blinded = self.blinded_element();
-        verify_proof(pk, &blinded, evaluation)?;
-        let evaluated_point = element_from_bytes(&evaluation.element)?;
+        verify_proof_batch(
+            pk,
+            core::slice::from_ref(&blinded),
+            core::slice::from_ref(&evaluation.element),
+            &evaluation.proof,
+        )?;
+        self.unblind(&evaluation.element)
+    }
+
+    /// The output from an evaluated element whose batch proof the caller
+    /// verified with `verify_proof_batch`.
+    pub fn unblind(&self, element: &[u8; ELEMENT_LEN]) -> Result<[u8; OUTPUT_LEN], Error> {
+        let evaluated_point = element_from_bytes(element)?;
         let unblinded = (self.blind.invert() * evaluated_point)
             .compress()
             .to_bytes();
@@ -330,24 +395,52 @@ pub fn verify_proof(
     blinded: &[u8; ELEMENT_LEN],
     evaluation: &Evaluation,
 ) -> Result<(), Error> {
+    verify_proof_batch(
+        pk,
+        core::slice::from_ref(blinded),
+        core::slice::from_ref(&evaluation.element),
+        &evaluation.proof,
+    )
+}
+
+/// `VerifyProof` over a batch.
+pub fn verify_proof_batch(
+    pk: &[u8; ELEMENT_LEN],
+    blinded: &[[u8; ELEMENT_LEN]],
+    elements: &[[u8; ELEMENT_LEN]],
+    proof: &[u8; PROOF_LEN],
+) -> Result<(), Error> {
+    if blinded.is_empty() || blinded.len() != elements.len() {
+        return Err(Error::Length);
+    }
     let pk_point = element_from_bytes(pk)?;
-    let blinded_point = element_from_bytes(blinded)?;
-    let evaluated_point = element_from_bytes(&evaluation.element)?;
-    let c_bytes: [u8; 32] = evaluation
-        .proof
+    let blinded_points = blinded
+        .iter()
+        .map(element_from_bytes)
+        .collect::<Result<Vec<_>, _>>()?;
+    let evaluated_points = elements
+        .iter()
+        .map(element_from_bytes)
+        .collect::<Result<Vec<_>, _>>()?;
+    let c_bytes: [u8; 32] = proof
         .get(..32)
         .and_then(|b| b.try_into().ok())
         .ok_or(Error::Length)?;
-    let s_bytes: [u8; 32] = evaluation
-        .proof
+    let s_bytes: [u8; 32] = proof
         .get(32..)
         .and_then(|b| b.try_into().ok())
         .ok_or(Error::Length)?;
     let c = scalar_from_bytes(&c_bytes)?;
     let s = scalar_from_bytes(&s_bytes)?;
-    let (di, _) = composites(pk, blinded, &evaluation.element);
-    let m = di * blinded_point;
-    let z = di * evaluated_point;
+    let scalars = composite_scalars(pk, blinded, elements);
+    let m = scalars
+        .iter()
+        .zip(&blinded_points)
+        .fold(RistrettoPoint::default(), |acc, (di, ci)| acc + di * ci);
+    let z = scalars
+        .iter()
+        .zip(&evaluated_points)
+        .fold(RistrettoPoint::default(), |acc, (di, ei)| acc + di * ei);
     let t2 = s * G + c * pk_point;
     let t3 = s * m + c * z;
     let expected = challenge(pk, &m, &z, &t2, &t3);
@@ -445,6 +538,58 @@ mod tests {
             forged.element = other.evaluate_with(&element, r).unwrap().element;
             assert_eq!(state.finalize(&forged, key.public()), Err(Error::Auth));
         }
+    }
+
+    #[test]
+    fn the_rfc_9497_batch_vector_holds_with_one_proof() {
+        let seed = Secret::new(
+            hex("a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3")
+                .try_into()
+                .unwrap(),
+        );
+        let key = ServerKey::derive(&seed, b"test key").unwrap();
+        let inputs = [hex("00"), hex("5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a")];
+        let blinds = [
+            scalar("64d37aed22a27f5191de1c1d69fadb899d8862b58eb4220029e036ec4c1f6706"),
+            scalar("222a5e897cf59db8145db8d16e597e8facb80ae7d4e26d9881aa6f61d645fc0e"),
+        ];
+        let r = scalar("419c4f4f5052c53c45f3da494d2b67b220d02118e0857cdbcf037f9ea84bbe0c");
+        let states: Vec<(BlindState, [u8; 32])> = inputs
+            .iter()
+            .zip(blinds)
+            .map(|(input, blind)| BlindState::blind_with(input, blind).unwrap())
+            .collect();
+        let blinded: Vec<[u8; 32]> = states.iter().map(|(_, e)| *e).collect();
+        assert_eq!(
+            blinded[1][..],
+            hex("90a0145ea9da29254c3a56be4fe185465ebb3bf2a1801f7124bbbadac751e654")[..]
+        );
+        let batch = key.evaluate_batch_with(&blinded, r).unwrap();
+        assert_eq!(
+            batch.elements[1][..],
+            hex("cc5ac221950a49ceaa73c8db41b82c20372a4c8d63e5dded2db920b7eee36a2a")[..]
+        );
+        assert_eq!(
+            batch.proof[..],
+            hex("cc203910175d786927eeb44ea847328047892ddf8590e723c37205cb74600b0a5ab5337c8eb4ceae0494c2cf89529dcf94572ed267473d567aeed6ab873dee08")[..]
+        );
+        verify_proof_batch(key.public(), &blinded, &batch.elements, &batch.proof).unwrap();
+        let outputs: Vec<[u8; 64]> = states
+            .iter()
+            .zip(&batch.elements)
+            .map(|((state, _), e)| state.unblind(e).unwrap())
+            .collect();
+        assert_eq!(
+            outputs[0][..],
+            hex("b58cfbe118e0cb94d79b5fd6a6dafb98764dff49c14e1770b566e42402da1a7da4d8527693914139caee5bd03903af43a491351d23b430948dd50cde10d32b3c")[..]
+        );
+        assert_eq!(
+            outputs[1][..],
+            hex("8a9a2f3c7f085b65933594309041fc1898d42d0858e59f90814ae90571a6df60356f4610bf816f27afdd84f47719e480906d27ecd994985890e5f539e7ea74b6")[..]
+        );
+        // A swapped element fails the one proof.
+        let swapped = [batch.elements[1], batch.elements[0]];
+        assert!(verify_proof_batch(key.public(), &blinded, &swapped, &batch.proof).is_err());
     }
 
     #[test]

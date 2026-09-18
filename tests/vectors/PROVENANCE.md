@@ -45,6 +45,17 @@ the files, and run the script again.
 | `cctv/ML-KEM/strcmp/ML-KEM-768.txt` | 7056 | `2b09aa46d8b1c7b9a549a25f009cbd3937b98df177e868d3eb6395930079e4fa` |
 | `cctv/ML-KEM/unluckysample/ML-KEM-768.txt` | 9637 | `fede6f787581dc708e5c3337d7e49de33333d23023470668cd0588b65ad0ba90` |
 
+## `rfc9474/` — RFC 9474 RSABSSA-SHA384-PSS-Deterministic test vector
+
+- Upstream: https://www.rfc-editor.org/rfc/rfc9474.txt, path `Appendix A.3`
+- Commit: `RFC 9474, October 2023` (2026-09-18)
+- License: the IETF Trust Legal Provisions (code components under the Revised BSD License)
+- Note: The hex fields of Appendix A.3, one `name=value` line each, with the page breaks removed. The rsabssa module of umbra-crypto reads the file at compile time.
+
+| File | Bytes | SHA-256 |
+| --- | --- | --- |
+| `rfc9474/deterministic.txt` | 8597 | `e4597e66c3cc601ab5683104f46aaeccd32e39fe78dafa1057e06ab6de10ab4a` |
+
 ## `umbra/` — UMBRA-KEM and key-hierarchy vectors (Part 5 rules CRY-045, CRY-046, CRY-121)
 
 - Upstream: this repository, path `crates/umbra-crypto/tests/umbra_vectors.rs, the ignored test `generate``

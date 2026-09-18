@@ -40,6 +40,16 @@ CORPORA = [
         "note": "Only the ML-KEM-768 files are vendored: strcmp, unluckysample, modulus, and intermediate. The modulus file is stored decompressed (upstream ships it as .txt.gz); its content is byte-identical after gunzip. The keyGen half of unluckysample and intermediate follows the initial public draft of FIPS 203; the harness uses their expanded keys.",
     },
     {
+        "dir": "rfc9474",
+        "name": "RFC 9474 RSABSSA-SHA384-PSS-Deterministic test vector",
+        "repo": "https://www.rfc-editor.org/rfc/rfc9474.txt",
+        "path": "Appendix A.3",
+        "commit": "RFC 9474, October 2023",
+        "date": "2026-09-18",
+        "license": "the IETF Trust Legal Provisions (code components under the Revised BSD License)",
+        "note": "The hex fields of Appendix A.3, one `name=value` line each, with the page breaks removed. The rsabssa module of umbra-crypto reads the file at compile time.",
+    },
+    {
         "dir": "umbra",
         "name": "UMBRA-KEM and key-hierarchy vectors (Part 5 rules CRY-045, CRY-046, CRY-121)",
         "repo": "this repository",
