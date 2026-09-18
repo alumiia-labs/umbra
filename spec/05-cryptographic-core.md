@@ -38,7 +38,7 @@ manner, and it carries a dependency cap of its own.
 | AUX-3 | **ECVRF-Edwards25519-SHA512-TAI** | RFC 9381, classically secure only | Index blinding for handle key transparency, and the probe selection that a relay MUST NOT predict | Part 9 §9.5, Part 10 §10.4.1 |
 | AUX-4 | **Argon2id** | about 3 s for each try on a mid-range device | Human recovery code, and the at-rest passphrase | Part 15 §15.6.4 |
 | AUX-5 | **A keyed function inside the secure element** | HMAC-SHA256 in StrongBox | Entanglement of the at-rest key with the secure element | Part 15 §15.6.4 |
-| AUX-6 | **HPKE under OHTTP** | RFC 9180 and RFC 9458, with `UMBRA-KEM` | The notification boundary, and the one-time `k_ntf_root` | Part 8 §8.2.3 |
+| AUX-6 | **HPKE under OHTTP** | RFC 9180 and RFC 9458, with `UMBRA-KEM`; the suite is `UMBRA-KEM`, HKDF-SHA3-256, and ChaCha20-Poly1305 under the identifiers of §5.4, and the labels of RFC 9180 §4 hold (CRY-151) | The notification boundary, and the one-time `k_ntf_root` | Part 8 §8.2.3 |
 | AUX-7 | **XChaCha20-Poly1305** | 24-byte random nonce | Storage master key wrap, and each database record | Part 15 §15.6.4 |
 | AUX-8 | **Equi-X** | the `hashx` and `equix` crates, with the JIT off | Proof of work as a surge valve | Part 14 §14.8 |
 | AUX-9 | **Two-aggregator additive secret sharing with Laplace noise** | PrivEx-S2, `b = σ/ε` | The relay statistic that a directory publishes | Part 10 §10.8 |
@@ -341,6 +341,12 @@ queue_address                129 B    QueueAddress, Part 6 §6.6.10, the first q
 bundle_len                   2 B      the length of relay_bundle, u16
 relay_bundle                 var      signed, for bootstrapping
 ```
+
+**[CRY-151]** An HPKE of AUX-6 MUST build its `suite_id` as `"HPKE" ||
+kem_id || kdf_id || aead_id` from the identifiers of §5.4, which are `0x0001`
+each, and it MUST use `UMBRA-KEM` as the KEM with `Nsecret` of 32, `Nenc` of
+1 120, and `Npk` of 1 216, HKDF-SHA3-256 as the KDF, and ChaCha20-Poly1305 as
+the AEAD, with the labeled extract and expand of RFC 9180 §4 unchanged.
 
 **[CRY-150]** A client MUST write the five fields in the order above, with
 `bundle_len` before `relay_bundle`, and a reader MUST reject a bundle with

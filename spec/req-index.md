@@ -69,10 +69,10 @@ each column when a crate implements the requirement and a test covers it.
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
 | `NET` | 192 | 82 | 0 | 0 | 8 | **282** |
 | `IDN` | 108 | 40 | 1 | 0 | 5 | **154** |
-| `CRY` | 117 | 27 | 0 | 0 | 1 | **145** |
+| `CRY` | 118 | 27 | 0 | 0 | 1 | **146** |
 | `WIR` | 366 | 81 | 0 | 0 | 6 | **453** |
 | `DEV` | 172 | 87 | 2 | 0 | 7 | **268** |
-| `NTF` | 59 | 28 | 0 | 0 | 2 | **89** |
+| `NTF` | 62 | 29 | 0 | 0 | 2 | **93** |
 | `DIS` | 108 | 35 | 0 | 0 | 1 | **144** |
 | `REL` | 114 | 27 | 1 | 0 | 2 | **144** |
 | `GRP` | 201 | 56 | 0 | 0 | 4 | **261** |
@@ -81,7 +81,7 @@ each column when a crate implements the requirement and a test covers it.
 | `ABU` | 60 | 31 | 0 | 0 | 0 | **91** |
 | `IMP` | 72 | 32 | 0 | 0 | 0 | **104** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2014 | 681 | 6 | 0 | 49 | **2750** |
+| **All** | 2018 | 682 | 6 | 0 | 49 | **2755** |
 
 ## SCP — Scope and Conventions
 
@@ -734,6 +734,7 @@ Source: `spec/05-cryptographic-core.md`
 | `CRY-148` | §5.5.5 | MUST | The peer | The peer MUST apply the same mix immediately before it derives the receiving chain of the step that the same chain starts, which it recognizes by the epoch number in the frame of any record of that chain. |  |  |
 | `CRY-149` | §5.5.5 | MUST | A party | A party MUST retain `ss_e` from the moment it computes it, by encapsulation or by decapsulation, until the mix consumes it. |  |  |
 | `CRY-150` | §5.4.1 | MUST | A client | A client MUST write the five fields in the order above, with `bundle_len` before `relay_bundle`, and a reader MUST reject a bundle with bytes after `relay_bundle`. |  |  |
+| `CRY-151` | §5.4.1 | MUST | An HPKE of AUX-6 | An HPKE of AUX-6 MUST build its `suite_id` as `"HPKE" || kem_id || kdf_id || aead_id` from the identifiers of §5.4, which are `0x0001` each, and it MUST use `UMBRA-KEM` as the KEM with `Nsecret` of 32, `Nenc` of 1 120, and `Npk` of 1 216, HKDF-SHA3-256 as the KDF, and ChaCha20-Poly1305 as the AEAD, with the labeled extract and expand of RFC 9180 §4 unchanged. |  |  |
 
 ## WIR — Wire Format
 
@@ -1565,6 +1566,10 @@ Source: `spec/08-notifications.md`
 | `NTF-109` | §8.7 | MAY | A deployment | A deployment MAY operate its own Notification Delivery Relay. |  |  |
 | `NTF-110` | §8.6 | MUST NOT | A web client | A web client MUST NOT register a push token with the NDR, and it MUST NOT hold a registration of §8.5.1 or §8.5.2 of its own. |  |  |
 | `NTF-111` | §8.6 | MUST | A web client | A web client MUST take each arrival from its live session, and it MUST show an alert through the notification API of the browser while the browser runs. |  |  |
+| `NTF-112` | §8.2.3 | MUST | A queue relay | A queue relay MUST hold an `UMBRA-KEM` notification key pair, and it MUST answer the `NKEY` of a queue with an `NPK` that carries the public half, before the `NID`. |  |  |
+| `NTF-113` | §8.2.3 | MUST | A device | A device MUST seal a `NotifyBinding` to that key with HPKE of AUX-6 in the base mode, with `"umbra/v1/ntf"` as the HPKE info and the `RecipientId` of the queue as the associated data, and MUST send it as the `NBIND` of that queue. |  |  |
+| `NTF-114` | §8.2.3 | MUST NOT | (unstated) | A queue relay MUST seal the blobs of that queue under the fields of the binding, and it MUST NOT hold a binding after the queue is deleted or after the rotation of `NTF-007` replaces it. |  |  |
+| `NTF-115` | §8.2 | MUST | The OHTTP of that hop | The OHTTP of that hop MUST use the HPKE of AUX-6, and its key configuration and its request header MUST carry the suite identifiers of Part 5 §5.4 in place of the registry values of RFC 9180. |  |  |
 
 ## DIS — Discovery, Handles, and Key Transparency
 

@@ -62,7 +62,10 @@ threat model and its own trust boundary.
 - **[NTF-002]** The hop from the queue relay to the NDR MUST use Oblivious HTTP (RFC 9458) or
   a second mix hop. Thus the NDR cannot learn which relay holds a given handle.
   Without this hop, the NDR learns that the relays R1 and R2 serve the token T,
-  which shows the relay set of the user.
+  which shows the relay set of the user. **[NTF-115]** The OHTTP of that hop
+  MUST use the HPKE of AUX-6, and its key configuration and its request header
+  MUST carry the suite identifiers of Part 5 §5.4 in place of the registry
+  values of RFC 9180.
 
 ### 8.2.1 Token blinding
 
@@ -195,7 +198,32 @@ or after the one that the device computes.
 > both. Part 1 §1.9 gives the clock rules.
 
 The device establishes `k_ntf_root` one time at the subscription, with
-`UMBRA-KEM` in HPKE. The KEM ciphertext of about 1.1 KB is a one-time cost. The
+`UMBRA-KEM` in HPKE. The relay descriptor of Part 10 §10.5.3 carries no KEM
+key, thus the relay hands its notification key in the session, and the device
+answers with the binding below.
+
+```
+NotifyBinding {                   // 98 bytes, sealed under NBIND
+    k_ntf_root     [32]u8
+    handle         [16]u8         // the handle of the group of §8.2.1
+    k_tok          [32]u8         // the token key of that group
+    queue_alias    [16]u8         // the alias the blob carries
+    relay_idx      u16            // the index the blob carries
+}
+```
+
+- **[NTF-112]** A queue relay MUST hold an `UMBRA-KEM` notification key pair,
+  and it MUST answer the `NKEY` of a queue with an `NPK` that carries the
+  public half, before the `NID`. **[NTF-113]** A device MUST seal a
+  `NotifyBinding` to that key with HPKE of AUX-6 in the base mode, with
+  `"umbra/v1/ntf"` as the HPKE info and the `RecipientId` of the queue as the
+  associated data, and MUST send it as the `NBIND` of that queue. The payload
+  is the encapsulation, then the ciphertext with its tag, which is 1 234 bytes.
+  **[NTF-114]** A queue relay MUST seal the blobs of that queue under the
+  fields of the binding, and it MUST NOT hold a binding after the queue is
+  deleted or after the rotation of `NTF-007` replaces it.
+
+The KEM ciphertext of about 1.1 KB is a one-time cost. The
 path for each notification stays symmetric only, and a symmetric path at 256-bit
 keys is post-quantum safe. Thus the design meets the harvest-now-decrypt-later
 requirement, and the push payload stays small.

@@ -407,6 +407,8 @@ party MUST NOT compute `auth` as an AEAD ciphertext.
 | `0x21` | `UNSUB` | Recipient | — |
 | `0x30` | `NKEY` | Recipient | the notifier public key of Part 8 §8.2.4, 32 bytes |
 | `0x31` | `NID` | Relay | `notifier_id`, 32 bytes |
+| `0x32` | `NPK` | Relay | the notification key of the relay, an `UMBRA-KEM` public key of 1 216 bytes, Part 8 §8.2.3 |
+| `0x33` | `NBIND` | Recipient | the sealed `NotifyBinding` of Part 8 §8.2.3, 1 234 bytes |
 | `0x40` | `DEL` | Recipient | — |
 | `0x50` | `QUOTA` | Relay | the remaining record count of the queue, `u32`, 4 bytes |
 | `0x51` | `NACK` | Relay | `NackPayload`, 17 B, §6.4.4 |
