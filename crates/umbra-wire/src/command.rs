@@ -38,6 +38,10 @@ pub enum Cmd {
     Nkey,
     /// `0x31`, sent by the relay.
     Nid,
+    /// `0x32`, sent by the relay: its notification key, Part 8 §8.2.3.
+    Npk,
+    /// `0x33`, sent by the recipient: the sealed binding, Part 8 §8.2.3.
+    Nbind,
     /// `0x40`.
     Del,
     /// `0x50`, sent by the relay.
@@ -67,6 +71,8 @@ impl Cmd {
             Cmd::Unsub => 0x21,
             Cmd::Nkey => 0x30,
             Cmd::Nid => 0x31,
+            Cmd::Npk => 0x32,
+            Cmd::Nbind => 0x33,
             Cmd::Del => 0x40,
             Cmd::Quota => 0x50,
             Cmd::Nack => 0x51,
@@ -88,6 +94,8 @@ impl Cmd {
             0x21 => Cmd::Unsub,
             0x30 => Cmd::Nkey,
             0x31 => Cmd::Nid,
+            0x32 => Cmd::Npk,
+            0x33 => Cmd::Nbind,
             0x40 => Cmd::Del,
             0x50 => Cmd::Quota,
             0x51 => Cmd::Nack,
@@ -111,6 +119,8 @@ impl Cmd {
             Cmd::Ack | Cmd::Quota => Some(4),
             Cmd::Sub | Cmd::Unsub | Cmd::Del => Some(0),
             Cmd::Nkey | Cmd::Nid => Some(32),
+            Cmd::Npk => Some(NPK_LEN),
+            Cmd::Nbind => Some(NBIND_LEN),
             Cmd::Ids => Some(IDS_LEN),
             Cmd::Nack => Some(crate::nack::LEN),
             Cmd::Group(g) => g.fixed_payload_len(bucket),
@@ -239,6 +249,11 @@ impl<'a> Command<'a> {
 
 /// The length of an `IDS` payload.
 pub const IDS_LEN: usize = 96;
+/// The length of an `NPK` payload: the `UMBRA-KEM` public key of the relay.
+pub const NPK_LEN: usize = 1_216;
+/// The length of an `NBIND` payload: the HPKE encapsulation of 1 120 bytes,
+/// the 98-byte binding of Part 8 §8.2.3, and the 16-byte tag.
+pub const NBIND_LEN: usize = 1_120 + 98 + 16;
 /// The length of a `NEW` payload at an empty admission.
 pub const NEW_NONE_LEN: usize = 67;
 
@@ -413,7 +428,7 @@ mod tests {
     #[test]
     fn the_namespace_is_closed() {
         for b in [
-            0x00u8, 0x03, 0x13, 0x22, 0x32, 0x41, 0x52, 0x61, 0x6F, 0x7C, 0x86, 0x9B, 0x9F, 0xA0,
+            0x00u8, 0x03, 0x13, 0x22, 0x34, 0x41, 0x52, 0x61, 0x6F, 0x7C, 0x86, 0x9B, 0x9F, 0xA0,
             0xFF,
         ] {
             assert!(Cmd::from_byte(b).is_err(), "{b:#x}");

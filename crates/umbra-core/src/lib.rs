@@ -20,6 +20,7 @@ pub mod devset;
 pub mod directory;
 pub mod discovery;
 pub mod identity;
+pub mod notify;
 
 /// The one error of this crate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
