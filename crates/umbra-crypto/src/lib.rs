@@ -28,6 +28,8 @@ pub mod ratchet;
 pub mod rng;
 pub mod secret;
 pub mod sign;
+pub mod voprf;
+pub mod vrf;
 
 /// The KDF, MAC, and hash crates, for a caller above this one that derives
 /// under a label of Part 5 §5.11 and links no primitive of its own.
@@ -35,6 +37,7 @@ pub use hkdf;
 pub use hmac;
 /// The random-generator traits, for a caller that signs or draws a key.
 pub use rand_core;
+pub use sha2;
 pub use sha3;
 /// The X25519 crate, for a caller that holds a queue or a group
 /// credential and links no primitive of its own.

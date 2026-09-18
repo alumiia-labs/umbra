@@ -27,6 +27,11 @@ kem = { version = "0.3.0", default-features = false }
 # code and of the at-rest wrap.
 argon2 = { version = "0.6", default-features = false, features = ["alloc"] }
 rand_core = { version = "0.10.1", default-features = false }
+# Register R2 AUX-2 and AUX-3 of Part 15 §15.2.2: the VOPRF over ristretto255
+# and the ECVRF over edwards25519, both with SHA-512. The curve crate is in
+# the R1 graph already under x25519-dalek.
+curve25519-dalek = { version = "5.0.0", default-features = false, features = ["zeroize", "precomputed-tables"] }
+sha2 = { version = "0.11", default-features = false }
 
 [dev-dependencies]
 # The known-answer harness reads the vendored ACVP JSON. A dev-dependency

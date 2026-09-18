@@ -229,6 +229,7 @@ dependencies = [
  "fiat-crypto",
  "rustc_version",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -777,6 +778,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha2"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "446ba717509524cb3f22f17ecc096f10f4822d76ab5c0b9822c5f9c284e825f4"
+dependencies = [
+ "cfg-if",
+ "cpufeatures",
+ "digest",
+]
+
+[[package]]
 name = "sha3"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -967,6 +979,7 @@ version = "0.1.0"
 dependencies = [
  "argon2",
  "chacha20poly1305",
+ "curve25519-dalek",
  "hkdf",
  "hmac",
  "kem",
@@ -974,6 +987,7 @@ dependencies = [
  "ml-kem",
  "rand_core",
  "serde_json",
+ "sha2",
  "sha3",
  "subtle",
  "x25519-dalek",
