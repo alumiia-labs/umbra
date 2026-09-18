@@ -78,10 +78,10 @@ each column when a crate implements the requirement and a test covers it.
 | `GRP` | 201 | 56 | 0 | 0 | 4 | **261** |
 | `COM` | 275 | 95 | 0 | 0 | 5 | **375** |
 | `ATT` | 134 | 46 | 1 | 0 | 2 | **183** |
-| `ABU` | 54 | 31 | 0 | 0 | 0 | **85** |
+| `ABU` | 60 | 31 | 0 | 0 | 0 | **91** |
 | `IMP` | 72 | 32 | 0 | 0 | 0 | **104** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2008 | 681 | 6 | 0 | 49 | **2744** |
+| **All** | 2014 | 681 | 6 | 0 | 49 | **2750** |
 
 ## SCP — Scope and Conventions
 
@@ -2799,6 +2799,12 @@ Source: `spec/14-anti-abuse.md`
 | `ABU-089` | §14.2 | MUST | A parser | A parser MUST reject kind `0x02`, which an earlier draft gave to an ARC presentation. |  |  |
 | `ABU-090` | §14.9 | MUST | The nonprofit | The nonprofit MUST publish the price of a token batch with the cost model of Part 16 §16.6.1. |  |  |
 | `ABU-091` | §14.9 | MUST NOT | The nonprofit | The nonprofit MUST NOT set that price above the recovery of the relay cost. |  |  |
+| `ABU-092` | §14.8 | MUST | That derivation | That derivation MUST be `effort = min(POW_EFFORT_MAX, backlog / POW_BACKLOG_UNIT)`, raised to the floor of the verifier where one applies, with `backlog` the count of admissions pending in that period. |  |  |
+| `ABU-093` | §14.3.2 | MUST | A party | A party MUST compute `token_key_id` as `SHA3-256` over the issuer public key bytes: the 256-byte modulus of a `0x0002` key, or the 32-byte ristretto255 element of a `0x0005` key. |  |  |
+| `ABU-094` | §14.3.2 | MUST | A party | A party MUST compute `challenge_digest` as `SHA3-256` over `TokenChallenge = token_type u16 || epoch u32 || redemption_context [32]u8`, where `epoch` is the epoch number of §14.6 and `redemption_context` is the `relay_id` of one relay under §14.7, or 32 zero bytes for any relay of the type. |  |  |
+| `ABU-095` | §14.3.2 | MUST | A verifier | A verifier MUST accept a token whose `challenge_digest` names the current epoch or the one before it, with its own `relay_id` or the zero context, and MUST reject each other digest. |  |  |
+| `ABU-096` | §14.3.2 | MUST | (unstated) | The `0x0002` authenticator is the RFC 9474 signature over `token_input` with a 48-byte salt that the client draws at the blind, and the `0x0005` authenticator is the RFC 9497 output over `token_input` at the VOPRF mode. |  |  |
+| `ABU-097` | §14.3.2 | MUST | An issuer | An issuer MUST answer a batch of `0x0005` requests with one DLEQ proof over the batch, and a client MUST verify that proof before it finalizes a token of the batch. |  |  |
 
 ## IMP — Implementation
 

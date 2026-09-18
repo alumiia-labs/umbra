@@ -150,6 +150,29 @@ issuer CPU.
 
 A relay advertises the type that it accepts.
 
+**The token layout.** Both types follow RFC 9578: `token_type u16 || nonce
+[32]u8 || challenge_digest [32]u8 || token_key_id [32]u8 || authenticator`,
+with an authenticator of 256 bytes for `0x0002` and 64 bytes for `0x0005`.
+The client draws `nonce` from the device CSPRNG, and the issuer signs or
+evaluates `token_input`, which is the four fields before the authenticator.
+
+- **[ABU-093]** A party MUST compute `token_key_id` as `SHA3-256` over the
+  issuer public key bytes: the 256-byte modulus of a `0x0002` key, or the
+  32-byte ristretto255 element of a `0x0005` key.
+- **[ABU-094]** A party MUST compute `challenge_digest` as `SHA3-256` over
+  `TokenChallenge = token_type u16 || epoch u32 || redemption_context [32]u8`,
+  where `epoch` is the epoch number of §14.6 and `redemption_context` is the
+  `relay_id` of one relay under §14.7, or 32 zero bytes for any relay of the
+  type. **[ABU-095]** A verifier MUST accept a token whose `challenge_digest`
+  names the current epoch or the one before it, with its own `relay_id` or
+  the zero context, and MUST reject each other digest.
+- **[ABU-096]** The `0x0002` authenticator is the RFC 9474 signature over
+  `token_input` with a 48-byte salt that the client draws at the blind, and
+  the `0x0005` authenticator is the RFC 9497 output over `token_input` at the
+  VOPRF mode. **[ABU-097]** An issuer MUST answer a batch of `0x0005` requests
+  with one DLEQ proof over the batch, and a client MUST verify that proof
+  before it finalizes a token of the batch.
+
 ### 14.3.3 Post-quantum status — state it accurately
 
 **The token unlinkability is information-theoretic.** The blinding factor is
@@ -368,7 +391,10 @@ The object is 3 387 bytes. The signature covers
   solution to its newest challenge and to the one before it. **[ABU-059]** A
   verifier MUST NOT accept a solution to an older challenge.
 - **[ABU-060]** A relay MUST derive `effort` from the backlog of its own
-  admission queue over the last `POW_CHALLENGE_PERIOD`. **[ABU-061]** A
+  admission queue over the last `POW_CHALLENGE_PERIOD`. **[ABU-092]** That
+  derivation MUST be `effort = min(POW_EFFORT_MAX, backlog / POW_BACKLOG_UNIT)`,
+  raised to the floor of the verifier where one applies, with `backlog` the
+  count of admissions pending in that period. **[ABU-061]** A
   verifier MUST NOT take an `effort` value from a client or from another
   party. **[ABU-062]** A verifier MUST NOT set `effort` above
   `POW_EFFORT_MAX`. These three rules give `ABU-007` its mechanism.
@@ -614,3 +640,4 @@ tag check of Part 11 §11.3.5, and no relay learns the block.
 | `POW_CHALLENGE_PERIOD` | 10 min, measured by the verifier from the issue of the last challenge (§14.8) |
 | `POW_EFFORT_MAX` | 150 expected Equi-X solves (§14.8) |
 | `POW_LOOKUP_FLOOR` | 20 expected Equi-X solves (§14.8) |
+| `POW_BACKLOG_UNIT` | 64 pending admissions in one `POW_CHALLENGE_PERIOD` raise the effort by one (§14.8) |

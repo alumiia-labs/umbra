@@ -87,20 +87,20 @@ one time.
 
 | # | Primitive | Likely pure-Rust crate | New crates (estimate) |
 | --- | --- | --- | --- |
-| AUX-1 | Blind RSA-2048 | `blind-rsa-signatures` over `rsa` 0.10 | **14–18** |
+| AUX-1 | Blind RSA-2048 | in-workspace over `crypto-bigint`, which gives the modular arithmetic and nothing else; no `rsa` crate, and no key generation in the client | **1** |
 | AUX-2 | ristretto255 with SHA512 | `curve25519-dalek`, which R1 holds already, plus `sha2` | **1–3** |
 | AUX-3 | ECVRF-Edwards25519-SHA512-TAI | a vendored module, and no crate (Part 9 §9.11) | **0–1** |
 | AUX-4 | Argon2id | `argon2`, `blake2`, `base64ct` | **3–5** |
 | AUX-5 | A keyed function in the secure element | a platform adapter, and no crate. Android uses the HMAC-SHA256 key of StrongBox | **0** |
 | AUX-6 | HPKE under OHTTP | in-workspace, over `UMBRA-KEM` | **0–2** |
 | AUX-7 | XChaCha20-Poly1305 | `chacha20poly1305`, which R1 holds already | **0** |
-| AUX-8 | Equi-X | `equix` and `hashx`, with the JIT feature off | **4–6** |
+| AUX-8 | Equi-X | `equix` over `hashx`, with the JIT feature off; the interpreter needs std, thus a default feature of `umbra-crypto` carries it | **4–8** |
 | AUX-9 | Additive secret sharing with Laplace noise | in-workspace, PrivEx-S2 | **0–1** |
 | AUX-10 | The `UsernameCaseMapped` profile of RFC 8265 (Part 9 §9.3.2) | `precis-profiles`, `precis-core`, `unicode-normalization`, `tinyvec`; the table generator `precis-tools` and its parsers are build-only | **4** |
 
-The low column sums to 26, and the high column sums to 40. Thus the estimate for
-R1 and R2 together is 63 to 77 crates, against the combined cap of 70.
-`DEPENDENCIES.md` holds the measured count, which is below both estimates. AUX-1
+The low column sums to 13, and the high column sums to 25. Thus the estimate for
+R1 and R2 together is 50 to 62 crates, against the combined cap of 70.
+`DEPENDENCIES.md` holds the measured count. AUX-1
 alone takes half of the R2 cap.
 
 The cap of 30 is a real limit, and four decisions make it reachable. Each
