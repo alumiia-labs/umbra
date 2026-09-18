@@ -40,6 +40,11 @@ pub struct ChainState {
 }
 
 impl EpochSecret {
+    /// Wraps a secret that a slot payload carried.
+    pub const fn from_secret(secret: Secret<32>) -> Self {
+        Self(secret)
+    }
+
     /// Draws a fresh secret (`GRP-220`).
     pub fn generate<R: TryCryptoRng + ?Sized>(rng: &mut R) -> Result<Self, Error> {
         let mut bytes = Secret::<32>::zeroed();
@@ -138,6 +143,27 @@ impl ChainState {
     /// The slot whose key this state holds.
     pub fn slot(&self) -> u32 {
         self.slot
+    }
+
+    /// A chain from a slot key that an admit handed over: `K_{e,slot}`
+    /// (`GRP-312`, `GRP-313`).
+    pub const fn from_slot_key(epoch: u32, slot: u32, key: Secret<32>) -> Self {
+        ChainState { epoch, slot, key }
+    }
+
+    /// `K_{e,slot}` itself, for an admit; the slot must be at or after the
+    /// one this state holds.
+    pub fn slot_key(&self, slot: u32) -> Result<Secret<32>, Error> {
+        if slot < self.slot {
+            return Err(Error::Group);
+        }
+        let mut key = Secret::new(*self.key.expose());
+        let mut at = self.slot;
+        while at < slot {
+            key = next_slot_key(&key);
+            at = at.saturating_add(1);
+        }
+        Ok(key)
     }
 
     /// Moves the state to `slot` and drops the keys before it (`GRP-227`).
