@@ -1307,8 +1307,9 @@ UTF-8. For kind `0x03`, for kind `0x06`, for kind `0x07`, and for kind `0x08`,
 emission rules of a receipt.
 
 For kind `0x20`, the body starts with a `u8` sub-kind. The value `0x01` names
-mutable state and the value `0x02` names a control record. Part 7 §7.5.3 gives
-the class of each value. Part 7 §7.5.5 gives the `DeviceSetControl` structure
+mutable state, the value `0x02` names a control record, and the value `0x03`
+names a synced conversation record. Part 7 §7.5.3 gives the class and the
+layout of each value. Part 7 §7.5.5 gives the `DeviceSetControl` structure
 that sub-kind `0x02` carries, and it gives the device-set control type
 namespace.
 

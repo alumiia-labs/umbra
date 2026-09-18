@@ -18,6 +18,8 @@ pub enum SubKind {
     MutableState = 0x01,
     /// A `DeviceSetControl` record.
     Control = 0x02,
+    /// A synced conversation record of Part 7 §7.5.3.
+    Record = 0x03,
 }
 
 /// The type of a device-set control record. The list is closed
@@ -62,6 +64,8 @@ pub enum DeviceSetBody<'a> {
         /// The object that `control_type` names.
         payload: &'a [u8],
     },
+    /// Sub-kind `0x03`; Part 7 §7.5.3 gives the `SyncedRecord` payload.
+    Record(&'a [u8]),
 }
 
 impl<'a> DeviceSetBody<'a> {
@@ -85,6 +89,10 @@ impl<'a> DeviceSetBody<'a> {
                 w.u8(*control_type as u8)?;
                 w.put(payload)?;
             }
+            DeviceSetBody::Record(payload) => {
+                w.u8(SubKind::Record as u8)?;
+                w.put(payload)?;
+            }
         }
         Ok(w.position())
     }
@@ -94,6 +102,7 @@ impl<'a> DeviceSetBody<'a> {
         let mut r = Reader::new(bytes);
         match r.u8()? {
             0x01 => Ok(DeviceSetBody::MutableState(r.rest())),
+            0x03 => Ok(DeviceSetBody::Record(r.rest())),
             0x02 => {
                 if r.u8()? != 0x01 {
                     return Err(Error::Malformed);
@@ -147,7 +156,7 @@ mod tests {
         assert!(DeviceSetBody::parse(&out[..10]).is_err());
         out[2] = 0x06;
         assert!(DeviceSetBody::parse(&out[..11]).is_err());
-        out[0] = 0x03;
+        out[0] = 0x04;
         assert!(DeviceSetBody::parse(&out[..11]).is_err());
         let state = DeviceSetBody::MutableState(b"state");
         let n = state.encode(&mut out).unwrap();

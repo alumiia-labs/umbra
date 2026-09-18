@@ -578,7 +578,52 @@ interface MUST state that trade at the point where the user sets the value.
 A sync message carries a **causal context**. That context is a compact version
 vector over the device IDs, together with a Lamport counter. For a record
 under a live conversation timer the context also carries `expires_in`, and
-§7.5.8 gives that field.
+§7.5.8 gives that field. The three layouts below carry it.
+
+```
+CausalContext {
+    version       u8          // 0x01
+    lamport       u64         // the Lamport counter of the sender at the send
+    device_count  u8          // 0 to MAX_DEVICES
+    vector        [device_count]VectorEntry   // device_id ascending, no repeat
+    expires_in    u32         // seconds, or 0 (§7.5.8)
+}
+
+VectorEntry {                 // 24 bytes
+    device_id     [16]u8
+    counter       u64         // the causal counter of that device the sender has seen
+}
+
+SyncedRecord {                // the body of kind 0x20 at sub-kind 0x03
+    sub_kind      u8          // 0x03
+    context       CausalContext
+    inner_len     u32
+    inner         [inner_len]u8   // one AppMessage of Part 6 §6.6
+}
+
+MutableItem {                 // the body of kind 0x20 at sub-kind 0x01
+    sub_kind      u8          // 0x01
+    context       CausalContext
+    item          u8          // the row of the mutable-state table below, from 1
+    key_len       u16
+    key           [key_len]u8     // the scope of the row: a conversation, a contact,
+                                  // an identity, or a message
+    value_len     u16
+    value         [value_len]u8
+}
+```
+
+- **[DEV-268]** A device MUST carry a conversation record on a sync channel
+  as a `SyncedRecord`, and it MUST take the class of that record from the
+  kind of `inner`. **[DEV-269]** A parser MUST reject a `vector` that is not
+  in strictly increasing `device_id` order, or that holds more than
+  `MAX_DEVICES` entries. **[DEV-270]** A device MUST apply a `MutableItem`
+  when its `lamport` is above the value held, or equal with a lower
+  `device_id` of the writer, and it MUST discard it otherwise.
+
+> *Cause.* An earlier draft named the context and the sub-kinds and gave
+> them no layout, thus two implementations could not exchange one sync
+> record. The three layouts above are the one carrier of each.
 
 Each kind of Part 6 §6.6 is in exactly one class. **[DEV-021]** A new kind MUST declare its
 class in Part 6 §6.6. **[DEV-022]** A client MUST NOT process a kind that declares no class.
@@ -589,10 +634,10 @@ class in Part 6 §6.6. **[DEV-022]** A client MUST NOT process a kind that decla
 | Revision | `0x04` | The sender-chain position gives the order |
 | Tombstone | `0x05` | Terminal |
 | Peer signal | `0x06`, `0x07` | Part 3 §3.5.4 gives the rules. **[DEV-023]** A client MUST NOT put a peer signal on a sync channel |
-| Mutable state | `0x20` sub-kind `0x01` | The last writer wins |
+| Mutable state | `0x20` sub-kind `0x01` | The last writer wins, under `DEV-270` |
 | Ephemeral | `0x08` | The client does not store it |
 | Control | `0x10`, `0x11`, `0x20` sub-kind `0x02`, `0x30`, `0x31`, `0x32`, `0x33`, `0x34`, `0x35` | Part 11 gives `0x10`. Part 12 gives `0x11`. §7.5.5 gives `0x20` sub-kind `0x02`, which is the sync acknowledgment. Part 4 §4.5.1 gives `0x30`. Part 9 §9.5.3 gives `0x31`. §7.5.8 gives `0x32`. Part 6 §6.6.10 gives `0x33`. Part 6 §6.6.11 gives `0x34` and `0x35` |
-| Wrapper | `0x09` | Part 6 §6.6.5 gives the rich record. Kind `0x12` of Part 6 §6.6.2 is retired; a group content record is the `app` of a group record of Part 11 §11.3, and its own kind gives its class. **[DEV-174]** A client MUST take the class from `inner_kind`. **[DEV-175]** A client MUST NOT give a wrapper a class of its own |
+| Wrapper | `0x09`, and `0x20` sub-kind `0x03` | Part 6 §6.6.5 gives the rich record, and `DEV-268` gives the synced record. Kind `0x12` of Part 6 §6.6.2 is retired; a group content record is the `app` of a group record of Part 11 §11.3, and its own kind gives its class. **[DEV-174]** A client MUST take the class from `inner_kind`. **[DEV-175]** A client MUST NOT give a wrapper a class of its own |
 
 - **Insertion** is commutative. **[DEV-024]** A client MUST identify each message by the
   triple (conversation, sender, `msg_ref`) of Part 6 §6.6. **[DEV-025]** A client MUST remove

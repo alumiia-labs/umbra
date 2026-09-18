@@ -71,7 +71,7 @@ each column when a crate implements the requirement and a test covers it.
 | `IDN` | 108 | 40 | 1 | 0 | 5 | **154** |
 | `CRY` | 117 | 27 | 0 | 0 | 1 | **145** |
 | `WIR` | 366 | 81 | 0 | 0 | 6 | **453** |
-| `DEV` | 169 | 87 | 2 | 0 | 7 | **265** |
+| `DEV` | 172 | 87 | 2 | 0 | 7 | **268** |
 | `NTF` | 59 | 28 | 0 | 0 | 2 | **89** |
 | `DIS` | 104 | 34 | 0 | 0 | 1 | **139** |
 | `REL` | 114 | 27 | 1 | 0 | 2 | **144** |
@@ -81,7 +81,7 @@ each column when a crate implements the requirement and a test covers it.
 | `ABU` | 54 | 31 | 0 | 0 | 0 | **85** |
 | `IMP` | 72 | 32 | 0 | 0 | 0 | **104** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 1995 | 680 | 6 | 0 | 49 | **2730** |
+| **All** | 1998 | 680 | 6 | 0 | 49 | **2733** |
 
 ## SCP — Scope and Conventions
 
@@ -1466,6 +1466,9 @@ Source: `spec/07-device-sets.md`
 | `DEV-265` | §7.4 | MUST | (unstated) | When a web client returns to this flow after it lost its store, the existing device MUST revoke the old entry under §7.7 before step |  |  |
 | `DEV-266` | §7.4 | MAY | The new device | The new device MAY show the QR code of step 1 in the place of the existing device. |  |  |
 | `DEV-267` | §7.4 | MUST | In that direction the existing device | In that direction the existing device MUST show the label of the new device, and it MUST get an explicit confirmation from the user, before step 4. |  |  |
+| `DEV-268` | §7.5.3 | MUST | A device | A device MUST carry a conversation record on a sync channel as a `SyncedRecord`, and it MUST take the class of that record from the kind of `inner`. |  |  |
+| `DEV-269` | §7.5.3 | MUST | A parser | A parser MUST reject a `vector` that is not in strictly increasing `device_id` order, or that holds more than `MAX_DEVICES` entries. |  |  |
+| `DEV-270` | §7.5.3 | MUST | A device | A device MUST apply a `MutableItem` when its `lamport` is above the value held, or equal with a lower `device_id` of the writer, and it MUST discard it otherwise. |  |  |
 
 ## NTF — Notifications
 

@@ -91,6 +91,118 @@ impl CausalContext {
     }
 }
 
+/// A synced conversation record: the causal context and the inner
+/// `AppMessage` bytes, the payload of kind `0x20` sub-kind `0x03`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncedRecord<'a> {
+    /// The causal context.
+    pub context: CausalContext,
+    /// The `AppMessage` of Part 6 §6.6 that the peer synced.
+    pub inner: &'a [u8],
+}
+
+impl<'a> SyncedRecord<'a> {
+    /// Writes the record.
+    pub fn encode(&self, out: &mut [u8]) -> Result<usize, Error> {
+        let mut w = Writer::new(out);
+        w.u8(0x03)?;
+        let n = self.context.encode(w.tail())?;
+        let at = w.position().saturating_add(n);
+        let mut w = Writer::new(out.get_mut(at..).ok_or(Error::Malformed)?);
+        w.u32(u32::try_from(self.inner.len()).map_err(|_| Error::Malformed)?)?;
+        w.put(self.inner)?;
+        Ok(at.saturating_add(w.position()))
+    }
+
+    /// Reads a record.
+    pub fn parse(bytes: &'a [u8]) -> Result<Self, Error> {
+        let mut r = Reader::new(bytes);
+        if r.u8()? != 0x03 {
+            return Err(Error::Malformed);
+        }
+        let context_len = context_len_at(r.rest())?;
+        let mut r = Reader::new(bytes.get(1..).ok_or(Error::Malformed)?);
+        let context = CausalContext::parse(r.take(context_len)?)?;
+        let inner_len = usize::try_from(r.u32()?).map_err(|_| Error::Malformed)?;
+        let inner = r.take(inner_len)?;
+        r.finish()?;
+        Ok(SyncedRecord { context, inner })
+    }
+}
+
+/// The length of the context at the front of `bytes`, from its count.
+fn context_len_at(bytes: &[u8]) -> Result<usize, Error> {
+    let count = usize::from(*bytes.get(9).ok_or(Error::Malformed)?);
+    Ok(1 + 8 + 1 + count * 24 + 4)
+}
+
+/// One item of mutable state, the payload of kind `0x20` sub-kind `0x01`:
+/// the causal context, the item of the table of §7.5.3, its key, and its
+/// value. Last writer wins by the context, then by the device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MutableItem<'a> {
+    /// The causal context.
+    pub context: CausalContext,
+    /// The item, a row of the mutable-state table in its order from 1.
+    pub item: u8,
+    /// The scope key: a conversation, a contact, an identity, or a message.
+    pub key: &'a [u8],
+    /// The value.
+    pub value: &'a [u8],
+}
+
+impl<'a> MutableItem<'a> {
+    /// Writes the item.
+    pub fn encode(&self, out: &mut [u8]) -> Result<usize, Error> {
+        let mut w = Writer::new(out);
+        w.u8(0x01)?;
+        let n = self.context.encode(w.tail())?;
+        let at = w.position().saturating_add(n);
+        let mut w = Writer::new(out.get_mut(at..).ok_or(Error::Malformed)?);
+        w.u8(self.item)?;
+        w.u16(u16::try_from(self.key.len()).map_err(|_| Error::Malformed)?)?;
+        w.put(self.key)?;
+        w.u16(u16::try_from(self.value.len()).map_err(|_| Error::Malformed)?)?;
+        w.put(self.value)?;
+        Ok(at.saturating_add(w.position()))
+    }
+
+    /// Reads an item.
+    pub fn parse(bytes: &'a [u8]) -> Result<Self, Error> {
+        let mut r = Reader::new(bytes);
+        if r.u8()? != 0x01 {
+            return Err(Error::Malformed);
+        }
+        let context_len = context_len_at(r.rest())?;
+        let mut r = Reader::new(bytes.get(1..).ok_or(Error::Malformed)?);
+        let context = CausalContext::parse(r.take(context_len)?)?;
+        let item = r.u8()?;
+        let key_len = usize::from(r.u16()?);
+        let key = r.take(key_len)?;
+        let value_len = usize::from(r.u16()?);
+        let value = r.take(value_len)?;
+        r.finish()?;
+        Ok(MutableItem {
+            context,
+            item,
+            key,
+            value,
+        })
+    }
+
+    /// Whether this write wins against `held` (§7.5.3): the higher Lamport
+    /// counter, then the lower device.
+    pub fn wins_over(
+        &self,
+        held: &MutableItem<'_>,
+        own_device: &DeviceId,
+        held_device: &DeviceId,
+    ) -> bool {
+        self.context.lamport > held.context.lamport
+            || (self.context.lamport == held.context.lamport && own_device < held_device)
+    }
+}
+
 /// The source watermarks of one device (§7.5.2): the counter at or below
 /// which each source's records are gone, and an insertion below it is
 /// rejected (`DEV-037`).
@@ -301,6 +413,38 @@ mod tests {
             ..ctx
         };
         assert!(bad.encode(&mut out).is_err());
+    }
+
+    #[test]
+    fn the_envelope_and_the_item_round_trip() {
+        let ctx = CausalContext {
+            lamport: 3,
+            vector: vec![([1; 16], 3)],
+            expires_in: 0,
+        };
+        let rec = SyncedRecord {
+            context: ctx.clone(),
+            inner: b"app message bytes",
+        };
+        let mut out = [0u8; 200];
+        let n = rec.encode(&mut out).unwrap();
+        assert_eq!(SyncedRecord::parse(&out[..n]).unwrap(), rec);
+        let item = MutableItem {
+            context: ctx.clone(),
+            item: 1,
+            key: &[9; 32],
+            value: &[1],
+        };
+        let n = item.encode(&mut out).unwrap();
+        let back = MutableItem::parse(&out[..n]).unwrap();
+        assert_eq!(back, item);
+        let newer = MutableItem {
+            context: CausalContext { lamport: 4, ..ctx },
+            ..item.clone()
+        };
+        assert!(newer.wins_over(&item, &[2; 16], &[1; 16]));
+        assert!(!item.wins_over(&newer, &[1; 16], &[2; 16]));
+        assert!(item.wins_over(&item, &[0; 16], &[1; 16]));
     }
 
     #[test]
