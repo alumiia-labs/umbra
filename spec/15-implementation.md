@@ -96,9 +96,11 @@ one time.
 | AUX-7 | XChaCha20-Poly1305 | `chacha20poly1305`, which R1 holds already | **0** |
 | AUX-8 | Equi-X | `equix` and `hashx`, with the JIT feature off | **4–6** |
 | AUX-9 | Additive secret sharing with Laplace noise | in-workspace, PrivEx-S2 | **0–1** |
+| AUX-10 | The `UsernameCaseMapped` profile of RFC 8265 (Part 9 §9.3.2) | `precis-profiles`, `precis-core`, `unicode-normalization`, `tinyvec`; the table generator `precis-tools` and its parsers are build-only | **4** |
 
-The low column sums to 22, and the high column sums to 36. Thus the estimate for
-R1 and R2 together is 59 to 73 crates, against the combined cap of 70. AUX-1
+The low column sums to 26, and the high column sums to 40. Thus the estimate for
+R1 and R2 together is 63 to 77 crates, against the combined cap of 70.
+`DEPENDENCIES.md` holds the measured count, which is below both estimates. AUX-1
 alone takes half of the R2 cap.
 
 The cap of 30 is a real limit, and four decisions make it reachable. Each

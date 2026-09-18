@@ -1522,6 +1522,7 @@ names the object type and its lifetime:
 "umbra/v1/community-listing"
 "umbra/v1/moderator-set"
 "umbra/v1/community-contact"
+"umbra/v1/hello"
 ```
 
 **The list above is closed.** **[CRY-028]** An implementation MUST NOT use a label that this
@@ -1626,6 +1627,11 @@ primitive register in the same manner.
 > makes the `verifier_id`, and `"umbra/v1/hello-seed"` makes the `seed`. The
 > two values enter the challenge string at two positions, thus CRY-031 keeps
 > them apart.
+
+> *The cause of the hello label.* Part 9 §9.6 rule `DIS-143` encapsulates the
+> hello to the entry key and seals it under a key that only that encapsulation
+> gives. The label `"umbra/v1/hello"` keeps that key apart from the challenge
+> keys of §9.9.1 and §9.9.3, which take the same shared-secret shape.
 
 > *The cause of the hop-update label.* Part 3 §3.4.4 rule `NET-204` replaces
 > the key set of the hop 3 layer after each cell under

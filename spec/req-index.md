@@ -73,7 +73,7 @@ each column when a crate implements the requirement and a test covers it.
 | `WIR` | 366 | 81 | 0 | 0 | 6 | **453** |
 | `DEV` | 172 | 87 | 2 | 0 | 7 | **268** |
 | `NTF` | 59 | 28 | 0 | 0 | 2 | **89** |
-| `DIS` | 104 | 34 | 0 | 0 | 1 | **139** |
+| `DIS` | 108 | 35 | 0 | 0 | 1 | **144** |
 | `REL` | 114 | 27 | 1 | 0 | 2 | **144** |
 | `GRP` | 201 | 56 | 0 | 0 | 4 | **261** |
 | `COM` | 275 | 95 | 0 | 0 | 5 | **375** |
@@ -81,7 +81,7 @@ each column when a crate implements the requirement and a test covers it.
 | `ABU` | 54 | 31 | 0 | 0 | 0 | **85** |
 | `IMP` | 72 | 32 | 0 | 0 | 0 | **104** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2004 | 680 | 6 | 0 | 49 | **2739** |
+| **All** | 2008 | 681 | 6 | 0 | 49 | **2744** |
 
 ## SCP — Scope and Conventions
 
@@ -1711,6 +1711,11 @@ Source: `spec/09-discovery.md`
 | `DIS-137` | §9.5.2 | MUST | A client that holds a published label | A client that holds a published label MUST fetch the inclusion proof of its newest version at each head that it accepts. |  |  |
 | `DIS-138` | §9.5.2 | MUST | (unstated) | If that version differs from the version that the client published, the client MUST show the takeover warning of §9.9.2. |  |  |
 | `DIS-139` | §9.5.2 | MUST NOT | The client | The client MUST NOT publish a new version over a version that it did not publish, without a user action. |  |  |
+| `DIS-140` | §9.3 | MUST | A `DirectoryEntry` on the wire | A `DirectoryEntry` on the wire MUST be `handle_len u8 || handle || HK_pub [1216]u8 || rendezvous [129]u8 || version u32`, with the canonical handle of §9.3.2 in `handle` and the `QueueAddress` of Part 6 §6.6.10 in `rendezvous`. |  |  |
+| `DIS-141` | §9.3.1 | MUST | A client | A client MUST seal the profile blob as `0x01 || nonce [24]u8 || XChaCha20-Poly1305(blob key, nonce, profile, ad = <handle>)`, with the canonical handle as the associated data and the nonce from the device CSPRNG. |  |  |
+| `DIS-142` | §9.5.2 | MUST | Each `sig` | Each `sig` MUST cover `"umbra/v1/tree-head" || version || tree_size || timestamp || root keyset_hash`, which is the label and then each field before `sig_count`. |  |  |
+| `DIS-143` | §9.6 | MUST | A client | A client MUST seal a hello as `0x01 || ct || nonce [24]u8 || XChaCha20-Poly1305(K_hello, nonce, body, ad = ct)`, where `(ct, ss) = UMBRA-KEM.Encap(entry_pk)`, `K_hello = HKDF-SHA3-256(salt = "", ikm = ss, info = "umbra/v1/hello" || entry_pk, L = 32)`, and `entry_pk` is the key of the entry that the initiator resolved. |  |  |
+| `DIS-144` | §9.9.1 | MUST NOT | A directory | A directory MUST NOT accept an `ans` for a `lease_epoch` that it issued before the current version of the label was published. |  |  |
 
 ## REL — Relay Directory
 

@@ -75,6 +75,12 @@ DirectoryEntry {
 }
 ```
 
+**[DIS-140]** A `DirectoryEntry` on the wire MUST be `handle_len u8 ||
+handle || HK_pub [1216]u8 || rendezvous [129]u8 || version u32`, with the
+canonical handle of §9.3.2 in `handle` and the `QueueAddress` of Part 6 §6.6.10
+in `rendezvous`. A tombstone of §9.9.2 holds zero bytes in `HK_pub` and in
+`rendezvous`, and no other entry holds a zero byte in either field.
+
 An entry contains **no** profile name, **no** avatar, **no** status text, **no**
 key-rotation timestamp, and **no** long-lived value.
 
@@ -101,10 +107,14 @@ link, and the directory does not hold it:
 umbra://h/<handle>#<128-bit fragment>
 
 directory index = VOPRF over <handle> only
-blob key        = HKDF("umbra/v1/profile-blob" || <handle> || fragment)
+blob key        = HKDF-SHA3-256( salt = "", ikm = fragment,
+                                 info = "umbra/v1/profile-blob" || <handle>, L = 32 )
 ```
 
-Part 5 §5.11 holds the label `"umbra/v1/profile-blob"`.
+Part 5 §5.11 holds the label `"umbra/v1/profile-blob"`. **[DIS-141]** A client
+MUST seal the profile blob as `0x01 || nonce [24]u8 || XChaCha20-Poly1305(blob
+key, nonce, profile, ad = <handle>)`, with the canonical handle as the
+associated data and the nonce from the device CSPRNG.
 
 A person that types a bare handle gets the rendezvous queue only, and that
 person has to ask for permission. A person that receives the full link gets the
@@ -288,7 +298,9 @@ other.
 Part 10 §10.5.2. Part 5 §5.1 gives ML-DSA-65 as primitive 3, and the primitive
 register holds no threshold scheme. **[DIS-043]** A signer MUST sign a
 `SignedTreeHead` with ML-DSA-65. **[DIS-044]** An implementation MUST NOT use a
-threshold signature construction for a tree head.
+threshold signature construction for a tree head. **[DIS-142]** Each `sig`
+MUST cover `"umbra/v1/tree-head" || version || tree_size || timestamp || root
+|| keyset_hash`, which is the label and then each field before `sig_count`.
 
 ```
 SignedTreeHead {
@@ -533,6 +545,14 @@ cross-relay token of Part 14 §14.3.1 or a `PowSolution` of Part 14 §14.4. Part
 14 §14.4 gives the verification at the addressee, and the queue relay reads a
 padded message and nothing more.
 
+**[DIS-143]** A client MUST seal a hello as `0x01 || ct || nonce [24]u8 ||
+XChaCha20-Poly1305(K_hello, nonce, body, ad = ct)`, where `(ct, ss) =
+UMBRA-KEM.Encap(entry_pk)`, `K_hello = HKDF-SHA3-256(salt = "", ikm = ss, info
+= "umbra/v1/hello" || entry_pk, L = 32)`, and `entry_pk` is the key of the
+entry that the initiator resolved. The `body` is `BE16(len) || the five fields
+of Part 5 §5.4.1 || BE16(len) || the profile blob plaintext of §9.3.1 ||
+Admission`. Part 5 §5.11 holds the label.
+
 **Contact through a Public Address.** The initiator holds the 20-byte address
 from a pasted string or from a reusable link of Part 4 §4.3.2. Step 1 then
 looks up the `AddressEntry` of §9.3.3, and it gets `(address_pk, rendezvous)`.
@@ -681,6 +701,8 @@ holder:      ss  <- UMBRA-KEM.Decap( HK_sk, HK_pub, ct )
 - **[DIS-039]** A directory MUST compare `ans` in constant time. **[DIS-040]** A
   directory MUST NOT renew a lease without a correct `ans`. **[DIS-041]** A
   directory MUST NOT accept an `ans` for a `lease_epoch` that it did not issue.
+  **[DIS-144]** A directory MUST NOT accept an `ans` for a `lease_epoch` that
+  it issued before the current version of the label was published.
 - **[DIS-042]** A directory MUST NOT retain `ss`, `k`, or `ans` after the
   renewal.
 
@@ -854,8 +876,8 @@ The signature covers each field before it, with the label in front. A link is
 259 characters at `COMMUNITY_RELAY_MAX` hints. That count is 10 characters
 of scheme and path, 52 of `community_id`, and 3 of `?r=`. It is then 167 of
 eight 20-character hints with seven commas, and 27 of the fragment with its
-`#`. Thus a listing
-is a maximum of 5 659 bytes. Part 5 §5.11 holds the two labels.
+`#`. The fields before the name are 2 028 bytes. Thus a listing
+is a maximum of 5 660 bytes. Part 5 §5.11 holds the two labels.
 
 | `activity` | The distinct pseudonyms that posted in the last 7 days |
 | --- | --- |
