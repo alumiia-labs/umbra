@@ -404,7 +404,10 @@ read_sk    := HKDF-SHA3-256("umbra/v1/chunk-read", file_key, chunk_index_be32)
    `NET-183`.
    Thus each party that holds the descriptor authorizes a `CGET`, and the
    descriptor carries no extra byte. Part 5 §5.11 holds the label
-   `"umbra/v1/chunk-read"`.
+   `"umbra/v1/chunk-read"`. **[ATT-182]** A client MUST derive `read_sk` as
+   `HKDF-SHA3-256(salt = "", ikm = file_key, info = "umbra/v1/chunk-read" ||
+   BE32(chunk_index), L = 32)`, and it MUST clamp the result as an X25519
+   scalar.
 3. **[ATT-038]** A relay MUST select `storage_token` from its own CSPRNG.
    **[ATT-039]** A relay MUST NOT derive `storage_token` from `cred_pk`, from
    `read_pk`, or from the chunk bytes. **[ATT-055]** An uploader MUST select
@@ -436,7 +439,13 @@ read_sk    := HKDF-SHA3-256("umbra/v1/chunk-read", file_key, chunk_index_be32)
    > releases it.
 4. **[ATT-040]** A relay MUST authorize `CPUT` and `CDEL` against `cred_pk`
    only. **[ATT-041]** A relay MUST authorize `CGET` and `CRNW` against
-   `read_pk` only.
+   `read_pk` only. **[ATT-180]** A relay MUST authorize `CREP` and `CVFY`
+   against `cred_pk` only, and it MUST authorize a `CNEW` and a `BNEW` against
+   the `cred_pk` that the payload carries, in the same manner as Part 6 §6.4
+   authorizes a `NEW` against the key in its payload. **[ATT-181]** A pending
+   registration whose bytes never arrive MUST leave the relay at `CHUNK_TTL`
+   after the `CNEW` or the `BNEW`, and the relay MUST count it as `CHUNK_SIZE`
+   of used store until then.
 5. **[ATT-042]** The authorized bytes of a `CPUT` MUST hold `storage_token`.
    Thus a relay binds the upload to the registration that gave the token. Part 3
    §3.2.3 rule `NET-120` gives the encoding, which puts `storage_token` in the
@@ -523,7 +532,13 @@ each manifest chunk.
 - **[ATT-077]** A client MUST order the `ChunkRef` values of a manifest by the
   chunk index, from the lowest index to the highest index. **[ATT-078]** A
   receiver MUST reject a manifest whose length is not a whole multiple of 120
-  bytes after the padding is removed.
+  bytes after the padding is removed. **[ATT-183]** A client MUST derive
+  `K_manifest` as `HKDF-SHA3-256(salt = "", ikm = file_key, info =
+  "umbra/v1/file-manifest" || file_nonce, L = 32)`. **[ATT-184]** A manifest
+  carries no digest of its own: the tag of each manifest chunk under
+  `K_manifest` authenticates it, and a receiver MUST accept a manifest whose
+  chunks each verify under §13.3.1 and whose ref count equals the data chunk
+  count of `padded_size`.
 - **[ATT-079]** A receiver MUST rebuild the full manifest before it fetches a
   data chunk. **[ATT-080]** A receiver MUST NOT present a file as complete
   before it verifies `digest` under `ATT-031`.
@@ -603,7 +618,7 @@ is what stops a relay from pushing bytes into a relay that no client named.
 ```
 CrepPayload {
     version        u8        // 0x01
-    target_count   u8        // 1 to REPLICAS - 1
+    target_count   u8        // 1 to HOT_REPLICAS - 1
     targets        [target_count]ReplicaTarget
 }
 
@@ -614,9 +629,13 @@ ReplicaTarget {
 ```
 
 A `ReplicaTarget` is 64 bytes, thus a `CREP` at `REPLICAS` of 3 carries 130
-bytes and it fits bucket `B0`. `ATT-057` makes the `chunk_id` one value at each
-replica, thus the `queue_id` field of the command names the chunk at each
-target and a target needs no identifier of its own.
+bytes and it fits bucket `B0`. A `CREP` at `HOT_REPLICAS` of 6 carries 322 bytes
+and it fits bucket `B1`, and a `CREP` for a backup-class chunk at
+`BACKUP_REPLICAS` of 2 carries one target. **[ATT-185]** A relay MUST reject a
+`CREP` whose `target_count` is 0 or above `HOT_REPLICAS` − 1. `ATT-057` makes
+the `chunk_id` one value at each replica, thus the `queue_id` field of the
+command names the chunk at each target and a target needs no identifier of its
+own.
 
 - **[ATT-100]** A client MUST put the `storage_token` that each target issued in
   the target of that relay. **[ATT-101]** A client MUST NOT put a token of one

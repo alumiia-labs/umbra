@@ -77,11 +77,11 @@ each column when a crate implements the requirement and a test covers it.
 | `REL` | 114 | 27 | 1 | 0 | 2 | **144** |
 | `GRP` | 201 | 56 | 0 | 0 | 4 | **261** |
 | `COM` | 275 | 95 | 0 | 0 | 5 | **375** |
-| `ATT` | 128 | 46 | 1 | 0 | 2 | **177** |
+| `ATT` | 134 | 46 | 1 | 0 | 2 | **183** |
 | `ABU` | 54 | 31 | 0 | 0 | 0 | **85** |
 | `IMP` | 72 | 32 | 0 | 0 | 0 | **104** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 1998 | 680 | 6 | 0 | 49 | **2733** |
+| **All** | 2004 | 680 | 6 | 0 | 49 | **2739** |
 
 ## SCP — Scope and Conventions
 
@@ -2696,6 +2696,12 @@ Source: `spec/13-attachments.md`
 | `ATT-177` | §13.2.3 | MUST | A receiver | A receiver MUST pass over each `0x00` byte of that read. |  |  |
 | `ATT-178` | §13.7.2 | MUST NOT | A client | A client MUST NOT wait for the `CRPUT` of a replica before the next `CPUT`. |  |  |
 | `ATT-179` | §13.10 | MUST NOT | Such a relay | Such a relay MUST NOT erase a backup-class chunk. |  |  |
+| `ATT-180` | §13.3.3 | MUST | A relay | A relay MUST authorize `CREP` and `CVFY` against `cred_pk` only, and it MUST authorize a `CNEW` and a `BNEW` against the `cred_pk` that the payload carries, in the same manner as Part 6 §6.4 authorizes a `NEW` against the key in its payload. |  |  |
+| `ATT-181` | §13.3.3 | MUST | A pending registration whose bytes never arrive | A pending registration whose bytes never arrive MUST leave the relay at `CHUNK_TTL` after the `CNEW` or the `BNEW`, and the relay MUST count it as `CHUNK_SIZE` of used store until then. |  |  |
+| `ATT-182` | §13.3.3 | MUST | A client | A client MUST derive `read_sk` as `HKDF-SHA3-256(salt = "", ikm = file_key, info = "umbra/v1/chunk-read" || BE32(chunk_index), L = 32)`, and it MUST clamp the result as an X25519 scalar. |  |  |
+| `ATT-183` | §13.3.4 | MUST | A client | A client MUST derive `K_manifest` as `HKDF-SHA3-256(salt = "", ikm = file_key, info = "umbra/v1/file-manifest" || file_nonce, L = 32)`. |  |  |
+| `ATT-184` | §13.3.4 | MUST | (unstated) | A manifest carries no digest of its own: the tag of each manifest chunk under `K_manifest` authenticates it, and a receiver MUST accept a manifest whose chunks each verify under §13.3.1 and whose ref count equals the data chunk count of `padded_size`. |  |  |
+| `ATT-185` | §13.4.1 | MUST | A relay | A relay MUST reject a `CREP` whose `target_count` is 0 or above `HOT_REPLICAS` − 1. |  |  |
 
 ## ABU — Anti-Abuse Without Identifiers
 
