@@ -4,13 +4,17 @@
 //! [`directory`] holds Part 10: the directory root under its 5-of-7
 //! multi-signature, the relay descriptor and entry, the relay-set tree
 //! and its proofs, the diff, the bloc list, the layer assignment, and the
-//! path invariants of Part 3 §3.4.6. Each type takes the time and the
-//! random values it needs as arguments.
+//! path invariants of Part 3 §3.4.6. [`attach`] holds Part 13: the
+//! segments, the key-committing seal, the manifest level, the chunk
+//! commands, the relay chunk store, and the placement of a handle-addressed
+//! chunk. Each type takes the time and the random values it needs as
+//! arguments.
 #![forbid(unsafe_code)]
 #![no_std]
 
 extern crate alloc;
 
+pub mod attach;
 pub mod devset;
 pub mod directory;
 pub mod identity;
