@@ -14,6 +14,7 @@
 
 extern crate alloc;
 
+pub mod abuse;
 pub mod attach;
 pub mod devset;
 pub mod directory;
