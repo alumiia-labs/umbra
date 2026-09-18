@@ -11,6 +11,7 @@
 
 extern crate alloc;
 
+pub mod devset;
 pub mod directory;
 pub mod identity;
 

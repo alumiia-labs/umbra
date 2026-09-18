@@ -91,6 +91,17 @@ labels! {
     TABLE_MAC = "umbra/v1/table-mac";
     AT_REST_WRAP = "umbra/v1/at-rest-wrap";
     RECORD_KEY = "umbra/v1/record-key";
+    SYNC_SEED = "umbra/v1/sync-seed";
+    ADDRESS_INDEX = "umbra/v1/address-index";
+    COMMUNITY_CONTACT = "umbra/v1/community-contact";
+    COMMUNITY_LISTING = "umbra/v1/community-listing";
+    HANDLE_WRITE = "umbra/v1/handle-write";
+    HELLO_SEED = "umbra/v1/hello-seed";
+    HELLO_VERIFIER = "umbra/v1/hello-verifier";
+    MODERATOR_SET = "umbra/v1/moderator-set";
+    POW = "umbra/v1/pow";
+    POW_CHALLENGE = "umbra/v1/pow-challenge";
+    TREE_HEAD_KEYSET = "umbra/v1/tree-head-keyset";
 }
 
 /// `umbra/v1/handle-key`
