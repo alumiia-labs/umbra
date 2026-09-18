@@ -68,8 +68,8 @@ each column when a crate implements the requirement and a test covers it.
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
 | `NET` | 192 | 82 | 0 | 0 | 8 | **282** |
-| `IDN` | 103 | 40 | 1 | 0 | 5 | **149** |
-| `CRY` | 116 | 27 | 0 | 0 | 1 | **144** |
+| `IDN` | 108 | 40 | 1 | 0 | 5 | **154** |
+| `CRY` | 117 | 27 | 0 | 0 | 1 | **145** |
 | `WIR` | 366 | 81 | 0 | 0 | 6 | **453** |
 | `DEV` | 169 | 87 | 2 | 0 | 7 | **265** |
 | `NTF` | 59 | 28 | 0 | 0 | 2 | **89** |
@@ -81,7 +81,7 @@ each column when a crate implements the requirement and a test covers it.
 | `ABU` | 54 | 31 | 0 | 0 | 0 | **85** |
 | `IMP` | 72 | 32 | 0 | 0 | 0 | **104** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 1989 | 680 | 6 | 0 | 49 | **2724** |
+| **All** | 1995 | 680 | 6 | 0 | 49 | **2730** |
 
 ## SCP — Scope and Conventions
 
@@ -577,6 +577,11 @@ Source: `spec/04-identity.md`
 | `IDN-154` | §4.7.7 | MUST NOT | A client | A client MUST NOT use a payload of a type other than the one that the screen asks for. |  |  |
 | `IDN-155` | §4.7.7 | MUST | (unstated) | If a restore yields an empty local identity table, the client MUST show a blocking screen that states that the restore recovered no identity. |  |  |
 | `IDN-156` | §4.7.7 | MUST | That screen | That screen MUST offer the three recovery paths of §4.7 and no message list. |  |  |
+| `IDN-157` | §4.2.3 | MUST | A client | A client MUST encode the 20 bytes in the Crockford base32 alphabet `0123456789abcdefghjkmnpqrstvwxyz`, in lower case, with no padding, and with the spare low bits of the last character at zero. |  |  |
+| `IDN-158` | §4.2.3 | MUST | A client that reads an address | A client that reads an address MUST fold upper case to lower case, and it MUST read `o` as `0` and `i` and `l` as `1`, as that alphabet permits. |  |  |
+| `IDN-159` | §4.3.1 | MUST | A client | A client MUST write the fragment after `#` as the 68 bytes above in base64url with no padding. |  |  |
+| `IDN-160` | §4.3.1 | MUST | A client | A client MUST seal the bundle in the layout above, with the 192-bit link ID as the associated data, thus a blob moved under a second link ID fails to open. |  |  |
+| `IDN-161` | §4.3.1 | MUST | A client | A client MUST reject a blob whose `version` is not `0x01` or whose `sealed` field does not open under the key of the fragment. |  |  |
 
 ## CRY — Cryptographic Core
 
@@ -728,6 +733,7 @@ Source: `spec/05-cryptographic-core.md`
 | `CRY-147` | §5.5.5 | MUST | P | P MUST apply the mix of `CRY-064` for epoch `e` immediately before it derives the sending chain of its first DH ratchet step whose chain carries an epoch above `e`. |  |  |
 | `CRY-148` | §5.5.5 | MUST | The peer | The peer MUST apply the same mix immediately before it derives the receiving chain of the step that the same chain starts, which it recognizes by the epoch number in the frame of any record of that chain. |  |  |
 | `CRY-149` | §5.5.5 | MUST | A party | A party MUST retain `ss_e` from the moment it computes it, by encapsulation or by decapsulation, until the mix consumes it. |  |  |
+| `CRY-150` | §5.4.1 | MUST | A client | A client MUST write the five fields in the order above, with `bundle_len` before `relay_bundle`, and a reader MUST reject a bundle with bytes after `relay_bundle`. |  |  |
 
 ## WIR — Wire Format
 

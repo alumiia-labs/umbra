@@ -2,10 +2,9 @@
 //! §5.4.1: the link fragment, the blob key, the sealed bundle, and the
 //! lifetime on the client side.
 //!
-//! The link puts the fragment after `#`, and the specification names no
-//! text encoding for it. This module uses base64url without padding, the
-//! encoding of a URL fragment that is shortest and that no browser
-//! rewrites.
+//! The link carries the fragment after `#` in base64url without padding
+//! (`IDN-159`), and the blob seals the bundle with the link id bound
+//! (`IDN-160`).
 
 use alloc::{string::String, vec::Vec};
 

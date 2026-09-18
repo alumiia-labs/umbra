@@ -338,8 +338,14 @@ responder_static_x25519      32 B
 responder_kem_ek             1184 B   (ML-KEM-768 encapsulation key, one-time)
 version_range                2 B      min and max, Part 6 §6.7
 queue_address                129 B    QueueAddress, Part 6 §6.6.10, the first queue of the responder
+bundle_len                   2 B      the length of relay_bundle, u16
 relay_bundle                 var      signed, for bootstrapping
 ```
+
+**[CRY-150]** A client MUST write the five fields in the order above, with
+`bundle_len` before `relay_bundle`, and a reader MUST reject a bundle with
+bytes after `relay_bundle`. Part 6 §6.1.1 rule 2 gives each variable field a
+length before it.
 
 The field `queue_address` is the queue that carries flight 1, and Part 3 rule
 `NET-172` requires it. The initiator answers with its own first queue in

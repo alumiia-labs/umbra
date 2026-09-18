@@ -119,6 +119,18 @@ umbra:pub:<base32(SHA3-256(PublicAddressKey_j.pk)[0..20])>
         # 32 characters, for example umbra:pub:7f3ck2mq9x4vhn8dpwr5esa1
 ```
 
+**[IDN-157]** A client MUST encode the 20 bytes in the Crockford base32
+alphabet `0123456789abcdefghjkmnpqrstvwxyz`, in lower case, with no padding,
+and with the spare low bits of the last character at zero. **[IDN-158]** A
+client that reads an address MUST fold upper case to lower case, and it MUST
+read `o` as `0` and `i` and `l` as `1`, as that alphabet permits.
+
+> *Cause.* An earlier draft wrote "base32" and named no alphabet, and its
+> example held the digits 1, 8, and 9, which the alphabet of RFC 4648 lacks.
+> Two implementations then read one string as two addresses. The Crockford
+> alphabet holds the example, and its folding rules absorb the transcription
+> errors of a string that a user reads aloud.
+
 #### The unlinkability property in full
 
 > An adversary has `PairwiseIdentity_c.pk` for a contact *c*. That adversary
@@ -383,11 +395,32 @@ learns the open and not the invitation.
   rule `CRY-123` then erases the prekey. **[IDN-128]** A client MUST show the
   remaining lifetime beside an invitation that no party consumed.
 
+**[IDN-159]** A client MUST write the fragment after `#` as the 68 bytes
+above in base64url with no padding. A browser rewrites no character of that
+alphabet in a fragment, and the string is 91 characters.
+
 The relay that the `RelayRef` names stores an **encrypted blob** that it cannot
 read. The blob key comes from
-`HKDF("umbra/v1/invite-blob" || SHA3-256(link_fragment))`. Part 5 §5.11
+`HKDF("umbra/v1/invite-blob" || SHA3-256(link_fragment))`, which is
+`HKDF-SHA3-256(salt = "", ikm = SHA3-256(fragment), info =
+"umbra/v1/invite-blob", L = 32)`. Part 5 §5.11
 holds that label. That key is different from the link ID
 that the relay knows, thus a seized relay gives only ciphertext.
+
+```
+InvitationBlob {                  // the object the relay stores under the link ID
+    version       u8              // 0x01
+    nonce         [24]u8          // from the device CSPRNG
+    sealed        var             // XChaCha20-Poly1305( blob_key, nonce, the bundle of Part 5 §5.4.1,
+                                  //                     ad = link_id )
+}
+```
+
+**[IDN-160]** A client MUST seal the bundle in the layout above, with the
+192-bit link ID as the associated data, thus a blob moved under a second link
+ID fails to open. **[IDN-161]** A client MUST reject a blob whose `version` is
+not `0x01` or whose `sealed` field does not open under the key of the
+fragment.
 
 > *Cause.* An earlier draft put the relay host in the link. An App Link needs
 > a host list that the client package states in advance, and a relay set

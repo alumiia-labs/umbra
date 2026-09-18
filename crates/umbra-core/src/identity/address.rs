@@ -1,10 +1,9 @@
 //! The public address string, the reusable link, the safety number, and
 //! the avatar color of Part 4 §4.2.3, §4.2.5, §4.3.2, and §4.5.
 //!
-//! The specification writes the address as base32 and names no alphabet.
-//! Its example holds the digits 1, 8, and 9, which the RFC 4648 alphabet
-//! lacks, thus this module uses the Crockford alphabet in lower case, and
-//! a decoder folds case and the confusable letters as that alphabet does.
+//! An address is Crockford base32 in lower case (`IDN-157`), and a reader
+//! folds case and the confusable letters as that alphabet permits
+//! (`IDN-158`).
 
 use alloc::string::String;
 
