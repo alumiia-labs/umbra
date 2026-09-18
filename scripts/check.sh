@@ -16,6 +16,11 @@ cargo clippy --workspace --all-targets -- -D warnings
 step "tests, host"
 cargo test --workspace
 
+step "core without its default features"
+# The PRECIS tables need std; the no_std path must still lint and test.
+cargo clippy -p umbra-core --no-default-features --all-targets -- -D warnings
+cargo test -p umbra-core --no-default-features
+
 step "native transport, host only"
 # The native stack builds a C library, thus the cross builds below leave it
 # off and this host step turns it on.

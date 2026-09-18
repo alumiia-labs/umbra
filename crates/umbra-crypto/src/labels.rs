@@ -102,6 +102,7 @@ labels! {
     POW = "umbra/v1/pow";
     POW_CHALLENGE = "umbra/v1/pow-challenge";
     TREE_HEAD_KEYSET = "umbra/v1/tree-head-keyset";
+    HELLO = "umbra/v1/hello";
 }
 
 /// `umbra/v1/handle-key`

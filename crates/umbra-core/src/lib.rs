@@ -17,6 +17,7 @@ extern crate alloc;
 pub mod attach;
 pub mod devset;
 pub mod directory;
+pub mod discovery;
 pub mod identity;
 
 /// The one error of this crate.

@@ -1,0 +1,48 @@
+//! The discovery of Part 9: the canonical handle, the directory entry and
+//! the address entry, the signed tree head with its key set and the
+//! client rules over it, the renewal and the write challenges, the label
+//! lifecycle at the directory and the takeover check at the client, the
+//! community listing, and the hello with its inbound limits.
+//!
+//! The KEYTRANS combined tree itself, which the directory serves and the
+//! client verifies inclusion proofs against, is a later step. Each type
+//! here takes the time and the random values it needs as arguments.
+
+pub mod challenge;
+pub mod entry;
+pub mod handle;
+pub mod head;
+pub mod hello;
+pub mod lifecycle;
+pub mod listing;
+
+/// `GOSSIP_INTERVAL`, in seconds, for each digest source.
+pub const GOSSIP_INTERVAL: u64 = 6 * 3_600;
+/// `HANDLE_LEASE`, in seconds.
+pub const HANDLE_LEASE: u64 = 180 * 86_400;
+/// `TREE_HEAD_FRESHNESS`, in seconds, from the `timestamp` of the head.
+pub const TREE_HEAD_FRESHNESS: u64 = 7 * 86_400;
+/// `TREE_HEAD_RETAIN`, in seconds, from the acceptance of the head.
+pub const TREE_HEAD_RETAIN: u64 = 14 * 86_400;
+/// `HANDLE_RESERVE`, in seconds, from the tombstone.
+pub const HANDLE_RESERVE: u64 = 180 * 86_400;
+/// `HANDLE_HISTORY_MAX`, the version scan bound of §9.9.2.
+pub const HANDLE_HISTORY_MAX: u32 = 64;
+/// `LISTING_LEASE`, in seconds, from the acceptance of a listing.
+pub const LISTING_LEASE: u64 = 30 * 86_400;
+/// `RENDEZVOUS_ROTATE`, in seconds, from the write of the current
+/// rendezvous version.
+pub const RENDEZVOUS_ROTATE: u64 = 30 * 86_400;
+/// `ROTATE_GRACE` of Part 3 §3.2.6, in seconds.
+pub const ROTATE_GRACE: u64 = 7 * 86_400;
+/// `LISTING_PAGE`.
+pub const LISTING_PAGE: usize = 20;
+/// The signer count of the log.
+pub const SIGNER_COUNT: usize = 3;
+/// The signatures a head or a key set needs.
+pub const SIGNATURES_NEEDED: usize = 2;
+/// `HELLO_INBOUND_LIMIT` of Part 14 §14.4, hellos for one entry in one
+/// epoch.
+pub const HELLO_INBOUND_LIMIT: u32 = 64;
+/// `HELLO_POW_EFFORT` of Part 14 §14.13.
+pub const HELLO_POW_EFFORT: u8 = 50;
