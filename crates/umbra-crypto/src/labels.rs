@@ -86,6 +86,11 @@ labels! {
     BACKUP_KEY = "umbra/v1/backup-key";
     REPORT_KEY = "umbra/v1/report-key";
     TREE_HEAD = "umbra/v1/tree-head";
+    SAS_COMMIT = "umbra/v1/sas-commit";
+    SAS = "umbra/v1/sas";
+    TABLE_MAC = "umbra/v1/table-mac";
+    AT_REST_WRAP = "umbra/v1/at-rest-wrap";
+    RECORD_KEY = "umbra/v1/record-key";
 }
 
 /// `umbra/v1/handle-key`

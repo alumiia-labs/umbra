@@ -12,6 +12,7 @@
 extern crate alloc;
 
 pub mod directory;
+pub mod identity;
 
 /// The one error of this crate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

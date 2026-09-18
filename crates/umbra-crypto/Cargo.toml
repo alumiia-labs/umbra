@@ -23,6 +23,9 @@ subtle = { version = "2", default-features = false }
 zeroize = { version = "1", default-features = false, features = ["derive"] }
 # Trait crates that the R1 graph holds already; a direct edge names them.
 kem = { version = "0.3.0", default-features = false }
+# Register R2 AUX-4 of Part 15 §15.2.2: the memory-hard KDF of the recovery
+# code and of the at-rest wrap.
+argon2 = { version = "0.6", default-features = false, features = ["alloc"] }
 rand_core = { version = "0.10.1", default-features = false }
 
 [dev-dependencies]

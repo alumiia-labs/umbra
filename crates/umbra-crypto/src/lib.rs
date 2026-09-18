@@ -14,11 +14,13 @@
 // prefers for a secret.
 extern crate alloc;
 
+pub mod aead;
 pub mod auth;
 pub mod group;
 pub mod handshake;
 pub mod hash;
 pub mod hierarchy;
+pub mod kdf;
 pub mod kem;
 pub mod labels;
 pub mod queue;
@@ -27,14 +29,25 @@ pub mod rng;
 pub mod secret;
 pub mod sign;
 
+/// The KDF, MAC, and hash crates, for a caller above this one that derives
+/// under a label of Part 5 §5.11 and links no primitive of its own.
+pub use hkdf;
+pub use hmac;
 /// The random-generator traits, for a caller that signs or draws a key.
 pub use rand_core;
+pub use sha3;
 /// The X25519 crate, for a caller that holds a queue or a group
 /// credential and links no primitive of its own.
 pub use x25519_dalek as x25519;
 
 #[cfg(test)]
 pub(crate) mod test_rng;
+
+/// Compares two byte strings in constant time.
+pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    use subtle::ConstantTimeEq;
+    a.len() == b.len() && bool::from(a.ct_eq(b))
+}
 
 /// The one error of this crate.
 ///

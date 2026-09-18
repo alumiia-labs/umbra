@@ -31,6 +31,10 @@ skip = []
 # (Part 15 §15.2.3), and DEPENDENCIES.md lists it apart.
 allow = [
   { crate = "aead" },                    # R1
+  { crate = "argon2" },                  # R2, AUX-4
+  { crate = "base64ct" },                # R2, under argon2
+  { crate = "blake2" },                  # R2, under argon2
+  { crate = "password-hash" },           # R2, under argon2
   { crate = "aes" },                     # R1, the onion layer only
   { crate = "block-buffer" },            # R1
   { crate = "cfg-if" },                  # R1
