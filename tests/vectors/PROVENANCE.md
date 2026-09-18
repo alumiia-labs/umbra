@@ -56,6 +56,17 @@ the files, and run the script again.
 | --- | --- | --- |
 | `rfc9474/deterministic.txt` | 8597 | `e4597e66c3cc601ab5683104f46aaeccd32e39fe78dafa1057e06ab6de10ab4a` |
 
+## `rfc9180/` — RFC 9180 HPKE base-mode vector, DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, ChaCha20Poly1305
+
+- Upstream: https://www.rfc-editor.org/rfc/rfc9180.txt, path `Appendix A.2.1`
+- Commit: `RFC 9180, February 2022` (2026-09-18)
+- License: the IETF Trust Legal Provisions (code components under the Revised BSD License)
+- Note: The values of A.2.1 with its encryptions and exports, one `name=value` line each, with a repeated name suffixed by its index. The hpke module of umbra-crypto reads the file at compile time and runs the key schedule under the DHKEM of the vector.
+
+| File | Bytes | SHA-256 |
+| --- | --- | --- |
+| `rfc9180/a2_base.txt` | 2719 | `0017b8d661759a04afc6d2d9747118f06c25ef45ca4fc26f50cb6a102ef01e76` |
+
 ## `umbra/` — UMBRA-KEM and key-hierarchy vectors (Part 5 rules CRY-045, CRY-046, CRY-121)
 
 - Upstream: this repository, path `crates/umbra-crypto/tests/umbra_vectors.rs, the ignored test `generate``

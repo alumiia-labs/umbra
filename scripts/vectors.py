@@ -50,6 +50,16 @@ CORPORA = [
         "note": "The hex fields of Appendix A.3, one `name=value` line each, with the page breaks removed. The rsabssa module of umbra-crypto reads the file at compile time.",
     },
     {
+        "dir": "rfc9180",
+        "name": "RFC 9180 HPKE base-mode vector, DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, ChaCha20Poly1305",
+        "repo": "https://www.rfc-editor.org/rfc/rfc9180.txt",
+        "path": "Appendix A.2.1",
+        "commit": "RFC 9180, February 2022",
+        "date": "2026-09-18",
+        "license": "the IETF Trust Legal Provisions (code components under the Revised BSD License)",
+        "note": "The values of A.2.1 with its encryptions and exports, one `name=value` line each, with a repeated name suffixed by its index. The hpke module of umbra-crypto reads the file at compile time and runs the key schedule under the DHKEM of the vector.",
+    },
+    {
         "dir": "umbra",
         "name": "UMBRA-KEM and key-hierarchy vectors (Part 5 rules CRY-045, CRY-046, CRY-121)",
         "repo": "this repository",

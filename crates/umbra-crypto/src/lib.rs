@@ -20,6 +20,7 @@ pub mod group;
 pub mod handshake;
 pub mod hash;
 pub mod hierarchy;
+pub mod hpke;
 pub mod kdf;
 pub mod kem;
 pub mod labels;
