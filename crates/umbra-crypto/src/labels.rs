@@ -105,6 +105,7 @@ labels! {
     HELLO = "umbra/v1/hello";
     LOG_COMMIT = "umbra/v1/log-commit";
     ISSUER_KEY = "umbra/v1/issuer-key";
+    ROW_ID = "umbra/v1/row-id";
 }
 
 /// `umbra/v1/handle-key`

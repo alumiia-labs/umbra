@@ -25,6 +25,7 @@ pub mod discovery;
 pub mod group;
 pub mod identity;
 pub mod notify;
+pub mod store;
 
 /// The one error of this crate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +38,8 @@ pub enum Error {
     Stale,
     /// No object satisfies the rule, thus the client fails closed.
     NoPath,
+    /// The platform store failed to read or to write.
+    Storage,
     /// A wire structure did not parse.
     Wire(umbra_wire::Error),
 }
@@ -60,6 +63,7 @@ impl core::fmt::Display for Error {
             Error::Unverified => f.write_str("does not verify"),
             Error::Stale => f.write_str("stale or out of validity"),
             Error::NoPath => f.write_str("no conformant path"),
+            Error::Storage => f.write_str("the platform store failed"),
             Error::Wire(inner) => write!(f, "{inner}"),
         }
     }
