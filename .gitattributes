@@ -6,3 +6,7 @@
 *.json text eol=lf
 *.yml text eol=lf
 *.html text eol=lf
+# A shell script with CRLF line ends does not run on Linux or macOS.
+android/gradlew text eol=lf
+*.bat text eol=crlf
+*.jar binary
