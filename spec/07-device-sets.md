@@ -625,6 +625,31 @@ MutableItem {                 // the body of kind 0x20 at sub-kind 0x01
 > them no layout, thus two implementations could not exchange one sync
 > record. The three layouts above are the one carrier of each.
 
+**The counters of a context.**
+
+- **[DEV-271]** A device MUST give each `SyncedRecord` and each `MutableItem`
+  that it sends the next value of its causal counter, which starts at 1. It
+  MUST give a `DeviceSetControl` no counter. **[DEV-272]** The `vector` MUST
+  hold the entry of the sender, and the `counter` of that entry is the causal
+  counter of the record. **[DEV-273]** A receiver MUST reject a record whose
+  `vector` holds no entry of the device that the sync channel names.
+- **[DEV-274]** The entry of each other device MUST carry the acknowledgment
+  point of `DEV-055` that the sender holds for that device.
+- **[DEV-275]** A device MUST add one to its `lamport` before each send of a
+  counted record. At the receipt of a counted record, it MUST set its
+  `lamport` to the higher of its own value and the value of the record.
+- **[DEV-276]** A device MUST reject a `SyncAck` whose `counter` is above its
+  own causal counter, because no record holds that counter.
+- **[DEV-277]** A device MUST retain a `MutableItem` for the resend of §7.5.5
+  under a reference to its row and its key, and not under its bytes. A resend
+  MUST carry the value that the device holds at the resend. The last writer
+  wins under `DEV-270`, thus an older value would lose at the peer in any
+  case.
+
+> *Cause.* §7.5.5 acknowledges a causal counter, and no rule said where a
+> record carries its own counter or which records take one. The entry of the
+> sender in the vector is that place, and it costs no field.
+
 Each kind of Part 6 §6.6 is in exactly one class. **[DEV-021]** A new kind MUST declare its
 class in Part 6 §6.6. **[DEV-022]** A client MUST NOT process a kind that declares no class.
 

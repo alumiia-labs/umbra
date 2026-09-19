@@ -71,7 +71,7 @@ each column when a crate implements the requirement and a test covers it.
 | `IDN` | 110 | 40 | 1 | 0 | 5 | **156** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
 | `WIR` | 371 | 82 | 0 | 0 | 6 | **459** |
-| `DEV` | 172 | 87 | 2 | 0 | 7 | **268** |
+| `DEV` | 179 | 87 | 2 | 0 | 7 | **275** |
 | `NTF` | 62 | 29 | 0 | 0 | 2 | **93** |
 | `DIS` | 123 | 37 | 0 | 0 | 1 | **161** |
 | `REL` | 114 | 27 | 1 | 0 | 2 | **144** |
@@ -81,7 +81,7 @@ each column when a crate implements the requirement and a test covers it.
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
 | `IMP` | 77 | 34 | 0 | 0 | 1 | **112** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2081 | 688 | 6 | 0 | 51 | **2826** |
+| **All** | 2088 | 688 | 6 | 0 | 51 | **2833** |
 
 ## SCP — Scope and Conventions
 
@@ -1484,6 +1484,13 @@ Source: `spec/07-device-sets.md`
 | `DEV-268` | §7.5.3 | MUST | A device | A device MUST carry a conversation record on a sync channel as a `SyncedRecord`, and it MUST take the class of that record from the kind of `inner`. |  |  |
 | `DEV-269` | §7.5.3 | MUST | A parser | A parser MUST reject a `vector` that is not in strictly increasing `device_id` order, or that holds more than `MAX_DEVICES` entries. |  |  |
 | `DEV-270` | §7.5.3 | MUST | A device | A device MUST apply a `MutableItem` when its `lamport` is above the value held, or equal with a lower `device_id` of the writer, and it MUST discard it otherwise. |  |  |
+| `DEV-271` | §7.5.3 | MUST | A device | A device MUST give each `SyncedRecord` and each `MutableItem` that it sends the next value of its causal counter, which starts at 1. |  |  |
+| `DEV-272` | §7.5.3 | MUST | The `vector` | The `vector` MUST hold the entry of the sender, and the `counter` of that entry is the causal counter of the record. |  |  |
+| `DEV-273` | §7.5.3 | MUST | A receiver | A receiver MUST reject a record whose `vector` holds no entry of the device that the sync channel names. |  |  |
+| `DEV-274` | §7.5.3 | MUST | The entry of each other device | The entry of each other device MUST carry the acknowledgment point of `DEV-055` that the sender holds for that device. |  |  |
+| `DEV-275` | §7.5.3 | MUST | A device | A device MUST add one to its `lamport` before each send of a counted record. |  |  |
+| `DEV-276` | §7.5.3 | MUST | A device | A device MUST reject a `SyncAck` whose `counter` is above its own causal counter, because no record holds that counter. |  |  |
+| `DEV-277` | §7.5.3 | MUST | A device | A device MUST retain a `MutableItem` for the resend of §7.5.5 under a reference to its row and its key, and not under its bytes. |  |  |
 
 ## NTF — Notifications
 
