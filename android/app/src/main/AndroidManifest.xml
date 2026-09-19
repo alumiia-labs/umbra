@@ -3,6 +3,9 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- IMP-048: the platform backup carries no UMBRA data, and a library
          manifest cannot set the value again. -->
@@ -21,6 +24,16 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!-- Part 8 §8.4.1: `specialUse`, and never `dataSync`, which the
+             platform ends after 6 hours in 24. -->
+        <service
+            android:name=".DeliveryService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="An end-to-end encrypted messenger holds one connection to its relay, thus a message arrives with no push provider." />
+        </service>
     </application>
 
 </manifest>

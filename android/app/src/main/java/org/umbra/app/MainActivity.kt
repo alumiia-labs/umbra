@@ -1,5 +1,6 @@
 package org.umbra.app
 
+import android.Manifest
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
@@ -8,6 +9,7 @@ import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.widget.FrameLayout
 import androidx.activity.ComponentActivity
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.platform.ComposeView
 
 class MainActivity : ComponentActivity() {
@@ -18,6 +20,13 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        Notifier.makeChannels(this)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            // With no permission the app shows no alert, and it takes each
+            // record all the same.
+            registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
+                .launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             setRecentsScreenshotEnabled(false)
         }
@@ -32,6 +41,11 @@ class MainActivity : ComponentActivity() {
         root.addView(content, MATCH_PARENT, MATCH_PARENT)
         root.addView(cover, MATCH_PARENT, MATCH_PARENT)
         setContentView(root)
+    }
+
+    override fun onUserInteraction() {
+        super.onUserInteraction()
+        Core.touched()
     }
 
     override fun onStart() {

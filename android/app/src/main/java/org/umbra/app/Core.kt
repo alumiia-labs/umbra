@@ -61,6 +61,11 @@ object Core {
 
     /** Whether a view of the app is on the screen. */
     private var isVisible = false
+
+    /** Whether the foreground service of the socket carrier runs. */
+    private var carrierHolds = false
+    private var lastTouchMs = 0L
+    private const val TOUCH_GAP_MS = 10_000L
     private var retryDelayMs = FIRST_RETRY_MS
     private const val FIRST_RETRY_MS = 2_000L
     private const val LAST_RETRY_MS = 30_000L
@@ -90,6 +95,9 @@ object Core {
                     conversations.clear()
                     conversations.addAll(stored)
                     phase = Phase.Open
+                    // The user opened the client, thus a view is on the
+                    // screen, and the platform permits the start.
+                    DeliveryService.start(app)
                 }
             } catch (wrong: FfiException.WrongPassphrase) {
                 fail("The passphrase does not open the store.")
@@ -144,12 +152,20 @@ object Core {
                 val conversation = Conversation(event.conversation)
                 if (conversation !in conversations) conversations.add(conversation)
             }
-            is FfiEvent.Message, is FfiEvent.Delivery -> revision++
+            is FfiEvent.Message -> {
+                revision++
+                if (!isVisible) Notifier.message(app, Conversation(event.conversation))
+            }
+            is FfiEvent.Delivery -> revision++
             is FfiEvent.Locked -> {
                 online = false
                 invitation = null
                 conversations.clear()
                 phase = Phase.Locked
+                // A locked client holds no key that reads a queue, thus the
+                // carrier ends, and the user learns it.
+                DeliveryService.stop(app)
+                if (!isVisible) Notifier.locked(app)
             }
             is FfiEvent.IntegrityFault -> fault = "The local store does not verify."
         }
@@ -176,12 +192,30 @@ object Core {
     private fun retryLater(app: Context) {
         val delay = retryDelayMs
         retryDelayMs = (retryDelayMs * 2).coerceAtMost(LAST_RETRY_MS)
-        main.postDelayed({ if (isVisible && !online && phase == Phase.Open) connect(app) }, delay)
+        main.postDelayed({ if (wantsNetwork() && !online) connect(app) }, delay)
+    }
+
+    /** The platform leaves the sockets of a visible app and of the carrier. */
+    private fun wantsNetwork() = phase == Phase.Open && (isVisible || carrierHolds)
+
+    /** The foreground service tells the core when it starts and when it ends. */
+    fun carrierRuns(context: Context, runs: Boolean) {
+        carrierHolds = runs
+        if (runs && !online && phase == Phase.Open) connect(context)
+    }
+
+    /** The user acted, thus the idle time of the auto-lock starts again. */
+    fun touched() {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - lastTouchMs < TOUCH_GAP_MS) return
+        lastTouchMs = now
+        call { it.touch() }
     }
 
     /** The activity tells the core when a view enters or leaves the screen. */
     fun visible(context: Context, nowVisible: Boolean) {
         isVisible = nowVisible
+        if (nowVisible) Notifier.clear(context)
         if (nowVisible && !online && phase == Phase.Open) {
             retryDelayMs = FIRST_RETRY_MS
             connect(context)

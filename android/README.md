@@ -42,12 +42,15 @@ emulator is the clipboard of the machine.
 
 ## Open items of the shell
 
-- Android closes the sockets of an app a short time after it leaves the
-  screen, and the run ends with "the link to the guard closed". A test on two
-  emulators showed it after 45 seconds. The store holds each contact, and the
-  app starts a new run when a view comes back to the screen. A record that
-  arrives in between waits at the relay. The wake path of Part 8 is the part
-  that is open.
+- The app carries its wakes over the persistent socket of Part 8 §8.4.1: a
+  `specialUse` foreground service holds the one connection while the client
+  is unlocked, and a message alert shows no content. FCM and UnifiedPush need
+  the Notification Delivery Relay and the OHTTP hop, which are not built.
+- A locked client takes no record. The auto-lock comes 15 minutes after the
+  last action of the user, thus delivery in the background lasts that long.
+  Part 8 §8.4.1 states the two remedies, and the owner picks one.
+- Doze can suspend the network of a foreground service on a device that does
+  not move. The app asks for no exemption from the battery optimization yet.
 - One circuit carries each queue of the client, and a relay serves 8 queues
   in one session (`NET-022`). A client with more than 8 contacts and open
   invitations needs the path selection of Part 3 §3.4.6.

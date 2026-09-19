@@ -72,7 +72,7 @@ each column when a crate implements the requirement and a test covers it.
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
 | `WIR` | 377 | 82 | 0 | 0 | 6 | **465** |
 | `DEV` | 179 | 87 | 2 | 0 | 7 | **275** |
-| `NTF` | 62 | 29 | 0 | 0 | 2 | **93** |
+| `NTF` | 67 | 30 | 0 | 0 | 2 | **99** |
 | `DIS` | 123 | 37 | 0 | 0 | 1 | **161** |
 | `REL` | 114 | 27 | 1 | 0 | 2 | **144** |
 | `GRP` | 204 | 56 | 0 | 0 | 5 | **265** |
@@ -81,7 +81,7 @@ each column when a crate implements the requirement and a test covers it.
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
 | `IMP` | 88 | 37 | 0 | 0 | 1 | **126** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2109 | 691 | 6 | 0 | 51 | **2857** |
+| **All** | 2114 | 692 | 6 | 0 | 51 | **2863** |
 
 ## SCP — Scope and Conventions
 
@@ -1600,6 +1600,12 @@ Source: `spec/08-notifications.md`
 | `NTF-113` | §8.2.3 | MUST | A device | A device MUST seal a `NotifyBinding` to that key with HPKE of AUX-6 in the base mode, with `"umbra/v1/ntf"` as the HPKE info and the `RecipientId` of the queue as the associated data, and MUST send it as the `NBIND` of that queue. |  |  |
 | `NTF-114` | §8.2.3 | MUST NOT | (unstated) | A queue relay MUST seal the blobs of that queue under the fields of the binding, and it MUST NOT hold a binding after the queue is deleted or after the rotation of `NTF-007` replaces it. |  |  |
 | `NTF-115` | §8.2 | MUST | The OHTTP of that hop | The OHTTP of that hop MUST use the HPKE of AUX-6, and its key configuration and its request header MUST carry the suite identifiers of Part 5 §5.4 in place of the registry values of RFC 9180. |  |  |
+| `NTF-116` | §8.4.1 | MUST | A client that carries its wakes over a persistent socket | A client that carries its wakes over a persistent socket MUST hold that socket in a `specialUse` foreground service, with a notice that the user can see for the whole time. |  |  |
+| `NTF-117` | §8.4.1 | MUST | That service | That service MUST hold no key and no socket of its own. |  |  |
+| `NTF-118` | §8.4.1 | MUST | A client | A client MUST start a new run after a run ends with a fault, while a view is on the screen or the service runs. |  |  |
+| `NTF-119` | §8.4.1 | MUST | A message alert | A message alert MUST show no text of the message and no name of a contact while the content preview is off (`NTF-083`). |  |  |
+| `NTF-120` | §8.4.1 | MUST | A client | A client MUST end the service at a lock, because a locked client holds no key that reads a queue (Part 15 rule `IMP-127`). |  |  |
+| `NTF-121` | §8.4.1 | MUST NOT | A record that arrives | A record that arrives MUST NOT start the idle time of the auto-lock again. |  |  |
 
 ## DIS — Discovery, Handles, and Key Transparency
 

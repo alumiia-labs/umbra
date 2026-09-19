@@ -400,6 +400,54 @@ builds and on the direct-download builds, and UMBRA includes its own
 distributor.
 
 A **persistent socket** is the third fallback, behind the same Rust trait.
+It needs no Notification Delivery Relay and no provider, thus it is the
+carrier of a build that holds no other one.
+
+- **[NTF-116]** A client that carries its wakes over a persistent socket MUST
+  hold that socket in a `specialUse` foreground service, with a notice that the
+  user can see for the whole time. Android closes the sockets of an
+  application a short time after it leaves the screen, and a test on an
+  emulator of API 35 showed the close after 45 seconds. The 6 s bound of
+  `NTF-012` applies to a push-wake session, and it does not apply to this
+  service.
+- **[NTF-117]** That service MUST hold no key and no socket of its own. The
+  one run of the network of Part 15 §15.6.1 continues under it.
+- **[NTF-118]** A client MUST start a new run after a run ends with a fault,
+  while a view is on the screen or the service runs. The delay before a new
+  run MUST double from 2 s to a ceiling of 30 s, and a run that reaches the
+  ready state MUST set it back to 2 s.
+- **[NTF-119]** A message alert MUST show no text of the message and no name
+  of a contact while the content preview is off (`NTF-083`). On the lock
+  screen it MUST show that an alert exists, and no more.
+- **[NTF-120]** A client MUST end the service at a lock, because a locked
+  client holds no key that reads a queue (Part 15 rule `IMP-127`). A client
+  that locks with no view on the screen MUST tell the user one time, with no
+  sound, that no message arrives until the unlock.
+- **[NTF-121]** A record that arrives MUST NOT start the idle time of the
+  auto-lock again. An action of the user alone does that. Thus a peer that
+  writes each 10 minutes does not keep `K_store` in RAM.
+
+> **Open in 0.2.0-draft: a wake of a locked client.** Part 15 rule `IMP-119`
+> locks the client after 15 minutes with no action of the user, and the
+> ceiling is 30 minutes. A locked client holds no `K_store`, thus it holds no
+> queue key, no ratchet, and no key of the blob of §8.2.2. No carrier of this
+> section delivers a record to it. A push reaches the device, and nothing on
+> the device opens it. Thus each mode of §8.3 delivers for the idle time of the
+> auto-lock, and after that time it delivers when the user unlocks. Two
+> remedies exist, and the owner of the specification picks one.
+>
+> 1. A **wake key** outside `K_store`: the key schedule of §8.2.3 sits under a
+>    keystore key that needs no passphrase. A locked client opens the 69-byte
+>    blob and shows "a message waits" for the conversation of `queue_alias`.
+>    The record stays at the relay until the unlock. A seized device in the
+>    AFU state gives the wake key, which opens blobs and no message.
+> 2. A **receive state** outside `K_store`: the queue keys and the ratchets
+>    stay in RAM under a lock, and the lock covers the message store alone.
+>    The alert then holds the text. A seized device in the AFU state gives
+>    each later message of each channel.
+>
+> Remedy 1 keeps the claim of Part 15 §15.6.4 and costs the latency of the
+> unlock. This revision ships neither, and Part 16 §16.3 holds the residual.
 
 **Private mode does not use FCM on Android.** §8.3 wakes the device on a fixed
 clock of 20 or 30 minutes, and a message arrival does not change that clock.

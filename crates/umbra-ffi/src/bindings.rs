@@ -684,6 +684,13 @@ impl Handle {
         Ok(inner.client.unlock(&passphrase, unix_now())?)
     }
 
+    /// The user acted. The idle time of the auto-lock starts again
+    /// (`IMP-119`). The platform calls it for an action of the user only,
+    /// and never for a record that arrived.
+    pub fn touch(&self) {
+        locked(&self.inner).client.touch(unix_now());
+    }
+
     /// The clock of the platform, for the auto-lock.
     pub fn tick(&self) {
         let mut inner = locked(&self.inner);
