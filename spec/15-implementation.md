@@ -407,7 +407,7 @@ from an unsupported claim, and the users of libcrux paid for its absence.
 UMBRA uses **UniFFI 0.32.x**, with a deliberately narrow surface:
 
 ```
-init(config) -> Handle
+init(config, SecureElement, CharArray) -> Handle   // the passphrase, at the first launch
 
 // Plaintext never crosses as ByteArray. The platform builds a Draft on the
 // Rust side, writes into it, and sends the handle.
@@ -421,9 +421,11 @@ cancel_send(handle, MsgId)
 // the renderer owns for the frame, and does not copy it into a String.
 next_event(handle) -> Event               // Event carries a MsgRef, not bytes
 msg_render(MsgRef, Sink)
+messages(handle, conv) -> [MsgRef]        // the handles of one conversation
 
 lock()
 unlock(CharArray)                         // 15.4 gives the passphrase exception
+tick(handle)                              // the clock of the platform, for the auto-lock
 ```
 
 Each network, ratchet, queue, and onion function stays on the Rust side.
@@ -441,6 +443,25 @@ gives that rule, and this section gives the surface that obeys it.
 **[IMP-038]** `Draft` and `MsgRef` MUST be opaque UniFFI object handles.
 **[IMP-039]** An implementation MUST zeroize the buffer behind a `Draft` when
 that draft is dropped, and it MUST do that whether the send succeeded or failed.
+
+**Three points where the platform shapes the surface.**
+
+- **[IMP-124]** Text and the passphrase MUST cross as UTF-16 code units, and
+  the Rust side MUST overwrite its copy after the use. UniFFI 0.32 has no
+  `CharArray` type, thus the generated Kotlin takes a list of code units. The
+  Kotlin wrapper of the app MUST fill that list from a `CharArray`, and it
+  MUST overwrite the `CharArray` after the call. The list is an object on the
+  JVM heap for the length of the call, and Part 16 §16.3 holds that residual.
+- **[IMP-125]** The secure-element step of §15.6.4 MUST cross as one callback
+  that takes the input of the keyed function and returns its 32 bytes. The
+  Android keystore has a Java interface only, thus this one value crosses as
+  bytes. The Rust side MUST overwrite the returned value after it derives
+  `K_wrap`.
+- **[IMP-126]** A record that waits for the send path MUST sit in the store
+  under the record encryption of §15.6.4, in a table of its own. A lock MUST
+  clear the queue in RAM, and an unlock MUST fill it again from that table.
+  The row leaves the table when a relay accepts the record, when the ARQ of
+  Part 3 §3.7 stops, or when the user cancels the send.
 
 > *Cause.* An earlier draft of this section gave `send(handle, conv, bytes)`.
 > UniFFI maps a `bytes` parameter onto a Kotlin `ByteArray`, thus that one

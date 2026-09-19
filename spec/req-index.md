@@ -79,9 +79,9 @@ each column when a crate implements the requirement and a test covers it.
 | `COM` | 299 | 96 | 0 | 0 | 5 | **400** |
 | `ATT` | 134 | 46 | 1 | 0 | 2 | **183** |
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
-| `IMP` | 77 | 34 | 0 | 0 | 1 | **112** |
+| `IMP` | 80 | 34 | 0 | 0 | 1 | **115** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2095 | 688 | 6 | 0 | 51 | **2840** |
+| **All** | 2098 | 688 | 6 | 0 | 51 | **2843** |
 
 ## SCP — Scope and Conventions
 
@@ -3006,6 +3006,9 @@ Source: `spec/15-implementation.md`
 | `IMP-121` | §15.6.4 | MAY | A row | A row MAY carry one more indexed column, which is the `row_id` of the row that owns it, such as the conversation of a message. |  |  |
 | `IMP-122` | §15.6.4 | MUST NOT | A client | A client MUST NOT open a record whose `record_salt` is zero bytes. |  |  |
 | `IMP-123` | §15.6.4 | MUST | A client | A client MUST write the rows of a commit batch and the table MAC of each table that the batch changed in one transaction of the database. |  |  |
+| `IMP-124` | §15.6.1 | MUST | Text and the passphrase | Text and the passphrase MUST cross as UTF-16 code units, and the Rust side MUST overwrite its copy after the use. |  |  |
+| `IMP-125` | §15.6.1 | MUST | The secure-element step of §15.6.4 | The secure-element step of §15.6.4 MUST cross as one callback that takes the input of the keyed function and returns its 32 bytes. |  |  |
+| `IMP-126` | §15.6.1 | MUST | A record that waits for the send path | A record that waits for the send path MUST sit in the store under the record encryption of §15.6.4, in a table of its own. |  |  |
 
 ## SEC — Security Considerations
 

@@ -223,6 +223,7 @@ fail at the next start. UMBRA accepts this residual, and §16.3 holds the row.
 | The list of the handles | Each party | Part 9 §9.3 — worthless deliberately |
 | A device has UMBRA installed, and the wake times | Google, under FCM | Part 8 §8.7. A device under UnifiedPush or under background polling gives Google nothing |
 | The community content | The community relays | Part 12 §12.1 — public by design |
+| The code units of a draft, of a rendered message, and of the passphrase, as a list on the JVM heap for the length of one call | A party that reads the memory of the Android process | Part 15 §15.6.1 rule `IMP-124`. UniFFI has no `CharArray` type. The Rust side overwrites its copy, and the collector of the JVM frees the list |
 | A push token belongs to a party with a published handle or address | The Notification Delivery Relay and the queue relay of the rendezvous queue, in collusion | Part 8 §8.2.6. The rendezvous queue registers under a notification handle of its own, thus the pairwise queues stay apart. Private mode registers no rendezvous queue |
 | The name, the topic, the language, and the activity of a listed community | Each party | Part 12 §12.7.2 — a listing is opt-in and off by default |
 | The pseudonyms that reacted to a post, and the count | Each subscriber and each community relay | Part 12 §12.6.2 — a reaction is a chain record, and it is public in the same manner as a post |
