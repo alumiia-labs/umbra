@@ -3,6 +3,7 @@ package org.umbra.app
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
@@ -25,13 +26,30 @@ class Conversation(val id: ByteArray) {
     override fun equals(other: Any?) = other is Conversation && id.contentEquals(other.id)
     override fun hashCode() = id.contentHashCode()
 
-    /** A short name for the list, until contacts have names. */
+    /** A stable short name for a contact that the user did not name yet. */
     val label: String
         get() = id.take(4).joinToString("") { "%02x".format(it) }
 }
 
 /** One message of a conversation view. The text stays a `CharArray`. */
 class Line(val text: CharArray, val info: MsgInfo)
+
+/**
+ * One row of the chat list and of the contact list. The name is a label of
+ * the user. The preview is message text, thus it stays a `CharArray`.
+ */
+class Chat(
+    val conversation: Conversation,
+    val name: String,
+    val preview: CharArray?,
+    val isPreviewOutgoing: Boolean,
+    val lastAtMs: Long,
+    val unread: Int,
+) {
+    /** What each list shows: the name of the user, or a stable short label. */
+    val title: String
+        get() = name.ifEmpty { "Contact ${conversation.label}" }
+}
 
 /**
  * The one owner of the Rust client. Each call into Rust runs on the worker
@@ -46,9 +64,11 @@ object Core {
     var online by mutableStateOf(false)
         private set
     var fault by mutableStateOf<String?>(null)
-        private set
     var invitation by mutableStateOf<String?>(null)
-    val conversations = mutableStateListOf<Conversation>()
+    val chats = mutableStateListOf<Chat>()
+
+    /** A contact that is new in this run and has no name yet. */
+    var toName by mutableStateOf<Conversation?>(null)
 
     /** Grows at each change of a message, thus a view loads its lines again. */
     var revision by mutableIntStateOf(0)
@@ -65,10 +85,11 @@ object Core {
     /** Whether the foreground service of the socket carrier runs. */
     private var carrierHolds = false
     private var lastTouchMs = 0L
-    private const val TOUCH_GAP_MS = 10_000L
     private var retryDelayMs = FIRST_RETRY_MS
+    private const val TOUCH_GAP_MS = 10_000L
     private const val FIRST_RETRY_MS = 2_000L
     private const val LAST_RETRY_MS = 30_000L
+    private const val STOPPED = 0
 
     /**
      * Opens the client under the passphrase. The first launch makes the
@@ -88,24 +109,27 @@ object Core {
                 opened.unlock(units)
                 handle = opened
                 // The store holds each contact, thus the list needs no network.
-                val stored = opened.conversations().map(::Conversation)
+                val stored = summaries(opened)
                 BuildNetwork.network(app)?.let(opened::connect)
                 drain(opened, app)
                 main.post {
-                    conversations.clear()
-                    conversations.addAll(stored)
+                    chats.clear()
+                    chats.addAll(stored)
                     phase = Phase.Open
                     // The user opened the client, thus a view is on the
                     // screen, and the platform permits the start.
                     DeliveryService.start(app)
                 }
             } catch (wrong: FfiException.WrongPassphrase) {
-                fail("The passphrase does not open the store.")
+                fail("That passphrase does not open this device.")
             } catch (other: FfiException) {
-                fail("The client did not open: ${other.javaClass.simpleName}.")
+                fail("The store did not open: ${other.javaClass.simpleName}.")
             }
         }
     }
+
+    /** Whether this device holds a store, thus the unlock view says so. */
+    fun hasStore(context: Context) = File(context.filesDir, "umbra.db").exists()
 
     private fun launch(app: Context, passphrase: List<UShort>): Handle {
         val database = File(app.filesDir, "umbra.db")
@@ -142,7 +166,7 @@ object Core {
             is FfiEvent.Offline -> {
                 online = false
                 if (event.cause.toInt() != STOPPED) {
-                    fault = "The network ended: ${cause(event.cause)}."
+                    fault = "No connection: ${cause(event.cause)}. UMBRA tries again."
                     retryLater(app)
                 }
             }
@@ -157,17 +181,25 @@ object Core {
                 // The link of this device served, or the link of a contact did.
                 invitation = null
                 val conversation = Conversation(event.conversation)
-                if (conversation !in conversations) conversations.add(conversation)
+                refreshChats { list ->
+                    val isNamed = list.any { it.conversation == conversation && it.name.isNotEmpty() }
+                    if (!isNamed) toName = conversation
+                }
             }
             is FfiEvent.Message -> {
                 revision++
+                refreshChats()
                 if (!isVisible) Notifier.message(app, Conversation(event.conversation))
             }
-            is FfiEvent.Delivery -> revision++
+            is FfiEvent.Delivery -> {
+                revision++
+                refreshChats()
+            }
             is FfiEvent.Locked -> {
                 online = false
                 invitation = null
-                conversations.clear()
+                toName = null
+                chats.clear()
                 phase = Phase.Locked
                 // A locked client holds no key that reads a queue, thus the
                 // carrier ends, and the user learns it.
@@ -181,20 +213,18 @@ object Core {
     }
 
     private fun cause(code: UByte): String = when (code.toInt()) {
-        1 -> "the dial of the guard failed"
-        2 -> "the link to the guard closed"
-        3 -> "a relay destroyed the circuit"
+        1 -> "the first relay did not answer"
+        2 -> "the link to the first relay closed"
+        3 -> "a relay ended the circuit"
         5 -> "the store took no batch"
         else -> "a fault in the client"
     }
 
-    private const val STOPPED = 0
-
     /**
      * Starts a new run after a run ended with a fault. Android closes the
      * sockets of an app that left the screen, thus a run starts while a view
-     * is on the screen only. The store holds each contact, and the new run
-     * continues them.
+     * is on the screen or the carrier runs. The store holds each contact, and
+     * the new run continues them.
      */
     private fun retryLater(app: Context) {
         val delay = retryDelayMs
@@ -213,7 +243,7 @@ object Core {
 
     /** The user acted, thus the idle time of the auto-lock starts again. */
     fun touched() {
-        val now = android.os.SystemClock.elapsedRealtime()
+        val now = SystemClock.elapsedRealtime()
         if (now - lastTouchMs < TOUCH_GAP_MS) return
         lastTouchMs = now
         call { it.touch() }
@@ -242,6 +272,18 @@ object Core {
     /** Accepts the link of a contact. A link that does not parse is a fault. */
     fun accept(link: String) = call { it.accept(link) }
 
+    /** Gives a contact a name that this device alone holds. */
+    fun setName(conversation: Conversation, name: String) = call { client ->
+        client.setContactName(conversation.id, name)
+        refreshChats()
+    }
+
+    /** The user looks at the conversation, thus its messages are seen. */
+    fun markRead(conversation: Conversation) = call { client ->
+        client.markRead(conversation.id)
+        refreshChats()
+    }
+
     /** Sends the text of a composer. This call overwrites `text`. */
     fun send(conversation: Conversation, text: CharArray) = call { client ->
         val units = text.map { it.code.toUShort() }
@@ -251,6 +293,7 @@ object Core {
             client.sendDraft(draft).destroy()
         }
         main.post { revision++ }
+        refreshChats()
     }
 
     /** Loads the lines of a conversation, and gives them on the main thread. */
@@ -265,13 +308,46 @@ object Core {
         main.post { onLoaded(lines) }
     }
 
+    /** Reads the list again, and gives it to `then` on the main thread. */
+    private fun refreshChats(then: (List<Chat>) -> Unit = {}) = call { client ->
+        val list = summaries(client)
+        main.post {
+            chats.clear()
+            chats.addAll(list)
+            then(list)
+        }
+    }
+
+    private fun summaries(client: Handle): List<Chat> = client.summaries().map { summary ->
+        val last = summary.lastMessage
+        val sink = CharSink()
+        var isOutgoing = false
+        last?.use {
+            // A record of a kind with no text gives no preview.
+            try {
+                client.msgRender(it, sink)
+                isOutgoing = client.msgInfo(it).outgoing
+            } catch (noText: FfiException) {
+                sink.chars = CharArray(0)
+            }
+        }
+        Chat(
+            conversation = Conversation(summary.conversation),
+            name = summary.name,
+            preview = sink.chars.takeIf { last != null },
+            isPreviewOutgoing = isOutgoing,
+            lastAtMs = summary.lastAtMs.toLong(),
+            unread = summary.unread.toInt(),
+        )
+    }
+
     private fun call(action: (Handle) -> Unit) {
         val client = handle ?: return
         worker.execute {
             try {
                 action(client)
             } catch (failure: FfiException) {
-                main.post { fault = "The call failed: ${failure.javaClass.simpleName}." }
+                main.post { fault = "That did not work: ${failure.javaClass.simpleName}." }
             }
         }
     }

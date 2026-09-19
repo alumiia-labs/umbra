@@ -1,14 +1,7 @@
 package org.umbra.app
 
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
-import android.os.PersistableBundle
-import android.text.InputType
-import android.text.TextUtils
-import android.view.inputmethod.EditorInfo
-import android.widget.EditText
-import android.widget.TextView
+import android.text.format.DateUtils
+import android.view.inputmethod.InputMethodManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -23,22 +16,20 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
-import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.Button
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -47,299 +38,399 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
+
+/** The views above the tabs. The list is a stack, and Back takes the top. */
+sealed interface Screen {
+    data object AddContact : Screen
+    data object YourInvitation : Screen
+    data object UseInvitation : Screen
+    data class Chat(val conversation: Conversation) : Screen
+}
+
+enum class Tab(val label: String, val icon: String) {
+    Chats("Chats", "comment"),
+    Contacts("Contacts", "user-group"),
+    Settings("Settings", "gear"),
+}
 
 @Composable
 fun UmbraApp() {
-    MaterialTheme(colorScheme = darkColorScheme()) {
-        Surface(Modifier.fillMaxSize()) {
+    UmbraTheme {
+        Surface(Modifier.fillMaxSize(), color = Palette.Surface) {
             Box(Modifier.safeDrawingPadding().imePadding()) {
-                var shown by remember { mutableStateOf<Conversation?>(null) }
-                // A conversation of a run that ended has no contact.
-                val current = shown?.takeIf { it in Core.conversations }
-                when {
-                    Core.phase != Core.Phase.Open -> UnlockScreen()
-                    current != null -> ChatScreen(current, onBack = { shown = null })
-                    else -> HomeScreen(onOpen = { shown = it })
+                if (Core.phase != Core.Phase.Open) {
+                    UnlockScreen()
+                } else {
+                    OpenApp()
                 }
             }
         }
     }
 }
 
-/**
- * A text field of the platform, and no composable field, because a
- * composable field holds its text in a `String`. The caller gets the text as
- * a `CharArray` that it overwrites, and the field is empty after that.
- */
 @Composable
-private fun PlatformField(
-    hint: String,
-    isPassphrase: Boolean,
-    actionLabel: String,
-    enabled: Boolean = true,
-    onSubmit: (CharArray) -> Unit,
-) {
-    var field by remember { mutableStateOf<EditText?>(null) }
-    val textColor = MaterialTheme.colorScheme.onSurface.toArgb()
-    val hintColor = MaterialTheme.colorScheme.onSurfaceVariant.toArgb()
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        AndroidView(
-            modifier = Modifier.weight(1f),
-            factory = { context ->
-                EditText(context).apply {
-                    this.hint = hint
-                    setTextColor(textColor)
-                    setHintTextColor(hintColor)
-                    // IMP-057: the input method learns nothing from this field.
-                    imeOptions = EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING or
-                        EditorInfo.IME_FLAG_NO_EXTRACT_UI
-                    inputType = if (isPassphrase) {
-                        InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-                    } else {
-                        InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or
-                            InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
-                    }
-                    field = this
-                }
+private fun OpenApp() {
+    var tab by remember { mutableStateOf(Tab.Chats) }
+    var stack by remember { mutableStateOf(listOf<Screen>()) }
+    val push: (Screen) -> Unit = { stack = stack + it }
+    val pop: () -> Unit = { stack = stack.dropLast(1) }
+    BackHandler(enabled = stack.isNotEmpty(), onBack = pop)
+    // The keyboard of one view has no field in the next one.
+    HideKeyboardOn(stack.lastOrNull())
+
+    // A contact that is new takes its name before each other view.
+    val unnamed = Core.toName
+    if (unnamed != null) {
+        NameContactScreen(
+            unnamed,
+            onDone = {
+                Core.toName = null
+                stack = listOf(Screen.Chat(unnamed))
             },
         )
-        Button(
-            enabled = enabled,
-            modifier = Modifier.padding(start = 8.dp),
-            onClick = {
-                val editable = field?.editableText ?: return@Button
-                if (editable.isEmpty()) return@Button
-                val chars = CharArray(editable.length)
-                TextUtils.getChars(editable, 0, editable.length, chars, 0)
-                editable.clear()
-                onSubmit(chars)
-            },
-        ) { Text(actionLabel) }
+        return
+    }
+    when (val top = stack.lastOrNull()) {
+        null -> TabsScreen(tab, onTab = { tab = it }, push)
+        Screen.AddContact -> AddContactScreen(pop, push)
+        Screen.YourInvitation -> YourInvitationScreen(pop)
+        Screen.UseInvitation -> UseInvitationScreen(pop)
+        is Screen.Chat -> {
+            val chat = Core.chats.firstOrNull { it.conversation == top.conversation }
+            // The list loads again after a lock or a new run.
+            if (chat == null) LaunchedEffect(Unit) { pop() } else ChatScreen(chat, pop)
+        }
     }
 }
 
-/** The text of a message, which goes from a `CharArray` to the platform view. */
+/** Closes the keyboard of the platform when `key` changes. */
 @Composable
-private fun PlatformText(chars: CharArray, color: Color) {
-    val argb = color.toArgb()
-    AndroidView(
-        factory = { context -> TextView(context).apply { textSize = 16f } },
-        update = { view ->
-            view.setTextColor(argb)
-            view.setText(chars, 0, chars.size)
-        },
-    )
+private fun HideKeyboardOn(key: Any?) {
+    val view = LocalView.current
+    LaunchedEffect(key) {
+        val keyboard = view.context.getSystemService(InputMethodManager::class.java)
+        keyboard.hideSoftInputFromWindow(view.windowToken, 0)
+    }
 }
 
 @Composable
 private fun UnlockScreen() {
     val context = LocalContext.current
+    val field = rememberPlatformField()
+    val isFirst = remember { !Core.hasStore(context) }
     Column(
-        modifier = Modifier.fillMaxSize().padding(24.dp),
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
         verticalArrangement = Arrangement.Center,
     ) {
-        Text("UMBRA", style = MaterialTheme.typography.headlineLarge)
-        Spacer(Modifier.height(8.dp))
-        Text(
-            "The passphrase opens the store of this device. The first launch sets it.",
-            style = MaterialTheme.typography.bodyMedium,
-        )
+        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { HeroIcon("lock") }
         Spacer(Modifier.height(24.dp))
-        if (Core.phase == Core.Phase.Opening) {
-            CircularProgressIndicator()
+        if (isFirst) {
+            Headline(
+                "Protect this device.",
+                "Choose a passphrase. It opens your conversations on this device, and " +
+                    "nobody can reset it for you.",
+            )
         } else {
-            PlatformField(hint = "Passphrase", isPassphrase = true, actionLabel = "Open") {
-                Core.open(context, it)
+            Headline("Welcome back.", "Enter your passphrase to open your conversations.")
+        }
+        Spacer(Modifier.height(20.dp))
+        if (Core.phase == Core.Phase.Opening) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 3.dp)
+                Spacer(Modifier.width(12.dp))
+                Text("Opening the store. This takes a few seconds by design.")
+            }
+        } else {
+            FramedPlatformField(field, "Passphrase", isPassphrase = true)
+            Spacer(Modifier.height(12.dp))
+            PrimaryButton(if (isFirst) "Create and open" else "Unlock") {
+                field.take()?.let { Core.open(context, it) }
             }
         }
         Core.fault?.let {
             Spacer(Modifier.height(16.dp))
-            Text(it, color = MaterialTheme.colorScheme.error)
+            Note(it, isError = true)
         }
         BuildNetwork.Panel()
     }
 }
 
 @Composable
-private fun HomeScreen(onOpen: (Conversation) -> Unit) {
-    val context = LocalContext.current
-    Column(Modifier.fillMaxSize().padding(16.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                if (Core.online) "Online" else "No circuit",
-                modifier = Modifier.weight(1f),
-                style = MaterialTheme.typography.titleMedium,
-            )
-            if (!Core.online) {
-                TextButton(onClick = { Core.connect(context) }) { Text("Connect") }
+private fun TabsScreen(tab: Tab, onTab: (Tab) -> Unit, push: (Screen) -> Unit) {
+    Column(Modifier.fillMaxSize()) {
+        BrandBar()
+        Box(Modifier.weight(1f)) {
+            when (tab) {
+                Tab.Chats -> ChatsTab(push)
+                Tab.Contacts -> ContactsTab(push)
+                Tab.Settings -> SettingsTab()
             }
-            TextButton(onClick = { Core.lock() }) { Text("Lock") }
+            if (tab != Tab.Settings) {
+                Box(
+                    Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(20.dp)
+                        .size(56.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(Palette.Container)
+                        .clickable(role = Role.Button, onClickLabel = "Add a contact") {
+                            push(Screen.AddContact)
+                        },
+                    contentAlignment = Alignment.Center,
+                ) { FaIcon("user-plus", label = "Add a contact", tint = Palette.Action) }
+            }
         }
-        Core.fault?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-        Spacer(Modifier.height(12.dp))
-        InvitePanel()
-        Spacer(Modifier.height(12.dp))
-        HorizontalDivider()
-        Text(
-            "Conversations",
-            modifier = Modifier.padding(vertical = 12.dp),
-            style = MaterialTheme.typography.titleSmall,
-        )
-        if (Core.conversations.isEmpty()) {
+        Row(Modifier.fillMaxWidth().background(Palette.Incoming).padding(vertical = 8.dp)) {
+            for (entry in Tab.entries) {
+                val isSelected = entry == tab
+                Column(
+                    Modifier
+                        .weight(1f)
+                        .clickable(role = Role.Tab) { onTab(entry) }
+                        .padding(vertical = 4.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Box(
+                        Modifier
+                            .clip(CircleShape)
+                            .background(if (isSelected) Palette.Container else Color.Transparent)
+                            .padding(horizontal = 18.dp, vertical = 5.dp),
+                    ) { FaIcon(entry.icon, size = 18.dp, tint = Palette.Text) }
+                    Text(
+                        entry.label,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TabTitle(title: String) {
+    Text(
+        title,
+        style = MaterialTheme.typography.headlineMedium,
+        modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 20.dp, bottom = 12.dp),
+    )
+}
+
+@Composable
+private fun ConnectionNote() {
+    val context = LocalContext.current
+    val fault = Core.fault
+    when {
+        fault != null -> Box(Modifier.padding(horizontal = 20.dp, vertical = 6.dp)) {
+            Note(fault, isError = true)
+        }
+        !Core.online -> Row(
+            Modifier.padding(horizontal = 20.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             Text(
-                "No contact yet. Make an invitation, or accept one.",
+                "Connecting through three relays.",
                 style = MaterialTheme.typography.bodySmall,
+                color = Palette.TextSecondary,
+                modifier = Modifier.weight(1f),
             )
+            TextButton(onClick = { Core.connect(context) }) { Text("Try now") }
+        }
+    }
+}
+
+@Composable
+private fun ChatsTab(push: (Screen) -> Unit) {
+    Column(Modifier.fillMaxSize()) {
+        TabTitle("Chats")
+        ConnectionNote()
+        val withMessages = Core.chats.filter { it.preview != null }
+        if (withMessages.isEmpty()) {
+            EmptyState(
+                "No conversations yet.",
+                "Add a contact with a one-time invitation. No phone number and no " +
+                    "public name is needed.",
+            )
+            return
         }
         LazyColumn {
-            items(Core.conversations, key = { it.label }) { conversation ->
-                Text(
-                    "Contact ${conversation.label}",
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { onOpen(conversation) }
-                        .padding(vertical = 14.dp),
-                )
-                HorizontalDivider()
+            items(withMessages, key = { it.conversation.label }) { chat ->
+                ChatRow(chat) { push(Screen.Chat(chat.conversation)) }
             }
         }
     }
 }
 
 @Composable
-private fun InvitePanel() {
-    val context = LocalContext.current
-    var pasted by remember { mutableStateOf("") }
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Button(enabled = Core.online, onClick = { Core.invite() }) { Text("Invite") }
-        Core.invitation?.let { link ->
-            OutlinedButton(onClick = { copySensitive(context, link) }) {
-                Text("Copy the link")
-            }
-        }
-    }
-    Core.invitation?.let { link ->
-        Text(
-            "This link works one time, for 14 days.",
-            style = MaterialTheme.typography.bodySmall,
-            modifier = Modifier.padding(top = 8.dp),
-        )
-        Text(
-            link,
-            maxLines = 3,
-            overflow = TextOverflow.Ellipsis,
-            fontFamily = FontFamily.Monospace,
-            style = MaterialTheme.typography.bodySmall,
-        )
-    }
-    Spacer(Modifier.height(12.dp))
-    // An invitation is no message text, thus a composable field holds it.
-    OutlinedTextField(
-        value = pasted,
-        onValueChange = { pasted = it },
-        label = { Text("The link of a contact") },
-        // The input method changes no character of the pasted value.
-        keyboardOptions = KeyboardOptions(
-            keyboardType = KeyboardType.Password,
-            autoCorrectEnabled = false,
-        ),
-        maxLines = 3,
-        modifier = Modifier.fillMaxWidth(),
-    )
-    Button(
-        enabled = Core.online && pasted.isNotBlank(),
-        modifier = Modifier.padding(top = 8.dp),
-        onClick = {
-            Core.accept(pasted)
-            pasted = ""
-        },
-    ) { Text("Accept") }
-}
-
-@Composable
-private fun ChatScreen(conversation: Conversation, onBack: () -> Unit) {
-    BackHandler(onBack = onBack)
-    var lines by remember { mutableStateOf(emptyList<Line>()) }
-    val listState = rememberLazyListState()
-    LaunchedEffect(conversation, Core.revision) {
-        Core.load(conversation) { lines = it }
-    }
-    LaunchedEffect(lines.size) {
-        if (lines.isNotEmpty()) listState.scrollToItem(lines.lastIndex)
-    }
-    Column(Modifier.fillMaxSize()) {
-        Row(Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = onBack) { Text("Back") }
-            Text("Contact ${conversation.label}", style = MaterialTheme.typography.titleMedium)
-        }
-        HorizontalDivider()
-        LazyColumn(
-            state = listState,
-            modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 12.dp),
-        ) {
-            items(lines) { line -> Bubble(line) }
-        }
-        Box(Modifier.padding(8.dp)) {
-            PlatformField(
-                hint = "Message",
-                isPassphrase = false,
-                actionLabel = "Send",
-                // With no network the record waits in the store.
-            ) { Core.send(conversation, it) }
-        }
-    }
-}
-
-@Composable
-private fun Bubble(line: Line) {
-    val outgoing = line.info.outgoing
-    val colors = MaterialTheme.colorScheme
+private fun ChatRow(chat: Chat, onOpen: () -> Unit) {
     Row(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-        horizontalArrangement = if (outgoing) Arrangement.End else Arrangement.Start,
+        Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onOpen)
+            .padding(horizontal = 20.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Column(
-            modifier = Modifier
-                .widthIn(max = 300.dp)
-                .background(
-                    if (outgoing) colors.primaryContainer else colors.surfaceVariant,
-                    RoundedCornerShape(14.dp),
-                )
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-        ) {
-            PlatformText(
-                line.text,
-                if (outgoing) colors.onPrimaryContainer else colors.onSurfaceVariant,
+        Avatar(chat)
+        Spacer(Modifier.width(14.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                chat.title,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
-            if (outgoing) {
-                Text(deliveryLabel(line.info.delivery), style = MaterialTheme.typography.labelSmall)
+            chat.preview?.let {
+                PlatformText(
+                    it,
+                    Palette.TextSecondary,
+                    modifier = Modifier.subline(),
+                    sizeSp = 13f,
+                    maxLines = 1,
+                    prefix = if (chat.isPreviewOutgoing) "You: " else "",
+                )
+            }
+        }
+        Spacer(Modifier.width(8.dp))
+        Column(horizontalAlignment = Alignment.End) {
+            Text(
+                timeLabel(LocalContext.current, chat.lastAtMs),
+                style = MaterialTheme.typography.labelSmall,
+                color = Palette.TextSecondary,
+            )
+            if (chat.unread > 0) {
+                Spacer(Modifier.height(4.dp))
+                Box(
+                    Modifier
+                        .clip(CircleShape)
+                        .background(Palette.Action)
+                        .padding(horizontal = 7.dp, vertical = 2.dp),
+                ) {
+                    Text(
+                        "${chat.unread}",
+                        color = Color.White,
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                }
             }
         }
     }
 }
 
-/** The closed list of Part 15 §15.9.1. */
-private fun deliveryLabel(state: UByte): String = when (state.toInt()) {
-    0 -> "Queued"
-    1 -> "Accepted by the relay"
-    2 -> "Delivered"
-    3 -> "Read"
-    else -> "Failed"
+@Composable
+private fun ContactsTab(push: (Screen) -> Unit) {
+    Column(Modifier.fillMaxSize()) {
+        TabTitle("Contacts")
+        if (Core.chats.isEmpty()) {
+            EmptyState("No contacts yet.", "An invitation works one time, for one person.")
+            return
+        }
+        val byName = Core.chats.sortedBy { it.title.lowercase() }
+        LazyColumn {
+            items(byName, key = { it.conversation.label }) { chat ->
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable { push(Screen.Chat(chat.conversation)) }
+                        .padding(horizontal = 20.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Avatar(chat)
+                    Spacer(Modifier.width(14.dp))
+                    Column {
+                        Text(chat.title, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            if (chat.name.isEmpty()) "No name yet" else "Name only you see",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Palette.TextSecondary,
+                            modifier = Modifier.subline(),
+                        )
+                    }
+                }
+            }
+        }
+    }
 }
 
-/** IMP-056: the clipboard preview of the platform hides a sensitive clip. */
-private fun copySensitive(context: Context, text: String) {
-    val clip = ClipData.newPlainText("UMBRA invitation", text)
-    clip.description.extras = PersistableBundle().apply {
-        putBoolean("android.content.extra.IS_SENSITIVE", true)
+@Composable
+private fun EmptyState(title: String, body: String) {
+    Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 24.dp)) {
+        Text(title, style = MaterialTheme.typography.titleMedium)
+        Spacer(Modifier.height(6.dp))
+        Text(body, style = MaterialTheme.typography.bodyMedium, color = Palette.TextSecondary)
     }
-    context.getSystemService(ClipboardManager::class.java).setPrimaryClip(clip)
+}
+
+@Composable
+private fun SettingsTab() {
+    val context = LocalContext.current
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+        TabTitle("Settings")
+        SettingRow("lock", "App lock", "Locks after 15 minutes with no action. Tap to lock now.") {
+            Core.lock()
+        }
+        SettingRow(
+            "signal",
+            "Connection",
+            if (Core.online) "Connected through three relays" else "Not connected. Tap to try now.",
+        ) { Core.connect(context) }
+        SettingRow(
+            "bell",
+            "Notifications",
+            "Alerts show no text and no name. They arrive until the app locks.",
+            onClick = null,
+        )
+        SettingRow(
+            "shield-halved",
+            "About this build",
+            "Test build. Contacts and messages stay on this device. " +
+                "Icons by Font Awesome, CC BY 4.0.",
+            onClick = null,
+        )
+    }
+}
+
+@Composable
+private fun SettingRow(icon: String, title: String, detail: String, onClick: (() -> Unit)?) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .padding(horizontal = 20.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        FaIcon(icon, size = 20.dp, tint = Palette.Text)
+        Spacer(Modifier.width(18.dp))
+        Column {
+            Text(title)
+            Text(
+                detail,
+                style = MaterialTheme.typography.bodySmall,
+                color = Palette.TextSecondary,
+                modifier = Modifier.subline(),
+            )
+        }
+    }
+    HorizontalDivider(Modifier.padding(start = 58.dp, end = 20.dp), color = Palette.Divider)
+}
+
+/**
+ * The time of a list row: the clock today, and the day before that. The
+ * platform reads the 12 or 24 hour setting of the user from the context.
+ */
+fun timeLabel(context: android.content.Context, atMs: Long): String {
+    if (atMs == 0L) return ""
+    val flags = if (DateUtils.isToday(atMs)) {
+        DateUtils.FORMAT_SHOW_TIME
+    } else {
+        DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_ABBREV_MONTH
+    }
+    return DateUtils.formatDateTime(context, atMs, flags)
 }

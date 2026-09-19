@@ -485,6 +485,17 @@ that draft is dropped, and it MUST do that whether the send succeeded or failed.
   of §15.6.4 under the store key, and it MUST NOT be a queue identifier. Thus
   the owner column of a message row names no queue to a party that reads the
   file and holds no `K_store`.
+- **[IMP-138]** The name that a user gives a contact MUST stay on the devices
+  of that user, and a client MUST NOT send it to a peer or to a relay. It is a
+  label of the user and no message text, thus it crosses the surface as a
+  string. The preview of a conversation list is message text, thus it goes
+  into a sink under `IMP-037`. `summaries` gives the handle of the newest
+  message and no text.
+- **[IMP-139]** A client MUST count a received message as not seen while its
+  store time is above the read marker of its conversation, and it MUST move
+  that marker when the user looks at the conversation and at no other time.
+  The marker sends nothing: a read receipt is a record of Part 6 §6.6.9 with
+  its own setting.
 - The bundle of an invitation crosses as bytes in an event and in `accept`.
   The bundle holds the send key and the end-to-end key of one queue (Part 6
   §6.6.10), thus this is an exception to `IMP-037`. The platform shows the
@@ -731,7 +742,8 @@ flight 1, with its one-time prekey.
 | `0x05` | Verifications | One verification of Part 4 §4.5 |
 | `0x06` | Local identity | The root seed |
 | `0x07` | Send queue | One record that waits for the send path (`IMP-126`) |
-| `0x08` | Invitations | One invitation that waits: the `RecipientId` of its queue, the bundle, the queue end, and the prekey seed |
+| `0x08` | Invitations | One invitation that waits: the `RecipientId` of its queue, the fragment of its link or its bundle, the queue end, and the prekey seed |
+| `0x09` | Conversations | What this device alone knows of one conversation: the time up to which the user saw its messages, and the name that the user gave the contact |
 
 The stored form of a row is local to one device, and no peer reads it. This
 part gives it no byte layout. **[IMP-130]** A stored object MUST start with a

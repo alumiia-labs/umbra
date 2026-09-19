@@ -4,6 +4,7 @@ kotlin = "2.4.20"
 composeBom = "2026.09.00"
 activityCompose = "1.13.0"
 jna = "5.19.1"
+zxing = "3.5.4"
 
 [libraries]
 androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
@@ -11,6 +12,7 @@ androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", versi
 androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3" }
 androidx-compose-ui = { group = "androidx.compose.ui", name = "ui" }
 jna = { group = "net.java.dev.jna", name = "jna", version.ref = "jna" }
+zxing-core = { group = "com.google.zxing", name = "core", version.ref = "zxing" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

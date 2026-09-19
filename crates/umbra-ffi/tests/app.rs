@@ -378,6 +378,26 @@ fn two_apps_meet_and_talk_through_the_exported_surface() {
     let (conversation, message) = wait_for_message(&bob);
     assert_eq!(conversation, bob_conversation);
     assert_eq!(rendered(&bob, message), "hello bob");
+    // The list of Bob shows one conversation with one message that he did
+    // not see, under the name that he gave. The name and the marker live
+    // in his store alone.
+    bob.set_contact_name(bob_conversation.clone(), "  Alice  ".into())
+        .unwrap();
+    let listed = bob.summaries().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].name, "Alice");
+    assert_eq!(listed[0].unread, 1);
+    assert_eq!(
+        rendered(&bob, listed[0].last_message.clone().unwrap()),
+        "hello bob"
+    );
+    bob.mark_read(bob_conversation.clone()).unwrap();
+    assert_eq!(bob.summaries().unwrap()[0].unread, 0);
+    assert!(bob
+        .set_contact_name(bob_conversation.clone(), "x".repeat(121))
+        .is_err());
+    assert_eq!(alice.summaries().unwrap()[0].name, "");
+
     // The view of Bob holds the two messages in the order of their store.
     let shown = bob.messages(bob_conversation.clone()).unwrap();
     assert_eq!(shown.len(), 2);

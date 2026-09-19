@@ -264,6 +264,24 @@ pub struct MsgInfo {
     pub stored_at_ms: u64,
 }
 
+/// What a conversation list shows for one conversation.
+#[derive(uniffi::Record)]
+pub struct Summary {
+    /// The conversation.
+    pub conversation: Vec<u8>,
+    /// The name that the user of this device gave the contact, or an empty
+    /// string. It is a label of the user and no message text, thus it
+    /// crosses as a string.
+    pub name: String,
+    /// The newest message, or none. Its text goes into a sink, as each
+    /// message text does (`IMP-037`).
+    pub last_message: Option<Arc<MsgHandle>>,
+    /// The store time of the newest message, in milliseconds, or zero.
+    pub last_at_ms: u64,
+    /// The received messages that the user did not see yet.
+    pub unread: u32,
+}
+
 /// One event of the stream.
 #[derive(uniffi::Enum)]
 pub enum FfiEvent {
@@ -692,6 +710,40 @@ impl Handle {
             .into_iter()
             .map(|conversation| conversation.0.to_vec())
             .collect())
+    }
+
+    /// One summary for each contact, the newest conversation first.
+    pub fn summaries(&self) -> Result<Vec<Summary>, FfiError> {
+        let found = locked(&self.inner).client.summaries()?;
+        Ok(found
+            .into_iter()
+            .map(|summary| Summary {
+                conversation: summary.conversation.0.to_vec(),
+                name: summary.name,
+                last_message: summary.last.map(|last| Arc::new(MsgHandle(last))),
+                last_at_ms: summary.last_at_ms,
+                unread: summary.unread,
+            })
+            .collect())
+    }
+
+    /// Gives a contact a name on this device. No peer and no relay learns
+    /// it. An empty name takes the name away.
+    pub fn set_contact_name(&self, conversation: Vec<u8>, name: String) -> Result<(), FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        let mut inner = locked(&self.inner);
+        Ok(inner
+            .client
+            .set_contact_name(conversation, &name, &mut OsRng)?)
+    }
+
+    /// The user saw each message of the conversation that the store holds.
+    pub fn mark_read(&self, conversation: Vec<u8>) -> Result<(), FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        let mut inner = locked(&self.inner);
+        Ok(inner
+            .client
+            .mark_read(conversation, unix_now_ms(), &mut OsRng)?)
     }
 
     /// An empty draft for one conversation.

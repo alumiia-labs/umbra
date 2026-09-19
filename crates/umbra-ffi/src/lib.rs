@@ -94,6 +94,25 @@ pub struct MessageInfo {
     pub stored_at_ms: u64,
 }
 
+/// The longest local name of a contact, in bytes of UTF-8.
+pub const CONTACT_NAME_MAX: usize = 120;
+
+/// What a conversation list shows for one conversation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversationSummary {
+    /// The conversation.
+    pub conversation: ConversationId,
+    /// The name that the user of this device gave the contact, or an empty
+    /// string. No peer and no relay learns it.
+    pub name: String,
+    /// The newest message, or none.
+    pub last: Option<MsgRef>,
+    /// The store time of the newest message, in milliseconds, or zero.
+    pub last_at_ms: u64,
+    /// The received messages that the user did not see yet.
+    pub unread: u32,
+}
+
 /// One event of the stream from Rust to the platform. An event carries a
 /// handle and no content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

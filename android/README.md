@@ -23,6 +23,23 @@ cd android && ./gradlew :app:assembleDebug
 `app/src/main/kotlin-generated`. Git ignores the two, because a build makes
 them again. Run the script again after each change of `umbra-ffi`.
 
+## Icons
+
+The app reads its icons at run time from SVG files of Font Awesome. The
+repository holds the Free set in `app/src/main/assets/fa`, under CC BY 4.0. An
+icon of `app/src/main/assets/fa-pro` wins over the same name in the Free set.
+Git ignores that folder, because a Pro file must not sit in a public
+repository.
+
+```sh
+# The owner of a Pro license, with the unpacked "Pro for Web" download:
+python scripts/fa-icons.py path/to/fontawesome-pro-web --pro light
+```
+
+The mockups of `design/mockups/light` use a line look, which is the `light`
+style of Pro. `scripts/fa-icons.py` holds the list of the icons that the app
+names, and a name that a package does not hold fails the script.
+
 ## Run against a local network
 
 ```sh
@@ -59,8 +76,13 @@ emulator is the clipboard of the machine.
 - A handshake between its flight 1 and its flight 3 has no stored form. A run
   that ends inside those seconds loses that one handshake.
 - The invitation is a link of 91 characters after `#`, which works one time.
-  The user copies it as text. The QR code, the share sheet, and the App Link
-  of `IDN-123` with its invitation host are open.
+  The app shows it as a QR code, shares it through the share sheet, and copies
+  it as sensitive text. The scan of a QR code, and the App Link of `IDN-123`
+  with its invitation host, are open.
+- The interface follows `design/mockups/light` for the flows that exist:
+  unlock, chats, contacts, add contact, invitation, use invitation, name a
+  contact, conversation, settings. It has three tabs. Communities, groups,
+  profiles, devices, and recovery have no view yet.
 - The wrapping key of the keystore asks for no biometric and no device
   credential at each use. That step needs a `BiometricPrompt` around the
   keyed function.

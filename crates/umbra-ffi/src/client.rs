@@ -21,7 +21,10 @@ use umbra_crypto::{hierarchy::RootIdentity, rand_core::CryptoRng, secret::Secret
 use umbra_wire::app::{msg_ref, AppKind, AppMessage, Channel};
 use zeroize::Zeroizing;
 
-use crate::{draft::Draft, ConversationId, Delivery, Error, Event, MessageInfo, MsgRef, Sink};
+use crate::{
+    draft::Draft, ConversationId, ConversationSummary, Delivery, Error, Event, MessageInfo, MsgRef,
+    Sink, CONTACT_NAME_MAX,
+};
 
 const ROOT_KEY: &[u8] = b"root";
 const OUTGOING: u8 = 1;
@@ -42,6 +45,13 @@ const OUTBOX: TableId = TableId(0x07);
 /// the `RecipientId` of the queue and then the stored form of the node,
 /// with the one-time prekey in it (Part 5 rule `CRY-089`).
 const INVITATION: TableId = TableId(0x08);
+/// The table of what this device alone knows of a conversation: the time
+/// up to which the user saw its messages, and the name that the user gave
+/// the contact. A row holds the conversation, the time, and the name.
+const CONVERSATION: TableId = TableId(0x09);
+const READ_UP_TO: core::ops::Range<usize> = 16..24;
+const CONVERSATION_PREFIX: usize = 16 + 8;
+
 /// The bytes of a contact row and of an invitation row before the stored
 /// form: the `RecipientId` of the queue.
 const QUEUE_ID_LEN: usize = 32;
@@ -411,6 +421,110 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .collect())
     }
 
+    /// The read marker and the local name of a conversation. A
+    /// conversation with no row has the marker zero and no name.
+    fn conversation_meta(&self, conversation: ConversationId) -> Result<(u64, String), Error> {
+        let store = &self.open_ref()?.store;
+        let row = store.row_id(CONVERSATION, &conversation.0);
+        let Some(plain) = store.get(CONVERSATION, &row)? else {
+            return Ok((0, String::new()));
+        };
+        // IMP-121: the plaintext names its owner.
+        if plain.get(..16) != Some(conversation.0.as_slice()) {
+            return Err(Error::Integrity);
+        }
+        let marker: [u8; 8] = plain
+            .get(READ_UP_TO)
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or(Error::Integrity)?;
+        let name = plain.get(CONVERSATION_PREFIX..).ok_or(Error::Integrity)?;
+        let name = core::str::from_utf8(name).map_err(|_| Error::Integrity)?;
+        Ok((u64::from_be_bytes(marker), name.to_owned()))
+    }
+
+    fn put_conversation_meta<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        read_up_to: u64,
+        name: &str,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let open = self.open_mut()?;
+        let row = open.store.row_id(CONVERSATION, &conversation.0);
+        let mut plain = Vec::with_capacity(CONVERSATION_PREFIX.saturating_add(name.len()));
+        plain.extend_from_slice(&conversation.0);
+        plain.extend_from_slice(&read_up_to.to_be_bytes());
+        plain.extend_from_slice(name.as_bytes());
+        let mut batch = open.store.begin();
+        batch.put(CONVERSATION, row, None, &plain, rng)?;
+        Ok(batch.commit()?)
+    }
+
+    /// Gives a contact a name on this device. No peer and no relay learns
+    /// it. An empty name takes the name away.
+    pub fn set_contact_name<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        name: &str,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let name = name.trim();
+        if name.len() > CONTACT_NAME_MAX {
+            return Err(Error::TooLong);
+        }
+        let (read_up_to, _) = self.conversation_meta(conversation)?;
+        self.put_conversation_meta(conversation, read_up_to, name, rng)
+    }
+
+    /// The user saw each message of the conversation that the store holds
+    /// at `now_ms`.
+    pub fn mark_read<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let (read_up_to, name) = self.conversation_meta(conversation)?;
+        if now_ms <= read_up_to {
+            return Ok(());
+        }
+        self.put_conversation_meta(conversation, now_ms, &name, rng)?;
+        self.auto_lock.touch(now_ms / 1_000);
+        Ok(())
+    }
+
+    /// One summary for each contact, the newest conversation first. The
+    /// list needs no network.
+    pub fn summaries(&self) -> Result<Vec<ConversationSummary>, Error> {
+        let store = &self.open_ref()?.store;
+        let mut out = Vec::new();
+        for conversation in self.conversations()? {
+            let (read_up_to, name) = self.conversation_meta(conversation)?;
+            let mut last: Option<(u64, u64, RowId)> = None;
+            let mut unread = 0u32;
+            for (row, plain) in store.list(TableId::MESSAGE, Some(&conversation.0))? {
+                let plain = Zeroizing::new(plain);
+                let info = info_of(&plain)?;
+                if !info.outgoing && info.stored_at_ms > read_up_to {
+                    unread = unread.saturating_add(1);
+                }
+                let key = (info.stored_at_ms, info.sent_at_ms, row);
+                if last.is_none_or(|newest| key > newest) {
+                    last = Some(key);
+                }
+            }
+            out.push(ConversationSummary {
+                conversation,
+                name,
+                last: last.map(|(_, _, row)| MsgRef(row)),
+                last_at_ms: last.map_or(0, |(stored_at, _, _)| stored_at),
+                unread,
+            });
+        }
+        out.sort_by_key(|summary| core::cmp::Reverse(summary.last_at_ms));
+        Ok(out)
+    }
+
     /// Puts each record that waits in the store back into the send queue.
     /// A run of the network that ended took records that no relay
     /// accepted, and the next run sends them again under their `msg_id`.
@@ -677,6 +791,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             TableId::CONTACT,
             OUTBOX,
             INVITATION,
+            CONVERSATION,
         ];
         if tables.iter().any(|table| open.store.audit(*table).is_err()) {
             self.events.push_back(Event::IntegrityFault);

@@ -7,3 +7,5 @@ local.properties
 # scripts/android.sh makes these two again.
 app/src/main/jniLibs/
 app/src/main/kotlin-generated/
+# A Pro icon file must not sit in a public repository.
+app/src/main/assets/fa-pro/

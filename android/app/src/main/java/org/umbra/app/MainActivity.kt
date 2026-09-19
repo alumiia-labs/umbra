@@ -8,6 +8,7 @@ import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.widget.FrameLayout
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.platform.ComposeView
@@ -19,7 +20,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        // The app has one light theme, thus the bars take dark icons in each
+        // mode of the system.
+        val clear = Color.TRANSPARENT
+        enableEdgeToEdge(SystemBarStyle.light(clear, clear), SystemBarStyle.light(clear, clear))
         Notifier.makeChannels(this)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             // With no permission the app shows no alert, and it takes each
@@ -32,7 +36,7 @@ class MainActivity : ComponentActivity() {
         }
         val content = ComposeView(this).apply { setContent { UmbraApp() } }
         cover = View(this).apply {
-            setBackgroundColor(Color.BLACK)
+            setBackgroundColor(getColor(R.color.surface))
             visibility = View.GONE
         }
         // The cover is a platform view and no composable, because the

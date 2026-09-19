@@ -1,4 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.Umbra" parent="android:Theme.Material.NoActionBar" />
+    <style name="Theme.Umbra" parent="android:Theme.Material.Light.NoActionBar">
+        <!-- The ground of `design/mockups/light`, before the first frame. -->
+        <item name="android:windowBackground">@color/surface</item>
+    </style>
 </resources>

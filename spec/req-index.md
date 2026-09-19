@@ -79,9 +79,9 @@ each column when a crate implements the requirement and a test covers it.
 | `COM` | 299 | 96 | 0 | 0 | 5 | **400** |
 | `ATT` | 134 | 46 | 1 | 0 | 2 | **183** |
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
-| `IMP` | 88 | 37 | 0 | 0 | 1 | **126** |
+| `IMP` | 89 | 38 | 0 | 0 | 1 | **128** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2136 | 694 | 7 | 0 | 51 | **2888** |
+| **All** | 2137 | 695 | 7 | 0 | 51 | **2890** |
 
 ## SCP — Scope and Conventions
 
@@ -3054,6 +3054,8 @@ Source: `spec/15-implementation.md`
 | `IMP-135` | §15.6.4 | MUST NOT | (unstated) | A record that arrives a second time at or below the stored cursor, or at a stored sequence number above it, MUST NOT reach the ratchet. |  |  |
 | `IMP-136` | §15.6.4 | MUST | A client | A client MUST delete the row of an invitation in the batch that follows the flight 1 that consumed its prekey, before flight 2 leaves. |  |  |
 | `IMP-137` | §15.6.4 | MUST | A record that waits in the send queue at the start of a run | A record that waits in the send queue at the start of a run MUST go again under its `msg_id`. |  |  |
+| `IMP-138` | §15.6.1 | MUST NOT | (unstated) | The name that a user gives a contact MUST stay on the devices of that user, and a client MUST NOT send it to a peer or to a relay. |  |  |
+| `IMP-139` | §15.6.1 | MUST | A client | A client MUST count a received message as not seen while its store time is above the read marker of its conversation, and it MUST move that marker when the user looks at the conversation and at no other time. |  |  |
 
 ## SEC — Security Considerations
 
