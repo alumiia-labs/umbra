@@ -1,0 +1,37 @@
+[package]
+name = "umbra-ffi"
+description = "The coarse-grained client surface of the UMBRA protocol for Android"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+# The Android build adds the shared library with
+# `cargo rustc -p umbra-ffi --features bindings,sqlite --crate-type cdylib`.
+# A cdylib in this list would make each cross build of the workspace need
+# the linker of the NDK.
+crate-type = ["lib"]
+
+[features]
+# The UniFFI scaffolding of Part 15 §15.6.1. It is off by default, thus the
+# client core builds and tests with no binding generator in the graph.
+bindings = ["dep:uniffi", "dep:getrandom", "sqlite"]
+# The SQLite backend of Part 15 §15.6.4 over rusqlite with the bundled
+# library, which builds C code.
+sqlite = ["dep:rusqlite"]
+
+[dependencies]
+umbra-crypto = { version = "0.1.0", path = "../umbra-crypto" }
+umbra-wire = { version = "0.1.0", path = "../umbra-wire" }
+umbra-core = { version = "0.1.0", path = "../umbra-core" }
+zeroize = { version = "1", default-features = false, features = ["alloc"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+uniffi = { version = "=0.32.1", default-features = false, optional = true }
+getrandom = { version = "0.4", optional = true }
+rusqlite = { version = "0.40", default-features = false, features = ["bundled"], optional = true }

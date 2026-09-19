@@ -31,6 +31,12 @@ step "relay server, host only"
 cargo clippy -p umbra-relay --features native --all-targets -- -D warnings
 cargo test -p umbra-relay --features native
 
+step "client surface, host only"
+# The SQLite library and the UniFFI scaffolding build on the host. The cross
+# builds below take the client core alone.
+cargo clippy -p umbra-ffi --features bindings --all-targets -- -D warnings
+cargo test -p umbra-ffi --features bindings
+
 step "build, wasm32-unknown-unknown"
 cargo build --workspace --target wasm32-unknown-unknown
 
