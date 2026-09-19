@@ -67,21 +67,21 @@ each column when a crate implements the requirement and a test covers it.
 | --- | --- | --- | --- | --- | --- | --- |
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
-| `NET` | 197 | 82 | 0 | 0 | 8 | **287** |
+| `NET` | 200 | 82 | 0 | 0 | 8 | **290** |
 | `IDN` | 110 | 40 | 1 | 0 | 5 | **156** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
-| `WIR` | 371 | 82 | 0 | 0 | 6 | **459** |
+| `WIR` | 374 | 82 | 0 | 0 | 6 | **462** |
 | `DEV` | 179 | 87 | 2 | 0 | 7 | **275** |
 | `NTF` | 62 | 29 | 0 | 0 | 2 | **93** |
 | `DIS` | 123 | 37 | 0 | 0 | 1 | **161** |
 | `REL` | 114 | 27 | 1 | 0 | 2 | **144** |
 | `GRP` | 204 | 56 | 0 | 0 | 5 | **265** |
-| `COM` | 298 | 96 | 0 | 0 | 5 | **399** |
+| `COM` | 299 | 96 | 0 | 0 | 5 | **400** |
 | `ATT` | 134 | 46 | 1 | 0 | 2 | **183** |
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
 | `IMP` | 77 | 34 | 0 | 0 | 1 | **112** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2088 | 688 | 6 | 0 | 51 | **2833** |
+| **All** | 2095 | 688 | 6 | 0 | 51 | **2840** |
 
 ## SCP — Scope and Conventions
 
@@ -426,6 +426,9 @@ Source: `spec/03-network-architecture.md`
 | `NET-286` | §3.2.3 | MUST | Each other hop | Each other hop MUST erase the private half of its `er` at the end of the handshake, under `CRY-059`. |  |  |
 | `NET-287` | §3.2.3 | MUST | (unstated) | For the rules `NET-122` and `NET-123`, and for each rule of Part 6 that names the transport session of a command, the session of a command that arrives over a circuit is that circuit. |  |  |
 | `NET-288` | §3.2.3 | MUST | A client | A client MUST reject an `IDS` whose `relay_session_pk` differs from the `er` of the circuit that carried it. |  |  |
+| `NET-289` | §3.4.3 | MUST | (unstated) | A relay of layer 1 or 2 whose circuit holds no next hop is the endpoint of a forward cell, and it makes the check of `NET-114`. |  |  |
+| `NET-290` | §3.4.3 | MUST | (unstated) | A relay reaches a relay of the next layer as a client of the session of Part 6 §6.2.3. |  |  |
+| `NET-291` | §3.5.2 | MUST | A relay | A relay MUST send each cell that it starts on a circuit that ends at it on a tick of that clock. |  |  |
 
 ## IDN — Identity
 
@@ -1209,6 +1212,9 @@ Source: `spec/06-wire-format.md`
 | `WIR-496` | §6.4 | MUST | A relay | A relay MUST answer an accepted `SEND` with one `QUOTA` under `WIR-494`. |  |  |
 | `WIR-497` | §6.4 | MUST | A client | A client MUST take a `QUOTA` or a `NACK` as an answer only when its `corr_id` names a command of the same circuit that holds no answer yet, and it MUST discard each other one. |  |  |
 | `WIR-498` | §6.4 | MUST NOT | A client | A client MUST NOT use a `corr_id` two times on one circuit. |  |  |
+| `WIR-499` | §6.2.1 | MUST | A sender | A sender MUST put an `UMBRA_SESSION` capsule in a frame with the 7-bit length form of RFC 6455 §5.2, because that capsule is 47, 35, or 15 bytes. |  |  |
+| `WIR-500` | §6.2.1 | MUST | A receiver | A receiver MUST reject a frame in the 16-bit length form whose length is below 126, and a frame in the 64-bit length form. |  |  |
+| `WIR-501` | §6.2.2 | MUST | (unstated) | Each direction of a session holds a `seq` of its own. |  |  |
 
 ## DEV — Device Sets
 
@@ -2588,6 +2594,7 @@ Source: `spec/12-communities.md`
 | `COM-397` | §12.6.2 | MUST | The `link` of a `RepostBody` | The `link` of a `RepostBody` MUST name `origin_community`, and `link_len` MUST be 0 exactly when `origin_community` is this community. |  |  |
 | `COM-398` | §12.4.5 | MUST | (unstated) | The history of a post ends below its own `index`, thus a party MUST reject a `CommunityPost` whose `amends` is not the sentinel and is at or above its `index`. |  |  |
 | `COM-399` | §12.3.3 | MUST | (unstated) | Under selector `0x02`, the records of one `index` are one unit: each body or stub at that index, the `OperatorRemoval` of a stub, and the `Checkpoint` whose `end_index` is that index. |  |  |
+| `COM-400` | §12.3.3 | MUST | (unstated) | A `PUB` payload holds one record and then the `Admission`. |  |  |
 
 ## ATT — Attachments and Large Objects
 

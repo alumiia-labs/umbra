@@ -506,6 +506,10 @@ and a page that holds it is 8 074 bytes, which is that payload exactly.
 - **[COM-197]** A `PUB` MUST carry one record of type `0x01`, `0x03`, `0x04`,
   `0x05`, `0x06`, or `0x08`. **[COM-198]** A relay MUST reject a `PUB` that carries a
   `PostStub`. A relay makes each stub itself under §12.4.4 rule 1.
+- **[COM-400]** A `PUB` payload holds one record and then the `Admission`. A
+  relay MUST take the length of the record from its `type` and its count
+  fields, and it MUST reject a payload whose `Admission` does not end at the
+  end of the payload.
 - **[COM-199]** A relay MUST reject a record whose `community_id` field differs
   from the `queue_id` of the command. A `CommunityPost` holds no such field,
   and the `queue_id` gives its community.

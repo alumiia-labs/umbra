@@ -734,6 +734,15 @@ forward cell on that circuit. §3.4.4 rule `NET-114` gives it the check.
    `NET-198` MUST send that body on the held circuit. **[NET-199]** That relay
    MUST send that body under its backward layer, with `X_L` of 16 zero bytes.
    §3.4.4 gives the backward direction.
+   - **[NET-289]** A relay of layer 1 or 2 whose circuit holds no next hop is
+     the endpoint of a forward cell, and it makes the check of `NET-114`. It
+     MUST NOT run the key update of `NET-205` and `NET-206`, because that
+     update belongs to the hop 3 layer. The client runs no update on a build
+     cell for the same cause.
+   - **[NET-290]** A relay reaches a relay of the next layer as a client of
+     the session of Part 6 §6.2.3. It MAY hold one session for each such
+     relay and put each circuit on it. It holds no resend window there: a
+     lost link ends its circuits, and each client builds again.
 8. **[NET-165]** A relay MUST drop an `EXTEND` cell at the endpoint of a
    circuit that holds a next hop already. **[NET-166]** A relay in layer 3 MUST
    drop an `EXTEND` cell at the endpoint of a circuit. **[NET-167]** A relay
@@ -1080,6 +1089,11 @@ on the arrival times of the messages.** A per-client Poisson clock emits the
 deliveries. §3.9 gives `PACING_MEAN`, which is the mean of that clock. If the
 clock fires and no real message is in the queue, the relay emits a `B0` cover
 cell. This cover cell is bit-indistinguishable from a real `B0` delivery.
+
+**[NET-291]** A relay MUST send each cell that it starts on a circuit that ends
+at it on a tick of that clock. An answer, a `MSG`, a `NACK`, and a reflected
+loop cell each take one tick. The two exceptions are the `EXTENDED` cell of a
+build and the drain of `NET-037`.
 
 **The clock governs each held session.** A push-wake session is a held session,
 thus the clock runs during it. The one exception is the reconnect drain of §3.7

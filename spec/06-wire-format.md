@@ -139,9 +139,20 @@ gives for its `op`.
 one capsule in one WebSocket binary frame with the FIN bit set. **[WIR-223]** A
 sender MUST NOT put two capsules in one frame. **[WIR-224]** A sender MUST NOT
 split a capsule across two frames. RFC 6455 §5.3 masks each client frame with a
-4-byte key, and a relay frame carries no mask. Each capsule length is between
-126 and 65 535 bytes, thus the frame header is 4 bytes at each bucket. A client
-frame therefore adds 8 bytes, and a relay frame adds 4 bytes.
+4-byte key, and a relay frame carries no mask. The length of each cell capsule
+is between 126 and 65 535 bytes, thus the frame header is 4 bytes at each
+bucket. A client frame therefore adds 8 bytes, and a relay frame adds 4 bytes.
+
+**[WIR-499]** A sender MUST put an `UMBRA_SESSION` capsule in a frame with the
+7-bit length form of RFC 6455 §5.2, because that capsule is 47, 35, or 15
+bytes. Its frame header is 2 bytes. **[WIR-500]** A receiver MUST reject a
+frame in the 16-bit length form whose length is below 126, and a frame in the
+64-bit length form. Thus each length has one frame form.
+
+> *Cause.* An earlier draft gave each capsule the 16-bit form. A session
+> capsule is below 126 bytes, and RFC 6455 gives that length the 7-bit form
+> only. Thus no client could send the `SessionOpen` of `WIR-229`, and no
+> session opened on the TCP transport.
 
 **[WIR-485]** A relay MUST NOT negotiate the `permessage-deflate` extension of
 RFC 7692, or any other WebSocket extension, on an L1 connection. A browser
@@ -194,6 +205,10 @@ cost of 560 bytes.
 **[WIR-136]** A client MUST make `session_id` from the device CSPRNG at the
 open of a session (§6.2.3). **[WIR-137]** A client MUST NOT reuse a `session_id`
 across two sessions to one relay.
+
+**[WIR-501]** Each direction of a session holds a `seq` of its own. A relay
+frames each cell that it sends with its own `seq`, and a client applies
+`WIR-141` to it.
 
 **[WIR-138]** A sender MUST increase `seq` by one for each frame, and it MUST
 start at zero. **[WIR-139]** A sender MUST close the session before `seq` wraps.

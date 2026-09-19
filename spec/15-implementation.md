@@ -19,7 +19,7 @@ umbra/
 │   ├── umbra-core/       orchestration, state machine, storage       → all above
 │   ├── umbra-ffi/        UniFFI surface, coarse-grained only         → umbra-core
 │   ├── umbra-web/        wasm-bindgen surface, browser socket, store → umbra-core
-│   ├── umbra-relay/      relay server binary                         → queue, onion
+│   ├── umbra-relay/      relay node and server binary                → umbra-core
 │   └── umbra-simd/       the ONLY crate permitted `unsafe`           → nothing
 ├── spec/
 ├── tests/vectors/        vendored KATs + PROVENANCE.md
