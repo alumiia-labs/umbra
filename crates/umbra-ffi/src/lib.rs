@@ -12,6 +12,8 @@
 //! both.
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "runtime")]
+pub mod bridge;
 pub mod client;
 pub mod draft;
 #[cfg(feature = "runtime")]
@@ -114,6 +116,8 @@ pub enum Error {
     Storage,
     /// An earlier fault closed the client.
     Closed,
+    /// The network runtime does not run.
+    Offline,
 }
 
 impl From<umbra_core::Error> for Error {
@@ -143,6 +147,7 @@ impl core::fmt::Display for Error {
             Error::NotFound => "no such message",
             Error::Storage => "the platform store failed",
             Error::Closed => "the client is closed",
+            Error::Offline => "the network does not run",
         })
     }
 }

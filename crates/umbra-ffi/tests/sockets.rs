@@ -161,7 +161,7 @@ async fn two_clients_meet_and_talk_over_real_sockets() {
     for index in 0..2u8 {
         let path = [relay_static(1).0, relay_static(2).0, relay_static(3).0];
         let node = ClientNode::new(path, RootIdentity::new(Secret::new([0x40 + index; 32])));
-        let (commands, runtime_commands) = mpsc::channel(16);
+        let (commands, runtime_commands) = mpsc::unbounded_channel();
         let (runtime_updates, updates) = mpsc::unbounded_channel();
         tokio::spawn(run_client(
             node,
@@ -177,13 +177,13 @@ async fn two_clients_meet_and_talk_over_real_sockets() {
 
     // The commands go before the circuits are ready, and the runtime holds
     // them.
-    alice.send(Command::Invite).await.unwrap();
+    alice.send(Command::Invite).unwrap();
     let bundle = wait_for(&mut alice_updates, |update| match update {
         Update::Invitation(bundle) => Some(bundle),
         _ => None,
     })
     .await;
-    bob.send(Command::Accept(bundle)).await.unwrap();
+    bob.send(Command::Accept(bundle)).unwrap();
     let alice_contact = wait_for_contact(&mut alice_updates).await;
     let bob_contact = wait_for_contact(&mut bob_updates).await;
 
@@ -193,7 +193,7 @@ async fn two_clients_meet_and_talk_over_real_sockets() {
         app: text(1, "hello alice"),
         tag: 71,
     };
-    bob.send(send).await.unwrap();
+    bob.send(send).unwrap();
     let (from, app) = wait_for_message(&mut alice_updates).await;
     assert_eq!(from, alice_contact);
     let parsed = AppMessage::parse(&app, Channel::Pairwise).unwrap();
@@ -202,7 +202,7 @@ async fn two_clients_meet_and_talk_over_real_sockets() {
         (update == Update::Sent(71)).then_some(())
     })
     .await;
-    alice.send(Command::Committed(alice_contact)).await.unwrap();
+    alice.send(Command::Committed(alice_contact)).unwrap();
 
     // And back.
     let send = Command::Send {
@@ -210,7 +210,7 @@ async fn two_clients_meet_and_talk_over_real_sockets() {
         app: text(2, "hello bob"),
         tag: 72,
     };
-    alice.send(send).await.unwrap();
+    alice.send(send).unwrap();
     let (from, app) = wait_for_message(&mut bob_updates).await;
     assert_eq!(from, bob_contact);
     let parsed = AppMessage::parse(&app, Channel::Pairwise).unwrap();
@@ -222,7 +222,7 @@ async fn two_clients_meet_and_talk_over_real_sockets() {
         app: text(3, "nobody"),
         tag: 73,
     };
-    alice.send(send).await.unwrap();
+    alice.send(send).unwrap();
     wait_for(&mut alice_updates, |update| {
         (update == Update::Failed(73)).then_some(())
     })

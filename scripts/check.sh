@@ -35,12 +35,12 @@ step "client surface, host only"
 # The SQLite library and the UniFFI scaffolding build on the host. The cross
 # builds below take the client core alone.
 cargo clippy -p umbra-ffi --features bindings --all-targets -- -D warnings
-cargo test -p umbra-ffi --features bindings
 
 step "client runtime over real sockets, host only"
-# Three relay servers and two client runtimes on localhost.
+# Three relay servers on localhost, under two client runtimes and under two
+# handles of the exported surface.
 cargo clippy -p umbra-ffi --features bindings,sockets-test --all-targets -- -D warnings
-cargo test -p umbra-ffi --features sockets-test --test sockets
+cargo test -p umbra-ffi --features bindings,sockets-test
 
 step "build, wasm32-unknown-unknown"
 cargo build --workspace --target wasm32-unknown-unknown

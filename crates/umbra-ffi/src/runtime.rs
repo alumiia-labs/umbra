@@ -105,12 +105,14 @@ fn unix_now() -> u64 {
 }
 
 /// Runs one client until the connection ends or each sender of `commands`
-/// closes. A command that arrives before the circuit is ready waits.
+/// closes. A command that arrives before the circuit is ready waits. The
+/// channel has no bound, because the caller is a thread of the platform
+/// that cannot wait, and the store holds each record of it already.
 pub async fn run_client(
     mut node: ClientNode,
     guard: Dial,
     tls: Arc<ClientConfig>,
-    mut commands: mpsc::Receiver<Command>,
+    mut commands: mpsc::UnboundedReceiver<Command>,
     updates: mpsc::UnboundedSender<Update>,
 ) {
     let mut rng = OsRng;

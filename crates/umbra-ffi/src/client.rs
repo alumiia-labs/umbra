@@ -288,6 +288,27 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
     }
 
+    /// The root identity of the device, for the network runtime.
+    pub fn root_identity(&self) -> Result<RootIdentity, Error> {
+        let store = &self.open_ref()?.store;
+        let row = store.row_id(TableId::LOCAL_IDENTITY, ROOT_KEY);
+        let seed = Zeroizing::new(
+            store
+                .get(TableId::LOCAL_IDENTITY, &row)?
+                .ok_or(Error::Integrity)?,
+        );
+        let seed: [u8; 32] = seed.as_slice().try_into().map_err(|_| Error::Integrity)?;
+        Ok(RootIdentity::new(Secret::new(seed)))
+    }
+
+    /// The conversation of a contact: the surrogate of the contact under
+    /// the store key, thus the owner column of a message names no queue to
+    /// a party without `K_store`.
+    pub fn conversation_for(&self, contact: &[u8; 32]) -> Result<ConversationId, Error> {
+        let store = &self.open_ref()?.store;
+        Ok(ConversationId(store.row_id(TableId::CONTACT, contact)))
+    }
+
     /// An empty draft for one conversation.
     pub fn new_draft(&self, conversation: ConversationId) -> Draft {
         Draft::new(conversation)
@@ -424,6 +445,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             message,
         });
         Ok(message)
+    }
+
+    /// Whether the stream holds an event.
+    pub fn has_event(&self) -> bool {
+        !self.events.is_empty()
     }
 
     /// The next event of the one stream from Rust to the platform.

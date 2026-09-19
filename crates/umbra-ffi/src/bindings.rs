@@ -7,49 +7,34 @@
 //! type, thus the generated Kotlin takes a list of code units, and the
 //! Kotlin wrapper of the app fills it from a `CharArray` that it overwrites
 //! after the call.
+//!
+//! The network runtime sits behind the same handle. One tokio runtime of
+//! two workers owns the client node and the socket, and a task of it gives
+//! each update to the client under the lock of the handle.
 
 use std::{
-    sync::{Arc, Mutex, MutexGuard},
-    time::{SystemTime, UNIX_EPOCH},
+    collections::VecDeque,
+    sync::{Arc, Condvar, Mutex, MutexGuard, Weak},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use umbra_core::store::wrap::{Cost, SecureElement};
-use umbra_crypto::rand_core::{TryCryptoRng, TryRng};
+use tokio::sync::mpsc;
+use umbra_core::{
+    session::node::ClientNode,
+    store::wrap::{Cost, SecureElement},
+};
+use umbra_crypto::handshake::nk::RelayStatic;
+use umbra_transport::{native, Dial};
 use zeroize::Zeroizing;
 
 use crate::{
-    client::Client, draft::Draft, sqlite::SqliteBackend, ConversationId, Delivery, Error, Event,
-    MsgRef, Sink,
+    bridge::{Bridge, NetEvent},
+    client::Client,
+    draft::Draft,
+    runtime::{run_client, OsRng, Update},
+    sqlite::SqliteBackend,
+    ConversationId, Delivery, Error, Event, MsgRef, Sink,
 };
-
-/// The entropy of the operating system. A client that cannot draw a random
-/// value stops, because each `msg_id` and each record key needs one.
-struct OsRng;
-
-impl TryRng for OsRng {
-    type Error = core::convert::Infallible;
-
-    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
-        let mut bytes = [0u8; 4];
-        self.try_fill_bytes(&mut bytes)?;
-        Ok(u32::from_le_bytes(bytes))
-    }
-
-    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
-        let mut bytes = [0u8; 8];
-        self.try_fill_bytes(&mut bytes)?;
-        Ok(u64::from_le_bytes(bytes))
-    }
-
-    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
-        if getrandom::fill(dst).is_err() {
-            std::process::abort();
-        }
-        Ok(())
-    }
-}
-
-impl TryCryptoRng for OsRng {}
 
 fn unix_now() -> u64 {
     SystemTime::now()
@@ -76,6 +61,8 @@ pub enum FfiError {
     Storage,
     /// An earlier fault closed the client.
     Closed,
+    /// The network runtime does not run.
+    Offline,
 }
 
 impl core::fmt::Display for FfiError {
@@ -95,6 +82,7 @@ impl From<Error> for FfiError {
             Error::NotFound => FfiError::NotFound,
             Error::Storage => FfiError::Storage,
             Error::Closed => FfiError::Closed,
+            Error::Offline => FfiError::Offline,
         }
     }
 }
@@ -148,9 +136,58 @@ pub struct Config {
     pub argon2_floor_ms: u64,
 }
 
+/// One relay of the path of the client.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct RelayEndpoint {
+    /// The host name that the TLS certificate names.
+    pub host: String,
+    /// The 4 bytes of the IPv4 address.
+    pub ipv4: Vec<u8>,
+    /// The port.
+    pub port: u16,
+    /// The 32 bytes of the static X25519 key.
+    pub static_key: Vec<u8>,
+    /// The 32 bytes of the relay identifier.
+    pub relay_id: Vec<u8>,
+}
+
+/// The network of the client: the guard, the middle relay, and the queue
+/// relay. The relay directory of Part 10 replaces this record later.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct Network {
+    /// The three relays of the path, the guard first.
+    pub relays: Vec<RelayEndpoint>,
+    /// A PEM file of the one authority that the client trusts, for a test
+    /// network. With no file the client trusts the web roots.
+    pub root_ca_path: Option<String>,
+}
+
+fn relay_static(endpoint: &RelayEndpoint) -> Result<RelayStatic, FfiError> {
+    let s = endpoint.static_key.as_slice().try_into();
+    let relay_id = endpoint.relay_id.as_slice().try_into();
+    Ok(RelayStatic {
+        s: s.map_err(|_| FfiError::Malformed)?,
+        relay_id: relay_id.map_err(|_| FfiError::Malformed)?,
+    })
+}
+
 /// One event of the stream.
 #[derive(uniffi::Enum)]
 pub enum FfiEvent {
+    /// The circuit is ready.
+    Online,
+    /// The connection or the circuit ended.
+    Offline,
+    /// The bundle of an invitation, which the user gives out of band.
+    Invitation {
+        /// The bundle.
+        bundle: Vec<u8>,
+    },
+    /// A contact is ready, and its conversation takes drafts.
+    Contact {
+        /// The conversation.
+        conversation: Vec<u8>,
+    },
     /// A message arrived.
     Message {
         /// The conversation.
@@ -212,9 +249,74 @@ impl DraftHandle {
     }
 }
 
+struct Inner {
+    client: Client<SqliteBackend, ForeignElement>,
+    /// The bridge of one run of the network, or none when no run is active.
+    bridge: Option<Bridge>,
+    net_events: VecDeque<NetEvent>,
+}
+
+impl Inner {
+    fn has_event(&self) -> bool {
+        self.client.has_event() || !self.net_events.is_empty()
+    }
+
+    fn next_event(&mut self) -> Option<FfiEvent> {
+        if let Some(event) = self.client.next_event() {
+            return Some(match event {
+                Event::Message {
+                    conversation,
+                    message,
+                } => FfiEvent::Message {
+                    conversation: conversation.0.to_vec(),
+                    message: Arc::new(MsgHandle(message)),
+                },
+                Event::Delivery { message, delivery } => FfiEvent::Delivery {
+                    message: Arc::new(MsgHandle(message)),
+                    state: delivery as u8,
+                },
+                Event::Locked => FfiEvent::Locked,
+                Event::IntegrityFault => FfiEvent::IntegrityFault,
+            });
+        }
+        Some(match self.net_events.pop_front()? {
+            NetEvent::Online => FfiEvent::Online,
+            NetEvent::Offline => FfiEvent::Offline,
+            NetEvent::Invitation(bundle) => FfiEvent::Invitation { bundle },
+            NetEvent::Contact(conversation) => FfiEvent::Contact {
+                conversation: conversation.0.to_vec(),
+            },
+        })
+    }
+
+    /// The ratchet keys of the runtime leave RAM with `K_store`, thus a
+    /// locked client runs no network.
+    fn stop_network_if_locked(&mut self) {
+        if !self.client.is_unlocked() {
+            self.bridge = None;
+        }
+    }
+}
+
 /// The client of the device.
 #[derive(uniffi::Object)]
-pub struct Handle(Mutex<Client<SqliteBackend, ForeignElement>>);
+pub struct Handle {
+    inner: Mutex<Inner>,
+    /// Signals each change of the event stream to [`Handle::wait_event`].
+    changed: Condvar,
+    runtime: Mutex<Option<tokio::runtime::Runtime>>,
+}
+
+impl Drop for Handle {
+    fn drop(&mut self) {
+        // The last reference can drop on a worker of the runtime, and a
+        // runtime that drops there panics. This form of the stop is safe on
+        // each thread.
+        if let Some(runtime) = locked(&self.runtime).take() {
+            runtime.shutdown_background();
+        }
+    }
+}
 
 /// Opens the client. The first launch makes the store under `passphrase`,
 /// and the client is unlocked. A later launch returns a locked client, and
@@ -244,7 +346,15 @@ pub fn init(
             client
         }
     };
-    Ok(Arc::new(Handle(Mutex::new(client))))
+    Ok(Arc::new(Handle {
+        inner: Mutex::new(Inner {
+            client,
+            bridge: None,
+            net_events: VecDeque::new(),
+        }),
+        changed: Condvar::new(),
+        runtime: Mutex::new(None),
+    }))
 }
 
 fn conversation_of(bytes: &[u8]) -> Result<ConversationId, FfiError> {
@@ -253,45 +363,158 @@ fn conversation_of(bytes: &[u8]) -> Result<ConversationId, FfiError> {
     ))
 }
 
+impl Handle {
+    /// A task of the runtime gives one update of the network to the client.
+    fn on_update(&self, update: Update) {
+        let mut inner = locked(&self.inner);
+        let Inner {
+            client,
+            bridge,
+            net_events,
+        } = &mut *inner;
+        let ended = update == Update::Offline;
+        if let Some(running) = bridge {
+            // A fault of the store shows in the event stream of the client,
+            // and such an update gives no event of the network.
+            if let Ok(Some(event)) = running.on_update(client, update, &mut OsRng) {
+                net_events.push_back(event);
+            }
+        } else if ended {
+            net_events.push_back(NetEvent::Offline);
+        }
+        if ended {
+            *bridge = None;
+        }
+        drop(inner);
+        self.changed.notify_all();
+    }
+}
+
 #[uniffi::export]
 impl Handle {
+    /// Starts the network of an unlocked client. A [`FfiEvent::Online`]
+    /// follows the build of the circuit. A second call ends the first run.
+    pub fn connect(self: Arc<Self>, network: Network) -> Result<(), FfiError> {
+        let [guard, middle, queue_relay] = network.relays.as_slice() else {
+            return Err(FfiError::Malformed);
+        };
+        let path = [
+            relay_static(guard)?,
+            relay_static(middle)?,
+            relay_static(queue_relay)?,
+        ];
+        let address = guard.ipv4.as_slice().try_into();
+        let dial = Dial {
+            host: guard.host.clone(),
+            addr_v4: Some(address.map_err(|_| FfiError::Malformed)?),
+            addr_v6: None,
+            port: guard.port,
+        };
+        let tls = match &network.root_ca_path {
+            Some(path) => native::tls_config_with_root_file(path),
+            None => native::tls_config(),
+        }
+        .map_err(|_| FfiError::Malformed)?;
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .map_err(|_| FfiError::Offline)?;
+
+        let (commands, runtime_commands) = mpsc::unbounded_channel();
+        let (runtime_updates, mut updates) = mpsc::unbounded_channel();
+        {
+            let mut inner = locked(&self.inner);
+            let node = ClientNode::new(path, inner.client.root_identity()?);
+            inner.bridge = Some(Bridge::new(commands));
+            runtime.spawn(run_client(
+                node,
+                dial,
+                tls,
+                runtime_commands,
+                runtime_updates,
+            ));
+        }
+        // The task holds a weak reference, thus a handle that the platform
+        // drops ends the runtime.
+        let handle: Weak<Handle> = Arc::downgrade(&self);
+        runtime.spawn(async move {
+            while let Some(update) = updates.recv().await {
+                let Some(handle) = handle.upgrade() else {
+                    break;
+                };
+                handle.on_update(update);
+            }
+        });
+        if let Some(earlier) = locked(&self.runtime).replace(runtime) {
+            earlier.shutdown_background();
+        }
+        Ok(())
+    }
+
+    /// Ends the network. Each contact of the run is gone.
+    pub fn disconnect(&self) {
+        locked(&self.inner).bridge = None;
+        if let Some(runtime) = locked(&self.runtime).take() {
+            runtime.shutdown_background();
+        }
+    }
+
+    /// Asks for one invitation. A [`FfiEvent::Invitation`] follows.
+    pub fn invite(&self) -> Result<(), FfiError> {
+        let inner = locked(&self.inner);
+        let bridge = inner.bridge.as_ref().ok_or(FfiError::Offline)?;
+        Ok(bridge.invite()?)
+    }
+
+    /// Accepts the bundle of an inviter. A [`FfiEvent::Contact`] follows.
+    pub fn accept(&self, bundle: Vec<u8>) -> Result<(), FfiError> {
+        let inner = locked(&self.inner);
+        let bridge = inner.bridge.as_ref().ok_or(FfiError::Offline)?;
+        Ok(bridge.accept(bundle)?)
+    }
+
     /// An empty draft for one conversation.
     pub fn new_draft(&self, conversation: Vec<u8>) -> Result<Arc<DraftHandle>, FfiError> {
-        let draft = locked(&self.0).new_draft(conversation_of(&conversation)?);
+        let conversation = conversation_of(&conversation)?;
+        let draft = locked(&self.inner).client.new_draft(conversation);
         Ok(Arc::new(DraftHandle(Mutex::new(Some(draft)))))
     }
 
     /// Sends a draft. The handle of the draft is empty after this call.
     pub fn send_draft(&self, draft: Arc<DraftHandle>) -> Result<Arc<MsgHandle>, FfiError> {
         let draft = locked(&draft.0).take().ok_or(FfiError::NotFound)?;
-        let message = locked(&self.0).send_draft(draft, unix_now(), &mut OsRng)?;
+        let mut inner = locked(&self.inner);
+        let Inner { client, bridge, .. } = &mut *inner;
+        let message = client.send_draft(draft, unix_now(), &mut OsRng)?;
+        // With no network the record waits in the store.
+        if let Some(running) = bridge {
+            running.flush(client, &mut OsRng)?;
+        }
+        drop(inner);
+        self.changed.notify_all();
         Ok(Arc::new(MsgHandle(message)))
     }
 
     /// Cancels a send that the send path did not take yet.
     pub fn cancel_send(&self, message: Arc<MsgHandle>) -> Result<bool, FfiError> {
-        Ok(locked(&self.0).cancel_send(&message.0)?)
+        Ok(locked(&self.inner).client.cancel_send(&message.0)?)
     }
 
-    /// The next event, or none. One thread of the platform drains the
-    /// stream.
+    /// The next event, or none.
     pub fn next_event(&self) -> Option<FfiEvent> {
-        let event = locked(&self.0).next_event()?;
-        Some(match event {
-            Event::Message {
-                conversation,
-                message,
-            } => FfiEvent::Message {
-                conversation: conversation.0.to_vec(),
-                message: Arc::new(MsgHandle(message)),
-            },
-            Event::Delivery { message, delivery } => FfiEvent::Delivery {
-                message: Arc::new(MsgHandle(message)),
-                state: delivery as u8,
-            },
-            Event::Locked => FfiEvent::Locked,
-            Event::IntegrityFault => FfiEvent::IntegrityFault,
-        })
+        locked(&self.inner).next_event()
+    }
+
+    /// The next event, and the call waits for it up to `timeout_ms`. One
+    /// thread of the platform drains the stream with this call.
+    pub fn wait_event(&self, timeout_ms: u32) -> Option<FfiEvent> {
+        let timeout = Duration::from_millis(u64::from(timeout_ms));
+        let (mut inner, _) = self
+            .changed
+            .wait_timeout_while(locked(&self.inner), timeout, |inner| !inner.has_event())
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        inner.next_event()
     }
 
     /// Renders the text of a message into a sink of the platform.
@@ -301,32 +524,42 @@ impl Handle {
         sink: Arc<dyn TextSink>,
     ) -> Result<(), FfiError> {
         let mut sink = ForeignSink(sink);
-        Ok(locked(&self.0).render(&message.0, &mut sink)?)
+        Ok(locked(&self.inner).client.render(&message.0, &mut sink)?)
     }
 
     /// The messages of one conversation, as handles.
     pub fn messages(&self, conversation: Vec<u8>) -> Result<Vec<Arc<MsgHandle>>, FfiError> {
-        let found = locked(&self.0).messages(conversation_of(&conversation)?)?;
+        let conversation = conversation_of(&conversation)?;
+        let found = locked(&self.inner).client.messages(conversation)?;
         Ok(found
             .into_iter()
             .map(|message| Arc::new(MsgHandle(message)))
             .collect())
     }
 
-    /// Locks the client.
+    /// Locks the client, and ends the network with it.
     pub fn lock(&self) {
-        locked(&self.0).lock();
+        let mut inner = locked(&self.inner);
+        inner.client.lock();
+        inner.stop_network_if_locked();
+        drop(inner);
+        self.changed.notify_all();
     }
 
     /// Unlocks the client with the passphrase.
     pub fn unlock(&self, passphrase: Vec<u16>) -> Result<(), FfiError> {
         let passphrase = Zeroizing::new(passphrase);
-        Ok(locked(&self.0).unlock(&passphrase, unix_now())?)
+        let mut inner = locked(&self.inner);
+        Ok(inner.client.unlock(&passphrase, unix_now())?)
     }
 
     /// The clock of the platform, for the auto-lock.
     pub fn tick(&self) {
-        locked(&self.0).tick(unix_now());
+        let mut inner = locked(&self.inner);
+        inner.client.tick(unix_now());
+        inner.stop_network_if_locked();
+        drop(inner);
+        self.changed.notify_all();
     }
 }
 
