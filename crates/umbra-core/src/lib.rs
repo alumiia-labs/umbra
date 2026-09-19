@@ -7,8 +7,10 @@
 //! path invariants of Part 3 §3.4.6. [`attach`] holds Part 13: the
 //! segments, the key-committing seal, the manifest level, the chunk
 //! commands, the relay chunk store, and the placement of a handle-addressed
-//! chunk. Each type takes the time and the random values it needs as
-//! arguments.
+//! chunk. [`community`] holds Part 12: the chains of the authors, the
+//! control chain, the pull protocol, the relay cache, and the cross-relay
+//! checks of a reader. Each type takes the time and the random values it
+//! needs as arguments.
 #![forbid(unsafe_code)]
 #![no_std]
 
@@ -16,6 +18,7 @@ extern crate alloc;
 
 pub mod abuse;
 pub mod attach;
+pub mod community;
 pub mod devset;
 pub mod directory;
 pub mod discovery;
