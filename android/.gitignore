@@ -1,0 +1,9 @@
+.gradle/
+.idea/
+.kotlin/
+build/
+local.properties
+*.iml
+# scripts/android.sh makes these two again.
+app/src/main/jniLibs/
+app/src/main/kotlin-generated/
