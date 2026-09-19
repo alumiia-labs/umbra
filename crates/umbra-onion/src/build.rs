@@ -108,6 +108,16 @@ impl Pending {
         }
         Ok(self.0.read_flight2(reply, &mut NoTrace)?)
     }
+
+    /// Reads the reply of the queue relay, and returns `ss_hop` with
+    /// `RelaySession_pk`, which is the `er` of that reply (Part 3 §3.2.3).
+    pub fn finish_at_queue_relay(self, reply: &[u8]) -> Result<(Secret<32>, [u8; 32]), Error> {
+        let er: [u8; 32] = reply
+            .get(..32)
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or(Error::Length)?;
+        Ok((self.finish(reply)?, er))
+    }
 }
 
 /// The relay side of one build: reads a hello addressed to this relay
@@ -127,6 +137,25 @@ pub fn answer<R: CryptoRng + ?Sized>(
     let responder = nk::Relay::read_flight1(relay, static_secret, hello.flight1, &mut NoTrace)?;
     let out = out.get_mut(..REPLY_LEN).ok_or(Error::Length)?;
     Ok(responder.flight2(rng, out, &mut NoTrace)?)
+}
+
+/// The relay side of a build at the queue relay of a circuit: as
+/// [`answer`], and the private half of `er` stays as `RelaySession_sk` for
+/// the life of the circuit.
+pub fn answer_at_queue_relay<R: CryptoRng + ?Sized>(
+    relay: &RelayStatic,
+    static_secret: &StaticSecret,
+    hello: &[u8],
+    rng: &mut R,
+    out: &mut [u8],
+) -> Result<(Secret<32>, StaticSecret), Error> {
+    let hello = HopHello::parse(hello)?;
+    if hello.relay_id != relay.relay_id {
+        return Err(Error::Build);
+    }
+    let responder = nk::Relay::read_flight1(relay, static_secret, hello.flight1, &mut NoTrace)?;
+    let out = out.get_mut(..REPLY_LEN).ok_or(Error::Length)?;
+    Ok(responder.flight2_keeping_er(rng, out, &mut NoTrace)?)
 }
 
 #[cfg(test)]
@@ -176,6 +205,16 @@ mod tests {
         let at_relay = answer(&relay, &s_sk, payload, &mut Rng(2), &mut reply).unwrap();
         let at_client = pending.finish(&reply).unwrap();
         assert_eq!(at_relay.expose(), at_client.expose());
+
+        // The queue relay keeps the private half of `er`, and the client
+        // reads the public half from the reply.
+        let mut hello_q = [0u8; HELLO_LEN];
+        let pending = Pending::hello(&relay, &mut Rng(4), &mut hello_q).unwrap();
+        let (ss_relay, session_sk) =
+            answer_at_queue_relay(&relay, &s_sk, &hello_q, &mut Rng(5), &mut reply).unwrap();
+        let (ss_client, session_pk) = pending.finish_at_queue_relay(&reply).unwrap();
+        assert_eq!(ss_relay.expose(), ss_client.expose());
+        assert_eq!(XPublic::from(&session_sk).as_bytes(), &session_pk);
 
         // NET-153: a hello for another relay is dropped.
         let other = RelayStatic {

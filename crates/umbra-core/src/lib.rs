@@ -25,6 +25,7 @@ pub mod discovery;
 pub mod group;
 pub mod identity;
 pub mod notify;
+pub mod session;
 pub mod store;
 
 /// The one error of this crate.

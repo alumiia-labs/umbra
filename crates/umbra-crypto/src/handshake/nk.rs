@@ -165,13 +165,27 @@ impl Relay {
     }
 
     /// Writes flight 2 into `out`, which needs `FLIGHT2_LEN` bytes, and
-    /// returns `ss_hop`.
+    /// returns `ss_hop`. The ephemeral private key is erased.
     pub fn flight2<R: CryptoRng + ?Sized, T: Trace>(
-        mut self,
+        self,
         rng: &mut R,
         out: &mut [u8],
         trace: &mut T,
     ) -> Result<Secret<32>, Error> {
+        self.flight2_keeping_er(rng, out, trace)
+            .map(|(ss_hop, _)| ss_hop)
+    }
+
+    /// Writes flight 2 and returns `ss_hop` with the private half of `er`.
+    /// The queue relay of a circuit keeps that key as `RelaySession_sk` of
+    /// Part 3 §3.2.3 for the life of the circuit, as the responder of §5.4
+    /// keeps its `er_sk` under `CRY-136`.
+    pub fn flight2_keeping_er<R: CryptoRng + ?Sized, T: Trace>(
+        mut self,
+        rng: &mut R,
+        out: &mut [u8],
+        trace: &mut T,
+    ) -> Result<(Secret<32>, StaticSecret), Error> {
         let out = out.get_mut(..FLIGHT2_LEN).ok_or(Error::Length)?;
         let (er_out, rest) = out.split_at_mut(32);
         let (ekem1_out, tag_out) = rest.split_at_mut(CT_LEN);
@@ -196,6 +210,6 @@ impl Relay {
         st.trace(trace, "2.4 tag2");
         let ss_hop = split(st);
         st.trace(trace, "2.5 split");
-        Ok(ss_hop)
+        Ok((ss_hop, er_sk))
     }
 }
