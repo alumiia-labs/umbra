@@ -241,10 +241,15 @@ pseudonym_g             := SHA3-256(CommunityIdentityKey_g.pk)      // 32 B
   ```
   RoleSeed_r       := 256 bits from the device CSPRNG
   RoleSigningKey_r := ML-DSA-65 keypair from RoleSeed_r
-  RoleReportKey_r  := UMBRA-KEM keypair from
-                      HKDF-SHA3-256( salt = "umbra/v1/community-report",
-                                     ikm = RoleSeed_r, L = 64 )
+  RoleReportKey_r  := Hybrid( HKDF-SHA3-256( ikm = RoleSeed_r,
+                                 info = "umbra/v1/community-report", L = 96 ) )
   ```
+
+  **[COM-376]** A member MUST derive `RoleReportKey_r`, and
+  `CommunityContactKey_g` of §12.6.3, as 96 bytes of HKDF-SHA3-256 output
+  under the label as the `info`, split by `Hybrid` of Part 5 §5.2. Part 11
+  §11.3.3 derives the member KEM key of a group in the same manner. An
+  earlier draft asked for 64 bytes, and a `UMBRA-KEM` keypair takes 96.
 
   **[COM-142]** A member that holds a role MUST derive `RoleReportKey_r` from
   the seed of that role. **[COM-143]** That member MUST publish the
@@ -458,7 +463,11 @@ and a page that holds it is 8 074 bytes, which is that payload exactly.
 
 - **[COM-181]** A relay MUST fill a `PAGE` in the order of the selector table.
   **[COM-182]** A relay MUST stop a page at `count` entries, or at the `B3` L5
-  payload of Part 6 §6.9.
+  payload of Part 6 §6.9. **[COM-399]** Under selector `0x02`, the records
+  of one `index` are one unit: each body or stub at that index, the
+  `OperatorRemoval` of a stub, and the `Checkpoint` whose `end_index` is
+  that index. A relay MUST put a unit in one page in full, or stop the page
+  before it. Thus the `next` value of a page never skips a checkpoint.
 - The **seq floor** of a community at one relay is the lowest `seq` that the
   relay holds for it, or 0 when it holds none. **[COM-183]** Under selector
   `0x01`, a relay MUST set `floor` to the seq floor. **[COM-184]** Under
@@ -526,6 +535,19 @@ and a page that holds it is 8 074 bytes, which is that payload exactly.
   `pseudonym` of a `CommunityPost`, or the `actor` of another record.
   §12.6.2 gives a reaction and a repost their own limits, and §12.5.2 rule 11
   gives the control chain its own limits.
+- **[COM-391]** A relay MUST reject a `CommunityPost` whose `body` does not
+  parse as the `RichRecord` of `COM-158`, or whose `forward_depth` is not
+  zero. The relay reads `inner_kind` for the limits of §12.6.2, thus it holds
+  the parser already.
+- **[COM-392]** A relay MUST count a `Checkpoint` against its `pseudonym` in a
+  count of its own, at `POST_RATE_LIMIT` in each `POST_RATE_WINDOW`.
+  **[COM-393]** A relay MUST reject a `Checkpoint` whose window holds an index
+  that a held `Checkpoint` of that pseudonym covers, unless the two are one
+  checkpoint under `COM-203`. A checkpoint covers one post at the least, thus
+  the two rules bound the checkpoints of a chain by its posts. A relay does
+  not measure `SIG_MIN_INTERVAL`: two checkpoints that an author sent 60 s
+  apart can arrive 59 s apart, and a `NACK` there would stop the settlement
+  of a correct window.
 - **[COM-212]** A party MUST reject a `Checkpoint` whose window holds more than
   `SIG_INTERVAL` indexes. Rule 1 of §12.4.1 makes a larger window impossible
   for a conforming author.
@@ -547,6 +569,18 @@ triple first. The checkpoint of the author decides between the two.
   `SIG_INTERVAL` indexes, thus it tries 32 combinations at the most.
 - **[COM-218]** If a relay holds an admitted body at a triple, the relay MUST
   reject a different body at that triple.
+- **[COM-394]** A relay that holds two bodies at a pending triple MUST accept
+  a third body when a held `Checkpoint` covers the triple and the
+  recomputation of §12.4.4 rule 6 admits that body. The relay then drops the
+  two other bodies under `COM-217`. `COM-214` rejects each other third body.
+  **[COM-395]** An author whose `PUB` of a post got a `NACK` MUST send that
+  `PUB` again after the `PUBACK` of the `Checkpoint` that covers the post.
+
+  > *Cause.* A second party that put two bodies at the next index of an
+  > author made the relay reject the body of the author as the third one.
+  > The window then never resolved at that relay. The signed head decides
+  > which body is the body of the author, thus it also admits that body
+  > late.
 - **[COM-219]** If a relay serves two bodies at one triple, a client MUST hold
   both pending until a checkpoint covers it. **[COM-220]** A client MUST apply
   the selection of `COM-216` at that checkpoint.
@@ -1027,7 +1061,9 @@ checkpoint. Thus one mechanism serves a correction and a replacement.
 - **[COM-100]** If the earlier body is withdrawn, the client MUST show the `PostStub`
   placeholder of §12.4.4 in its place.
 - **[COM-101]** A client MUST reject an `amends` value that names an index outside the history
-  of that pseudonym.
+  of that pseudonym. **[COM-398]** The history of a post ends below its own
+  `index`, thus a party MUST reject a `CommunityPost` whose `amends` is not
+  the sentinel and is at or above its `index`.
 
 **What the interface states to an author.**
 
@@ -1232,7 +1268,8 @@ CommunityRoster {
 }
 
 RosterCosign {
-    actor           [32]u8        // an owner role pseudonym of that roster
+    actor           [32]u8        // an owner role pseudonym of the roster before this one
+    actor_pk        [1952]u8      // the ML-DSA-65 public key of that role pseudonym
     signature       [3309]u8      // ML-DSA-65, the preimage of signature
 }
 
@@ -1349,6 +1386,28 @@ previous_epoch || actor || actor_pk || entry_count || entries
 The three labels are different, because the three objects are different types.
 Part 5 §5.11 holds each label.
 
+**The chain fields.** The three object types share one chain, and `epoch_index`
+counts across them.
+
+- **[COM-377]** `previous_epoch` MUST be the SHA3-256 of the predecessor bytes
+  that its signature covers, without the label. It is zero bytes at
+  `epoch_index` 0. No signature byte enters the value, thus `COM-022` holds
+  for the control chain too, and two signatures over one object give one
+  identifier.
+- **[COM-378]** A verifier MUST reject an object whose `epoch_index` is not
+  one above the `epoch_index` of the object that `previous_epoch` names.
+- **[COM-381]** The `actor_role` byte MUST be 1 for an owner, 2 for an admin,
+  and 3 for a moderator, and a verifier MUST reject an epoch whose
+  `actor_role` differs from the role that rule 5 gives the `actor`.
+  **[COM-382]** An action of kind 4 or kind 7 MUST come from an admin or an
+  owner, because a lock stops each author of the community. Each other kind
+  MAY come from a moderator.
+- **[COM-383]** The `entries` of a `ModeratorSet` MUST be in strictly
+  increasing byte order. **[COM-384]** A `CommunityRoster` MUST NOT name one
+  `pseudonym` in two entries.
+- **[COM-385]** The `CommunityRoster` at `epoch_index` 0 MUST name its `actor`
+  in an owner entry, and it MUST carry no cosignature.
+
 A `ModerationAction` is 37 bytes. A moderation epoch at `MOD_ACTION_MAX` is
 6 105 bytes, and it uses bucket `B2`. That total is 104 bytes of fields, a
 1 952-byte public key, 20 actions at 37 bytes, and a 3 309-byte signature. The
@@ -1359,7 +1418,7 @@ A `RosterEntry` is **1 378 bytes**. That is 1 byte of role, 32 bytes of
 pseudonym, a 1 216-byte encapsulation key, and a 129-byte queue address. A
 community roster at `ROSTER_ENTRY_MAX` is **31 547 bytes** with no
 cosignature, and it uses bucket
-`B3`. That total is 103 bytes of fields, a 1 952-byte public key, 19 entries at
+`B3`. That total is 104 bytes of fields, a 1 952-byte public key, 19 entries at
 1 378 bytes, and a 3 309-byte signature. Part 6 §6.9 gives the `B3` L5 payload
 32 650 bytes, thus the object fits one `B3` cell. A 20th entry would take the
 object to 32 924 bytes, which is above that payload, thus `ROSTER_ENTRY_MAX` is
@@ -1407,6 +1466,10 @@ MUST derive this total again if it adds a field to `ModeratorSet` or raises
    resolve a removal by the index alone. Each pseudonym holds a separate chain,
    and each chain starts at index 0.
 3. **[COM-118]** A relay MUST serve the artifact that justifies a stub, beside that stub.
+   **[COM-396]** For a moderation epoch that means selector `0x03`, and for
+   a checkpoint it means selector `0x02`, at the relay that serves the stub.
+   An `OperatorRemoval` MUST follow its stub in the same `PAGE`, and the
+   relay gives it a `seq` of its own under selector `0x01`.
    Exactly three artifacts authorize a stub. The first is a moderation epoch
    that names the index. The second is a checkpoint whose `withdrawn` list
    names the index. The third is an `OperatorRemoval` of §12.4.4 rule 10, which
@@ -1507,6 +1570,22 @@ MUST derive this total again if it adds a field to `ModeratorSet` or raises
     **[COM-366]** A cosignature MUST cover the preimage of `signature`, under
     the key of the named owner. **[COM-367]** A client MUST reject a roster
     whose `cosign_count` is not 0 and whose entries drop no owner.
+    **[COM-379]** A verifier MUST apply rule 1 to the `actor_pk` of each
+    cosignature, and it MUST reject a roster with a cosignature of its
+    signer, of one owner two times, or of a party that the roster before it
+    does not name as an owner. An owner that is demoted to admin counts as
+    dropped. **[COM-380]** A `CommunityRoster` with its cosignatures MUST fit
+    the 32 589 bytes of one `PAGE` record. A `RosterCosign` is 5 293 bytes,
+    thus a roster with 1 cosignature holds 15 entries at the most, 2 give 12,
+    3 give 8, and 4 give 4. A community that needs more drops the owner in one
+    epoch and adds the other role holders again in the next, which needs no
+    cosignature.
+
+    > *Cause of the key.* A `RosterEntry` holds a report key and no signing
+    > key. An owner that never signed a control object showed its ML-DSA-65
+    > key nowhere, thus no verifier could check its cosignature. The key in
+    > the cosignature costs 1 952 bytes on the rare epoch that drops an
+    > owner, and a key in each `RosterEntry` would cost that on each roster.
 
     > *Cause.* An earlier draft let one owner sign a roster that removed each
     > other owner. Thus one seized owner device or one hostile owner took a
@@ -1749,6 +1828,11 @@ RepostBody {
   The `target` of that body MUST be the `community_reply_id` of the target
   post. **[COM-324]** A client MUST NOT set a reply target or a mention in a
   reaction.
+- **[COM-397]** The `link` of a `RepostBody` MUST name `origin_community`,
+  and `link_len` MUST be 0 exactly when `origin_community` is this community.
+  A link with `COMMUNITY_RELAY_MAX` hints is 259 characters, and `link_len`
+  is one byte, thus a client MUST drop hints from the end of the list until
+  the link fits 255 bytes. Seven hints fit.
 - **[COM-325]** A repost MUST be a `CommunityPost` whose `RichRecord`
   `inner_kind` is `0x0D`, with a `RepostBody`. **[COM-326]** If the client
   subscribes to the origin community, it MUST render a repost with the target
@@ -1759,7 +1843,7 @@ RepostBody {
   repost under `REPOST_RATE_LIMIT`. **[COM-329]** A relay MUST NOT count a
   reaction or a repost under `POST_RATE_LIMIT`. The relay reads the
   `inner_kind` byte of the body, and §12.1 makes that byte public.
-- **[COM-330]** If the `flags` field of the current `CommunityMetaBody` sets
+- **[COM-330]** If the `flags` field of the current `CommunityMeta` sets
   bit 0, a relay MUST reject a reaction. **[COM-331]** If that field sets bit
   1, a relay MUST reject a repost. **[COM-332]** A client MUST NOT send a
   record that a set bit forbids.
@@ -1785,8 +1869,8 @@ then sends the hello of Part 9 §9.6 to it, and the author stays a pseudonym
 until the author accepts.
 
 ```
-CommunityContactKey_g := UMBRA-KEM keypair from
-                         HKDF(CommunityIdentitySeed_g, "umbra/v1/community-contact")
+CommunityContactKey_g := Hybrid( HKDF-SHA3-256( ikm = CommunityIdentitySeed_g,
+                                 info = "umbra/v1/community-contact", L = 96 ) )
 
 CommunityContact {
     version         u8            // 0x01
@@ -1890,7 +1974,10 @@ through the directory.
 
 - **[COM-242]** A client MUST make the fragment from the device CSPRNG at the
   creation. **[COM-243]** A client MUST derive `meta_key` from `community_id`
-  and the fragment. **[COM-244]** A client MUST NOT send the fragment, or a
+  and the fragment. **[COM-390]** The derivation is HKDF-SHA3-256 with the
+  fragment as the `ikm`, no salt, the label and then `community_id` as the
+  `info`, and 32 bytes of output. Part 9 §9.3.1 derives the key of a profile
+  blob in the same manner. **[COM-244]** A client MUST NOT send the fragment, or a
   value that comes from it, to a relay.
 - **[COM-245]** A client that shares a link MUST fill the hints from the
   `relays` list of the current `CommunityMeta`. **[COM-246]** A joiner MUST pull
@@ -1922,6 +2009,7 @@ CommunityMeta {
     actor_pk        [1952]u8      // the ML-DSA-65 public key of that role pseudonym
     relay_count     u8            // COMMUNITY_MIN_RELAYS to COMMUNITY_RELAY_MAX
     relays          [relay_count]RelayRef   // 12 bytes each, Part 13 §13.3.2
+    flags           u8            // bit 0 reactions off, bit 1 reposts off (§12.6.2)
     nonce           [12]u8        // from the device CSPRNG
     body_len        u16
     body            [body_len]u8  // ChaCha20-Poly1305(meta_key, nonce, aad, CommunityMetaBody)
@@ -1931,7 +2019,6 @@ CommunityMeta {
 CommunityMetaBody {
     version         u8            // 0x01
     category        u8            // the table below
-    flags           u8            // bit 0 reactions off, bit 1 reposts off (§12.6.2)
     name_len        u8            // 1 to META_NAME_MAX
     name            [name_len]u8      // UTF-8
     text_len        u16           // 0 to META_TEXT_MAX
@@ -1944,9 +2031,17 @@ CommunityMetaBody {
 ```
 
 The `aad` of the body is `community_id || meta_index`, with `meta_index` in
-big-endian order. The fixed fields are 5 378 bytes, and `COMMUNITY_RELAY_MAX`
-relays add 96 bytes. A body at each maximum is 2 375 bytes of plaintext and a
-16-byte tag. Thus the largest `CommunityMeta` is 7 865 bytes, and a `PAGE` that
+big-endian order. The signature covers `"umbra/v1/community-metadata"` and
+then each byte of the record before `signature`. The fixed fields are 5 379
+bytes, and `COMMUNITY_RELAY_MAX` relays add 96 bytes. A body at each maximum is
+2 374 bytes of plaintext and a 16-byte tag, where the icon is one
+`FileDescriptor` of 253 bytes at the most.
+
+**[COM-386]** The `flags` field MUST sit in the signed record and not in the
+sealed body. A relay applies `COM-330` and `COM-331`, and `COM-244` keeps
+`meta_key` from each relay, thus a relay cannot read a field of the body. An
+earlier draft put `flags` in the `CommunityMetaBody`, and no relay could
+enforce the dial. Thus the largest `CommunityMeta` is 7 865 bytes, and a `PAGE` that
 holds it is 7 926 bytes. Both fit the `B2` L5 payload of 8 074 bytes.
 
 | `category` | Name |
@@ -1972,6 +2067,19 @@ holds it is 7 926 bytes. Both fit the `B2` L5 payload of 8 074 bytes.
   party MUST apply the hash check of §12.5.2 rule 1 to `actor_pk`.
   **[COM-251]** A party MUST reject a `CommunityMeta` whose `previous_meta`
   differs from the hash of the `CommunityMeta` at `meta_index` − 1.
+  **[COM-387]** That hash is the SHA3-256 of the bytes that the signature
+  covers, without the label, in the manner of `COM-377`. **[COM-388]** The
+  check of `COM-251` binds a party that holds the record at `meta_index` − 1.
+  A party that does not hold it MUST NOT reject the record for that cause.
+  **[COM-389]** When a `CommunityRoster` drops the owner that signed the
+  current `CommunityMeta`, a remaining owner MUST publish a new
+  `CommunityMeta`.
+
+  > *Cause.* `COM-249` verifies a record under the current roster. At a join
+  > and at a re-seed, a record of a former owner does not verify, and its
+  > index stays empty at that party. A strict chain from `meta_index` 0 would
+  > then stop at the first such record. `COM-253` selects the highest verified
+  > record, and `COM-389` keeps that record under a current owner.
 - **[COM-252]** A client MUST apply the successor order of §12.5.2 rule 6 to
   two verified `CommunityMeta` records at one `meta_index`. **[COM-253]** A
   client MUST select the verified `CommunityMeta` with the highest `meta_index`

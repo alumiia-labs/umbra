@@ -76,12 +76,12 @@ each column when a crate implements the requirement and a test covers it.
 | `DIS` | 108 | 35 | 0 | 0 | 1 | **144** |
 | `REL` | 114 | 27 | 1 | 0 | 2 | **144** |
 | `GRP` | 204 | 56 | 0 | 0 | 5 | **265** |
-| `COM` | 275 | 95 | 0 | 0 | 5 | **375** |
+| `COM` | 298 | 96 | 0 | 0 | 5 | **399** |
 | `ATT` | 134 | 46 | 1 | 0 | 2 | **183** |
 | `ABU` | 60 | 31 | 0 | 0 | 0 | **91** |
 | `IMP` | 72 | 32 | 0 | 0 | 0 | **104** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2022 | 682 | 6 | 0 | 50 | **2760** |
+| **All** | 2045 | 683 | 6 | 0 | 50 | **2784** |
 
 ## SCP — Scope and Conventions
 
@@ -2527,6 +2527,30 @@ Source: `spec/12-communities.md`
 | `COM-373` | §12.6.4 | MUST NOT | A community relay | A community relay MUST NOT link a registration to a pull. |  |  |
 | `COM-374` | §12.6.4 | MUST NOT | A subscriber | A subscriber MUST NOT put a pseudonym in a `NotifyRegistration`. |  |  |
 | `COM-375` | §12.6.4 | MUST | A community relay | A community relay MUST discard a registration 7 days plus `CLOCK_SKEW` after its `NREG`. |  |  |
+| `COM-376` | §12.3.2 | MUST | A member | A member MUST derive `RoleReportKey_r`, and `CommunityContactKey_g` of §12.6.3, as 96 bytes of HKDF-SHA3-256 output under the label as the `info`, split by `Hybrid` of Part 5 §5.2. |  |  |
+| `COM-377` | §12.5.2 | MUST | `previous_epoch` | `previous_epoch` MUST be the SHA3-256 of the predecessor bytes that its signature covers, without the label. |  |  |
+| `COM-378` | §12.5.2 | MUST | A verifier | A verifier MUST reject an object whose `epoch_index` is not one above the `epoch_index` of the object that `previous_epoch` names. |  |  |
+| `COM-379` | §12.5.2 | MUST | A verifier | A verifier MUST apply rule 1 to the `actor_pk` of each cosignature, and it MUST reject a roster with a cosignature of its signer, of one owner two times, or of a party that the roster before it does not name as an owner. |  |  |
+| `COM-380` | §12.5.2 | MUST | A `CommunityRoster` with its cosignatures | A `CommunityRoster` with its cosignatures MUST fit the 32 589 bytes of one `PAGE` record. |  |  |
+| `COM-381` | §12.5.2 | MUST | The `actor_role` byte | The `actor_role` byte MUST be 1 for an owner, 2 for an admin, and 3 for a moderator, and a verifier MUST reject an epoch whose `actor_role` differs from the role that rule 5 gives the `actor`. |  |  |
+| `COM-382` | §12.5.2 | MUST | An action of kind 4 or kind 7 | An action of kind 4 or kind 7 MUST come from an admin or an owner, because a lock stops each author of the community. |  |  |
+| `COM-383` | §12.5.2 | MUST | The `entries` of a `ModeratorSet` | The `entries` of a `ModeratorSet` MUST be in strictly increasing byte order. |  |  |
+| `COM-384` | §12.5.2 | MUST NOT | A `CommunityRoster` | A `CommunityRoster` MUST NOT name one `pseudonym` in two entries. |  |  |
+| `COM-385` | §12.5.2 | MUST | The `CommunityRoster` at `epoch_index` 0 | The `CommunityRoster` at `epoch_index` 0 MUST name its `actor` in an owner entry, and it MUST carry no cosignature. |  |  |
+| `COM-386` | §12.7.1 | MUST | The `flags` field | The `flags` field MUST sit in the signed record and not in the sealed body. |  |  |
+| `COM-387` | §12.7.1 | MUST | (unstated) | That hash is the SHA3-256 of the bytes that the signature covers, without the label, in the manner of `COM-377`. |  |  |
+| `COM-388` | §12.7.1 | MUST | (unstated) | The check of `COM-251` binds a party that holds the record at `meta_index` − 1. |  |  |
+| `COM-389` | §12.7.1 | MUST | (unstated) | When a `CommunityRoster` drops the owner that signed the current `CommunityMeta`, a remaining owner MUST publish a new `CommunityMeta`. |  |  |
+| `COM-390` | §12.7 | MUST | (unstated) | The derivation is HKDF-SHA3-256 with the fragment as the `ikm`, no salt, the label and then `community_id` as the `info`, and 32 bytes of output. |  |  |
+| `COM-391` | §12.3.3 | MUST | A relay | A relay MUST reject a `CommunityPost` whose `body` does not parse as the `RichRecord` of `COM-158`, or whose `forward_depth` is not zero. |  |  |
+| `COM-392` | §12.3.3 | MUST | A relay | A relay MUST count a `Checkpoint` against its `pseudonym` in a count of its own, at `POST_RATE_LIMIT` in each `POST_RATE_WINDOW`. |  |  |
+| `COM-393` | §12.3.3 | MUST | A relay | A relay MUST reject a `Checkpoint` whose window holds an index that a held `Checkpoint` of that pseudonym covers, unless the two are one checkpoint under `COM-203`. |  |  |
+| `COM-394` | §12.3.3 | MUST | A relay that holds two bodies at a pending triple | A relay that holds two bodies at a pending triple MUST accept a third body when a held `Checkpoint` covers the triple and the recomputation of §12.4.4 rule 6 admits that body. |  |  |
+| `COM-395` | §12.3.3 | MUST | An author whose `PUB` of a post got a `NACK` | An author whose `PUB` of a post got a `NACK` MUST send that `PUB` again after the `PUBACK` of the `Checkpoint` that covers the post. |  |  |
+| `COM-396` | §12.5.2 | MUST | (unstated) | For a moderation epoch that means selector `0x03`, and for a checkpoint it means selector `0x02`, at the relay that serves the stub. |  |  |
+| `COM-397` | §12.6.2 | MUST | The `link` of a `RepostBody` | The `link` of a `RepostBody` MUST name `origin_community`, and `link_len` MUST be 0 exactly when `origin_community` is this community. |  |  |
+| `COM-398` | §12.4.5 | MUST | (unstated) | The history of a post ends below its own `index`, thus a party MUST reject a `CommunityPost` whose `amends` is not the sentinel and is at or above its `index`. |  |  |
+| `COM-399` | §12.3.3 | MUST | (unstated) | Under selector `0x02`, the records of one `index` are one unit: each body or stub at that index, the `OperatorRemoval` of a stub, and the `Checkpoint` whose `end_index` is that index. |  |  |
 
 ## ATT — Attachments and Large Objects
 
