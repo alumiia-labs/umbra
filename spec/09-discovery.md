@@ -279,6 +279,131 @@ More requirements:
   key that an attacker chooses cannot collide two handles.
 - **[DIS-010]** There MUST be a maximum of **one update for each label in each epoch**.
 
+**The layout.** The KEYTRANS draft leaves the byte layout to its profile, and
+this section gives the profile of UMBRA. Each hash is SHA3-256.
+
+```
+search_key   = the VOPRF output of §9.4 step 3, 64 bytes
+index(v)     = ECVRF_hash( search_key || BE32(v) )[0..32]          // version v
+commitment   = HMAC-SHA3-256( key = opening, "umbra/v1/log-commit" || entry )
+
+empty(d)     = H( 0x10 || nonce_e || prefix(index, d) || BE16(d) )
+leaf(d)      = H( 0x11 || nonce_e || index || BE16(d) || commitment )
+interior     = H( 0x12 || left || right )
+
+log_leaf_e   = H( 0x00 || nonce_e || prefix_root_e )
+log_node     = H( 0x01 || left || right )
+```
+
+The **prefix tree** is a binary tree over the bits of `index`, the most
+significant bit first. A leaf sits at the first depth `d` where no other leaf
+shares its first `d` bits. `prefix(index, d)` is `index` with each bit from
+position `d` on cleared. The prefix tree holds each version of each label that
+the log ever took, thus it only grows. The **log tree** is the left-balanced
+tree of Part 10 §10.5.3 over one `log_leaf_e` for each epoch `e`, and
+`tree_size` of §9.5.2 counts those leaves. `opening` is 32 bytes from the
+CSPRNG of the log operator. `entry` is the encoded `DirectoryEntry`,
+`AddressEntry`, `CommunityListing`, or `IssuerKeyEntry` of Part 14 §14.5. Part
+5 §5.11 holds the label.
+
+- **[DIS-145]** The VRF input of a version MUST be `search_key || BE32(version)`,
+  where `search_key` is the VOPRF output over the label input. Thus the
+  directory reads no handle at a lookup, and `DIS-007` holds. **[DIS-146]** The
+  first version of a label MUST be 0, and each next version MUST be one above
+  the version before it.
+- **[DIS-147]** The log operator MUST compute each hash of the prefix tree
+  under the nonce of the epoch, and it MUST NOT use one nonce in two epochs.
+- **[DIS-148]** The log operator MUST NOT change a leaf and MUST NOT remove a
+  leaf. A new version of a label takes a new index, thus no update needs
+  either act.
+
+**The binary ladder.** The ladder of a label whose newest version is `n` is a
+list of versions. It holds `2^k − 1` for `k` = 0, 1, 2, and so on, up to the
+first value above `n`. A binary search then runs between the last value at or
+below `n` and the first value above it, until the two are `n` and `n + 1`. A
+version at or below `n` is present, and a version above `n` is absent. The
+ladder of a label with no version is version 0 alone, absent. A ladder holds 65
+steps at the most.
+
+```
+LookupProof {                     // the answer of §9.4 step 4
+    version        u8             // 0x01
+    tree_size      u64            // the head that the proof is under
+    nonce          [32]u8         // nonce_e of the newest epoch
+    prefix_root    [32]u8         // prefix_root_e of the newest epoch
+    path_len       u8             // 0 to 64
+    log_path       [path_len]{ side u8, sibling [32]u8 }
+    found          u8             // 0x00 absent, 0x01 present
+    newest         u32            // the newest version, or 0 when absent
+    step_count     u8
+    steps          [step_count]LadderStep
+    opening        [32]u8         // present when found is 0x01
+    entry_len      u16            // present when found is 0x01
+    entry          [entry_len]u8
+}
+
+LadderStep {
+    vrf_proof      [80]u8         // ECVRF proof over search_key || BE32(version)
+    terminal       u8             // 0x00 the leaf, 0x01 an empty node, 0x02 another leaf
+    commitment     [32]u8         // under 0x00
+    other_index    [32]u8         // under 0x02
+    other_commit   [32]u8         // under 0x02
+    sibling_count  u16            // the depth of the terminal, 0 to 256
+    siblings       [sibling_count][32]u8   // the root level first
+}
+```
+
+- **[DIS-149]** A client MUST reject a `LookupProof` whose `tree_size` differs
+  from the `tree_size` of the accepted head. **[DIS-150]** A client MUST
+  recompute `log_leaf_e` from `nonce` and `prefix_root`, and it MUST verify it
+  under the `root` of that head with `log_path`. **[DIS-151]** A client MUST
+  reject a `log_path` with a `side` of 0x01. The newest leaf of a left-balanced
+  tree has each sibling on its left, thus the proof names the newest epoch
+  and no older one.
+- **[DIS-152]** A client MUST compute the ladder from `found` and `newest`, and
+  it MUST reject a proof whose `steps` differ from that ladder in count.
+  **[DIS-153]** For each step, a client MUST verify `vrf_proof` under the VRF
+  key of the directory, and it MUST verify the prefix proof at the index that
+  the VRF gives. **[DIS-154]** A client MUST reject a proof where a present
+  version shows no leaf, or an absent version shows one. **[DIS-155]** Under
+  terminal 0x02, a client MUST reject an `other_index` that equals the index
+  of the step, or that differs from it in the first `sibling_count` bits.
+- **[DIS-156]** A client MUST recompute `commitment` from `opening` and `entry`,
+  and it MUST reject a proof whose step at `newest` holds another value.
+  **[DIS-157]** A client MUST reject a `DirectoryEntry` whose `handle` differs
+  from the canonical handle of the query, or whose `version` differs from
+  `newest`.
+- **[DIS-158]** A client build MUST ship the ECVRF public key of the directory
+  beside the genesis `LogKeySet` of `DIS-066`.
+
+> *Cause of the ladder.* An inclusion proof of one version shows that the
+> version exists, and it does not show that no newer one does. A directory
+> under an order would then answer with the old key of a label after its
+> holder rotated it. The absent step at `n + 1` closes that path, and the
+> steps below `n` stop a directory that skips version numbers to hide one.
+
+**The consistency of two heads.**
+
+- **[DIS-159]** A client that retains an accepted head MUST verify a
+  consistency proof from that head before it accepts a head with a higher
+  `tree_size`. The proof is the list of node hashes of RFC 9162 §2.1.4 over
+  the log tree. **[DIS-160]** A client MUST reject a head whose `tree_size`
+  equals the `tree_size` of a retained head and whose `root` differs. That
+  head and the retained one are the evidence of `DIS-051`.
+
+**What an auditor verifies.** An auditor reads the blinded indexes and the
+commitments, and it reads no label. `DIS-050` binds it to the three checks that
+such a party can make.
+
+- **[DIS-161]** Before an auditor signs the head of an epoch, it MUST verify
+  that the nonce of the epoch is new, that each new leaf sits at an index that
+  held no leaf, and that the log tree is the tree it signed last with one leaf
+  more. The auditor recomputes the prefix root under the new nonce from the
+  leaves that it holds, thus a changed leaf and a removed leaf both fail.
+- An auditor cannot verify `DIS-010`, because two versions of one label sit at
+  two unlinked indexes. The holder of a label verifies it with the self-check
+  of `DIS-137`.
+
 ### 9.5.2 Third-party auditing, three jurisdictions
 
 The log operates in `thirdPartyAuditing` mode, with **three independent signers

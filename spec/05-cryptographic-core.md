@@ -1529,6 +1529,8 @@ names the object type and its lifetime:
 "umbra/v1/moderator-set"
 "umbra/v1/community-contact"
 "umbra/v1/hello"
+"umbra/v1/log-commit"
+"umbra/v1/issuer-key"
 ```
 
 **The list above is closed.** **[CRY-028]** An implementation MUST NOT use a label that this
@@ -1638,6 +1640,12 @@ primitive register in the same manner.
 > hello to the entry key and seals it under a key that only that encapsulation
 > gives. The label `"umbra/v1/hello"` keeps that key apart from the challenge
 > keys of §9.9.1 and §9.9.3, which take the same shared-secret shape.
+
+> *The cause of the two log labels.* Part 9 §9.5.1 commits a leaf of the
+> transparency log to its entry under `"umbra/v1/log-commit"`, with the
+> opening as the HMAC key. Part 14 §14.5 names the label input of an issuer
+> key under `"umbra/v1/issuer-key"`, which keeps that input apart from a
+> handle, an address, and a listing in the one VOPRF of Part 9 §9.4.
 
 > *The cause of the hop-update label.* Part 3 §3.4.4 rule `NET-204` replaces
 > the key set of the hop 3 layer after each cell under

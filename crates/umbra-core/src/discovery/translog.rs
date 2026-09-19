@@ -33,7 +33,7 @@ pub const VERSION: u8 = 0x01;
 /// `tree_size`.
 pub const LOG_PATH_MAX: usize = 64;
 /// The most steps of a binary ladder over a 32-bit version.
-pub const LADDER_MAX: usize = 66;
+pub const LADDER_MAX: usize = 65;
 /// The longest entry that a leaf commits to.
 pub const ENTRY_MAX: usize = 8_192;
 

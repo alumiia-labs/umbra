@@ -301,6 +301,36 @@ log**. **[ABU-002]** A client MUST refuse a token from a key that is not in the 
 MUST also refuse to redeem against a relay that advertises a key that is not in
 the log. The issuer publishes DLEQ evidence for privately-verifiable issuance.
 
+**The log is the log of Part 9 §9.5.** The signers, the gossip, and the
+lookup of that log serve an issuer key with no new mechanism.
+
+```
+IssuerKeyEntry {                  // the entry of one leaf, Part 9 §9.5.1
+    token_type     u16            // §14.3
+    epoch          u32            // §14.6
+    key_len        u16
+    public_key     [key_len]u8
+}
+
+label input = "umbra/v1/issuer-key" || BE16(token_type) || BE32(epoch)
+```
+
+- **[ABU-098]** An issuer MUST publish the key of each token type for each
+  epoch as version 0 of the label above, before the epoch starts.
+  **[ABU-099]** A client MUST look up that label under Part 9 §9.4, and it
+  MUST verify the `LookupProof` of Part 9 §9.5.1 before it accepts the key.
+- **[ABU-100]** A client MUST reject the label when its newest version is not
+  0. A second version is a second key for one epoch, and the binary ladder of
+  Part 9 §9.5.1 shows it to each client.
+- **[ABU-101]** A client MUST reject an entry whose `token_type` or `epoch`
+  differs from the label that it looked up.
+
+> *Cause.* An earlier draft named a log and defined no object, no signer, and
+> no lookup. A second log needs a second signer set and a second gossip
+> source, and Part 9 §9.5.2 records how hard one funded set is to keep. The
+> label input is public, and the client still blinds it, thus the directory
+> serves one lookup shape.
+
 > Without this log, a coerced or seized issuer performs the per-client-key
 > attack of RFC 9576 with no difficulty. That issuer gives one user a unique
 > key, and each redemption of that key is then attributable. The attack

@@ -73,15 +73,15 @@ each column when a crate implements the requirement and a test covers it.
 | `WIR` | 367 | 81 | 0 | 0 | 6 | **454** |
 | `DEV` | 172 | 87 | 2 | 0 | 7 | **268** |
 | `NTF` | 62 | 29 | 0 | 0 | 2 | **93** |
-| `DIS` | 108 | 35 | 0 | 0 | 1 | **144** |
+| `DIS` | 123 | 37 | 0 | 0 | 1 | **161** |
 | `REL` | 114 | 27 | 1 | 0 | 2 | **144** |
 | `GRP` | 204 | 56 | 0 | 0 | 5 | **265** |
 | `COM` | 298 | 96 | 0 | 0 | 5 | **399** |
 | `ATT` | 134 | 46 | 1 | 0 | 2 | **183** |
-| `ABU` | 60 | 31 | 0 | 0 | 0 | **91** |
+| `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
 | `IMP` | 72 | 32 | 0 | 0 | 0 | **104** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2045 | 683 | 6 | 0 | 50 | **2784** |
+| **All** | 2064 | 685 | 6 | 0 | 50 | **2805** |
 
 ## SCP — Scope and Conventions
 
@@ -1722,6 +1722,23 @@ Source: `spec/09-discovery.md`
 | `DIS-142` | §9.5.2 | MUST | Each `sig` | Each `sig` MUST cover `"umbra/v1/tree-head" || version || tree_size || timestamp || root keyset_hash`, which is the label and then each field before `sig_count`. |  |  |
 | `DIS-143` | §9.6 | MUST | A client | A client MUST seal a hello as `0x01 || ct || nonce [24]u8 || XChaCha20-Poly1305(K_hello, nonce, body, ad = ct)`, where `(ct, ss) = UMBRA-KEM.Encap(entry_pk)`, `K_hello = HKDF-SHA3-256(salt = "", ikm = ss, info = "umbra/v1/hello" || entry_pk, L = 32)`, and `entry_pk` is the key of the entry that the initiator resolved. |  |  |
 | `DIS-144` | §9.9.1 | MUST NOT | A directory | A directory MUST NOT accept an `ans` for a `lease_epoch` that it issued before the current version of the label was published. |  |  |
+| `DIS-145` | §9.5.1 | MUST | The VRF input of a version | The VRF input of a version MUST be `search_key || BE32(version)`, where `search_key` is the VOPRF output over the label input. |  |  |
+| `DIS-146` | §9.5.1 | MUST | The first version of a label | The first version of a label MUST be 0, and each next version MUST be one above the version before it. |  |  |
+| `DIS-147` | §9.5.1 | MUST NOT | (unstated) | The log operator MUST compute each hash of the prefix tree under the nonce of the epoch, and it MUST NOT use one nonce in two epochs. |  |  |
+| `DIS-148` | §9.5.1 | MUST NOT | The log operator | The log operator MUST NOT change a leaf and MUST NOT remove a leaf. |  |  |
+| `DIS-149` | §9.5.1 | MUST | A client | A client MUST reject a `LookupProof` whose `tree_size` differs from the `tree_size` of the accepted head. |  |  |
+| `DIS-150` | §9.5.1 | MUST | A client | A client MUST recompute `log_leaf_e` from `nonce` and `prefix_root`, and it MUST verify it under the `root` of that head with `log_path`. |  |  |
+| `DIS-151` | §9.5.1 | MUST | A client | A client MUST reject a `log_path` with a `side` of 0x01. |  |  |
+| `DIS-152` | §9.5.1 | MUST | A client | A client MUST compute the ladder from `found` and `newest`, and it MUST reject a proof whose `steps` differ from that ladder in count. |  |  |
+| `DIS-153` | §9.5.1 | MUST | For each step, a client | For each step, a client MUST verify `vrf_proof` under the VRF key of the directory, and it MUST verify the prefix proof at the index that the VRF gives. |  |  |
+| `DIS-154` | §9.5.1 | MUST | A client | A client MUST reject a proof where a present version shows no leaf, or an absent version shows one. |  |  |
+| `DIS-155` | §9.5.1 | MUST | Under terminal 0x02, a client | Under terminal 0x02, a client MUST reject an `other_index` that equals the index of the step, or that differs from it in the first `sibling_count` bits. |  |  |
+| `DIS-156` | §9.5.1 | MUST | A client | A client MUST recompute `commitment` from `opening` and `entry`, and it MUST reject a proof whose step at `newest` holds another value. |  |  |
+| `DIS-157` | §9.5.1 | MUST | A client | A client MUST reject a `DirectoryEntry` whose `handle` differs from the canonical handle of the query, or whose `version` differs from `newest`. |  |  |
+| `DIS-158` | §9.5.1 | MUST | A client build | A client build MUST ship the ECVRF public key of the directory beside the genesis `LogKeySet` of `DIS-066`. |  |  |
+| `DIS-159` | §9.5.1 | MUST | A client that retains an accepted head | A client that retains an accepted head MUST verify a consistency proof from that head before it accepts a head with a higher `tree_size`. |  |  |
+| `DIS-160` | §9.5.1 | MUST | A client | A client MUST reject a head whose `tree_size` equals the `tree_size` of a retained head and whose `root` differs. |  |  |
+| `DIS-161` | §9.5.1 | MUST | Before an auditor signs the head of an epoch, it | Before an auditor signs the head of an epoch, it MUST verify that the nonce of the epoch is new, that each new leaf sits at an index that held no leaf, and that the log tree is the tree it signed last with one leaf more. |  |  |
 
 ## REL — Relay Directory
 
@@ -2839,6 +2856,10 @@ Source: `spec/14-anti-abuse.md`
 | `ABU-095` | §14.3.2 | MUST | A verifier | A verifier MUST accept a token whose `challenge_digest` names the current epoch or the one before it, with its own `relay_id` or the zero context, and MUST reject each other digest. |  |  |
 | `ABU-096` | §14.3.2 | MUST | (unstated) | The `0x0002` authenticator is the RFC 9474 signature over `token_input` with a 48-byte salt that the client draws at the blind, and the `0x0005` authenticator is the RFC 9497 output over `token_input` at the VOPRF mode. |  |  |
 | `ABU-097` | §14.3.2 | MUST | An issuer | An issuer MUST answer a batch of `0x0005` requests with one DLEQ proof over the batch, and a client MUST verify that proof before it finalizes a token of the batch. |  |  |
+| `ABU-098` | §14.5 | MUST | An issuer | An issuer MUST publish the key of each token type for each epoch as version 0 of the label above, before the epoch starts. |  |  |
+| `ABU-099` | §14.5 | MUST | A client | A client MUST look up that label under Part 9 §9.4, and it MUST verify the `LookupProof` of Part 9 §9.5.1 before it accepts the key. |  |  |
+| `ABU-100` | §14.5 | MUST | A client | A client MUST reject the label when its newest version is not A second version is a second key for one epoch, and the binary ladder of Part 9 §9.5.1 shows it to each client. |  |  |
+| `ABU-101` | §14.5 | MUST | A client | A client MUST reject an entry whose `token_type` or `epoch` differs from the label that it looked up. |  |  |
 
 ## IMP — Implementation
 

@@ -458,6 +458,8 @@ side channel that the user selects, such as a QR code scan.
 | Handle link | Part 9 §9.3.1 | Out of band | Client |
 | Profile blob (Part 9 §9.3.1) | none | none | Client |
 | Lookup request and response (Part 9 §9.4) | none | none | Client and directory |
+| `LookupProof`, `LadderStep` | Part 9 §9.5.1 | The lookup response of Part 9 §9.4 step 4 | Directory |
+| `IssuerKeyEntry` | Part 14 §14.5 | A leaf of the log of Part 9 §9.5.1 | The issuer of Part 14 §14.9 |
 | `SignedTreeHead`, `SignerSig` | Part 9 §9.5.2 | The lookup response of Part 9 §9.4 step 4 | The signers of Part 9 §9.5.2 |
 | `LogKeySet`, `SignedLogKeySet` | Part 9 §9.5.2 | The client build, and the signers of Part 9 §9.5.2 | The signers of Part 9 §9.5.2 |
 | Rendezvous hello (Part 9 §9.6), which carries the fields of Part 5 §5.4.1 and ends with an `Admission` | none | The rendezvous queue, Part 9 §9.6 | Client |
