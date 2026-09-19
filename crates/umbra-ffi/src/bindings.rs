@@ -21,7 +21,7 @@ use std::{
 use tokio::sync::mpsc;
 use umbra_core::{
     session::node::ClientNode,
-    store::wrap::{Cost, SecureElement},
+    store::wrap::{Cost, SecureElement, WrapHeader, M_KIB_FLOOR, T_FLOOR},
 };
 use umbra_crypto::handshake::nk::RelayStatic;
 use umbra_transport::{native, Dial};
@@ -36,10 +36,16 @@ use crate::{
     ConversationId, Delivery, Error, Event, MsgRef, Sink,
 };
 
-fn unix_now() -> u64 {
+fn unix_now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs())
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
+fn unix_now() -> u64 {
+    unix_now_ms() / 1_000
 }
 
 /// The error of the surface.
@@ -171,13 +177,32 @@ fn relay_static(endpoint: &RelayEndpoint) -> Result<RelayStatic, FfiError> {
     })
 }
 
+/// What a conversation view shows beside the text of a message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct MsgInfo {
+    /// Whether this device sent the message.
+    pub outgoing: bool,
+    /// The delivery state, with the values of [`FfiEvent::Delivery`].
+    pub delivery: u8,
+    /// The send time that the sender wrote, in milliseconds.
+    pub sent_at_ms: u64,
+    /// The time of this device at the store of the message, in
+    /// milliseconds. The list of [`Handle::messages`] is in this order.
+    pub stored_at_ms: u64,
+}
+
 /// One event of the stream.
 #[derive(uniffi::Enum)]
 pub enum FfiEvent {
     /// The circuit is ready.
     Online,
-    /// The connection or the circuit ended.
-    Offline,
+    /// The run of the network ended. The cause is 0 for a stop by the
+    /// application, 1 for a dial that failed, 2 for a link that closed, 3
+    /// for a circuit that a relay destroyed, and 4 for a fault in the client.
+    Offline {
+        /// The cause.
+        cause: u8,
+    },
     /// The bundle of an invitation, which the user gives out of band.
     Invitation {
         /// The bundle.
@@ -188,6 +213,9 @@ pub enum FfiEvent {
         /// The conversation.
         conversation: Vec<u8>,
     },
+    /// The client refused an invitation command, such as a bundle that does
+    /// not parse.
+    Refused,
     /// A message arrived.
     Message {
         /// The conversation.
@@ -281,11 +309,12 @@ impl Inner {
         }
         Some(match self.net_events.pop_front()? {
             NetEvent::Online => FfiEvent::Online,
-            NetEvent::Offline => FfiEvent::Offline,
+            NetEvent::Offline(ended) => FfiEvent::Offline { cause: ended as u8 },
             NetEvent::Invitation(bundle) => FfiEvent::Invitation { bundle },
             NetEvent::Contact(conversation) => FfiEvent::Contact {
                 conversation: conversation.0.to_vec(),
             },
+            NetEvent::Refused => FfiEvent::Refused,
         })
     }
 
@@ -305,6 +334,36 @@ pub struct Handle {
     /// Signals each change of the event stream to [`Handle::wait_event`].
     changed: Condvar,
     runtime: Mutex<Option<tokio::runtime::Runtime>>,
+}
+
+struct NoElement;
+
+impl SecureElement for NoElement {
+    fn keyed(&self, _input: &[u8]) -> Result<[u8; 32], umbra_core::Error> {
+        Ok([0; 32])
+    }
+}
+
+/// Runs one Argon2id try at the floor cost, and returns its time in
+/// milliseconds. The platform gives the result to [`init`] at the first
+/// launch, off the main thread.
+#[uniffi::export]
+pub fn measure_argon2_floor_ms() -> u64 {
+    let floor = Cost {
+        m_kib: M_KIB_FLOOR,
+        t: T_FLOOR,
+    };
+    let start = std::time::Instant::now();
+    // The key and the passphrase are fixed values, and the result drops.
+    let _ = WrapHeader::wrap(
+        &umbra_crypto::secret::Secret::new([0; 32]),
+        b"calibration",
+        floor,
+        [0; 16],
+        [0; 24],
+        &NoElement,
+    );
+    u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 impl Drop for Handle {
@@ -372,15 +431,15 @@ impl Handle {
             bridge,
             net_events,
         } = &mut *inner;
-        let ended = update == Update::Offline;
+        let ended = matches!(update, Update::Offline(_));
         if let Some(running) = bridge {
             // A fault of the store shows in the event stream of the client,
             // and such an update gives no event of the network.
-            if let Ok(Some(event)) = running.on_update(client, update, &mut OsRng) {
+            if let Ok(Some(event)) = running.on_update(client, update, unix_now_ms(), &mut OsRng) {
                 net_events.push_back(event);
             }
-        } else if ended {
-            net_events.push_back(NetEvent::Offline);
+        } else if let Update::Offline(cause) = update {
+            net_events.push_back(NetEvent::Offline(cause));
         }
         if ended {
             *bridge = None;
@@ -486,7 +545,7 @@ impl Handle {
         let draft = locked(&draft.0).take().ok_or(FfiError::NotFound)?;
         let mut inner = locked(&self.inner);
         let Inner { client, bridge, .. } = &mut *inner;
-        let message = client.send_draft(draft, unix_now(), &mut OsRng)?;
+        let message = client.send_draft(draft, unix_now_ms(), &mut OsRng)?;
         // With no network the record waits in the store.
         if let Some(running) = bridge {
             running.flush(client, &mut OsRng)?;
@@ -527,7 +586,19 @@ impl Handle {
         Ok(locked(&self.inner).client.render(&message.0, &mut sink)?)
     }
 
-    /// The messages of one conversation, as handles.
+    /// The direction, the delivery state, and the send time of a message.
+    pub fn msg_info(&self, message: Arc<MsgHandle>) -> Result<MsgInfo, FfiError> {
+        let info = locked(&self.inner).client.info(&message.0)?;
+        Ok(MsgInfo {
+            outgoing: info.outgoing,
+            delivery: info.delivery as u8,
+            sent_at_ms: info.sent_at_ms,
+            stored_at_ms: info.stored_at_ms,
+        })
+    }
+
+    /// The messages of one conversation, as handles, in the order in which
+    /// this device stored them.
     pub fn messages(&self, conversation: Vec<u8>) -> Result<Vec<Arc<MsgHandle>>, FfiError> {
         let conversation = conversation_of(&conversation)?;
         let found = locked(&self.inner).client.messages(conversation)?;

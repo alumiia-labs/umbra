@@ -14,9 +14,12 @@
 //! issuer_modulus=<512 hex characters>
 //! community_capacity=1073741824
 //! next=<relay_id hex>,<host name>,<IPv4 address>,<port>
+//! trust=/etc/umbra/test-authority.pem
 //! ```
 //!
-//! The `next` line repeats, one for each relay of the next layer.
+//! The `next` line repeats, one for each relay of the next layer. The
+//! `trust` line is for a test network: the dialer then trusts that one
+//! authority and not the web roots. A deployment leaves it out.
 
 #![forbid(unsafe_code)]
 
@@ -44,6 +47,10 @@ fn hex(text: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
+fn to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 fn hex32(text: &str) -> Option<[u8; 32]> {
     hex(text)?.try_into().ok()
 }
@@ -52,6 +59,7 @@ struct Settings {
     listen: String,
     cert: String,
     key: String,
+    trust: Option<String>,
     config: Config,
     next: BTreeMap<[u8; 32], Dial>,
 }
@@ -90,6 +98,7 @@ fn read_settings(path: &str) -> Option<Settings> {
         listen: (*values.get("listen")?).to_owned(),
         cert: (*values.get("cert")?).to_owned(),
         key: (*values.get("key")?).to_owned(),
+        trust: values.get("trust").map(|path| (*path).to_owned()),
         config: Config {
             relay,
             static_secret,
@@ -124,10 +133,22 @@ async fn main() -> ExitCode {
         return ExitCode::from(1);
     };
 
-    let Ok(client_tls) = native::tls_config() else {
+    let client_tls = match &settings.trust {
+        Some(path) => native::tls_config_with_root_file(path),
+        None => native::tls_config(),
+    };
+    let Ok(client_tls) = client_tls else {
         eprintln!("the TLS client configuration does not build");
         return ExitCode::from(1);
     };
+    // The public half of the identity, for the network record of a client.
+    println!(
+        "relay_id={} static_key={} layer={} listen={}",
+        to_hex(&settings.config.relay.relay_id),
+        to_hex(&settings.config.relay.s),
+        settings.config.layer,
+        settings.listen,
+    );
     run_relay(
         RelayNode::new(settings.config),
         listener,

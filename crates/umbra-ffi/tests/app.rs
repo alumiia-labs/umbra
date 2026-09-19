@@ -101,7 +101,7 @@ fn wait_for<T>(handle: &Handle, mut pick: impl FnMut(FfiEvent) -> Option<T>) -> 
             continue;
         };
         assert!(
-            !matches!(event, FfiEvent::Offline),
+            !matches!(event, FfiEvent::Offline { .. }),
             "the client went offline"
         );
         if let Some(found) = pick(event) {
@@ -212,6 +212,13 @@ fn two_apps_meet_and_talk_through_the_exported_surface() {
     alice.clone().connect(network.clone()).unwrap();
     bob.clone().connect(network.clone()).unwrap();
 
+    // A bundle that does not parse is refused, and the network stays up.
+    bob.accept(vec![1, 2, 3]).unwrap();
+    wait_for(&bob, |event| match event {
+        FfiEvent::Refused => Some(()),
+        _ => None,
+    });
+
     alice.invite().unwrap();
     let bundle = wait_for(&alice, |event| match event {
         FfiEvent::Invitation { bundle } => Some(bundle),
@@ -241,7 +248,14 @@ fn two_apps_meet_and_talk_through_the_exported_surface() {
     let (conversation, message) = wait_for_message(&bob);
     assert_eq!(conversation, bob_conversation);
     assert_eq!(rendered(&bob, message), "hello bob");
-    assert_eq!(bob.messages(bob_conversation).unwrap().len(), 2);
+    // The view of Bob holds the two messages in the order of their store.
+    let shown = bob.messages(bob_conversation).unwrap();
+    assert_eq!(shown.len(), 2);
+    let first = bob.msg_info(shown[0].clone()).unwrap();
+    let second = bob.msg_info(shown[1].clone()).unwrap();
+    assert!(first.outgoing && first.delivery == 1);
+    assert!(!second.outgoing && second.delivery == 2);
+    assert!(first.stored_at_ms <= second.stored_at_ms);
 
     // A draft for no contact fails, and the network stays up.
     let draft = alice.new_draft(vec![0xEE; 16]).unwrap();

@@ -18,16 +18,19 @@ use umbra_crypto::{hierarchy::RootIdentity, rand_core::CryptoRng, secret::Secret
 use umbra_wire::app::{msg_ref, AppKind, AppMessage, Channel};
 use zeroize::Zeroizing;
 
-use crate::{draft::Draft, ConversationId, Delivery, Error, Event, MsgRef, Sink};
+use crate::{draft::Draft, ConversationId, Delivery, Error, Event, MessageInfo, MsgRef, Sink};
 
 const ROOT_KEY: &[u8] = b"root";
 const OUTGOING: u8 = 1;
 const INCOMING: u8 = 2;
 /// The bytes of a stored message before its `AppMessage`: the direction,
-/// the delivery state, and the conversation. The conversation sits in the
+/// the delivery state, the conversation, and the time of this device at the
+/// store of the message, in milliseconds. The conversation sits in the
 /// plaintext, because the owner column of a row is outside the associated
-/// data (`IMP-121`).
-const MESSAGE_PREFIX: usize = 2 + 16;
+/// data (`IMP-121`). The store time orders a conversation view, because the
+/// send time is a value of the peer.
+const MESSAGE_PREFIX: usize = 2 + 16 + 8;
+const STORED_AT: core::ops::Range<usize> = 18..26;
 /// The table of the records that wait for the send path. A row holds the
 /// file references of its draft, under the row identifier of its message.
 /// A lock clears the queue in RAM, and an unlock fills it again from here.
@@ -118,12 +121,14 @@ fn stored_message(
     direction: u8,
     delivery: Delivery,
     conversation: ConversationId,
+    stored_at_ms: u64,
     app: &[u8],
 ) -> Zeroizing<Vec<u8>> {
     let mut plain = Zeroizing::new(Vec::with_capacity(MESSAGE_PREFIX.saturating_add(app.len())));
     plain.push(direction);
     plain.push(delivery as u8);
     plain.extend_from_slice(&conversation.0);
+    plain.extend_from_slice(&stored_at_ms.to_be_bytes());
     plain.extend_from_slice(app);
     plain
 }
@@ -321,7 +326,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     pub fn send_draft<R: CryptoRng + ?Sized>(
         &mut self,
         draft: Draft,
-        now: u64,
+        now_ms: u64,
         rng: &mut R,
     ) -> Result<MsgRef, Error> {
         if draft.is_empty() {
@@ -332,7 +337,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let message = AppMessage {
             kind: AppKind::Text,
             msg_id,
-            sent_at: now.saturating_mul(1_000),
+            sent_at: now_ms,
             body: draft.text(),
         };
         let mut app = Zeroizing::new(vec![0u8; message.len()]);
@@ -345,7 +350,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let reference = msg_ref(&open.device_set_key, &msg_id);
         let natural = [conversation.0.as_slice(), &reference].concat();
         let row = open.store.row_id(TableId::MESSAGE, &natural);
-        let plain = stored_message(OUTGOING, Delivery::Queued, conversation, &app);
+        let plain = stored_message(OUTGOING, Delivery::Queued, conversation, now_ms, &app);
         let mut batch = open.store.begin();
         batch.put(TableId::MESSAGE, row, Some(conversation.0), &plain, rng)?;
         batch.put(OUTBOX, row, None, &outbox_row(&attachments)?, rng)?;
@@ -358,7 +363,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             app: app.to_vec(),
             attachments,
         });
-        self.auto_lock.touch(now);
+        self.auto_lock.touch(now_ms / 1_000);
         Ok(message)
     }
 
@@ -425,6 +430,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         &mut self,
         conversation: ConversationId,
         app: &[u8],
+        now_ms: u64,
         rng: &mut R,
     ) -> Result<MsgRef, Error> {
         let parsed = AppMessage::parse(app, Channel::Pairwise)?;
@@ -436,7 +442,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if open.store.get(TableId::MESSAGE, &row)?.is_some() {
             return Ok(message);
         }
-        let plain = stored_message(INCOMING, Delivery::Delivered, conversation, app);
+        let plain = stored_message(INCOMING, Delivery::Delivered, conversation, now_ms, app);
         let mut batch = open.store.begin();
         batch.put(TableId::MESSAGE, row, Some(conversation.0), &plain, rng)?;
         batch.commit()?;
@@ -479,19 +485,34 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(())
     }
 
-    /// The messages of one conversation, as handles.
+    /// The direction, the delivery state, and the send time of a message.
+    pub fn info(&self, message: &MsgRef) -> Result<MessageInfo, Error> {
+        let open = self.open_ref()?;
+        let plain = Zeroizing::new(
+            open.store
+                .get(TableId::MESSAGE, &message.0)?
+                .ok_or(Error::NotFound)?,
+        );
+        info_of(&plain)
+    }
+
+    /// The messages of one conversation, as handles, in the order in which
+    /// this device stored them. The row identifier is a keyed hash, thus
+    /// the order of the store says nothing.
     pub fn messages(&self, conversation: ConversationId) -> Result<Vec<MsgRef>, Error> {
         let open = self.open_ref()?;
-        let mut out = Vec::new();
+        let mut found = Vec::new();
         for (row, plain) in open.store.list(TableId::MESSAGE, Some(&conversation.0))? {
             let plain = Zeroizing::new(plain);
             // IMP-121: the plaintext names its owner.
             if conversation_of(&plain)? != conversation {
                 return Err(Error::Integrity);
             }
-            out.push(MsgRef(row));
+            let info = info_of(&plain)?;
+            found.push((info.stored_at_ms, info.sent_at_ms, row));
         }
-        Ok(out)
+        found.sort_unstable();
+        Ok(found.into_iter().map(|(_, _, row)| MsgRef(row)).collect())
     }
 
     /// Compares each table with its accumulator by a scan, outside the
@@ -508,9 +529,25 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     }
 }
 
+fn info_of(plain: &[u8]) -> Result<MessageInfo, Error> {
+    let direction = *plain.first().ok_or(Error::Integrity)?;
+    let delivery = plain.get(1).copied().and_then(Delivery::from_byte);
+    let app = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
+    let stored_at: [u8; 8] = plain
+        .get(STORED_AT)
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or(Error::Integrity)?;
+    Ok(MessageInfo {
+        outgoing: direction == OUTGOING,
+        stored_at_ms: u64::from_be_bytes(stored_at),
+        delivery: delivery.ok_or(Error::Integrity)?,
+        sent_at_ms: AppMessage::parse(app, Channel::Pairwise)?.sent_at,
+    })
+}
+
 fn conversation_of(plain: &[u8]) -> Result<ConversationId, Error> {
     let bytes: [u8; 16] = plain
-        .get(2..MESSAGE_PREFIX)
+        .get(2..18)
         .and_then(|b| b.try_into().ok())
         .ok_or(Error::Integrity)?;
     Ok(ConversationId(bytes))

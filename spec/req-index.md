@@ -79,9 +79,9 @@ each column when a crate implements the requirement and a test covers it.
 | `COM` | 299 | 96 | 0 | 0 | 5 | **400** |
 | `ATT` | 134 | 46 | 1 | 0 | 2 | **183** |
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
-| `IMP` | 80 | 34 | 0 | 0 | 1 | **115** |
+| `IMP` | 82 | 35 | 0 | 0 | 1 | **118** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2101 | 688 | 6 | 0 | 51 | **2846** |
+| **All** | 2103 | 689 | 6 | 0 | 51 | **2849** |
 
 ## SCP — Scope and Conventions
 
@@ -3012,6 +3012,9 @@ Source: `spec/15-implementation.md`
 | `IMP-124` | §15.6.1 | MUST | Text and the passphrase | Text and the passphrase MUST cross as UTF-16 code units, and the Rust side MUST overwrite its copy after the use. |  |  |
 | `IMP-125` | §15.6.1 | MUST | The secure-element step of §15.6.4 | The secure-element step of §15.6.4 MUST cross as one callback that takes the input of the keyed function and returns its 32 bytes. |  |  |
 | `IMP-126` | §15.6.1 | MUST | A record that waits for the send path | A record that waits for the send path MUST sit in the store under the record encryption of §15.6.4, in a table of its own. |  |  |
+| `IMP-127` | §15.6.1 | MUST | A lock | A lock MUST stop the network runtime, and the runtime MUST drop its state at that stop. |  |  |
+| `IMP-128` | §15.6.1 | MUST | A client | A client MUST order a conversation view by the time of its own store of each message. |  |  |
+| `IMP-129` | §15.6.1 | MUST NOT | (unstated) | A conversation identifier on the surface MUST be the surrogate of §15.6.4 under the store key, and it MUST NOT be a queue identifier. |  |  |
 
 ## SEC — Security Considerations
 

@@ -65,6 +65,35 @@ pub enum Delivery {
     Failed = 4,
 }
 
+impl Delivery {
+    /// The state of a stored byte.
+    pub fn from_byte(byte: u8) -> Option<Self> {
+        [
+            Delivery::Queued,
+            Delivery::Accepted,
+            Delivery::Delivered,
+            Delivery::Read,
+            Delivery::Failed,
+        ]
+        .into_iter()
+        .find(|state| *state as u8 == byte)
+    }
+}
+
+/// What a conversation view shows beside the text of a message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MessageInfo {
+    /// Whether this device sent the message.
+    pub outgoing: bool,
+    /// The delivery state.
+    pub delivery: Delivery,
+    /// The send time that the sender wrote, in milliseconds.
+    pub sent_at_ms: u64,
+    /// The time of this device at the store of the message, in
+    /// milliseconds. A conversation view orders by it.
+    pub stored_at_ms: u64,
+}
+
 /// One event of the stream from Rust to the platform. An event carries a
 /// handle and no content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -244,9 +273,9 @@ mod tests {
 
         let mut draft = client.new_draft(conversation);
         draft.set_text(&units("hello 👋")).unwrap();
-        let sent = client.send_draft(draft, 1_010, &mut rng).unwrap();
+        let sent = client.send_draft(draft, 1_010_000, &mut rng).unwrap();
         assert!(client
-            .send_draft(client.new_draft(conversation), 1_011, &mut rng)
+            .send_draft(client.new_draft(conversation), 1_011_000, &mut rng)
             .is_err());
 
         let outgoing = client.take_outgoing().unwrap();
@@ -271,9 +300,12 @@ mod tests {
 
         // The peer runtime hands the same record over. It gives one event.
         let mut peer = new_client(&mut Rng(2));
-        let received = peer.receive(conversation, &outgoing.app, &mut rng).unwrap();
+        let received = peer
+            .receive(conversation, &outgoing.app, 1_012_000, &mut rng)
+            .unwrap();
         assert_eq!(
-            peer.receive(conversation, &outgoing.app, &mut rng).unwrap(),
+            peer.receive(conversation, &outgoing.app, 1_012_000, &mut rng)
+                .unwrap(),
             received
         );
         assert_eq!(
@@ -298,10 +330,10 @@ mod tests {
         let mut draft = client.new_draft(conversation);
         draft.set_text(&units("still waiting")).unwrap();
         draft.attach("content://media/9".into());
-        let waiting = client.send_draft(draft, 1_010, &mut rng).unwrap();
+        let waiting = client.send_draft(draft, 1_010_000, &mut rng).unwrap();
         let mut gone = client.new_draft(conversation);
         gone.set_text(&units("never mind")).unwrap();
-        let cancelled = client.send_draft(gone, 1_011, &mut rng).unwrap();
+        let cancelled = client.send_draft(gone, 1_011_000, &mut rng).unwrap();
         assert!(client.cancel_send(&cancelled).unwrap());
         assert!(!client.cancel_send(&cancelled).unwrap());
 

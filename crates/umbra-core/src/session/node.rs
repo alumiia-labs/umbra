@@ -324,6 +324,7 @@ impl ClientNode {
         bundle: Vec<u8>,
         rng: &mut R,
     ) -> Result<u64, Error> {
+        Invitee::check(&bundle)?;
         self.make_queue(Purpose::Accept { bundle }, rng)
     }
 

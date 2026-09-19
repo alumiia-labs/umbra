@@ -15,7 +15,7 @@ use umbra_crypto::rand_core::CryptoRng;
 
 use crate::{
     client::Client,
-    runtime::{Command, Update},
+    runtime::{Command, Ended, Update},
     ConversationId, Delivery, Error, MsgRef,
 };
 
@@ -27,11 +27,14 @@ pub enum NetEvent {
     Online,
     /// The connection or the circuit ended. Each contact of this session is
     /// gone, because the ratchet state sits in RAM only.
-    Offline,
+    Offline(Ended),
     /// The bundle of an invitation, which the user gives out of band.
     Invitation(Vec<u8>),
     /// A contact is ready, and its conversation takes drafts.
     Contact(ConversationId),
+    /// The client refused an invitation command, such as a bundle that does
+    /// not parse.
+    Refused,
 }
 
 /// The state of the bridge for one run of the network runtime.
@@ -102,12 +105,14 @@ impl Bridge {
         &mut self,
         client: &mut Client<B, E>,
         update: Update,
+        now_ms: u64,
         rng: &mut R,
     ) -> Result<Option<NetEvent>, Error> {
         Ok(match update {
             Update::Online => Some(NetEvent::Online),
-            Update::Offline => Some(NetEvent::Offline),
+            Update::Offline(ended) => Some(NetEvent::Offline(ended)),
             Update::Invitation(bundle) => Some(NetEvent::Invitation(bundle)),
+            Update::Refused => Some(NetEvent::Refused),
             Update::Contact { contact, .. } => {
                 let conversation = client.conversation_for(&contact.0)?;
                 self.contacts.insert(conversation, contact);
@@ -115,7 +120,7 @@ impl Bridge {
             }
             Update::Message { contact, app } => {
                 let conversation = client.conversation_for(&contact.0)?;
-                client.receive(conversation, &app, rng)?;
+                client.receive(conversation, &app, now_ms, rng)?;
                 // The store holds the record, thus the relay can drop it.
                 self.command(Command::Committed(contact))?;
                 None

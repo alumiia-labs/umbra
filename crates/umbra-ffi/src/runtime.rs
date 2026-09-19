@@ -94,8 +94,28 @@ pub enum Update {
     Sent(u64),
     /// A relay rejected the record with this tag.
     Failed(u64),
-    /// The connection or the circuit ended.
-    Offline,
+    /// The node refused an invitation command. A bundle that does not parse
+    /// gives this update, and the runtime stays up.
+    Refused,
+    /// The run ended.
+    Offline(Ended),
+}
+
+/// Why a run of the network ended. The interface shows it, and a later
+/// reconnect policy reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Ended {
+    /// The application stopped the run.
+    Stopped = 0,
+    /// The dial of the guard failed.
+    DialFailed = 1,
+    /// The link to the guard closed.
+    LinkClosed = 2,
+    /// A relay destroyed the circuit.
+    CircuitLost = 3,
+    /// A capsule or a command gave a fault in the client node.
+    NodeFault = 4,
 }
 
 fn unix_now() -> u64 {
@@ -123,32 +143,32 @@ pub async fn run_client(
     let plan = Plan::Only(Wire::Tcp);
     let Ok(mut link) = native::connect(&guard, tls, plan, key, mask, Duration::from_secs(10)).await
     else {
-        let _ = updates.send(Update::Offline);
+        let _ = updates.send(Update::Offline(Ended::DialFailed));
         return;
     };
     if node.connected(&mut rng).is_err() {
-        let _ = updates.send(Update::Offline);
+        let _ = updates.send(Update::Offline(Ended::NodeFault));
         return;
     }
 
     let mut early: VecDeque<Command> = VecDeque::new();
     let mut tags: BTreeMap<u64, u64> = BTreeMap::new();
-    'run: loop {
+    let ended = 'run: loop {
         for capsule in node.take_capsules() {
             if link.send(&capsule).await.is_err() {
-                break 'run;
+                break 'run Ended::LinkClosed;
             }
         }
         let events = tokio::select! {
             received = link.recv() => match received {
                 Ok(bytes) => match node.on_capsule(&bytes, unix_now(), &mut rng) {
                     Ok(events) => events,
-                    Err(_) => break 'run,
+                    Err(_) => break 'run Ended::NodeFault,
                 },
-                Err(_) => break 'run,
+                Err(_) => break 'run Ended::LinkClosed,
             },
             command = commands.recv() => match command {
-                None => break 'run,
+                None => break 'run Ended::Stopped,
                 Some(command) => {
                     early.push_back(command);
                     Vec::new()
@@ -175,7 +195,7 @@ pub async fn run_client(
                     Some(tag) => Update::Failed(tag),
                     None => continue,
                 },
-                ClientEvent::CircuitLost => break 'run,
+                ClientEvent::CircuitLost => break 'run Ended::CircuitLost,
             };
             let _ = updates.send(update);
         }
@@ -184,11 +204,22 @@ pub async fn run_client(
                 break;
             };
             let now = unix_now();
+            // A value of the user ends no runtime: a bad bundle and a send
+            // to no contact fail that one command.
             let done = match command {
-                Command::Invite => node.invite(&mut rng).map(|_| ()),
-                Command::Accept(bundle) => node.accept(bundle, &mut rng).map(|_| ()),
+                Command::Invite => {
+                    if node.invite(&mut rng).is_err() {
+                        let _ = updates.send(Update::Refused);
+                    }
+                    Ok(())
+                }
+                Command::Accept(bundle) => {
+                    if node.accept(bundle, &mut rng).is_err() {
+                        let _ = updates.send(Update::Refused);
+                    }
+                    Ok(())
+                }
                 Command::Send { contact, app, tag } => {
-                    // A send to no contact fails that record and no other.
                     match node.send(&contact, &app, now, &mut rng) {
                         Ok(handle) => {
                             tags.insert(handle, tag);
@@ -202,9 +233,9 @@ pub async fn run_client(
                 Command::Committed(contact) => node.acknowledge(&contact, now, &mut rng),
             };
             if done.is_err() {
-                break 'run;
+                break 'run Ended::NodeFault;
             }
         }
-    }
-    let _ = updates.send(Update::Offline);
+    };
+    let _ = updates.send(Update::Offline(ended));
 }

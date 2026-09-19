@@ -420,12 +420,21 @@ cancel_send(handle, MsgId)
 // A received message is a handle. The platform reads it into a view that
 // the renderer owns for the frame, and does not copy it into a String.
 next_event(handle) -> Event               // Event carries a MsgRef, not bytes
+wait_event(handle, timeout_ms) -> Event   // the same, and the call waits
 msg_render(MsgRef, Sink)
+msg_info(handle, MsgRef) -> MsgInfo       // the direction, the delivery state, two times
 messages(handle, conv) -> [MsgRef]        // the handles of one conversation
+
+// The network. The relay directory of Part 10 replaces the Network record.
+connect(handle, Network)                  // the three relays of the path
+disconnect(handle)
+invite(handle)                            // an Invitation event follows
+accept(handle, bundle)                    // a Contact event follows
 
 lock()
 unlock(CharArray)                         // 15.4 gives the passphrase exception
 tick(handle)                              // the clock of the platform, for the auto-lock
+measure_argon2_floor_ms() -> u64          // one try at the floor cost, for init
 ```
 
 Each network, ratchet, queue, and onion function stays on the Rust side.
@@ -462,6 +471,27 @@ that draft is dropped, and it MUST do that whether the send succeeded or failed.
   clear the queue in RAM, and an unlock MUST fill it again from that table.
   The row leaves the table when a relay accepts the record, when the ARQ of
   Part 3 §3.7 stops, or when the user cancels the send.
+
+**The network behind the surface.**
+
+- **[IMP-127]** A lock MUST stop the network runtime, and the runtime MUST
+  drop its state at that stop. That state holds ratchet keys, queue keys, and
+  circuit keys, and a locked client holds no key in RAM.
+- **[IMP-128]** A client MUST order a conversation view by the time of its own
+  store of each message. It MUST NOT order the view by `sent_at`, because that
+  value comes from the peer, and a peer could thus put a message before an
+  earlier one. `msg_info` gives the two times, and it gives no content.
+- **[IMP-129]** A conversation identifier on the surface MUST be the surrogate
+  of §15.6.4 under the store key, and it MUST NOT be a queue identifier. Thus
+  the owner column of a message row names no queue to a party that reads the
+  file and holds no `K_store`.
+- The bundle of an invitation crosses as bytes in an event and in `accept`.
+  The bundle holds the send key and the end-to-end key of one queue (Part 6
+  §6.6.10), thus this is an exception to `IMP-037`. The platform shows the
+  bundle as a link or as a QR code, thus the platform holds it in each
+  design. A holder of the bundle can open the queue layer of that one queue,
+  and it can send to that queue. The ratchet of Part 5 protects each record
+  under that layer.
 
 > *Cause.* An earlier draft of this section gave `send(handle, conv, bytes)`.
 > UniFFI maps a `bytes` parameter onto a Kotlin `ByteArray`, thus that one

@@ -91,7 +91,10 @@ async fn wait_for<T>(
     timeout(STEP, async {
         loop {
             let update = updates.recv().await.expect("the runtime stopped");
-            assert_ne!(update, Update::Offline, "the client went offline");
+            assert!(
+                !matches!(update, Update::Offline(_)),
+                "the client went offline"
+            );
             if let Some(found) = pick(update) {
                 return found;
             }

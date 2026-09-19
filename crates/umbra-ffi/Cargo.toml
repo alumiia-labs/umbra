@@ -21,6 +21,8 @@ crate-type = ["lib"]
 # The UniFFI scaffolding of Part 15 §15.6.1. It is off by default, thus the
 # client core builds and tests with no binding generator in the graph.
 bindings = ["dep:uniffi", "dep:getrandom", "sqlite", "runtime"]
+# The binding generator, which runs on the host only.
+bindgen = ["bindings", "uniffi/cli"]
 # The SQLite backend of Part 15 §15.6.4 over rusqlite with the bundled
 # library, which builds C code.
 sqlite = ["dep:rusqlite"]
@@ -29,6 +31,10 @@ runtime = ["dep:tokio", "dep:getrandom", "umbra-transport/native"]
 # A test that runs three relay servers and two client runtimes on
 # localhost. The relay is a dependency of that test alone.
 sockets-test = ["runtime", "dep:umbra-relay", "umbra-relay/native"]
+
+[[bin]]
+name = "uniffi-bindgen"
+required-features = ["bindgen"]
 
 [dependencies]
 umbra-crypto = { version = "0.1.0", path = "../umbra-crypto" }

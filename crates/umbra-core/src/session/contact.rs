@@ -156,6 +156,17 @@ pub struct Invitee {
 }
 
 impl Invitee {
+    /// Checks a bundle before the client makes a queue for it. A value of
+    /// the user that does not parse thus fails at the call, and not later
+    /// on the network path.
+    pub fn check(bundle: &[u8]) -> Result<(), Error> {
+        let bundle = Bundle::parse(bundle)?;
+        if bundle.responder_kem_ek.len() != EK_LEN {
+            return Err(Error::Malformed);
+        }
+        Ok(())
+    }
+
     /// Reads a bundle and writes flight 1, with the first queue of the
     /// invitee in `app_1`. The result holds the inner record of flight 1
     /// and the queue of the inviter that it goes to.
