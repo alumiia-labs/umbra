@@ -298,7 +298,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     }
 
     /// Commits what one call of the client node gave, in one batch
-    /// (`IMP-130`): each change of the node state, and each record that the
+    /// (`IMP-132`): each change of the node state, and each record that the
     /// node opened. The runtime acknowledges the records to the relay after
     /// this call (`WIR-115`), and it writes no capsule of the call before
     /// it. A record that the store holds gives no second event.

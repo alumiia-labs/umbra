@@ -189,14 +189,13 @@ private fun HomeScreen(onOpen: (Conversation) -> Unit) {
         Spacer(Modifier.height(12.dp))
         HorizontalDivider()
         Text(
-            "Conversations of this run",
+            "Conversations",
             modifier = Modifier.padding(vertical = 12.dp),
             style = MaterialTheme.typography.titleSmall,
         )
         if (Core.conversations.isEmpty()) {
             Text(
-                "No contact yet. The contacts of a run end with it, because this " +
-                    "build keeps no ratchet state in the store.",
+                "No contact yet. Make an invitation, or accept one.",
                 style = MaterialTheme.typography.bodySmall,
             )
         }
@@ -289,7 +288,7 @@ private fun ChatScreen(conversation: Conversation, onBack: () -> Unit) {
                 hint = "Message",
                 isPassphrase = false,
                 actionLabel = "Send",
-                enabled = Core.online,
+                // With no network the record waits in the store.
             ) { Core.send(conversation, it) }
         }
     }

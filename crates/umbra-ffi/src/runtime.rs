@@ -138,7 +138,7 @@ pub enum Ended {
 
 /// Commits what the last call of the node gave, and acknowledges each
 /// record after its commit (`WIR-115`). The caller writes the capsules of
-/// the node after this function only (`IMP-130`).
+/// the node after this function only (`IMP-131`).
 fn settle(
     node: &mut ClientNode,
     persist: &mut dyn Persist,

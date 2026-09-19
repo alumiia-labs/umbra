@@ -714,6 +714,62 @@ ECDH P-256, HMAC-SHA256, and 3DES only. It has no X25519 and no ML-KEM.
 > CVE-2024-50302. That chain gets kernel code execution over USB on a locked
 > Android device in the AFU state. A short auto-lock is not a convenience.
 
+**The state of the client between two runs.** A platform ends a run of the
+network with no notice. Android closes the sockets of an application a short
+time after it leaves the screen. Thus the store holds the state that a run
+needs to continue each contact: the two queue ends of each channel, the
+cursor of the inbound queue, the Double Ratchet session with its skipped
+keys, and the braid. It also holds each invitation that waits for its
+flight 1, with its one-time prekey.
+
+| `table_id` | Table | One row |
+| --- | --- | --- |
+| `0x01` | Messages | One message, under its conversation and its `msg_ref` |
+| `0x02` | Tombstones | One deleted message |
+| `0x03` | Contacts | One contact: the `RecipientId` of its inbound queue, and the stored channel |
+| `0x04` | Queues | Reserved for the queues of the path selection of Part 3 §3.4.6 |
+| `0x05` | Verifications | One verification of Part 4 §4.5 |
+| `0x06` | Local identity | The root seed |
+| `0x07` | Send queue | One record that waits for the send path (`IMP-126`) |
+| `0x08` | Invitations | One invitation that waits: the `RecipientId` of its queue, the bundle, the queue end, and the prekey seed |
+
+The stored form of a row is local to one device, and no peer reads it. This
+part gives it no byte layout. **[IMP-130]** A stored object MUST start with a
+version byte, and a client MUST reject a row whose version it does not read.
+
+- **[IMP-131]** A client MUST commit each change of a channel to the store
+  before it writes a byte of that call to the link. A ratchet record that
+  left the device under a state that the store does not hold lets a restart
+  seal a second record under the same message key and the same nonce.
+- **[IMP-132]** A client MUST commit a received record and the channel state
+  that opened it in one batch of `IMP-123`. A state without its record loses
+  the record, because the message key is gone. `WIR-115` puts the `ACK`
+  after that batch.
+- **[IMP-133]** A client MUST replace the row of a channel at each commit,
+  and it MUST NOT keep an earlier state of a channel. An earlier state holds
+  chain keys that the forward secrecy of Part 5 §5.5 erased. The
+  `secure_delete` setting and the truncation of the write-ahead log of this
+  section apply to that row.
+- **[IMP-134]** At the start of a run a client MUST send a `SUB` for each
+  stored queue. It MUST then send an `ACK` at the last sequence number that
+  it acknowledged, when that number is above zero. The `ACK` of the last run
+  can be lost with its link, and a relay would deliver those records at each
+  later `SUB`. A relay takes an `ACK` at or below its cursor as no change.
+- **[IMP-135]** A record that arrives a second time at or below the stored
+  cursor, or at a stored sequence number above it, MUST NOT reach the
+  ratchet. The cursor drops it, and the `ACK` covers it.
+- **[IMP-136]** A client MUST delete the row of an invitation in the batch
+  that follows the flight 1 that consumed its prekey, before flight 2
+  leaves. Part 5 rule `CRY-089` erases the prekey at that point.
+- **[IMP-137]** A record that waits in the send queue at the start of a run
+  MUST go again under its `msg_id`. The receiver drops the second copy by
+  that `msg_id`.
+
+A handshake between its flight 1 and its flight 3 has no stored form in
+0.2.0-draft. A run that ends inside that window loses that one handshake: the
+invitation is spent, and the invitee holds a contact that gets no answer.
+Part 16 §16.3 holds that residual.
+
 ### 15.6.5 No hardware attestation for anti-abuse
 
 **[IMP-029]** Relay reputation MUST come from measured behavior only. That behavior is the

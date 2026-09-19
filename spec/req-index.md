@@ -79,9 +79,9 @@ each column when a crate implements the requirement and a test covers it.
 | `COM` | 299 | 96 | 0 | 0 | 5 | **400** |
 | `ATT` | 134 | 46 | 1 | 0 | 2 | **183** |
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
-| `IMP` | 82 | 35 | 0 | 0 | 1 | **118** |
+| `IMP` | 88 | 37 | 0 | 0 | 1 | **126** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2103 | 689 | 6 | 0 | 51 | **2849** |
+| **All** | 2109 | 691 | 6 | 0 | 51 | **2857** |
 
 ## SCP — Scope and Conventions
 
@@ -3015,6 +3015,14 @@ Source: `spec/15-implementation.md`
 | `IMP-127` | §15.6.1 | MUST | A lock | A lock MUST stop the network runtime, and the runtime MUST drop its state at that stop. |  |  |
 | `IMP-128` | §15.6.1 | MUST | A client | A client MUST order a conversation view by the time of its own store of each message. |  |  |
 | `IMP-129` | §15.6.1 | MUST NOT | (unstated) | A conversation identifier on the surface MUST be the surrogate of §15.6.4 under the store key, and it MUST NOT be a queue identifier. |  |  |
+| `IMP-130` | §15.6.4 | MUST | A stored object | A stored object MUST start with a version byte, and a client MUST reject a row whose version it does not read. |  |  |
+| `IMP-131` | §15.6.4 | MUST | A client | A client MUST commit each change of a channel to the store before it writes a byte of that call to the link. |  |  |
+| `IMP-132` | §15.6.4 | MUST | A client | A client MUST commit a received record and the channel state that opened it in one batch of `IMP-123`. |  |  |
+| `IMP-133` | §15.6.4 | MUST NOT | (unstated) | A client MUST replace the row of a channel at each commit, and it MUST NOT keep an earlier state of a channel. |  |  |
+| `IMP-134` | §15.6.4 | MUST | At the start of a run a client | At the start of a run a client MUST send a `SUB` for each stored queue. |  |  |
+| `IMP-135` | §15.6.4 | MUST NOT | (unstated) | A record that arrives a second time at or below the stored cursor, or at a stored sequence number above it, MUST NOT reach the ratchet. |  |  |
+| `IMP-136` | §15.6.4 | MUST | A client | A client MUST delete the row of an invitation in the batch that follows the flight 1 that consumed its prekey, before flight 2 leaves. |  |  |
+| `IMP-137` | §15.6.4 | MUST | A record that waits in the send queue at the start of a run | A record that waits in the send queue at the start of a run MUST go again under its `msg_id`. |  |  |
 
 ## SEC — Security Considerations
 

@@ -34,6 +34,16 @@ class MainActivity : ComponentActivity() {
         setContentView(root)
     }
 
+    override fun onStart() {
+        super.onStart()
+        Core.visible(this, true)
+    }
+
+    override fun onStop() {
+        Core.visible(this, false)
+        super.onStop()
+    }
+
     override fun onPause() {
         cover.visibility = View.VISIBLE
         super.onPause()

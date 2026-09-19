@@ -59,6 +59,12 @@ object Core {
     private var handle: Handle? = null
     private var draining = false
 
+    /** Whether a view of the app is on the screen. */
+    private var isVisible = false
+    private var retryDelayMs = FIRST_RETRY_MS
+    private const val FIRST_RETRY_MS = 2_000L
+    private const val LAST_RETRY_MS = 30_000L
+
     /**
      * Opens the client under the passphrase. The first launch makes the
      * store. This call overwrites `passphrase`.
@@ -76,9 +82,15 @@ object Core {
                 val opened = handle ?: launch(app, units)
                 opened.unlock(units)
                 handle = opened
+                // The store holds each contact, thus the list needs no network.
+                val stored = opened.conversations().map(::Conversation)
                 BuildNetwork.network(app)?.let(opened::connect)
-                drain(opened)
-                main.post { phase = Phase.Open }
+                drain(opened, app)
+                main.post {
+                    conversations.clear()
+                    conversations.addAll(stored)
+                    phase = Phase.Open
+                }
             } catch (wrong: FfiException.WrongPassphrase) {
                 fail("The passphrase does not open the store.")
             } catch (other: FfiException) {
@@ -100,27 +112,31 @@ object Core {
     }
 
     /** One thread drains the event stream, and it gives the clock to Rust. */
-    private fun drain(opened: Handle) {
+    private fun drain(opened: Handle, app: Context) {
         if (draining) return
         draining = true
         thread(name = "umbra-events", isDaemon = true) {
             while (true) {
                 opened.tick()
                 val event = opened.waitEvent(1_000u) ?: continue
-                main.post { apply(event) }
+                main.post { apply(event, app) }
             }
         }
     }
 
-    private fun apply(event: FfiEvent) {
+    private fun apply(event: FfiEvent, app: Context) {
         when (event) {
             is FfiEvent.Online -> {
                 online = true
                 fault = null
+                retryDelayMs = FIRST_RETRY_MS
             }
             is FfiEvent.Offline -> {
-                networkEnded()
-                if (event.cause.toInt() != 0) fault = "The network ended: ${cause(event.cause)}."
+                online = false
+                if (event.cause.toInt() != STOPPED) {
+                    fault = "The network ended: ${cause(event.cause)}."
+                    retryLater(app)
+                }
             }
             is FfiEvent.Invitation -> invitation = event.bundle
             is FfiEvent.Refused -> fault = "The invitation does not parse."
@@ -130,7 +146,9 @@ object Core {
             }
             is FfiEvent.Message, is FfiEvent.Delivery -> revision++
             is FfiEvent.Locked -> {
-                networkEnded()
+                online = false
+                invitation = null
+                conversations.clear()
                 phase = Phase.Locked
             }
             is FfiEvent.IntegrityFault -> fault = "The local store does not verify."
@@ -143,14 +161,31 @@ object Core {
         1 -> "the dial of the guard failed"
         2 -> "the link to the guard closed"
         3 -> "a relay destroyed the circuit"
+        5 -> "the store took no batch"
         else -> "a fault in the client"
     }
 
-    /** The ratchet state of a run sits in RAM, thus its contacts end with it. */
-    private fun networkEnded() {
-        online = false
-        invitation = null
-        conversations.clear()
+    private const val STOPPED = 0
+
+    /**
+     * Starts a new run after a run ended with a fault. Android closes the
+     * sockets of an app that left the screen, thus a run starts while a view
+     * is on the screen only. The store holds each contact, and the new run
+     * continues them.
+     */
+    private fun retryLater(app: Context) {
+        val delay = retryDelayMs
+        retryDelayMs = (retryDelayMs * 2).coerceAtMost(LAST_RETRY_MS)
+        main.postDelayed({ if (isVisible && !online && phase == Phase.Open) connect(app) }, delay)
+    }
+
+    /** The activity tells the core when a view enters or leaves the screen. */
+    fun visible(context: Context, nowVisible: Boolean) {
+        isVisible = nowVisible
+        if (nowVisible && !online && phase == Phase.Open) {
+            retryDelayMs = FIRST_RETRY_MS
+            connect(context)
+        }
     }
 
     fun lock() = call { it.lock() }

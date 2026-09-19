@@ -330,7 +330,8 @@ impl ClientNode {
     }
 
     /// Subscribes to each queue of an earlier run on a new circuit. The
-    /// `ACK` of the last run can be lost with its link, thus it goes again.
+    /// `ACK` of the last run can be lost with its link, thus it goes again
+    /// (`IMP-134`).
     fn subscribe_stored<R: CryptoRng + ?Sized>(&mut self, rng: &mut R) -> Result<(), Error> {
         let session_pk = self.session_pk()?;
         let mut commands = Vec::new();

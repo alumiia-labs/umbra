@@ -42,13 +42,17 @@ emulator is the clipboard of the machine.
 
 ## Open items of the shell
 
-- The ratchet state of a run sits in RAM. A lock, a loss of the connection, or
-  a restart of the app ends each contact of the run.
 - Android closes the sockets of an app a short time after it leaves the
-  foreground, and the run ends with "the link to the guard closed". A test on
-  two emulators showed it after 45 seconds. The remedy has two parts: the
-  state of the client node in the store, thus a new run continues each
-  contact, and the wake path of Part 8.
+  screen, and the run ends with "the link to the guard closed". A test on two
+  emulators showed it after 45 seconds. The store holds each contact, and the
+  app starts a new run when a view comes back to the screen. A record that
+  arrives in between waits at the relay. The wake path of Part 8 is the part
+  that is open.
+- One circuit carries each queue of the client, and a relay serves 8 queues
+  in one session (`NET-022`). A client with more than 8 contacts and open
+  invitations needs the path selection of Part 3 §3.4.6.
+- A handshake between its flight 1 and its flight 3 has no stored form. A run
+  that ends inside those seconds loses that one handshake.
 - The invitation travels as text. The link, the blob, and the first-access
   lock of Part 4 §4.3.1 have no wire command yet.
 - The wrapping key of the keystore asks for no biometric and no device
