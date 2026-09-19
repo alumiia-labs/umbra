@@ -713,6 +713,12 @@ Thus five rules apply, and they apply to each table.
    each table MAC at the unlock.
 5. **[IDN-039]** If a table MAC does not match at the unlock, the client MUST tell the user.
    **[IDN-040]** The client MUST NOT continue silently.
+6. The check at the unlock reads the stored `accum`, and `IDN-037` keeps a scan
+   out of that path. Thus a changed row shows only when a scan compares the
+   rows with `accum`. **[IDN-162]** After the unlock, a client MUST compute
+   `accum` and `row_count` of each table from a scan of its rows, outside the
+   unlock path, one time or more in each 24 hours that the store is open.
+   **[IDN-163]** A client MUST report a difference in the manner of `IDN-039`.
 
 The message table, the tombstone table, the contact table, the queue table, the
 verification table, and the local identity table are each under these rules.

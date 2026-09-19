@@ -68,7 +68,7 @@ each column when a crate implements the requirement and a test covers it.
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
 | `NET` | 192 | 82 | 0 | 0 | 8 | **282** |
-| `IDN` | 108 | 40 | 1 | 0 | 5 | **154** |
+| `IDN` | 110 | 40 | 1 | 0 | 5 | **156** |
 | `CRY` | 118 | 27 | 0 | 0 | 1 | **146** |
 | `WIR` | 367 | 81 | 0 | 0 | 6 | **454** |
 | `DEV` | 172 | 87 | 2 | 0 | 7 | **268** |
@@ -79,9 +79,9 @@ each column when a crate implements the requirement and a test covers it.
 | `COM` | 298 | 96 | 0 | 0 | 5 | **399** |
 | `ATT` | 134 | 46 | 1 | 0 | 2 | **183** |
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
-| `IMP` | 72 | 32 | 0 | 0 | 0 | **104** |
+| `IMP` | 77 | 34 | 0 | 0 | 1 | **112** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2064 | 685 | 6 | 0 | 50 | **2805** |
+| **All** | 2071 | 687 | 6 | 0 | 51 | **2815** |
 
 ## SCP — Scope and Conventions
 
@@ -582,6 +582,8 @@ Source: `spec/04-identity.md`
 | `IDN-159` | §4.3.1 | MUST | A client | A client MUST write the fragment after `#` as the 68 bytes above in base64url with no padding. |  |  |
 | `IDN-160` | §4.3.1 | MUST | A client | A client MUST seal the bundle in the layout above, with the 192-bit link ID as the associated data, thus a blob moved under a second link ID fails to open. |  |  |
 | `IDN-161` | §4.3.1 | MUST | A client | A client MUST reject a blob whose `version` is not `0x01` or whose `sealed` field does not open under the key of the fragment. |  |  |
+| `IDN-162` | §4.6 | MUST | After the unlock, a client | After the unlock, a client MUST compute `accum` and `row_count` of each table from a scan of its rows, outside the unlock path, one time or more in each 24 hours that the store is open. |  |  |
+| `IDN-163` | §4.6 | MUST | A client | A client MUST report a difference in the manner of `IDN-039`. |  |  |
 
 ## CRY — Cryptographic Core
 
@@ -2971,6 +2973,14 @@ Source: `spec/15-implementation.md`
 | `IMP-113` | §15.7.6 | MUST NOT | The `umbra-web` crate | The `umbra-web` crate MUST NOT add more transitive crates than its row in §15.2.3. |  |  |
 | `IMP-114` | §15.7.6 | MUST | The extension bundle | The extension bundle MUST be reproducible under §15.8, and Part 16 rule `SEC-005` names it. |  |  |
 | `IMP-115` | §15.7.6 | MUST | The web client | The web client MUST verify the inclusion proof of Part 16 rule `SEC-006` for its own bundle at each start, and it MUST refuse to unlock the store while that proof is absent. |  |  |
+| `IMP-116` | §15.6.4 | MUST | A client | A client MUST run Argon2id with one lane, a memory of 64 MiB or more, and 3 passes or more. |  |  |
+| `IMP-117` | §15.6.4 | MUST | At the creation of the store, a client | At the creation of the store, a client MUST measure one try at that floor on the device, and it MUST raise the passes until one try takes about 3 s. |  |  |
+| `IMP-118` | §15.6.4 | MUST | A passphrase change | A passphrase change MUST wrap the same `K_store` under a new `salt_pw` and a new `nonce_w`. |  |  |
+| `IMP-119` | §15.6.4 | MUST NOT | A client | A client MUST NOT let the user set an auto-lock above 30 minutes of idle time, and the default MUST be 15 minutes. |  |  |
+| `IMP-120` | §15.6.4 | MUST | `table_id` | `table_id` MUST be one byte, and `row_id` MUST be the 16 bytes of the block above. |  |  |
+| `IMP-121` | §15.6.4 | MAY | A row | A row MAY carry one more indexed column, which is the `row_id` of the row that owns it, such as the conversation of a message. |  |  |
+| `IMP-122` | §15.6.4 | MUST NOT | A client | A client MUST NOT open a record whose `record_salt` is zero bytes. |  |  |
+| `IMP-123` | §15.6.4 | MUST | A client | A client MUST write the rows of a commit batch and the table MAC of each table that the batch changed in one transaction of the database. |  |  |
 
 ## SEC — Security Considerations
 

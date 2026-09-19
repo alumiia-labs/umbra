@@ -530,6 +530,34 @@ the label.
 - **[IMP-065]** A client MUST NOT demand a user authentication for each use of
   the secure-element key. The passphrase is the authentication of this step.
 
+**The stored header.** The client holds the values that open `K_store` again
+in one record beside the database. The record holds no secret.
+
+```
+WrapHeader {                      // 97 bytes
+    version        u8             // 0x01
+    m_kib          u32            // the Argon2id memory, in KiB
+    t              u32            // the Argon2id passes
+    salt_pw        [16]u8         // from the CSPRNG
+    nonce_w        [24]u8
+    wrapped        [32]u8
+    tag            [16]u8
+}
+```
+
+- **[IMP-116]** A client MUST run Argon2id with one lane, a memory of 64 MiB or
+  more, and 3 passes or more. **[IMP-117]** At the creation of the store, a
+  client MUST measure one try at that floor on the device, and it MUST raise
+  the passes until one try takes about 3 s. A device that needs more than 3 s
+  at the floor keeps the floor. The header carries the two values, thus a
+  restore on a faster device opens the store and the next passphrase change
+  calibrates again.
+- **[IMP-118]** A passphrase change MUST wrap the same `K_store` under a new
+  `salt_pw` and a new `nonce_w`. It MUST NOT change `K_store`, because each
+  record key derives from it.
+- **[IMP-119]** A client MUST NOT let the user set an auto-lock above 30
+  minutes of idle time, and the default MUST be 15 minutes.
+
 > *Cause.* An earlier draft gave this block a second branch for the secure
 > element of a platform that this revision defers, and §15.6.3 records that an
 > iOS revision revisits this step.
@@ -548,6 +576,23 @@ only on keyed-hash surrogate IDs.
 **The record key.** `K_store` is the at-rest master key of Part 5 §5.2, and
 the passphrase construction above wraps it. `table_id` is the table identifier,
 and `row_id` is the keyed-hash surrogate ID above.
+
+```
+K_row   <- HKDF-SHA3-256( salt = empty, ikm = K_store,
+                          info = "umbra/v1/row-id", L = 32 )
+row_id  <- HMAC-SHA3-256( K_row, table_id || natural_key )[0..16]
+```
+
+- **[IMP-120]** `table_id` MUST be one byte, and `row_id` MUST be the 16 bytes
+  of the block above. Both lengths are fixed, thus the `info` and the `ad` of
+  the record key parse in one way. `natural_key` is the value that names the
+  row in the protocol, such as a contact identifier with a `msg_ref`. Part 5
+  §5.11 holds the label.
+- **[IMP-121]** A row MAY carry one more indexed column, which is the `row_id`
+  of the row that owns it, such as the conversation of a message. A client
+  MUST NOT index on another value. The owner column sits outside the
+  associated data, thus the plaintext of a row MUST name its owner, and a
+  client MUST reject a row whose plaintext names another owner.
 
 ```
 record_salt <- 16 bytes from the CSPRNG, stored beside the record
@@ -569,6 +614,13 @@ ct || tag   <- XChaCha20-Poly1305( K_rec, nonce, plaintext,
 - **[IMP-041]** A client that discards a record key under Part 7 MUST overwrite
   `record_salt` with zero bytes. Rules `DEV-099` and `DEV-210` of Part 7
   discard that key. Thus no party derives the key again from `K_store`.
+  **[IMP-122]** A client MUST NOT open a record whose `record_salt` is zero
+  bytes. The record tag stays in the row, thus the table MAC of Part 4 §4.6
+  does not change at a discard.
+- **[IMP-123]** A client MUST write the rows of a commit batch and the table
+  MAC of each table that the batch changed in one transaction of the
+  database. A crash between the two would leave a table that fails its MAC
+  with no attacker.
 - A **deletion batch** is a tombstone batch of Part 7 §7.5.6, a retention purge
   of §7.5.2, or a timer expiry of §7.5.8. **[IMP-042]** A client
   MUST open the database with `PRAGMA secure_delete=ON`. **[IMP-043]** After a

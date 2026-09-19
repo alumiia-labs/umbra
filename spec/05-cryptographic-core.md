@@ -1531,6 +1531,7 @@ names the object type and its lifetime:
 "umbra/v1/hello"
 "umbra/v1/log-commit"
 "umbra/v1/issuer-key"
+"umbra/v1/row-id"
 ```
 
 **The list above is closed.** **[CRY-028]** An implementation MUST NOT use a label that this
@@ -1640,6 +1641,11 @@ primitive register in the same manner.
 > hello to the entry key and seals it under a key that only that encapsulation
 > gives. The label `"umbra/v1/hello"` keeps that key apart from the challenge
 > keys of §9.9.1 and §9.9.3, which take the same shared-secret shape.
+
+> *The cause of the row label.* Part 15 §15.6.4 derives the key of the
+> surrogate row identifiers from `K_store` under `"umbra/v1/row-id"`. The
+> table MAC key and each record key derive from the same master key, thus the
+> surrogate key needs a label of its own.
 
 > *The cause of the two log labels.* Part 9 §9.5.1 commits a leaf of the
 > transparency log to its entry under `"umbra/v1/log-commit"`, with the
