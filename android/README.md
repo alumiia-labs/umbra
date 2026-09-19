@@ -51,9 +51,10 @@ emulator is the clipboard of the machine.
   Part 8 §8.4.1 states the two remedies, and the owner picks one.
 - Doze can suspend the network of a foreground service on a device that does
   not move. The app asks for no exemption from the battery optimization yet.
-- One circuit carries each queue of the client, and a relay serves 8 queues
-  in one session (`NET-022`). A client with more than 8 contacts and open
-  invitations needs the path selection of Part 3 §3.4.6.
+- Each circuit takes the one path of the build configuration. The client
+  builds one more circuit for each 8 queues (`NET-022`), and the relay chains
+  that differ (`NET-023`) need the path selection of Part 3 §3.4.6 over the
+  relay directory.
 - A handshake between its flight 1 and its flight 3 has no stored form. A run
   that ends inside those seconds loses that one handshake.
 - The invitation travels as text. The link, the blob, and the first-access

@@ -94,6 +94,11 @@ impl CircuitSession {
         }
     }
 
+    /// The identifier of the circuit, which leads each cell of it.
+    pub fn circ_id(&self) -> [u8; 16] {
+        self.circuit.circ_id()
+    }
+
     /// `RelaySession_pk`, which keys the authenticator of each command on
     /// this circuit.
     pub fn relay_session_pk(&self) -> &[u8; 32] {

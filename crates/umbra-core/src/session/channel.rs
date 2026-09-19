@@ -397,6 +397,18 @@ impl PairwiseChannel {
         }
     }
 
+    /// Whether the ratchet holds a sending chain. The inviter holds none
+    /// before the first record of the invitee arrives (`NET-292`).
+    pub fn can_send(&self) -> bool {
+        self.ratchet.can_send()
+    }
+
+    /// Takes the newest `QueueAddress` of the peer as the queue that this
+    /// device writes to (`NET-179`).
+    pub fn accept_address(&mut self, address: &QueueAddress) {
+        self.outbound = Outbound::new(address);
+    }
+
     /// The queue that this device writes to.
     pub fn outbound(&self) -> &Outbound {
         &self.outbound

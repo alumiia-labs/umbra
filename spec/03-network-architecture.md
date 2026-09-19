@@ -226,6 +226,19 @@ one transport session to one relay. **[NET-023]** A client MUST divide its queue
 independent sessions over independent relay chains. **[NET-024]** A client MUST do this
 division again at each rotation.
 
+**[NET-295]** A client MUST count a queue toward that bound from its `NEW` or
+its `SUB`, because a relay binds the queue to the session at those two
+commands. A `SEND` binds no queue. **[NET-296]** A client that holds no
+session with room MUST build one more circuit, and the `NEW` MUST wait for
+that circuit. **[NET-297]** A client SHOULD put the `SEND` to a contact on a
+circuit that does not serve the inbound queue of that contact. Thus one
+session shows a relay one queue of the pair, and not the two.
+
+The reference client of 0.2.0-draft gives each circuit the one path of its
+configuration, thus it meets the bound of `NET-022` and not the chains of
+`NET-023`. The chains need the path selection of §3.4.6 over the relay
+directory of Part 10.
+
 > *Rationale.* This leak is the largest unfixed leak in the system that UMBRA
 > inherits. The overview of SimpleX states that a malicious router "records all
 > queues ... sent via the same transport connection to gain a partial knowledge
@@ -266,6 +279,29 @@ The address travels on four carriers.
    queue of the contact before flight 3 verifies. A replayed flight 1 fails at
    Part 5 rule `CRY-055`, thus a responder sends flight 2 to a replayed address
    at most one time.
+
+**The first ratchet record.** Part 5 §5.5.1 makes the flight-2 ephemeral of
+the responder its first ratchet key, and the initiator takes a ratchet step
+against it at the start of the session. Thus the initiator holds a sending
+chain at once. The responder holds none before a record of the initiator
+gives it the ratchet key of the initiator.
+
+- **[NET-292]** After flight 3, an initiator MUST send a record of kind `0x33`
+  as its first ratchet record, with the `QueueAddress` that `app_1` carried.
+  The record opens the sending chain of the responder, and it gives that
+  address again under the complete session.
+- **[NET-293]** A responder MUST hold a record of its user that comes before
+  that first record, and it MUST send it when the chain opens. It MUST NOT
+  show that record as failed.
+- **[NET-294]** A client MUST NOT show a record of kind `0x33` in a
+  conversation.
+
+> *Cause.* An earlier draft gave the responder no way to write first. The user
+> that made the invitation is the responder, and that user often writes first.
+> A reference client showed such a record as failed. A ratchet key of the
+> initiator inside the handshake would open the two chains at once, and it
+> would change the key schedule of Part 5 §5.4.8. One record of a kind that
+> Part 6 holds already costs one `B0` cell and changes no schedule.
 
 **A rotation.** §3.2.4 gives the schedule.
 

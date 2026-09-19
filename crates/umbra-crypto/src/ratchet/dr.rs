@@ -714,6 +714,13 @@ impl Session {
         self.mixed
     }
 
+    /// Whether a sending chain exists. A responder has none before the
+    /// first record of the initiator arrives, because that record carries
+    /// the ratchet key of the initiator.
+    pub fn can_send(&self) -> bool {
+        self.ck_s.is_some()
+    }
+
     /// The position of the next record in the sending chain; zero at a
     /// chain start.
     pub fn sending_position(&self) -> u32 {

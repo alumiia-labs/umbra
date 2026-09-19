@@ -418,6 +418,12 @@ impl Ratchet {
         Ok(Self { session, braid })
     }
 
+    /// Whether a sending chain exists. A responder has none before the
+    /// first record of the initiator arrives.
+    pub fn can_send(&self) -> bool {
+        self.session.can_send()
+    }
+
     /// The own epoch, zero before the first.
     pub fn epoch(&self) -> u32 {
         self.braid.epoch

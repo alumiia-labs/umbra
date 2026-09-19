@@ -67,7 +67,7 @@ each column when a crate implements the requirement and a test covers it.
 | --- | --- | --- | --- | --- | --- | --- |
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
-| `NET` | 200 | 82 | 0 | 0 | 8 | **290** |
+| `NET` | 204 | 83 | 1 | 0 | 8 | **296** |
 | `IDN` | 110 | 40 | 1 | 0 | 5 | **156** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
 | `WIR` | 377 | 82 | 0 | 0 | 6 | **465** |
@@ -81,7 +81,7 @@ each column when a crate implements the requirement and a test covers it.
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
 | `IMP` | 88 | 37 | 0 | 0 | 1 | **126** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2114 | 692 | 6 | 0 | 51 | **2863** |
+| **All** | 2118 | 693 | 7 | 0 | 51 | **2869** |
 
 ## SCP — Scope and Conventions
 
@@ -429,6 +429,12 @@ Source: `spec/03-network-architecture.md`
 | `NET-289` | §3.4.3 | MUST | (unstated) | A relay of layer 1 or 2 whose circuit holds no next hop is the endpoint of a forward cell, and it makes the check of `NET-114`. |  |  |
 | `NET-290` | §3.4.3 | MUST | (unstated) | A relay reaches a relay of the next layer as a client of the session of Part 6 §6.2.3. |  |  |
 | `NET-291` | §3.5.2 | MUST | A relay | A relay MUST send each cell that it starts on a circuit that ends at it on a tick of that clock. |  |  |
+| `NET-292` | §3.2.6 | MUST | After flight 3, an initiator | After flight 3, an initiator MUST send a record of kind `0x33` as its first ratchet record, with the `QueueAddress` that `app_1` carried. |  |  |
+| `NET-293` | §3.2.6 | MUST | A responder | A responder MUST hold a record of its user that comes before that first record, and it MUST send it when the chain opens. |  |  |
+| `NET-294` | §3.2.6 | MUST NOT | A client | A client MUST NOT show a record of kind `0x33` in a conversation. |  |  |
+| `NET-295` | §3.2.5 | MUST | A client | A client MUST count a queue toward that bound from its `NEW` or its `SUB`, because a relay binds the queue to the session at those two commands. |  |  |
+| `NET-296` | §3.2.5 | MUST | A client that holds no session with room | A client that holds no session with room MUST build one more circuit, and the `NEW` MUST wait for that circuit. |  |  |
+| `NET-297` | §3.2.5 | SHOULD | A client | A client SHOULD put the `SEND` to a contact on a circuit that does not serve the inbound queue of that contact. |  |  |
 
 ## IDN — Identity
 

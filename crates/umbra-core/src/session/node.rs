@@ -6,9 +6,12 @@
 //! The runtime gives it each capsule that arrives and sends each capsule
 //! that [`ClientNode::take_capsules`] returns.
 //!
-//! This revision runs each queue of the client on one circuit. The rules
-//! that put a send and a subscription on different circuits belong to the
-//! path selection of Part 3 §3.4.6, which the runtime adds over this type.
+//! One circuit serves at most `MAX_QUEUES_PER_SESSION` inbound queues
+//! (`NET-022`), thus the node builds one more circuit when each one is full,
+//! and it divides the stored queues again at each run (`NET-024`). Each
+//! circuit of this revision takes the one path that the caller gave. The
+//! relay chains that differ (`NET-023`) come with the path selection of
+//! Part 3 §3.4.6, which reads the relay directory.
 
 use alloc::{
     boxed::Box,
@@ -32,10 +35,11 @@ use umbra_onion::{
     circuit::CircuitBuild,
     HOPS,
 };
-use umbra_queue::Reject;
+use umbra_queue::{params::MAX_QUEUES_PER_SESSION, Reject};
 use umbra_transport::link::ClientLink;
 use umbra_wire::{
-    address::QueueAddress,
+    address::{QueueAddress, LEN as QUEUE_ADDRESS_LEN},
+    app::{AppKind, AppMessage, Channel},
     bucket::Bucket,
     capsule,
     cell::{Cell, CellCommand},
@@ -111,6 +115,40 @@ enum Circuit {
     Ready(Box<CircuitSession>),
 }
 
+/// One circuit, and the inbound queues that its session serves.
+struct Slot {
+    circuit: Circuit,
+    queues: BTreeSet<[u8; 32]>,
+    /// The `NEW` commands of this circuit that wait for their `IDS`.
+    reserved: usize,
+}
+
+impl Slot {
+    fn empty() -> Self {
+        Slot {
+            circuit: Circuit::None,
+            queues: BTreeSet::new(),
+            reserved: 0,
+        }
+    }
+
+    fn is_ready(&self) -> bool {
+        matches!(self.circuit, Circuit::Ready(_))
+    }
+
+    fn has_room(&self) -> bool {
+        self.queues.len().saturating_add(self.reserved) < MAX_QUEUES_PER_SESSION
+    }
+
+    fn circ_id(&self) -> Option<[u8; 16]> {
+        match &self.circuit {
+            Circuit::None => None,
+            Circuit::Building { build, .. } => Some(build.circ_id()),
+            Circuit::Ready(session) => Some(session.circ_id()),
+        }
+    }
+}
+
 /// Why the client made a queue.
 enum Purpose {
     Invite,
@@ -125,6 +163,8 @@ struct QueueKeys {
     salt: [u8; 16],
     purpose: Purpose,
     handle: u64,
+    /// The circuit that carries the `NEW`.
+    slot: usize,
 }
 
 /// What a command of this node waits for.
@@ -150,12 +190,19 @@ struct Half {
     peer_static: [u8; 32],
     /// The bundle of an invitation that this device issued.
     bundle: Vec<u8>,
+    /// The encoded `QueueAddress` of an invitee, which goes again as its
+    /// first ratchet record (`NET-292`). An inviter holds none.
+    opening: Vec<u8>,
 }
 
 struct Contact {
     channel: PairwiseChannel,
     peer_static: [u8; 32],
     salt: [u8; 16],
+    /// The records of the user that wait for the sending chain, each with
+    /// its handle. An inviter holds no chain before the first record of
+    /// the invitee arrives.
+    waiting_sends: VecDeque<(Vec<u8>, u64)>,
 }
 
 /// A change of the state that a client keeps between two runs. The runtime
@@ -193,7 +240,12 @@ pub struct ClientNode {
     relays: [RelayStatic; HOPS],
     root: RootIdentity,
     link: Option<ClientLink>,
-    circuit: Circuit,
+    slots: Vec<Slot>,
+    /// The circuit of the call that runs. Each command of that call goes
+    /// to it, under its `RelaySession_pk`.
+    current: usize,
+    /// The queues that wait for a circuit with room.
+    deferred: VecDeque<(Purpose, u64)>,
     capsules: VecDeque<Vec<u8>>,
     next_handle: u64,
     waiting: BTreeMap<u64, Waiting>,
@@ -227,7 +279,9 @@ impl ClientNode {
             relays,
             root,
             link: None,
-            circuit: Circuit::None,
+            slots: Vec::new(),
+            current: 0,
+            deferred: VecDeque::new(),
             capsules: VecDeque::new(),
             next_handle: 1,
             waiting: BTreeMap::new(),
@@ -270,12 +324,14 @@ impl ClientNode {
         let channel = PairwiseChannel::restore(reader.var()?)?;
         reader.end()?;
         let id = *channel.inbound().recipient_id();
+        self.assign(id);
         self.contacts.insert(
             id,
             Contact {
                 channel,
                 peer_static,
                 salt,
+                waiting_sends: VecDeque::new(),
             },
         );
         Ok(ContactId(id))
@@ -293,6 +349,7 @@ impl ClientNode {
         let inbound = Inbound::restore(&mut reader)?;
         let inviter = Inviter::from_prekey_seed(Secret::new(reader.array()?));
         reader.end()?;
+        self.assign(*inbound.recipient_id());
         self.halves.insert(
             *inbound.recipient_id(),
             Half {
@@ -303,6 +360,7 @@ impl ClientNode {
                 outbound: None,
                 peer_static: [0; 32],
                 bundle: bundle.clone(),
+                opening: Vec::new(),
             },
         );
         Ok(bundle)
@@ -329,17 +387,36 @@ impl ClientNode {
         Ok(())
     }
 
-    /// Subscribes to each queue of an earlier run on a new circuit. The
-    /// `ACK` of the last run can be lost with its link, thus it goes again
+    /// Gives a stored queue to a circuit with room, and adds a circuit when
+    /// each one is full (`NET-022`). The division runs again at each run
+    /// (`NET-024`), thus the store holds no circuit of a queue.
+    fn assign(&mut self, queue: [u8; 32]) {
+        let slot = match self.slots.iter_mut().find(|slot| slot.has_room()) {
+            Some(slot) => slot,
+            None => {
+                self.slots.push(Slot::empty());
+                match self.slots.last_mut() {
+                    Some(slot) => slot,
+                    None => return,
+                }
+            }
+        };
+        slot.queues.insert(queue);
+    }
+
+    /// Subscribes to each stored queue of the current circuit. The `ACK`
+    /// of the last run can be lost with its link, thus it goes again
     /// (`IMP-134`).
     fn subscribe_stored<R: CryptoRng + ?Sized>(&mut self, rng: &mut R) -> Result<(), Error> {
         let session_pk = self.session_pk()?;
+        let queues = &self.slot()?.queues;
         let mut commands = Vec::new();
         let contacts = self
             .contacts
             .values()
             .map(|contact| contact.channel.inbound());
-        for inbound in contacts.chain(self.halves.values().map(|half| &half.inbound)) {
+        let stored = contacts.chain(self.halves.values().map(|half| &half.inbound));
+        for inbound in stored.filter(|inbound| queues.contains(inbound.recipient_id())) {
             commands.push(inbound.subscribe(&session_pk, random(rng))?);
             commands.extend(inbound.acknowledge_again(&session_pk, random(rng))?);
         }
@@ -354,9 +431,17 @@ impl ClientNode {
         self.capsules.drain(..).collect()
     }
 
-    /// Whether the circuit holds its three hops.
+    /// Whether a circuit holds its three hops.
     pub fn is_ready(&self) -> bool {
-        matches!(self.circuit, Circuit::Ready(_))
+        self.slots.iter().any(Slot::is_ready)
+    }
+
+    fn slot(&self) -> Result<&Slot, Error> {
+        self.slots.get(self.current).ok_or(Error::NoPath)
+    }
+
+    fn slot_mut(&mut self) -> Result<&mut Slot, Error> {
+        self.slots.get_mut(self.current).ok_or(Error::NoPath)
     }
 
     /// The contacts whose handshake finished.
@@ -388,8 +473,23 @@ impl ClientNode {
         capsule.truncate(used);
         self.capsules.push_back(capsule);
         self.link = Some(link);
-        let build = CircuitBuild::new(random(rng));
-        self.extend(build, rng)
+        if self.slots.is_empty() {
+            self.slots.push(Slot::empty());
+        }
+        // The builds run side by side, and the `circ_id` of a cell names
+        // its circuit.
+        for slot in 0..self.slots.len() {
+            self.current = slot;
+            self.extend(CircuitBuild::new(random(rng)), rng)?;
+        }
+        Ok(())
+    }
+
+    /// Adds one circuit, and starts its build.
+    fn add_circuit<R: CryptoRng + ?Sized>(&mut self, rng: &mut R) -> Result<(), Error> {
+        self.slots.push(Slot::empty());
+        self.current = self.slots.len().saturating_sub(1);
+        self.extend(CircuitBuild::new(random(rng)), rng)
     }
 
     /// Sends the `EXTEND` cell for the next hop of `build`.
@@ -405,29 +505,34 @@ impl ClientNode {
         build_cell_body(CellCommand::Extend, &hello, &mut body).map_err(|_| Error::NoPath)?;
         let tag = build.seal(&mut body).map_err(|_| Error::NoPath)?;
         let cell = [build.circ_id().as_slice(), &tag, &body].concat();
-        self.circuit = Circuit::Building {
+        self.slot_mut()?.circuit = Circuit::Building {
             build: Box::new(build),
             pending: Box::new(pending),
         };
         self.send_cell(&cell)
     }
 
-    /// Moves each ready command of the circuit into a cell.
+    /// Moves each ready command of each circuit into a cell.
     fn pump(&mut self) -> Result<(), Error> {
-        loop {
-            let Circuit::Ready(session) = &mut self.circuit else {
-                return Ok(());
-            };
-            let Some(cell) = session.next_cell()? else {
-                return Ok(());
-            };
-            self.send_cell(&cell)?;
+        for slot in 0..self.slots.len() {
+            while let Some(cell) = self.next_cell_of(slot)? {
+                self.send_cell(&cell)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn next_cell_of(&mut self, slot: usize) -> Result<Option<Vec<u8>>, Error> {
+        match self.slots.get_mut(slot).map(|slot| &mut slot.circuit) {
+            Some(Circuit::Ready(session)) => session.next_cell(),
+            _ => Ok(None),
         }
     }
 
+    /// Puts a command on the current circuit.
     fn queue_command(&mut self, encoded: Vec<u8>, waiting: Waiting) -> Result<u64, Error> {
         let handle = self.handle();
-        let Circuit::Ready(session) = &mut self.circuit else {
+        let Circuit::Ready(session) = &mut self.slot_mut()?.circuit else {
             return Err(Error::NoPath);
         };
         session.queue(encoded, handle)?;
@@ -435,19 +540,43 @@ impl ClientNode {
         Ok(handle)
     }
 
+    /// `RelaySession_pk` of the current circuit.
     fn session_pk(&self) -> Result<[u8; 32], Error> {
-        match &self.circuit {
+        match &self.slot()?.circuit {
             Circuit::Ready(session) => Ok(*session.relay_session_pk()),
             _ => Err(Error::NoPath),
         }
     }
 
+    /// Makes a queue on a circuit with room. With no such circuit the
+    /// queue waits, and one more circuit starts (`NET-022`).
     fn make_queue<R: CryptoRng + ?Sized>(
         &mut self,
         purpose: Purpose,
         rng: &mut R,
     ) -> Result<u64, Error> {
         let user_handle = self.handle();
+        let with_room = |slot: &Slot| slot.is_ready() && slot.has_room();
+        let Some(slot) = self.slots.iter().position(with_room) else {
+            self.deferred.push_back((purpose, user_handle));
+            let is_building = |slot: &Slot| matches!(slot.circuit, Circuit::Building { .. });
+            if !self.slots.iter().any(is_building) {
+                self.add_circuit(rng)?;
+            }
+            return Ok(user_handle);
+        };
+        self.current = slot;
+        self.make_queue_here(purpose, user_handle, rng)?;
+        Ok(user_handle)
+    }
+
+    /// Sends the `NEW` of a queue on the current circuit.
+    fn make_queue_here<R: CryptoRng + ?Sized>(
+        &mut self,
+        purpose: Purpose,
+        user_handle: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
         let qr_auth = StaticSecret::from(random::<32, _>(rng));
         let qs_auth: [u8; 32] = random(rng);
         let encoded = new_queue_command(
@@ -463,10 +592,19 @@ impl ClientNode {
             salt: random(rng),
             purpose,
             handle: user_handle,
+            slot: self.current,
         };
         self.queue_command(encoded, Waiting::Queue(Box::new(keys)))?;
-        self.pump()?;
-        Ok(user_handle)
+        let slot = self.slot_mut()?;
+        slot.reserved = slot.reserved.saturating_add(1);
+        self.pump()
+    }
+
+    /// The circuit that serves an inbound queue.
+    fn slot_of(&self, queue: &[u8; 32]) -> Option<usize> {
+        self.slots
+            .iter()
+            .position(|slot| slot.queues.contains(queue))
     }
 
     /// Starts one invitation. A [`ClientEvent::Invitation`] with the same
@@ -497,16 +635,43 @@ impl ClientNode {
         now: u64,
         rng: &mut R,
     ) -> Result<u64, Error> {
-        let session_pk = self.session_pk()?;
+        let user_handle = self.handle();
         let held = self.contacts.get_mut(&contact.0).ok_or(Error::NoPath)?;
+        if !held.channel.can_send() {
+            // The first record of the invitee opens the chain (`NET-292`).
+            held.waiting_sends.push_back((app.to_vec(), user_handle));
+            return Ok(user_handle);
+        }
+        self.send_now(contact.0, app, Waiting::UserSend(user_handle), now, rng)?;
+        Ok(user_handle)
+    }
+
+    /// Seals one application record for a contact and puts its `SEND` on a
+    /// circuit.
+    fn send_now<R: CryptoRng + ?Sized>(
+        &mut self,
+        contact: [u8; 32],
+        app: &[u8],
+        waiting: Waiting,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        // A `SEND` binds no queue to a session. It goes on a circuit that
+        // does not serve the inbound queue of the contact when one is
+        // ready, thus one session shows a relay one queue of the pair.
+        let inbound = self.slot_of(&contact);
+        let ready = |(index, slot): (usize, &Slot)| slot.is_ready().then_some(index);
+        let mut candidates = self.slots.iter().enumerate().filter_map(ready);
+        let other = candidates.clone().find(|index| Some(*index) != inbound);
+        self.current = other.or_else(|| candidates.next()).ok_or(Error::NoPath)?;
+        let session_pk = self.session_pk()?;
+        let held = self.contacts.get_mut(&contact).ok_or(Error::NoPath)?;
         let (_, encoded) =
             held.channel
                 .send(app, &session_pk, random(rng), random(rng), now, rng)?;
-        self.moved.insert(contact.0);
-        let user_handle = self.handle();
-        self.queue_command(encoded, Waiting::UserSend(user_handle))?;
-        self.pump()?;
-        Ok(user_handle)
+        self.moved.insert(contact);
+        self.queue_command(encoded, waiting)?;
+        self.pump()
     }
 
     /// Acknowledges each record of a contact that the runtime committed.
@@ -516,6 +681,8 @@ impl ClientNode {
         now: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
+        // The `ACK` goes to the session that serves the queue.
+        self.current = self.slot_of(&contact.0).ok_or(Error::NoPath)?;
         let session_pk = self.session_pk()?;
         let held = self.contacts.get_mut(&contact.0).ok_or(Error::NoPath)?;
         let channel = &mut held.channel;
@@ -541,19 +708,28 @@ impl ClientNode {
             return Ok(Vec::new());
         };
         let cell = cell.to_vec();
-        match core::mem::replace(&mut self.circuit, Circuit::None) {
+        // The `circ_id` of the cell names its circuit. A cell of no circuit
+        // of this node drops.
+        let circ_id = cell.get(..16);
+        let of_cell = |slot: &Slot| slot.circ_id().as_ref().map(<[u8; 16]>::as_slice) == circ_id;
+        let Some(index) = self.slots.iter().position(of_cell) else {
+            return Ok(Vec::new());
+        };
+        self.current = index;
+        let circuit = core::mem::replace(&mut self.slot_mut()?.circuit, Circuit::None);
+        match circuit {
             Circuit::None => Ok(Vec::new()),
             Circuit::Building { build, pending } => {
                 self.on_build_cell(*build, *pending, &cell, rng)
             }
             Circuit::Ready(mut session) => {
                 let received = session.receive_cell(&cell);
-                self.circuit = Circuit::Ready(session);
+                self.slot_mut()?.circuit = Circuit::Ready(session);
                 match received {
                     Ok(events) => self.on_events(events, now, rng),
                     // NET-115: a failed check ends the circuit.
                     Err(_) => {
-                        self.circuit = Circuit::None;
+                        self.slot_mut()?.circuit = Circuit::None;
                         Ok(alloc::vec![ClientEvent::CircuitLost])
                     }
                 }
@@ -594,13 +770,34 @@ impl ClientNode {
         };
         build.push(&ss_hop).map_err(|_| Error::NoPath)?;
         let circuit = build.finish().map_err(|_| Error::NoPath)?;
-        self.circuit = Circuit::Ready(Box::new(CircuitSession::new(
+        self.slot_mut()?.circuit = Circuit::Ready(Box::new(CircuitSession::new(
             circuit,
             relay_session_pk,
             Range::Queue,
         )));
+        let ready = self.current;
         self.subscribe_stored(rng)?;
-        Ok(alloc::vec![ClientEvent::CircuitReady])
+        // Each queue that waited for room goes to this circuit.
+        while self.slot()?.has_room() {
+            let Some((purpose, user_handle)) = self.deferred.pop_front() else {
+                break;
+            };
+            self.make_queue_here(purpose, user_handle, rng)?;
+        }
+        if !self.deferred.is_empty() {
+            self.add_circuit(rng)?;
+        }
+        // The runtime learns of the first circuit, which takes its commands.
+        let is_first = !self
+            .slots
+            .iter()
+            .enumerate()
+            .any(|(index, slot)| index != ready && slot.is_ready());
+        Ok(if is_first {
+            alloc::vec![ClientEvent::CircuitReady]
+        } else {
+            Vec::new()
+        })
     }
 
     fn on_events<R: CryptoRng + ?Sized>(
@@ -610,7 +807,11 @@ impl ClientNode {
         rng: &mut R,
     ) -> Result<Vec<ClientEvent>, Error> {
         let mut out = Vec::new();
+        let arrival = self.current;
         for event in events {
+            // A reply to one event can go to a second circuit. The next
+            // event belongs to the circuit of the cell again.
+            self.current = arrival;
             match event {
                 CircuitEvent::Answered {
                     handle,
@@ -628,7 +829,12 @@ impl ClientNode {
                 },
                 CircuitEvent::Rejected { handle, reason } => {
                     let user = match self.waiting.remove(&handle) {
-                        Some(Waiting::Queue(keys)) => keys.handle,
+                        Some(Waiting::Queue(keys)) => {
+                            if let Some(slot) = self.slots.get_mut(keys.slot) {
+                                slot.reserved = slot.reserved.saturating_sub(1);
+                            }
+                            keys.handle
+                        }
                         Some(Waiting::UserSend(user)) => user,
                         _ => handle,
                     };
@@ -663,6 +869,11 @@ impl ClientNode {
         if ids.relay_session_pk != session_pk {
             return Err(Error::Unverified);
         }
+        // The session of the circuit serves the queue from its `NEW`.
+        if let Some(slot) = self.slots.get_mut(keys.slot) {
+            slot.reserved = slot.reserved.saturating_sub(1);
+            slot.queues.insert(ids.recipient_id);
+        }
         let queue_relay = self.relays.last().ok_or(Error::NoPath)?.relay_id;
         let own_address = || QueueAddress {
             relay_id: queue_relay,
@@ -682,6 +893,7 @@ impl ClientNode {
         let identity = self.root.pairwise_identity(&keys.salt);
 
         let mut out = Vec::new();
+        let mut opening = Vec::new();
         let (setup, outbound, peer_static, issued) = match keys.purpose {
             Purpose::Invite => {
                 let (inviter, bundle) = Inviter::issue(&identity, own_address(), rng)?;
@@ -692,6 +904,8 @@ impl ClientNode {
                 (Setup::Inviting(Box::new(inviter)), None, [0u8; 32], bundle)
             }
             Purpose::Accept { bundle } => {
+                opening = alloc::vec![0u8; QUEUE_ADDRESS_LEN];
+                own_address().encode(&mut opening)?;
                 let peer_static = Bundle::parse(&bundle)?.responder_static_x25519;
                 let (invitee, flight1, to) = Invitee::accept(&bundle, &own_address(), rng)?;
                 let outbound = Outbound::new(&to);
@@ -719,6 +933,7 @@ impl ClientNode {
             outbound,
             peer_static,
             bundle: issued,
+            opening,
         };
         self.invitation_changed(ids.recipient_id, &half)?;
         self.halves.insert(ids.recipient_id, half);
@@ -736,13 +951,32 @@ impl ClientNode {
         if let Some(held) = self.contacts.get_mut(&queue_id) {
             // Each outcome moves the cursor of the queue.
             self.moved.insert(queue_id);
-            return Ok(match held.channel.receive(payload, bucket, now, rng)? {
-                Received::App { bytes, .. } => alloc::vec![ClientEvent::Message {
-                    contact: ContactId(queue_id),
-                    app: bytes,
-                }],
-                Received::Duplicate | Received::Undecryptable { .. } => Vec::new(),
-            });
+            let mut out = Vec::new();
+            if let Received::App { bytes, .. } = held.channel.receive(payload, bucket, now, rng)? {
+                let address = AppMessage::parse(&bytes, Channel::Pairwise)
+                    .ok()
+                    .filter(|parsed| parsed.kind == AppKind::QueueAddress)
+                    .map(|parsed| QueueAddress::parse(parsed.body));
+                match address {
+                    // NET-179, WIR-330: the receiving chain gave the address.
+                    Some(Ok(address)) => held.channel.accept_address(&address),
+                    Some(Err(_)) => {}
+                    None => out.push(ClientEvent::Message {
+                        contact: ContactId(queue_id),
+                        app: bytes,
+                    }),
+                }
+            }
+            // The record opened the sending chain of an inviter.
+            let waiting = if held.channel.can_send() {
+                core::mem::take(&mut held.waiting_sends)
+            } else {
+                VecDeque::new()
+            };
+            for (app, user_handle) in waiting {
+                self.send_now(queue_id, &app, Waiting::UserSend(user_handle), now, rng)?;
+            }
+            return Ok(out);
         }
         let Some(mut half) = self.halves.remove(&queue_id) else {
             return Ok(Vec::new());
@@ -847,9 +1081,24 @@ impl ClientNode {
                 channel: PairwiseChannel::new(ratchet, outbound, half.inbound),
                 peer_static,
                 salt: half.salt,
+                waiting_sends: VecDeque::new(),
             },
         );
         self.moved.insert(queue_id);
+        if !half.opening.is_empty() {
+            // NET-292: the first ratchet record of the invitee opens the
+            // sending chain of the inviter, and it gives the address of
+            // flight 1 again under the complete session.
+            let record = AppMessage {
+                kind: AppKind::QueueAddress,
+                msg_id: random(rng),
+                sent_at: now.saturating_mul(1_000),
+                body: &half.opening,
+            };
+            let mut app = alloc::vec![0u8; record.len()];
+            record.encode(&mut app)?;
+            self.send_now(queue_id, &app, Waiting::Other, now, rng)?;
+        }
         Ok(alloc::vec![ClientEvent::ContactReady {
             contact: ContactId(queue_id),
             peer_static,

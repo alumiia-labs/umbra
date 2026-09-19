@@ -162,6 +162,13 @@ impl Network {
     /// clients send, each pacing clock ticks, and the clients receive.
     fn settle(&mut self) {
         for _ in 0..12 {
+            self.step();
+        }
+    }
+
+    /// One turn of each party.
+    fn step(&mut self) {
+        {
             for client in 0..self.clients.len() {
                 // The store takes each change before a capsule leaves.
                 self.commit(client);
@@ -523,4 +530,123 @@ fn an_invitation_waits_across_a_restart() {
     contact_of(&network.take_events(ALICE));
     contact_of(&network.take_events(BOB));
     assert!(network.stored[ALICE].invitations.is_empty());
+}
+
+fn invitations_of(events: Vec<ClientEvent>) -> Vec<Vec<u8>> {
+    events
+        .into_iter()
+        .filter_map(|event| match event {
+            ClientEvent::Invitation { bundle, .. } => Some(bundle),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn more_queues_than_one_session_serves_go_to_more_circuits() {
+    const ALICE: usize = 0;
+    const BOB: usize = 1;
+    let mut network = Network::new();
+    network.settle();
+    network.take_events(ALICE);
+
+    // A relay serves 8 queues in one session (`NET-022`). The ninth queue
+    // and each later one wait for a second circuit.
+    for n in 0..11u64 {
+        network.clients[ALICE].invite(&mut Rng(40 + n)).unwrap();
+    }
+    network.settle();
+    network.settle();
+    let events = network.take_events(ALICE);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, ClientEvent::Rejected { .. })),
+        "{events:?}"
+    );
+    let bundles = invitations_of(events);
+    assert_eq!(bundles.len(), 11);
+    assert_eq!(network.stored[ALICE].invitations.len(), 11);
+
+    // A new run divides the 11 stored queues over two circuits, and the
+    // last invitation, which is on the second one, gives a contact.
+    network.restart(ALICE, 0x40);
+    network.settle();
+    let events = network.take_events(ALICE);
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, ClientEvent::Rejected { .. })));
+    network.clients[BOB]
+        .accept(bundles[10].clone(), &mut Rng(60))
+        .unwrap();
+    network.settle();
+    let (alice_contact, _) = contact_of(&network.take_events(ALICE));
+    let (bob_contact, _) = contact_of(&network.take_events(BOB));
+
+    // Text travels both ways with the queues on different circuits.
+    let now = network.now;
+    network.clients[BOB]
+        .send(
+            &bob_contact,
+            &text(1, "to the second circuit"),
+            now,
+            &mut Rng(61),
+        )
+        .unwrap();
+    network.clients[ALICE]
+        .send(&alice_contact, &text(2, "and back"), now, &mut Rng(62))
+        .unwrap();
+    network.settle();
+    assert_eq!(
+        messages_of(network.take_events(ALICE)),
+        [b"to the second circuit"]
+    );
+    assert_eq!(messages_of(network.take_events(BOB)), [b"and back"]);
+}
+
+#[test]
+fn the_inviter_writes_first_and_the_record_waits_for_the_chain() {
+    const ALICE: usize = 0;
+    const BOB: usize = 1;
+    let mut network = Network::new();
+    network.settle();
+    network.clients[ALICE].invite(&mut Rng(1)).unwrap();
+    network.settle();
+    let bundle = invitations_of(network.take_events(ALICE)).remove(0);
+    network.clients[BOB].accept(bundle, &mut Rng(2)).unwrap();
+
+    // Alice writes in the turn that gives her the contact. Her ratchet has
+    // no sending chain before the first record of Bob arrives (`NET-292`),
+    // thus the record waits in the node, and it does not fail.
+    let mut alice_contact = None;
+    for _ in 0..24 {
+        network.step();
+        let events = network.take_events(ALICE);
+        if let Some(ClientEvent::ContactReady { contact, .. }) = events
+            .iter()
+            .find(|event| matches!(event, ClientEvent::ContactReady { .. }))
+        {
+            alice_contact = Some(*contact);
+            break;
+        }
+    }
+    let alice_contact = alice_contact.expect("a contact");
+    let now = network.now;
+    let sent = network.clients[ALICE]
+        .send(
+            &alice_contact,
+            &text(7, "the inviter writes first"),
+            now,
+            &mut Rng(3),
+        )
+        .unwrap();
+    network.settle();
+    assert!(network
+        .take_events(ALICE)
+        .contains(&ClientEvent::Accepted { handle: sent }));
+    // The queue address record of Bob is no message of the conversation.
+    assert_eq!(
+        messages_of(network.take_events(BOB)),
+        [b"the inviter writes first"]
+    );
 }
