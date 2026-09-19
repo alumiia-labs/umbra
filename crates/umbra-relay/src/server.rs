@@ -32,6 +32,7 @@ use crate::{
     circuits::{CircuitKey, LinkId},
     node::{Output, RelayNode},
     service::community::DigestDue,
+    store::RelayStore,
 };
 
 /// The mean of the pacing clock of a circuit, in milliseconds (Part 3
@@ -118,12 +119,16 @@ fn unix_now() -> u64 {
         .map_or(0, |elapsed| elapsed.as_secs())
 }
 
-/// Runs the node until each sender of `inputs` closes.
+/// Runs the node until each sender of `inputs` closes, or until the store
+/// fails. `store` takes the changes of each call of the node before an
+/// output of that call leaves (`NET-298`). A relay that cannot write stops,
+/// because it can acknowledge nothing.
 pub async fn run_node(
     mut node: RelayNode,
     mut inputs: mpsc::Receiver<Input>,
     requests: mpsc::UnboundedSender<Request>,
     pacing_mean_ms: u64,
+    mut store: Box<dyn RelayStore>,
 ) {
     let mut rng = OsRng;
     let mut writers: BTreeMap<LinkId, mpsc::UnboundedSender<Vec<u8>>> = BTreeMap::new();
@@ -180,6 +185,10 @@ pub async fn run_node(
                 outputs
             }
         };
+        if store.commit(&node.take_changes()).is_err() {
+            eprintln!("the store took no commit, and the relay stops");
+            return;
+        }
         for output in outputs {
             match output {
                 Output::Send { link, capsule } => {
@@ -369,10 +378,11 @@ pub async fn run_relay(
     next_hops: BTreeMap<[u8; 32], Dial>,
     client_tls: Arc<rustls::ClientConfig>,
     pacing_mean_ms: u64,
+    store: Box<dyn RelayStore>,
 ) {
     let (inputs, node_inputs) = mpsc::channel::<Input>(1_024);
     let (requests, mut node_requests) = mpsc::unbounded_channel::<Request>();
-    tokio::spawn(run_node(node, node_inputs, requests, pacing_mean_ms));
+    let node_task = tokio::spawn(run_node(node, node_inputs, requests, pacing_mean_ms, store));
 
     let dial_inputs = inputs.clone();
     tokio::spawn(async move {
@@ -412,5 +422,9 @@ pub async fn run_relay(
             }
         }
     });
-    accept_loop(listener, tls, inputs).await;
+    // The node task ends when the store fails, and the relay ends with it.
+    tokio::select! {
+        () = accept_loop(listener, tls, inputs) => {}
+        _ = node_task => {}
+    }
 }

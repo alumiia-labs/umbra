@@ -30,6 +30,7 @@ use umbra_ffi::runtime::{run_client, Command, NoStore, Update};
 use umbra_relay::{
     node::{Config, RelayNode},
     server::{run_relay, tls_acceptor},
+    store::MemoryStore,
 };
 use umbra_transport::{native, Dial};
 use umbra_wire::app::{AppKind, AppMessage, Channel};
@@ -157,6 +158,7 @@ async fn two_clients_meet_and_talk_over_real_sockets() {
             next_hops,
             client_tls.clone(),
             PACING_MEAN_MS,
+            Box::new(MemoryStore::default()),
         ));
     }
 

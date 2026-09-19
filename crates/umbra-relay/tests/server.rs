@@ -27,6 +27,7 @@ use umbra_onion::{
 use umbra_relay::{
     node::{Config, RelayNode},
     server::{run_node, serve_connection, OsRng},
+    store::MemoryStore,
 };
 use umbra_transport::{link::ClientLink, upgrade, websocket};
 use umbra_wire::{
@@ -75,7 +76,8 @@ async fn a_client_upgrades_opens_a_session_and_builds_one_hop() {
     });
     let (inputs, node_inputs) = mpsc::channel(64);
     let (requests, _node_requests) = mpsc::unbounded_channel();
-    tokio::spawn(run_node(node, node_inputs, requests, 1_000));
+    let store = Box::new(MemoryStore::default());
+    tokio::spawn(run_node(node, node_inputs, requests, 1_000, store));
     let (mut client, server) = tokio::io::duplex(1 << 16);
     tokio::spawn(serve_connection(server, 2, inputs));
 

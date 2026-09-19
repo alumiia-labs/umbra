@@ -200,6 +200,7 @@ operations (Part 12).
 | --- | --- | --- |
 | `QUEUE_QUOTA` | 256 messages | **[NET-016]** The relay MUST reject more than this number. **[NET-017]** The relay MUST signal the quota |
 | `MSG_TTL` | **45 days** | Undelivered messages expire. The 14 days of Session is too short, because a restore then recovers almost nothing. The floor is 21 days. 45 days is the same as the media window of Signal, and U6 needs it. Stored ciphertext is not compellable identity data, thus the retention cost is storage and not exposure. |
+| `STORE_TIME_GRAIN` | 3 600 s | The unit of each time in the store of a relay (`NET-301`) |
 | `QUEUE_IDLE_TTL` | 60 days | The relay deletes a queue with no activity. **[NET-195]** A relay MUST count an accepted `SEND` and a `SUB` on a queue as activity. **[NET-196]** A relay MUST NOT count a `COVER` as activity |
 | `ROTATE_AFTER` | 90 days **or** 10 000 messages | The first limit to occur applies |
 | `ROTATE_JITTER` | ±20 % | **[NET-018]** A client MUST NOT synchronize the rotation across queues |
@@ -218,6 +219,51 @@ MUST NOT send `DEL` at a device revocation.
 > backup and a rotated address break a conversation silently and permanently. In
 > UMBRA this behavior is a conformance bug. Refer to Part 7 §7.6 for the
 > mandatory rotation-safe backup rule.
+
+**The store of a queue relay.** A client names a contact by the identifiers
+of two queues, and those identifiers exist at one relay each. A relay that
+loses its queues at a restart ends each contact that it served, and no action
+of a client brings one back. Thus the queues of a relay outlive its process.
+
+- **[NET-298]** A queue relay MUST commit a change to durable storage before
+  it sends the answer of the command that made the change. The `IDS` follows
+  the commit of the queue, the `QUOTA` follows the commit of the record, and
+  the `ILINK` and the `IBLOB` of Part 6 §6.4 follow the commit of the
+  invitation. A `QUOTA` for a record that the store does not hold is a false
+  acknowledgment under Part 6 rule `WIR-496`.
+- **[NET-299]** A relay MUST commit the changes of one command as a whole or
+  not at all. A relay whose store takes no commit MUST stop, and it MUST NOT
+  answer the command.
+- **[NET-300]** The store MUST hold, for each queue: the two identifiers, the
+  two authorization keys with a lock key of Part 4 §4.3.1 in the place of
+  `QS_auth`, the next sequence number, the last `ACK`, the notifier
+  credential, the time of the last activity, and each record that no `ACK`
+  covers. It MUST hold each invitation with its blob. It MUST NOT hold a
+  circuit, a session, a subscription, an address of a client, or a link
+  between two queues. Each of those ends with its process, and §3.11 gives a
+  queue relay none of the last two.
+- **[NET-301]** A relay MUST write each time to its store as a multiple of
+  `STORE_TIME_GRAIN`, which is 3 600 s. The lifetimes that read those times
+  are 14 days and more. A seized file then gives no arrival time to the
+  second, and a live relay learns that time in each design.
+- **[NET-302]** A relay MUST erase from its storage a record that an `ACK`
+  covers, a record past `MSG_TTL`, a queue after its `DEL` or its idle
+  lifetime, and an invitation after its first fetch or its lifetime. The
+  erased bytes MUST NOT stay in the file, in a journal, or in a log of the
+  storage engine. Part 6 rules `WIR-039` to `WIR-042` state that duty for the
+  `DEL`, and this rule gives it to each other case.
+- **[NET-303]** At its start a relay MUST drop a stored queue whose form does
+  not parse, whose record sits at or below its last `ACK`, or whose record
+  sits at or above its next sequence number. It MUST serve each other queue.
+
+> *Cause.* An earlier draft gave a relay no storage rule, and the reference
+> relay held each queue in RAM. The reference client stores its ratchets
+> since 0.2.0-draft, thus a restart of a client cost nothing and a restart of
+> a relay cost each contact. `NET-302` repeats the erase duty for the
+> storage engine, because a deleted row of a database stays in its free pages
+> and in its write-ahead log until the engine overwrites them. The reference
+> relay runs SQLite under `secure_delete`, and it truncates the log after
+> each commit that deletes.
 
 ### 3.2.5 Transport isolation
 

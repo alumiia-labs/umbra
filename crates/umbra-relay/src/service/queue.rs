@@ -5,12 +5,16 @@
 use std::collections::BTreeMap;
 
 use umbra_core::abuse::admission::{Accepts, RelayGate};
-use umbra_crypto::rand_core::CryptoRng;
+use umbra_crypto::{
+    rand_core::CryptoRng,
+    stored::{Reader, Writer},
+};
 use umbra_queue::{
-    params::{INVITE_RESERVE_TTL, INVITE_TTL},
+    params::{store_time, INVITE_RESERVE_TTL, INVITE_TTL, MSG_TTL},
     relay::{
         queue::{Queue, QueueKeys},
         session::Session,
+        Stored,
     },
     Reject,
 };
@@ -24,19 +28,12 @@ use umbra_wire::{
 };
 
 use super::{answer, Outbound, Reply};
-use crate::circuits::CircuitKey;
+use crate::{
+    circuits::CircuitKey,
+    store::{Loaded, StoreChange, StoredInvitation as Invitation},
+};
 
 const BUCKETS: [Bucket; 4] = [Bucket::B0, Bucket::B1, Bucket::B2, Bucket::B3];
-
-/// One invitation of Part 4 §4.3.1. The relay holds a ciphertext that it
-/// cannot read, and the link identifier is no key of it.
-struct Invitation {
-    recipient_id: [u8; 32],
-    /// `None` between the `IRES` and the `IPUT`.
-    blob: Option<Vec<u8>>,
-    /// The time of the `IRES`, and then the time of the `IPUT` (`IDN-126`).
-    at: u64,
-}
 
 /// The queues of the relay, by `RecipientId`.
 #[derive(Default)]
@@ -48,6 +45,8 @@ pub struct QueueService {
     by_sender: BTreeMap<[u8; 32], [u8; 32]>,
     /// The circuit that holds the subscription of a queue.
     subscribers: BTreeMap<[u8; 32], CircuitKey>,
+    /// The changes since the last [`QueueService::take_changes`].
+    changes: Vec<StoreChange>,
 }
 
 fn random_id<R: CryptoRng + ?Sized>(rng: &mut R) -> [u8; 32] {
@@ -84,6 +83,73 @@ fn msg_of<R: CryptoRng + ?Sized>(
 }
 
 impl QueueService {
+    /// The queues and the invitations of an earlier run. A queue whose
+    /// stored form has a fault is dropped, and the others stay.
+    pub fn restore(loaded: Loaded) -> Self {
+        let mut service = QueueService {
+            invitations: loaded.invitations,
+            ..QueueService::default()
+        };
+        for (recipient_id, stored) in loaded.queues {
+            let mut reader = Reader::new(&stored.head);
+            let Ok(queue) = Queue::restore(&mut reader, stored.records) else {
+                continue;
+            };
+            if queue.keys().recipient_id != recipient_id {
+                continue;
+            }
+            service
+                .by_sender
+                .insert(queue.keys().sender_id, recipient_id);
+            service.queues.insert(recipient_id, queue);
+        }
+        // An invitation of a queue that is gone serves no party.
+        let queues = &service.queues;
+        service
+            .invitations
+            .retain(|_, held| queues.contains_key(&held.recipient_id));
+        service
+    }
+
+    /// The changes since the last call. The process commits them before it
+    /// sends an output of the same call of the node (`NET-298`).
+    pub fn take_changes(&mut self) -> Vec<StoreChange> {
+        core::mem::take(&mut self.changes)
+    }
+
+    /// Records the head of a queue after a change of it.
+    fn head_changed(&mut self, recipient_id: [u8; 32]) {
+        if let Some(queue) = self.queues.get(&recipient_id) {
+            let mut writer = Writer::new();
+            queue.export_head(&mut writer);
+            self.changes.push(StoreChange::Queue {
+                recipient_id,
+                head: writer.finish().to_vec(),
+            });
+        }
+    }
+
+    /// Records an invitation, with its time as the store holds it.
+    fn invitation_changed(&mut self, link_id: [u8; LINK_ID_LEN], mut held: Invitation) {
+        held.at = store_time(held.at);
+        self.changes.push(StoreChange::Invitation { link_id, held });
+    }
+
+    /// Ends each invitation of a queue.
+    fn end_invitations(&mut self, recipient_id: [u8; 32]) {
+        let ended: Vec<_> = self
+            .invitations
+            .iter()
+            .filter(|(_, held)| held.recipient_id == recipient_id)
+            .map(|(link_id, _)| *link_id)
+            .collect();
+        for link_id in ended {
+            self.invitations.remove(&link_id);
+            self.changes
+                .push(StoreChange::InvitationDeleted { link_id });
+        }
+    }
+
     /// The count of the queues.
     pub fn len(&self) -> usize {
         self.queues.len()
@@ -123,8 +189,10 @@ impl QueueService {
                     relay_session_pk: session.relay_session_pk(),
                 };
                 session.bind_queue(keys.recipient_id)?;
-                self.by_sender.insert(keys.sender_id, keys.recipient_id);
-                self.queues.insert(keys.recipient_id, Queue::new(keys, now));
+                let recipient_id = keys.recipient_id;
+                self.by_sender.insert(keys.sender_id, recipient_id);
+                self.queues.insert(recipient_id, Queue::new(keys, now));
+                self.head_changed(recipient_id);
                 let mut payload = [0u8; 96];
                 ids.encode(&mut payload).map_err(|_| Reject::Busy)?;
                 Ok(vec![answer(circuit, command, Cmd::Ids, &payload)])
@@ -139,6 +207,15 @@ impl QueueService {
                 session.accept(command, &queue.keys().qs_auth_pk)?;
                 let seq = queue.send(command.payload, now)?;
                 let remaining = u32::try_from(queue.remaining()).unwrap_or(u32::MAX);
+                self.changes.push(StoreChange::Record {
+                    recipient_id,
+                    record: Stored {
+                        seq,
+                        accepted_at: store_time(now),
+                        bytes: command.payload.to_vec(),
+                    },
+                });
+                self.head_changed(recipient_id);
                 // WIR-496: the QUOTA is the relay acknowledgment.
                 let mut replies = vec![answer(
                     circuit,
@@ -176,9 +253,12 @@ impl QueueService {
                 // queue. A second fetch finds no link.
                 let recipient_id = held.recipient_id;
                 self.invitations.remove(&link_id);
+                self.changes
+                    .push(StoreChange::InvitationDeleted { link_id });
                 if let Some(queue) = self.queues.get_mut(&recipient_id) {
                     queue.lock_sender(lock_pk);
                 }
+                self.head_changed(recipient_id);
                 Ok(vec![answer(circuit, command, Cmd::Iblob, &payload)])
             }
             Cmd::Sub | Cmd::Unsub | Cmd::Ack | Cmd::Del | Cmd::Nkey | Cmd::Ires | Cmd::Iput => {
@@ -199,6 +279,24 @@ impl QueueService {
         let recipient_id = command.queue_id;
         let queue = self.queues.get_mut(&recipient_id).ok_or(Reject::Rejected)?;
         session.accept(command, &queue.keys().qr_auth_pk)?;
+        let replies = self.owner_command(circuit, session, command, now, rng)?;
+        // Each command of the owner moves the head: the time of the last
+        // activity at the least. A `DEL` left no queue, and then no head.
+        self.head_changed(recipient_id);
+        Ok(replies)
+    }
+
+    /// A command that `QR_auth` authorized.
+    fn owner_command<R: CryptoRng + ?Sized>(
+        &mut self,
+        circuit: CircuitKey,
+        session: &mut Session,
+        command: &Command<'_>,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<Vec<Reply>, Reject> {
+        let recipient_id = command.queue_id;
+        let queue = self.queues.get_mut(&recipient_id).ok_or(Reject::Rejected)?;
         match command.cmd {
             Cmd::Sub => {
                 session.bind_queue(recipient_id)?;
@@ -218,7 +316,9 @@ impl QueueService {
             }
             Cmd::Ack => {
                 let seq: [u8; 4] = command.payload.try_into().map_err(|_| Reject::Rejected)?;
-                queue.ack(u32::from_be_bytes(seq));
+                let seq = u32::from_be_bytes(seq);
+                queue.ack(seq);
+                self.changes.push(StoreChange::Acked { recipient_id, seq });
                 Ok(Vec::new())
             }
             Cmd::Nkey => {
@@ -231,16 +331,16 @@ impl QueueService {
             Cmd::Ires => {
                 // One queue holds one invitation. A second `IRES` takes the
                 // place of the first, and the first link ends.
-                self.invitations
-                    .retain(|_, held| held.recipient_id != recipient_id);
+                self.end_invitations(recipient_id);
                 let mut link_id = [0u8; LINK_ID_LEN];
                 rng.fill_bytes(&mut link_id);
-                let reserved = Invitation {
+                let held = Invitation {
                     recipient_id,
                     blob: None,
                     at: now,
                 };
-                self.invitations.insert(link_id, reserved);
+                self.invitations.insert(link_id, held.clone());
+                self.invitation_changed(link_id, held);
                 Ok(vec![answer(circuit, command, Cmd::Ilink, &link_id)])
             }
             Cmd::Iput => {
@@ -253,16 +353,19 @@ impl QueueService {
                 held.blob = Some(blob.to_vec());
                 // IDN-126: the lifetime runs from the store of the blob.
                 held.at = now;
+                let held = held.clone();
+                self.invitation_changed(link_id, held);
                 Ok(vec![answer(circuit, command, Cmd::Ilink, &link_id)])
             }
             Cmd::Del => {
-                self.invitations
-                    .retain(|_, held| held.recipient_id != recipient_id);
+                self.end_invitations(recipient_id);
                 // WIR-039 to WIR-042: no identifier of the queue stays.
                 if let Some(queue) = self.queues.remove(&recipient_id) {
                     self.by_sender.remove(&queue.keys().sender_id);
                     drop(queue.delete());
                 }
+                self.changes
+                    .push(StoreChange::QueueDeleted { recipient_id });
                 self.subscribers.remove(&recipient_id);
                 Ok(Vec::new())
             }
@@ -288,15 +391,32 @@ impl QueueService {
 
     /// Expires each record past `MSG_TTL`, and erases each idle queue.
     pub fn sweep(&mut self, now: u64) {
-        self.invitations.retain(|_, held| {
+        let past_lifetime = |held: &Invitation| {
             let limit = match held.blob {
                 Some(_) => INVITE_TTL,
                 None => INVITE_RESERVE_TTL,
             };
-            now.saturating_sub(held.at) < limit
-        });
+            now.saturating_sub(held.at) >= limit
+        };
+        let ended: Vec<_> = self
+            .invitations
+            .iter()
+            .filter(|(_, held)| past_lifetime(held))
+            .map(|(link_id, _)| *link_id)
+            .collect();
+        for link_id in ended {
+            self.invitations.remove(&link_id);
+            self.changes
+                .push(StoreChange::InvitationDeleted { link_id });
+        }
         for queue in self.queues.values_mut() {
             queue.expire(now);
+        }
+        // The store drops the same records as `Queue::expire`.
+        if let Some(limit) = now.checked_sub(MSG_TTL) {
+            self.changes.push(StoreChange::Expired {
+                accepted_before: limit.saturating_add(1),
+            });
         }
         let idle: Vec<[u8; 32]> = self
             .queues
@@ -308,6 +428,9 @@ impl QueueService {
             if let Some(queue) = self.queues.remove(&recipient_id) {
                 self.by_sender.remove(&queue.keys().sender_id);
             }
+            self.end_invitations(recipient_id);
+            self.changes
+                .push(StoreChange::QueueDeleted { recipient_id });
             self.subscribers.remove(&recipient_id);
         }
     }

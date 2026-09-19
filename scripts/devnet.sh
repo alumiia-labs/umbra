@@ -7,6 +7,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 cargo build -p umbra-relay --features native
+# Each relay keeps its queues in a file here, thus a restart of this script
+# ends no contact. Delete the directory for an empty network.
+mkdir -p target/devnet
 
 pids=()
 trap 'kill "${pids[@]}" 2>/dev/null || true' EXIT INT TERM

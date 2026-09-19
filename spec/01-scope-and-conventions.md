@@ -296,6 +296,7 @@ examples. Without the table below a maintainer finds the dependents by hand.
 | --- | --- | --- |
 | `MSG_TTL` | Part 3 §3.2.4 | Part 5 §5.5.4, Part 7 §7.5.6, Part 13 §13.7.1, Part 16 §16.1 |
 | `QUEUE_IDLE_TTL` | Part 3 §3.2.4 | Part 7 §7.5.1, Part 16 §16.1 |
+| `STORE_TIME_GRAIN` | Part 3 §3.2.4 | — |
 | `MAX_QUEUES_PER_SESSION` | Part 3 §3.2.5 | Part 2 §2.7, Part 3 §3.11, Part 8 §8.2.1, Part 16 §16.3 |
 | The bucket ladder | Part 3 §3.3 | Part 5 §5.6, Part 6 §6.9, Part 3 §3.12, Part 11 §11.3.3 |
 | `CIRCUIT_MAX_AGE`, `CIRCUIT_MAX_CELLS` | Part 3 §3.4.3 | Part 2 §2.4, Part 3 §3.4.4, Part 3 §3.11.1, Part 3 §3.12, Part 6 §6.2.2, Part 6 §6.2.3, Part 6 §6.8, Part 16 §16.3 |

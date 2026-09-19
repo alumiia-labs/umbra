@@ -3,8 +3,10 @@
 
 use alloc::{vec, vec::Vec};
 
+use umbra_crypto::stored::{Reader, Writer};
+
 use crate::{
-    params::{MSG_TTL, QUEUE_IDLE_TTL, QUEUE_QUOTA},
+    params::{store_time, MSG_TTL, QUEUE_IDLE_TTL, QUEUE_QUOTA},
     relay::Stored,
     Reject,
 };
@@ -45,6 +47,55 @@ impl Queue {
             last_activity: now,
             subscribed: false,
         }
+    }
+
+    /// Writes the head of the queue for the store of a relay: each field
+    /// but the records. The head holds public keys and identifiers, and no
+    /// secret. A subscription belongs to one session, thus it is not part
+    /// of the head.
+    pub fn export_head(&self, writer: &mut Writer) {
+        writer.bytes(&self.keys.recipient_id);
+        writer.bytes(&self.keys.sender_id);
+        writer.bytes(&self.keys.qr_auth_pk);
+        writer.bytes(&self.keys.qs_auth_pk);
+        writer.u32(self.next_seq);
+        writer.u32(self.last_ack);
+        writer.option(self.notifier.as_ref(), |w, (key, id)| {
+            w.bytes(key);
+            w.bytes(id);
+        });
+        writer.u64(store_time(self.last_activity));
+    }
+
+    /// A queue from the head that [`Queue::export_head`] wrote and from
+    /// its stored records. A record that an `ACK` covers, a record at or
+    /// above `next_seq`, and a record above the quota are faults of the
+    /// store.
+    pub fn restore(reader: &mut Reader<'_>, mut records: Vec<Stored>) -> Result<Self, Reject> {
+        let mut head = || -> Result<Queue, umbra_crypto::Error> {
+            Ok(Queue {
+                keys: QueueKeys {
+                    recipient_id: reader.array()?,
+                    sender_id: reader.array()?,
+                    qr_auth_pk: reader.array()?,
+                    qs_auth_pk: reader.array()?,
+                },
+                records: Vec::new(),
+                next_seq: reader.u32()?,
+                last_ack: reader.u32()?,
+                notifier: reader.option(|r| Ok((r.array()?, r.array()?)))?,
+                last_activity: reader.u64()?,
+                subscribed: false,
+            })
+        };
+        let mut queue = head().map_err(|_| Reject::Rejected)?;
+        records.sort_by_key(|record| record.seq);
+        let in_range = |record: &Stored| record.seq > queue.last_ack && record.seq < queue.next_seq;
+        if records.len() > QUEUE_QUOTA || !records.iter().all(in_range) {
+            return Err(Reject::Rejected);
+        }
+        queue.records = records;
+        Ok(queue)
     }
 
     /// The identifiers and keys.

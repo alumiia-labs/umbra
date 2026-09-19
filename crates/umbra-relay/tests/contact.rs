@@ -24,6 +24,7 @@ use umbra_crypto::{
 use umbra_relay::{
     circuits::LinkId,
     node::{Config, Output, RelayNode},
+    store::{MemoryStore, RelayStore},
 };
 use umbra_wire::app::{AppKind, AppMessage, Channel};
 
@@ -67,6 +68,8 @@ struct Stored {
 
 struct Network {
     relays: Vec<RelayNode>,
+    /// The store of each relay, which outlives its node.
+    relay_stores: Vec<MemoryStore>,
     peers: Vec<Vec<(LinkId, Peer)>>,
     clients: Vec<ClientNode>,
     /// The link of each client at the guard. A restart takes a new one.
@@ -88,18 +91,58 @@ fn relay_static(layer: u8) -> (RelayStatic, StaticSecret) {
 }
 
 impl Network {
-    fn new() -> Self {
-        let mut relays = Vec::new();
-        for layer in 1..=3u8 {
-            let (relay, static_secret) = relay_static(layer);
-            relays.push(RelayNode::new(Config {
-                relay,
-                static_secret,
-                layer,
-                issuer_key: PublicKey2048::from_modulus(&[0xFF; 256]).unwrap(),
-                community_capacity: 1 << 20,
-            }));
+    fn relay_config(layer: u8) -> Config {
+        let (relay, static_secret) = relay_static(layer);
+        Config {
+            relay,
+            static_secret,
+            layer,
+            issuer_key: PublicKey2048::from_modulus(&[0xFF; 256]).unwrap(),
+            community_capacity: 1 << 20,
         }
+    }
+
+    /// The links between the relays of two layers.
+    fn wire_relays(&mut self) {
+        self.peers = vec![Vec::new(), Vec::new(), Vec::new()];
+        for from in 0..2usize {
+            self.peers[from].push((900, Peer::Relay(from + 1, 800)));
+            self.peers[from + 1].push((800, Peer::Relay(from, 900)));
+            let next_id = relay_static(from as u8 + 2).0.relay_id;
+            let outputs =
+                self.relays[from].dialed(900, next_id, [from as u8; 8], Secret::new([9; 32]));
+            self.route(from, outputs);
+        }
+    }
+
+    /// The store takes each change of each relay.
+    fn commit_relays(&mut self) {
+        for (relay, store) in self.relays.iter_mut().zip(&mut self.relay_stores) {
+            store.commit(&relay.take_changes()).unwrap();
+        }
+    }
+
+    /// Each relay process ends, and a new one starts from its store. Each
+    /// circuit, session, and subscription is gone, thus each client starts
+    /// a new run too.
+    fn restart_network(&mut self, seeds: &[u8]) {
+        self.commit_relays();
+        self.relays = (1..=3u8)
+            .zip(&mut self.relay_stores)
+            .map(|(layer, store)| {
+                RelayNode::restored(Self::relay_config(layer), store.load().unwrap())
+            })
+            .collect();
+        self.wire_relays();
+        for (client, seed) in seeds.iter().enumerate() {
+            self.restart(client, *seed);
+        }
+    }
+
+    fn new() -> Self {
+        let relays = (1..=3u8)
+            .map(|layer| RelayNode::new(Self::relay_config(layer)))
+            .collect();
         let clients = (0..2u8)
             .map(|index| {
                 let path = [relay_static(1).0, relay_static(2).0, relay_static(3).0];
@@ -108,7 +151,8 @@ impl Network {
             .collect();
         let mut network = Network {
             relays,
-            peers: vec![Vec::new(), Vec::new(), Vec::new()],
+            relay_stores: vec![MemoryStore::default(); 3],
+            peers: Vec::new(),
             clients,
             links: vec![1, 2],
             stored: vec![Stored::default(), Stored::default()],
@@ -117,14 +161,7 @@ impl Network {
             rng: Rng(7),
             now: 1_000,
         };
-        for from in 0..2usize {
-            network.peers[from].push((900, Peer::Relay(from + 1, 800)));
-            network.peers[from + 1].push((800, Peer::Relay(from, 900)));
-            let next_id = relay_static(from as u8 + 2).0.relay_id;
-            let outputs =
-                network.relays[from].dialed(900, next_id, [from as u8; 8], Secret::new([9; 32]));
-            network.route(from, outputs);
-        }
+        network.wire_relays();
         for client in 0..2usize {
             network.peers[0].push((network.links[client], Peer::Client(client)));
             network.clients[client]
@@ -168,6 +205,7 @@ impl Network {
 
     /// One turn of each party.
     fn step(&mut self) {
+        self.commit_relays();
         {
             for client in 0..self.clients.len() {
                 // The store takes each change before a capsule leaves.
@@ -767,4 +805,81 @@ fn a_link_with_a_wrong_key_opens_no_blob() {
     assert!(network.clients[BOB]
         .accept_link(&fragment[..60], &mut Rng(3))
         .is_err());
+}
+
+#[test]
+fn the_relays_restart_and_each_contact_continues() {
+    const ALICE: usize = 0;
+    const BOB: usize = 1;
+    let mut network = Network::new();
+    network.settle();
+    network.clients[ALICE].invite_link(&mut Rng(1)).unwrap();
+    network.settle();
+    let first_link = link_of(network.take_events(ALICE));
+    network.clients[BOB]
+        .accept_link(&first_link, &mut Rng(2))
+        .unwrap();
+    network.settle();
+    let (alice_contact, _) = contact_of(&network.take_events(ALICE));
+    let (bob_contact, _) = contact_of(&network.take_events(BOB));
+
+    // A second link waits at the relay, and Bob writes a record that Alice
+    // does not take before the restart: her client is gone first.
+    network.clients[ALICE].invite_link(&mut Rng(3)).unwrap();
+    network.settle();
+    let waiting_link = link_of(network.take_events(ALICE));
+    network.restart(ALICE, 0x40);
+    let now = network.now;
+    network.clients[BOB]
+        .send(
+            &bob_contact,
+            &text(1, "held across the restart"),
+            now,
+            &mut Rng(4),
+        )
+        .unwrap();
+    network.settle();
+    network.commit_relays();
+    let holds_a_record =
+        |store: &MemoryStore| store.0.queues.values().any(|q| !q.records.is_empty());
+    assert!(holds_a_record(&network.relay_stores[2]));
+
+    // Each relay process ends. The store of the queue relay holds the two
+    // queues of the pair, the queue of the second link, the record, and
+    // the blob.
+    network.restart_network(&[0x40, 0x41]);
+    let held = &network.relay_stores[2].0;
+    assert_eq!(held.queues.len(), 3);
+    assert_eq!(held.invitations.len(), 1);
+    assert!(network.relay_stores[0].0.queues.is_empty());
+    network.settle();
+
+    // Alice takes the record one time, and the pair talks under the
+    // stored ratchets.
+    assert_eq!(
+        messages_of(network.take_events(ALICE)),
+        [b"held across the restart"]
+    );
+    let now = network.now;
+    network.clients[ALICE]
+        .send(
+            &alice_contact,
+            &text(2, "after the relays"),
+            now,
+            &mut Rng(5),
+        )
+        .unwrap();
+    network.settle();
+    assert_eq!(messages_of(network.take_events(BOB)), [b"after the relays"]);
+
+    // The link that waited serves a third party, and the lock of the first
+    // link holds: a record under the old `QS_auth` would be refused, and
+    // the records of Bob above went under his lock key.
+    let carol = network.add_client(0x50);
+    network.clients[carol]
+        .accept_link(&waiting_link, &mut Rng(6))
+        .unwrap();
+    network.settle();
+    contact_of(&network.take_events(carol));
+    assert_eq!(network.clients[ALICE].contacts().count(), 2);
 }

@@ -33,6 +33,8 @@ use umbra_ffi::bindings::{
 use umbra_relay::{
     node::{Config as RelayConfig, RelayNode},
     server::{run_relay, tls_acceptor},
+    sqlite_store::SqliteStore,
+    store::{MemoryStore, RelayStore},
 };
 use umbra_transport::{native, Dial};
 
@@ -137,30 +139,46 @@ fn rendered(handle: &Handle, message: Arc<MsgHandle>) -> String {
     text
 }
 
-#[test]
-fn two_apps_meet_and_talk_through_the_exported_surface() {
-    // The relays run on a runtime of the test. Each handle makes its own.
+/// Starts three relay servers on localhost, and returns their runtime with
+/// their ports. With a directory each relay keeps its queues in an SQLite
+/// file there. With ports each relay takes the port of an earlier run. A
+/// drop of the runtime ends the three servers and closes each socket.
+fn start_relays(
+    directory: Option<&std::path::Path>,
+    ports: Option<&[u16]>,
+) -> (tokio::runtime::Runtime, Vec<u16>) {
     let relays = tokio::runtime::Runtime::new().unwrap();
     let client_tls = native::tls_config_with_root_file(CA).unwrap();
     let mut listeners = Vec::new();
-    let mut ports = Vec::new();
-    for _ in 0..3 {
+    for index in 0..3 {
+        let port = ports.map_or(0, |ports| ports[index]);
         let listener = relays
-            .block_on(TcpListener::bind(("127.0.0.1", 0)))
+            .block_on(TcpListener::bind(("127.0.0.1", port)))
             .unwrap();
-        ports.push(listener.local_addr().unwrap().port());
         listeners.push(listener);
     }
+    let ports: Vec<u16> = listeners
+        .iter()
+        .map(|listener| listener.local_addr().unwrap().port())
+        .collect();
     for (index, listener) in listeners.into_iter().enumerate() {
         let layer = index as u8 + 1;
         let (relay, static_secret) = relay_static(layer);
-        let node = RelayNode::new(RelayConfig {
+        let config = RelayConfig {
             relay,
             static_secret,
             layer,
             issuer_key: PublicKey2048::from_modulus(&[0xFF; 256]).unwrap(),
             community_capacity: 1 << 20,
-        });
+        };
+        let mut store: Box<dyn RelayStore> = match directory {
+            Some(directory) => {
+                let path = directory.join(format!("relay{layer}.db"));
+                Box::new(SqliteStore::open(path.to_str().unwrap()).unwrap())
+            }
+            None => Box::new(MemoryStore::default()),
+        };
+        let node = RelayNode::restored(config, store.load().unwrap());
         let mut next_hops = BTreeMap::new();
         if layer < 3 {
             next_hops.insert(
@@ -175,9 +193,14 @@ fn two_apps_meet_and_talk_through_the_exported_surface() {
             next_hops,
             client_tls.clone(),
             PACING_MEAN_MS,
+            store,
         ));
     }
-    let network = Network {
+    (relays, ports)
+}
+
+fn network_of(ports: &[u16]) -> Network {
+    Network {
         relays: (1..=3u8)
             .map(|layer| {
                 let relay = relay_static(layer).0;
@@ -192,7 +215,97 @@ fn two_apps_meet_and_talk_through_the_exported_surface() {
             .collect(),
         root_ca_path: Some(CA.into()),
         invitation_host: HOST.into(),
+    }
+}
+
+fn launch(directory: &std::path::Path, name: &str, key: u8) -> Arc<Handle> {
+    let config = Config {
+        database_path: directory.join(name).to_str().unwrap().to_owned(),
+        // A slow device keeps the floor cost, which keeps this test short.
+        argon2_floor_ms: 60_000,
     };
+    let keystore = Arc::new(Keystore([key; 32])) as Arc<dyn SecureElementCallback>;
+    init(config, keystore, units("correct horse")).unwrap()
+}
+
+/// As [`wait_for`], for a test that ends the relays: a run that ends with a
+/// fault is what that test expects.
+fn wait_past_faults<T>(handle: &Handle, mut pick: impl FnMut(FfiEvent) -> Option<T>) -> T {
+    let start = Instant::now();
+    while start.elapsed() < STEP {
+        let found = handle.wait_event(500).and_then(&mut pick);
+        if let Some(found) = found {
+            return found;
+        }
+    }
+    panic!("no such event in time");
+}
+
+#[test]
+fn the_relay_processes_end_and_the_contact_continues() {
+    let directory = std::env::temp_dir().join(format!("umbra-relays-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let (relays, ports) = start_relays(Some(&directory), None);
+    let network = network_of(&ports);
+    let alice = launch(&directory, "alice.db", 1);
+    let bob = launch(&directory, "bob.db", 2);
+    alice.clone().connect(network.clone()).unwrap();
+    bob.clone().connect(network.clone()).unwrap();
+
+    alice.invite().unwrap();
+    let link = wait_past_faults(&alice, |event| match event {
+        FfiEvent::Invitation { link } => Some(link),
+        _ => None,
+    });
+    bob.accept(link).unwrap();
+    let contact = |event| match event {
+        FfiEvent::Contact { conversation } => Some(conversation),
+        _ => None,
+    };
+    let alice_conversation = wait_past_faults(&alice, contact);
+    let bob_conversation = wait_past_faults(&bob, contact);
+
+    // Bob leaves. The queue relay accepts a record for him and holds it in
+    // its file.
+    bob.disconnect();
+    let draft = alice.new_draft(alice_conversation.clone()).unwrap();
+    draft.set_text(units("held in the file")).unwrap();
+    alice.send_draft(draft).unwrap();
+    wait_past_faults(&alice, |event| match event {
+        FfiEvent::Delivery { state: 1, .. } => Some(()),
+        _ => None,
+    });
+
+    // Each relay process ends, and three new ones take the same ports and
+    // the same files.
+    drop(relays);
+    let (_relays, again) = start_relays(Some(&directory), Some(&ports));
+    assert_eq!(again, ports);
+    alice.clone().connect(network.clone()).unwrap();
+    bob.clone().connect(network.clone()).unwrap();
+
+    let message = |event| match event {
+        FfiEvent::Message { message, .. } => Some(message),
+        _ => None,
+    };
+    let held = wait_past_faults(&bob, message);
+    assert_eq!(rendered(&bob, held), "held in the file");
+    let draft = bob.new_draft(bob_conversation).unwrap();
+    draft.set_text(units("the queues are there")).unwrap();
+    bob.send_draft(draft).unwrap();
+    let answer = wait_past_faults(&alice, message);
+    assert_eq!(rendered(&alice, answer), "the queues are there");
+
+    alice.disconnect();
+    bob.disconnect();
+}
+
+#[test]
+fn two_apps_meet_and_talk_through_the_exported_surface() {
+    // The relays run on a runtime of the test. Each handle makes its own.
+    let (_relays, ports) = start_relays(None, None);
+    let network = network_of(&ports);
 
     let directory = std::env::temp_dir().join(format!("umbra-app-{}", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap();

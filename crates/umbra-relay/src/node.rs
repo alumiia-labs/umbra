@@ -34,6 +34,7 @@ use crate::{
         queue::QueueService,
         Outbound, Reply,
     },
+    store::{Loaded, StoreChange},
 };
 
 /// `DRAIN_THRESHOLD`: above this count the answer to a `SUB` goes in one
@@ -119,6 +120,21 @@ impl RelayNode {
             queues: QueueService::default(),
             communities: CommunityService::new(config.community_capacity),
         }
+    }
+
+    /// A node that continues the queues and the invitations of an earlier
+    /// run. Each circuit, each session, and each subscription of that run
+    /// is gone, and the clients build them again.
+    pub fn restored(config: Config, loaded: Loaded) -> Self {
+        let mut node = RelayNode::new(config);
+        node.queues = QueueService::restore(loaded);
+        node
+    }
+
+    /// The changes of the stored state since the last call. The process
+    /// commits them before it sends an output of the same call (`NET-298`).
+    pub fn take_changes(&mut self) -> Vec<StoreChange> {
+        self.queues.take_changes()
     }
 
     /// The gate, for the effort that the runtime sets under load.

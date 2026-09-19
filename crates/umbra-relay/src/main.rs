@@ -15,7 +15,12 @@
 //! community_capacity=1073741824
 //! next=<relay_id hex>,<host name>,<IPv4 address>,<port>
 //! trust=/etc/umbra/test-authority.pem
+//! store=/var/lib/umbra/relay.db
 //! ```
+//!
+//! The `store` line names the SQLite file of the queues. A relay with no
+//! such line keeps its queues in RAM, and a restart of it ends each contact
+//! that it served. It says so at its start.
 //!
 //! The `next` line repeats, one for each relay of the next layer. The
 //! `trust` line is for a test network: the dialer then trusts that one
@@ -34,6 +39,8 @@ use umbra_crypto::{
 use umbra_relay::{
     node::{Config, RelayNode},
     server::{run_relay, tls_acceptor, PACING_MEAN_MS},
+    sqlite_store::SqliteStore,
+    store::{MemoryStore, RelayStore},
 };
 use umbra_transport::{native, Dial};
 
@@ -60,6 +67,7 @@ struct Settings {
     cert: String,
     key: String,
     trust: Option<String>,
+    store: Option<String>,
     config: Config,
     next: BTreeMap<[u8; 32], Dial>,
 }
@@ -99,6 +107,7 @@ fn read_settings(path: &str) -> Option<Settings> {
         cert: (*values.get("cert")?).to_owned(),
         key: (*values.get("key")?).to_owned(),
         trust: values.get("trust").map(|path| (*path).to_owned()),
+        store: values.get("store").map(|path| (*path).to_owned()),
         config: Config {
             relay,
             static_secret,
@@ -149,13 +158,36 @@ async fn main() -> ExitCode {
         settings.config.layer,
         settings.listen,
     );
+    let mut store: Box<dyn RelayStore> = match &settings.store {
+        Some(path) => match SqliteStore::open(path) {
+            Ok(store) => Box::new(store),
+            Err(_) => {
+                eprintln!("the store file does not open, or it has another schema");
+                return ExitCode::from(1);
+            }
+        },
+        None => {
+            eprintln!("no store line: the queues sit in RAM and end with this process");
+            Box::new(MemoryStore::default())
+        }
+    };
+    let Ok(loaded) = store.load() else {
+        eprintln!("the store does not load");
+        return ExitCode::from(1);
+    };
+    println!(
+        "queues={} invitations={}",
+        loaded.queues.len(),
+        loaded.invitations.len()
+    );
     run_relay(
-        RelayNode::new(settings.config),
+        RelayNode::restored(settings.config, loaded),
         listener,
         tls,
         settings.next,
         client_tls,
         PACING_MEAN_MS,
+        store,
     )
     .await;
     ExitCode::SUCCESS

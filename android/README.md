@@ -26,7 +26,8 @@ them again. Run the script again after each change of `umbra-ffi`.
 ## Run against a local network
 
 ```sh
-scripts/devnet.sh               # three relays on the ports 7441 to 7443
+scripts/devnet.sh               # three relays on the ports 7441 to 7443,
+                                # with their queues in target/devnet
 adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 ```
 

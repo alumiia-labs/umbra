@@ -67,7 +67,7 @@ each column when a crate implements the requirement and a test covers it.
 | --- | --- | --- | --- | --- | --- | --- |
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
-| `NET` | 204 | 83 | 1 | 0 | 8 | **296** |
+| `NET` | 210 | 83 | 1 | 0 | 8 | **302** |
 | `IDN` | 115 | 41 | 1 | 0 | 5 | **162** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
 | `WIR` | 384 | 82 | 0 | 0 | 6 | **472** |
@@ -81,7 +81,7 @@ each column when a crate implements the requirement and a test covers it.
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
 | `IMP` | 88 | 37 | 0 | 0 | 1 | **126** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2130 | 694 | 7 | 0 | 51 | **2882** |
+| **All** | 2136 | 694 | 7 | 0 | 51 | **2888** |
 
 ## SCP — Scope and Conventions
 
@@ -435,6 +435,12 @@ Source: `spec/03-network-architecture.md`
 | `NET-295` | §3.2.5 | MUST | A client | A client MUST count a queue toward that bound from its `NEW` or its `SUB`, because a relay binds the queue to the session at those two commands. |  |  |
 | `NET-296` | §3.2.5 | MUST | A client that holds no session with room | A client that holds no session with room MUST build one more circuit, and the `NEW` MUST wait for that circuit. |  |  |
 | `NET-297` | §3.2.5 | SHOULD | A client | A client SHOULD put the `SEND` to a contact on a circuit that does not serve the inbound queue of that contact. |  |  |
+| `NET-298` | §3.2.4 | MUST | A queue relay | A queue relay MUST commit a change to durable storage before it sends the answer of the command that made the change. |  |  |
+| `NET-299` | §3.2.4 | MUST | A relay | A relay MUST commit the changes of one command as a whole or not at all. |  |  |
+| `NET-300` | §3.2.4 | MUST | The store | The store MUST hold, for each queue: the two identifiers, the two authorization keys with a lock key of Part 4 §4.3.1 in the place of `QS_auth`, the next sequence number, the last `ACK`, the notifier credential, the time of the last activity, and each record that no `ACK` covers. |  |  |
+| `NET-301` | §3.2.4 | MUST | A relay | A relay MUST write each time to its store as a multiple of `STORE_TIME_GRAIN`, which is 3 600 s. |  |  |
+| `NET-302` | §3.2.4 | MUST | A relay | A relay MUST erase from its storage a record that an `ACK` covers, a record past `MSG_TTL`, a queue after its `DEL` or its idle lifetime, and an invitation after its first fetch or its lifetime. |  |  |
+| `NET-303` | §3.2.4 | MUST | At its start a relay | At its start a relay MUST drop a stored queue whose form does not parse, whose record sits at or below its last `ACK`, or whose record sits at or above its next sequence number. |  |  |
 
 ## IDN — Identity
 
