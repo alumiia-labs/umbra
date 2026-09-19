@@ -43,17 +43,23 @@ use umbra_wire::{
     bucket::Bucket,
     capsule,
     cell::{Cell, CellCommand},
-    command::{Cmd, IdsPayload},
+    command::{iblob_parse, Cmd, IdsPayload, LINK_ID_LEN},
     queue::L6Kind,
 };
 
 use super::{
     batch::Range,
-    channel::{new_queue_command, Inbound, Opened, Outbound, PairwiseChannel, Received},
+    channel::{
+        get_blob_command, new_queue_command, Inbound, Opened, Outbound, PairwiseChannel, Received,
+    },
     circuit::{CircuitSession, Event as CircuitEvent},
     contact::{Invitee, Inviter, FLIGHT_1, FLIGHT_2},
 };
-use crate::{identity::invitation::Bundle, Error};
+use crate::{
+    attach::seal::relay_hint,
+    identity::invitation::{Bundle, Fragment, FRAGMENT_LEN},
+    Error,
+};
 
 /// A contact of this client, by the `RecipientId` of the queue that the
 /// client reads for it.
@@ -72,6 +78,22 @@ pub enum ClientEvent {
         handle: u64,
         /// The encoded bundle of Part 5 §5.4.1.
         bundle: Vec<u8>,
+    },
+    /// The relay holds the blob of an invitation. The user gives the link
+    /// of this fragment to the other party (Part 4 §4.3.1).
+    InvitationLink {
+        /// The handle of the call that asked for it.
+        handle: u64,
+        /// The 68 bytes of the fragment.
+        fragment: Vec<u8>,
+    },
+    /// The relay holds no blob for a link: a second party fetched it
+    /// first, it passed `INVITE_TTL`, or it does not open under the link.
+    /// The user learns it, because a fetch by a second party is an attack
+    /// that the two parties detect (`IDN-023`).
+    InvitationGone {
+        /// The handle of the call that gave the link.
+        handle: u64,
     },
     /// The handshake with a contact finished on this side.
     ContactReady {
@@ -151,8 +173,31 @@ impl Slot {
 
 /// Why the client made a queue.
 enum Purpose {
+    /// The bundle goes to the caller.
     Invite,
-    Accept { bundle: Vec<u8> },
+    /// The bundle goes to the relay as a blob, and a link goes to the
+    /// caller.
+    InviteLink,
+    Accept {
+        bundle: Vec<u8>,
+        /// The lock key of the first fetch, which writes to the queue of
+        /// the inviter in the place of the `QS_auth` of the bundle.
+        lock: Option<[u8; 32]>,
+    },
+}
+
+/// The fetch of a blob between its `IGET` and its `IBLOB`.
+struct BlobWait {
+    fragment: Fragment,
+    lock: [u8; 32],
+    handle: u64,
+}
+
+/// The store of a blob between the `IDS` of its queue and the second
+/// `ILINK`.
+struct LinkSetup {
+    handle: u64,
+    fragment: Option<Fragment>,
 }
 
 /// The keys of a queue between its `NEW` and its `IDS`.
@@ -171,6 +216,9 @@ struct QueueKeys {
 enum Waiting {
     Queue(Box<QueueKeys>),
     UserSend(u64),
+    /// An `IRES` or an `IPUT` of the invitation on this queue.
+    Link([u8; 32]),
+    Blob(Box<BlobWait>),
     Other,
 }
 
@@ -193,6 +241,8 @@ struct Half {
     /// The encoded `QueueAddress` of an invitee, which goes again as its
     /// first ratchet record (`NET-292`). An inviter holds none.
     opening: Vec<u8>,
+    /// The store of the blob, while it runs.
+    link: Option<LinkSetup>,
 }
 
 struct Contact {
@@ -361,6 +411,7 @@ impl ClientNode {
                 peer_static: [0; 32],
                 bundle: bundle.clone(),
                 opening: Vec::new(),
+                link: None,
             },
         );
         Ok(bundle)
@@ -614,6 +665,13 @@ impl ClientNode {
         self.make_queue(Purpose::Invite, rng)
     }
 
+    /// Starts one invitation with a link (Part 4 §4.3.1). The relay holds
+    /// the sealed bundle, and a [`ClientEvent::InvitationLink`] with the
+    /// same handle carries the fragment of the link.
+    pub fn invite_link<R: CryptoRng + ?Sized>(&mut self, rng: &mut R) -> Result<u64, Error> {
+        self.make_queue(Purpose::InviteLink, rng)
+    }
+
     /// Accepts the bundle of an inviter. A [`ClientEvent::ContactReady`]
     /// follows after flight 2 arrives.
     pub fn accept<R: CryptoRng + ?Sized>(
@@ -622,7 +680,118 @@ impl ClientNode {
         rng: &mut R,
     ) -> Result<u64, Error> {
         Invitee::check(&bundle)?;
-        self.make_queue(Purpose::Accept { bundle }, rng)
+        self.make_queue(Purpose::Accept { bundle, lock: None }, rng)
+    }
+
+    /// Accepts the link of an inviter, by the 68 bytes of its fragment. The
+    /// node makes the first fetch of the blob, which locks the queue of the
+    /// inviter to a key of this device (`IDN-023`). A
+    /// [`ClientEvent::ContactReady`] follows, or a
+    /// [`ClientEvent::InvitationGone`] with the same handle.
+    pub fn accept_link<R: CryptoRng + ?Sized>(
+        &mut self,
+        fragment: &[u8],
+        rng: &mut R,
+    ) -> Result<u64, Error> {
+        let bytes: &[u8; FRAGMENT_LEN] = fragment.try_into().map_err(|_| Error::Malformed)?;
+        let fragment = Fragment::from_bytes(bytes)?;
+        // Each circuit of this revision ends at one queue relay.
+        let queue_relay = self.relays.last().ok_or(Error::NoPath)?.relay_id;
+        if fragment.relay_ref != relay_hint(&queue_relay) {
+            return Err(Error::NoPath);
+        }
+        let ready = self.slots.iter().position(Slot::is_ready);
+        self.current = ready.ok_or(Error::NoPath)?;
+        let lock: [u8; 32] = random(rng);
+        let command = get_blob_command(
+            &fragment.link_id,
+            &StaticSecret::from(lock),
+            &self.session_pk()?,
+            random(rng),
+        )?;
+        let handle = self.handle();
+        let wait = BlobWait {
+            fragment,
+            lock,
+            handle,
+        };
+        self.queue_command(command, Waiting::Blob(Box::new(wait)))?;
+        self.pump()?;
+        Ok(handle)
+    }
+
+    /// The relay answered the `IRES` or the `IPUT` of an invitation.
+    fn on_link<R: CryptoRng + ?Sized>(
+        &mut self,
+        queue: [u8; 32],
+        payload: &[u8],
+        rng: &mut R,
+    ) -> Result<Vec<ClientEvent>, Error> {
+        let link_id: [u8; LINK_ID_LEN] = payload.try_into().map_err(|_| Error::Malformed)?;
+        let session_pk = self.session_pk()?;
+        let queue_relay = self.relays.last().ok_or(Error::NoPath)?.relay_id;
+        let Some(half) = self.halves.get_mut(&queue) else {
+            return Ok(Vec::new());
+        };
+        let Some(link) = &mut half.link else {
+            return Ok(Vec::new());
+        };
+        let Some(fragment) = &link.fragment else {
+            // The relay drew the identifier, thus the seal can bind it
+            // (`IDN-160`).
+            let fragment = Fragment {
+                key: random(rng),
+                link_id,
+                relay_ref: relay_hint(&queue_relay),
+            };
+            let blob = Bundle::parse(&half.bundle)?.seal(&fragment, random(rng))?;
+            let command = half
+                .inbound
+                .put_blob(&link_id, &blob, &session_pk, random(rng))?;
+            link.fragment = Some(fragment);
+            self.queue_command(command, Waiting::Link(queue))?;
+            return Ok(Vec::new());
+        };
+        if fragment.link_id != link_id {
+            return Err(Error::Unverified);
+        }
+        // The relay holds the blob. The store keeps the fragment in the
+        // place of the bundle, because the user gives out the fragment.
+        let shared = fragment.to_bytes().to_vec();
+        let handle = link.handle;
+        half.bundle = shared.clone();
+        half.link = None;
+        if let Some(half) = self.halves.remove(&queue) {
+            self.invitation_changed(queue, &half)?;
+            self.halves.insert(queue, half);
+        }
+        Ok(alloc::vec![ClientEvent::InvitationLink {
+            handle,
+            fragment: shared,
+        }])
+    }
+
+    /// The relay gave the blob of a link.
+    fn on_blob<R: CryptoRng + ?Sized>(
+        &mut self,
+        wait: BlobWait,
+        payload: &[u8],
+        rng: &mut R,
+    ) -> Result<Vec<ClientEvent>, Error> {
+        let gone = alloc::vec![ClientEvent::InvitationGone {
+            handle: wait.handle
+        }];
+        let mut bundle = Vec::new();
+        let opens = iblob_parse(payload)
+            .map_err(Error::from)
+            .and_then(|blob| Bundle::open(&wait.fragment, blob, &mut bundle).map(|_| ()));
+        // IDN-161: a blob that does not open under the fragment is refused.
+        if opens.is_err() || Invitee::check(&bundle).is_err() {
+            return Ok(gone);
+        }
+        let lock = Some(wait.lock);
+        self.make_queue(Purpose::Accept { bundle, lock }, rng)?;
+        Ok(Vec::new())
     }
 
     /// Sends one application record to a contact. A
@@ -825,6 +994,12 @@ impl ClientNode {
                     (Some(Waiting::UserSend(user)), Cmd::Quota) => {
                         out.push(ClientEvent::Accepted { handle: user });
                     }
+                    (Some(Waiting::Link(queue)), Cmd::Ilink) => {
+                        out.extend(self.on_link(queue, &payload, rng)?);
+                    }
+                    (Some(Waiting::Blob(wait)), Cmd::Iblob) => {
+                        out.extend(self.on_blob(*wait, &payload, rng)?);
+                    }
                     _ => {}
                 },
                 CircuitEvent::Rejected { handle, reason } => {
@@ -836,6 +1011,18 @@ impl ClientNode {
                             keys.handle
                         }
                         Some(Waiting::UserSend(user)) => user,
+                        Some(Waiting::Link(queue)) => {
+                            let setup = self.halves.get(&queue).and_then(|half| half.link.as_ref());
+                            setup.map_or(handle, |link| link.handle)
+                        }
+                        // WIR-317 gives one reason for each cause, and each
+                        // cause means that this party gets no blob.
+                        Some(Waiting::Blob(wait)) => {
+                            out.push(ClientEvent::InvitationGone {
+                                handle: wait.handle,
+                            });
+                            continue;
+                        }
                         _ => handle,
                     };
                     out.push(ClientEvent::Rejected {
@@ -894,7 +1081,18 @@ impl ClientNode {
 
         let mut out = Vec::new();
         let mut opening = Vec::new();
+        let mut link = None;
         let (setup, outbound, peer_static, issued) = match keys.purpose {
+            Purpose::InviteLink => {
+                let (inviter, bundle) = Inviter::issue(&identity, own_address(), rng)?;
+                let reserve = inbound.reserve_link(&session_pk, random(rng))?;
+                self.queue_command(reserve, Waiting::Link(ids.recipient_id))?;
+                link = Some(LinkSetup {
+                    handle: keys.handle,
+                    fragment: None,
+                });
+                (Setup::Inviting(Box::new(inviter)), None, [0u8; 32], bundle)
+            }
             Purpose::Invite => {
                 let (inviter, bundle) = Inviter::issue(&identity, own_address(), rng)?;
                 out.push(ClientEvent::Invitation {
@@ -903,12 +1101,15 @@ impl ClientNode {
                 });
                 (Setup::Inviting(Box::new(inviter)), None, [0u8; 32], bundle)
             }
-            Purpose::Accept { bundle } => {
+            Purpose::Accept { bundle, lock } => {
                 opening = alloc::vec![0u8; QUEUE_ADDRESS_LEN];
                 own_address().encode(&mut opening)?;
                 let peer_static = Bundle::parse(&bundle)?.responder_static_x25519;
                 let (invitee, flight1, to) = Invitee::accept(&bundle, &own_address(), rng)?;
-                let outbound = Outbound::new(&to);
+                let outbound = match lock {
+                    Some(lock) => Outbound::locked(&to, StaticSecret::from(lock)),
+                    None => Outbound::new(&to),
+                };
                 let (_, encoded) = outbound.send_record(
                     L6Kind::Handshake,
                     &flight1,
@@ -934,8 +1135,12 @@ impl ClientNode {
             peer_static,
             bundle: issued,
             opening,
+            link,
         };
-        self.invitation_changed(ids.recipient_id, &half)?;
+        // An invitation with a link waits for the store of its blob.
+        if half.link.is_none() {
+            self.invitation_changed(ids.recipient_id, &half)?;
+        }
         self.halves.insert(ids.recipient_id, half);
         Ok(out)
     }

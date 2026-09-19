@@ -47,7 +47,7 @@ object Core {
         private set
     var fault by mutableStateOf<String?>(null)
         private set
-    var invitation by mutableStateOf<ByteArray?>(null)
+    var invitation by mutableStateOf<String?>(null)
     val conversations = mutableStateListOf<Conversation>()
 
     /** Grows at each change of a message, thus a view loads its lines again. */
@@ -146,9 +146,16 @@ object Core {
                     retryLater(app)
                 }
             }
-            is FfiEvent.Invitation -> invitation = event.bundle
-            is FfiEvent.Refused -> fault = "The invitation does not parse."
+            is FfiEvent.Invitation -> invitation = event.link
+            is FfiEvent.Refused -> fault = "This build cannot reach the relay of that link."
+            // IDN-023: a fetch by a second party is an attack that the two
+            // parties detect, thus the words name that cause first.
+            is FfiEvent.InvitationGone -> fault =
+                "This link gives no invitation. A second party opened it first, " +
+                "or it is older than 14 days. Tell your contact, and ask for a new link."
             is FfiEvent.Contact -> {
+                // The link of this device served, or the link of a contact did.
+                invitation = null
                 val conversation = Conversation(event.conversation)
                 if (conversation !in conversations) conversations.add(conversation)
             }
@@ -232,7 +239,8 @@ object Core {
 
     fun invite() = call { it.invite() }
 
-    fun accept(bundle: ByteArray) = call { it.accept(bundle) }
+    /** Accepts the link of a contact. A link that does not parse is a fault. */
+    fun accept(link: String) = call { it.accept(link) }
 
     /** Sends the text of a composer. This call overwrites `text`. */
     fun send(conversation: Conversation, text: CharArray) = call { client ->

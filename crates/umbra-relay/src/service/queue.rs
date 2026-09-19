@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use umbra_core::abuse::admission::{Accepts, RelayGate};
 use umbra_crypto::rand_core::CryptoRng;
 use umbra_queue::{
+    params::{INVITE_RESERVE_TTL, INVITE_TTL},
     relay::{
         queue::{Queue, QueueKeys},
         session::Session,
@@ -15,7 +16,10 @@ use umbra_queue::{
 };
 use umbra_wire::{
     bucket::Bucket,
-    command::{Cmd, Command, IdsPayload, NewPayload},
+    command::{
+        blob_bucket, iblob_payload, iput_parse, Cmd, Command, IdsPayload, NewPayload, IGET_LEN,
+        LINK_ID_LEN,
+    },
     queue::msg_from_send,
 };
 
@@ -24,9 +28,21 @@ use crate::circuits::CircuitKey;
 
 const BUCKETS: [Bucket; 4] = [Bucket::B0, Bucket::B1, Bucket::B2, Bucket::B3];
 
+/// One invitation of Part 4 §4.3.1. The relay holds a ciphertext that it
+/// cannot read, and the link identifier is no key of it.
+struct Invitation {
+    recipient_id: [u8; 32],
+    /// `None` between the `IRES` and the `IPUT`.
+    blob: Option<Vec<u8>>,
+    /// The time of the `IRES`, and then the time of the `IPUT` (`IDN-126`).
+    at: u64,
+}
+
 /// The queues of the relay, by `RecipientId`.
 #[derive(Default)]
 pub struct QueueService {
+    /// The invitations, by link identifier. A queue holds one at most.
+    invitations: BTreeMap<[u8; LINK_ID_LEN], Invitation>,
     queues: BTreeMap<[u8; 32], Queue>,
     /// `RecipientId` by `SenderId`.
     by_sender: BTreeMap<[u8; 32], [u8; 32]>,
@@ -140,7 +156,32 @@ impl QueueService {
                 }
                 Ok(replies)
             }
-            Cmd::Sub | Cmd::Unsub | Cmd::Ack | Cmd::Del | Cmd::Nkey => {
+            Cmd::Iget => {
+                // The party holds no key of the queue yet. It signs under
+                // the lock key, thus the lock names a key that it holds.
+                let payload: &[u8; IGET_LEN] =
+                    command.payload.try_into().map_err(|_| Reject::Rejected)?;
+                let (link_id, lock_pk) = payload.split_at(LINK_ID_LEN);
+                let link_id: [u8; LINK_ID_LEN] =
+                    link_id.try_into().map_err(|_| Reject::Rejected)?;
+                let lock_pk: [u8; 32] = lock_pk.try_into().map_err(|_| Reject::Rejected)?;
+                // WIR-317: an unknown link, a link with no blob, and a
+                // failed auth give one reason.
+                let held = self.invitations.get(&link_id).ok_or(Reject::Rejected)?;
+                let blob = held.blob.as_ref().ok_or(Reject::Rejected)?;
+                session.accept(command, &lock_pk)?;
+                let bucket = blob_bucket(blob.len()).ok_or(Reject::Rejected)?;
+                let payload = iblob_payload(blob, bucket).map_err(|_| Reject::Busy)?;
+                // IDN-023: the first fetch takes the blob and locks the
+                // queue. A second fetch finds no link.
+                let recipient_id = held.recipient_id;
+                self.invitations.remove(&link_id);
+                if let Some(queue) = self.queues.get_mut(&recipient_id) {
+                    queue.lock_sender(lock_pk);
+                }
+                Ok(vec![answer(circuit, command, Cmd::Iblob, &payload)])
+            }
+            Cmd::Sub | Cmd::Unsub | Cmd::Ack | Cmd::Del | Cmd::Nkey | Cmd::Ires | Cmd::Iput => {
                 self.recipient_command(circuit, session, command, now, rng)
             }
             _ => Err(Reject::Rejected),
@@ -187,7 +228,36 @@ impl QueueService {
                 queue.set_notifier(notifier_pk, notifier_id);
                 Ok(vec![answer(circuit, command, Cmd::Nid, &notifier_id)])
             }
+            Cmd::Ires => {
+                // One queue holds one invitation. A second `IRES` takes the
+                // place of the first, and the first link ends.
+                self.invitations
+                    .retain(|_, held| held.recipient_id != recipient_id);
+                let mut link_id = [0u8; LINK_ID_LEN];
+                rng.fill_bytes(&mut link_id);
+                let reserved = Invitation {
+                    recipient_id,
+                    blob: None,
+                    at: now,
+                };
+                self.invitations.insert(link_id, reserved);
+                Ok(vec![answer(circuit, command, Cmd::Ilink, &link_id)])
+            }
+            Cmd::Iput => {
+                let (link_id, blob) = iput_parse(command.payload).map_err(|_| Reject::Rejected)?;
+                let held = self
+                    .invitations
+                    .get_mut(&link_id)
+                    .filter(|held| held.recipient_id == recipient_id && held.blob.is_none())
+                    .ok_or(Reject::Rejected)?;
+                held.blob = Some(blob.to_vec());
+                // IDN-126: the lifetime runs from the store of the blob.
+                held.at = now;
+                Ok(vec![answer(circuit, command, Cmd::Ilink, &link_id)])
+            }
             Cmd::Del => {
+                self.invitations
+                    .retain(|_, held| held.recipient_id != recipient_id);
                 // WIR-039 to WIR-042: no identifier of the queue stays.
                 if let Some(queue) = self.queues.remove(&recipient_id) {
                     self.by_sender.remove(&queue.keys().sender_id);
@@ -218,6 +288,13 @@ impl QueueService {
 
     /// Expires each record past `MSG_TTL`, and erases each idle queue.
     pub fn sweep(&mut self, now: u64) {
+        self.invitations.retain(|_, held| {
+            let limit = match held.blob {
+                Some(_) => INVITE_TTL,
+                None => INVITE_RESERVE_TTL,
+            };
+            now.saturating_sub(held.at) < limit
+        });
         for queue in self.queues.values_mut() {
             queue.expire(now);
         }

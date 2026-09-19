@@ -28,8 +28,11 @@ pub enum NetEvent {
     Online,
     /// The run of the network ended. Each contact stays in the store.
     Offline(Ended),
-    /// The bundle of an invitation, which the user gives out of band.
+    /// The fragment of an invitation link, which the user gives out of
+    /// band.
     Invitation(Vec<u8>),
+    /// The relay holds no blob for a link that the user accepted.
+    InvitationGone,
     /// A contact is ready, and its conversation takes drafts.
     Contact(ConversationId),
     /// The client refused an invitation command, such as a bundle that does
@@ -69,9 +72,10 @@ impl Bridge {
         self.command(Command::Invite)
     }
 
-    /// Accepts the bundle of an inviter. A [`NetEvent::Contact`] follows.
-    pub fn accept(&self, bundle: Vec<u8>) -> Result<(), Error> {
-        self.command(Command::Accept(bundle))
+    /// Accepts the fragment of a link. A [`NetEvent::Contact`] follows, or
+    /// a [`NetEvent::InvitationGone`].
+    pub fn accept(&self, fragment: Vec<u8>) -> Result<(), Error> {
+        self.command(Command::Accept(fragment))
     }
 
     /// Gives each record that waits in the client to the runtime. A record
@@ -116,6 +120,7 @@ impl Bridge {
             Update::Offline(ended) => Some(NetEvent::Offline(ended)),
             Update::Invitation(bundle) => Some(NetEvent::Invitation(bundle)),
             Update::Refused => Some(NetEvent::Refused),
+            Update::InvitationGone => Some(NetEvent::InvitationGone),
             Update::Contact { contact, .. } => {
                 let conversation = client.conversation_for(&contact.0)?;
                 self.contacts.insert(conversation, contact);

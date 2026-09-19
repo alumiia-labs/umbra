@@ -20,6 +20,7 @@ use std::{
 
 use tokio::sync::mpsc;
 use umbra_core::{
+    identity::invitation::{Fragment, FRAGMENT_LEN},
     session::node::{ClientNode, ContactId, StateChange},
     store::wrap::{Cost, SecureElement, WrapHeader, M_KIB_FLOOR, T_FLOOR},
 };
@@ -166,6 +167,8 @@ pub struct Network {
     /// A PEM file of the one authority that the client trusts, for a test
     /// network. With no file the client trusts the web roots.
     pub root_ca_path: Option<String>,
+    /// The invitation host of Part 4 §4.3.1, which each link names.
+    pub invitation_host: String,
 }
 
 fn relay_static(endpoint: &RelayEndpoint) -> Result<RelayStatic, FfiError> {
@@ -204,11 +207,17 @@ pub enum FfiEvent {
         /// The cause.
         cause: u8,
     },
-    /// The bundle of an invitation, which the user gives out of band.
+    /// The link of an invitation, which the user gives out of band. It
+    /// works one time (Part 4 §4.3.1).
     Invitation {
-        /// The bundle.
-        bundle: Vec<u8>,
+        /// The link, with the 68-byte fragment after `#`.
+        link: String,
     },
+    /// The relay holds no blob for a link that the user accepted: a second
+    /// party opened the link first, or the link passed its lifetime. The
+    /// interface tells the user, because the first case is an attack that
+    /// the two parties detect (`IDN-023`).
+    InvitationGone,
     /// A contact is ready, and its conversation takes drafts.
     Contact {
         /// The conversation.
@@ -279,6 +288,8 @@ impl DraftHandle {
 }
 
 struct Inner {
+    /// The invitation host of the run, for the text of a link.
+    invitation_host: String,
     client: Client<SqliteBackend, ForeignElement>,
     /// The bridge of one run of the network, or none when no run is active.
     bridge: Option<Bridge>,
@@ -311,7 +322,18 @@ impl Inner {
         Some(match self.net_events.pop_front()? {
             NetEvent::Online => FfiEvent::Online,
             NetEvent::Offline(ended) => FfiEvent::Offline { cause: ended as u8 },
-            NetEvent::Invitation(bundle) => FfiEvent::Invitation { bundle },
+            NetEvent::Invitation(shared) => {
+                // The app makes each invitation with a link. A stored
+                // bundle of another path has no link, and it gives no event.
+                let bytes: Result<&[u8; FRAGMENT_LEN], _> = shared.as_slice().try_into();
+                let Some(fragment) = bytes.ok().and_then(|b| Fragment::from_bytes(b).ok()) else {
+                    return self.next_event();
+                };
+                FfiEvent::Invitation {
+                    link: fragment.link(&self.invitation_host),
+                }
+            }
+            NetEvent::InvitationGone => FfiEvent::InvitationGone,
             NetEvent::Contact(conversation) => FfiEvent::Contact {
                 conversation: conversation.0.to_vec(),
             },
@@ -408,6 +430,7 @@ pub fn init(
     };
     Ok(Arc::new(Handle {
         inner: Mutex::new(Inner {
+            invitation_host: String::new(),
             client,
             bridge: None,
             net_events: VecDeque::new(),
@@ -452,6 +475,7 @@ impl Handle {
             client,
             bridge,
             net_events,
+            ..
         } = &mut *inner;
         let ended = matches!(update, Update::Offline(_));
         if let Some(running) = bridge {
@@ -506,10 +530,12 @@ impl Handle {
         let (runtime_updates, mut updates) = mpsc::unbounded_channel();
         {
             let mut inner = locked(&self.inner);
+            inner.invitation_host.clone_from(&network.invitation_host);
             let Inner {
                 client,
                 bridge,
                 net_events,
+                ..
             } = &mut *inner;
             // The node continues each contact and each invitation of the
             // earlier runs.
@@ -576,11 +602,16 @@ impl Handle {
         Ok(bridge.invite()?)
     }
 
-    /// Accepts the bundle of an inviter. A [`FfiEvent::Contact`] follows.
-    pub fn accept(&self, bundle: Vec<u8>) -> Result<(), FfiError> {
+    /// Accepts the link of an inviter. The client makes the first fetch of
+    /// the blob, which locks the invitation to this device. A
+    /// [`FfiEvent::Contact`] follows, or a [`FfiEvent::InvitationGone`]. A
+    /// link that names another host or that does not parse is an error.
+    pub fn accept(&self, link: String) -> Result<(), FfiError> {
         let inner = locked(&self.inner);
         let bridge = inner.bridge.as_ref().ok_or(FfiError::Offline)?;
-        Ok(bridge.accept(bundle)?)
+        let fragment = Fragment::parse(link.trim(), &inner.invitation_host)
+            .map_err(|_| FfiError::Malformed)?;
+        Ok(bridge.accept(fragment.to_bytes().to_vec())?)
     }
 
     /// The conversations of the device, one for each contact. The list

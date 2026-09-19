@@ -372,6 +372,7 @@ examples. Without the table below a maintainer finds the dependents by hand.
 | `POW_LOOKUP_FLOOR` | Part 14 §14.13 | Part 9 §9.4.1 |
 | `HELLO_POW_EFFORT`, `HELLO_INBOUND_LIMIT` | Part 14 §14.13 | Part 9 §9.9, Part 2 §2.4 |
 | `INVITE_TTL` | Part 4 §4.8 | Part 5 §5.4.5 |
+| `INVITE_RESERVE_TTL` | Part 4 §4.8 | Part 6 §6.4 |
 | `CLUSTER_SAMPLE` | Part 10 §10.11 | Part 16 §16.3, Part 16 §16.6.1 |
 | `AUTHORITY_FLOOR` | Part 10 §10.11 | Part 16 §16.6.1 |
 

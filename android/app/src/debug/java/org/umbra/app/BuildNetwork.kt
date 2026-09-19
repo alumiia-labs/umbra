@@ -42,6 +42,9 @@ object BuildNetwork {
                 )
             },
             rootCaPath = authority.absolutePath,
+            // No party serves this host. The release build names the host of
+            // Part 4 §4.3.1, and it registers the link as an App Link.
+            invitationHost = "invite.umbra.test",
         )
     }
 }

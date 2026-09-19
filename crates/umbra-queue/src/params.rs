@@ -3,6 +3,11 @@
 
 /// `QUEUE_QUOTA`, records a pairwise queue holds.
 pub const QUEUE_QUOTA: usize = 256;
+/// `INVITE_TTL`: a relay deletes an invitation blob that no party fetched
+/// (Part 4 §4.8, `IDN-126`).
+pub const INVITE_TTL: u64 = 14 * 86_400;
+/// `INVITE_RESERVE_TTL`: a relay deletes a link identifier that got no blob.
+pub const INVITE_RESERVE_TTL: u64 = 600;
 /// `MSG_TTL`.
 pub const MSG_TTL: u64 = 45 * 86_400;
 /// `QUEUE_IDLE_TTL`.

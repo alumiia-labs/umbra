@@ -85,6 +85,13 @@ impl Queue {
         Ok(seq)
     }
 
+    /// The first-access lock of Part 4 §4.3.1: the key of the party that
+    /// fetched the invitation takes the place of `QS_auth`. From this point
+    /// the queue takes a `SEND` under that key alone (`IDN-023`).
+    pub fn lock_sender(&mut self, lock_pk: [u8; 32]) {
+        self.keys.qs_auth_pk = lock_pk;
+    }
+
     /// Records a `SUB` (`NET-195`) or an `UNSUB`.
     pub fn subscribe(&mut self, on: bool, now: u64) {
         self.subscribed = on;

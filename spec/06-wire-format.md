@@ -416,6 +416,11 @@ party MUST NOT compute `auth` as an AEAD ciphertext.
 | --- | --- | --- | --- |
 | `0x01` | `NEW` | Recipient | `NewPayload`, 64 bytes and an `Admission` of Part 14 §14.2 |
 | `0x02` | `IDS` | Relay | `IdsPayload`, 96 bytes |
+| `0x03` | `IRES` | Recipient | — |
+| `0x04` | `ILINK` | Relay | the link identifier of Part 4 §4.3.1, 24 bytes |
+| `0x05` | `IPUT` | Recipient | `IputPayload`, the length of the L6 record of the bucket |
+| `0x06` | `IGET` | The party that holds the link | `IgetPayload`, 56 bytes |
+| `0x07` | `IBLOB` | Relay | `IblobPayload`, the length of the L6 record of the bucket |
 | `0x10` | `SEND` | Sender | L6 record |
 | `0x11` | `MSG` | Relay | `seq` `u32`, L6 record |
 | `0x12` | `ACK` | Recipient | `seq` `u32`, cumulative |
@@ -446,6 +451,59 @@ IdsPayload {                      // the payload of IDS, 96 bytes
     relay_session_pk [32]u8       // RelaySession_pk of Part 3 §3.2.3, X25519
 }
 ```
+
+```
+IputPayload {                     // the payload of IPUT
+    link_id         [24]u8        // the value of the ILINK
+    blob_len        u16           // the true length of the blob
+    blob            [blob_len]u8  // the InvitationBlob of Part 4 §4.3.1
+    fill            [..]u8        // zero bytes, to the L6 record length of the bucket
+}
+
+IgetPayload {                     // the payload of IGET, 56 bytes
+    link_id         [24]u8
+    lock_pk         [32]u8        // X25519, from the device CSPRNG, for this fetch alone
+}
+
+IblobPayload {                    // the payload of IBLOB
+    blob_len        u16
+    blob            [blob_len]u8
+    fill            [..]u8        // zero bytes, to the L6 record length of the bucket
+}
+```
+
+**The invitation commands.** Part 4 §4.3.1 gives their function.
+
+- **[WIR-505]** The `payload_len` of an `IPUT` and of an `IBLOB` MUST equal the
+  "L6 record on a `MSG`" row of §6.9 at the bucket of the cell. Thus a blob has
+  the length of a `SEND` at its relay, and the length names no bundle. A blob
+  with the bundle of Part 5 §5.4.1 takes bucket `B1`.
+- **[WIR-506]** A sender MUST fill with zero bytes, and a receiver MUST reject
+  a payload whose fill holds another byte or whose `blob_len` is zero.
+- **[WIR-507]** The queue owner signs an `IRES` and an `IPUT` under `QR_auth`,
+  with the `RecipientId` in `queue_id`. A relay MUST answer an `IRES` with an
+  `ILINK` that holds 24 bytes from its CSPRNG. A relay MUST hold one link
+  identifier for one queue, and a second `IRES` ends the first link.
+- **[WIR-508]** A relay MUST accept an `IPUT` one time for a link identifier,
+  from the queue of its `IRES` alone, and it MUST answer with an `ILINK` of
+  that identifier. A relay MUST delete a link identifier that gets no `IPUT`
+  inside `INVITE_RESERVE_TTL`, which is 600 s.
+- **[WIR-509]** The party that fetches signs an `IGET` under the private half
+  of `lock_pk`, with a `queue_id` of zero, as a `NEW` signs under its new
+  `QR_auth`. A relay MUST verify `auth` under `lock_pk` before it answers.
+- **[WIR-510]** At the first `IGET` that verifies, a relay MUST answer with the
+  blob, delete the blob and the link identifier, and put `lock_pk` in the
+  place of the `QS_auth` of the queue. From that point the queue takes a
+  `SEND` under `lock_pk` alone.
+- **[WIR-511]** A relay MUST answer an `IGET` for an identifier that it does
+  not hold with the `NACK` reason `REJECTED`, and `WIR-317` gives that one
+  reason to an unknown link, to a link with no blob, and to an `auth` that
+  does not verify.
+
+> *Cause of the two steps.* Part 4 rule `IDN-160` binds the link identifier as
+> the associated data of the blob, and Part 4 §4.3.1 makes the relay draw that
+> identifier. Thus the owner learns the identifier before it seals. A client
+> that drew the identifier could pick the identifier of a second queue.
 
 **The answer of a relay.** A relay answers a command, and it starts a command
 of its own, such as a `MSG`, a `GMSG`, and a `COVER`.

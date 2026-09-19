@@ -37,7 +37,7 @@ release build holds no network until the client reads the relay directory of
 Part 10.
 
 Two emulators make one conversation: the first one invites and copies the
-invitation, and the second one pastes it and accepts. The clipboard of an
+link, and the second one pastes it and accepts. The clipboard of an
 emulator is the clipboard of the machine.
 
 ## Open items of the shell
@@ -57,8 +57,9 @@ emulator is the clipboard of the machine.
   relay directory.
 - A handshake between its flight 1 and its flight 3 has no stored form. A run
   that ends inside those seconds loses that one handshake.
-- The invitation travels as text. The link, the blob, and the first-access
-  lock of Part 4 §4.3.1 have no wire command yet.
+- The invitation is a link of 91 characters after `#`, which works one time.
+  The user copies it as text. The QR code, the share sheet, and the App Link
+  of `IDN-123` with its invitation host are open.
 - The wrapping key of the keystore asks for no biometric and no device
   credential at each use. That step needs a `BiometricPrompt` around the
   keyed function.

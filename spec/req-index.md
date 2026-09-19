@@ -68,9 +68,9 @@ each column when a crate implements the requirement and a test covers it.
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
 | `NET` | 204 | 83 | 1 | 0 | 8 | **296** |
-| `IDN` | 110 | 40 | 1 | 0 | 5 | **156** |
+| `IDN` | 115 | 41 | 1 | 0 | 5 | **162** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
-| `WIR` | 377 | 82 | 0 | 0 | 6 | **465** |
+| `WIR` | 384 | 82 | 0 | 0 | 6 | **472** |
 | `DEV` | 179 | 87 | 2 | 0 | 7 | **275** |
 | `NTF` | 67 | 30 | 0 | 0 | 2 | **99** |
 | `DIS` | 123 | 37 | 0 | 0 | 1 | **161** |
@@ -81,7 +81,7 @@ each column when a crate implements the requirement and a test covers it.
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
 | `IMP` | 88 | 37 | 0 | 0 | 1 | **126** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2118 | 693 | 7 | 0 | 51 | **2869** |
+| **All** | 2130 | 694 | 7 | 0 | 51 | **2882** |
 
 ## SCP — Scope and Conventions
 
@@ -598,6 +598,12 @@ Source: `spec/04-identity.md`
 | `IDN-161` | §4.3.1 | MUST | A client | A client MUST reject a blob whose `version` is not `0x01` or whose `sealed` field does not open under the key of the fragment. |  |  |
 | `IDN-162` | §4.6 | MUST | After the unlock, a client | After the unlock, a client MUST compute `accum` and `row_count` of each table from a scan of its rows, outside the unlock path, one time or more in each 24 hours that the store is open. |  |  |
 | `IDN-163` | §4.6 | MUST | A client | A client MUST report a difference in the manner of `IDN-039`. |  |  |
+| `IDN-164` | §4.3.1 | MUST NOT | (unstated) | A client MUST draw the 256 bits of key material of the fragment from the device CSPRNG, and it MUST NOT give them to a relay. |  |  |
+| `IDN-165` | §4.3.1 | MUST | A client | A client MUST give the link to the user after the relay answered the `IPUT`, and not before. |  |  |
+| `IDN-166` | §4.3.1 | MUST | A client that accepts a link | A client that accepts a link MUST write to the queue of the bundle under its lock key, and not under the `QS_auth` of the bundle. |  |  |
+| `IDN-167` | §4.3.1 | MUST | (unstated) | A client whose `IGET` gets a `NACK`, or whose blob does not open under the fragment, MUST tell the user that the link gives no invitation. |  |  |
+| `IDN-168` | §4.3.1 | MUST | A client | A client MUST resolve the `RelayRef` of the fragment before the `IGET`, and it MUST send the `IGET` on a circuit whose last hop is that relay. |  |  |
+| `IDN-169` | §4.3.1 | MUST | The store of an inviter | The store of an inviter MUST hold the fragment of an invitation that waits, thus the client shows the link again after a restart. |  |  |
 
 ## CRY — Cryptographic Core
 
@@ -1224,6 +1230,13 @@ Source: `spec/06-wire-format.md`
 | `WIR-502` | §6.4.2 | MUST | A party | A party MUST send each flight of `UMBRA-XKhfs` as a `HandshakeRecord`, and in the smallest bucket whose L7 row of §6.9 holds the record. |  |  |
 | `WIR-503` | §6.4.2 | MUST | A receiver | A receiver MUST drop a `HandshakeRecord` whose `flight` is not the flight that the queue waits for, and it MUST keep the state of the handshake. |  |  |
 | `WIR-504` | §6.4.2 | MUST | A receiver | A receiver MUST drop a record of kind `0x01` on a queue whose handshake is not complete, because no ratchet state can open it. |  |  |
+| `WIR-505` | §6.4 | MUST | The `payload_len` of an `IPUT` and of an `IBLOB` | The `payload_len` of an `IPUT` and of an `IBLOB` MUST equal the "L6 record on a `MSG`" row of §6.9 at the bucket of the cell. |  |  |
+| `WIR-506` | §6.4 | MUST | A sender | A sender MUST fill with zero bytes, and a receiver MUST reject a payload whose fill holds another byte or whose `blob_len` is zero. |  |  |
+| `WIR-507` | §6.4 | MUST | (unstated) | The queue owner signs an `IRES` and an `IPUT` under `QR_auth`, with the `RecipientId` in `queue_id`. |  |  |
+| `WIR-508` | §6.4 | MUST | A relay | A relay MUST accept an `IPUT` one time for a link identifier, from the queue of its `IRES` alone, and it MUST answer with an `ILINK` of that identifier. |  |  |
+| `WIR-509` | §6.4 | MUST | (unstated) | The party that fetches signs an `IGET` under the private half of `lock_pk`, with a `queue_id` of zero, as a `NEW` signs under its new `QR_auth`. |  |  |
+| `WIR-510` | §6.4 | MUST | At the first `IGET` that verifies, a relay | At the first `IGET` that verifies, a relay MUST answer with the blob, delete the blob and the link identifier, and put `lock_pk` in the place of the `QS_auth` of the queue. |  |  |
+| `WIR-511` | §6.4 | MUST | A relay | A relay MUST answer an `IGET` for an identifier that it does not hold with the `NACK` reason `REJECTED`, and `WIR-317` gives that one reason to an unknown link, to a link with no blob, and to an `auth` that does not verify. |  |  |
 
 ## DEV — Device Sets
 

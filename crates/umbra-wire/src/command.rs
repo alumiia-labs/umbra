@@ -24,6 +24,17 @@ pub enum Cmd {
     New,
     /// `0x02`, sent by the relay.
     Ids,
+    /// `0x03`, sent by the recipient: it asks for the link identifier of
+    /// an invitation (Part 4 §4.3.1).
+    Ires,
+    /// `0x04`, sent by the relay: the link identifier.
+    Ilink,
+    /// `0x05`, sent by the recipient: the invitation blob.
+    Iput,
+    /// `0x06`, sent by the party that holds the link: the first fetch.
+    Iget,
+    /// `0x07`, sent by the relay: the invitation blob.
+    Iblob,
     /// `0x10`, sent by the sender.
     Send,
     /// `0x11`, sent by the relay.
@@ -64,6 +75,11 @@ impl Cmd {
         match self {
             Cmd::New => 0x01,
             Cmd::Ids => 0x02,
+            Cmd::Ires => 0x03,
+            Cmd::Ilink => 0x04,
+            Cmd::Iput => 0x05,
+            Cmd::Iget => 0x06,
+            Cmd::Iblob => 0x07,
             Cmd::Send => 0x10,
             Cmd::Msg => 0x11,
             Cmd::Ack => 0x12,
@@ -87,6 +103,11 @@ impl Cmd {
         Ok(match b {
             0x01 => Cmd::New,
             0x02 => Cmd::Ids,
+            0x03 => Cmd::Ires,
+            0x04 => Cmd::Ilink,
+            0x05 => Cmd::Iput,
+            0x06 => Cmd::Iget,
+            0x07 => Cmd::Iblob,
             0x10 => Cmd::Send,
             0x11 => Cmd::Msg,
             0x12 => Cmd::Ack,
@@ -117,7 +138,12 @@ impl Cmd {
             Cmd::Send => Some(bucket.l6_record()),
             Cmd::Msg | Cmd::Cover => Some(bucket.l5_payload()),
             Cmd::Ack | Cmd::Quota => Some(4),
-            Cmd::Sub | Cmd::Unsub | Cmd::Del => Some(0),
+            Cmd::Sub | Cmd::Unsub | Cmd::Del | Cmd::Ires => Some(0),
+            Cmd::Ilink => Some(LINK_ID_LEN),
+            Cmd::Iget => Some(IGET_LEN),
+            // WIR-505: a blob fills the record length of its bucket, as a
+            // `SEND` does, thus its length names no bundle.
+            Cmd::Iput | Cmd::Iblob => Some(bucket.l6_record()),
             Cmd::Nkey | Cmd::Nid => Some(32),
             Cmd::Npk => Some(NPK_LEN),
             Cmd::Nbind => Some(NBIND_LEN),
@@ -249,6 +275,65 @@ impl<'a> Command<'a> {
 
 /// The length of an `IDS` payload.
 pub const IDS_LEN: usize = 96;
+/// The length of the link identifier of an invitation (Part 4 §4.3.1).
+pub const LINK_ID_LEN: usize = 24;
+/// The length of an `IGET` payload: the link identifier and the lock key.
+pub const IGET_LEN: usize = LINK_ID_LEN + 32;
+
+/// Writes the payload of an `IPUT` at `bucket`: the link identifier, the
+/// true length of the blob, the blob, and the zero fill.
+pub fn iput_payload(
+    link_id: &[u8; LINK_ID_LEN],
+    blob: &[u8],
+    bucket: Bucket,
+) -> Result<alloc::vec::Vec<u8>, Error> {
+    let mut out = alloc::vec![0u8; bucket.l6_record()];
+    let mut w = Writer::new(&mut out);
+    w.put(link_id)?;
+    w.u16(u16::try_from(blob.len()).map_err(|_| Error::Capacity)?)?;
+    w.put(blob)?;
+    Ok(out)
+}
+
+/// Reads the payload of an `IPUT`.
+pub fn iput_parse(payload: &[u8]) -> Result<([u8; LINK_ID_LEN], &[u8]), Error> {
+    let mut r = Reader::new(payload);
+    let link_id = r.array()?;
+    Ok((link_id, filled_blob(&mut r)?))
+}
+
+/// Writes the payload of an `IBLOB` at `bucket`.
+pub fn iblob_payload(blob: &[u8], bucket: Bucket) -> Result<alloc::vec::Vec<u8>, Error> {
+    let mut out = alloc::vec![0u8; bucket.l6_record()];
+    let mut w = Writer::new(&mut out);
+    w.u16(u16::try_from(blob.len()).map_err(|_| Error::Capacity)?)?;
+    w.put(blob)?;
+    Ok(out)
+}
+
+/// Reads the payload of an `IBLOB`.
+pub fn iblob_parse(payload: &[u8]) -> Result<&[u8], Error> {
+    filled_blob(&mut Reader::new(payload))
+}
+
+/// A blob behind its true length, with a fill that MUST be zero bytes
+/// (`WIR-506`).
+fn filled_blob<'a>(r: &mut Reader<'a>) -> Result<&'a [u8], Error> {
+    let len = usize::from(r.u16()?);
+    let blob = r.take(len)?;
+    if len == 0 || r.rest().iter().any(|byte| *byte != 0) {
+        return Err(Error::Malformed);
+    }
+    Ok(blob)
+}
+
+/// The smallest bucket whose record length holds an invitation blob with
+/// the fields of an `IPUT` before it.
+pub fn blob_bucket(blob_len: usize) -> Option<Bucket> {
+    [Bucket::B0, Bucket::B1, Bucket::B2, Bucket::B3]
+        .into_iter()
+        .find(|bucket| LINK_ID_LEN + 2 + blob_len <= bucket.l6_record())
+}
 /// The length of an `NPK` payload: the `UMBRA-KEM` public key of the relay.
 pub const NPK_LEN: usize = 1_216;
 /// The length of an `NBIND` payload: the HPKE encapsulation of 1 120 bytes,
@@ -340,6 +425,29 @@ mod tests {
     use alloc::vec;
     use umbra_crypto::x25519::{PublicKey as XPublic, StaticSecret};
 
+    #[test]
+    fn an_invitation_blob_fills_its_bucket_and_reads_back() {
+        let blob = vec![7u8; 1_400];
+        let bucket = blob_bucket(blob.len()).unwrap();
+        assert_eq!(bucket, Bucket::B1);
+        let put = iput_payload(&[9; LINK_ID_LEN], &blob, bucket).unwrap();
+        assert_eq!(Some(put.len()), Cmd::Iput.fixed_payload_len(bucket));
+        assert_eq!(
+            iput_parse(&put).unwrap(),
+            ([9; LINK_ID_LEN], blob.as_slice())
+        );
+        let given = iblob_payload(&blob, bucket).unwrap();
+        assert_eq!(iblob_parse(&given).unwrap(), blob.as_slice());
+
+        // WIR-506: a fill that is not zero bytes is a fault, and so is an
+        // empty blob.
+        let mut dirty = given.clone();
+        *dirty.last_mut().unwrap() = 1;
+        assert_eq!(iblob_parse(&dirty), Err(Error::Malformed));
+        assert!(iblob_parse(&iblob_payload(&[], Bucket::B0).unwrap()).is_err());
+        assert_eq!(blob_bucket(40_000), None);
+    }
+
     fn key_pair() -> (CommandAuthKey, CommandAuthKey) {
         let client = StaticSecret::from([3u8; 32]);
         let relay = StaticSecret::from([4u8; 32]);
@@ -428,12 +536,12 @@ mod tests {
     #[test]
     fn the_namespace_is_closed() {
         for b in [
-            0x00u8, 0x03, 0x13, 0x22, 0x34, 0x41, 0x52, 0x61, 0x6F, 0x7C, 0x86, 0x9B, 0x9F, 0xA0,
+            0x00u8, 0x08, 0x13, 0x22, 0x34, 0x41, 0x52, 0x61, 0x6F, 0x7C, 0x86, 0x9B, 0x9F, 0xA0,
             0xFF,
         ] {
             assert!(Cmd::from_byte(b).is_err(), "{b:#x}");
         }
-        for b in [0x70u8, 0x7B, 0x80, 0x85, 0x90, 0x9A] {
+        for b in [0x03u8, 0x07, 0x70, 0x7B, 0x80, 0x85, 0x90, 0x9A] {
             assert_eq!(Cmd::from_byte(b).unwrap().to_byte(), b);
         }
     }

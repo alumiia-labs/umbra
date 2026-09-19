@@ -37,6 +37,7 @@ use umbra_relay::{
 use umbra_transport::{native, Dial};
 
 const PACING_MEAN_MS: u64 = 20;
+const HOST: &str = "invite.umbra.test";
 const STEP: Duration = Duration::from_secs(20);
 
 const CA: &str = concat!(
@@ -190,6 +191,7 @@ fn two_apps_meet_and_talk_through_the_exported_surface() {
             })
             .collect(),
         root_ca_path: Some(CA.into()),
+        invitation_host: HOST.into(),
     };
 
     let directory = std::env::temp_dir().join(format!("umbra-app-{}", std::process::id()));
@@ -215,21 +217,33 @@ fn two_apps_meet_and_talk_through_the_exported_surface() {
     alice.clone().connect(network.clone()).unwrap();
     bob.clone().connect(network.clone()).unwrap();
 
-    // A bundle that does not parse is refused, and the network stays up.
-    bob.accept(vec![1, 2, 3]).unwrap();
-    wait_for(&bob, |event| match event {
-        FfiEvent::Refused => Some(()),
-        _ => None,
-    });
+    // A link of another host and a link that does not parse are errors of
+    // the call, and the network stays up.
+    let foreign = "https://evil.example/i#AAAA".to_owned();
+    assert_eq!(bob.accept(foreign), Err(FfiError::Malformed));
+    assert_eq!(
+        bob.accept(format!("https://{HOST}/i#short")),
+        Err(FfiError::Malformed)
+    );
 
     alice.invite().unwrap();
-    let bundle = wait_for(&alice, |event| match event {
-        FfiEvent::Invitation { bundle } => Some(bundle),
+    let link = wait_for(&alice, |event| match event {
+        FfiEvent::Invitation { link } => Some(link),
         _ => None,
     });
-    bob.accept(bundle).unwrap();
+    // IDN-159: the fragment is 91 characters of base64url.
+    assert_eq!(link.len(), format!("https://{HOST}/i#").len() + 91);
+    bob.accept(link.clone()).unwrap();
     let alice_conversation = wait_for_contact(&alice);
     let bob_conversation = wait_for_contact(&bob);
+
+    // The link worked one time. A second use finds no blob, and the user
+    // learns it (`IDN-023`).
+    bob.accept(link).unwrap();
+    wait_for(&bob, |event| match event {
+        FfiEvent::InvitationGone => Some(()),
+        _ => None,
+    });
 
     // A draft of Bob becomes a message of Alice.
     let draft = bob.new_draft(bob_conversation.clone()).unwrap();

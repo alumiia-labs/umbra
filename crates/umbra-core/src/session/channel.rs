@@ -24,7 +24,7 @@ use umbra_wire::{
     address::QueueAddress,
     admission::{Admission, AdmissionKind},
     bucket::Bucket,
-    command::{Cmd, Command, NewPayload},
+    command::{blob_bucket, iput_payload, Cmd, Command, NewPayload, IGET_LEN, LINK_ID_LEN},
     queue::{self, L6Kind},
 };
 
@@ -83,6 +83,29 @@ pub fn new_queue_command(
     )
 }
 
+/// The `IGET` of an invitation: the first fetch of the blob under
+/// `link_id`. The party signs under the lock key, which the relay then
+/// takes as the one key that writes to the queue (`IDN-023`).
+pub fn get_blob_command(
+    link_id: &[u8; LINK_ID_LEN],
+    lock_secret: &StaticSecret,
+    relay_session_pk: &[u8; 32],
+    corr_id: [u8; 16],
+) -> Result<Vec<u8>, Error> {
+    let mut payload = [0u8; IGET_LEN];
+    let (id, key) = payload.split_at_mut(LINK_ID_LEN);
+    id.copy_from_slice(link_id);
+    key.copy_from_slice(XPublic::from(lock_secret).as_bytes());
+    signed(
+        Cmd::Iget,
+        [0; 32],
+        corr_id,
+        &payload,
+        lock_secret,
+        relay_session_pk,
+    )
+}
+
 /// The queue of the peer, which this device writes to.
 pub struct Outbound {
     sender_id: [u8; 32],
@@ -115,6 +138,16 @@ impl Outbound {
             auth_secret: StaticSecret::from(*address.qs_auth_sk.expose()),
             queue_key: QueueKey::derive(&address.qe, &address.sender_id),
             relay_id: address.relay_id,
+        }
+    }
+
+    /// The writer side of a queue that this device locked with its first
+    /// fetch of the invitation. The lock key took the place of the
+    /// `QS_auth` of the address at the relay.
+    pub fn locked(address: &QueueAddress, lock_secret: StaticSecret) -> Self {
+        Outbound {
+            auth_secret: lock_secret,
+            ..Outbound::new(address)
         }
     }
 
@@ -279,6 +312,42 @@ impl Inbound {
             }
             Err(_) => Ok(Opened::Undecryptable { seq }),
         }
+    }
+
+    /// The `IRES` of the queue: it asks the relay for the link identifier
+    /// of an invitation (Part 4 §4.3.1).
+    pub fn reserve_link(
+        &self,
+        relay_session_pk: &[u8; 32],
+        corr_id: [u8; 16],
+    ) -> Result<Vec<u8>, Error> {
+        signed(
+            Cmd::Ires,
+            self.recipient_id,
+            corr_id,
+            &[],
+            &self.auth_secret,
+            relay_session_pk,
+        )
+    }
+
+    /// The `IPUT` of the queue: the sealed blob under `link_id`.
+    pub fn put_blob(
+        &self,
+        link_id: &[u8; LINK_ID_LEN],
+        blob: &[u8],
+        relay_session_pk: &[u8; 32],
+        corr_id: [u8; 16],
+    ) -> Result<Vec<u8>, Error> {
+        let bucket = blob_bucket(blob.len()).ok_or(Error::Malformed)?;
+        signed(
+            Cmd::Iput,
+            self.recipient_id,
+            corr_id,
+            &iput_payload(link_id, blob, bucket)?,
+            &self.auth_secret,
+            relay_session_pk,
+        )
     }
 
     /// The `SUB` of the queue.

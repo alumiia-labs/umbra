@@ -10,7 +10,10 @@ use std::{
 };
 
 use tokio::sync::mpsc;
-use umbra_core::session::node::{ClientEvent, ClientNode, ContactId, StateChange};
+use umbra_core::{
+    identity::invitation::FRAGMENT_LEN,
+    session::node::{ClientEvent, ClientNode, ContactId, StateChange},
+};
 use umbra_crypto::rand_core::{TryCryptoRng, TryRng};
 use umbra_transport::{
     native::{self, ClientConfig},
@@ -50,9 +53,11 @@ impl TryCryptoRng for OsRng {}
 /// What the application asks of the runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
-    /// Make one invitation. An [`Update::Invitation`] follows.
+    /// Make one invitation with a link. An [`Update::Invitation`] follows
+    /// with the 68 bytes of the fragment of Part 4 §4.3.1.
     Invite,
-    /// Accept the bundle of an inviter.
+    /// Accept an invitation: the 68 bytes of a fragment, or a bundle that
+    /// came by another path.
     Accept(Vec<u8>),
     /// Send one application record. An [`Update::Sent`] with the same tag
     /// follows the acknowledgment of the relay.
@@ -89,8 +94,12 @@ impl Persist for NoStore {
 pub enum Update {
     /// The circuit is ready.
     Online,
-    /// The bundle of an invitation, which the user gives out of band.
+    /// The fragment of an invitation link, which the user gives out of
+    /// band.
     Invitation(Vec<u8>),
+    /// The relay holds no blob for a link that the user accepted: a second
+    /// party fetched it first, or it passed its lifetime (`IDN-023`).
+    InvitationGone,
     /// A contact is ready.
     Contact {
         /// The contact.
@@ -244,6 +253,8 @@ pub async fn run_client(
             let update = match event {
                 ClientEvent::CircuitReady => Update::Online,
                 ClientEvent::Invitation { bundle, .. } => Update::Invitation(bundle),
+                ClientEvent::InvitationLink { fragment, .. } => Update::Invitation(fragment),
+                ClientEvent::InvitationGone { .. } => Update::InvitationGone,
                 ClientEvent::ContactReady {
                     contact,
                     peer_static,
@@ -273,12 +284,17 @@ pub async fn run_client(
             // to no contact fail that one command.
             match command {
                 Command::Invite => {
-                    if node.invite(&mut rng).is_err() {
+                    if node.invite_link(&mut rng).is_err() {
                         let _ = updates.send(Update::Refused);
                     }
                 }
-                Command::Accept(bundle) => {
-                    if node.accept(bundle, &mut rng).is_err() {
+                Command::Accept(given) => {
+                    let accepted = if given.len() == FRAGMENT_LEN {
+                        node.accept_link(&given, &mut rng)
+                    } else {
+                        node.accept(given, &mut rng)
+                    };
+                    if accepted.is_err() {
                         let _ = updates.send(Update::Refused);
                     }
                 }

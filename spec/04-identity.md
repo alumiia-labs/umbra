@@ -445,13 +445,42 @@ connection of the intended recipient fails. Thus a passive link-interception
 attack becomes an event that **the two parties detect**. **[IDN-023]** Implementations MUST
 implement this lock for one-time invitations.
 
-> *Open in 0.2.0-draft.* Part 6 §6.4 gives no command that stores a blob
-> under a link ID, that fetches it, or that sets the lock. The reference
-> client thus passes the bundle of Part 5 §5.4.1 to the second device
-> directly, and the link, the blob, and the lock do not run. The handshake
-> after that step is complete (Part 6 §6.4.2, the handshake record). The
-> three commands are work for a revision before 1.0, and Part 16 §16.3 holds
-> this residual until then.
+**The commands.** Part 6 §6.4 gives five commands for this path. The inviter
+makes the queue of the invitation with a `NEW`, and it asks the relay of that
+queue for a link identifier with an `IRES`. It seals the bundle under the
+fragment and stores the blob with an `IPUT`. The party that holds the link
+sends an `IGET` with a lock key that it drew for this fetch.
+
+- **[IDN-164]** A client MUST draw the 256 bits of key material of the
+  fragment from the device CSPRNG, and it MUST NOT give them to a relay. The
+  relay holds the link identifier and the ciphertext.
+- **[IDN-165]** A client MUST give the link to the user after the relay
+  answered the `IPUT`, and not before. A link with no blob behind it fails at
+  the other party.
+- **[IDN-166]** A client that accepts a link MUST write to the queue of the
+  bundle under its lock key, and not under the `QS_auth` of the bundle. The
+  relay put the lock key in the place of that `QS_auth` at the fetch (Part 6
+  rule `WIR-510`). Thus a party that reads the bundle by another path writes
+  no flight 1 to a queue that a fetch locked.
+- **[IDN-167]** A client whose `IGET` gets a `NACK`, or whose blob does not
+  open under the fragment, MUST tell the user that the link gives no
+  invitation. It MUST name the fetch by a second party as a cause, and it MUST
+  ask the user to tell the inviter. That report is the detection of
+  `IDN-023`: the intended party holds no contact, and the inviter holds one
+  that it did not expect.
+- **[IDN-168]** A client MUST resolve the `RelayRef` of the fragment before the
+  `IGET`, and it MUST send the `IGET` on a circuit whose last hop is that
+  relay.
+- **[IDN-169]** The store of an inviter MUST hold the fragment of an
+  invitation that waits, thus the client shows the link again after a
+  restart. It MUST delete the fragment with the invitation (Part 15 rule
+  `IMP-136`).
+
+> *What the lock does not do.* A party that reads the link first fetches the
+> blob, takes the lock, and runs the handshake as the invitee. The inviter
+> then holds a contact with that party. The lock makes that event visible to
+> the intended party, and the verification of §4.5 makes it visible to the
+> inviter. It prevents nothing alone.
 
 ### 4.3.2 Reusable contact link
 
@@ -1108,6 +1137,7 @@ decodes `type`, and knows the width.
 | `HANDLE_KEY_LOOKAHEAD` | 64, the count of rotation counter values that a restore tries above the restored counter (§4.2.4) |
 | `PALETTE_SIZE` | 12 (§4.2.5) |
 | `INVITE_TTL` | 14 days, measured by the relay from the store of the blob, and by the client from the issue (§4.3.1) |
+| `INVITE_RESERVE_TTL` | 600 s, the time that a relay holds a link identifier with no blob (Part 6 rule `WIR-508`) |
 | Invitation host | One host that the nonprofit operates, named at the release tag of the client (§4.3.1) |
 
 > *The cause of `BACKUP_REPLICAS` of 2.* Part 13 §13.4 sets `REPLICAS` to 3 for

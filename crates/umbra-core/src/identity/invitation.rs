@@ -84,6 +84,16 @@ fn base64url_decode(text: &str, out: &mut [u8]) -> Result<(), Error> {
 }
 
 impl Fragment {
+    /// The fragment of its 68 bytes.
+    pub fn from_bytes(bytes: &[u8; FRAGMENT_LEN]) -> Result<Self, Error> {
+        let mut r = Reader::new(bytes);
+        Ok(Fragment {
+            key: r.array()?,
+            link_id: r.array()?,
+            relay_ref: r.array()?,
+        })
+    }
+
     /// The bytes of the fragment.
     pub fn to_bytes(&self) -> [u8; FRAGMENT_LEN] {
         let mut out = [0u8; FRAGMENT_LEN];

@@ -6,7 +6,6 @@ import android.content.Context
 import android.os.PersistableBundle
 import android.text.InputType
 import android.text.TextUtils
-import android.util.Base64
 import android.view.inputmethod.EditorInfo
 import android.widget.EditText
 import android.widget.TextView
@@ -220,20 +219,24 @@ private fun InvitePanel() {
     var pasted by remember { mutableStateOf("") }
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         Button(enabled = Core.online, onClick = { Core.invite() }) { Text("Invite") }
-        Core.invitation?.let { bundle ->
-            OutlinedButton(onClick = { copySensitive(context, encode(bundle)) }) {
-                Text("Copy the invitation")
+        Core.invitation?.let { link ->
+            OutlinedButton(onClick = { copySensitive(context, link) }) {
+                Text("Copy the link")
             }
         }
     }
-    Core.invitation?.let { bundle ->
+    Core.invitation?.let { link ->
         Text(
-            encode(bundle),
-            maxLines = 2,
+            "This link works one time, for 14 days.",
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(top = 8.dp),
+        )
+        Text(
+            link,
+            maxLines = 3,
             overflow = TextOverflow.Ellipsis,
             fontFamily = FontFamily.Monospace,
             style = MaterialTheme.typography.bodySmall,
-            modifier = Modifier.padding(top = 8.dp),
         )
     }
     Spacer(Modifier.height(12.dp))
@@ -241,7 +244,7 @@ private fun InvitePanel() {
     OutlinedTextField(
         value = pasted,
         onValueChange = { pasted = it },
-        label = { Text("An invitation of a contact") },
+        label = { Text("The link of a contact") },
         // The input method changes no character of the pasted value.
         keyboardOptions = KeyboardOptions(
             keyboardType = KeyboardType.Password,
@@ -254,7 +257,7 @@ private fun InvitePanel() {
         enabled = Core.online && pasted.isNotBlank(),
         modifier = Modifier.padding(top = 8.dp),
         onClick = {
-            decode(pasted)?.let(Core::accept)
+            Core.accept(pasted)
             pasted = ""
         },
     ) { Text("Accept") }
@@ -330,17 +333,6 @@ private fun deliveryLabel(state: UByte): String = when (state.toInt()) {
     3 -> "Read"
     else -> "Failed"
 }
-
-private const val BASE64 = Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP
-
-private fun encode(bundle: ByteArray): String = Base64.encodeToString(bundle, BASE64)
-
-private fun decode(text: String): ByteArray? =
-    try {
-        Base64.decode(text.trim(), BASE64)
-    } catch (malformed: IllegalArgumentException) {
-        null
-    }
 
 /** IMP-056: the clipboard preview of the platform hides a sensitive clip. */
 private fun copySensitive(context: Context, text: String) {

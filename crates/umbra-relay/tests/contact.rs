@@ -650,3 +650,121 @@ fn the_inviter_writes_first_and_the_record_waits_for_the_chain() {
         [b"the inviter writes first"]
     );
 }
+
+fn link_of(events: Vec<ClientEvent>) -> Vec<u8> {
+    events
+        .into_iter()
+        .find_map(|event| match event {
+            ClientEvent::InvitationLink { fragment, .. } => Some(fragment),
+            _ => None,
+        })
+        .expect("a link")
+}
+
+#[test]
+fn a_link_gives_one_contact_and_a_second_fetch_finds_nothing() {
+    const ALICE: usize = 0;
+    const BOB: usize = 1;
+    let mut network = Network::new();
+    network.settle();
+    let carol = network.add_client(0x50);
+
+    // The relay draws the link identifier, Alice seals the bundle under
+    // it, and the relay holds a blob that it cannot read.
+    network.clients[ALICE].invite_link(&mut Rng(1)).unwrap();
+    network.settle();
+    let fragment = link_of(network.take_events(ALICE));
+    assert_eq!(fragment.len(), 68);
+    assert_eq!(network.stored[ALICE].invitations.len(), 1);
+
+    // The link waits across a restart of Alice, and the store gives the
+    // fragment again.
+    network.restart(ALICE, 0x40);
+    network.settle();
+    network.take_events(ALICE);
+
+    // Bob makes the first fetch, which locks the queue of Alice to his key.
+    network.clients[BOB]
+        .accept_link(&fragment, &mut Rng(2))
+        .unwrap();
+    network.settle();
+    let (alice_contact, _) = contact_of(&network.take_events(ALICE));
+    let (bob_contact, _) = contact_of(&network.take_events(BOB));
+
+    // IDN-023: a second party that holds the link gets no blob, and it
+    // learns that.
+    let late = network.clients[carol]
+        .accept_link(&fragment, &mut Rng(3))
+        .unwrap();
+    network.settle();
+    assert_eq!(
+        network.take_events(carol),
+        [ClientEvent::InvitationGone { handle: late }]
+    );
+
+    let now = network.now;
+    network.clients[ALICE]
+        .send(&alice_contact, &text(1, "over a link"), now, &mut Rng(4))
+        .unwrap();
+    network.clients[BOB]
+        .send(&bob_contact, &text(2, "and back"), now, &mut Rng(5))
+        .unwrap();
+    network.settle();
+    assert_eq!(messages_of(network.take_events(BOB)), [b"over a link"]);
+    assert_eq!(messages_of(network.take_events(ALICE)), [b"and back"]);
+}
+
+#[test]
+fn a_party_that_fetches_first_is_seen_by_the_true_invitee() {
+    const ALICE: usize = 0;
+    const BOB: usize = 1;
+    let mut network = Network::new();
+    network.settle();
+    let mallory = network.add_client(0x66);
+    network.clients[ALICE].invite_link(&mut Rng(1)).unwrap();
+    network.settle();
+    let fragment = link_of(network.take_events(ALICE));
+
+    // Mallory reads the link on its way and fetches first.
+    network.clients[mallory]
+        .accept_link(&fragment, &mut Rng(2))
+        .unwrap();
+    network.settle();
+    network.take_events(mallory);
+
+    // The fetch of Bob fails, thus Bob and Alice learn of the attack when
+    // they compare: Bob holds no contact, and Alice holds one.
+    let tried = network.clients[BOB]
+        .accept_link(&fragment, &mut Rng(3))
+        .unwrap();
+    network.settle();
+    assert!(network
+        .take_events(BOB)
+        .contains(&ClientEvent::InvitationGone { handle: tried }));
+    assert_eq!(network.clients[BOB].contacts().count(), 0);
+}
+
+#[test]
+fn a_link_with_a_wrong_key_opens_no_blob() {
+    const ALICE: usize = 0;
+    const BOB: usize = 1;
+    let mut network = Network::new();
+    network.settle();
+    network.clients[ALICE].invite_link(&mut Rng(1)).unwrap();
+    network.settle();
+    let mut fragment = link_of(network.take_events(ALICE));
+
+    // The first 32 bytes are the key material. The relay knows the link
+    // identifier alone, thus it gives the blob, and the blob does not open.
+    fragment[0] ^= 1;
+    let tried = network.clients[BOB]
+        .accept_link(&fragment, &mut Rng(2))
+        .unwrap();
+    network.settle();
+    assert!(network
+        .take_events(BOB)
+        .contains(&ClientEvent::InvitationGone { handle: tried }));
+    assert!(network.clients[BOB]
+        .accept_link(&fragment[..60], &mut Rng(3))
+        .is_err());
+}
