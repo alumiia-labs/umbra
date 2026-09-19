@@ -758,7 +758,10 @@ from flight 2, and the responder holds its private half. **[CRY-136]** The
 responder MUST keep `er_sk` as its first DH ratchet private key until the
 first DH ratchet step of §5.5.1 replaces it, and it MUST erase it at that
 step. **[CRY-137]** The initiator MUST use `er` as the ratchet public key of
-the responder at the start of the session.
+the responder at the start of the session. **[CRY-152]** The relay handshake
+of §5.4.9 has one exception of the same kind: the last hop of a circuit MUST
+keep its `er_sk` as `RelaySession_sk` under Part 3 rule `NET-285`, and it
+MUST erase it when the circuit ends.
 
 > *Cause.* An earlier draft gave `RK` and the two header keys and named no
 > initial DH key. The Double Ratchet needs one, and the two candidates were

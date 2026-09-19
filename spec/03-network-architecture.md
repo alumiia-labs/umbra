@@ -149,6 +149,29 @@ community command of Part 12 §12.3.3, a party MUST use `pull_sk` in the place o
 `Q*_auth_sk`. Part 12 rule `COM-175` states the same binding. A community has no
 queue secret, and `pull_sk` comes from `community_id`.
 
+**The session key.** A command reaches its relay over a circuit of §3.4, and
+that relay is the last hop of the circuit. The handshake of §3.4.3 gives that
+hop one fresh X25519 key, and both ends hold it.
+
+- **[NET-284]** `RelaySession_pk` of a circuit MUST be the `er` field of the
+  `HopReply` of its last hop. **[NET-285]** That hop MUST keep the private half
+  of `er` as `RelaySession_sk` until the circuit ends, and it MUST erase it
+  then. Part 5 rule `CRY-136` keeps the `er_sk` of a pairwise handshake in the
+  same manner. **[NET-286]** Each other hop MUST erase the private half of its
+  `er` at the end of the handshake, under `CRY-059`.
+- **[NET-287]** For the rules `NET-122` and `NET-123`, and for each rule of
+  Part 6 that names the transport session of a command, the session of a
+  command that arrives over a circuit is that circuit.
+- **[NET-288]** A client MUST reject an `IDS` whose `relay_session_pk` differs
+  from the `er` of the circuit that carried it.
+
+> *Cause.* An earlier draft gave `RelaySession_pk` to a recipient in the `IDS`
+> of Part 6 §6.4, and it gave it to no other party. A sender holds a
+> `QueueAddress` and no `IDS`, and a recipient in a later session holds the key
+> of an earlier one. Thus no sender could compute `auth`. The flight-2
+> ephemeral is fresh for each circuit, both ends hold it, and the client
+> verified it inside the handshake transcript. It adds no byte to the wire.
+
 **[NET-121]** A relay MUST reject a command whose `auth` does not verify.
 **[NET-122]** A relay MUST reject a command whose `corr_id` that relay accepted
 before in the same transport session. **[NET-123]** A relay MUST NOT retain a

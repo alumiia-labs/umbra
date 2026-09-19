@@ -431,6 +431,28 @@ IdsPayload {                      // the payload of IDS, 96 bytes
 }
 ```
 
+**The answer of a relay.** A relay answers a command, and it starts a command
+of its own, such as a `MSG`, a `GMSG`, and a `COVER`.
+
+- **[WIR-494]** A relay MUST put the `corr_id` of a command in the `corr_id`
+  field of its answer. A `NACK` and a `GSEQ` carry that value in the payload
+  also, and the two MUST agree. **[WIR-495]** A relay MUST draw the `corr_id`
+  of a command that it starts from its CSPRNG.
+- **[WIR-496]** A relay MUST answer an accepted `SEND` with one `QUOTA` under
+  `WIR-494`. That `QUOTA` is the relay acknowledgment of Part 3 §3.7, and it
+  travels in the place of a cover cell in the manner of `WIR-320`.
+  **[WIR-497]** A client MUST take a `QUOTA` or a `NACK` as an answer only
+  when its `corr_id` names a command of the same circuit that holds no answer
+  yet, and it MUST discard each other one.
+- **[WIR-498]** A client MUST NOT use a `corr_id` two times on one circuit.
+
+> *Cause.* Part 3 §3.7 runs the ARQ of a record until a relay acknowledges it.
+> A `GPOST` had the `GSEQ`, and a pairwise `SEND` had no acknowledgment on the
+> wire. Rule `NET-017` already made the relay signal the quota of a queue,
+> thus the `QUOTA` carries the acknowledgment and no new command exists. An
+> `IDS`, a `PAGE`, a `PUBACK`, and each attachment answer name their command
+> through the same field.
+
 A `NEW` requests no parameter. The relay applies its own quota of Part 3
 §3.2.4, and `QUOTA` reports it. **[WIR-487]** A party MUST reject a command
 of `ACK`, `NKEY`, `NID`, `QUOTA`, `NACK`, `SUB`, `UNSUB`, or `DEL` whose

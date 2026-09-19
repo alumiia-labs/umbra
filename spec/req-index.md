@@ -67,10 +67,10 @@ each column when a crate implements the requirement and a test covers it.
 | --- | --- | --- | --- | --- | --- | --- |
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
-| `NET` | 192 | 82 | 0 | 0 | 8 | **282** |
+| `NET` | 197 | 82 | 0 | 0 | 8 | **287** |
 | `IDN` | 110 | 40 | 1 | 0 | 5 | **156** |
-| `CRY` | 118 | 27 | 0 | 0 | 1 | **146** |
-| `WIR` | 367 | 81 | 0 | 0 | 6 | **454** |
+| `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
+| `WIR` | 371 | 82 | 0 | 0 | 6 | **459** |
 | `DEV` | 172 | 87 | 2 | 0 | 7 | **268** |
 | `NTF` | 62 | 29 | 0 | 0 | 2 | **93** |
 | `DIS` | 123 | 37 | 0 | 0 | 1 | **161** |
@@ -81,7 +81,7 @@ each column when a crate implements the requirement and a test covers it.
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
 | `IMP` | 77 | 34 | 0 | 0 | 1 | **112** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2071 | 687 | 6 | 0 | 51 | **2815** |
+| **All** | 2081 | 688 | 6 | 0 | 51 | **2826** |
 
 ## SCP — Scope and Conventions
 
@@ -421,6 +421,11 @@ Source: `spec/03-network-architecture.md`
 | `NET-281` | §3.8 | MUST NOT | (unstated) | A relay MUST answer an upgrade it accepts with status `101`, the `Sec-WebSocket-Accept` of RFC 6455 §4.2.2, and the same subprotocol, and it MUST NOT accept an extension. |  |  |
 | `NET-282` | §3.8 | MUST NOT | (unstated) | A client MUST verify the TLS certificate of a relay against the `host` of its descriptor under the public CA roots, and it MUST NOT accept a connection without that check. |  |  |
 | `NET-283` | §3.8 | MUST | A QUIC connection | A QUIC connection MUST negotiate the ALPN `umbra.v1`, and the TCP connection negotiates none. |  |  |
+| `NET-284` | §3.2.3 | MUST | `RelaySession_pk` of a circuit | `RelaySession_pk` of a circuit MUST be the `er` field of the `HopReply` of its last hop. |  |  |
+| `NET-285` | §3.2.3 | MUST | That hop | That hop MUST keep the private half of `er` as `RelaySession_sk` until the circuit ends, and it MUST erase it then. |  |  |
+| `NET-286` | §3.2.3 | MUST | Each other hop | Each other hop MUST erase the private half of its `er` at the end of the handshake, under `CRY-059`. |  |  |
+| `NET-287` | §3.2.3 | MUST | (unstated) | For the rules `NET-122` and `NET-123`, and for each rule of Part 6 that names the transport session of a command, the session of a command that arrives over a circuit is that circuit. |  |  |
+| `NET-288` | §3.2.3 | MUST | A client | A client MUST reject an `IDS` whose `relay_session_pk` differs from the `er` of the circuit that carried it. |  |  |
 
 ## IDN — Identity
 
@@ -737,6 +742,7 @@ Source: `spec/05-cryptographic-core.md`
 | `CRY-149` | §5.5.5 | MUST | A party | A party MUST retain `ss_e` from the moment it computes it, by encapsulation or by decapsulation, until the mix consumes it. |  |  |
 | `CRY-150` | §5.4.1 | MUST | A client | A client MUST write the five fields in the order above, with `bundle_len` before `relay_bundle`, and a reader MUST reject a bundle with bytes after `relay_bundle`. |  |  |
 | `CRY-151` | §5.4.1 | MUST | An HPKE of AUX-6 | An HPKE of AUX-6 MUST build its `suite_id` as `"HPKE" || kem_id || kdf_id || aead_id` from the identifiers of §5.4, which are `0x0001` each, and it MUST use `UMBRA-KEM` as the KEM with `Nsecret` of 32, `Nenc` of 1 120, and `Npk` of 1 216, HKDF-SHA3-256 as the KDF, and ChaCha20-Poly1305 as the AEAD, with the labeled extract and expand of RFC 9180 §4 unchanged. |  |  |
+| `CRY-152` | §5.4.8 | MUST | (unstated) | The relay handshake of §5.4.9 has one exception of the same kind: the last hop of a circuit MUST keep its `er_sk` as `RelaySession_sk` under Part 3 rule `NET-285`, and it MUST erase it when the circuit ends. |  |  |
 
 ## WIR — Wire Format
 
@@ -1198,6 +1204,11 @@ Source: `spec/06-wire-format.md`
 | `WIR-491` | §6.6.3 | MUST | A parser | A parser MUST reject an `action_count` of 0 or above `MOD_ACTION_MAX`, and an `action` that the layout above does not hold. |  |  |
 | `WIR-492` | §6.6.3 | MUST | A parser | A parser MUST reject a `GroupPresence` whose length is not 1. |  |  |
 | `WIR-493` | §6.6.3 | MUST | The `path` | The `path` MUST be a sequence of `BE16(len) || GroupControl` entries, each a granting epoch of Part 11 §11.9.2 under its wrapper, in chain order; a parser MUST reject a `path` that ends inside an entry or that holds a `control_type` other than `0x04`. |  |  |
+| `WIR-494` | §6.4 | MUST | A relay | A relay MUST put the `corr_id` of a command in the `corr_id` field of its answer. |  |  |
+| `WIR-495` | §6.4 | MUST | A relay | A relay MUST draw the `corr_id` of a command that it starts from its CSPRNG. |  |  |
+| `WIR-496` | §6.4 | MUST | A relay | A relay MUST answer an accepted `SEND` with one `QUOTA` under `WIR-494`. |  |  |
+| `WIR-497` | §6.4 | MUST | A client | A client MUST take a `QUOTA` or a `NACK` as an answer only when its `corr_id` names a command of the same circuit that holds no answer yet, and it MUST discard each other one. |  |  |
+| `WIR-498` | §6.4 | MUST NOT | A client | A client MUST NOT use a `corr_id` two times on one circuit. |  |  |
 
 ## DEV — Device Sets
 
