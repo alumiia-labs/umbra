@@ -79,6 +79,25 @@ pub enum Width {
 }
 
 impl Width {
+    /// The byte of the width in a stored object.
+    pub(crate) const fn to_byte(self) -> u8 {
+        match self {
+            Self::W32 => 1,
+            Self::W64 => 2,
+            Self::W128 => 3,
+        }
+    }
+
+    /// The width of a stored byte.
+    pub(crate) fn from_byte(byte: u8) -> Result<Self, Error> {
+        match byte {
+            1 => Ok(Self::W32),
+            2 => Ok(Self::W64),
+            3 => Ok(Self::W128),
+            _ => Err(Error::Length),
+        }
+    }
+
     /// The width in bytes.
     pub const fn bytes(self) -> usize {
         match self {
@@ -266,6 +285,29 @@ impl Collector {
             }
         }
         Ok(self.count >= code.k)
+    }
+
+    /// Writes the held chunks for the at-rest store.
+    pub(crate) fn export(&self, writer: &mut crate::stored::Writer) -> Result<(), Error> {
+        let w = self.width.bytes();
+        writer.u8(self.width.to_byte());
+        writer.u16(u16::try_from(self.count).map_err(|_| Error::Length)?);
+        for (index, _) in self.held.iter().enumerate().filter(|(_, held)| **held) {
+            writer.u8(u8::try_from(index).map_err(|_| Error::Length)?);
+            writer.bytes(window(&self.chunks, index * w, w)?);
+        }
+        Ok(())
+    }
+
+    /// Reads the chunks that [`Collector::export`] wrote.
+    pub(crate) fn restore(reader: &mut crate::stored::Reader<'_>) -> Result<Self, Error> {
+        let mut collector = Self::new(Width::from_byte(reader.u8()?)?);
+        let w = collector.width.bytes();
+        for _ in 0..reader.u16()? {
+            let index = usize::from(reader.u8()?);
+            collector.put(index, reader.take(w)?)?;
+        }
+        Ok(collector)
     }
 
     /// Whether `k` positions are held.

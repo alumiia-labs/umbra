@@ -13,14 +13,14 @@
 //! each update to the client under the lock of the handle.
 
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     sync::{Arc, Condvar, Mutex, MutexGuard, Weak},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use tokio::sync::mpsc;
 use umbra_core::{
-    session::node::ClientNode,
+    session::node::{ClientNode, ContactId, StateChange},
     store::wrap::{Cost, SecureElement, WrapHeader, M_KIB_FLOOR, T_FLOOR},
 };
 use umbra_crypto::handshake::nk::RelayStatic;
@@ -31,7 +31,7 @@ use crate::{
     bridge::{Bridge, NetEvent},
     client::Client,
     draft::Draft,
-    runtime::{run_client, OsRng, Update},
+    runtime::{run_client, OsRng, Persist, Update},
     sqlite::SqliteBackend,
     ConversationId, Delivery, Error, Event, MsgRef, Sink,
 };
@@ -198,7 +198,8 @@ pub enum FfiEvent {
     Online,
     /// The run of the network ended. The cause is 0 for a stop by the
     /// application, 1 for a dial that failed, 2 for a link that closed, 3
-    /// for a circuit that a relay destroyed, and 4 for a fault in the client.
+    /// for a circuit that a relay destroyed, 4 for a fault in the client,
+    /// and 5 for a store that took no batch.
     Offline {
         /// The cause.
         cause: u8,
@@ -422,6 +423,27 @@ fn conversation_of(bytes: &[u8]) -> Result<ConversationId, FfiError> {
     ))
 }
 
+/// The store of the client, as the runtime of one run sees it. It holds a
+/// weak reference, thus a handle that the platform drops ends the run.
+struct HandleStore(Weak<Handle>);
+
+impl Persist for HandleStore {
+    fn commit(&mut self, changes: Vec<StateChange>, received: &[(ContactId, Vec<u8>)]) -> bool {
+        let Some(handle) = self.0.upgrade() else {
+            return false;
+        };
+        let mut inner = locked(&handle.inner);
+        // A locked client takes no batch, and the run ends (`IMP-127`).
+        let committed = inner
+            .client
+            .commit_network(&changes, received, unix_now_ms(), &mut OsRng)
+            .is_ok();
+        drop(inner);
+        handle.changed.notify_all();
+        committed
+    }
+}
+
 impl Handle {
     /// A task of the runtime gives one update of the network to the client.
     fn on_update(&self, update: Update) {
@@ -435,7 +457,7 @@ impl Handle {
         if let Some(running) = bridge {
             // A fault of the store shows in the event stream of the client,
             // and such an update gives no event of the network.
-            if let Ok(Some(event)) = running.on_update(client, update, unix_now_ms(), &mut OsRng) {
+            if let Ok(Some(event)) = running.on_update(client, update, &mut OsRng) {
                 net_events.push_back(event);
             }
         } else if let Update::Offline(cause) = update {
@@ -484,14 +506,41 @@ impl Handle {
         let (runtime_updates, mut updates) = mpsc::unbounded_channel();
         {
             let mut inner = locked(&self.inner);
-            let node = ClientNode::new(path, inner.client.root_identity()?);
-            inner.bridge = Some(Bridge::new(commands));
+            let Inner {
+                client,
+                bridge,
+                net_events,
+            } = &mut *inner;
+            // The node continues each contact and each invitation of the
+            // earlier runs.
+            let mut node = ClientNode::new(path, client.root_identity()?);
+            let stored = client.stored_network()?;
+            let mut contacts = BTreeMap::new();
+            for (conversation, state) in &stored.contacts {
+                let contact = node
+                    .restore_contact(state)
+                    .map_err(|_| FfiError::Integrity)?;
+                contacts.insert(*conversation, contact);
+            }
+            for state in &stored.invitations {
+                let bundle = node
+                    .restore_invitation(state)
+                    .map_err(|_| FfiError::Integrity)?;
+                net_events.push_back(NetEvent::Invitation(bundle));
+            }
+            // Each record that no relay accepted in an earlier run goes
+            // again. The runtime holds it until the circuit is ready.
+            let mut running = Bridge::new(commands, contacts);
+            client.requeue_waiting()?;
+            running.flush(client, &mut OsRng)?;
+            *bridge = Some(running);
             runtime.spawn(run_client(
                 node,
                 dial,
                 tls,
                 runtime_commands,
                 runtime_updates,
+                Box::new(HandleStore(Arc::downgrade(&self))),
             ));
         }
         // The task holds a weak reference, thus a handle that the platform
@@ -511,7 +560,8 @@ impl Handle {
         Ok(())
     }
 
-    /// Ends the network. Each contact of the run is gone.
+    /// Ends the network. Each contact stays in the store, and the next
+    /// [`Handle::connect`] continues it.
     pub fn disconnect(&self) {
         locked(&self.inner).bridge = None;
         if let Some(runtime) = locked(&self.runtime).take() {
@@ -531,6 +581,16 @@ impl Handle {
         let inner = locked(&self.inner);
         let bridge = inner.bridge.as_ref().ok_or(FfiError::Offline)?;
         Ok(bridge.accept(bundle)?)
+    }
+
+    /// The conversations of the device, one for each contact. The list
+    /// needs no network.
+    pub fn conversations(&self) -> Result<Vec<Vec<u8>>, FfiError> {
+        let found = locked(&self.inner).client.conversations()?;
+        Ok(found
+            .into_iter()
+            .map(|conversation| conversation.0.to_vec())
+            .collect())
     }
 
     /// An empty draft for one conversation.

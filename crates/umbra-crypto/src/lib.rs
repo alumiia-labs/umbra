@@ -32,6 +32,7 @@ pub mod rng;
 pub mod rsabssa;
 pub mod secret;
 pub mod sign;
+pub mod stored;
 pub mod voprf;
 pub mod vrf;
 
@@ -46,6 +47,8 @@ pub use sha3;
 /// The X25519 crate, for a caller that holds a queue or a group
 /// credential and links no primitive of its own.
 pub use x25519_dalek as x25519;
+/// The buffers of [`stored`] overwrite themselves through this crate.
+pub use zeroize;
 
 #[cfg(test)]
 pub(crate) mod test_rng;

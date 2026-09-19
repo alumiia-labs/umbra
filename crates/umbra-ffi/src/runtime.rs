@@ -10,7 +10,7 @@ use std::{
 };
 
 use tokio::sync::mpsc;
-use umbra_core::session::node::{ClientEvent, ClientNode, ContactId};
+use umbra_core::session::node::{ClientEvent, ClientNode, ContactId, StateChange};
 use umbra_crypto::rand_core::{TryCryptoRng, TryRng};
 use umbra_transport::{
     native::{self, ClientConfig},
@@ -64,9 +64,24 @@ pub enum Command {
         /// A value of the caller, which comes back in the update.
         tag: u64,
     },
-    /// The application committed each record of a contact that it took,
-    /// thus the runtime acknowledges them to the relay (`WIR-115`).
-    Committed(ContactId),
+}
+
+/// The store of the client, as the runtime sees it.
+pub trait Persist: Send {
+    /// Commits the changes of the node state and the records that one call
+    /// of the node gave, in one batch. The result is false when the store
+    /// did not take the batch, and the run then ends with no capsule of
+    /// that call on the link.
+    fn commit(&mut self, changes: Vec<StateChange>, received: &[(ContactId, Vec<u8>)]) -> bool;
+}
+
+/// A store that keeps nothing, for a run whose state ends with it.
+pub struct NoStore;
+
+impl Persist for NoStore {
+    fn commit(&mut self, _: Vec<StateChange>, _: &[(ContactId, Vec<u8>)]) -> bool {
+        true
+    }
 }
 
 /// What the runtime tells the application.
@@ -116,6 +131,49 @@ pub enum Ended {
     CircuitLost = 3,
     /// A capsule or a command gave a fault in the client node.
     NodeFault = 4,
+    /// The store did not take a batch, such as the store of a locked
+    /// client.
+    StoreFault = 5,
+}
+
+/// Commits what the last call of the node gave, and acknowledges each
+/// record after its commit (`WIR-115`). The caller writes the capsules of
+/// the node after this function only (`IMP-130`).
+fn settle(
+    node: &mut ClientNode,
+    persist: &mut dyn Persist,
+    events: &[ClientEvent],
+    rng: &mut OsRng,
+) -> Result<(), Ended> {
+    let received: Vec<(ContactId, Vec<u8>)> = events
+        .iter()
+        .filter_map(|event| match event {
+            ClientEvent::Message { contact, app } => Some((*contact, app.clone())),
+            _ => None,
+        })
+        .collect();
+    let changes = node.take_changes().map_err(|_| Ended::NodeFault)?;
+    if changes.is_empty() && received.is_empty() {
+        return Ok(());
+    }
+    if !persist.commit(changes, &received) {
+        return Err(Ended::StoreFault);
+    }
+    let mut acknowledged = Vec::new();
+    for (contact, _) in &received {
+        if acknowledged.contains(contact) {
+            continue;
+        }
+        acknowledged.push(*contact);
+        // A node with no circuit sends the ACK in its next run.
+        let _ = node.acknowledge(contact, unix_now(), rng);
+    }
+    // The cursor moved at the ACK.
+    let changes = node.take_changes().map_err(|_| Ended::NodeFault)?;
+    if !changes.is_empty() && !persist.commit(changes, &[]) {
+        return Err(Ended::StoreFault);
+    }
+    Ok(())
 }
 
 fn unix_now() -> u64 {
@@ -128,12 +186,16 @@ fn unix_now() -> u64 {
 /// closes. A command that arrives before the circuit is ready waits. The
 /// channel has no bound, because the caller is a thread of the platform
 /// that cannot wait, and the store holds each record of it already.
+///
+/// `node` holds the contacts and the invitations of the earlier runs, and
+/// `persist` takes each change of them.
 pub async fn run_client(
     mut node: ClientNode,
     guard: Dial,
     tls: Arc<ClientConfig>,
     mut commands: mpsc::UnboundedReceiver<Command>,
     updates: mpsc::UnboundedSender<Update>,
+    mut persist: Box<dyn Persist>,
 ) {
     let mut rng = OsRng;
     let mut key = [0u8; 16];
@@ -175,6 +237,9 @@ pub async fn run_client(
                 }
             },
         };
+        if let Err(ended) = settle(&mut node, persist.as_mut(), &events, &mut rng) {
+            break 'run ended;
+        }
         for event in events {
             let update = match event {
                 ClientEvent::CircuitReady => Update::Online,
@@ -206,18 +271,16 @@ pub async fn run_client(
             let now = unix_now();
             // A value of the user ends no runtime: a bad bundle and a send
             // to no contact fail that one command.
-            let done = match command {
+            match command {
                 Command::Invite => {
                     if node.invite(&mut rng).is_err() {
                         let _ = updates.send(Update::Refused);
                     }
-                    Ok(())
                 }
                 Command::Accept(bundle) => {
                     if node.accept(bundle, &mut rng).is_err() {
                         let _ = updates.send(Update::Refused);
                     }
-                    Ok(())
                 }
                 Command::Send { contact, app, tag } => {
                     match node.send(&contact, &app, now, &mut rng) {
@@ -228,12 +291,10 @@ pub async fn run_client(
                             let _ = updates.send(Update::Failed(tag));
                         }
                     }
-                    Ok(())
                 }
-                Command::Committed(contact) => node.acknowledge(&contact, now, &mut rng),
-            };
-            if done.is_err() {
-                break 'run Ended::NodeFault;
+            }
+            if let Err(ended) = settle(&mut node, persist.as_mut(), &[], &mut rng) {
+                break 'run ended;
             }
         }
     };

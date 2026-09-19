@@ -100,10 +100,11 @@ fn wait_for<T>(handle: &Handle, mut pick: impl FnMut(FfiEvent) -> Option<T>) -> 
         let Some(event) = handle.wait_event(500) else {
             continue;
         };
-        assert!(
-            !matches!(event, FfiEvent::Offline { .. }),
-            "the client went offline"
-        );
+        // A stop by the application is no fault of the network.
+        if let FfiEvent::Offline { cause } = event {
+            assert_eq!(cause, 0, "the client went offline");
+            continue;
+        }
         if let Some(found) = pick(event) {
             return found;
         }
@@ -193,9 +194,11 @@ fn two_apps_meet_and_talk_through_the_exported_surface() {
 
     let directory = std::env::temp_dir().join(format!("umbra-app-{}", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap();
-    let launch = |name: &str, key: u8| {
+    let launch = |name: &str, key: u8, is_first: bool| {
         let path = directory.join(name);
-        let _ = std::fs::remove_file(&path);
+        if is_first {
+            let _ = std::fs::remove_file(&path);
+        }
         let config = Config {
             database_path: path.to_str().unwrap().to_owned(),
             // A slow device keeps the floor cost, which keeps this test short.
@@ -204,8 +207,8 @@ fn two_apps_meet_and_talk_through_the_exported_surface() {
         let keystore = Arc::new(Keystore([key; 32])) as Arc<dyn SecureElementCallback>;
         init(config, keystore, units("correct horse")).unwrap()
     };
-    let alice = launch("alice.db", 1);
-    let bob = launch("bob.db", 2);
+    let alice = launch("alice.db", 1, true);
+    let bob = launch("bob.db", 2, true);
 
     // No network runs yet.
     assert_eq!(alice.invite(), Err(FfiError::Offline));
@@ -249,7 +252,7 @@ fn two_apps_meet_and_talk_through_the_exported_surface() {
     assert_eq!(conversation, bob_conversation);
     assert_eq!(rendered(&bob, message), "hello bob");
     // The view of Bob holds the two messages in the order of their store.
-    let shown = bob.messages(bob_conversation).unwrap();
+    let shown = bob.messages(bob_conversation.clone()).unwrap();
     assert_eq!(shown.len(), 2);
     let first = bob.msg_info(shown[0].clone()).unwrap();
     let second = bob.msg_info(shown[1].clone()).unwrap();
@@ -266,10 +269,64 @@ fn two_apps_meet_and_talk_through_the_exported_surface() {
         _ => None,
     });
 
-    // A lock ends the network, because the ratchet keys sit in RAM.
-    alice.lock();
-    assert_eq!(alice.invite(), Err(FfiError::Offline));
+    let say = |from: &Handle, conversation: &[u8], words: &str| {
+        let draft = from.new_draft(conversation.to_vec()).unwrap();
+        draft.set_text(units(words)).unwrap();
+        from.send_draft(draft).unwrap();
+    };
+
+    // Bob leaves the network. Alice writes, and the relay holds the record.
+    // The next run of Bob continues the contact from the store.
     bob.disconnect();
     assert_eq!(bob.invite(), Err(FfiError::Offline));
+    say(&alice, &alice_conversation, "while you were away");
+    assert_eq!(
+        bob.conversations().unwrap(),
+        std::slice::from_ref(&bob_conversation)
+    );
+    bob.clone().connect(network.clone()).unwrap();
+    let (conversation, message) = wait_for_message(&bob);
+    assert_eq!(conversation, bob_conversation);
+    assert_eq!(rendered(&bob, message), "while you were away");
+
+    // A lock ends the network, because a locked client holds no key in
+    // RAM. An unlock and a new run continue the contact.
+    alice.lock();
+    assert_eq!(alice.invite(), Err(FfiError::Offline));
+    alice.unlock(units("correct horse")).unwrap();
+    alice.clone().connect(network.clone()).unwrap();
+    say(&alice, &alice_conversation, "after the lock");
+    let (_, message) = wait_for_message(&bob);
+    assert_eq!(rendered(&bob, message), "after the lock");
+
+    // A record that Bob writes with no network waits in the store, and the
+    // next run sends it.
+    bob.disconnect();
+    say(&bob, &bob_conversation, "written offline");
+    bob.clone().connect(network.clone()).unwrap();
+    let (_, message) = wait_for_message(&alice);
+    assert_eq!(rendered(&alice, message), "written offline");
+
+    // The process of Alice ends. A new process opens the same file, and
+    // the contact, the history, and the ratchet are there.
+    alice.disconnect();
+    drop(alice);
+    let alice = launch("alice.db", 1, false);
+    alice.unlock(units("correct horse")).unwrap();
+    assert_eq!(
+        alice.conversations().unwrap(),
+        std::slice::from_ref(&alice_conversation)
+    );
+    assert_eq!(alice.messages(alice_conversation.clone()).unwrap().len(), 5);
+    alice.clone().connect(network.clone()).unwrap();
+    say(&alice, &alice_conversation, "a new process");
+    let (_, message) = wait_for_message(&bob);
+    assert_eq!(rendered(&bob, message), "a new process");
+    say(&bob, &bob_conversation, "and an answer");
+    let (_, message) = wait_for_message(&alice);
+    assert_eq!(rendered(&alice, message), "and an answer");
+
+    alice.disconnect();
+    bob.disconnect();
     std::fs::remove_dir_all(&directory).ok();
 }

@@ -12,7 +12,7 @@
 
 use alloc::{
     boxed::Box,
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     vec::Vec,
 };
 
@@ -23,7 +23,9 @@ use umbra_crypto::{
     rand_core::CryptoRng,
     ratchet::{braid::Ratchet, codeword::Width, dr::Role},
     secret::Secret,
+    stored::{Reader, Writer},
     x25519::StaticSecret,
+    zeroize::Zeroizing,
 };
 use umbra_onion::{
     build::{build_cell_body, read_cell_body, Pending, BUILD_BUCKET, HELLO_LEN},
@@ -138,13 +140,53 @@ enum Setup {
 }
 
 struct Half {
+    /// The salt of the pairwise identity (Part 5 §5.2).
+    salt: [u8; 16],
     identity: KeyPair,
     inbound: Inbound,
     setup: Setup,
     outbound: Option<Outbound>,
     /// The static key of the inviter, which the bundle gave the invitee.
     peer_static: [u8; 32],
+    /// The bundle of an invitation that this device issued.
+    bundle: Vec<u8>,
 }
+
+struct Contact {
+    channel: PairwiseChannel,
+    peer_static: [u8; 32],
+    salt: [u8; 16],
+}
+
+/// A change of the state that a client keeps between two runs. The runtime
+/// commits each change of one call before it writes a capsule of that call
+/// to the link, and in one batch with the records that the call gave. A
+/// record that left the device under a state that the store does not hold
+/// would let a restart seal a second record under the same key.
+pub enum StateChange {
+    /// A contact is new, or its channel moved.
+    Contact {
+        /// The contact.
+        contact: ContactId,
+        /// The stored form, which holds each key of the channel.
+        state: Zeroizing<Vec<u8>>,
+    },
+    /// An invitation waits for its flight 1.
+    Invitation {
+        /// The `RecipientId` of the queue of the invitation.
+        queue: [u8; 32],
+        /// The stored form, which holds the prekey.
+        state: Zeroizing<Vec<u8>>,
+    },
+    /// An invitation ended: a flight 1 consumed its prekey.
+    InvitationEnded {
+        /// The `RecipientId` of the queue of the invitation.
+        queue: [u8; 32],
+    },
+}
+
+/// The version byte of a stored contact and of a stored invitation.
+const STORED_VERSION: u8 = 0x01;
 
 /// One client.
 pub struct ClientNode {
@@ -157,7 +199,11 @@ pub struct ClientNode {
     waiting: BTreeMap<u64, Waiting>,
     /// The contacts whose handshake runs, by `RecipientId`.
     halves: BTreeMap<[u8; 32], Half>,
-    contacts: BTreeMap<[u8; 32], PairwiseChannel>,
+    contacts: BTreeMap<[u8; 32], Contact>,
+    /// The contacts whose channel moved since the last
+    /// [`ClientNode::take_changes`].
+    moved: BTreeSet<[u8; 32]>,
+    changes: Vec<StateChange>,
 }
 
 fn random<const N: usize, R: CryptoRng + ?Sized>(rng: &mut R) -> [u8; N] {
@@ -187,7 +233,119 @@ impl ClientNode {
             waiting: BTreeMap::new(),
             halves: BTreeMap::new(),
             contacts: BTreeMap::new(),
+            moved: BTreeSet::new(),
+            changes: Vec::new(),
         }
+    }
+
+    /// The changes of the state since the last call, for the store.
+    pub fn take_changes(&mut self) -> Result<Vec<StateChange>, Error> {
+        let mut changes = core::mem::take(&mut self.changes);
+        for id in core::mem::take(&mut self.moved) {
+            let Some(contact) = self.contacts.get(&id) else {
+                continue;
+            };
+            let mut writer = Writer::new();
+            writer.u8(STORED_VERSION);
+            writer.bytes(&contact.salt);
+            writer.bytes(&contact.peer_static);
+            writer.var(&contact.channel.export()?)?;
+            changes.push(StateChange::Contact {
+                contact: ContactId(id),
+                state: writer.finish(),
+            });
+        }
+        Ok(changes)
+    }
+
+    /// Takes a contact of an earlier run from its stored form. The node
+    /// subscribes to its queue when the circuit is ready.
+    pub fn restore_contact(&mut self, state: &[u8]) -> Result<ContactId, Error> {
+        let mut reader = Reader::new(state);
+        if reader.u8()? != STORED_VERSION {
+            return Err(Error::Malformed);
+        }
+        let salt = reader.array()?;
+        let peer_static = reader.array()?;
+        let channel = PairwiseChannel::restore(reader.var()?)?;
+        reader.end()?;
+        let id = *channel.inbound().recipient_id();
+        self.contacts.insert(
+            id,
+            Contact {
+                channel,
+                peer_static,
+                salt,
+            },
+        );
+        Ok(ContactId(id))
+    }
+
+    /// Takes an invitation of an earlier run from its stored form, and
+    /// returns its bundle.
+    pub fn restore_invitation(&mut self, state: &[u8]) -> Result<Vec<u8>, Error> {
+        let mut reader = Reader::new(state);
+        if reader.u8()? != STORED_VERSION {
+            return Err(Error::Malformed);
+        }
+        let salt = reader.array()?;
+        let bundle = reader.var()?.to_vec();
+        let inbound = Inbound::restore(&mut reader)?;
+        let inviter = Inviter::from_prekey_seed(Secret::new(reader.array()?));
+        reader.end()?;
+        self.halves.insert(
+            *inbound.recipient_id(),
+            Half {
+                salt,
+                identity: self.root.pairwise_identity(&salt),
+                inbound,
+                setup: Setup::Inviting(Box::new(inviter)),
+                outbound: None,
+                peer_static: [0; 32],
+                bundle: bundle.clone(),
+            },
+        );
+        Ok(bundle)
+    }
+
+    /// Records the stored form of an invitation that waits for flight 1.
+    fn invitation_changed(&mut self, queue: [u8; 32], half: &Half) -> Result<(), Error> {
+        let Setup::Inviting(inviter) = &half.setup else {
+            return Ok(());
+        };
+        let Some(seed) = inviter.prekey_seed()? else {
+            return Ok(());
+        };
+        let mut writer = Writer::new();
+        writer.u8(STORED_VERSION);
+        writer.bytes(&half.salt);
+        writer.var(&half.bundle)?;
+        half.inbound.export(&mut writer)?;
+        writer.bytes(seed.expose());
+        self.changes.push(StateChange::Invitation {
+            queue,
+            state: writer.finish(),
+        });
+        Ok(())
+    }
+
+    /// Subscribes to each queue of an earlier run on a new circuit. The
+    /// `ACK` of the last run can be lost with its link, thus it goes again.
+    fn subscribe_stored<R: CryptoRng + ?Sized>(&mut self, rng: &mut R) -> Result<(), Error> {
+        let session_pk = self.session_pk()?;
+        let mut commands = Vec::new();
+        let contacts = self
+            .contacts
+            .values()
+            .map(|contact| contact.channel.inbound());
+        for inbound in contacts.chain(self.halves.values().map(|half| &half.inbound)) {
+            commands.push(inbound.subscribe(&session_pk, random(rng))?);
+            commands.extend(inbound.acknowledge_again(&session_pk, random(rng))?);
+        }
+        for command in commands {
+            self.queue_command(command, Waiting::Other)?;
+        }
+        self.pump()
     }
 
     /// The capsules to write to the link, in order.
@@ -339,8 +497,11 @@ impl ClientNode {
         rng: &mut R,
     ) -> Result<u64, Error> {
         let session_pk = self.session_pk()?;
-        let channel = self.contacts.get_mut(&contact.0).ok_or(Error::NoPath)?;
-        let (_, encoded) = channel.send(app, &session_pk, random(rng), random(rng), now, rng)?;
+        let held = self.contacts.get_mut(&contact.0).ok_or(Error::NoPath)?;
+        let (_, encoded) =
+            held.channel
+                .send(app, &session_pk, random(rng), random(rng), now, rng)?;
+        self.moved.insert(contact.0);
         let user_handle = self.handle();
         self.queue_command(encoded, Waiting::UserSend(user_handle))?;
         self.pump()?;
@@ -355,9 +516,11 @@ impl ClientNode {
         rng: &mut R,
     ) -> Result<(), Error> {
         let session_pk = self.session_pk()?;
-        let channel = self.contacts.get_mut(&contact.0).ok_or(Error::NoPath)?;
+        let held = self.contacts.get_mut(&contact.0).ok_or(Error::NoPath)?;
+        let channel = &mut held.channel;
         if let Some((point, encoded)) = channel.acknowledge(&session_pk, random(rng), now)? {
             channel.acknowledged(point);
+            self.moved.insert(contact.0);
             self.queue_command(encoded, Waiting::Other)?;
             self.pump()?;
         }
@@ -435,6 +598,7 @@ impl ClientNode {
             relay_session_pk,
             Range::Queue,
         )));
+        self.subscribe_stored(rng)?;
         Ok(alloc::vec![ClientEvent::CircuitReady])
     }
 
@@ -517,14 +681,14 @@ impl ClientNode {
         let identity = self.root.pairwise_identity(&keys.salt);
 
         let mut out = Vec::new();
-        let (setup, outbound, peer_static) = match keys.purpose {
+        let (setup, outbound, peer_static, issued) = match keys.purpose {
             Purpose::Invite => {
                 let (inviter, bundle) = Inviter::issue(&identity, own_address(), rng)?;
                 out.push(ClientEvent::Invitation {
                     handle: keys.handle,
-                    bundle,
+                    bundle: bundle.clone(),
                 });
-                (Setup::Inviting(Box::new(inviter)), None, [0u8; 32])
+                (Setup::Inviting(Box::new(inviter)), None, [0u8; 32], bundle)
             }
             Purpose::Accept { bundle } => {
                 let peer_static = Bundle::parse(&bundle)?.responder_static_x25519;
@@ -542,19 +706,21 @@ impl ClientNode {
                     Setup::Accepting(Box::new(invitee)),
                     Some(outbound),
                     peer_static,
+                    Vec::new(),
                 )
             }
         };
-        self.halves.insert(
-            ids.recipient_id,
-            Half {
-                identity,
-                inbound,
-                setup,
-                outbound,
-                peer_static,
-            },
-        );
+        let half = Half {
+            salt: keys.salt,
+            identity,
+            inbound,
+            setup,
+            outbound,
+            peer_static,
+            bundle: issued,
+        };
+        self.invitation_changed(ids.recipient_id, &half)?;
+        self.halves.insert(ids.recipient_id, half);
         Ok(out)
     }
 
@@ -566,8 +732,10 @@ impl ClientNode {
         now: u64,
         rng: &mut R,
     ) -> Result<Vec<ClientEvent>, Error> {
-        if let Some(channel) = self.contacts.get_mut(&queue_id) {
-            return Ok(match channel.receive(payload, bucket, now, rng)? {
+        if let Some(held) = self.contacts.get_mut(&queue_id) {
+            // Each outcome moves the cursor of the queue.
+            self.moved.insert(queue_id);
+            return Ok(match held.channel.receive(payload, bucket, now, rng)? {
                 Received::App { bytes, .. } => alloc::vec![ClientEvent::Message {
                     contact: ContactId(queue_id),
                     app: bytes,
@@ -585,6 +753,8 @@ impl ClientNode {
             ..
         } = opened
         else {
+            // The cursor of the queue moved.
+            self.invitation_changed(queue_id, &half)?;
             self.halves.insert(queue_id, half);
             return Ok(Vec::new());
         };
@@ -602,6 +772,7 @@ impl ClientNode {
             self.queue_command(encoded, Waiting::Other)?;
         }
         if inner.first() != Some(&awaited) {
+            self.invitation_changed(queue_id, &half)?;
             self.halves.insert(queue_id, half);
             return Ok(Vec::new());
         }
@@ -616,10 +787,19 @@ impl ClientNode {
                         // nothing.
                         if inviter.awaits() == FLIGHT_1 {
                             half.setup = Setup::Inviting(inviter);
+                            self.invitation_changed(queue_id, &half)?;
                             self.halves.insert(queue_id, half);
+                        } else {
+                            self.changes
+                                .push(StateChange::InvitationEnded { queue: queue_id });
                         }
                         return Ok(Vec::new());
                     };
+                    // The prekey served, thus the stored invitation ends. A
+                    // handshake between its flight 1 and its flight 3 has
+                    // no stored form.
+                    self.changes
+                        .push(StateChange::InvitationEnded { queue: queue_id });
                     let outbound = Outbound::new(reply_to);
                     let (_, encoded) = outbound.send_record(
                         L6Kind::Handshake,
@@ -662,8 +842,13 @@ impl ClientNode {
         let ratchet = Ratchet::new(keys, role, Width::W64, now, rng)?;
         self.contacts.insert(
             queue_id,
-            PairwiseChannel::new(ratchet, outbound, half.inbound),
+            Contact {
+                channel: PairwiseChannel::new(ratchet, outbound, half.inbound),
+                peer_static,
+                salt: half.salt,
+            },
         );
+        self.moved.insert(queue_id);
         Ok(alloc::vec![ClientEvent::ContactReady {
             contact: ContactId(queue_id),
             peer_static,

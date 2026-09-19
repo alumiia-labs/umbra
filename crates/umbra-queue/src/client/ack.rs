@@ -4,6 +4,8 @@
 
 use alloc::collections::BTreeMap;
 
+use umbra_crypto::stored::{Reader, Writer};
+
 use crate::params::{ACK_HOLE_TIMEOUT, DRAIN_THRESHOLD, IN_FLIGHT_WINDOW};
 
 /// The cursor of one queue.
@@ -31,6 +33,42 @@ impl Default for AckCursor {
 }
 
 impl AckCursor {
+    /// Writes the cursor for the at-rest store. A client stores it in the
+    /// batch that commits the records it covers (`WIR-115`), thus a record
+    /// that arrives a second time after a restart is a duplicate.
+    pub fn export(&self, writer: &mut Writer) -> Result<(), umbra_crypto::Error> {
+        writer.u32(self.acked);
+        let count = u32::try_from(self.received.len());
+        writer.u32(count.map_err(|_| umbra_crypto::Error::Length)?);
+        for (seq, at) in &self.received {
+            writer.u32(*seq);
+            writer.u64(*at);
+        }
+        writer.option(self.hole_since.as_ref(), |w, since| w.u64(*since));
+        writer.flag(self.gap_shown);
+        Ok(())
+    }
+
+    /// Reads the cursor that [`AckCursor::export`] wrote.
+    pub fn restore(reader: &mut Reader<'_>) -> Result<Self, umbra_crypto::Error> {
+        let acked = reader.u32()?;
+        let count = reader.u32()?;
+        if count > IN_FLIGHT_WINDOW {
+            return Err(umbra_crypto::Error::Length);
+        }
+        let mut received = BTreeMap::new();
+        for _ in 0..count {
+            let seq = reader.u32()?;
+            received.insert(seq, reader.u64()?);
+        }
+        Ok(AckCursor {
+            acked,
+            received,
+            hole_since: reader.option(|r| r.u64())?,
+            gap_shown: reader.flag()?,
+        })
+    }
+
     /// A cursor whose last acknowledged sequence is `acked`.
     pub fn new(acked: u32) -> Self {
         AckCursor {

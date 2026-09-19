@@ -20,7 +20,7 @@ sha3 = { version = "0.11", default-features = false }
 hkdf = { version = "0.13.0", default-features = false }
 hmac = { version = "0.13.0", default-features = false }
 subtle = { version = "2", default-features = false }
-zeroize = { version = "1", default-features = false, features = ["derive"] }
+zeroize = { version = "1", default-features = false, features = ["derive", "alloc"] }
 # Trait crates that the R1 graph holds already; a direct edge names them.
 kem = { version = "0.3.0", default-features = false }
 # Register R2 AUX-4 of Part 15 §15.2.2: the memory-hard KDF of the recovery

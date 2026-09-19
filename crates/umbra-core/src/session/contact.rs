@@ -22,6 +22,7 @@ use umbra_crypto::{
     },
     kem::KeyPair,
     rand_core::CryptoRng,
+    secret::Secret,
 };
 use umbra_wire::address::{QueueAddress, LEN as QUEUE_ADDRESS_LEN};
 
@@ -86,6 +87,25 @@ impl Inviter {
             },
             encoded,
         ))
+    }
+
+    /// The seeds of the prekey, while no flight 1 consumed it. An inviter
+    /// after flight 1 has no stored form, because its prekey is erased
+    /// (`CRY-089`).
+    pub fn prekey_seed(&self) -> Result<Option<Secret<64>>, Error> {
+        match &self.prekey {
+            Some(prekey) => Ok(Some(prekey.seed()?)),
+            None => Ok(None),
+        }
+    }
+
+    /// The inviter of a stored invitation, which waits for flight 1.
+    pub fn from_prekey_seed(seed: Secret<64>) -> Self {
+        Inviter {
+            prekey: Some(OneTimePrekey::from_seed(seed)),
+            responder: None,
+            reply_to: None,
+        }
     }
 
     /// The number of the flight that this inviter waits for (`WIR-503`).

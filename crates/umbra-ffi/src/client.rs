@@ -9,10 +9,13 @@
 
 use std::collections::VecDeque;
 
-use umbra_core::store::{
-    engine::{Backend, Store},
-    record::{RowId, TableId},
-    wrap::{AutoLock, Cost, SecureElement, WrapHeader},
+use umbra_core::{
+    session::node::{ContactId, StateChange},
+    store::{
+        engine::{Backend, Store},
+        record::{RowId, TableId},
+        wrap::{AutoLock, Cost, SecureElement, WrapHeader},
+    },
 };
 use umbra_crypto::{hierarchy::RootIdentity, rand_core::CryptoRng, secret::Secret};
 use umbra_wire::app::{msg_ref, AppKind, AppMessage, Channel};
@@ -35,6 +38,21 @@ const STORED_AT: core::ops::Range<usize> = 18..26;
 /// file references of its draft, under the row identifier of its message.
 /// A lock clears the queue in RAM, and an unlock fills it again from here.
 const OUTBOX: TableId = TableId(0x07);
+/// The table of the invitations that wait for their flight 1. A row holds
+/// the `RecipientId` of the queue and then the stored form of the node,
+/// with the one-time prekey in it (Part 5 rule `CRY-089`).
+const INVITATION: TableId = TableId(0x08);
+/// The bytes of a contact row and of an invitation row before the stored
+/// form: the `RecipientId` of the queue.
+const QUEUE_ID_LEN: usize = 32;
+
+/// The state of the client node that the store holds between two runs.
+pub struct StoredNetwork {
+    /// Each contact, with its conversation and its stored form.
+    pub contacts: Vec<(ConversationId, Zeroizing<Vec<u8>>)>,
+    /// The stored form of each invitation that waits.
+    pub invitations: Vec<Zeroizing<Vec<u8>>>,
+}
 
 /// A record that waits for the send path.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -231,26 +249,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .ok_or(Error::Integrity)?;
         let seed: [u8; 32] = seed.as_slice().try_into().map_err(|_| Error::Integrity)?;
         let root = RootIdentity::new(Secret::new(seed));
-        // Each record that waited for the send path at the lock waits again.
-        for (row, waiting) in store.list(OUTBOX, None)? {
-            let Some(plain) = store.get(TableId::MESSAGE, &row)? else {
-                continue;
-            };
-            let plain = Zeroizing::new(plain);
-            self.outgoing.push_back(Outgoing {
-                message: MsgRef(row),
-                conversation: conversation_of(&plain)?,
-                app: plain
-                    .get(MESSAGE_PREFIX..)
-                    .ok_or(Error::Integrity)?
-                    .to_vec(),
-                attachments: attachments_of(&waiting)?,
-            });
-        }
         self.state = State::Unlocked(Box::new(Open {
             store,
             device_set_key: root.device_set_key(),
         }));
+        // Each record that waited for the send path at the lock waits again.
+        self.requeue_waiting()?;
         self.auto_lock.touch(now);
         Ok(())
     }
@@ -291,6 +295,153 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             State::Locked(_) => Err(Error::Locked),
             State::Closed => Err(Error::Closed),
         }
+    }
+
+    /// Commits what one call of the client node gave, in one batch
+    /// (`IMP-130`): each change of the node state, and each record that the
+    /// node opened. The runtime acknowledges the records to the relay after
+    /// this call (`WIR-115`), and it writes no capsule of the call before
+    /// it. A record that the store holds gives no second event.
+    pub fn commit_network<R: CryptoRng + ?Sized>(
+        &mut self,
+        changes: &[StateChange],
+        received: &[(ContactId, Vec<u8>)],
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let open = self.open_mut()?;
+        // The batch borrows the store, thus each row identifier and each
+        // duplicate check comes first.
+        enum Planned {
+            Put(TableId, RowId, Option<RowId>, Zeroizing<Vec<u8>>),
+            Delete(TableId, RowId),
+        }
+        let mut planned = Vec::new();
+        for change in changes {
+            planned.push(match change {
+                StateChange::Contact { contact, state } => Planned::Put(
+                    TableId::CONTACT,
+                    open.store.row_id(TableId::CONTACT, &contact.0),
+                    None,
+                    Zeroizing::new([contact.0.as_slice(), state].concat()),
+                ),
+                StateChange::Invitation { queue, state } => Planned::Put(
+                    INVITATION,
+                    open.store.row_id(INVITATION, queue),
+                    None,
+                    Zeroizing::new([queue.as_slice(), state].concat()),
+                ),
+                StateChange::InvitationEnded { queue } => {
+                    Planned::Delete(INVITATION, open.store.row_id(INVITATION, queue))
+                }
+            });
+        }
+        let mut events = Vec::new();
+        for (contact, app) in received {
+            let parsed = AppMessage::parse(app, Channel::Pairwise)?;
+            let conversation = ConversationId(open.store.row_id(TableId::CONTACT, &contact.0));
+            let reference = msg_ref(&open.device_set_key, &parsed.msg_id);
+            let natural = [conversation.0.as_slice(), &reference].concat();
+            let row = open.store.row_id(TableId::MESSAGE, &natural);
+            let message = MsgRef(row);
+            let in_batch = events
+                .iter()
+                .any(|event| matches!(event, Event::Message { message: m, .. } if *m == message));
+            if in_batch || open.store.get(TableId::MESSAGE, &row)?.is_some() {
+                continue;
+            }
+            planned.push(Planned::Put(
+                TableId::MESSAGE,
+                row,
+                Some(conversation.0),
+                stored_message(INCOMING, Delivery::Delivered, conversation, now_ms, app),
+            ));
+            events.push(Event::Message {
+                conversation,
+                message,
+            });
+        }
+        let mut batch = open.store.begin();
+        for write in &planned {
+            match write {
+                Planned::Put(table, row, owner, plain) => {
+                    batch.put(*table, *row, *owner, plain, rng)?;
+                }
+                Planned::Delete(table, row) => batch.delete(*table, *row),
+            }
+        }
+        batch.commit()?;
+        self.events.extend(events);
+        Ok(())
+    }
+
+    /// The state of the client node from the earlier runs.
+    pub fn stored_network(&self) -> Result<StoredNetwork, Error> {
+        let store = &self.open_ref()?.store;
+        let state_of = |plain: Vec<u8>| -> Result<Zeroizing<Vec<u8>>, Error> {
+            let plain = Zeroizing::new(plain);
+            let state = plain.get(QUEUE_ID_LEN..).ok_or(Error::Integrity)?;
+            Ok(Zeroizing::new(state.to_vec()))
+        };
+        let mut contacts = Vec::new();
+        for (row, plain) in store.list(TableId::CONTACT, None)? {
+            contacts.push((ConversationId(row), state_of(plain)?));
+        }
+        let mut invitations = Vec::new();
+        for (_, plain) in store.list(INVITATION, None)? {
+            invitations.push(state_of(plain)?);
+        }
+        Ok(StoredNetwork {
+            contacts,
+            invitations,
+        })
+    }
+
+    /// The conversations of the device, one for each contact. The list
+    /// needs no network.
+    pub fn conversations(&self) -> Result<Vec<ConversationId>, Error> {
+        let store = &self.open_ref()?.store;
+        let rows = store.list(TableId::CONTACT, None)?;
+        Ok(rows
+            .into_iter()
+            .map(|(row, plain)| {
+                drop(Zeroizing::new(plain));
+                ConversationId(row)
+            })
+            .collect())
+    }
+
+    /// Puts each record that waits in the store back into the send queue.
+    /// A run of the network that ended took records that no relay
+    /// accepted, and the next run sends them again under their `msg_id`.
+    pub fn requeue_waiting(&mut self) -> Result<(), Error> {
+        self.outgoing.clear();
+        let store = &self.open_ref()?.store;
+        let mut waiting_records = Vec::new();
+        for (row, waiting) in store.list(OUTBOX, None)? {
+            let Some(plain) = store.get(TableId::MESSAGE, &row)? else {
+                continue;
+            };
+            let plain = Zeroizing::new(plain);
+            let info = info_of(&plain)?;
+            waiting_records.push((
+                info.stored_at_ms,
+                Outgoing {
+                    message: MsgRef(row),
+                    conversation: conversation_of(&plain)?,
+                    app: plain
+                        .get(MESSAGE_PREFIX..)
+                        .ok_or(Error::Integrity)?
+                        .to_vec(),
+                    attachments: attachments_of(&waiting)?,
+                },
+            ));
+        }
+        // The order of the store is the order of a keyed hash.
+        waiting_records.sort_by_key(|(stored_at, _)| *stored_at);
+        self.outgoing
+            .extend(waiting_records.into_iter().map(|(_, record)| record));
+        Ok(())
     }
 
     /// The root identity of the device, for the network runtime.
@@ -520,7 +671,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// [`Event::IntegrityFault`].
     pub fn audit(&mut self) -> Result<(), Error> {
         let open = self.open_ref()?;
-        let tables = [TableId::MESSAGE, TableId::LOCAL_IDENTITY, OUTBOX];
+        let tables = [
+            TableId::MESSAGE,
+            TableId::LOCAL_IDENTITY,
+            TableId::CONTACT,
+            OUTBOX,
+            INVITATION,
+        ];
         if tables.iter().any(|table| open.store.audit(*table).is_err()) {
             self.events.push_back(Event::IntegrityFault);
             return Err(Error::Integrity);

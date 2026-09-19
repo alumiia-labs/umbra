@@ -26,7 +26,7 @@ use umbra_crypto::{
     secret::Secret,
     x25519::{PublicKey as XPublic, StaticSecret},
 };
-use umbra_ffi::runtime::{run_client, Command, Update};
+use umbra_ffi::runtime::{run_client, Command, NoStore, Update};
 use umbra_relay::{
     node::{Config, RelayNode},
     server::{run_relay, tls_acceptor},
@@ -172,6 +172,7 @@ async fn two_clients_meet_and_talk_over_real_sockets() {
             client_tls.clone(),
             runtime_commands,
             runtime_updates,
+            Box::new(NoStore),
         ));
         clients.push((commands, updates));
     }
@@ -205,7 +206,6 @@ async fn two_clients_meet_and_talk_over_real_sockets() {
         (update == Update::Sent(71)).then_some(())
     })
     .await;
-    alice.send(Command::Committed(alice_contact)).unwrap();
 
     // And back.
     let send = Command::Send {

@@ -15,7 +15,9 @@ use umbra_crypto::{
     rand_core::CryptoRng,
     ratchet::braid::Ratchet,
     secret::Secret,
+    stored::{Reader, Writer},
     x25519::{PublicKey as XPublic, StaticSecret},
+    zeroize::Zeroizing,
 };
 use umbra_queue::client::ack::{AckCursor, AckPoint};
 use umbra_wire::{
@@ -90,6 +92,22 @@ pub struct Outbound {
 }
 
 impl Outbound {
+    fn export(&self, writer: &mut Writer) {
+        writer.bytes(&self.sender_id);
+        writer.bytes(self.auth_secret.as_bytes());
+        self.queue_key.export(writer);
+        writer.bytes(&self.relay_id);
+    }
+
+    fn restore(reader: &mut Reader<'_>) -> Result<Self, Error> {
+        Ok(Outbound {
+            sender_id: reader.array()?,
+            auth_secret: StaticSecret::from(reader.array::<32>()?),
+            queue_key: QueueKey::restore(reader)?,
+            relay_id: reader.array()?,
+        })
+    }
+
     /// The writer side of a `QueueAddress` that the peer gave.
     pub fn new(address: &QueueAddress) -> Self {
         Outbound {
@@ -174,6 +192,50 @@ pub struct Inbound {
 }
 
 impl Inbound {
+    /// Writes the queue end for the at-rest store.
+    pub fn export(&self, writer: &mut Writer) -> Result<(), Error> {
+        writer.bytes(&self.recipient_id);
+        writer.bytes(&self.sender_id);
+        writer.bytes(self.auth_secret.as_bytes());
+        self.queue_key.export(writer);
+        Ok(self.cursor.export(writer)?)
+    }
+
+    /// Reads the queue end that [`Inbound::export`] wrote.
+    pub fn restore(reader: &mut Reader<'_>) -> Result<Self, Error> {
+        Ok(Inbound {
+            recipient_id: reader.array()?,
+            sender_id: reader.array()?,
+            auth_secret: StaticSecret::from(reader.array::<32>()?),
+            queue_key: QueueKey::restore(reader)?,
+            cursor: AckCursor::restore(reader)?,
+        })
+    }
+
+    /// The `ACK` at the point that the device acknowledged last, or `None`
+    /// before the first one. A device sends it after a restart, because the
+    /// `ACK` of the last run can be lost with its link, and the relay
+    /// would deliver those records at each later `SUB`.
+    pub fn acknowledge_again(
+        &self,
+        relay_session_pk: &[u8; 32],
+        corr_id: [u8; 16],
+    ) -> Result<Option<Vec<u8>>, Error> {
+        let acked = self.cursor.acked();
+        if acked == 0 {
+            return Ok(None);
+        }
+        signed(
+            Cmd::Ack,
+            self.recipient_id,
+            corr_id,
+            &acked.to_be_bytes(),
+            &self.auth_secret,
+            relay_session_pk,
+        )
+        .map(Some)
+    }
+
     /// The reader side of a queue: the two identifiers of the `IDS`, the
     /// private half of `QR_auth`, the queue secret `QE`, and the last
     /// sequence number that the device acknowledged.
@@ -292,7 +354,40 @@ pub struct PairwiseChannel {
     inbound: Inbound,
 }
 
+/// The version byte of a stored channel.
+const STORED_VERSION: u8 = 0x01;
+
 impl PairwiseChannel {
+    /// Writes the channel for the at-rest store: the two queue ends and the
+    /// ratchet. A client stores it before a record of
+    /// [`PairwiseChannel::send`] leaves the device, and in the batch that
+    /// commits a record of [`PairwiseChannel::receive`].
+    pub fn export(&self) -> Result<Zeroizing<Vec<u8>>, Error> {
+        let mut writer = Writer::new();
+        writer.u8(STORED_VERSION);
+        self.outbound.export(&mut writer);
+        self.inbound.export(&mut writer)?;
+        writer.var(&self.ratchet.export()?)?;
+        Ok(writer.finish())
+    }
+
+    /// Reads the channel that [`PairwiseChannel::export`] wrote.
+    pub fn restore(bytes: &[u8]) -> Result<Self, Error> {
+        let mut reader = Reader::new(bytes);
+        if reader.u8()? != STORED_VERSION {
+            return Err(Error::Malformed);
+        }
+        let outbound = Outbound::restore(&mut reader)?;
+        let inbound = Inbound::restore(&mut reader)?;
+        let ratchet = Ratchet::restore(reader.var()?)?;
+        reader.end()?;
+        Ok(PairwiseChannel {
+            ratchet,
+            outbound,
+            inbound,
+        })
+    }
+
     /// A channel over a ratchet that the handshake of Part 5 §5.4 made.
     pub fn new(ratchet: Ratchet, outbound: Outbound, inbound: Inbound) -> Self {
         PairwiseChannel {

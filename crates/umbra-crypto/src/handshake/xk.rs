@@ -70,6 +70,13 @@ impl OneTimePrekey {
         }
     }
 
+    /// The seeds `d || z`, for the at-rest store of an invitation that no
+    /// party consumed yet.
+    pub fn seed(&self) -> Result<Secret<64>, Error> {
+        let seed = self.dk.to_seed().ok_or(Error::Key)?;
+        Ok(Secret::new(seed.into()))
+    }
+
     /// The encapsulation key `s1`, as the invitation carries it.
     pub fn encapsulation_key(&self) -> &[u8; EK_LEN] {
         &self.ek

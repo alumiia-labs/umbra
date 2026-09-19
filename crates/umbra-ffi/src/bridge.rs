@@ -1,8 +1,9 @@
 //! The bridge between the client of the device and the network runtime. It
-//! gives each outgoing record of the client to the runtime, and it commits
-//! each received record to the store before the runtime acknowledges it to
-//! the relay (`WIR-115`). It holds no socket and no task, thus a test drives
-//! it with plain values.
+//! gives each outgoing record of the client to the runtime, and it turns
+//! each update of the runtime into a delivery state or an event. The store
+//! takes the received records through [`crate::runtime::Persist`], in one
+//! batch with the ratchet state that opened them. The bridge holds no
+//! socket and no task, thus a test drives it with plain values.
 
 use std::collections::BTreeMap;
 
@@ -25,8 +26,7 @@ use crate::{
 pub enum NetEvent {
     /// The circuit is ready.
     Online,
-    /// The connection or the circuit ended. Each contact of this session is
-    /// gone, because the ratchet state sits in RAM only.
+    /// The run of the network ended. Each contact stays in the store.
     Offline(Ended),
     /// The bundle of an invitation, which the user gives out of band.
     Invitation(Vec<u8>),
@@ -46,11 +46,15 @@ pub struct Bridge {
 }
 
 impl Bridge {
-    /// A bridge over the command channel of one runtime.
-    pub fn new(commands: UnboundedSender<Command>) -> Self {
+    /// A bridge over the command channel of one runtime. `contacts` holds
+    /// each contact of the earlier runs.
+    pub fn new(
+        commands: UnboundedSender<Command>,
+        contacts: BTreeMap<ConversationId, ContactId>,
+    ) -> Self {
         Bridge {
             commands,
-            contacts: BTreeMap::new(),
+            contacts,
             sent: BTreeMap::new(),
             next_tag: 0,
         }
@@ -105,7 +109,6 @@ impl Bridge {
         &mut self,
         client: &mut Client<B, E>,
         update: Update,
-        now_ms: u64,
         rng: &mut R,
     ) -> Result<Option<NetEvent>, Error> {
         Ok(match update {
@@ -118,13 +121,8 @@ impl Bridge {
                 self.contacts.insert(conversation, contact);
                 Some(NetEvent::Contact(conversation))
             }
-            Update::Message { contact, app } => {
-                let conversation = client.conversation_for(&contact.0)?;
-                client.receive(conversation, &app, now_ms, rng)?;
-                // The store holds the record, thus the relay can drop it.
-                self.command(Command::Committed(contact))?;
-                None
-            }
+            // The store took the record in the batch of its ratchet state.
+            Update::Message { .. } => None,
             Update::Sent(tag) => {
                 if let Some(message) = self.sent.remove(&tag) {
                     client.set_delivery(&message, Delivery::Accepted, rng)?;

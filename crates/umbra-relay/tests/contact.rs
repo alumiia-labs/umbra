@@ -10,9 +10,9 @@
     missing_docs
 )]
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
-use umbra_core::session::node::{ClientEvent, ClientNode, ContactId};
+use umbra_core::session::node::{ClientEvent, ClientNode, ContactId, StateChange};
 use umbra_crypto::{
     handshake::nk::RelayStatic,
     hierarchy::RootIdentity,
@@ -58,10 +58,20 @@ enum Peer {
     Relay(usize, LinkId),
 }
 
+/// What one client holds between two runs, as the at-rest store does.
+#[derive(Default)]
+struct Stored {
+    contacts: BTreeMap<ContactId, Vec<u8>>,
+    invitations: BTreeMap<[u8; 32], Vec<u8>>,
+}
+
 struct Network {
     relays: Vec<RelayNode>,
     peers: Vec<Vec<(LinkId, Peer)>>,
     clients: Vec<ClientNode>,
+    /// The link of each client at the guard. A restart takes a new one.
+    links: Vec<LinkId>,
+    stored: Vec<Stored>,
     inboxes: Vec<VecDeque<Vec<u8>>>,
     events: Vec<Vec<ClientEvent>>,
     rng: Rng,
@@ -100,6 +110,8 @@ impl Network {
             relays,
             peers: vec![Vec::new(), Vec::new(), Vec::new()],
             clients,
+            links: vec![1, 2],
+            stored: vec![Stored::default(), Stored::default()],
             inboxes: vec![VecDeque::new(), VecDeque::new()],
             events: vec![Vec::new(), Vec::new()],
             rng: Rng(7),
@@ -114,7 +126,7 @@ impl Network {
             network.route(from, outputs);
         }
         for client in 0..2usize {
-            network.peers[0].push((client as LinkId + 1, Peer::Client(client)));
+            network.peers[0].push((network.links[client], Peer::Client(client)));
             network.clients[client]
                 .connected(&mut Rng(100 + client as u64))
                 .unwrap();
@@ -125,10 +137,16 @@ impl Network {
     fn route(&mut self, relay: usize, outputs: Vec<Output>) {
         let mut work: VecDeque<(usize, Output)> = outputs.into_iter().map(|o| (relay, o)).collect();
         while let Some((at, output)) = work.pop_front() {
-            let Output::Send { link, capsule } = output else {
-                panic!("an unexpected output");
+            let (link, capsule) = match output {
+                Output::Send { link, capsule } => (link, capsule),
+                // The link of a client that stopped.
+                Output::Close { .. } => continue,
+                other => panic!("an unexpected output: {other:?}"),
             };
-            let peer = self.peers[at].iter().find(|(l, _)| *l == link).unwrap().1;
+            let Some(peer) = self.peers[at].iter().find(|(l, _)| *l == link) else {
+                continue;
+            };
+            let peer = peer.1;
             match peer {
                 Peer::Client(client) => self.inboxes[client].push_back(capsule),
                 Peer::Relay(next, next_link) => {
@@ -145,9 +163,11 @@ impl Network {
     fn settle(&mut self) {
         for _ in 0..12 {
             for client in 0..self.clients.len() {
+                // The store takes each change before a capsule leaves.
+                self.commit(client);
                 for capsule in self.clients[client].take_capsules() {
                     let outputs = self.relays[0].on_capsule(
-                        client as LinkId + 1,
+                        self.links[client],
                         &capsule,
                         self.now,
                         &mut self.rng,
@@ -172,6 +192,49 @@ impl Network {
         }
     }
 
+    fn commit(&mut self, client: usize) {
+        for change in self.clients[client].take_changes().unwrap() {
+            let stored = &mut self.stored[client];
+            match change {
+                StateChange::Contact { contact, state } => {
+                    stored.contacts.insert(contact, state.to_vec());
+                }
+                StateChange::Invitation { queue, state } => {
+                    stored.invitations.insert(queue, state.to_vec());
+                }
+                StateChange::InvitationEnded { queue } => {
+                    stored.invitations.remove(&queue);
+                }
+            }
+        }
+    }
+
+    /// Ends the run of a client and starts a new one from its store: the
+    /// link closes, the node drops, and a new node takes the stored state.
+    fn restart(&mut self, client: usize, seed: u8) {
+        self.commit(client);
+        let closed = self.relays[0].link_closed(self.links[client], self.now);
+        self.route(0, closed);
+        let old_link = self.links[client];
+        self.peers[0].retain(|(link, _)| *link != old_link);
+        self.inboxes[client].clear();
+
+        let mut node = ClientNode::new(
+            [relay_static(1).0, relay_static(2).0, relay_static(3).0],
+            RootIdentity::new(Secret::new([seed; 32])),
+        );
+        for state in self.stored[client].contacts.values() {
+            node.restore_contact(state).unwrap();
+        }
+        for state in self.stored[client].invitations.values() {
+            node.restore_invitation(state).unwrap();
+        }
+        node.connected(&mut Rng(300 + u64::from(seed))).unwrap();
+        self.clients[client] = node;
+        self.links[client] = old_link + 100;
+        self.peers[0].push((self.links[client], Peer::Client(client)));
+    }
+
     /// Connects one more client to the guard, and returns its index.
     fn add_client(&mut self, seed: u8) -> usize {
         let index = self.clients.len();
@@ -181,6 +244,8 @@ impl Network {
         );
         client.connected(&mut Rng(200 + u64::from(seed))).unwrap();
         self.clients.push(client);
+        self.links.push(index as LinkId + 1);
+        self.stored.push(Stored::default());
         self.inboxes.push(VecDeque::new());
         self.events.push(Vec::new());
         self.peers[0].push((index as LinkId + 1, Peer::Client(index)));
@@ -343,4 +408,119 @@ fn a_second_holder_of_the_bundle_ends_no_handshake_in_progress() {
         "one holder and no more gets the contact"
     );
     assert_eq!(network.clients[ALICE].contacts().count(), 1);
+}
+
+fn messages_of(events: Vec<ClientEvent>) -> Vec<Vec<u8>> {
+    events
+        .into_iter()
+        .filter_map(|event| match event {
+            ClientEvent::Message { app, .. } => Some(
+                AppMessage::parse(&app, Channel::Pairwise)
+                    .unwrap()
+                    .body
+                    .to_vec(),
+            ),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_client_continues_each_contact_after_a_restart() {
+    const ALICE: usize = 0;
+    const BOB: usize = 1;
+    let mut network = Network::new();
+    network.settle();
+    network.clients[ALICE].invite(&mut Rng(1)).unwrap();
+    network.settle();
+    let events = network.take_events(ALICE);
+    let Some(ClientEvent::Invitation { bundle, .. }) = events.last() else {
+        panic!("{events:?}");
+    };
+    network.clients[BOB]
+        .accept(bundle.clone(), &mut Rng(2))
+        .unwrap();
+    network.settle();
+    let (alice_contact, _) = contact_of(&network.take_events(ALICE));
+    let (bob_contact, _) = contact_of(&network.take_events(BOB));
+    // The handshake ended the stored invitation, and the contact took its
+    // place.
+    assert!(network.stored[ALICE].invitations.is_empty());
+    assert_eq!(network.stored[ALICE].contacts.len(), 1);
+
+    let now = network.now;
+    network.clients[BOB]
+        .send(&bob_contact, &text(1, "before"), now, &mut Rng(3))
+        .unwrap();
+    network.settle();
+    assert_eq!(messages_of(network.take_events(ALICE)), [b"before"]);
+    network.clients[ALICE]
+        .acknowledge(&alice_contact, network.now, &mut Rng(4))
+        .unwrap();
+    network.settle();
+
+    // Alice stops. Bob writes two records, and the relay holds them.
+    network.restart(ALICE, 0x40);
+    let now = network.now;
+    for (n, words) in ["while away", "and again"].into_iter().enumerate() {
+        network.clients[BOB]
+            .send(
+                &bob_contact,
+                &text(10 + n as u8, words),
+                now,
+                &mut Rng(5 + n as u64),
+            )
+            .unwrap();
+    }
+    network.settle();
+    let events = network.take_events(ALICE);
+    assert!(events.contains(&ClientEvent::CircuitReady));
+    assert_eq!(network.clients[ALICE].contacts().count(), 1);
+    assert_eq!(
+        messages_of(events),
+        [b"while away".to_vec(), b"and again".to_vec()]
+    );
+
+    // The store holds the two records, but no ACK left. After a second
+    // restart the relay delivers them again, and the cursor drops them.
+    network.restart(ALICE, 0x40);
+    network.settle();
+    assert_eq!(
+        messages_of(network.take_events(ALICE)),
+        Vec::<Vec<u8>>::new()
+    );
+
+    // And Alice writes under the ratchet of the stored state.
+    let now = network.now;
+    network.clients[ALICE]
+        .send(&alice_contact, &text(20, "back again"), now, &mut Rng(9))
+        .unwrap();
+    network.settle();
+    assert_eq!(messages_of(network.take_events(BOB)), [b"back again"]);
+}
+
+#[test]
+fn an_invitation_waits_across_a_restart() {
+    const ALICE: usize = 0;
+    const BOB: usize = 1;
+    let mut network = Network::new();
+    network.settle();
+    network.clients[ALICE].invite(&mut Rng(1)).unwrap();
+    network.settle();
+    let events = network.take_events(ALICE);
+    let Some(ClientEvent::Invitation { bundle, .. }) = events.last() else {
+        panic!("{events:?}");
+    };
+    assert_eq!(network.stored[ALICE].invitations.len(), 1);
+
+    network.restart(ALICE, 0x40);
+    network.settle();
+    network.take_events(ALICE);
+    network.clients[BOB]
+        .accept(bundle.clone(), &mut Rng(2))
+        .unwrap();
+    network.settle();
+    contact_of(&network.take_events(ALICE));
+    contact_of(&network.take_events(BOB));
+    assert!(network.stored[ALICE].invitations.is_empty());
 }

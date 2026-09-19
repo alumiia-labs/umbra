@@ -27,6 +27,16 @@ impl QueueKey {
         Self(key)
     }
 
+    /// Writes the key for the at-rest store.
+    pub fn export(&self, writer: &mut crate::stored::Writer) {
+        writer.bytes(self.0.expose());
+    }
+
+    /// Reads the key that [`QueueKey::export`] wrote.
+    pub fn restore(reader: &mut crate::stored::Reader<'_>) -> Result<Self, Error> {
+        Ok(Self(Secret::new(reader.array()?)))
+    }
+
     /// Seals `buf` in place with `version || SenderId` bound (`WIR-022`).
     pub fn seal(
         &self,

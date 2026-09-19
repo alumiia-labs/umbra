@@ -24,15 +24,23 @@
 //! rebuilt. A party starts the next epoch at the first chain start after its
 //! epoch is complete and a limit of §5.5.3 has occurred (`CRY-133`).
 
+use alloc::vec::Vec;
+
 use kem::{Decapsulate, Encapsulate};
 use ml_kem::{array::Array, DecapsulationKey, EncapsulationKey, KeyExport, MlKem768, Seed};
 use rand_core::CryptoRng;
+use zeroize::Zeroizing;
 
 use super::{
     codeword::{Collector, Kind, Material, Width},
     dr::{Header, Received, Role, Session, StepHooks},
 };
-use crate::{handshake::xk::SessionKeys, secret::Secret, Error};
+use crate::{
+    handshake::xk::SessionKeys,
+    secret::Secret,
+    stored::{Reader, Writer},
+    Error,
+};
 
 /// `N`, the records after which a sender starts a new epoch.
 pub const EPOCH_RECORDS: u32 = 100;
@@ -278,7 +286,107 @@ impl<R: CryptoRng + ?Sized> StepHooks for Hooks<'_, R> {
     }
 }
 
+/// The version byte of a stored ratchet.
+const STORED_VERSION: u8 = 0x01;
+
+impl Braid {
+    fn export(&self, writer: &mut Writer) -> Result<(), Error> {
+        writer.flag(self.role == Role::Initiator);
+        writer.u8(self.width.to_byte());
+        writer.u32(self.epoch);
+        // A key of this code comes from a seed, thus the seed restores it.
+        let seed = match &self.own_dk {
+            Some(dk) => Some(dk.to_seed().ok_or(Error::Key)?),
+            None => None,
+        };
+        writer.option(seed.as_ref(), |w, seed| w.bytes(seed));
+        writer.option(self.material.as_ref(), |w, material| w.bytes(&material.0));
+        writer.u32(u32::try_from(self.next_chunk).map_err(|_| Error::Length)?);
+        writer.u32(self.records_in_epoch);
+        writer.u64(self.epoch_started_at);
+        writer.flag(self.complete);
+        writer.option(self.own_secret.as_ref(), |w, s| w.bytes(s.expose()));
+        writer.u32(self.peer_epoch);
+        writer.flag(self.collector.is_some());
+        if let Some(collector) = &self.collector {
+            collector.export(writer)?;
+        }
+        writer.option(self.peer_ek.as_ref(), |w, (epoch, ek)| {
+            w.u32(*epoch);
+            w.bytes(ek);
+        });
+        writer.option(self.peer_secret.as_ref(), |w, (epoch, secret)| {
+            w.u32(*epoch);
+            w.bytes(secret.expose());
+        });
+        Ok(())
+    }
+
+    fn restore(reader: &mut Reader<'_>) -> Result<Self, Error> {
+        let role = if reader.flag()? {
+            Role::Initiator
+        } else {
+            Role::Responder
+        };
+        let width = Width::from_byte(reader.u8()?)?;
+        let epoch = reader.u32()?;
+        let own_dk = reader
+            .option(|r| r.array::<64>())?
+            .map(|seed| DecapsulationKey::<MlKem768>::from_seed(Seed::from(seed)));
+        let material = reader.option(|r| Ok(Material(r.array()?)))?;
+        let next_chunk = usize::try_from(reader.u32()?).map_err(|_| Error::Length)?;
+        let records_in_epoch = reader.u32()?;
+        let epoch_started_at = reader.u64()?;
+        let complete = reader.flag()?;
+        let own_secret = reader.option(|r| Ok(Secret::new(r.array()?)))?;
+        let peer_epoch = reader.u32()?;
+        let collector = reader.option(Collector::restore)?;
+        let peer_ek = reader.option(|r| Ok((r.u32()?, r.array()?)))?;
+        let peer_secret = reader.option(|r| Ok((r.u32()?, Secret::new(r.array()?))))?;
+        Ok(Braid {
+            role,
+            width,
+            epoch,
+            own_dk,
+            material,
+            next_chunk,
+            records_in_epoch,
+            epoch_started_at,
+            complete,
+            own_secret,
+            peer_epoch,
+            collector,
+            peer_ek,
+            peer_secret,
+        })
+    }
+}
+
 impl Ratchet {
+    /// Writes the state of both ratchets for the at-rest store of Part 15
+    /// §15.6.4. The bytes hold each key of the session. A client stores
+    /// them before a record of [`Ratchet::send`] leaves the device, because
+    /// an earlier state would seal a second record under the same key.
+    pub fn export(&self) -> Result<Zeroizing<Vec<u8>>, Error> {
+        let mut writer = Writer::new();
+        writer.u8(STORED_VERSION);
+        self.session.export(&mut writer)?;
+        self.braid.export(&mut writer)?;
+        Ok(writer.finish())
+    }
+
+    /// Reads the state that [`Ratchet::export`] wrote.
+    pub fn restore(bytes: &[u8]) -> Result<Self, Error> {
+        let mut reader = Reader::new(bytes);
+        if reader.u8()? != STORED_VERSION {
+            return Err(Error::Length);
+        }
+        let session = Session::restore(&mut reader)?;
+        let braid = Braid::restore(&mut reader)?;
+        reader.end()?;
+        Ok(Self { session, braid })
+    }
+
     /// Starts both ratchets from a completed handshake.
     pub fn new<R: CryptoRng + ?Sized>(
         keys: SessionKeys,
@@ -471,6 +579,56 @@ mod tests {
                 *now += 1;
             }
         }
+    }
+
+    fn stored_and_read_again(ratchet: &Ratchet) -> Ratchet {
+        let bytes = ratchet.export().unwrap();
+        let again = Ratchet::restore(&bytes).unwrap();
+        assert_eq!(*again.export().unwrap(), *bytes);
+        again
+    }
+
+    #[test]
+    fn a_stored_ratchet_continues_the_session_across_epochs() {
+        let (mut a, mut b, mut rng) = pair(b"stored", Width::W64);
+        let mut now = 0u64;
+        // Each party stops and starts again between the rounds, in each
+        // state of the braid: before an epoch, inside a codeword, and
+        // after several mixes.
+        for _ in 0..9 {
+            converse(&mut a, &mut b, &mut rng, 1, 23, &mut now);
+            a = stored_and_read_again(&a);
+            b = stored_and_read_again(&b);
+        }
+        assert!(a.epoch() >= 2, "initiator epoch {}", a.epoch());
+        assert!(a.mixed() >= 1);
+        assert_eq!(a.mixed(), b.mixed());
+    }
+
+    #[test]
+    fn a_stored_ratchet_keeps_its_skipped_keys() {
+        let (mut a, mut b, mut rng) = pair(b"skipped", Width::W64);
+        let late = send(&mut a, &mut rng, b"late", 0);
+        let first = send(&mut a, &mut rng, b"first", 1);
+        assert_eq!(recv(&mut b, &mut rng, &first, 1).unwrap(), b"first");
+        let mut b = stored_and_read_again(&b);
+        assert_eq!(recv(&mut b, &mut rng, &late, 2).unwrap(), b"late");
+        // The key served one record, in the stored form too.
+        let mut b = stored_and_read_again(&b);
+        assert!(recv(&mut b, &mut rng, &late, 3).is_err());
+    }
+
+    #[test]
+    fn a_stored_ratchet_with_a_fault_does_not_restore() {
+        let (a, _, _) = pair(b"fault", Width::W64);
+        let bytes = a.export().unwrap();
+        assert!(Ratchet::restore(&bytes[..bytes.len() - 1]).is_err());
+        let mut long = bytes.to_vec();
+        long.push(0);
+        assert!(Ratchet::restore(&long).is_err());
+        let mut version = bytes.to_vec();
+        version[0] = 0x02;
+        assert!(Ratchet::restore(&version).is_err());
     }
 
     #[test]

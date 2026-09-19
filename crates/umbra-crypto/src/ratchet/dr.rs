@@ -29,7 +29,13 @@ use sha3::{Digest, Sha3_256};
 use x25519_dalek::{PublicKey as XPublic, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::{handshake::xk::SessionKeys, labels, secret::Secret, Error};
+use crate::{
+    handshake::xk::SessionKeys,
+    labels,
+    secret::Secret,
+    stored::{Reader, Writer},
+    Error,
+};
 
 /// `MAX_SKIP`, the skipped keys one chain may leave.
 pub const MAX_SKIP: u32 = 1000;
@@ -244,7 +250,94 @@ fn open(
         .map_err(|_| Error::Ratchet)
 }
 
+fn write_secret(writer: &mut Writer, secret: &Secret<32>) {
+    writer.bytes(secret.expose());
+}
+
+fn read_secret(reader: &mut Reader<'_>) -> Result<Secret<32>, Error> {
+    Ok(Secret::new(reader.array()?))
+}
+
 impl Session {
+    /// Writes the state of the session for the at-rest store. The bytes hold
+    /// each key of the session, thus they go into a sealed record only.
+    pub(crate) fn export(&self, writer: &mut Writer) -> Result<(), Error> {
+        write_secret(writer, &self.rk);
+        writer.bytes(self.dh_s.as_bytes());
+        writer.option(self.dh_r.as_ref(), |w, key| w.bytes(key));
+        writer.option(self.ck_s.as_ref(), write_secret);
+        writer.option(self.ck_r.as_ref(), write_secret);
+        writer.option(self.hk_s.as_ref(), write_secret);
+        write_secret(writer, &self.nhk_s);
+        writer.option(self.hk_r.as_ref(), write_secret);
+        write_secret(writer, &self.nhk_r);
+        writer.u32(self.n_s);
+        writer.u32(self.n_r);
+        writer.u32(self.pn);
+        writer.u16(self.send_index);
+        writer.bytes(&self.session_tag);
+        writer.u32(self.mixed);
+        writer.u32(u32::try_from(self.skipped.len()).map_err(|_| Error::Length)?);
+        for skipped in &self.skipped {
+            writer.bytes(&skipped.hk);
+            writer.u32(skipped.n);
+            writer.bytes(&skipped.mk);
+            writer.u64(skipped.stored_at);
+        }
+        Ok(())
+    }
+
+    /// Reads the state that [`Session::export`] wrote.
+    pub(crate) fn restore(reader: &mut Reader<'_>) -> Result<Self, Error> {
+        let rk = read_secret(reader)?;
+        let dh_s = StaticSecret::from(reader.array::<32>()?);
+        let dh_r = reader.option(|r| r.array::<32>())?;
+        let ck_s = reader.option(read_secret)?;
+        let ck_r = reader.option(read_secret)?;
+        let hk_s = reader.option(read_secret)?;
+        let nhk_s = read_secret(reader)?;
+        let hk_r = reader.option(read_secret)?;
+        let nhk_r = read_secret(reader)?;
+        let n_s = reader.u32()?;
+        let n_r = reader.u32()?;
+        let pn = reader.u32()?;
+        let send_index = reader.u16()?;
+        let session_tag = reader.array()?;
+        let mixed = reader.u32()?;
+        let count = usize::try_from(reader.u32()?).map_err(|_| Error::Length)?;
+        // CRY-023: a stored session holds no more keys than a live one.
+        if count > MAX_STORED {
+            return Err(Error::Ratchet);
+        }
+        let mut skipped = Vec::with_capacity(count);
+        for _ in 0..count {
+            skipped.push(Skipped {
+                hk: reader.array()?,
+                n: reader.u32()?,
+                mk: reader.array()?,
+                stored_at: reader.u64()?,
+            });
+        }
+        Ok(Self {
+            rk,
+            dh_s,
+            dh_r,
+            ck_s,
+            ck_r,
+            hk_s,
+            nhk_s,
+            hk_r,
+            nhk_r,
+            n_s,
+            n_r,
+            pn,
+            send_index,
+            session_tag,
+            skipped,
+            mixed,
+        })
+    }
+
     /// Starts a session from the split of a completed handshake.
     pub fn new<R: CryptoRng + ?Sized>(
         keys: SessionKeys,
