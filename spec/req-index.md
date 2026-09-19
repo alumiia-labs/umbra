@@ -70,7 +70,7 @@ each column when a crate implements the requirement and a test covers it.
 | `NET` | 200 | 82 | 0 | 0 | 8 | **290** |
 | `IDN` | 110 | 40 | 1 | 0 | 5 | **156** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
-| `WIR` | 374 | 82 | 0 | 0 | 6 | **462** |
+| `WIR` | 377 | 82 | 0 | 0 | 6 | **465** |
 | `DEV` | 179 | 87 | 2 | 0 | 7 | **275** |
 | `NTF` | 62 | 29 | 0 | 0 | 2 | **93** |
 | `DIS` | 123 | 37 | 0 | 0 | 1 | **161** |
@@ -81,7 +81,7 @@ each column when a crate implements the requirement and a test covers it.
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
 | `IMP` | 80 | 34 | 0 | 0 | 1 | **115** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2098 | 688 | 6 | 0 | 51 | **2843** |
+| **All** | 2101 | 688 | 6 | 0 | 51 | **2846** |
 
 ## SCP — Scope and Conventions
 
@@ -1215,6 +1215,9 @@ Source: `spec/06-wire-format.md`
 | `WIR-499` | §6.2.1 | MUST | A sender | A sender MUST put an `UMBRA_SESSION` capsule in a frame with the 7-bit length form of RFC 6455 §5.2, because that capsule is 47, 35, or 15 bytes. |  |  |
 | `WIR-500` | §6.2.1 | MUST | A receiver | A receiver MUST reject a frame in the 16-bit length form whose length is below 126, and a frame in the 64-bit length form. |  |  |
 | `WIR-501` | §6.2.2 | MUST | (unstated) | Each direction of a session holds a `seq` of its own. |  |  |
+| `WIR-502` | §6.4.2 | MUST | A party | A party MUST send each flight of `UMBRA-XKhfs` as a `HandshakeRecord`, and in the smallest bucket whose L7 row of §6.9 holds the record. |  |  |
+| `WIR-503` | §6.4.2 | MUST | A receiver | A receiver MUST drop a `HandshakeRecord` whose `flight` is not the flight that the queue waits for, and it MUST keep the state of the handshake. |  |  |
+| `WIR-504` | §6.4.2 | MUST | A receiver | A receiver MUST drop a record of kind `0x01` on a queue whose handshake is not complete, because no ratchet state can open it. |  |  |
 
 ## DEV — Device Sets
 

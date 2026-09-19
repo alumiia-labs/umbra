@@ -360,7 +360,8 @@ pub async fn dial_next(
 
 /// Runs one relay: the node task, the dialer of the next layer, and the
 /// accept loop. `next_hops` names each relay of the next layer, and
-/// `client_tls` is the configuration that the dialer trusts them under.
+/// `client_tls` is the configuration that the dialer trusts them under. A
+/// deployment passes [`PACING_MEAN_MS`] (`NET-077`), and a test passes less.
 pub async fn run_relay(
     node: RelayNode,
     listener: TcpListener,

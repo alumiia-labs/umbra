@@ -380,7 +380,8 @@ endpoints of the measurement.
 > §6.4.2, an epoch-key record in §6.4.6, `ek` in §6.5, and an attachment
 > descriptor in §6.6. The value
 > `0x04` is `EXTENDED` here, `ct2` in §6.5, and Edit in §6.6. The value `0x05`
-> is `DESTROY` here, `mac` in §6.5, and Delete in §6.6. The value `0x07` is
+> is `DESTROY` here, a handshake record in §6.4.2, `mac` in §6.5, and Delete
+> in §6.6. The value `0x07` is
 > `MEAS_ECHO` here, and §6.4 gives it no queue command. Rule 7 of §6.1.1 keeps
 > them apart.
 
@@ -584,6 +585,8 @@ QueueE2E {
    The value `0x01` names a ratchet record (§6.5). The value `0x02` named a
    sender-key record in an earlier draft, and it is retired. The value `0x03`
    names a report record (Part 12 §12.5.3). The value `0x04` names a `NotifyDigest` (Part 12 §12.6.4).
+   The value `0x05` names a handshake record, which the text after rule 6
+   gives.
    **[WIR-023]** A receiver MUST reject an unknown kind.
 6. **[WIR-024]** **A sender MUST fill the L6 record to a fixed length for the bucket.** That
    length is the "L6 record on a `MSG`" row of §6.9. That row gives 390 bytes at
@@ -602,6 +605,38 @@ QueueE2E {
    Thus a `MSG` fills the command area exactly: 84 + 394 = 478 at bucket `B0`. A
    `SEND` reaches 84 + 390 = 474 and leaves 4 bytes. The cell padding of §6.3
    covers those 4 bytes.
+
+**The handshake record.** A flight of `UMBRA-XKhfs` (Part 5 §5.4.8) travels
+as an L6 record of kind `0x05`. No ratchet exists before flight 3, thus the
+flight skips L7, and the queue end-to-end layer alone covers it.
+
+```
+HandshakeRecord {                 // the content of an L6 record of kind 0x05
+    flight          u8            // 0x01, 0x02, or 0x03
+    body            var           // that flight, in the layout of Part 5 §5.4.8
+}
+```
+
+- **[WIR-502]** A party MUST send each flight of `UMBRA-XKhfs` as a
+  `HandshakeRecord`, and in the smallest bucket whose L7 row of §6.9 holds the
+  record. Flight 1 is 2 339 bytes and more, thus it takes bucket `B2`.
+- **[WIR-503]** A receiver MUST drop a `HandshakeRecord` whose `flight` is not
+  the flight that the queue waits for, and it MUST keep the state of the
+  handshake. Thus a replayed flight and a flight from a second holder of the
+  bundle end no handshake that is in progress.
+- **[WIR-504]** A receiver MUST drop a record of kind `0x01` on a queue whose
+  handshake is not complete, because no ratchet state can open it.
+- Flight 1 arrives on the queue that the bundle names (Part 5 §5.4.1). Flight
+  2 arrives on the queue that `app_1` names (Part 3 rule `NET-173`). Flight 3
+  arrives on the queue of flight 1. Then the two queues carry ratchet records,
+  one queue for each direction.
+
+> *Cause.* An earlier draft said that flight 1 travels inside the queue
+> end-to-end layer, and it gave the flight no record kind. Rule `WIR-023` then
+> made each receiver reject it. A kind of its own lets a receiver separate a
+> flight from a ratchet record before it has a ratchet. The `flight` byte
+> costs one byte, and it lets a receiver drop a late flight with no trial
+> decryption of a 2 339-byte record.
 
 > *Cause.* A relay parses `payload_len` in the clear. Without this rule a
 > relay reads the exact plaintext length of each record. That length separates

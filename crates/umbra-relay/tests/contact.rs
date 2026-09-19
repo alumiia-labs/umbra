@@ -172,6 +172,23 @@ impl Network {
         }
     }
 
+    /// Connects one more client to the guard, and returns its index.
+    fn add_client(&mut self, seed: u8) -> usize {
+        let index = self.clients.len();
+        let mut client = ClientNode::new(
+            [relay_static(1).0, relay_static(2).0, relay_static(3).0],
+            RootIdentity::new(Secret::new([seed; 32])),
+        );
+        client.connected(&mut Rng(200 + u64::from(seed))).unwrap();
+        self.clients.push(client);
+        self.inboxes.push(VecDeque::new());
+        self.events.push(Vec::new());
+        self.peers[0].push((index as LinkId + 1, Peer::Client(index)));
+        self.settle();
+        assert_eq!(self.take_events(index), [ClientEvent::CircuitReady]);
+        index
+    }
+
     fn take_events(&mut self, client: usize) -> Vec<ClientEvent> {
         core::mem::take(&mut self.events[client])
     }
@@ -273,23 +290,57 @@ fn two_clients_become_contacts_and_exchange_text() {
     assert_eq!(received.len(), 3);
 
     // A second use of the bundle gets no contact, because its prekey served.
-    let mut carol = ClientNode::new(
-        [relay_static(1).0, relay_static(2).0, relay_static(3).0],
-        RootIdentity::new(Secret::new([0x50; 32])),
-    );
-    carol.connected(&mut Rng(200)).unwrap();
-    network.clients.push(carol);
-    network.inboxes.push(VecDeque::new());
-    network.events.push(Vec::new());
-    network.peers[0].push((3, Peer::Client(2)));
-    network.settle();
-    network.clients[2]
+    let carol = network.add_client(0x50);
+    network.clients[carol]
         .accept(bundle.clone(), &mut Rng(6))
         .unwrap();
     network.settle();
     assert!(!network
-        .take_events(2)
+        .take_events(carol)
         .iter()
         .any(|event| matches!(event, ClientEvent::ContactReady { .. })));
+    assert_eq!(network.clients[ALICE].contacts().count(), 1);
+}
+
+fn became_contact(events: &[ClientEvent]) -> bool {
+    events
+        .iter()
+        .any(|event| matches!(event, ClientEvent::ContactReady { .. }))
+}
+
+#[test]
+fn a_second_holder_of_the_bundle_ends_no_handshake_in_progress() {
+    const ALICE: usize = 0;
+    const BOB: usize = 1;
+    let mut network = Network::new();
+    network.settle();
+    network.take_events(ALICE);
+    network.take_events(BOB);
+    let carol = network.add_client(0x50);
+
+    network.clients[ALICE].invite(&mut Rng(1)).unwrap();
+    network.settle();
+    let events = network.take_events(ALICE);
+    let [ClientEvent::Invitation { bundle, .. }] = &events[..] else {
+        panic!("{events:?}");
+    };
+
+    // The two accept in one turn, thus the second flight 1 reaches Alice
+    // while she waits for the flight 3 of the first (`WIR-503`).
+    network.clients[BOB]
+        .accept(bundle.clone(), &mut Rng(2))
+        .unwrap();
+    network.clients[carol]
+        .accept(bundle.clone(), &mut Rng(3))
+        .unwrap();
+    network.settle();
+
+    assert!(became_contact(&network.take_events(ALICE)));
+    let bob_won = became_contact(&network.take_events(BOB));
+    let carol_won = became_contact(&network.take_events(carol));
+    assert!(
+        bob_won != carol_won,
+        "one holder and no more gets the contact"
+    );
     assert_eq!(network.clients[ALICE].contacts().count(), 1);
 }

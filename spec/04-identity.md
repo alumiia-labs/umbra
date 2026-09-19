@@ -445,6 +445,14 @@ connection of the intended recipient fails. Thus a passive link-interception
 attack becomes an event that **the two parties detect**. **[IDN-023]** Implementations MUST
 implement this lock for one-time invitations.
 
+> *Open in 0.2.0-draft.* Part 6 §6.4 gives no command that stores a blob
+> under a link ID, that fetches it, or that sets the lock. The reference
+> client thus passes the bundle of Part 5 §5.4.1 to the second device
+> directly, and the link, the blob, and the lock do not run. The handshake
+> after that step is complete (Part 6 §6.4.2, the handshake record). The
+> three commands are work for a revision before 1.0, and Part 16 §16.3 holds
+> this residual until then.
+
 ### 4.3.2 Reusable contact link
 
 The user can give this link to many parties. The user can print it on a card or

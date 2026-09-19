@@ -45,7 +45,7 @@ use super::{
     batch::Range,
     channel::{new_queue_command, Inbound, Opened, Outbound, PairwiseChannel, Received},
     circuit::{CircuitSession, Event as CircuitEvent},
-    contact::{Invitee, Inviter},
+    contact::{Invitee, Inviter, FLIGHT_1, FLIGHT_2},
 };
 use crate::{identity::invitation::Bundle, Error};
 
@@ -587,19 +587,36 @@ impl ClientNode {
             self.halves.insert(queue_id, half);
             return Ok(Vec::new());
         };
+        // WIR-503: a flight with a number that the queue does not wait for
+        // ends no handshake. A second holder of the bundle makes such a
+        // flight 1.
+        let awaited = match &half.setup {
+            Setup::Inviting(inviter) => inviter.awaits(),
+            Setup::Accepting(_) => FLIGHT_2,
+        };
         let session_pk = self.session_pk()?;
         // A flight that the device read needs no second delivery.
         if let Some((point, encoded)) = half.inbound.acknowledge(&session_pk, random(rng), now)? {
             half.inbound.acknowledged(point);
             self.queue_command(encoded, Waiting::Other)?;
         }
+        if inner.first() != Some(&awaited) {
+            self.halves.insert(queue_id, half);
+            return Ok(Vec::new());
+        }
         let finished = match half.setup {
-            Setup::Inviting(mut inviter) => match inner.first() {
-                Some(1) => {
-                    // A flight 1 that does not verify leaves the invitation
-                    // spent, because its prekey served one try (`CRY-055`).
+            Setup::Inviting(mut inviter) => match awaited {
+                FLIGHT_1 => {
                     let Ok((flight2, reply_to)) = inviter.on_flight1(&half.identity, &inner, rng)
                     else {
+                        // A flight 1 that names the prekey and does not
+                        // verify spends it (`CRY-089`), and the invitation
+                        // ends. A flight that names a second prekey spends
+                        // nothing.
+                        if inviter.awaits() == FLIGHT_1 {
+                            half.setup = Setup::Inviting(inviter);
+                            self.halves.insert(queue_id, half);
+                        }
                         return Ok(Vec::new());
                     };
                     let outbound = Outbound::new(reply_to);

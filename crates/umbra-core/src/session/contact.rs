@@ -30,9 +30,12 @@ use crate::{identity::invitation::Bundle, Error};
 /// The one protocol version of this revision.
 pub const VERSION_RANGE: VersionRange = VersionRange { min: 1, max: 1 };
 
-const FLIGHT_1: u8 = 1;
-const FLIGHT_2: u8 = 2;
-const FLIGHT_3: u8 = 3;
+/// The number of flight 1 in a handshake record (`WIR-502`).
+pub const FLIGHT_1: u8 = 1;
+/// The number of flight 2.
+pub const FLIGHT_2: u8 = 2;
+/// The number of flight 3.
+pub const FLIGHT_3: u8 = 3;
 
 fn numbered(number: u8, flight: &[u8]) -> Vec<u8> {
     let mut inner = Vec::with_capacity(flight.len().saturating_add(1));
@@ -85,6 +88,15 @@ impl Inviter {
         ))
     }
 
+    /// The number of the flight that this inviter waits for (`WIR-503`).
+    pub fn awaits(&self) -> u8 {
+        if self.prekey.is_some() {
+            FLIGHT_1
+        } else {
+            FLIGHT_3
+        }
+    }
+
     /// Reads flight 1 and writes flight 2. The result is the inner record
     /// of flight 2 and the queue that it goes to. The prekey serves one
     /// flight 1, thus a second one fails.
@@ -96,10 +108,12 @@ impl Inviter {
     ) -> Result<(Vec<u8>, &QueueAddress), Error> {
         let flight = flight_of(inner, FLIGHT_1)?;
         let (_, _, pid) = Responder::peek(flight)?;
-        let prekey = self.prekey.take().ok_or(Error::Stale)?;
         // The lookup runs in constant time over the one prekey of the
-        // invitation, as it does over a list.
-        find_prekey(&pid, core::iter::once(prekey.id())).ok_or(Error::Unverified)?;
+        // invitation, as it does over a list. A flight that names a second
+        // prekey spends nothing.
+        let held = self.prekey.as_ref().ok_or(Error::Stale)?;
+        find_prekey(&pid, core::iter::once(held.id())).ok_or(Error::Unverified)?;
+        let prekey = self.prekey.take().ok_or(Error::Stale)?;
         let mut app_1 = [0u8; QUEUE_ADDRESS_LEN];
         let (mut responder, read) = Responder::read_flight1(
             identity,
