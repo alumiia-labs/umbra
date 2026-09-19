@@ -27,6 +27,9 @@ pub enum L6Kind {
     Report = 0x03,
     /// A `NotifyDigest` of Part 12 §12.6.4.
     NotifyDigest = 0x04,
+    /// One flight of the pairwise handshake of Part 5 §5.4: the flight
+    /// number from 1 to 3, and then the flight.
+    Handshake = 0x05,
 }
 
 impl L6Kind {
@@ -35,6 +38,7 @@ impl L6Kind {
             0x01 => Ok(L6Kind::Ratchet),
             0x03 => Ok(L6Kind::Report),
             0x04 => Ok(L6Kind::NotifyDigest),
+            0x05 => Ok(L6Kind::Handshake),
             _ => Err(Error::Malformed),
         }
     }

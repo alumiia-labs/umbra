@@ -18,7 +18,8 @@ const NAME: &[u8] = b"UMBRA-XKhfs/v1";
 /// The one handshake mode of v1.
 pub const MODE: u8 = 0x01;
 /// Size of an ML-KEM-768 encapsulation key.
-const EK_LEN: usize = 1184;
+/// The length of an ML-KEM-768 encapsulation key.
+pub const EK_LEN: usize = 1184;
 /// Size of an ML-KEM-768 ciphertext.
 const CT_LEN: usize = 1088;
 /// Size of `n_hs`.

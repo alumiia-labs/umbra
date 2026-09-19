@@ -14,6 +14,8 @@
 pub mod batch;
 pub mod channel;
 pub mod circuit;
+pub mod contact;
+pub mod node;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
