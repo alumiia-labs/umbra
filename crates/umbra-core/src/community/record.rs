@@ -49,6 +49,66 @@ pub fn post_hash(encoded_post: &[u8]) -> [u8; 32] {
     sha3_256(&[encoded_post])
 }
 
+/// The length of the community record at the front of `bytes`, from its
+/// type and its count fields. A `PUB` carries one record and then an
+/// `Admission`, and this length splits the two.
+pub fn record_len(bytes: &[u8]) -> Result<usize, Error> {
+    // The fields before the first count of a control object and of a
+    // metadata record: the version, the type, `community_id`, the index,
+    // the hash of the predecessor, `actor`, and `actor_pk`.
+    const CHAINED: usize = 2 + 32 + 4 + 32 + 32 + VERIFYING_KEY_LEN;
+    let byte_at = |at: usize| {
+        bytes
+            .get(at)
+            .copied()
+            .map(usize::from)
+            .ok_or(Error::Malformed)
+    };
+    let u16_at = |at: usize| Ok::<usize, Error>(byte_at(at)? << 8 | byte_at(at.saturating_add(1))?);
+    let len = match RecordType::of(bytes)? {
+        RecordType::Post => {
+            let body_len = (u16_at(42)? << 16) | u16_at(44)?;
+            POST_HEADER_LEN.saturating_add(body_len)
+        }
+        RecordType::Stub => STUB_LEN,
+        RecordType::Checkpoint => CHECKPOINT_LEN,
+        RecordType::OperatorRemoval => OPERATOR_REMOVAL_LEN,
+        RecordType::Report => 104usize.saturating_add(byte_at(103)?),
+        RecordType::Roster => {
+            let entries = byte_at(CHAINED)?.saturating_mul(1 + 32 + 1_216 + 129);
+            let cosign_at = CHAINED.saturating_add(1).saturating_add(entries);
+            let cosigns =
+                byte_at(cosign_at)?.saturating_mul(32 + VERIFYING_KEY_LEN + SIGNATURE_LEN);
+            cosign_at
+                .saturating_add(1)
+                .saturating_add(cosigns)
+                .saturating_add(SIGNATURE_LEN)
+        }
+        RecordType::ModeratorSet => CHAINED
+            .saturating_add(2)
+            .saturating_add(u16_at(CHAINED)?.saturating_mul(32))
+            .saturating_add(SIGNATURE_LEN),
+        RecordType::ModerationEpoch => CHAINED
+            .saturating_add(2)
+            .saturating_add(byte_at(CHAINED.saturating_add(1))?.saturating_mul(37))
+            .saturating_add(SIGNATURE_LEN),
+        RecordType::Meta => {
+            let body_len_at = CHAINED
+                .saturating_add(1)
+                .saturating_add(byte_at(CHAINED)?.saturating_mul(12))
+                .saturating_add(1 + 12);
+            body_len_at
+                .saturating_add(2)
+                .saturating_add(u16_at(body_len_at)?)
+                .saturating_add(SIGNATURE_LEN)
+        }
+    };
+    if len > bytes.len() {
+        return Err(Error::Malformed);
+    }
+    Ok(len)
+}
+
 /// A `CommunityPost`. It carries the pseudonym and no public key
 /// (`COM-035`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -545,6 +605,33 @@ mod tests {
             ..fields
         };
         assert!(Checkpoint::sign(&identity, &wide, &mut Rng(1)).is_err());
+    }
+
+    #[test]
+    fn the_length_of_a_record_splits_a_pub_payload() {
+        let post = CommunityPost {
+            pseudonym: [1; 32],
+            index: 0,
+            amends: NO_INDEX,
+            body: &[7; 300],
+        }
+        .encode()
+        .unwrap();
+        let payload = [post.as_slice(), &[0, 0, 0]].concat();
+        assert_eq!(record_len(&payload).unwrap(), post.len());
+        assert!(record_len(&post[..100]).is_err());
+
+        let identity = author(3);
+        let fields = CheckpointFields {
+            community_id: [9; 32],
+            start_index: 0,
+            end_index: 0,
+            previous_signed_head: [1; 32],
+            current_head: [2; 32],
+            withdrawn: Withdrawn::NONE,
+        };
+        let checkpoint = Checkpoint::sign(&identity, &fields, &mut Rng(1)).unwrap();
+        assert_eq!(record_len(&checkpoint).unwrap(), CHECKPOINT_LEN);
     }
 
     #[test]

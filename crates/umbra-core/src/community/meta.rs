@@ -522,6 +522,10 @@ mod tests {
         let meta = CommunityMeta::sign(&role(OWNER_A), &key, large, &mut Rng(1)).unwrap();
         let bytes = meta.encode().unwrap();
         assert_eq!(bytes.len(), META_MAX);
+        assert_eq!(
+            crate::community::record::record_len(&bytes).unwrap(),
+            META_MAX
+        );
         let parsed = CommunityMeta::parse(&bytes).unwrap();
         parsed.verify_signature(&[9; 32]).unwrap();
         assert_eq!(parsed.open(&key).unwrap(), full);

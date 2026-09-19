@@ -44,6 +44,23 @@ impl Session {
         }
     }
 
+    /// The session of a command that arrives over a circuit, which is
+    /// that circuit (`NET-287`). `relay_session_sk` is the private half of
+    /// the `er` of the circuit (`NET-285`). A circuit does not resume, thus
+    /// the session holds no resume secret.
+    pub fn for_circuit(circ_id: &[u8; 16], relay_session_sk: StaticSecret) -> Self {
+        let mut id = [0u8; 8];
+        id.copy_from_slice(circ_id.get(..8).unwrap_or(&[0; 8]));
+        Session {
+            id,
+            secret: Secret::new([0; 32]),
+            resume_count: u32::MAX,
+            relay_session_sk,
+            seen: Vec::new(),
+            queues: Vec::new(),
+        }
+    }
+
     /// The session identifier.
     pub fn id(&self) -> [u8; 8] {
         self.id

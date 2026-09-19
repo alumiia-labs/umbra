@@ -92,6 +92,83 @@ impl Circuit {
     }
 }
 
+/// The client end of a circuit under build (Part 3 §3.4.3): the key sets
+/// of the hops that answered so far. A build cell to hop *n* travels under
+/// the layers of hops 1 to *n* − 1, and the chaining values that those
+/// cells move stay in the finished circuit.
+pub struct CircuitBuild {
+    hops: [Option<KeySet>; HOPS],
+    circ_id: [u8; 16],
+}
+
+impl CircuitBuild {
+    /// A build with no hop, on a `circ_id` from the CSPRNG (`NET-154`).
+    pub fn new(circ_id: [u8; 16]) -> Self {
+        CircuitBuild {
+            hops: [None, None, None],
+            circ_id,
+        }
+    }
+
+    /// The circuit identifier on the link to hop 1.
+    pub fn circ_id(&self) -> [u8; 16] {
+        self.circ_id
+    }
+
+    /// The count of the hops that answered.
+    pub fn built(&self) -> usize {
+        self.hops.iter().flatten().count()
+    }
+
+    /// Wraps the body of an `EXTEND` cell for the next hop, and returns the
+    /// `tag`. With no hop built, the body stays plain and the tag is zero.
+    /// No layer runs the key update, because no layer is the hop 3 layer
+    /// of a finished circuit yet.
+    pub fn seal(&mut self, body: &mut [u8]) -> Result<[u8; BLOCK], Error> {
+        let mut left = [0u8; BLOCK];
+        for hop in self.hops.iter_mut().rev().flatten() {
+            left = hop.forward.encipher(&left, body)?;
+        }
+        Ok(left)
+    }
+
+    /// Removes the backward layers of an `EXTENDED` cell and makes the
+    /// check of `NET-114`.
+    pub fn open(&mut self, tag: &[u8; BLOCK], body: &mut [u8]) -> Result<(), Error> {
+        let mut left = *tag;
+        for hop in self.hops.iter_mut().flatten() {
+            left = hop.backward.decipher(&left, body)?;
+        }
+        if bool::from(left.ct_eq(&[0u8; BLOCK])) {
+            Ok(())
+        } else {
+            Err(Error::Rejected)
+        }
+    }
+
+    /// Adds the hop that answered, from its `ss_hop`.
+    pub fn push(&mut self, ss_hop: &Secret<32>) -> Result<(), Error> {
+        let built = self.built();
+        let index = u32::try_from(built.saturating_add(1)).map_err(|_| Error::Build)?;
+        let slot = self.hops.get_mut(built).ok_or(Error::Build)?;
+        *slot = Some(KeySet::derive(ss_hop, index));
+        Ok(())
+    }
+
+    /// The finished circuit, after the third hop answered.
+    pub fn finish(self) -> Result<Circuit, Error> {
+        let [Some(first), Some(second), Some(third)] = self.hops else {
+            return Err(Error::Build);
+        };
+        Ok(Circuit {
+            hops: [first, second, third],
+            circ_id: self.circ_id,
+            sent: 0,
+            received: 0,
+        })
+    }
+}
+
 /// The position of a relay on a circuit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Position {
@@ -142,6 +219,25 @@ impl RelayHop {
                 Ok([0u8; BLOCK])
             }
         }
+    }
+
+    /// Removes the forward layer of a cell at a relay of layer 1 or 2
+    /// whose circuit holds no next hop yet. That relay is the endpoint of
+    /// the cell, thus it makes the check of `NET-114`. It runs no key
+    /// update, because that update belongs to the hop 3 layer.
+    pub fn forward_build(&mut self, tag: &[u8; BLOCK], body: &mut [u8]) -> Result<(), Error> {
+        let x_l = self.keys.forward.decipher(tag, body)?;
+        if bool::from(x_l.ct_eq(&[0u8; BLOCK])) {
+            Ok(())
+        } else {
+            Err(Error::Rejected)
+        }
+    }
+
+    /// Adds the backward layer over the body of an `EXTENDED` cell, with
+    /// `X_L` of 16 zero bytes and no key update (`NET-199`).
+    pub fn backward_build(&mut self, body: &mut [u8]) -> Result<[u8; BLOCK], Error> {
+        self.keys.backward.encipher(&[0u8; BLOCK], body)
     }
 
     /// Adds this hop's backward layer. The endpoint starts from the zero

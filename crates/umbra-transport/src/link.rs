@@ -31,6 +31,8 @@ pub struct ClientLink {
     connected: bool,
     closed_at: Option<u64>,
     window: VecDeque<(u32, Vec<u8>)>,
+    /// The highest frame sequence of the relay that the client accepted.
+    relay_seq: Option<u32>,
 }
 
 impl ClientLink {
@@ -58,6 +60,7 @@ impl ClientLink {
                 connected: true,
                 closed_at: None,
                 window: VecDeque::new(),
+                relay_seq: None,
             },
             used,
         ))
@@ -103,6 +106,21 @@ impl ClientLink {
         let head: &mut [u8; HEADER_LEN] = head.try_into().map_err(|_| Error::Capacity)?;
         encode_header(n, head)?;
         Ok(HEADER_LEN.saturating_add(n))
+    }
+
+    /// Takes a frame of the relay. Returns the cell, or `None` for a frame
+    /// whose sequence the client accepted before (`WIR-141`). The relay
+    /// sends in order over TLS or QUIC, thus one high-water mark serves.
+    pub fn receive<'a>(&mut self, capsule_value: &'a [u8]) -> Result<Option<&'a [u8]>, Error> {
+        let (frame, _) = SessionFrame::parse(capsule_value)?;
+        if frame.session_id != self.id {
+            return Err(Error::Refused);
+        }
+        if self.relay_seq.is_some_and(|seen| frame.seq <= seen) {
+            return Ok(None);
+        }
+        self.relay_seq = Some(frame.seq);
+        Ok(Some(frame.cell))
     }
 
     /// A frame the relay drained: everything at or below `seq` leaves the
@@ -192,6 +210,7 @@ pub struct RelayLink {
     accepted: Vec<u32>,
     bound: bool,
     closed_at: Option<u64>,
+    next_seq: u32,
 }
 
 impl RelayLink {
@@ -209,6 +228,7 @@ impl RelayLink {
                 accepted: Vec::new(),
                 bound: true,
                 closed_at: None,
+                next_seq: 0,
             }),
             _ => Err(Error::Refused),
         }
@@ -234,6 +254,26 @@ impl RelayLink {
         }
         self.accepted.push(frame.seq);
         Ok(Some(frame.cell))
+    }
+
+    /// Frames a cell of the relay into a cell capsule, with the frame
+    /// sequence of the relay direction (`WIR-138`, `WIR-139`).
+    pub fn send(&mut self, cell: &[u8], out: &mut [u8]) -> Result<usize, Error> {
+        if !self.bound || self.next_seq >= SEQ_MAX {
+            return Err(Error::State);
+        }
+        let frame = SessionFrame {
+            session_id: self.id,
+            seq: self.next_seq,
+            resend: false,
+            cell,
+        };
+        let (head, tail) = out.split_at_mut(HEADER_LEN.min(out.len()));
+        let n = frame.encode(tail)?;
+        let head: &mut [u8; HEADER_LEN] = head.try_into().map_err(|_| Error::Capacity)?;
+        encode_header(n, head)?;
+        self.next_seq = self.next_seq.saturating_add(1);
+        Ok(HEADER_LEN.saturating_add(n))
     }
 
     /// The connection dropped at `now`; the state stays for the window

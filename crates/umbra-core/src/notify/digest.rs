@@ -119,6 +119,11 @@ impl DigestGate {
         self.registrations.remove(queue);
     }
 
+    /// Whether the gate holds the registration of `queue`.
+    pub fn holds(&self, queue: &[u8; 32]) -> bool {
+        self.registrations.contains_key(queue)
+    }
+
     /// The registrations held.
     pub fn len(&self) -> usize {
         self.registrations.len()

@@ -618,7 +618,11 @@ pub(crate) mod tests {
             &mut Rng(2),
         )
         .unwrap();
-        assert_eq!(set.encode().unwrap().len(), 30_965);
+        let set_bytes = set.encode().unwrap();
+        assert_eq!(set_bytes.len(), 30_965);
+        let length_of = crate::community::record::record_len;
+        assert_eq!(length_of(&set_bytes).unwrap(), set_bytes.len());
+        assert_eq!(length_of(&bytes).unwrap(), bytes.len());
         moderators.swap(0, 1);
         assert!(ControlObject::sign(
             &owner,
@@ -652,6 +656,7 @@ pub(crate) mod tests {
         .unwrap();
         let epoch_bytes = epoch.encode().unwrap();
         assert_eq!(epoch_bytes.len(), 6_105);
+        assert_eq!(length_of(&epoch_bytes).unwrap(), epoch_bytes.len());
         assert_eq!(ControlObject::parse(&epoch_bytes).unwrap(), epoch);
 
         // A kind outside the table rejects the epoch.
@@ -680,7 +685,12 @@ pub(crate) mod tests {
         let hash_before = roster.hash().unwrap();
         roster.cosign(&second, &mut Rng(2)).unwrap();
         assert_eq!(roster.hash().unwrap(), hash_before);
-        let parsed = ControlObject::parse(&roster.encode().unwrap()).unwrap();
+        let cosigned = roster.encode().unwrap();
+        assert_eq!(
+            crate::community::record::record_len(&cosigned).unwrap(),
+            cosigned.len()
+        );
+        let parsed = ControlObject::parse(&cosigned).unwrap();
         assert_eq!(parsed.verified_cosigners().unwrap(), [second.pseudonym()]);
 
         roster.cosign(&second, &mut Rng(3)).unwrap();

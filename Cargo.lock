@@ -1216,6 +1216,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "umbra-relay"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.4.3",
+ "rustls",
+ "tokio",
+ "tokio-rustls",
+ "umbra-core",
+ "umbra-crypto",
+ "umbra-onion",
+ "umbra-queue",
+ "umbra-transport",
+ "umbra-wire",
+]
+
+[[package]]
 name = "umbra-transport"
 version = "0.1.0"
 dependencies = [

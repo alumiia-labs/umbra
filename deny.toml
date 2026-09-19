@@ -118,6 +118,7 @@ allow = [
   { crate = "umbra-queue" },             # workspace
   { crate = "umbra-transport" },         # workspace
   { crate = "umbra-core" },              # workspace
+  { crate = "umbra-relay" },             # workspace
 ]
 
 [sources]

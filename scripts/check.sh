@@ -27,6 +27,10 @@ step "native transport, host only"
 cargo clippy -p umbra-transport --features native --all-targets -- -D warnings
 cargo test -p umbra-transport --features native
 
+step "relay server, host only"
+cargo clippy -p umbra-relay --features native --all-targets -- -D warnings
+cargo test -p umbra-relay --features native
+
 step "build, wasm32-unknown-unknown"
 cargo build --workspace --target wasm32-unknown-unknown
 
