@@ -308,6 +308,29 @@ impl<'a> HeadState<'a> {
         Ok(())
     }
 
+    /// Accepts a head that extends the newest retained head. The
+    /// consistency proof shows that the log only grew, and a second root at
+    /// one `tree_size` is the evidence of `DIS-051`. A client with no
+    /// retained head has nothing to compare, and it accepts under
+    /// [`HeadState::accept`] alone.
+    pub fn accept_extending(
+        &mut self,
+        head: &SignedTreeHead<'_>,
+        consistency: &[[u8; 32]],
+        device_clock: u64,
+    ) -> Result<(), Error> {
+        if let Some(held) = self.newest() {
+            super::logtree::verify_consistency(
+                held.tree_size,
+                &held.root,
+                head.tree_size,
+                &head.root,
+                consistency,
+            )?;
+        }
+        self.accept(head, device_clock)
+    }
+
     /// Drops each head past `TREE_HEAD_RETAIN` (`DIS-063`).
     pub fn retain(&mut self, now: u64) {
         self.retained

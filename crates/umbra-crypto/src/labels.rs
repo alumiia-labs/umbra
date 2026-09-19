@@ -103,6 +103,8 @@ labels! {
     POW_CHALLENGE = "umbra/v1/pow-challenge";
     TREE_HEAD_KEYSET = "umbra/v1/tree-head-keyset";
     HELLO = "umbra/v1/hello";
+    LOG_COMMIT = "umbra/v1/log-commit";
+    ISSUER_KEY = "umbra/v1/issuer-key";
 }
 
 /// `umbra/v1/handle-key`

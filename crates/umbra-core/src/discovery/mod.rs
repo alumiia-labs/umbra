@@ -4,9 +4,10 @@
 //! lifecycle at the directory and the takeover check at the client, the
 //! community listing, and the hello with its inbound limits.
 //!
-//! The KEYTRANS combined tree itself, which the directory serves and the
-//! client verifies inclusion proofs against, is a later step. Each type
-//! here takes the time and the random values it needs as arguments.
+//! [`translog`] holds the combined tree of §9.5.1 over [`prefix`] and
+//! [`logtree`]: the lookup proof that a client verifies, the log operator,
+//! and the check of an auditor. Each type here takes the time and the
+//! random values it needs as arguments.
 
 pub mod challenge;
 pub mod entry;
@@ -15,6 +16,9 @@ pub mod head;
 pub mod hello;
 pub mod lifecycle;
 pub mod listing;
+pub mod logtree;
+pub mod prefix;
+pub mod translog;
 
 /// `GOSSIP_INTERVAL`, in seconds, for each digest source.
 pub const GOSSIP_INTERVAL: u64 = 6 * 3_600;
