@@ -1,6 +1,7 @@
 package org.umbra.app
 
 import android.content.Context
+import androidx.compose.runtime.Composable
 import uniffi.umbra_ffi.Network
 
 /**
@@ -9,4 +10,8 @@ import uniffi.umbra_ffi.Network
  */
 object BuildNetwork {
     fun network(context: Context): Network? = null
+
+    /** The release build takes no descriptor from the user. */
+    @Composable
+    fun Panel() = Unit
 }

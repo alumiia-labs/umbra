@@ -164,6 +164,7 @@ private fun UnlockScreen() {
             Spacer(Modifier.height(16.dp))
             Text(it, color = MaterialTheme.colorScheme.error)
         }
+        BuildNetwork.Panel()
     }
 }
 

@@ -16,7 +16,18 @@
 //! next=<relay_id hex>,<host name>,<IPv4 address>,<port>
 //! trust=/etc/umbra/test-authority.pem
 //! store=/var/lib/umbra/relay.db
+//! public=relay1.example.org,203.0.113.7,443
 //! ```
+//!
+//! Two more forms of the command line help an operator:
+//!
+//! ```text
+//! umbra-relay keygen                 # a new relay_id and static_secret
+//! umbra-relay descriptor <settings>  # the line of this relay for a client
+//! ```
+//!
+//! The `public` line gives the host name of the certificate, the address,
+//! and the port that a client dials. The `descriptor` form reads it.
 //!
 //! The `store` line names the SQLite file of the queues. A relay with no
 //! such line keeps its queues in RAM, and a restart of it ends each contact
@@ -68,6 +79,7 @@ struct Settings {
     key: String,
     trust: Option<String>,
     store: Option<String>,
+    public: Option<String>,
     config: Config,
     next: BTreeMap<[u8; 32], Dial>,
 }
@@ -108,6 +120,7 @@ fn read_settings(path: &str) -> Option<Settings> {
         key: (*values.get("key")?).to_owned(),
         trust: values.get("trust").map(|path| (*path).to_owned()),
         store: values.get("store").map(|path| (*path).to_owned()),
+        public: values.get("public").map(|value| (*value).to_owned()),
         config: Config {
             relay,
             static_secret,
@@ -123,16 +136,59 @@ fn read_settings(path: &str) -> Option<Settings> {
     })
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
-    let Some(path) = std::env::args().nth(1) else {
-        eprintln!("usage: umbra-relay <settings file>");
+/// Prints a new identity for a settings file. The secret shows on the
+/// terminal of the operator one time, and no file of this program holds it.
+fn keygen() -> ExitCode {
+    let mut relay_id = [0u8; 32];
+    let mut static_secret = [0u8; 32];
+    if getrandom::fill(&mut relay_id).is_err() || getrandom::fill(&mut static_secret).is_err() {
+        eprintln!("the operating system gave no random bytes");
+        return ExitCode::from(1);
+    }
+    println!("relay_id={}", to_hex(&relay_id));
+    println!("static_secret={}", to_hex(&static_secret));
+    ExitCode::SUCCESS
+}
+
+/// Prints the line of this relay in a network descriptor, which holds the
+/// public half of its identity and the place that a client dials.
+fn descriptor(settings: &Settings) -> ExitCode {
+    let parts: Option<[&str; 3]> = settings
+        .public
+        .as_deref()
+        .and_then(|public| public.split(',').collect::<Vec<_>>().try_into().ok());
+    let Some([host, address, port]) = parts else {
+        eprintln!("the settings file needs a line: public=<host>,<IPv4 address>,<port>");
         return ExitCode::from(2);
     };
-    let Some(settings) = read_settings(&path) else {
+    println!(
+        "relay {host} {address} {port} {} {}",
+        to_hex(&settings.config.relay.s),
+        to_hex(&settings.config.relay.relay_id),
+    );
+    ExitCode::SUCCESS
+}
+
+#[tokio::main]
+async fn main() -> ExitCode {
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
+    let (path, only_descriptor) = match arguments.as_slice() {
+        ["keygen"] => return keygen(),
+        ["descriptor", path] => (*path, true),
+        [path] => (*path, false),
+        _ => {
+            eprintln!("usage: umbra-relay <settings file> | keygen | descriptor <settings file>");
+            return ExitCode::from(2);
+        }
+    };
+    let Some(settings) = read_settings(path) else {
         eprintln!("the settings file does not parse");
         return ExitCode::from(2);
     };
+    if only_descriptor {
+        return descriptor(&settings);
+    }
     let Some(tls) = tls_acceptor(&settings.cert, &settings.key) else {
         eprintln!("the certificate or the key does not load");
         return ExitCode::from(2);

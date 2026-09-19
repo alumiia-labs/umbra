@@ -171,6 +171,76 @@ pub struct Network {
     pub invitation_host: String,
 }
 
+/// The first line of a network descriptor.
+const DESCRIPTOR_HEADER: &str = "umbra-network 1";
+
+fn hex_bytes(text: &str) -> Option<Vec<u8>> {
+    if !text.len().is_multiple_of(2) || !text.is_ascii() {
+        return None;
+    }
+    (0..text.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(text.get(at..at + 2)?, 16).ok())
+        .collect()
+}
+
+/// Reads a network descriptor: the text that an operator of a test network
+/// gives to a tester. The relay directory of Part 10 replaces it later.
+///
+/// ```text
+/// umbra-network 1
+/// relay <host> <IPv4 address> <port> <static key, hex> <relay id, hex>
+/// relay ...                            # the middle relay
+/// relay ...                            # the queue relay
+/// invite <invitation host>
+/// ```
+///
+/// The three `relay` lines come from `umbra-relay descriptor`, the guard
+/// first. A line that starts with `#` and an empty line carry nothing.
+/// `root_ca_path` is the authority of a test network, or none for the web
+/// roots.
+#[uniffi::export]
+pub fn parse_network(text: String, root_ca_path: Option<String>) -> Result<Network, FfiError> {
+    let mut lines = text
+        .lines()
+        .map(|line| line.split('#').next().unwrap_or_default().trim())
+        .filter(|line| !line.is_empty());
+    if lines.next() != Some(DESCRIPTOR_HEADER) {
+        return Err(FfiError::Malformed);
+    }
+    let mut relays = Vec::new();
+    let mut invitation_host = None;
+    for line in lines {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        match words.as_slice() {
+            ["relay", host, address, port, static_key, relay_id] => {
+                let address: std::net::Ipv4Addr =
+                    address.parse().map_err(|_| FfiError::Malformed)?;
+                let key = |text: &str| hex_bytes(text).filter(|bytes| bytes.len() == 32);
+                relays.push(RelayEndpoint {
+                    host: (*host).to_owned(),
+                    ipv4: address.octets().to_vec(),
+                    port: port.parse().map_err(|_| FfiError::Malformed)?,
+                    static_key: key(static_key).ok_or(FfiError::Malformed)?,
+                    relay_id: key(relay_id).ok_or(FfiError::Malformed)?,
+                });
+            }
+            ["invite", host] if invitation_host.is_none() => {
+                invitation_host = Some((*host).to_owned());
+            }
+            _ => return Err(FfiError::Malformed),
+        }
+    }
+    if relays.len() != 3 {
+        return Err(FfiError::Malformed);
+    }
+    Ok(Network {
+        relays,
+        root_ca_path,
+        invitation_host: invitation_host.ok_or(FfiError::Malformed)?,
+    })
+}
+
 fn relay_static(endpoint: &RelayEndpoint) -> Result<RelayStatic, FfiError> {
     let s = endpoint.static_key.as_slice().try_into();
     let relay_id = endpoint.relay_id.as_slice().try_into();
@@ -735,3 +805,60 @@ impl Handle {
 // The delivery states that `FfiEvent::Delivery` carries stay in step with
 // the core enum.
 const _: () = assert!(Delivery::Failed as u8 == 4);
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+mod tests {
+    use super::*;
+
+    fn descriptor() -> String {
+        let relay = |n: u8| {
+            format!(
+                "relay relay{n}.example.org 203.0.113.{n} 443 {} {}",
+                "ab".repeat(32),
+                format!("{n:02x}").repeat(32)
+            )
+        };
+        format!(
+            "umbra-network 1
+# the guard first
+{}
+{}
+
+{}  # the queue relay
+invite invite.example.org
+",
+            relay(1),
+            relay(2),
+            relay(3)
+        )
+    }
+
+    #[test]
+    fn a_descriptor_gives_the_three_relays_and_the_invitation_host() {
+        let network = parse_network(descriptor(), None).unwrap();
+        assert_eq!(network.relays.len(), 3);
+        assert_eq!(network.relays[0].host, "relay1.example.org");
+        assert_eq!(network.relays[0].ipv4, [203, 0, 113, 1]);
+        assert_eq!(network.relays[2].port, 443);
+        assert_eq!(network.relays[2].relay_id, [3; 32]);
+        assert_eq!(network.invitation_host, "invite.example.org");
+        assert_eq!(network.root_ca_path, None);
+    }
+
+    #[test]
+    fn a_descriptor_with_a_fault_is_refused() {
+        let good = descriptor();
+        let two_relays = good.replacen("relay relay2", "# relay relay2", 1);
+        let short_key = good.replacen(&"ab".repeat(32), "abcd", 1);
+        let no_invite = good.replace("invite invite.example.org", "");
+        let no_header = good.replace("umbra-network 1", "umbra-network 2");
+        let unknown = format!(
+            "{good}
+guard relay1.example.org"
+        );
+        for bad in [two_relays, short_key, no_invite, no_header, unknown] {
+            assert_eq!(parse_network(bad, None).err(), Some(FfiError::Malformed));
+        }
+    }
+}
