@@ -5,17 +5,26 @@
 
 use std::{
     collections::BTreeMap,
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    net::TcpListener,
     sync::mpsc,
 };
+use tokio_rustls::TlsAcceptor;
 use umbra_core::group::backoff::exponential;
 use umbra_crypto::{
     rand_core::{TryCryptoRng, TryRng},
     secret::Secret,
+};
+use umbra_transport::{
+    native,
+    race::{Plan, Wire},
+    Dial,
 };
 use umbra_transport::{upgrade, websocket};
 
@@ -114,11 +123,13 @@ pub async fn run_node(
     mut node: RelayNode,
     mut inputs: mpsc::Receiver<Input>,
     requests: mpsc::UnboundedSender<Request>,
+    pacing_mean_ms: u64,
 ) {
     let mut rng = OsRng;
     let mut writers: BTreeMap<LinkId, mpsc::UnboundedSender<Vec<u8>>> = BTreeMap::new();
     let mut next_tick: BTreeMap<CircuitKey, tokio::time::Instant> = BTreeMap::new();
-    let mut clock = tokio::time::interval(Duration::from_millis(50));
+    let mut clock =
+        tokio::time::interval(Duration::from_millis((pacing_mean_ms / 20).clamp(1, 50)));
     let mut last_sweep = unix_now();
     loop {
         let outputs = tokio::select! {
@@ -158,7 +169,7 @@ pub async fn run_node(
                         outputs.extend(node.pacing_tick(&circuit, now, &mut rng));
                         let mut draw = [0u8; 4];
                         let _ = rng.try_fill_bytes(&mut draw);
-                        let wait = exponential(PACING_MEAN_MS, u32::from_le_bytes(draw));
+                        let wait = exponential(pacing_mean_ms, u32::from_le_bytes(draw));
                         *due = instant + Duration::from_millis(wait.max(1));
                     }
                 }
@@ -261,4 +272,144 @@ where
         }
     }
     let _ = node.send(Input::Closed { link }).await;
+}
+
+/// The TLS 1.3 acceptor of a relay, from a certificate chain and a key in
+/// PEM files.
+pub fn tls_acceptor(cert_path: &str, key_path: &str) -> Option<TlsAcceptor> {
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(cert_path)
+        .ok()?
+        .collect::<Result<_, _>>()
+        .ok()?;
+    let key = PrivateKeyDer::from_pem_file(key_path).ok()?;
+    let config = rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .ok()?;
+    Some(TlsAcceptor::from(Arc::new(config)))
+}
+
+/// Accepts connections until the listener fails. Accepted links take the
+/// even identifiers, and dialed links take the odd ones.
+pub async fn accept_loop(listener: TcpListener, tls: TlsAcceptor, node: mpsc::Sender<Input>) {
+    let mut link: LinkId = 2;
+    loop {
+        let Ok((tcp, _)) = listener.accept().await else {
+            return;
+        };
+        let _ = tcp.set_nodelay(true);
+        let tls = tls.clone();
+        let node = node.clone();
+        let this_link = link;
+        link = link.saturating_add(2);
+        tokio::spawn(async move {
+            if let Ok(stream) = tls.accept(tcp).await {
+                serve_connection(stream, this_link, node).await;
+            }
+        });
+    }
+}
+
+/// Dials one relay of the next layer, and moves its capsules until the
+/// link closes.
+pub async fn dial_next(
+    relay_id: [u8; 32],
+    target: Dial,
+    link: LinkId,
+    tls: Arc<rustls::ClientConfig>,
+    node: mpsc::Sender<Input>,
+) {
+    let mut rng = OsRng;
+    let mut key = [0u8; 16];
+    let mut mask = [0u8; 4];
+    let _ = rng.try_fill_bytes(&mut key);
+    let _ = rng.try_fill_bytes(&mut mask);
+    let plan = Plan::Only(Wire::Tcp);
+    let Ok(mut connection) =
+        native::connect(&target, tls, plan, key, mask, Duration::from_secs(10)).await
+    else {
+        return;
+    };
+    let (writer, mut outbound) = mpsc::unbounded_channel::<Vec<u8>>();
+    let opened = Input::Dialed {
+        link,
+        relay_id,
+        writer,
+    };
+    if node.send(opened).await.is_err() {
+        return;
+    }
+    loop {
+        tokio::select! {
+            received = connection.recv() => match received {
+                Ok(bytes) => {
+                    if node.send(Input::Capsule { link, bytes }).await.is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            },
+            next = outbound.recv() => match next {
+                Some(bytes) if connection.send(&bytes).await.is_ok() => {}
+                _ => break,
+            },
+        }
+    }
+    let _ = node.send(Input::Closed { link }).await;
+}
+
+/// Runs one relay: the node task, the dialer of the next layer, and the
+/// accept loop. `next_hops` names each relay of the next layer, and
+/// `client_tls` is the configuration that the dialer trusts them under.
+pub async fn run_relay(
+    node: RelayNode,
+    listener: TcpListener,
+    tls: TlsAcceptor,
+    next_hops: BTreeMap<[u8; 32], Dial>,
+    client_tls: Arc<rustls::ClientConfig>,
+    pacing_mean_ms: u64,
+) {
+    let (inputs, node_inputs) = mpsc::channel::<Input>(1_024);
+    let (requests, mut node_requests) = mpsc::unbounded_channel::<Request>();
+    tokio::spawn(run_node(node, node_inputs, requests, pacing_mean_ms));
+
+    let dial_inputs = inputs.clone();
+    tokio::spawn(async move {
+        let mut link: LinkId = 1;
+        // Each relay of the next layer gets a link at the start, thus the
+        // first circuit of a client does not wait for a dial.
+        for (relay_id, target) in &next_hops {
+            let tls = client_tls.clone();
+            tokio::spawn(dial_next(
+                *relay_id,
+                target.clone(),
+                link,
+                tls,
+                dial_inputs.clone(),
+            ));
+            link = link.saturating_add(2);
+        }
+        while let Some(request) = node_requests.recv().await {
+            match request {
+                Request::Dial(relay_id) => {
+                    if let Some(target) = next_hops.get(&relay_id) {
+                        let tls = client_tls.clone();
+                        tokio::spawn(dial_next(
+                            relay_id,
+                            target.clone(),
+                            link,
+                            tls,
+                            dial_inputs.clone(),
+                        ));
+                        link = link.saturating_add(2);
+                    }
+                }
+                // The write of a digest needs a circuit of this relay to the
+                // queue relay of the subscriber. That sender is not built
+                // yet, thus the digest stops here.
+                Request::Digest(_) => {}
+            }
+        }
+    });
+    accept_loop(listener, tls, inputs).await;
 }

@@ -15,7 +15,7 @@ use rustls::{
         hpke::Hpke,
     },
     pki_types::ServerName,
-    ClientConfig, RootCertStore,
+    RootCertStore,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -81,12 +81,41 @@ impl std::fmt::Display for NativeError {
 
 impl std::error::Error for NativeError {}
 
-/// The one TLS client configuration of every native client.
+pub use rustls::ClientConfig;
+
+/// The one TLS client configuration of every native client, under the
+/// public web roots.
 pub fn tls_config() -> Result<Arc<ClientConfig>, NativeError> {
-    let mut provider = aws_lc_rs::default_provider();
-    provider.kx_groups = vec![kx_group::X25519MLKEM768, kx_group::X25519];
     let mut roots = RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    tls_config_under(roots)
+}
+
+/// The same configuration under the given roots alone, in DER. A
+/// development network and a test put their own authority here. A shipped
+/// client uses [`tls_config`].
+pub fn tls_config_with_roots(roots_der: &[Vec<u8>]) -> Result<Arc<ClientConfig>, NativeError> {
+    let mut roots = RootCertStore::empty();
+    for der in roots_der {
+        roots.add(rustls::pki_types::CertificateDer::from(der.clone()))?;
+    }
+    tls_config_under(roots)
+}
+
+/// The same configuration under each certificate of a PEM file.
+pub fn tls_config_with_root_file(path: &str) -> Result<Arc<ClientConfig>, NativeError> {
+    use rustls::pki_types::{pem::PemObject, CertificateDer};
+    let mut roots = RootCertStore::empty();
+    let found = CertificateDer::pem_file_iter(path).map_err(|_| Error::Refused)?;
+    for certificate in found {
+        roots.add(certificate.map_err(|_| Error::Refused)?)?;
+    }
+    tls_config_under(roots)
+}
+
+fn tls_config_under(roots: RootCertStore) -> Result<Arc<ClientConfig>, NativeError> {
+    let mut provider = aws_lc_rs::default_provider();
+    provider.kx_groups = vec![kx_group::X25519MLKEM768, kx_group::X25519];
     // The GREASE placeholder needs one HPKE suite and a throwaway key.
     let suite = hpke::DH_KEM_X25519_HKDF_SHA256_AES_128;
     let (placeholder, _) = suite.generate_key_pair()?;

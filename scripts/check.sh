@@ -37,6 +37,11 @@ step "client surface, host only"
 cargo clippy -p umbra-ffi --features bindings --all-targets -- -D warnings
 cargo test -p umbra-ffi --features bindings
 
+step "client runtime over real sockets, host only"
+# Three relay servers and two client runtimes on localhost.
+cargo clippy -p umbra-ffi --features bindings,sockets-test --all-targets -- -D warnings
+cargo test -p umbra-ffi --features sockets-test --test sockets
+
 step "build, wasm32-unknown-unknown"
 cargo build --workspace --target wasm32-unknown-unknown
 

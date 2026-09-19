@@ -1403,8 +1403,11 @@ version = "0.1.0"
 dependencies = [
  "getrandom 0.4.3",
  "rusqlite",
+ "tokio",
  "umbra-core",
  "umbra-crypto",
+ "umbra-relay",
+ "umbra-transport",
  "umbra-wire",
  "uniffi",
  "zeroize",

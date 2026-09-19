@@ -24,14 +24,22 @@ bindings = ["dep:uniffi", "dep:getrandom", "sqlite"]
 # The SQLite backend of Part 15 §15.6.4 over rusqlite with the bundled
 # library, which builds C code.
 sqlite = ["dep:rusqlite"]
+# The client runtime over tokio and the native transport stack.
+runtime = ["dep:tokio", "dep:getrandom", "umbra-transport/native"]
+# A test that runs three relay servers and two client runtimes on
+# localhost. The relay is a dependency of that test alone.
+sockets-test = ["runtime", "dep:umbra-relay", "umbra-relay/native"]
 
 [dependencies]
 umbra-crypto = { version = "0.1.0", path = "../umbra-crypto" }
 umbra-wire = { version = "0.1.0", path = "../umbra-wire" }
 umbra-core = { version = "0.1.0", path = "../umbra-core" }
+umbra-transport = { version = "0.1.0", path = "../umbra-transport" }
+umbra-relay = { version = "0.1.0", path = "../umbra-relay", optional = true }
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 uniffi = { version = "=0.32.1", default-features = false, optional = true }
 getrandom = { version = "0.4", optional = true }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "time", "sync", "io-util", "macros"], optional = true }
 rusqlite = { version = "0.40", default-features = false, features = ["bundled"], optional = true }

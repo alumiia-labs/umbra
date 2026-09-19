@@ -20,27 +20,19 @@
 
 #![forbid(unsafe_code)]
 
-use std::{collections::BTreeMap, process::ExitCode, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, process::ExitCode};
 
-use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
-use tokio::{net::TcpListener, sync::mpsc};
-use tokio_rustls::TlsAcceptor;
+use tokio::net::TcpListener;
 use umbra_crypto::{
     handshake::nk::RelayStatic,
-    rand_core::TryRng,
     rsabssa::PublicKey2048,
     x25519::{PublicKey as XPublic, StaticSecret},
 };
 use umbra_relay::{
-    circuits::LinkId,
     node::{Config, RelayNode},
-    server::{run_node, serve_connection, Input, OsRng, Request},
+    server::{run_relay, tls_acceptor, PACING_MEAN_MS},
 };
-use umbra_transport::{
-    native,
-    race::{Plan, Wire},
-    Dial,
-};
+use umbra_transport::{native, Dial};
 
 fn hex(text: &str) -> Option<Vec<u8>> {
     if !text.len().is_multiple_of(2) {
@@ -113,64 +105,6 @@ fn read_settings(path: &str) -> Option<Settings> {
     })
 }
 
-fn acceptor(cert: &str, key: &str) -> Option<TlsAcceptor> {
-    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(cert)
-        .ok()?
-        .collect::<Result<_, _>>()
-        .ok()?;
-    let key = PrivateKeyDer::from_pem_file(key).ok()?;
-    let config = rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
-        .with_no_client_auth()
-        .with_single_cert(certs, key)
-        .ok()?;
-    Some(TlsAcceptor::from(Arc::new(config)))
-}
-
-/// Dials one relay of the next layer, and moves its capsules until the
-/// link closes.
-async fn dial(relay_id: [u8; 32], target: Dial, link: LinkId, node: mpsc::Sender<Input>) {
-    let mut rng = OsRng;
-    let mut key = [0u8; 16];
-    let mut mask = [0u8; 4];
-    let _ = rng.try_fill_bytes(&mut key);
-    let _ = rng.try_fill_bytes(&mut mask);
-    let Ok(tls) = native::tls_config() else {
-        return;
-    };
-    let plan = Plan::Only(Wire::Tcp);
-    let Ok(mut connection) =
-        native::connect(&target, tls, plan, key, mask, Duration::from_secs(10)).await
-    else {
-        return;
-    };
-    let (writer, mut outbound) = mpsc::unbounded_channel::<Vec<u8>>();
-    let opened = Input::Dialed {
-        link,
-        relay_id,
-        writer,
-    };
-    if node.send(opened).await.is_err() {
-        return;
-    }
-    loop {
-        tokio::select! {
-            received = connection.recv() => match received {
-                Ok(bytes) => {
-                    if node.send(Input::Capsule { link, bytes }).await.is_err() {
-                        break;
-                    }
-                }
-                Err(_) => break,
-            },
-            next = outbound.recv() => match next {
-                Some(bytes) if connection.send(&bytes).await.is_ok() => {}
-                _ => break,
-            },
-        }
-    }
-    let _ = node.send(Input::Closed { link }).await;
-}
-
 #[tokio::main]
 async fn main() -> ExitCode {
     let Some(path) = std::env::args().nth(1) else {
@@ -181,7 +115,7 @@ async fn main() -> ExitCode {
         eprintln!("the settings file does not parse");
         return ExitCode::from(2);
     };
-    let Some(tls) = acceptor(&settings.cert, &settings.key) else {
+    let Some(tls) = tls_acceptor(&settings.cert, &settings.key) else {
         eprintln!("the certificate or the key does not load");
         return ExitCode::from(2);
     };
@@ -190,55 +124,18 @@ async fn main() -> ExitCode {
         return ExitCode::from(1);
     };
 
-    let (inputs, node_inputs) = mpsc::channel::<Input>(1_024);
-    let (requests, mut node_requests) = mpsc::unbounded_channel::<Request>();
-    tokio::spawn(run_node(
+    let Ok(client_tls) = native::tls_config() else {
+        eprintln!("the TLS client configuration does not build");
+        return ExitCode::from(1);
+    };
+    run_relay(
         RelayNode::new(settings.config),
-        node_inputs,
-        requests,
-    ));
-
-    // Accepted links take the even identifiers, and dialed links the odd.
-    let next_hops = settings.next;
-    let dial_inputs = inputs.clone();
-    tokio::spawn(async move {
-        let mut link: LinkId = 1;
-        // Each relay of the next layer gets a link at the start, thus the
-        // first circuit of a client does not wait for a dial.
-        for (relay_id, target) in &next_hops {
-            tokio::spawn(dial(*relay_id, target.clone(), link, dial_inputs.clone()));
-            link = link.saturating_add(2);
-        }
-        while let Some(request) = node_requests.recv().await {
-            match request {
-                Request::Dial(relay_id) => {
-                    if let Some(target) = next_hops.get(&relay_id) {
-                        tokio::spawn(dial(relay_id, target.clone(), link, dial_inputs.clone()));
-                        link = link.saturating_add(2);
-                    }
-                }
-                // The write of a digest needs a circuit of this relay to the
-                // queue relay of the subscriber. That sender is not built
-                // yet, thus the digest stops here.
-                Request::Digest(_) => {}
-            }
-        }
-    });
-
-    let mut link: LinkId = 2;
-    loop {
-        let Ok((tcp, _)) = listener.accept().await else {
-            continue;
-        };
-        let _ = tcp.set_nodelay(true);
-        let tls = tls.clone();
-        let inputs = inputs.clone();
-        let this_link = link;
-        link = link.saturating_add(2);
-        tokio::spawn(async move {
-            if let Ok(stream) = tls.accept(tcp).await {
-                serve_connection(stream, this_link, inputs).await;
-            }
-        });
-    }
+        listener,
+        tls,
+        settings.next,
+        client_tls,
+        PACING_MEAN_MS,
+    )
+    .await;
+    ExitCode::SUCCESS
 }
