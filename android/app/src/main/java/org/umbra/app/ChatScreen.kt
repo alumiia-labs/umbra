@@ -50,6 +50,19 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.animateColorAsState
+import kotlin.math.roundToInt
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.gestures.rememberDraggableState
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.Animatable
 
 @Composable
 fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
@@ -158,6 +171,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                     isFlashed = flashed == line.key,
                     onQuote = line.quote?.let { quote -> { jumpTo(quote.key) } },
                     onLongPress = { chosen = line },
+                    onReply = { answered = line },
                 )
                 // The contact saw each message up to this one. The mark
                 // sits under it and under no other, as a read marker does.
@@ -165,7 +179,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
             }
         }
         answered?.let { line ->
-            ReplyStrip(if (line.info.outgoing) "You" else chat.title, line.text) { answered = null }
+            ReplyStrip(if (line.info.outgoing) "You" else chat.title) { answered = null }
         }
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
@@ -251,35 +265,83 @@ private fun Bubble(
     isFlashed: Boolean,
     onQuote: (() -> Unit)?,
     onLongPress: () -> Unit,
+    onReply: () -> Unit,
 ) {
     val isOutgoing = line.info.outgoing
+    // A slide to the right answers the message. The bubble follows the
+    // finger a short way, and it springs back at the release.
+    val slide = remember { Animatable(0f) }
+    val scope = rememberCoroutineScope()
+    val haptics = LocalHapticFeedback.current
+    val reach = with(LocalDensity.current) { SLIDE_REACH.toPx() }
+    val isPast = slide.value >= reach * SLIDE_POINT
+    // The tick tells the finger that a release now starts the answer.
+    LaunchedEffect(isPast) {
+        if (isPast) haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+    }
+    val drag = rememberDraggableState { delta ->
+        // The finger moves more than the bubble, thus the end feels firm.
+        val next = (slide.value + delta * 0.55f).coerceIn(0f, reach)
+        scope.launch { slide.snapTo(next) }
+    }
     // A jump to a message shows it for a moment, and the mark fades.
     val flash by animateColorAsState(
         if (isFlashed) Palette.Action.copy(alpha = 0.22f) else Color.Transparent,
         tween(durationMillis = if (isFlashed) 120 else 700),
         label = "jump flash",
     )
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-        horizontalArrangement = if (isOutgoing) Arrangement.End else Arrangement.Start,
+    Box(
+        Modifier.fillMaxWidth().draggable(
+            state = drag,
+            orientation = Orientation.Horizontal,
+            onDragStopped = {
+                if (slide.value >= reach * SLIDE_POINT) onReply()
+                slide.animateTo(0f, spring(stiffness = Spring.StiffnessMediumLow))
+            },
+        ),
+        contentAlignment = Alignment.CenterStart,
     ) {
-        // The text is a view of the platform, thus the press area lies above
-        // the content, as in a row of the chat list. A press on an answer
-        // leads to the message that it answers.
-        PressOver(
-            Modifier
-                .widthIn(max = 300.dp)
-                .clip(RoundedCornerShape(16.dp))
-                .drawWithContent {
-                    drawContent()
-                    drawRect(flash)
-                },
-            onClick = onQuote,
-            longLabel = "Message actions",
-            onLongClick = onLongPress,
-        ) { BubbleContent(line, chat) }
+        // The arrow grows behind the bubble as the slide goes on.
+        val progress = (slide.value / (reach * SLIDE_POINT)).coerceIn(0f, 1f)
+        FaIcon(
+            "reply",
+            size = 18.dp,
+            tint = Palette.Action,
+            modifier = Modifier.padding(start = 6.dp).graphicsLayer {
+                alpha = progress
+                scaleX = 0.6f + 0.4f * progress
+                scaleY = 0.6f + 0.4f * progress
+            },
+        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .offset { IntOffset(slide.value.roundToInt(), 0) }
+                .padding(vertical = 4.dp),
+            horizontalArrangement = if (isOutgoing) Arrangement.End else Arrangement.Start,
+        ) {
+            // The text is a view of the platform, thus the press area lies above
+            // the content, as in a row of the chat list. A press on an answer
+            // leads to the message that it answers.
+            PressOver(
+                Modifier
+                    .widthIn(max = 300.dp)
+                    .clip(RoundedCornerShape(16.dp))
+                    .drawWithContent {
+                        drawContent()
+                        drawRect(flash)
+                    },
+                onClick = onQuote,
+                longLabel = "Message actions",
+                onLongClick = onLongPress,
+            ) { BubbleContent(line, chat) }
+        }
     }
 }
+
+/** How far a bubble follows a slide, and the part of that way that answers. */
+private val SLIDE_REACH = 72.dp
+private const val SLIDE_POINT = 0.8f
 
 @Composable
 private fun BubbleContent(line: Line, chat: Chat) {
@@ -360,9 +422,12 @@ private fun QuoteBlock(author: String?, text: CharArray?, modifier: Modifier = M
     }
 }
 
-/** What the composer answers, above the field, with a way to take it back. */
+/**
+ * Whom the composer answers, above the field, with a way to take it back.
+ * The name alone: the message is a few lines above, and the user chose it.
+ */
 @Composable
-private fun ReplyStrip(author: String, text: CharArray, onCancel: () -> Unit) {
+private fun ReplyStrip(author: String, onCancel: () -> Unit) {
     Row(
         Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -370,7 +435,24 @@ private fun ReplyStrip(author: String, text: CharArray, onCancel: () -> Unit) {
         // The arrow says what the block is, before a user reads the name.
         FaIcon("reply", size = 18.dp, tint = Palette.Action)
         Spacer(Modifier.width(12.dp))
-        QuoteBlock(author, text, Modifier.weight(1f))
+        Row(
+            Modifier
+                .weight(1f)
+                .height(IntrinsicSize.Min)
+                .clip(RoundedCornerShape(10.dp))
+                .background(Palette.Pressed),
+        ) {
+            Box(Modifier.width(4.dp).fillMaxHeight().background(Palette.Action))
+            Text(
+                author,
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.SemiBold,
+                color = Palette.Action,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 9.dp),
+            )
+        }
         IconAction("xmark", "Cancel the reply", onCancel)
     }
 }
