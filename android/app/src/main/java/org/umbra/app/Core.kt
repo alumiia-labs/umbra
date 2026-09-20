@@ -288,6 +288,8 @@ object Core {
     /** The activity tells the core when a view enters or leaves the screen. */
     fun visible(context: Context, nowVisible: Boolean) {
         isVisible = nowVisible
+        // The client makes cover cells while a view is on the screen only.
+        call { it.setForeground(nowVisible) }
         if (nowVisible) Notifier.clear(context)
         // The setting "Immediately" locks when the last view leaves.
         if (!nowVisible && autoLockSeconds == 0L && phase == Phase.Open) lock()
@@ -330,7 +332,12 @@ object Core {
     /** Starts the network again after it ended. */
     fun connect(context: Context) {
         val app = context.applicationContext
-        call { client -> BuildNetwork.network(app)?.let(client::connect) }
+        call { client ->
+            BuildNetwork.network(app)?.let(client::connect)
+            // A run starts in the foreground tier, thus it takes the state
+            // of this moment.
+            client.setForeground(isVisible)
+        }
     }
 
     fun invite() = call { it.invite() }
