@@ -129,6 +129,9 @@ pub struct MessageInfo {
     pub stored_at_ms: u64,
     /// The message that this message answers.
     pub reply: ReplyTarget,
+    /// Whether a deletion took the content, and the row is its placeholder
+    /// (Part 7 §7.5.6).
+    pub deleted: bool,
 }
 
 /// The longest local name of a contact, in bytes of UTF-8.
@@ -193,6 +196,13 @@ pub enum Event {
         /// The new state.
         delivery: Delivery,
     },
+    /// The contact deleted a message, and its row is a placeholder now.
+    Deleted {
+        /// The conversation.
+        conversation: ConversationId,
+        /// The message.
+        message: MsgRef,
+    },
     /// The client locked itself, or the platform locked it.
     Locked,
     /// A table MAC or a scan does not match. The interface tells the user
@@ -228,6 +238,8 @@ pub enum Error {
     Closed,
     /// The network runtime does not run.
     Offline,
+    /// A limit on the rate of an act holds it back for a short time.
+    Busy,
 }
 
 impl From<umbra_core::Error> for Error {
@@ -258,6 +270,7 @@ impl core::fmt::Display for Error {
             Error::Storage => "the platform store failed",
             Error::Closed => "the client is closed",
             Error::Offline => "the network does not run",
+            Error::Busy => "a rate limit holds the act back",
         })
     }
 }
@@ -671,6 +684,161 @@ mod tests {
         );
         client.audit().unwrap();
         peer.audit().unwrap();
+    }
+
+    /// A client with one contact, and the conversation of that contact.
+    fn client_with_contact(
+        seed: u64,
+    ) -> (
+        Client<MemoryBackend, Element>,
+        umbra_core::session::node::ContactId,
+        ConversationId,
+    ) {
+        use umbra_core::session::node::{ContactId, StateChange};
+        let mut rng = Rng(seed);
+        let mut client = new_client(&mut rng);
+        let contact = ContactId([9; 32]);
+        let change = StateChange::Contact {
+            contact,
+            state: zeroize::Zeroizing::new(vec![1, 2, 3]),
+        };
+        client
+            .commit_network(&[change], &[], 1_000_000, &mut rng)
+            .unwrap();
+        let conversation = client.conversation_for(&contact.0).unwrap();
+        (client, contact, conversation)
+    }
+
+    #[test]
+    fn a_deletion_leaves_a_placeholder_and_reaches_the_messages_of_its_sender_alone() {
+        use umbra_wire::app::{
+            edit::{DeleteBody, DeleteScope},
+            AppKind, AppMessage, Channel,
+        };
+
+        let mut rng = Rng(11);
+        let (mut alice, contact, conversation) = client_with_contact(12);
+        let (mut bob, _, bob_conversation) = client_with_contact(13);
+
+        // Alice sends two texts, and Bob holds them.
+        let mut sent = Vec::new();
+        for (words, at) in [("first", 2_000_000), ("second", 2_001_000)] {
+            let mut draft = alice.new_draft(conversation);
+            draft.set_text(&units(words)).unwrap();
+            let message = alice.send_draft(draft, at, &mut rng).unwrap();
+            let outgoing = alice.take_outgoing().unwrap();
+            alice
+                .set_delivery(&message, Delivery::Accepted, &mut rng)
+                .unwrap();
+            bob.commit_network(&[], &[(contact, outgoing.app)], at + 500, &mut rng)
+                .unwrap();
+            sent.push(message);
+        }
+        while alice.next_event().is_some() {}
+        while bob.next_event().is_some() {}
+        let at_bob = bob.messages(bob_conversation).unwrap();
+
+        // For everyone: the content leaves Alice at once, a placeholder
+        // stands in its row, and one request waits for the send path.
+        alice
+            .delete_for_everyone(&sent[0], 3_000_000, &mut rng)
+            .unwrap();
+        let mut view = View::default();
+        assert!(alice.info(&sent[0]).unwrap().deleted);
+        assert!(alice.render(&sent[0], &mut view).is_err());
+        assert_eq!(alice.messages(conversation).unwrap(), sent);
+        let request = alice.take_outgoing().unwrap();
+        let parsed = AppMessage::parse(&request.app, Channel::Pairwise).unwrap();
+        assert_eq!(parsed.kind, AppKind::Delete);
+        assert_eq!(
+            DeleteBody::parse(parsed.body).unwrap().scope,
+            DeleteScope::OtherParty
+        );
+
+        // DELETE_RATE_LIMIT: a second request inside 10 seconds changes
+        // nothing, and a request after that time goes.
+        assert_eq!(
+            alice.delete_for_everyone(&sent[1], 3_009_000, &mut rng),
+            Err(Error::Busy)
+        );
+        assert!(!alice.info(&sent[1]).unwrap().deleted);
+
+        // The request leaves the store when a relay took it, and no view
+        // showed it.
+        alice
+            .set_delivery(&request.message, Delivery::Accepted, &mut rng)
+            .unwrap();
+        assert_eq!(alice.info(&request.message), Err(Error::NotFound));
+        assert_eq!(alice.messages(conversation).unwrap(), sent);
+
+        // Bob gets the request: a placeholder, an event, and no new message.
+        bob.commit_network(&[], &[(contact, request.app.clone())], 3_100_000, &mut rng)
+            .unwrap();
+        assert_eq!(
+            bob.next_event(),
+            Some(Event::Deleted {
+                conversation: bob_conversation,
+                message: at_bob[0]
+            })
+        );
+        assert_eq!(bob.messages(bob_conversation).unwrap(), at_bob);
+        assert!(bob.info(&at_bob[0]).unwrap().deleted);
+        assert!(bob.render(&at_bob[0], &mut view).is_err());
+        bob.render(&at_bob[1], &mut view).unwrap();
+        assert_eq!(String::from_utf16(&view.0).unwrap(), "second");
+
+        // DEV-085: a contact deletes no message of this device. Bob wrote a
+        // text, and a request of Alice that names it changes nothing.
+        let mut draft = bob.new_draft(bob_conversation);
+        draft.set_text(&units("mine")).unwrap();
+        let mine = bob.send_draft(draft, 3_200_000, &mut rng).unwrap();
+        let mine_id = AppMessage::parse(&bob.take_outgoing().unwrap().app, Channel::Pairwise)
+            .unwrap()
+            .msg_id;
+        let body = DeleteBody {
+            scope: DeleteScope::OtherParty,
+            targets: vec![mine_id],
+        };
+        let mut encoded = vec![0u8; body.len()];
+        body.encode(&mut encoded).unwrap();
+        let forged = record(AppKind::Delete, [0xD1; 16], &encoded);
+        bob.commit_network(&[], &[(contact, forged)], 3_300_000, &mut rng)
+            .unwrap();
+        assert!(!bob.info(&mine).unwrap().deleted);
+        assert_eq!(bob.next_event(), None);
+
+        // DEV-093: a deletion that comes before its target takes the target
+        // at its arrival, and the view shows nothing at that position.
+        let body = DeleteBody {
+            scope: DeleteScope::OtherParty,
+            targets: vec![[0x77; 16]],
+        };
+        let mut encoded = vec![0u8; body.len()];
+        body.encode(&mut encoded).unwrap();
+        let early = record(AppKind::Delete, [0xD2; 16], &encoded);
+        let late = record(AppKind::Text, [0x77; 16], b"too late");
+        let before = bob.messages(bob_conversation).unwrap().len();
+        bob.commit_network(&[], &[(contact, early)], 3_400_000, &mut rng)
+            .unwrap();
+        bob.commit_network(&[], &[(contact, late)], 3_500_000, &mut rng)
+            .unwrap();
+        assert_eq!(bob.messages(bob_conversation).unwrap().len(), before);
+        assert_eq!(bob.next_event(), None);
+
+        // A message of the contact is no target of a request of this device.
+        assert_eq!(
+            bob.delete_for_everyone(&at_bob[1], 3_600_000, &mut rng),
+            Err(Error::Malformed)
+        );
+
+        // DEV-105: the user clears a placeholder, and a message of the
+        // contact leaves this device alone.
+        bob.delete_for_me(&at_bob[0]).unwrap();
+        bob.delete_for_me(&at_bob[1]).unwrap();
+        assert_eq!(bob.messages(bob_conversation).unwrap(), [mine]);
+        assert_eq!(bob.delete_for_me(&at_bob[1]), Err(Error::NotFound));
+        alice.audit().unwrap();
+        bob.audit().unwrap();
     }
 
     #[test]

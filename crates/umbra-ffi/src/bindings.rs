@@ -70,6 +70,8 @@ pub enum FfiError {
     Closed,
     /// The network runtime does not run.
     Offline,
+    /// A limit on the rate of an act holds it back for a short time.
+    Busy,
 }
 
 impl core::fmt::Display for FfiError {
@@ -90,6 +92,7 @@ impl From<Error> for FfiError {
             Error::Storage => FfiError::Storage,
             Error::Closed => FfiError::Closed,
             Error::Offline => FfiError::Offline,
+            Error::Busy => FfiError::Busy,
         }
     }
 }
@@ -262,6 +265,9 @@ pub struct MsgInfo {
     /// The time of this device at the store of the message, in
     /// milliseconds. The list of [`Handle::messages`] is in this order.
     pub stored_at_ms: u64,
+    /// Whether a deletion took the content. The row is a placeholder, and
+    /// it has no text.
+    pub deleted: bool,
     /// Whether the message answers a message (Part 6 §6.6.5).
     pub is_reply: bool,
     /// The message that it answers. With `is_reply` and no handle here, the
@@ -346,6 +352,12 @@ pub enum FfiEvent {
     /// A ceremony did not start, or no complete ceremony was there to
     /// confirm. The store holds no new state.
     VerificationRefused {
+        /// The conversation.
+        conversation: Vec<u8>,
+    },
+    /// The contact deleted a message of a conversation, and a placeholder
+    /// stands in its place.
+    Deleted {
         /// The conversation.
         conversation: Vec<u8>,
     },
@@ -457,6 +469,9 @@ impl Inner {
                 Event::Delivery { message, delivery } => FfiEvent::Delivery {
                     message: Arc::new(MsgHandle(message)),
                     state: delivery as u8,
+                },
+                Event::Deleted { conversation, .. } => FfiEvent::Deleted {
+                    conversation: conversation.0.to_vec(),
                 },
                 Event::Locked => FfiEvent::Locked,
                 Event::IntegrityFault => FfiEvent::IntegrityFault,
@@ -972,12 +987,34 @@ impl Handle {
             delivery: info.delivery as u8,
             sent_at_ms: info.sent_at_ms,
             stored_at_ms: info.stored_at_ms,
+            deleted: info.deleted,
             is_reply: info.reply != crate::ReplyTarget::None,
             reply_to: match info.reply {
                 crate::ReplyTarget::Message(target) => Some(Arc::new(MsgHandle(target))),
                 _ => None,
             },
         })
+    }
+
+    /// Removes a message, or the placeholder of a deleted one, from this
+    /// device. No record leaves the device.
+    pub fn delete_for_me(&self, message: Arc<MsgHandle>) -> Result<(), FfiError> {
+        Ok(locked(&self.inner).client.delete_for_me(&message.0)?)
+    }
+
+    /// Asks the contact to delete a message that this device sent, and
+    /// puts a placeholder in its place here. One such request leaves in
+    /// each 10 seconds for one conversation, and a request before that
+    /// time is `Busy`.
+    pub fn delete_for_everyone(&self, message: Arc<MsgHandle>) -> Result<(), FfiError> {
+        let mut inner = locked(&self.inner);
+        let Inner { client, bridge, .. } = &mut *inner;
+        client.delete_for_everyone(&message.0, unix_now_ms(), &mut OsRng)?;
+        // With no network the request waits in the store.
+        if let Some(running) = bridge {
+            running.flush(client, &mut OsRng)?;
+        }
+        Ok(())
     }
 
     /// The messages of one conversation, as handles, in the order in which

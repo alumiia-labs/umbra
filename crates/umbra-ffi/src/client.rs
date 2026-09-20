@@ -21,7 +21,11 @@ use umbra_core::{
 use umbra_crypto::{hierarchy::RootIdentity, rand_core::CryptoRng, secret::Secret};
 use umbra_queue::client::receipts::ReceiptHold;
 use umbra_wire::app::{
-    msg_ref, rich::RichRecord, signal::ReceiptBody, AppKind, AppMessage, Channel,
+    edit::{DeleteBody, DeleteScope},
+    msg_ref,
+    rich::RichRecord,
+    signal::ReceiptBody,
+    AppKind, AppMessage, Channel,
 };
 use zeroize::Zeroizing;
 
@@ -65,6 +69,22 @@ const RECEIPT_ROW_LEN: usize = 16 + 1 + 16 + 8;
 const RECEIPT_SETTING: &[u8] = b"receipts/";
 const SENDS_DELIVERY: u8 = 0x01;
 const SENDS_READ: u8 = 0x02;
+
+/// The pending reference table of Part 7 §7.5.6: a deletion of the contact
+/// whose target did not arrive yet. A row holds the conversation, the
+/// `msg_ref` of the target, and the time of the deletion, in seconds.
+const PENDING: TableId = TableId(0x0C);
+const PENDING_ROW_LEN: usize = 16 + 16 + 8;
+/// `REF_ORPHAN_TTL`.
+const REF_ORPHAN_TTL: u64 = 45 * 24 * 3_600;
+/// `REF_ORPHAN_MAX`, for each conversation.
+const REF_ORPHAN_MAX: usize = 4_096;
+/// `DELETE_RATE_LIMIT`: one record of kind `0x05` in this time, in seconds,
+/// for each conversation.
+const DELETE_RATE_LIMIT: u64 = 10;
+/// The name of the time of the last deletion request of a conversation,
+/// before its identifier.
+const LAST_DELETE_SETTING: &[u8] = b"last-delete/";
 
 /// The table of the settings of this device. A row holds one value under
 /// the name of its setting.
@@ -166,6 +186,58 @@ fn attachments_of(row: &[u8]) -> Result<Vec<String>, Error> {
         at = at.saturating_add(2).saturating_add(len);
     }
     Ok(out)
+}
+
+/// What a stored record of kind `0x05` is. A placeholder names its own
+/// `msg_id`: it stands in the row of the message that a deletion took. A
+/// request names another message: it is the record of this device that
+/// waits for its relay, and no view shows it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tombstone {
+    Placeholder,
+    Request,
+}
+
+fn tombstone_of(parsed: &AppMessage<'_>) -> Result<Option<Tombstone>, Error> {
+    if parsed.kind != AppKind::Delete {
+        return Ok(None);
+    }
+    let body = DeleteBody::parse(parsed.body)?;
+    Ok(Some(if body.targets == [parsed.msg_id] {
+        Tombstone::Placeholder
+    } else {
+        Tombstone::Request
+    }))
+}
+
+/// An encoded deletion record.
+fn deletion_record(msg_id: [u8; 16], sent_at: u64, target: [u8; 16]) -> Result<Vec<u8>, Error> {
+    let body = DeleteBody {
+        scope: DeleteScope::OtherParty,
+        targets: vec![target],
+    };
+    let mut encoded = vec![0u8; body.len()];
+    body.encode(&mut encoded)?;
+    let record = AppMessage {
+        kind: AppKind::Delete,
+        msg_id,
+        sent_at,
+        body: &encoded,
+    };
+    let mut app = vec![0u8; record.len()];
+    record.encode(&mut app)?;
+    Ok(app)
+}
+
+/// The placeholder of a stored message: the same row with the same header,
+/// and a record in the place of its content that names itself. DEV-100: the
+/// content is overwritten, and the row is not hidden alone.
+fn placeholder_of(plain: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error> {
+    let prefix = plain.get(..MESSAGE_PREFIX).ok_or(Error::Integrity)?;
+    let app = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
+    let parsed = AppMessage::parse(app, Channel::Pairwise)?;
+    let record = deletion_record(parsed.msg_id, parsed.sent_at, parsed.msg_id)?;
+    Ok(Zeroizing::new([prefix, &record].concat()))
 }
 
 /// The text of a record: the body of a text, or the inner body of a rich
@@ -514,10 +586,82 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
                 continue;
             }
+            if parsed.kind == AppKind::Delete {
+                // A deletion is no message. WIR-084: a contact deletes for
+                // the other party, and a record of another scope, or one
+                // that does not parse, changes nothing.
+                let targets = match DeleteBody::parse(parsed.body) {
+                    Ok(body) if body.scope == DeleteScope::OtherParty => body.targets,
+                    _ => Vec::new(),
+                };
+                for target in targets {
+                    let reference = msg_ref(&open.device_set_key, &target);
+                    let natural = [conversation.0.as_slice(), &reference].concat();
+                    let row = open.store.row_id(TableId::MESSAGE, &natural);
+                    match open.store.get(TableId::MESSAGE, &row)? {
+                        Some(plain) => {
+                            let plain = Zeroizing::new(plain);
+                            // DEV-081, DEV-085: the contact names a message
+                            // that the contact sent, and no other one.
+                            if info_of(&plain)?.outgoing || info_of(&plain)?.deleted {
+                                continue;
+                            }
+                            planned.push(Planned::Put(
+                                TableId::MESSAGE,
+                                row,
+                                Some(conversation.0),
+                                placeholder_of(&plain)?,
+                            ));
+                            events.push(Event::Deleted {
+                                conversation,
+                                message: MsgRef(row),
+                            });
+                        }
+                        // DEV-093: the target did not arrive yet.
+                        None => {
+                            let held = open.store.list(PENDING, Some(&conversation.0))?.len();
+                            if held >= REF_ORPHAN_MAX {
+                                continue;
+                            }
+                            let pending = open.store.row_id(PENDING, &natural);
+                            let entry = [
+                                conversation.0.as_slice(),
+                                &reference,
+                                &(now_ms / 1_000).to_be_bytes(),
+                            ]
+                            .concat();
+                            planned.push(Planned::Put(
+                                PENDING,
+                                pending,
+                                Some(conversation.0),
+                                Zeroizing::new(entry),
+                            ));
+                        }
+                    }
+                }
+                continue;
+            }
             let reference = msg_ref(&open.device_set_key, &parsed.msg_id);
             let natural = [conversation.0.as_slice(), &reference].concat();
             let row = open.store.row_id(TableId::MESSAGE, &natural);
             let message = MsgRef(row);
+            // A deletion that came first takes the message at its arrival:
+            // the view shows nothing at that position (Part 7 §7.5.6).
+            let pending = open.store.row_id(PENDING, &natural);
+            if let Some(entry) = open.store.get(PENDING, &pending)? {
+                if entry.len() != PENDING_ROW_LEN {
+                    return Err(Error::Integrity);
+                }
+                let at: [u8; 8] = entry
+                    .get(32..)
+                    .and_then(|bytes| bytes.try_into().ok())
+                    .ok_or(Error::Integrity)?;
+                planned.push(Planned::Delete(PENDING, pending));
+                // DEV-095: an entry above its time counts for nothing.
+                if (now_ms / 1_000).saturating_sub(u64::from_be_bytes(at)) < REF_ORPHAN_TTL {
+                    continue;
+                }
+            }
             let in_batch = events
                 .iter()
                 .any(|event| matches!(event, Event::Message { message: m, .. } if *m == message));
@@ -881,6 +1025,96 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(batch.commit()?)
     }
 
+    /// Removes a message, or the placeholder of a deleted one, from this
+    /// device (`DEV-105`). No record leaves the device, and the store erases
+    /// the row and its key.
+    pub fn delete_for_me(&mut self, message: &MsgRef) -> Result<(), Error> {
+        self.outgoing.retain(|waiting| waiting.message != *message);
+        let open = self.open_mut()?;
+        if open.store.get(TableId::MESSAGE, &message.0)?.is_none() {
+            return Err(Error::NotFound);
+        }
+        let mut batch = open.store.begin();
+        batch.delete(TableId::MESSAGE, message.0);
+        batch.delete(OUTBOX, message.0);
+        Ok(batch.commit()?)
+    }
+
+    /// Asks the contact to delete a message that this device sent. The
+    /// content leaves this device at once (`DEV-106`), and a placeholder
+    /// stands in its row. The request is one record of kind `0x05` for the
+    /// send path. `DELETE_RATE_LIMIT` permits one such record in 10 seconds
+    /// for one conversation, and a call before that time is
+    /// [`Error::Busy`] and changes nothing.
+    pub fn delete_for_everyone<R: CryptoRng + ?Sized>(
+        &mut self,
+        message: &MsgRef,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let open = self.open_mut()?;
+        let plain = Zeroizing::new(
+            open.store
+                .get(TableId::MESSAGE, &message.0)?
+                .ok_or(Error::NotFound)?,
+        );
+        let info = info_of(&plain)?;
+        // A contact takes a deletion for a message of this device alone.
+        if !info.outgoing || info.deleted || is_request(&plain)? {
+            return Err(Error::Malformed);
+        }
+        let conversation = conversation_of(&plain)?;
+        let limit = [LAST_DELETE_SETTING, conversation.0.as_slice()].concat();
+        let limit_row = open.store.row_id(SETTINGS, &limit);
+        let now = now_ms / 1_000;
+        if let Some(last) = open.store.get(SETTINGS, &limit_row)? {
+            let last: [u8; 8] = last.as_slice().try_into().map_err(|_| Error::Integrity)?;
+            if now.saturating_sub(u64::from_be_bytes(last)) < DELETE_RATE_LIMIT {
+                return Err(Error::Busy);
+            }
+        }
+        let app = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
+        let target = AppMessage::parse(app, Channel::Pairwise)?.msg_id;
+        let mut msg_id = [0u8; 16];
+        rng.fill_bytes(&mut msg_id);
+        let request = deletion_record(msg_id, now_ms, target)?;
+        let reference = msg_ref(&open.device_set_key, &msg_id);
+        let natural = [conversation.0.as_slice(), &reference].concat();
+        let request_row = open.store.row_id(TableId::MESSAGE, &natural);
+        let stored = stored_message(OUTGOING, Delivery::Queued, conversation, now_ms, &request);
+
+        let mut batch = open.store.begin();
+        batch.put(
+            TableId::MESSAGE,
+            message.0,
+            Some(conversation.0),
+            &placeholder_of(&plain)?,
+            rng,
+        )?;
+        // The message itself waits for no relay now.
+        batch.delete(OUTBOX, message.0);
+        batch.put(
+            TableId::MESSAGE,
+            request_row,
+            Some(conversation.0),
+            &stored,
+            rng,
+        )?;
+        batch.put(OUTBOX, request_row, None, &outbox_row(&[])?, rng)?;
+        batch.put(SETTINGS, limit_row, None, &now.to_be_bytes(), rng)?;
+        batch.commit()?;
+
+        self.outgoing.retain(|waiting| waiting.message != *message);
+        self.outgoing.push_back(Outgoing {
+            message: MsgRef(request_row),
+            conversation,
+            app: request,
+            attachments: Vec::new(),
+        });
+        self.auto_lock.touch(now);
+        Ok(())
+    }
+
     /// Which receipts this device sends to the contact of a conversation.
     pub fn receipt_settings(&self, conversation: ConversationId) -> Result<ReceiptSettings, Error> {
         let store = &self.open_ref()?.store;
@@ -1036,6 +1270,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let mut unread = 0u32;
             for (row, plain) in store.list(TableId::MESSAGE, Some(&conversation.0))? {
                 let plain = Zeroizing::new(plain);
+                if is_request(&plain)? {
+                    continue;
+                }
                 let info = info_of(&plain)?;
                 if !info.outgoing && info.stored_at_ms > read_up_to {
                     unread = unread.saturating_add(1);
@@ -1233,6 +1470,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .ok_or(Error::NotFound)?,
         );
         let conversation = conversation_of(&plain)?;
+        if is_request(&plain)? && !matches!(delivery, Delivery::Queued | Delivery::Failed) {
+            // WIR-071: the request held a raw `msg_id` for its send, and a
+            // relay has it now. No view showed the row.
+            let mut batch = open.store.begin();
+            batch.delete(TableId::MESSAGE, message.0);
+            batch.delete(OUTBOX, message.0);
+            return Ok(batch.commit()?);
+        }
         if info_of(&plain)?.delivery == Delivery::Queued && delivery != Delivery::Queued {
             // WIR-071: the raw target served the send, and its time ends.
             let app = plain.get_mut(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
@@ -1363,6 +1608,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if conversation_of(&plain)? != conversation {
                 return Err(Error::Integrity);
             }
+            if is_request(&plain)? {
+                continue;
+            }
             let info = info_of(&plain)?;
             found.push((info.stored_at_ms, info.sent_at_ms, row));
         }
@@ -1381,6 +1629,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             TableId::CONTACT,
             TableId::VERIFICATION,
             RECEIPT,
+            PENDING,
             OUTBOX,
             INVITATION,
             CONVERSATION,
@@ -1398,6 +1647,7 @@ fn info_of(plain: &[u8]) -> Result<MessageInfo, Error> {
     let direction = *plain.first().ok_or(Error::Integrity)?;
     let delivery = plain.get(1).copied().and_then(Delivery::from_byte);
     let app = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
+    let parsed = AppMessage::parse(app, Channel::Pairwise)?;
     let stored_at: [u8; 8] = plain
         .get(STORED_AT)
         .and_then(|bytes| bytes.try_into().ok())
@@ -1406,10 +1656,18 @@ fn info_of(plain: &[u8]) -> Result<MessageInfo, Error> {
         outgoing: direction == OUTGOING,
         stored_at_ms: u64::from_be_bytes(stored_at),
         delivery: delivery.ok_or(Error::Integrity)?,
-        sent_at_ms: AppMessage::parse(app, Channel::Pairwise)?.sent_at,
+        sent_at_ms: parsed.sent_at,
         // The store resolves the target: see `Client::info`.
         reply: ReplyTarget::None,
+        deleted: tombstone_of(&parsed)? == Some(Tombstone::Placeholder),
     })
+}
+
+/// Whether a stored row is a deletion request of this device.
+fn is_request(plain: &[u8]) -> Result<bool, Error> {
+    let app = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
+    let parsed = AppMessage::parse(app, Channel::Pairwise)?;
+    Ok(tombstone_of(&parsed)? == Some(Tombstone::Request))
 }
 
 fn conversation_of(plain: &[u8]) -> Result<ConversationId, Error> {
