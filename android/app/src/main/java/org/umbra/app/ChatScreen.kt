@@ -71,6 +71,11 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.foundation.gestures.scrollBy
+import java.nio.CharBuffer
+import android.os.PersistableBundle
+import android.content.Context
+import android.content.ClipboardManager
+import android.content.ClipData
 
 @Composable
 fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
@@ -138,6 +143,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
             }
         }
     }
+    val context = LocalContext.current
     // The message whose text the composer changes.
     var edited by remember(conversation) { mutableStateOf<Line?>(null) }
     // The message that the user wants to delete, and a word for a user who
@@ -173,6 +179,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                         },
                     )
                 }
+                add(RowEntry("copy", "Copy text") { copyMessage(context, line.text) })
                 add(RowEntry("trash-can", "Delete") { deleting = line })
             }
         }
@@ -326,6 +333,19 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
             }
         }
     }
+}
+
+/**
+ * IMP-056: a copied message is marked as sensitive, thus the platform shows
+ * no preview of it. The text goes from its array, and this code makes no
+ * `String` of it.
+ */
+private fun copyMessage(context: Context, text: CharArray) {
+    val clip = ClipData.newPlainText("UMBRA message", CharBuffer.wrap(text))
+    clip.description.extras = PersistableBundle().apply {
+        putBoolean("android.content.extra.IS_SENSITIVE", true)
+    }
+    context.getSystemService(ClipboardManager::class.java).setPrimaryClip(clip)
 }
 
 private fun isSameDay(a: ULong, b: ULong): Boolean {
