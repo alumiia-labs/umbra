@@ -221,7 +221,7 @@ fn cover_delay(rng: &mut OsRng) -> Duration {
     COVER_MEAN.mul_f64(-unit.ln())
 }
 
-fn unix_now() -> u64 {
+pub(crate) fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs())

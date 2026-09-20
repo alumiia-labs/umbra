@@ -155,6 +155,11 @@ impl Upload {
         })
     }
 
+    /// Whether the answer with this handle belongs to this upload.
+    pub fn owns(&self, handle: u64) -> bool {
+        self.waiting.contains_key(&handle)
+    }
+
     fn in_flight(&self) -> usize {
         self.chunks
             .iter()
@@ -484,6 +489,11 @@ impl Download {
         let handle = node.chunk(relay, chunk_id, ChunkJob::Fetch { read }, rng)?;
         self.waiting.insert(handle, index);
         Ok(())
+    }
+
+    /// Whether the answer with this handle belongs to this download.
+    pub fn owns(&self, handle: u64) -> bool {
+        self.waiting.contains_key(&handle)
     }
 
     /// Asks for each chunk that has room under `MAX_CONCURRENT_DOWN`.
