@@ -22,6 +22,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -49,18 +50,45 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit) {
     var lines by remember { mutableStateOf(emptyList<Line>()) }
     val listState = rememberLazyListState()
     val conversation = chat.conversation
+    // The count of the messages that the user did not see, at the moment the
+    // view opened. The read marker moves at once, and the line stays where
+    // it was for this visit.
+    val unseenAtOpen = remember(conversation) { chat.unread }
+    var newFrom by remember(conversation) { mutableStateOf<ULong?>(null) }
+    var isPlaced by remember(conversation) { mutableStateOf(false) }
     LaunchedEffect(conversation, Core.revision) {
-        Core.load(conversation) { lines = it }
+        Core.load(conversation) { loaded ->
+            if (!isPlaced) {
+                isPlaced = true
+                // The line sits above the oldest of the received messages
+                // that the user did not see.
+                newFrom = loaded.filter { !it.info.outgoing }
+                    .takeLast(unseenAtOpen)
+                    .firstOrNull()
+                    ?.info?.storedAtMs
+            }
+            lines = loaded
+        }
         // The user looks at the conversation, thus each message is seen.
         Core.markRead(conversation)
     }
     LaunchedEffect(lines.size) {
-        if (lines.isNotEmpty()) listState.scrollToItem(lines.lastIndex)
+        if (lines.isEmpty()) return@LaunchedEffect
+        val firstNew = lines.indexOfFirst { it.info.storedAtMs == newFrom && !it.info.outgoing }
+        // A visit that starts with new messages starts at the line. The
+        // item before each message is the chip of the view.
+        val isFirstPlacement = listState.firstVisibleItemIndex == 0 && firstNew >= 0
+        listState.scrollToItem(if (isFirstPlacement) firstNew else lines.lastIndex + 1)
     }
     val composer = rememberPlatformField()
     Column(Modifier.fillMaxSize()) {
         BackBar(chat.title, onBack = onBack) {
-            OverflowMenu(listOf("Edit contact" to { isRenaming = true }))
+            OverflowSheet(
+                chat.title,
+                listOf(
+                    RowEntry("pen", "Edit name", "Only visible to you") { isRenaming = true },
+                ),
+            )
         }
         LazyColumn(
             state = listState,
@@ -91,6 +119,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit) {
                 if (before == null || !isSameDay(before.info.storedAtMs, line.info.storedAtMs)) {
                     DayLabel(line.info.storedAtMs.toLong())
                 }
+                if (!line.info.outgoing && line.info.storedAtMs == newFrom) NewLabel()
                 Bubble(line)
             }
         }
@@ -147,6 +176,24 @@ private fun DayLabel(atMs: Long) {
     }
     Box(Modifier.fillMaxWidth().padding(vertical = 8.dp), contentAlignment = Alignment.Center) {
         Text(label, style = MaterialTheme.typography.labelSmall, color = Palette.TextSecondary)
+    }
+}
+
+/** The line above the first message that the user did not see yet. */
+@Composable
+private fun NewLabel() {
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        HorizontalDivider(Modifier.weight(1f), color = Palette.Action.copy(alpha = 0.35f))
+        Text(
+            "New",
+            style = MaterialTheme.typography.labelMedium,
+            color = Palette.Action,
+            modifier = Modifier.padding(horizontal = 12.dp),
+        )
+        HorizontalDivider(Modifier.weight(1f), color = Palette.Action.copy(alpha = 0.35f))
     }
 }
 

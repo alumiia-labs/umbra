@@ -24,6 +24,7 @@ ICONS = [
     "arrow-left",
     "bell",
     "check",
+    "chevron-right",
     "circle-info",
     "clock",
     "comment",

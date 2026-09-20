@@ -24,8 +24,9 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -272,27 +273,76 @@ fun BackBar(
     }
 }
 
-/** The three dots of a bar, with the entries of its menu. */
+/** One entry of a sheet or of a detail view: what it does, and where it leads. */
+class RowEntry(
+    val icon: String,
+    val title: String,
+    val detail: String? = null,
+    val onClick: () -> Unit,
+)
+
+/**
+ * The three dots of a bar. They open a sheet from the bottom with a handle, a
+ * title, and one row for each entry, as `design/mockups/light` has it. The
+ * mockups use no popup menu.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun OverflowMenu(entries: List<Pair<String, () -> Unit>>) {
+fun OverflowSheet(title: String, entries: List<RowEntry>) {
     var isOpen by remember { mutableStateOf(false) }
-    Box {
-        IconAction("ellipsis-vertical", "More options") { isOpen = true }
-        DropdownMenu(
-            expanded = isOpen,
-            onDismissRequest = { isOpen = false },
-            containerColor = Palette.Raised,
-        ) {
-            for ((label, action) in entries) {
-                DropdownMenuItem(
-                    text = { Text(label) },
-                    onClick = {
-                        isOpen = false
-                        action()
-                    },
+    IconAction("ellipsis-vertical", "More options") { isOpen = true }
+    if (!isOpen) return
+    ModalBottomSheet(
+        onDismissRequest = { isOpen = false },
+        containerColor = Palette.Surface,
+        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+        dragHandle = {
+            Box(
+                Modifier
+                    .padding(top = 12.dp, bottom = 8.dp)
+                    .size(width = 32.dp, height = 4.dp)
+                    .background(Palette.Outline, CircleShape),
+            )
+        },
+    ) {
+        Column(Modifier.padding(start = 20.dp, end = 20.dp, bottom = 24.dp)) {
+            Text(title, style = MaterialTheme.typography.headlineSmall)
+            Spacer(Modifier.height(12.dp))
+            entries.forEachIndexed { index, entry ->
+                if (index > 0) HorizontalDivider(color = Palette.Divider)
+                EntryRow(entry) { isOpen = false }
+            }
+        }
+    }
+}
+
+/** A row with a line icon, a title, a smaller line, and a chevron. */
+@Composable
+fun EntryRow(entry: RowEntry, afterClick: () -> Unit = {}) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable(role = Role.Button) {
+                afterClick()
+                entry.onClick()
+            }
+            .padding(vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        FaIcon(entry.icon, size = 20.dp, tint = Palette.Text)
+        Spacer(Modifier.width(16.dp))
+        Column(Modifier.weight(1f)) {
+            Text(entry.title)
+            entry.detail?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Palette.TextSecondary,
+                    modifier = Modifier.subline(),
                 )
             }
         }
+        FaIcon("chevron-right", size = 14.dp, tint = Palette.TextSecondary)
     }
 }
 

@@ -280,27 +280,25 @@ fun NameContactScreen(conversation: Conversation, onDone: () -> Unit) {
     }
 }
 
-/** A dialog-free rename: the chat header opens this view for a contact. */
+/** The edit view of a contact, after mockup 023: the avatar, the name, a note. */
 @Composable
 fun RenameContactScreen(chat: Chat, onDone: () -> Unit) {
     var name by remember { mutableStateOf(chat.name) }
     Column(Modifier.fillMaxSize()) {
         BackBar("Edit contact", onBack = onDone)
-        Column(Modifier.padding(20.dp)) {
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
+            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { Avatar(chat, size = 84) }
+            Spacer(Modifier.height(20.dp))
             OutlinedTextField(
                 value = name,
                 onValueChange = { name = it.take(60) },
-                label = { Text("Name for this contact") },
+                label = { Text("Name only you see") },
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words),
                 modifier = Modifier.fillMaxWidth(),
             )
-            Spacer(Modifier.height(8.dp))
-            Text(
-                "Only you see this name.",
-                style = MaterialTheme.typography.bodySmall,
-                color = Palette.TextSecondary,
-            )
+            Spacer(Modifier.height(12.dp))
+            Note("This name stays on this device. It is not shared with your contact.")
             Spacer(Modifier.height(16.dp))
             PrimaryButton("Save") {
                 Core.setName(chat.conversation, name)
