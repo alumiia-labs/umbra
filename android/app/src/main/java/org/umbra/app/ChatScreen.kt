@@ -76,6 +76,8 @@ import android.os.PersistableBundle
 import android.content.Context
 import android.content.ClipboardManager
 import android.content.ClipData
+import uniffi.umbra_ffi.MsgReaction
+import androidx.compose.ui.unit.sp
 
 @Composable
 fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
@@ -88,29 +90,43 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
     val unseenAtOpen = remember(conversation) { chat.unread }
     var newFrom by remember(conversation) { mutableStateOf<ULong?>(null) }
     var isPlaced by remember(conversation) { mutableStateOf(false) }
+    // Whether the list follows its end at the next load. A user at the end
+    // stays there when a message comes or when the newest bubble grows, by a
+    // reaction or an edit. A user who reads further up stays there. A send of
+    // this user leads to the end.
+    var followsEnd by remember(conversation) { mutableStateOf(false) }
+    var jumpsAtNextLoad by remember(conversation) { mutableStateOf(false) }
     LaunchedEffect(conversation, Core.revision) {
         Core.load(conversation) { loaded ->
             if (!isPlaced) {
-                isPlaced = true
                 // The line sits above the oldest of the received messages
                 // that the user did not see.
                 newFrom = loaded.filter { !it.info.outgoing }
                     .takeLast(unseenAtOpen)
                     .firstOrNull()
                     ?.info?.storedAtMs
+            } else {
+                followsEnd = jumpsAtNextLoad || !listState.canScrollForward
+                jumpsAtNextLoad = false
             }
             lines = loaded
         }
         // The user looks at the conversation, thus each message is seen.
         Core.markRead(conversation)
     }
-    LaunchedEffect(lines.size) {
+    LaunchedEffect(lines) {
         if (lines.isEmpty()) return@LaunchedEffect
-        val firstNew = lines.indexOfFirst { it.info.storedAtMs == newFrom && !it.info.outgoing }
-        // A visit that starts with new messages starts at the line. The
-        // item before each message is the chip of the view.
-        val isFirstPlacement = listState.firstVisibleItemIndex == 0 && firstNew >= 0
-        listState.scrollToItem(if (isFirstPlacement) firstNew else lines.lastIndex + 1)
+        // The item before each message is the chip of the view, and an
+        // offset above each height means the end of the list.
+        val toEnd = suspend { listState.scrollToItem(lines.lastIndex + 1, END_OF_LIST) }
+        if (!isPlaced) {
+            isPlaced = true
+            // A visit that starts with new messages starts at the line.
+            val firstNew = lines.indexOfFirst { it.info.storedAtMs == newFrom && !it.info.outgoing }
+            if (firstNew >= 0) listState.scrollToItem(firstNew) else toEnd()
+        } else if (followsEnd) {
+            toEnd()
+        }
     }
     // The keyboard takes the lower part of the list, over several frames.
     // The list moves by each height that it loses, thus the messages that
@@ -183,7 +199,22 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                 add(RowEntry("trash-can", "Delete") { deleting = line })
             }
         }
-        ActionSheet("Message", entries, onDismiss = { chosen = null })
+        ActionSheet(
+            "Message",
+            entries,
+            // A placeholder takes no reaction.
+            top = if (line.info.deleted) {
+                null
+            } else {
+                {
+                    QuickReactions(line.reactions) { emoji ->
+                        Core.react(line.handle, emoji)
+                        chosen = null
+                    }
+                }
+            },
+            onDismiss = { chosen = null },
+        )
     }
     deleting?.let { line ->
         val entries = buildList {
@@ -320,6 +351,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                                 Core.edit(conversation, target.handle, text)
                             } else {
                                 Core.send(conversation, text, answered?.handle)
+                                jumpsAtNextLoad = true
                             }
                             answered = null
                             edited = null
@@ -449,21 +481,82 @@ private fun Bubble(
                 .padding(vertical = 4.dp),
             horizontalArrangement = if (isOutgoing) Arrangement.End else Arrangement.Start,
         ) {
-            // The text is a view of the platform, thus the press area lies above
-            // the content, as in a row of the chat list. A press on an answer
-            // leads to the message that it answers.
-            PressOver(
+            Column(horizontalAlignment = if (isOutgoing) Alignment.End else Alignment.Start) {
+                // The text is a view of the platform, thus the press area lies above
+                // the content, as in a row of the chat list. A press on an answer
+                // leads to the message that it answers.
+                PressOver(
+                    Modifier
+                        .widthIn(max = 300.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .drawWithContent {
+                            drawContent()
+                            drawRect(flash)
+                        },
+                    onClick = onQuote,
+                    longLabel = "Message actions",
+                    onLongClick = onLongPress,
+                ) { BubbleContent(line, chat) }
+                if (line.reactions.isNotEmpty()) ReactionPills(line)
+            }
+        }
+    }
+}
+
+/** The six reactions of the sheet, the first choices of the other messengers. */
+private val QUICK_REACTIONS = listOf("\u2764\uFE0F", "\uD83D\uDC4D", "\uD83D\uDC4E", "\uD83D\uDE02", "\uD83D\uDE2E", "\uD83D\uDE22")
+
+/** One row of reactions at the top of the sheet of a message. */
+@Composable
+private fun QuickReactions(held: List<MsgReaction>, onPick: (String) -> Unit) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+        for (emoji in QUICK_REACTIONS) {
+            val isMine = held.any { it.mine && it.emoji == emoji }
+            Box(
                 Modifier
-                    .widthIn(max = 300.dp)
-                    .clip(RoundedCornerShape(16.dp))
-                    .drawWithContent {
-                        drawContent()
-                        drawRect(flash)
+                    .size(48.dp)
+                    .clip(CircleShape)
+                    .background(if (isMine) Palette.Container else Color.Transparent)
+                    .press(role = Role.Button, label = if (isMine) "Remove $emoji" else "React $emoji") {
+                        onPick(emoji)
                     },
-                onClick = onQuote,
-                longLabel = "Message actions",
-                onLongClick = onLongPress,
-            ) { BubbleContent(line, chat) }
+                contentAlignment = Alignment.Center,
+            ) { Text(emoji, fontSize = 24.sp) }
+        }
+    }
+}
+
+/**
+ * The reactions under a bubble: one pill for each emoji, with a count when
+ * the two parties chose it. A press adds the reaction of this device or
+ * takes it away.
+ */
+@Composable
+private fun ReactionPills(line: Line) {
+    Row(
+        Modifier.padding(top = 4.dp, start = 6.dp, end = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        for ((emoji, parties) in line.reactions.groupBy { it.emoji }) {
+            val isMine = parties.any { it.mine }
+            val shape = RoundedCornerShape(12.dp)
+            Row(
+                Modifier
+                    .clip(shape)
+                    .background(if (isMine) Palette.Container else Palette.Surface)
+                    .border(1.dp, if (isMine) Palette.Action else Palette.Divider, shape)
+                    .press(role = Role.Button, label = if (isMine) "Remove $emoji" else "React $emoji") {
+                        Core.react(line.handle, emoji)
+                    }
+                    .padding(horizontal = 8.dp, vertical = 3.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(emoji, fontSize = 14.sp)
+                if (parties.size > 1) {
+                    Spacer(Modifier.width(4.dp))
+                    Text("${parties.size}", style = MaterialTheme.typography.labelSmall, color = Palette.TextSecondary)
+                }
+            }
         }
     }
 }
@@ -607,6 +700,8 @@ private fun ComposerHeader(icon: String, words: String, onCancel: () -> Unit) {
     }
 }
 
+/** A scroll offset above the height of each item: the end of the list. */
+private const val END_OF_LIST = 1_000_000
 private const val FAILED = 4
 private const val READ = 3
 

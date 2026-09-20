@@ -22,6 +22,7 @@ import uniffi.umbra_ffi.TextSink
 import uniffi.umbra_ffi.init
 import uniffi.umbra_ffi.measureArgon2FloorMs
 import uniffi.umbra_ffi.MsgHandle
+import uniffi.umbra_ffi.MsgReaction
 
 /** A conversation, by its surrogate identifier. */
 class Conversation(val id: ByteArray) {
@@ -43,6 +44,7 @@ class Line(
     val text: CharArray,
     val info: MsgInfo,
     val quote: Quoted?,
+    val reactions: List<MsgReaction>,
 ) {
     /**
      * The identity of the message: two loads of one message give one key. A
@@ -252,7 +254,9 @@ object Core {
                 revision++
                 refreshChats()
             }
-            // An edit and a deletion are no arrival, thus they raise no alert.
+            // A reaction, an edit, and a deletion are no arrival, thus they
+            // raise no alert.
+            is FfiEvent.Reacted -> revision++
             is FfiEvent.Edited -> {
                 revision++
                 refreshChats()
@@ -454,6 +458,12 @@ object Core {
         refreshChats()
     }
 
+    /** Adds a reaction of this device to a message, or takes it away. */
+    fun react(message: MsgHandle, emoji: String) = call { client ->
+        client.react(message, emoji)
+        main.post { revision++ }
+    }
+
     /** Changes the text of a message of this device. This call overwrites `text`. */
     fun edit(conversation: Conversation, message: MsgHandle, text: CharArray) = call { client ->
         val units = text.map { it.code.toUShort() }
@@ -512,7 +522,7 @@ object Core {
                 }
                 Quoted(target.key().toList(), client.msgInfo(target).outgoing, quoted.chars)
             }
-            Line(message, sink.chars, info, quote)
+            Line(message, sink.chars, info, quote, client.reactions(message))
         }
         main.post { onLoaded(lines) }
     }
