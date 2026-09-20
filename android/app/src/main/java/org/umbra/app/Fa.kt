@@ -21,7 +21,7 @@ import java.io.IOException
  * The icons of Font Awesome, from SVG files in the assets. An icon of
  * `assets/fa-pro` wins over the same name in `assets/fa`. The first folder
  * holds the files of a Pro license and git ignores it. The second one holds
- * the Free set under CC BY 4.0. `scripts/fa-icons.py` fills the two.
+ * the Free set under CC BY 4.0. `android/README.md` says how to add one.
  *
  * A Font Awesome file is one view box and one path, or two paths in a duotone
  * style. The loader reads those two things and no other part of SVG.
@@ -56,7 +56,7 @@ object Fa {
                 continue
             }
         }
-        error("scripts/fa-icons.py holds no icon named $name")
+        error("The assets hold no icon named $name")
     }
 
     private fun parse(name: String, svg: String): ImageVector {

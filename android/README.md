@@ -31,14 +31,12 @@ icon of `app/src/main/assets/fa-pro` wins over the same name in the Free set.
 Git ignores that folder, because a Pro file must not sit in a public
 repository.
 
-```sh
-# The owner of a Pro license, with the unpacked "Pro for Web" download:
-python scripts/fa-icons.py path/to/fontawesome-pro-web --pro light
-```
-
 The mockups of `design/mockups/light` use a line look, which is the `light`
-style of Pro. `scripts/fa-icons.py` holds the list of the icons that the app
-names, and a name that a package does not hold fails the script.
+style of Pro. For a new icon, copy `svgs/light/<name>.svg` of the Pro package
+into `fa-pro`, and copy the Free file of that name into `fa`. A Free file
+names "Font Awesome Free" in its first comment. An icon that the Free set does
+not hold takes the Free file of a near icon under its name, as `shield-check`
+takes `shield-halved`.
 
 ## Run against a local network
 
