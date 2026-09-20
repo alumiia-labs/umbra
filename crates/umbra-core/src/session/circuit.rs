@@ -136,7 +136,12 @@ impl CircuitSession {
         // A relay gives these four no answer but a `NACK`, thus nothing
         // waits for one. A `NACK` of one of them names no command here, and
         // `WIR-323` drops it: the records of a lost `ACK` come again.
-        let awaits = !matches!(cmd, Cmd::Ack | Cmd::Sub | Cmd::Unsub | Cmd::Del);
+        // A `CRNW` of Part 13 has no answer at all (`ATT-126`).
+        const CRNW: u8 = 0x7A;
+        let awaits = !matches!(
+            cmd,
+            Cmd::Ack | Cmd::Sub | Cmd::Unsub | Cmd::Del | Cmd::Attachment(CRNW)
+        );
         if awaits {
             self.pending.insert(corr_id, handle);
         }

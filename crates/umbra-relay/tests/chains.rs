@@ -17,8 +17,11 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use umbra_core::{
+    attach::{command::ReplicaTarget, CHUNK_SIZE},
     directory::{bloc::BlocId, path::Candidate},
-    session::node::{ClientEvent, ClientNode, ContactId, RelayInfo, StateChange},
+    session::node::{
+        ChunkJob, ChunkOutcome, ClientEvent, ClientNode, ContactId, RelayInfo, StateChange,
+    },
 };
 use umbra_crypto::{
     handshake::nk::RelayStatic,
@@ -59,8 +62,9 @@ impl TryRng for Rng {
 
 impl TryCryptoRng for Rng {}
 
-/// The layer of each relay of the set, by its index.
-const LAYERS: [u8; 5] = [1, 2, 2, 3, 3];
+/// The layer of each relay of the set, by its index. The three relays of
+/// layer 3 hold the three copies of a chunk (Part 13 §13.4).
+const LAYERS: [u8; 6] = [1, 2, 2, 3, 3, 3];
 
 fn relay_static(index: usize) -> (RelayStatic, StaticSecret) {
     let secret = StaticSecret::from([0x20 + index as u8; 32]);
@@ -71,7 +75,7 @@ fn relay_static(index: usize) -> (RelayStatic, StaticSecret) {
     (relay, secret)
 }
 
-/// Five operators in five blocs and five networks, thus each chain of one
+/// An operator, a bloc and a network for each relay, thus each chain of one
 /// relay for each layer obeys each invariant.
 fn relay_info(index: usize) -> RelayInfo {
     let key = relay_static(index).0;
@@ -96,7 +100,7 @@ fn relay_info(index: usize) -> RelayInfo {
 fn client(seed: u8) -> ClientNode {
     ClientNode::with_relays(
         relay_info(0),
-        (1..5).map(relay_info).collect(),
+        (1..LAYERS.len()).map(relay_info).collect(),
         RootIdentity::new(Secret::new([seed; 32])),
     )
 }
@@ -121,13 +125,15 @@ struct Mesh {
     now: u64,
     /// The seed of the root identity of each client.
     seeds: Vec<u8>,
+    /// The count of the copies that went between two relays.
+    pushes: LinkId,
 }
 
 impl Mesh {
     /// The relays, with a link from each relay to each relay of the next
     /// layer, and `seeds.len()` clients at the ingress.
     fn new(seeds: &[u8]) -> Self {
-        let relays = (0..5)
+        let relays = (0..LAYERS.len())
             .map(|index| {
                 let (relay, static_secret) = relay_static(index);
                 RelayNode::new(Config {
@@ -142,7 +148,7 @@ impl Mesh {
             .collect();
         let mut mesh = Mesh {
             relays,
-            peers: vec![Vec::new(); 5],
+            peers: vec![Vec::new(); LAYERS.len()],
             clients: Vec::new(),
             links: Vec::new(),
             stored: Vec::new(),
@@ -151,9 +157,10 @@ impl Mesh {
             rng: Rng(7),
             now: 1_000,
             seeds: seeds.to_vec(),
+            pushes: 0,
         };
-        for from in 0..5usize {
-            for to in (0..5usize).filter(|to| LAYERS[*to] == LAYERS[from] + 1) {
+        for from in 0..LAYERS.len() {
+            for to in (0..LAYERS.len()).filter(|to| LAYERS[*to] == LAYERS[from] + 1) {
                 let (out_link, in_link) = (900 + to as LinkId, 800 + from as LinkId);
                 mesh.peers[from].push((out_link, Peer::Relay(to, in_link)));
                 mesh.peers[to].push((in_link, Peer::Relay(from, out_link)));
@@ -186,6 +193,18 @@ impl Mesh {
                 Output::Send { link, capsule } => (link, capsule),
                 // The link of a client that stopped.
                 Output::Close { .. } => continue,
+                // The copy of a chunk goes on a connection of its own.
+                Output::Push { relay_id, capsule } => {
+                    let target = (0..LAYERS.len())
+                        .find(|index| relay_static(*index).0.relay_id == relay_id)
+                        .unwrap();
+                    self.pushes += 1;
+                    let link = 5_000 + self.pushes;
+                    let outputs =
+                        self.relays[target].on_capsule(link, &capsule, self.now, &mut self.rng);
+                    work.extend(outputs.into_iter().map(|o| (target, o)));
+                    continue;
+                }
                 other => panic!("an unexpected output: {other:?}"),
             };
             let Some(peer) = self.peers[at].iter().find(|(l, _)| *l == link) else {
@@ -229,7 +248,7 @@ impl Mesh {
                     self.route(0, outputs);
                 }
             }
-            for relay in (0..5).filter(|relay| LAYERS[*relay] == 3) {
+            for relay in (0..LAYERS.len()).filter(|relay| LAYERS[*relay] == 3) {
                 let circuits: Vec<_> = self.relays[relay].paced_circuits().copied().collect();
                 for circuit in circuits {
                     let outputs = self.relays[relay].pacing_tick(&circuit, self.now, &mut self.rng);
@@ -341,7 +360,7 @@ fn two_clients_at_two_queue_relays_meet_and_talk() {
         assert!([1, 2]
             .map(|i| relay_static(i).0.relay_id)
             .contains(&chain[1]));
-        assert!([3, 4]
+        assert!([3, 4, 5]
             .map(|i| relay_static(i).0.relay_id)
             .contains(&chain[2]));
     }
@@ -474,6 +493,194 @@ fn a_queue_at_a_relay_that_left_the_set_does_not_end_the_run() {
         .unwrap();
     mesh.settle();
     assert_eq!(texts_of(mesh.take_events(BOB)), [b"still there"]);
+}
+
+/// Waits for the answer to one chunk command.
+fn outcome_of(mesh: &mut Mesh, client: usize, handle: u64) -> ChunkOutcome {
+    mesh.settle();
+    let mut outcomes = mesh
+        .take_events(client)
+        .into_iter()
+        .filter_map(|event| match event {
+            ClientEvent::Chunk {
+                handle: of,
+                outcome,
+            } if of == handle => Some(outcome),
+            _ => None,
+        });
+    let outcome = outcomes.next().expect("an answer to the chunk command");
+    assert!(outcomes.next().is_none());
+    outcome
+}
+
+#[test]
+fn a_chunk_goes_to_one_relay_and_that_relay_makes_the_two_copies() {
+    const CLIENT: usize = 0;
+    let mut mesh = Mesh::new(&[0x61]);
+    // Part 13 §13.8: the transfer has a connection and a node of its own.
+    let mut node = ClientNode::for_transfers(
+        relay_info(0),
+        (1..LAYERS.len()).map(relay_info).collect(),
+        RootIdentity::new(Secret::new([0x61; 32])),
+    );
+    node.connected(&mut Rng(61)).unwrap();
+    mesh.clients[CLIENT] = node;
+    mesh.settle();
+    mesh.take_events(CLIENT);
+
+    let exits: Vec<[u8; 32]> = (0..LAYERS.len())
+        .filter(|index| LAYERS[*index] == 3)
+        .map(|index| relay_static(index).0.relay_id)
+        .collect();
+    let [first, second, third] = exits[..] else {
+        panic!("three exits");
+    };
+    let cred = || StaticSecret::from([0x71; 32]);
+    let read = || StaticSecret::from([0x72; 32]);
+    let chunk_id = [0xC4; 32];
+    let chunk = vec![0xAB; CHUNK_SIZE];
+    let mut rng = Rng(9);
+
+    // ATT-096: a registration at each of the three relays, before the bytes.
+    let mut tokens = Vec::new();
+    for relay in [first, second, third] {
+        let job = ChunkJob::Register {
+            cred: cred(),
+            read_pk: *XPublic::from(&read()).as_bytes(),
+            is_backup: false,
+        };
+        let handle = mesh.clients[CLIENT]
+            .chunk(relay, chunk_id, job, &mut rng)
+            .unwrap();
+        let ChunkOutcome::Registered(token) = outcome_of(&mut mesh, CLIENT, handle) else {
+            panic!("no token");
+        };
+        tokens.push(token);
+    }
+    // A circuit ends at each relay that holds a copy.
+    assert_eq!(mesh.clients[CLIENT].chains().len(), 3);
+
+    // ATT-097: the bytes go to one relay. ATT-042: its own token binds them.
+    let wrong_token = ChunkJob::Put {
+        cred: cred(),
+        storage_token: tokens[1],
+        chunk: chunk.clone(),
+    };
+    let handle = mesh.clients[CLIENT]
+        .chunk(first, chunk_id, wrong_token, &mut rng)
+        .unwrap();
+    assert!(matches!(
+        outcome_of(&mut mesh, CLIENT, handle),
+        ChunkOutcome::Refused(_)
+    ));
+    let put = ChunkJob::Put {
+        cred: cred(),
+        storage_token: tokens[0],
+        chunk: chunk.clone(),
+    };
+    let handle = mesh.clients[CLIENT]
+        .chunk(first, chunk_id, put, &mut rng)
+        .unwrap();
+    assert_eq!(outcome_of(&mut mesh, CLIENT, handle), ChunkOutcome::Stored);
+
+    // No replica holds the chunk before the `CREP`.
+    let early = ChunkJob::Fetch { read: read() };
+    let handle = mesh.clients[CLIENT]
+        .chunk(third, chunk_id, early, &mut rng)
+        .unwrap();
+    assert!(matches!(
+        outcome_of(&mut mesh, CLIENT, handle),
+        ChunkOutcome::Refused(_)
+    ));
+
+    // ATT-098, ATT-102: the first relay sends one copy to each target.
+    let replicate = ChunkJob::Replicate {
+        cred: cred(),
+        targets: vec![
+            ReplicaTarget {
+                relay_id: second,
+                storage_token: tokens[1],
+            },
+            ReplicaTarget {
+                relay_id: third,
+                storage_token: tokens[2],
+            },
+        ],
+        chunk: chunk.clone(),
+    };
+    let handle = mesh.clients[CLIENT]
+        .chunk(first, chunk_id, replicate, &mut rng)
+        .unwrap();
+    assert_eq!(
+        outcome_of(&mut mesh, CLIENT, handle),
+        ChunkOutcome::Replicated
+    );
+    assert_eq!(mesh.pushes, 2);
+
+    // ATT-113: each replica proves its copy, and a proof over other bytes
+    // does not pass.
+    for relay in [second, third] {
+        let verify = ChunkJob::Verify {
+            cred: cred(),
+            chunk: chunk.clone(),
+        };
+        let handle = mesh.clients[CLIENT]
+            .chunk(relay, chunk_id, verify, &mut rng)
+            .unwrap();
+        assert_eq!(
+            outcome_of(&mut mesh, CLIENT, handle),
+            ChunkOutcome::Verified
+        );
+    }
+    let other_bytes = ChunkJob::Verify {
+        cred: cred(),
+        chunk: vec![0xAC; CHUNK_SIZE],
+    };
+    let handle = mesh.clients[CLIENT]
+        .chunk(second, chunk_id, other_bytes, &mut rng)
+        .unwrap();
+    assert_eq!(
+        outcome_of(&mut mesh, CLIENT, handle),
+        ChunkOutcome::WrongProof
+    );
+
+    // A reader fetches from a replica under the read credential alone.
+    let by_cred = ChunkJob::Fetch { read: cred() };
+    let handle = mesh.clients[CLIENT]
+        .chunk(third, chunk_id, by_cred, &mut rng)
+        .unwrap();
+    assert!(matches!(
+        outcome_of(&mut mesh, CLIENT, handle),
+        ChunkOutcome::Refused(_)
+    ));
+    let fetch = ChunkJob::Fetch { read: read() };
+    let handle = mesh.clients[CLIENT]
+        .chunk(third, chunk_id, fetch, &mut rng)
+        .unwrap();
+    assert_eq!(
+        outcome_of(&mut mesh, CLIENT, handle),
+        ChunkOutcome::Fetched(chunk.clone())
+    );
+
+    // ATT-161: the erase at one relay, and that relay holds the chunk no more.
+    let erase = ChunkJob::Erase { cred: cred() };
+    let handle = mesh.clients[CLIENT]
+        .chunk(first, chunk_id, erase, &mut rng)
+        .unwrap();
+    assert_eq!(outcome_of(&mut mesh, CLIENT, handle), ChunkOutcome::Erased);
+    let gone = ChunkJob::Fetch { read: read() };
+    let handle = mesh.clients[CLIENT]
+        .chunk(first, chunk_id, gone, &mut rng)
+        .unwrap();
+    assert!(matches!(
+        outcome_of(&mut mesh, CLIENT, handle),
+        ChunkOutcome::Refused(_)
+    ));
+
+    // A node of queues sends no chunk command (`WIR-309`).
+    let mut queues = client(0x62);
+    let refused = queues.chunk(first, chunk_id, ChunkJob::Erase { cred: cred() }, &mut rng);
+    assert!(refused.is_err());
 }
 
 /// The seed of the root identity of a client of the mesh of this test.

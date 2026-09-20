@@ -328,6 +328,10 @@ pub async fn run_client(
                     Some(tag) => Update::Failed(tag),
                     None => continue,
                 },
+                // The node of the queues sends no chunk command, thus it
+                // gets no such answer. The transfer of Part 13 has a node
+                // and a connection of its own (§13.8).
+                ClientEvent::Chunk { .. } => continue,
                 ClientEvent::CircuitLost => break 'run Ended::CircuitLost,
             };
             let _ = updates.send(update);

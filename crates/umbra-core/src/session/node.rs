@@ -20,6 +20,7 @@ use alloc::{
 };
 
 use umbra_crypto::{
+    auth::CommandAuthKey,
     handshake::{nk::RelayStatic, xk::SessionKeys},
     hierarchy::RootIdentity,
     kem::KeyPair,
@@ -39,11 +40,12 @@ use umbra_queue::{params::MAX_QUEUES_PER_SESSION, Reject};
 use umbra_transport::link::ClientLink;
 use umbra_wire::{
     address::{QueueAddress, LEN as QUEUE_ADDRESS_LEN},
+    admission::Admission,
     app::{AppKind, AppMessage, Channel},
     bucket::Bucket,
     capsule,
     cell::{Cell, CellCommand},
-    command::{iblob_parse, Cmd, IdsPayload, LINK_ID_LEN},
+    command::{iblob_parse, Cmd, Command, IdsPayload, LINK_ID_LEN},
     queue::L6Kind,
 };
 
@@ -57,7 +59,11 @@ use super::{
     contact::{Invitee, Inviter, FLIGHT_1, FLIGHT_2},
 };
 use crate::{
-    attach::seal::relay_hint,
+    attach::{
+        command::{ChunkCmd, CrepPayload, RegisterPayload, ReplicaTarget, PROOF_LEN, TOKEN_LEN},
+        seal::{self, relay_hint},
+        CHUNK_SIZE,
+    },
     directory::{
         bloc::BlocId,
         path::{select, Candidate},
@@ -140,9 +146,92 @@ pub enum ClientEvent {
         /// The reason of the `NACK`.
         reason: Reject,
     },
+    /// The answer to a chunk command of [`ClientNode::chunk`].
+    Chunk {
+        /// The handle of the call.
+        handle: u64,
+        /// What the relay did.
+        outcome: ChunkOutcome,
+    },
     /// The circuit failed its check or its build, and the runtime builds a
     /// new one.
     CircuitLost,
+}
+
+/// One chunk command of Part 13 §13.3.3 for one relay.
+pub enum ChunkJob {
+    /// `CNEW`, or `BNEW` for a chunk of the backup class.
+    Register {
+        /// `cred_sk` of the chunk (`ATT-034`).
+        cred: StaticSecret,
+        /// The public half of `read_sk` (`ATT-037`).
+        read_pk: [u8; 32],
+        /// Whether the chunk is of the backup class (`ATT-131`).
+        is_backup: bool,
+    },
+    /// `CPUT`.
+    Put {
+        /// `cred_sk` of the chunk.
+        cred: StaticSecret,
+        /// The token that the `CID` of this relay gave (`ATT-042`).
+        storage_token: [u8; TOKEN_LEN],
+        /// The chunk, `CHUNK_SIZE` bytes.
+        chunk: Vec<u8>,
+    },
+    /// `CREP`, to the relay that took the `CPUT` (`ATT-098`).
+    Replicate {
+        /// `cred_sk` of the chunk.
+        cred: StaticSecret,
+        /// Each other replica relay with its token (`ATT-100`).
+        targets: Vec<ReplicaTarget>,
+        /// The chunk, for the proof of the answer (`ATT-188`).
+        chunk: Vec<u8>,
+    },
+    /// `CVFY`. The node draws the nonce (`ATT-114`).
+    Verify {
+        /// `cred_sk` of the chunk.
+        cred: StaticSecret,
+        /// The chunk, for the proof that the relay must give (`ATT-117`).
+        chunk: Vec<u8>,
+    },
+    /// `CGET`.
+    Fetch {
+        /// `read_sk` of the chunk.
+        read: StaticSecret,
+    },
+    /// `CRNW`. It has no answer (`ATT-126`), thus no event follows.
+    Renew {
+        /// `read_sk` of the chunk.
+        read: StaticSecret,
+    },
+    /// `CDEL`.
+    Erase {
+        /// `cred_sk` of the chunk.
+        cred: StaticSecret,
+    },
+}
+
+/// What a relay did with a chunk command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChunkOutcome {
+    /// The relay registered the chunk, and this is its `storage_token`.
+    Registered([u8; TOKEN_LEN]),
+    /// The relay holds the bytes of the `CPUT`, and its proof is right.
+    Stored,
+    /// The relay took the `CREP`, and its proof is right.
+    Replicated,
+    /// The proof of a `CVFY` is right.
+    Verified,
+    /// The chunk of a `CGET`. The caller opens it under the file key.
+    Fetched(Vec<u8>),
+    /// The relay erased the chunk.
+    Erased,
+    /// The proof of the relay differs from the one of this device
+    /// (`ATT-118`, `ATT-188`).
+    WrongProof,
+    /// The relay refused the command. `WIR-317` gives one reason for an
+    /// unknown chunk and for a wrong credential.
+    Refused(Reject),
 }
 
 enum Circuit {
@@ -219,6 +308,28 @@ impl Slot {
     }
 }
 
+/// Reads the answer to a chunk command against what the command expects.
+fn chunk_outcome(expect: ChunkExpect, cmd: u8, payload: Vec<u8>) -> ChunkOutcome {
+    let refused = ChunkOutcome::Refused(Reject::Rejected);
+    match (expect, ChunkCmd::from_byte(cmd)) {
+        (ChunkExpect::Token, Ok(ChunkCmd::Cid)) => payload
+            .as_slice()
+            .try_into()
+            .map_or(refused, ChunkOutcome::Registered),
+        (ChunkExpect::Proof(proof, outcome), Ok(ChunkCmd::Cprf)) => {
+            if umbra_crypto::ct_eq(&proof, &payload) {
+                outcome
+            } else {
+                ChunkOutcome::WrongProof
+            }
+        }
+        (ChunkExpect::Data, Ok(ChunkCmd::Cdat)) if payload.len() == CHUNK_SIZE => {
+            ChunkOutcome::Fetched(payload)
+        }
+        _ => refused,
+    }
+}
+
 /// A link that the user accepted, before its first fetch.
 struct LinkFetch {
     fragment: Fragment,
@@ -270,7 +381,30 @@ struct QueueKeys {
 }
 
 /// What a command of this node waits for.
+/// What the answer to a chunk command must hold.
+enum ChunkExpect {
+    Token,
+    /// A `CPRF` with this proof, and the outcome of a right one.
+    Proof([u8; PROOF_LEN], ChunkOutcome),
+    Data,
+}
+
+struct ChunkWait {
+    /// The handle of the caller.
+    handle: u64,
+    expect: ChunkExpect,
+}
+
+/// A chunk command that waits for a circuit to its relay.
+struct HeldChunk {
+    relay: [u8; 32],
+    chunk_id: [u8; 32],
+    handle: u64,
+    job: ChunkJob,
+}
+
 enum Waiting {
+    Chunk(Box<ChunkWait>),
     Queue(Box<QueueKeys>),
     UserSend(u64),
     /// An `IRES` or an `IPUT` of the invitation on this queue.
@@ -412,6 +546,11 @@ pub struct ClientNode {
     held_records: Vec<Sealed>,
     /// The links that wait for a circuit to the relay of their blob.
     held_fetches: Vec<LinkFetch>,
+    /// The chunk commands that wait for a circuit to their relay.
+    held_chunks: Vec<HeldChunk>,
+    /// The range of each circuit of this node (`WIR-309`). A node for
+    /// attachments carries no queue command (Part 13 §13.8).
+    range: Range,
     capsules: VecDeque<Vec<u8>>,
     next_handle: u64,
     waiting: BTreeMap<u64, Waiting>,
@@ -507,6 +646,8 @@ impl ClientNode {
             deferred: VecDeque::new(),
             held_records: Vec::new(),
             held_fetches: Vec::new(),
+            held_chunks: Vec::new(),
+            range: Range::Queue,
             capsules: VecDeque::new(),
             next_handle: 1,
             waiting: BTreeMap::new(),
@@ -1074,6 +1215,143 @@ impl ClientNode {
         Ok(handle)
     }
 
+    /// A node for the transfer of attachments. Part 13 §13.8 puts them on a
+    /// connection of their own, thus a client runs this node beside the one
+    /// of its queues. Each circuit of it carries the attachment range alone.
+    pub fn for_transfers(ingress: RelayInfo, relays: Vec<RelayInfo>, root: RootIdentity) -> Self {
+        let mut node = Self::with_relays(ingress, relays, root);
+        node.range = Range::Attachment;
+        node
+    }
+
+    /// Sends one chunk command to `relay` on a circuit that ends there. With
+    /// no such circuit the command waits, and the circuit starts. A
+    /// [`ClientEvent::Chunk`] with the handle follows the answer.
+    pub fn chunk<R: CryptoRng + ?Sized>(
+        &mut self,
+        relay: [u8; 32],
+        chunk_id: [u8; 32],
+        job: ChunkJob,
+        rng: &mut R,
+    ) -> Result<u64, Error> {
+        if self.range != Range::Attachment {
+            return Err(Error::Malformed);
+        }
+        if let ChunkJob::Put { chunk, .. }
+        | ChunkJob::Replicate { chunk, .. }
+        | ChunkJob::Verify { chunk, .. } = &job
+        {
+            if chunk.len() != CHUNK_SIZE {
+                return Err(Error::Malformed);
+            }
+        }
+        let handle = self.handle();
+        let held = HeldChunk {
+            relay,
+            chunk_id,
+            handle,
+            job,
+        };
+        if self.ready_slot_to(&relay, None).is_some() {
+            self.start_chunk(held, rng)?;
+        } else {
+            self.held_chunks.push(held);
+            self.circuit_to(relay, rng)?;
+        }
+        Ok(handle)
+    }
+
+    /// Signs a chunk command for the session of a circuit to its relay, and
+    /// queues it.
+    fn start_chunk<R: CryptoRng + ?Sized>(
+        &mut self,
+        held: HeldChunk,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        self.current = self.ready_slot_to(&held.relay, None).ok_or(Error::NoPath)?;
+        let session_pk = self.session_pk()?;
+        let corr_id: [u8; 16] = random(rng);
+        let mut bind = [0u8; TOKEN_LEN];
+        let (cmd, signer, payload, expect) = match held.job {
+            ChunkJob::Register {
+                cred,
+                read_pk,
+                is_backup,
+            } => {
+                let register = RegisterPayload {
+                    cred_pk: *umbra_crypto::x25519::PublicKey::from(&cred).as_bytes(),
+                    read_pk,
+                    admission: Admission::NONE,
+                };
+                let mut payload = alloc::vec![0u8; 64usize.saturating_add(Admission::NONE.len())];
+                let used = register.encode(&mut payload)?;
+                payload.truncate(used);
+                let cmd = if is_backup {
+                    ChunkCmd::Bnew
+                } else {
+                    ChunkCmd::Cnew
+                };
+                (cmd, cred, payload, Some(ChunkExpect::Token))
+            }
+            ChunkJob::Put {
+                cred,
+                storage_token,
+                chunk,
+            } => {
+                bind = storage_token;
+                let expect =
+                    ChunkExpect::Proof(seal::proof(&corr_id, &chunk), ChunkOutcome::Stored);
+                (ChunkCmd::Cput, cred, chunk, Some(expect))
+            }
+            ChunkJob::Replicate {
+                cred,
+                targets,
+                chunk,
+            } => {
+                let targets = CrepPayload { targets };
+                let mut payload = alloc::vec![0u8; targets.len()];
+                targets.encode(&mut payload)?;
+                let expect =
+                    ChunkExpect::Proof(seal::proof(&corr_id, &chunk), ChunkOutcome::Replicated);
+                (ChunkCmd::Crep, cred, payload, Some(expect))
+            }
+            ChunkJob::Verify { cred, chunk } => {
+                let nonce: [u8; 16] = random(rng);
+                let expect =
+                    ChunkExpect::Proof(seal::proof(&nonce, &chunk), ChunkOutcome::Verified);
+                (ChunkCmd::Cvfy, cred, nonce.to_vec(), Some(expect))
+            }
+            ChunkJob::Fetch { read } => (ChunkCmd::Cget, read, Vec::new(), Some(ChunkExpect::Data)),
+            ChunkJob::Renew { read } => (ChunkCmd::Crnw, read, Vec::new(), None),
+            ChunkJob::Erase { cred } => {
+                let expect = ChunkExpect::Proof([0; PROOF_LEN], ChunkOutcome::Erased);
+                (ChunkCmd::Cdel, cred, Vec::new(), Some(expect))
+            }
+        };
+        let is_put = cmd == ChunkCmd::Cput;
+        let mut command = Command {
+            cmd: Cmd::Attachment(cmd.to_byte()),
+            corr_id,
+            queue_id: held.chunk_id,
+            auth: [0; 32],
+            payload: &payload,
+        };
+        let key = CommandAuthKey::derive(&signer, &session_pk).map_err(|_| Error::Unverified)?;
+        // ATT-042: the authorized bytes of a `CPUT` hold the token.
+        command.sign(&key, if is_put { bind.as_slice() } else { &[] })?;
+        let mut encoded = alloc::vec![0u8; command.len()];
+        command.encode(&mut encoded)?;
+        let waiting = match expect {
+            Some(expect) => Waiting::Chunk(Box::new(ChunkWait {
+                handle: held.handle,
+                expect,
+            })),
+            None => Waiting::Other,
+        };
+        self.queue_command(encoded, waiting)?;
+        self.pump()
+    }
+
     /// Sends the first fetch of a link on a circuit to the relay of its blob.
     fn fetch_link<R: CryptoRng + ?Sized>(
         &mut self,
@@ -1506,6 +1784,13 @@ impl ClientNode {
         for fetch in due {
             self.fetch_link(fetch, rng)?;
         }
+        let (due, held): (Vec<HeldChunk>, Vec<HeldChunk>) = core::mem::take(&mut self.held_chunks)
+            .into_iter()
+            .partition(|held| held.relay == exit);
+        self.held_chunks = held;
+        for held in due {
+            self.start_chunk(held, rng)?;
+        }
         self.current = ready;
         let waiting: Vec<[u8; 32]> = self
             .contacts
@@ -1579,10 +1864,11 @@ impl ClientNode {
         };
         build.push(&ss_hop).map_err(|_| Error::NoPath)?;
         let circuit = build.finish().map_err(|_| Error::NoPath)?;
+        let range = self.range;
         self.slot_mut()?.circuit = Circuit::Ready(Box::new(CircuitSession::new(
             circuit,
             relay_session_pk,
-            Range::Queue,
+            range,
         )));
         let ready = self.current;
         self.subscribe_stored(rng)?;
@@ -1642,6 +1928,12 @@ impl ClientNode {
                     (Some(Waiting::Blob(wait)), Cmd::Iblob) => {
                         out.extend(self.on_blob(*wait, &payload, rng)?);
                     }
+                    (Some(Waiting::Chunk(wait)), Cmd::Attachment(byte)) => {
+                        out.push(ClientEvent::Chunk {
+                            handle: wait.handle,
+                            outcome: chunk_outcome(wait.expect, byte, payload),
+                        });
+                    }
                     _ => {}
                 },
                 CircuitEvent::Rejected { handle, reason } => {
@@ -1662,6 +1954,13 @@ impl ClientNode {
                         Some(Waiting::Blob(wait)) => {
                             out.push(ClientEvent::InvitationGone {
                                 handle: wait.handle,
+                            });
+                            continue;
+                        }
+                        Some(Waiting::Chunk(wait)) => {
+                            out.push(ClientEvent::Chunk {
+                                handle: wait.handle,
+                                outcome: ChunkOutcome::Refused(reason),
                             });
                             continue;
                         }
