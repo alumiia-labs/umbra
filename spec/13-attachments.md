@@ -699,6 +699,22 @@ proof = SHA3-256( nonce || chunk )
   for that chunk. **[ATT-119]** The client MUST report the relay that failed as
   a link fault under Part 10 §10.4.2.
 
+- **[ATT-189]** A registration, a `CPUT` or a `CREP` that a relay refuses,
+  or that gets no answer, fails the chunk before its copies exist. The client
+  MUST then start that chunk again at a new draw of relays that leaves out
+  the relay that failed, under a new `chunk_id` and a new `cred_sk`
+  (`ATT-036`, `ATT-055`), and it MUST send a `CDEL` to each relay that gave
+  it a `storage_token` for the old start. A registration that the client
+  leaves alone holds `CHUNK_SIZE` of that relay until `CHUNK_TTL`
+  (`ATT-181`).
+- **[ATT-190]** A `CVFY` can arrive before the copy that it asks for, because
+  the copy travels on a connection of its own. A client MUST ask again some
+  times before it applies `ATT-118` to a relay that answers unknown-chunk. A
+  client MUST bound the time that it waits for one answer, and the count of
+  the new relays and the new starts of one chunk. Past that count the upload
+  fails, and the message fails with it. The reference client asks 6 times,
+  waits 30 seconds, and stops at 3.
+
 **The sample size.** `REPLICA_VERIFY_SAMPLE` is the greater of 4 and one 32nd of
 the chunks that the relay holds for that file, and it is at most 64.
 **[ATT-120]** A client MUST select the sampled chunks at random. **[ATT-121]** A

@@ -77,11 +77,11 @@ each column when a crate implements the requirement and a test covers it.
 | `REL` | 122 | 30 | 1 | 0 | 2 | **155** |
 | `GRP` | 204 | 56 | 0 | 0 | 5 | **265** |
 | `COM` | 299 | 96 | 0 | 0 | 5 | **400** |
-| `ATT` | 137 | 46 | 1 | 0 | 2 | **186** |
+| `ATT` | 139 | 46 | 1 | 0 | 2 | **188** |
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
 | `IMP` | 112 | 41 | 0 | 0 | 2 | **155** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2192 | 707 | 7 | 0 | 52 | **2958** |
+| **All** | 2194 | 707 | 7 | 0 | 52 | **2960** |
 
 ## SCP — Scope and Conventions
 
@@ -2860,6 +2860,8 @@ Source: `spec/13-attachments.md`
 | `ATT-186` | §13.3.3 | MUST | A relay | A relay MUST answer an accepted `CPUT` and an accepted `CREP` with a `CPRF` whose `proof` is `SHA3-256(corr_id || chunk)`, where `corr_id` is the 16 bytes of that command and `chunk` is what the relay holds. |  |  |
 | `ATT-187` | §13.3.3 | MUST | A relay | A relay MUST answer an accepted `CDEL` with a `CPRF` of 32 zero bytes. |  |  |
 | `ATT-188` | §13.3.3 | MUST | A client | A client MUST compare the `proof` of `ATT-186` against the value from its own copy, and it MUST take a difference as a failed `CPUT` under `ATT-118`. |  |  |
+| `ATT-189` | §13.4.1 | MUST | (unstated) | A registration, a `CPUT` or a `CREP` that a relay refuses, or that gets no answer, fails the chunk before its copies exist. |  |  |
+| `ATT-190` | §13.4.1 | MUST | (unstated) | A `CVFY` can arrive before the copy that it asks for, because the copy travels on a connection of its own. |  |  |
 
 ## ABU — Anti-Abuse Without Identifiers
 

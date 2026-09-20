@@ -27,6 +27,13 @@ use crate::{
 /// of a `CREP` travels on a connection of its own, thus a `CVFY` can arrive
 /// before it.
 pub const VERIFY_ATTEMPTS: u8 = 6;
+/// How many ticks of the caller a chunk command waits for its answer. A
+/// relay that is out of reach gives none, and the upload must not wait
+/// without an end.
+pub const STEP_TIMEOUT_TICKS: u32 = 30;
+/// How many times one chunk takes a new relay or a new start before the
+/// upload fails.
+pub const CHUNK_REPAIRS_MAX: u8 = 3;
 
 fn random_below<R: CryptoRng + ?Sized>(rng: &mut R, bound: u32) -> u32 {
     let mut bytes = [0u8; 4];
@@ -74,6 +81,11 @@ enum Step {
     Put,
     Replicate,
     Verify(usize),
+    /// The registration at the relay that takes the place of a replica
+    /// which failed its proof (`ATT-118`).
+    RegisterFresh(usize),
+    /// The bytes for that relay, from this device.
+    PutFresh(usize),
 }
 
 struct ChunkState {
@@ -83,6 +95,10 @@ struct ChunkState {
     tokens: Vec<Option<[u8; 32]>>,
     /// The replicas that still owe a proof, with the attempts that remain.
     unverified: Vec<(usize, u8)>,
+    /// The relays that failed for this chunk. No new draw takes one of them.
+    failed: Vec<[u8; 32]>,
+    /// The new relays and the new starts that this chunk took.
+    repairs: u8,
     is_started: bool,
     is_done: bool,
 }
@@ -94,9 +110,13 @@ pub struct Upload {
     file_nonce: [u8; 24],
     shape: Shape,
     chunks: Vec<ChunkState>,
-    waiting: BTreeMap<u64, (usize, Step)>,
+    /// The relays with the attachment role, for a new draw.
+    pool: Vec<AttachmentRelay>,
+    /// Each command with no answer yet, and the tick of its send.
+    waiting: BTreeMap<u64, (usize, Step, u32)>,
     /// The proofs that a later tick asks for again.
     retries: Vec<(usize, usize)>,
+    ticks: u32,
 }
 
 /// The fields of a descriptor that the seal does not fix.
@@ -130,19 +150,7 @@ impl Upload {
         }
         let mut chunks = Vec::with_capacity(sealed.chunks.len());
         for _ in &sealed.chunks {
-            let picked = pick_relays(relays, rng)?;
-            let cred: [u8; 32] = random_bytes(rng);
-            chunks.push(ChunkState {
-                // ATT-034, ATT-055: each value from the CSPRNG, one for each
-                // chunk.
-                upload: ChunkUpload::new(random_bytes(rng), StaticSecret::from(cred)),
-                cred,
-                tokens: alloc::vec![None; picked.len()],
-                relays: picked,
-                unverified: Vec::new(),
-                is_started: false,
-                is_done: false,
-            });
+            chunks.push(ChunkState::draw(relays, Vec::new(), 0, rng)?);
         }
         Ok(Upload {
             sealed,
@@ -150,14 +158,24 @@ impl Upload {
             file_nonce,
             shape,
             chunks,
+            pool: relays.to_vec(),
             waiting: BTreeMap::new(),
             retries: Vec::new(),
+            ticks: 0,
         })
     }
 
     /// Whether the answer with this handle belongs to this upload.
     pub fn owns(&self, handle: u64) -> bool {
         self.waiting.contains_key(&handle)
+    }
+
+    /// How many times a chunk of this upload took a new relay or a new start.
+    pub fn repairs(&self) -> u32 {
+        self.chunks
+            .iter()
+            .map(|chunk| u32::from(chunk.repairs))
+            .sum()
     }
 
     fn in_flight(&self) -> usize {
@@ -199,7 +217,21 @@ impl Upload {
         let chunk_id = *chunk.upload.chunk_id();
         let relay_at = |at: usize| chunk.relays.get(at).copied().ok_or(Error::Malformed);
         let (relay, job) = match step {
-            Step::Register(at) => {
+            Step::PutFresh(at) => {
+                let storage_token = chunk
+                    .tokens
+                    .get(at)
+                    .copied()
+                    .flatten()
+                    .ok_or(Error::Malformed)?;
+                let job = ChunkJob::Put {
+                    cred,
+                    storage_token,
+                    chunk: bytes()?,
+                };
+                (relay_at(at)?, job)
+            }
+            Step::Register(at) | Step::RegisterFresh(at) => {
                 let index = u32::try_from(index).map_err(|_| Error::Malformed)?;
                 let read = read_secret(&self.file_key, index);
                 let job = ChunkJob::Register {
@@ -235,8 +267,89 @@ impl Upload {
             ),
         };
         let handle = node.chunk(relay, chunk_id, job, rng)?;
-        self.waiting.insert(handle, (index, step));
+        self.waiting.insert(handle, (index, step, self.ticks));
         Ok(())
+    }
+
+    /// A relay refused a step, gave a wrong proof, or gave no answer in
+    /// time. After the `CREP` one replica takes a new relay (`ATT-118`).
+    /// Before it the chunk starts again at a new draw, under a new
+    /// identifier and a new credential (`ATT-036`).
+    fn repair<R: CryptoRng + ?Sized>(
+        &mut self,
+        node: &mut ClientNode,
+        index: usize,
+        step: Step,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let chunk = self.chunks.get_mut(index).ok_or(Error::Malformed)?;
+        chunk.repairs = chunk.repairs.saturating_add(1);
+        if chunk.repairs > CHUNK_REPAIRS_MAX {
+            return Err(Error::Unverified);
+        }
+        let chunk_id = *chunk.upload.chunk_id();
+        let erase = |node: &mut ClientNode, relay: [u8; 32], cred: [u8; 32], rng: &mut R| {
+            // The relay can hold a registration or a bad copy. No answer is
+            // needed, and its life ends at `CHUNK_TTL` without this.
+            let job = ChunkJob::Erase {
+                cred: StaticSecret::from(cred),
+            };
+            let _ = node.chunk(relay, chunk_id, job, rng);
+        };
+        match step {
+            Step::Verify(at) | Step::RegisterFresh(at) | Step::PutFresh(at) => {
+                let bad = *chunk.relays.get(at).ok_or(Error::Malformed)?;
+                chunk.failed.push(bad);
+                let others: Vec<[u8; 32]> = chunk
+                    .relays
+                    .iter()
+                    .enumerate()
+                    .filter(|(place, _)| *place != at)
+                    .map(|(_, relay)| *relay)
+                    .collect();
+                let fresh = fresh_relay(&self.pool, &others, &chunk.failed, rng)?;
+                erase(node, bad, chunk.cred, rng);
+                *chunk.relays.get_mut(at).ok_or(Error::Malformed)? = fresh;
+                *chunk.tokens.get_mut(at).ok_or(Error::Malformed)? = None;
+                if !chunk.unverified.iter().any(|(of, _)| *of == at) {
+                    chunk.unverified.push((at, VERIFY_ATTEMPTS));
+                }
+                chunk.is_done = false;
+                self.retries
+                    .retain(|(of, place)| (*of, *place) != (index, at));
+                self.send(node, index, Step::RegisterFresh(at), rng)
+            }
+            Step::Register(_) | Step::Put | Step::Replicate => {
+                let bad = match step {
+                    Step::Register(at) => chunk.relays.get(at).copied(),
+                    _ => chunk.relays.first().copied(),
+                };
+                let mut failed = core::mem::take(&mut chunk.failed);
+                failed.extend(bad);
+                let held: Vec<[u8; 32]> = chunk
+                    .relays
+                    .iter()
+                    .zip(&chunk.tokens)
+                    .filter(|(_, token)| token.is_some())
+                    .map(|(relay, _)| *relay)
+                    .collect();
+                let cred = chunk.cred;
+                for relay in held {
+                    erase(node, relay, cred, rng);
+                }
+                let repairs = chunk.repairs;
+                // The answers of the old start name no step of this upload.
+                self.waiting.retain(|_, (of, _, _)| *of != index);
+                let mut next = ChunkState::draw(&self.pool, failed, repairs, rng)?;
+                next.is_started = true;
+                let replicas = next.relays.len();
+                *self.chunks.get_mut(index).ok_or(Error::Malformed)? = next;
+                for at in 0..replicas {
+                    self.send(node, index, Step::Register(at), rng)?;
+                }
+                Ok(())
+            }
+        }
     }
 
     /// Starts each chunk that has room under `MAX_CONCURRENT_UP`, and asks
@@ -247,6 +360,19 @@ impl Upload {
         node: &mut ClientNode,
         rng: &mut R,
     ) -> Result<(), Error> {
+        self.ticks = self.ticks.saturating_add(1);
+        let late: Vec<(u64, usize, Step)> = self
+            .waiting
+            .iter()
+            .filter(|(_, (_, _, sent))| self.ticks.saturating_sub(*sent) >= STEP_TIMEOUT_TICKS)
+            .map(|(handle, (index, step, _))| (*handle, *index, *step))
+            .collect();
+        for (handle, index, step) in late {
+            // A start that took the chunk since removed the step already.
+            if self.waiting.remove(&handle).is_some() {
+                self.repair(node, index, step, rng)?;
+            }
+        }
         for (index, at) in core::mem::take(&mut self.retries) {
             self.send(node, index, Step::Verify(at), rng)?;
         }
@@ -277,7 +403,7 @@ impl Upload {
         rng: &mut R,
     ) -> Result<Progress<Uploaded>, Error> {
         let total = u32::try_from(self.chunks.len()).unwrap_or(u32::MAX);
-        let Some((index, step)) = self.waiting.remove(&handle) else {
+        let Some((index, step, _)) = self.waiting.remove(&handle) else {
             return Ok(Progress::Running(self.done(), total));
         };
         let chunk = self.chunks.get_mut(index).ok_or(Error::Malformed)?;
@@ -329,7 +455,8 @@ impl Upload {
                 chunk.unverified.retain(|(of, _)| *of != at);
                 chunk.is_done = chunk.unverified.is_empty();
             }
-            // The copy can be on its way still. A wrong proof is final.
+            // The copy can be on its way still, thus a refusal gets some
+            // more attempts. A wrong proof gets none.
             (Step::Verify(at), ChunkOutcome::Refused(_)) => {
                 let entry = chunk
                     .unverified
@@ -338,11 +465,31 @@ impl Upload {
                     .ok_or(Error::Malformed)?;
                 entry.1 = entry.1.saturating_sub(1);
                 if entry.1 == 0 {
-                    return Err(Error::Unverified);
+                    self.repair(node, index, step, rng)?;
+                } else {
+                    self.retries.push((index, at));
                 }
-                self.retries.push((index, at));
             }
-            _ => return Err(Error::Unverified),
+            (Step::RegisterFresh(at), ChunkOutcome::Registered(token)) => {
+                *chunk.tokens.get_mut(at).ok_or(Error::Malformed)? = Some(token);
+                let fresh = *chunk.relays.get(at).ok_or(Error::Malformed)?;
+                // The registration that the new relay takes the place of:
+                // the one whose relay the chunk holds no more.
+                let stale = chunk
+                    .upload
+                    .relays()
+                    .find(|relay| !chunk.relays.contains(relay))
+                    .copied()
+                    .ok_or(Error::Malformed)?;
+                chunk.upload.replace_replica(&stale, fresh, token);
+                self.send(node, index, Step::PutFresh(at), rng)?;
+            }
+            // ATT-186: the answer of a `CPUT` is a proof of the bytes.
+            (Step::PutFresh(at), ChunkOutcome::Stored) => {
+                chunk.unverified.retain(|(of, _)| *of != at);
+                chunk.is_done = chunk.unverified.is_empty();
+            }
+            _ => self.repair(node, index, step, rng)?,
         }
         if self.chunks.iter().all(|chunk| chunk.is_done) {
             return self.finish().map(Progress::Done);
@@ -381,14 +528,72 @@ impl Upload {
     }
 }
 
+impl ChunkState {
+    /// A chunk under a new identifier and a new credential, at a new draw of
+    /// relays that leaves out each relay of `failed` (`ATT-034`, `ATT-055`).
+    fn draw<R: CryptoRng + ?Sized>(
+        pool: &[AttachmentRelay],
+        failed: Vec<[u8; 32]>,
+        repairs: u8,
+        rng: &mut R,
+    ) -> Result<Self, Error> {
+        let picked = pick_relays(pool, &failed, rng)?;
+        let cred: [u8; 32] = random_bytes(rng);
+        Ok(ChunkState {
+            upload: ChunkUpload::new(random_bytes(rng), StaticSecret::from(cred)),
+            cred,
+            tokens: alloc::vec![None; picked.len()],
+            relays: picked,
+            unverified: Vec::new(),
+            failed,
+            repairs,
+            is_started: false,
+            is_done: false,
+        })
+    }
+}
+
+/// One relay for the place of a replica that failed: no relay of `failed`,
+/// no relay of `others`, and no operator of `others` (`ATT-017`).
+fn fresh_relay<R: CryptoRng + ?Sized>(
+    pool: &[AttachmentRelay],
+    others: &[[u8; 32]],
+    failed: &[[u8; 32]],
+    rng: &mut R,
+) -> Result<[u8; 32], Error> {
+    let operators: Vec<[u8; 32]> = pool
+        .iter()
+        .filter(|relay| others.contains(&relay.relay_id))
+        .map(|relay| relay.operator_id)
+        .collect();
+    let free: Vec<&AttachmentRelay> = pool
+        .iter()
+        .filter(|relay| {
+            !others.contains(&relay.relay_id)
+                && !failed.contains(&relay.relay_id)
+                && !operators.contains(&relay.operator_id)
+        })
+        .collect();
+    let bound = u32::try_from(free.len()).map_err(|_| Error::Malformed)?;
+    let at = usize::try_from(random_below(rng, bound)).map_err(|_| Error::Malformed)?;
+    free.get(at)
+        .map(|relay| relay.relay_id)
+        .ok_or(Error::NoPath)
+}
+
 /// `REPLICAS` relays of different operators, in a random order. A relay set
 /// with fewer operators gives no upload, because the redundancy is
 /// mandatory (§13.4).
 fn pick_relays<R: CryptoRng + ?Sized>(
     relays: &[AttachmentRelay],
+    failed: &[[u8; 32]],
     rng: &mut R,
 ) -> Result<Vec<[u8; 32]>, Error> {
-    let mut pool: Vec<AttachmentRelay> = relays.to_vec();
+    let mut pool: Vec<AttachmentRelay> = relays
+        .iter()
+        .filter(|relay| !failed.contains(&relay.relay_id))
+        .copied()
+        .collect();
     let mut picked: Vec<AttachmentRelay> = Vec::with_capacity(REPLICAS);
     while picked.len() < REPLICAS && !pool.is_empty() {
         let bound = u32::try_from(pool.len()).map_err(|_| Error::Malformed)?;

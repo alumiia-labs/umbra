@@ -67,9 +67,13 @@ impl TryRng for Rng {
 
 impl TryCryptoRng for Rng {}
 
-/// The layer of each relay of the set, by its index. The three relays of
-/// layer 3 hold the three copies of a chunk (Part 13 §13.4).
-const LAYERS: [u8; 6] = [1, 2, 2, 3, 3, 3];
+/// The layer of each relay of the set, by its index. Three relays of layer 3
+/// hold the three copies of a chunk (Part 13 §13.4), and two more let an
+/// upload leave a relay that fails.
+const LAYERS: [u8; 8] = [1, 2, 2, 3, 3, 3, 3, 3];
+/// The relay of layer 3 whose chunk store has no room: it refuses each
+/// registration.
+const FULL_RELAY: usize = 7;
 
 fn relay_static(index: usize) -> (RelayStatic, StaticSecret) {
     let secret = StaticSecret::from([0x20 + index as u8; 32]);
@@ -132,6 +136,8 @@ struct Mesh {
     seeds: Vec<u8>,
     /// The count of the copies that went between two relays.
     pushes: LinkId,
+    /// A relay that gets no copy: each push to it is lost on its way.
+    loses_pushes_to: Option<[u8; 32]>,
 }
 
 impl Mesh {
@@ -147,7 +153,7 @@ impl Mesh {
                     layer: LAYERS[index],
                     issuer_key: PublicKey2048::from_modulus(&[0xFF; 256]).unwrap(),
                     community_capacity: 1 << 20,
-                    chunk_capacity: 1 << 26,
+                    chunk_capacity: if index == FULL_RELAY { 0 } else { 1 << 26 },
                 })
             })
             .collect();
@@ -163,6 +169,7 @@ impl Mesh {
             now: 1_000,
             seeds: seeds.to_vec(),
             pushes: 0,
+            loses_pushes_to: None,
         };
         for from in 0..LAYERS.len() {
             for to in (0..LAYERS.len()).filter(|to| LAYERS[*to] == LAYERS[from] + 1) {
@@ -203,6 +210,9 @@ impl Mesh {
                     let target = (0..LAYERS.len())
                         .find(|index| relay_static(*index).0.relay_id == relay_id)
                         .unwrap();
+                    if self.loses_pushes_to == Some(relay_id) {
+                        continue;
+                    }
                     self.pushes += 1;
                     let link = 5_000 + self.pushes;
                     let outputs =
@@ -365,7 +375,7 @@ fn two_clients_at_two_queue_relays_meet_and_talk() {
         assert!([1, 2]
             .map(|i| relay_static(i).0.relay_id)
             .contains(&chain[1]));
-        assert!([3, 4, 5]
+        assert!([3, 4, 5, 6, 7]
             .map(|i| relay_static(i).0.relay_id)
             .contains(&chain[2]));
     }
@@ -533,10 +543,7 @@ fn a_chunk_goes_to_one_relay_and_that_relay_makes_the_two_copies() {
     mesh.settle();
     mesh.take_events(CLIENT);
 
-    let exits: Vec<[u8; 32]> = (0..LAYERS.len())
-        .filter(|index| LAYERS[*index] == 3)
-        .map(|index| relay_static(index).0.relay_id)
-        .collect();
+    let exits: Vec<[u8; 32]> = (3..6).map(|index| relay_static(index).0.relay_id).collect();
     let [first, second, third] = exits[..] else {
         panic!("three exits");
     };
@@ -719,8 +726,7 @@ fn a_file_goes_up_from_one_client_and_comes_down_at_another() {
     use_transfer_node(&mut mesh, SENDER, 0x63);
     use_transfer_node(&mut mesh, RECEIVER, 0x64);
     mesh.settle();
-    let relays: Vec<AttachmentRelay> = (0..LAYERS.len())
-        .filter(|index| LAYERS[*index] == 3)
+    let relays: Vec<AttachmentRelay> = (3..6)
         .map(|index| {
             let info = relay_info(index).candidate;
             AttachmentRelay {
@@ -813,6 +819,116 @@ fn a_file_goes_up_from_one_client_and_comes_down_at_another() {
         }
     }
     assert_eq!(fetched.expect("the download ends"), plain);
+}
+
+fn holder(index: usize) -> AttachmentRelay {
+    let info = relay_info(index).candidate;
+    AttachmentRelay {
+        relay_id: info.relay_id,
+        operator_id: info.operator_id,
+        family_id: info.family_id,
+    }
+}
+
+#[test]
+fn an_upload_leaves_a_relay_that_refuses_and_a_relay_that_holds_no_copy() {
+    const SENDER: usize = 0;
+    const RECEIVER: usize = 1;
+    let mut mesh = Mesh::new(&[0x65, 0x66]);
+    use_transfer_node(&mut mesh, SENDER, 0x65);
+    use_transfer_node(&mut mesh, RECEIVER, 0x66);
+    mesh.settle();
+    // Five relays hold files. One has no room, and one gets no copy.
+    let relays: Vec<AttachmentRelay> = (3..8).map(holder).collect();
+    let full = holder(FULL_RELAY).relay_id;
+    let deaf = holder(4).relay_id;
+    mesh.loses_pushes_to = Some(deaf);
+
+    let plain: Vec<u8> = (0..SEGMENT_SIZE * 7 + 5).map(|i| (i % 247) as u8).collect();
+    let mut rng = Rng(31);
+    let mut upload = Upload::new(&plain, Shape::default(), &relays, &mut rng).unwrap();
+    upload.tick(&mut mesh.clients[SENDER], &mut rng).unwrap();
+    let mut uploaded: Option<Uploaded> = None;
+    for _ in 0..3_000 {
+        for (handle, outcome) in chunk_answers(&mut mesh, SENDER) {
+            let node = &mut mesh.clients[SENDER];
+            if let Progress::Done(done) =
+                upload.on_outcome(node, handle, outcome, &mut rng).unwrap()
+            {
+                uploaded = Some(done);
+            }
+        }
+        if uploaded.is_some() {
+            break;
+        }
+        // The clock of the caller: a proof that a replica did not hold goes
+        // again at a tick.
+        upload.tick(&mut mesh.clients[SENDER], &mut rng).unwrap();
+    }
+    let uploaded = uploaded.expect("the upload ends");
+    let repairs = upload.repairs();
+    assert_eq!(uploaded.credentials.len(), 8);
+    let mut met_deaf = false;
+    for credential in &uploaded.credentials {
+        assert_eq!(credential.relays.len(), 3);
+        // ATT-017: three operators. The relay with no room holds no chunk,
+        // and the relay that gets no copy holds a chunk only where it took
+        // the bytes from this device.
+        for (place, relay) in credential.relays.iter().enumerate() {
+            assert_ne!(*relay, full);
+            assert!(*relay != deaf || place == 0);
+            assert!(credential.relays[..place]
+                .iter()
+                .all(|other| other != relay));
+        }
+        met_deaf |= credential.relays.first() == Some(&deaf);
+    }
+    // The draw of this seed met the two relays, thus the test tested them.
+    assert!(met_deaf);
+    assert!(repairs >= 2, "{repairs} repairs");
+
+    // Each chunk is at three relays that hold it: the file comes down.
+    let mut rng = Rng(32);
+    let mut download = Download::new(&uploaded.descriptor, &relays, &mut rng).unwrap();
+    download
+        .tick(&mut mesh.clients[RECEIVER], &mut rng)
+        .unwrap();
+    let mut fetched = None;
+    for _ in 0..600 {
+        for (handle, outcome) in chunk_answers(&mut mesh, RECEIVER) {
+            let node = &mut mesh.clients[RECEIVER];
+            if let Progress::Done(bytes) = download
+                .on_outcome(node, handle, outcome, &mut rng)
+                .unwrap()
+            {
+                fetched = Some(bytes);
+            }
+        }
+        if fetched.is_some() {
+            break;
+        }
+    }
+    assert_eq!(fetched.expect("the download ends"), plain);
+
+    // With three relays and one of them with no room, no draw holds a file.
+    let few = [holder(3), holder(5), holder(FULL_RELAY)];
+    let mut upload = Upload::new(&plain[..100], Shape::default(), &few, &mut rng).unwrap();
+    upload.tick(&mut mesh.clients[SENDER], &mut rng).unwrap();
+    let mut failed = false;
+    'upload: for _ in 0..600 {
+        for (handle, outcome) in chunk_answers(&mut mesh, SENDER) {
+            let node = &mut mesh.clients[SENDER];
+            match upload.on_outcome(node, handle, outcome, &mut rng) {
+                Ok(Progress::Done(_)) => panic!("an upload to two relays"),
+                Ok(Progress::Running(..)) => {}
+                Err(_) => {
+                    failed = true;
+                    break 'upload;
+                }
+            }
+        }
+    }
+    assert!(failed);
 }
 
 /// The seed of the root identity of a client of the mesh of this test.
