@@ -59,7 +59,9 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit) {
     }
     val composer = rememberPlatformField()
     Column(Modifier.fillMaxSize()) {
-        BackBar(chat.title, subtitle = "Edit contact", onBack = onBack, onTitle = { isRenaming = true })
+        BackBar(chat.title, onBack = onBack) {
+            OverflowMenu(listOf("Edit contact" to { isRenaming = true }))
+        }
         LazyColumn(
             state = listState,
             modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp),

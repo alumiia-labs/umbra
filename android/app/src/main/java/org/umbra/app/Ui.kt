@@ -5,7 +5,6 @@ import android.view.inputmethod.InputMethodManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -24,8 +23,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -126,31 +125,42 @@ private fun UnlockScreen() {
     val context = LocalContext.current
     val field = rememberPlatformField()
     val isFirst = remember { !Core.hasStore(context) }
-    Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
-        verticalArrangement = Arrangement.Center,
-    ) {
+    val isOpening = Core.phase == Core.Phase.Opening
+    // The field is gone while the store opens, and its keyboard goes too.
+    HideKeyboardOn(isOpening)
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
+        // The block starts at one height in each state, thus nothing jumps
+        // when the field gives way to the progress bar.
+        Spacer(Modifier.height(132.dp))
         Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { HeroIcon("lock") }
-        Spacer(Modifier.height(24.dp))
-        if (isFirst) {
-            Headline(
+        Spacer(Modifier.height(28.dp))
+        when {
+            isOpening -> Headline("Opening UMBRA", "Your conversations will be ready in a moment.")
+            isFirst -> Headline(
                 "Protect this device.",
                 "Choose a passphrase. It opens your conversations on this device, and " +
                     "nobody can reset it for you.",
             )
-        } else {
-            Headline("Welcome back.", "Enter your passphrase to open your conversations.")
+            else -> Headline("Welcome back.", "Enter your passphrase to open your conversations.")
         }
         Spacer(Modifier.height(20.dp))
-        if (Core.phase == Core.Phase.Opening) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 3.dp)
-                Spacer(Modifier.width(12.dp))
-                Text("Opening the store. This takes a few seconds by design.")
-            }
+        if (isOpening) {
+            Text(
+                if (isFirst) "Protecting this device…" else "Unlocking this device…",
+                style = MaterialTheme.typography.bodySmall,
+                color = Palette.TextSecondary,
+            )
+            Spacer(Modifier.height(10.dp))
+            // The time of the key derivation is a few seconds by design, and
+            // the client knows no part of it, thus the bar shows no amount.
+            LinearProgressIndicator(
+                modifier = Modifier.fillMaxWidth().height(5.dp).clip(CircleShape),
+                color = Palette.Action,
+                trackColor = Palette.Container,
+            )
         } else {
             FramedPlatformField(field, "Passphrase", isPassphrase = true)
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(14.dp))
             PrimaryButton(if (isFirst) "Create and open" else "Unlock") {
                 field.take()?.let { Core.open(context, it) }
             }
@@ -159,7 +169,7 @@ private fun UnlockScreen() {
             Spacer(Modifier.height(16.dp))
             Note(it, isError = true)
         }
-        BuildNetwork.Panel()
+        if (!isOpening) BuildNetwork.Panel()
     }
 }
 

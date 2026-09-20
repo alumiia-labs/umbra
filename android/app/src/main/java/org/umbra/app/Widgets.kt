@@ -24,11 +24,16 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -235,18 +240,19 @@ fun BrandBar() {
 
 /** The bar of a view above the tabs: a way back and a title. */
 @Composable
-fun BackBar(title: String, subtitle: String? = null, onBack: () -> Unit, onTitle: (() -> Unit)? = null) {
+fun BackBar(
+    title: String,
+    subtitle: String? = null,
+    onBack: () -> Unit,
+    actions: @Composable () -> Unit = {},
+) {
     Row(
-        Modifier.fillMaxWidth().padding(start = 4.dp, end = 8.dp, top = 8.dp, bottom = 4.dp),
+        Modifier.fillMaxWidth().padding(start = 4.dp, end = 4.dp, top = 8.dp, bottom = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         IconAction("arrow-left", "Back", onBack)
         Spacer(Modifier.width(4.dp))
-        Column(
-            Modifier
-                .weight(1f)
-                .then(if (onTitle != null) Modifier.clickable(onClick = onTitle) else Modifier),
-        ) {
+        Column(Modifier.weight(1f)) {
             Text(
                 title,
                 style = MaterialTheme.typography.titleLarge,
@@ -259,6 +265,31 @@ fun BackBar(title: String, subtitle: String? = null, onBack: () -> Unit, onTitle
                     style = MaterialTheme.typography.labelMedium,
                     color = Palette.TextSecondary,
                     modifier = Modifier.subline(),
+                )
+            }
+        }
+        actions()
+    }
+}
+
+/** The three dots of a bar, with the entries of its menu. */
+@Composable
+fun OverflowMenu(entries: List<Pair<String, () -> Unit>>) {
+    var isOpen by remember { mutableStateOf(false) }
+    Box {
+        IconAction("ellipsis-vertical", "More options") { isOpen = true }
+        DropdownMenu(
+            expanded = isOpen,
+            onDismissRequest = { isOpen = false },
+            containerColor = Palette.Raised,
+        ) {
+            for ((label, action) in entries) {
+                DropdownMenuItem(
+                    text = { Text(label) },
+                    onClick = {
+                        isOpen = false
+                        action()
+                    },
                 )
             }
         }
