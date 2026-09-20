@@ -21,6 +21,7 @@ import uniffi.umbra_ffi.Receipts
 import uniffi.umbra_ffi.TextSink
 import uniffi.umbra_ffi.init
 import uniffi.umbra_ffi.measureArgon2FloorMs
+import uniffi.umbra_ffi.MsgHandle
 
 /** A conversation, by its surrogate identifier. */
 class Conversation(val id: ByteArray) {
@@ -32,8 +33,20 @@ class Conversation(val id: ByteArray) {
         get() = id.take(4).joinToString("") { "%02x".format(it) }
 }
 
-/** One message of a conversation view. The text stays a `CharArray`. */
-class Line(val text: CharArray, val info: MsgInfo)
+/**
+ * One message of a conversation view. The text stays a `CharArray`. `quote`
+ * is the text of the message that this one answers. An answer to a message
+ * that this device does not hold has `isReply` and no quote.
+ */
+class Line(
+    val handle: MsgHandle,
+    val text: CharArray,
+    val info: MsgInfo,
+    val quote: CharArray?,
+) {
+    val isReply: Boolean
+        get() = info.isReply
+}
 
 /**
  * One row of the chat list and of the contact list. The name is a label of
@@ -407,12 +420,16 @@ object Core {
         refreshChats()
     }
 
-    /** Sends the text of a composer. This call overwrites `text`. */
-    fun send(conversation: Conversation, text: CharArray) = call { client ->
+    /**
+     * Sends the text of a composer, as an answer to `replyTo` when the user
+     * chose one. This call overwrites `text`.
+     */
+    fun send(conversation: Conversation, text: CharArray, replyTo: MsgHandle? = null) = call { client ->
         val units = text.map { it.code.toUShort() }
         text.fill('\u0000')
         client.newDraft(conversation.id).use { draft ->
             draft.setText(units)
+            draft.setReplyTo(replyTo)
             client.sendDraft(draft).destroy()
         }
         main.post { revision++ }
@@ -421,12 +438,23 @@ object Core {
 
     /** Loads the lines of a conversation, and gives them on the main thread. */
     fun load(conversation: Conversation, onLoaded: (List<Line>) -> Unit) = call { client ->
+        // A line keeps the handle of its message, because the user can
+        // answer it. The collector frees a handle that no line holds.
         val lines = client.messages(conversation.id).map { message ->
-            message.use {
-                val sink = CharSink()
-                client.msgRender(it, sink)
-                Line(sink.chars, client.msgInfo(it))
+            val sink = CharSink()
+            client.msgRender(message, sink)
+            val info = client.msgInfo(message)
+            val quote = info.replyTo?.let { target ->
+                val quoted = CharSink()
+                // A target of a kind with no text gives an empty quote.
+                try {
+                    client.msgRender(target, quoted)
+                } catch (noText: FfiException) {
+                    quoted.chars = CharArray(0)
+                }
+                quoted.chars
             }
+            Line(message, sink.chars, info, quote)
         }
         main.post { onLoaded(lines) }
     }

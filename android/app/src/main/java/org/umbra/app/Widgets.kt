@@ -59,6 +59,15 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.onLongClick
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.semantics
 
 /**
  * The holder of a text field of the platform. A composable field holds its
@@ -407,6 +416,88 @@ class RowEntry(
     val detail: String? = null,
     val onClick: () -> Unit,
 )
+
+/**
+ * A sheet from the bottom with a handle, a title, and one row for each
+ * entry, as `design/mockups/light` has it. The mockups use no popup menu.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ActionSheet(title: String, entries: List<RowEntry>, onDismiss: () -> Unit) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = Palette.Surface,
+        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+        dragHandle = {
+            Box(
+                Modifier
+                    .padding(top = 12.dp, bottom = 8.dp)
+                    .size(width = 32.dp, height = 4.dp)
+                    .background(Palette.Outline, CircleShape),
+            )
+        },
+    ) {
+        Column(Modifier.padding(start = 20.dp, end = 20.dp, bottom = 24.dp)) {
+            Text(title, style = MaterialTheme.typography.headlineSmall)
+            Spacer(Modifier.height(12.dp))
+            entries.forEachIndexed { index, entry ->
+                if (index > 0) HorizontalDivider(color = Palette.Divider)
+                EntryRow(entry, afterClick = onDismiss)
+            }
+        }
+    }
+}
+
+/**
+ * Content with a press area above it. A view of the platform inside the
+ * content, such as message text, takes a touch before a composable does,
+ * thus the area lies on top. For a screen reader the content and the
+ * actions are one node: the area itself says nothing.
+ */
+@Composable
+fun PressOver(
+    modifier: Modifier = Modifier,
+    onClick: (() -> Unit)? = null,
+    longLabel: String? = null,
+    onLongClick: (() -> Unit)? = null,
+    content: @Composable () -> Unit,
+) {
+    Box(
+        modifier.semantics(mergeDescendants = true) {
+            if (onClick != null) {
+                role = Role.Button
+                onClick(null) { onClick(); true }
+            }
+            if (onLongClick != null) onLongClick(longLabel) { onLongClick(); true }
+        },
+    ) {
+        content()
+        val area = Modifier.matchParentSize().clearAndSetSemantics {}
+        Box(
+            when {
+                onLongClick != null -> area.pressLong(onClick ?: {}, onLongClick)
+                onClick != null -> area.press(onClick = onClick)
+                else -> area
+            },
+        )
+    }
+}
+
+/**
+ * The press of a thing that also takes a long press, with the shade of
+ * [press].
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun Modifier.pressLong(onClick: () -> Unit, onLongClick: () -> Unit): Modifier {
+    val source = remember { MutableInteractionSource() }
+    return pressShade(source).combinedClickable(
+        interactionSource = source,
+        indication = null,
+        onLongClick = onLongClick,
+        onClick = onClick,
+    )
+}
 
 /** A row with a line icon, a title, a smaller line, and a chevron. */
 @Composable

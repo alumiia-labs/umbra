@@ -345,13 +345,9 @@ private fun ChatsTab(push: (Screen) -> Unit) {
 
 @Composable
 private fun ChatRow(chat: Chat, onOpen: () -> Unit) {
-    // The preview is a view of the platform, and such a view takes a touch
-    // before the row does: a press above it gave no shade. The press area
-    // thus lies above the content, and the two are one node for a reader.
-    Box(Modifier.fillMaxWidth().pressShadeInList().semantics(mergeDescendants = true) {}) {
-        ChatRowContent(chat)
-        Box(Modifier.matchParentSize().press(role = Role.Button, onClick = onOpen))
-    }
+    // The preview is a view of the platform, thus the press area lies above
+    // the content.
+    PressOver(Modifier.fillMaxWidth().pressShadeInList(), onClick = onOpen) { ChatRowContent(chat) }
 }
 
 @Composable

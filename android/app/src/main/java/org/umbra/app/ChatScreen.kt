@@ -39,6 +39,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.border
 
 @Composable
 fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
@@ -77,6 +78,16 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
     }
     val readUpTo = lines.indexOfLast { it.info.outgoing && it.info.delivery.toInt() == READ }
     val composer = rememberPlatformField()
+    // The message under the finger, and the message that the composer answers.
+    var chosen by remember(conversation) { mutableStateOf<Line?>(null) }
+    var answered by remember(conversation) { mutableStateOf<Line?>(null) }
+    chosen?.let { line ->
+        ActionSheet(
+            "Message",
+            listOf(RowEntry("reply", "Reply") { answered = line }),
+            onDismiss = { chosen = null },
+        )
+    }
     Column(Modifier.fillMaxSize()) {
         // The name leads to the details of the contact, and that view holds
         // each action of a conversation. The bar needs no menu beside it.
@@ -116,11 +127,14 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                     DayLabel(line.info.storedAtMs.toLong())
                 }
                 if (!line.info.outgoing && line.info.storedAtMs == newFrom) NewLabel()
-                Bubble(line)
+                Bubble(line, chat) { chosen = line }
                 // The contact saw each message up to this one. The mark
                 // sits under it and under no other, as a read marker does.
                 if (index == readUpTo) ReadMark(chat)
             }
+        }
+        answered?.let { line ->
+            ReplyStrip(if (line.info.outgoing) "yourself" else chat.title, line.text) { answered = null }
         }
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
@@ -150,7 +164,10 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                     .clip(CircleShape)
                     .background(Palette.Action)
                     .clickable(role = Role.Button, onClickLabel = "Send") {
-                        composer.take()?.let { Core.send(conversation, it) }
+                        composer.take()?.let {
+                            Core.send(conversation, it, answered?.handle)
+                            answered = null
+                        }
                     },
                 contentAlignment = Alignment.Center,
             ) { FaIcon("paper-plane", label = "Send", size = 18.dp, tint = Color.White) }
@@ -197,23 +214,35 @@ private fun NewLabel() {
 }
 
 @Composable
-private fun Bubble(line: Line) {
+private fun Bubble(line: Line, chat: Chat, onLongPress: () -> Unit) {
     val isOutgoing = line.info.outgoing
     Row(
         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
         horizontalArrangement = if (isOutgoing) Arrangement.End else Arrangement.Start,
     ) {
-        Column(
-            modifier = Modifier
-                .widthIn(max = 300.dp)
-                .background(
-                    if (isOutgoing) Palette.Container else Palette.Incoming,
-                    RoundedCornerShape(16.dp),
-                )
-                .padding(horizontal = 14.dp, vertical = 10.dp),
-            horizontalAlignment = Alignment.End,
-        ) {
-            PlatformText(line.text, Palette.Text)
+        // The text is a view of the platform, thus the press area lies above
+        // the content, as in a row of the chat list.
+        PressOver(
+            Modifier.widthIn(max = 300.dp).clip(RoundedCornerShape(16.dp)),
+            longLabel = "Message actions",
+            onLongClick = onLongPress,
+        ) { BubbleContent(line, chat) }
+    }
+}
+
+@Composable
+private fun BubbleContent(line: Line, chat: Chat) {
+    val isOutgoing = line.info.outgoing
+    Column(
+        modifier = Modifier
+            .background(if (isOutgoing) Palette.Container else Palette.Incoming)
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        horizontalAlignment = Alignment.End,
+    ) {
+            // The quote starts at the left edge of the bubble, as a line of text does.
+            if (line.isReply) Quote(line.quote, Modifier.align(Alignment.Start))
+            // The text starts at the left edge, and the time sits at the right.
+            PlatformText(line.text, Palette.Text, modifier = Modifier.align(Alignment.Start))
             Spacer(Modifier.height(2.dp))
             val clock = DateUtils.formatDateTime(
                 LocalContext.current,
@@ -229,12 +258,59 @@ private fun Bubble(line: Line) {
                 color = if (line.info.delivery.toInt() == FAILED) Palette.Error else Palette.TextSecondary,
                 modifier = Modifier.subline(),
             )
-        }
     }
 }
 
 private const val FAILED = 4
 private const val READ = 3
+
+/** The message that a bubble answers, above its text. */
+@Composable
+private fun Quote(quote: CharArray?, modifier: Modifier = Modifier) {
+    Row(
+        modifier
+            .padding(bottom = 6.dp)
+            .background(Palette.Pressed, RoundedCornerShape(10.dp))
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+    ) {
+        if (quote == null) {
+            // WIR-173: the answer stays, and its target is not here.
+            Text(
+                "A message that is not on this device",
+                style = MaterialTheme.typography.bodySmall,
+                color = Palette.TextSecondary,
+            )
+        } else {
+            PlatformText(quote, Palette.TextSecondary, sizeSp = 13f, maxLines = 2)
+        }
+    }
+}
+
+/** What the composer answers, above the field, with a way to take it back. */
+@Composable
+private fun ReplyStrip(to: String, text: CharArray, onCancel: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp)
+            .background(Color.White, RoundedCornerShape(20.dp))
+            .border(1.dp, Palette.Divider, RoundedCornerShape(20.dp))
+            .padding(start = 16.dp, top = 8.dp, bottom = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text("Replying to $to", style = MaterialTheme.typography.labelMedium)
+            PlatformText(
+                text,
+                Palette.TextSecondary,
+                modifier = Modifier.subline(),
+                sizeSp = 13f,
+                maxLines = 2,
+            )
+        }
+        IconAction("xmark", "Cancel the reply", onCancel)
+    }
+}
 
 /** The small picture of the contact under the newest message that it saw. */
 @Composable
