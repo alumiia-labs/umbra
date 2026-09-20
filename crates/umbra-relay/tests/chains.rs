@@ -17,7 +17,12 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use umbra_core::{
-    attach::{command::ReplicaTarget, CHUNK_SIZE},
+    attach::{
+        command::ReplicaTarget,
+        place::AttachmentRelay,
+        transfer::{Download, Progress, Shape, Upload, Uploaded},
+        CHUNK_SIZE, SEGMENT_SIZE,
+    },
     directory::{bloc::BlocId, path::Candidate},
     session::node::{
         ChunkJob, ChunkOutcome, ClientEvent, ClientNode, ContactId, RelayInfo, StateChange,
@@ -681,6 +686,133 @@ fn a_chunk_goes_to_one_relay_and_that_relay_makes_the_two_copies() {
     let mut queues = client(0x62);
     let refused = queues.chunk(first, chunk_id, ChunkJob::Erase { cred: cred() }, &mut rng);
     assert!(refused.is_err());
+}
+
+/// A node for transfers in the place of the node of queues of one client.
+fn use_transfer_node(mesh: &mut Mesh, client: usize, seed: u8) {
+    let mut node = ClientNode::for_transfers(
+        relay_info(0),
+        (1..LAYERS.len()).map(relay_info).collect(),
+        RootIdentity::new(Secret::new([seed; 32])),
+    );
+    node.connected(&mut Rng(u64::from(seed))).unwrap();
+    mesh.clients[client] = node;
+}
+
+/// Each answer to a chunk command that one client got in one turn.
+fn chunk_answers(mesh: &mut Mesh, client: usize) -> Vec<(u64, ChunkOutcome)> {
+    mesh.step();
+    mesh.take_events(client)
+        .into_iter()
+        .filter_map(|event| match event {
+            ClientEvent::Chunk { handle, outcome } => Some((handle, outcome)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_file_goes_up_from_one_client_and_comes_down_at_another() {
+    const SENDER: usize = 0;
+    const RECEIVER: usize = 1;
+    let mut mesh = Mesh::new(&[0x63, 0x64]);
+    use_transfer_node(&mut mesh, SENDER, 0x63);
+    use_transfer_node(&mut mesh, RECEIVER, 0x64);
+    mesh.settle();
+    let relays: Vec<AttachmentRelay> = (0..LAYERS.len())
+        .filter(|index| LAYERS[*index] == 3)
+        .map(|index| {
+            let info = relay_info(index).candidate;
+            AttachmentRelay {
+                relay_id: info.relay_id,
+                operator_id: info.operator_id,
+                family_id: info.family_id,
+            }
+        })
+        .collect();
+
+    // Three segments and a part of a fourth one.
+    let plain: Vec<u8> = (0..SEGMENT_SIZE * 3 + 999)
+        .map(|i| (i % 251) as u8)
+        .collect();
+    let shape = Shape {
+        mime_class: 1,
+        pixel_w: 640,
+        pixel_h: 480,
+        ..Shape::default()
+    };
+    let mut rng = Rng(11);
+    // The redundancy is mandatory, thus a set of two relays holds no file.
+    assert!(Upload::new(&plain, shape, &relays[..2], &mut rng).is_err());
+    let mut upload = Upload::new(&plain, shape, &relays, &mut rng).unwrap();
+    upload.tick(&mut mesh.clients[SENDER], &mut rng).unwrap();
+    let mut uploaded: Option<Uploaded> = None;
+    for _ in 0..400 {
+        for (handle, outcome) in chunk_answers(&mut mesh, SENDER) {
+            let node = &mut mesh.clients[SENDER];
+            if let Progress::Done(done) =
+                upload.on_outcome(node, handle, outcome, &mut rng).unwrap()
+            {
+                uploaded = Some(done);
+            }
+        }
+        if uploaded.is_some() {
+            break;
+        }
+    }
+    let uploaded = uploaded.expect("the upload ends");
+    let descriptor = &uploaded.descriptor;
+    assert_eq!(descriptor.refs.len(), 4);
+    assert_eq!(descriptor.padded_size as usize, 4 * CHUNK_SIZE);
+    assert_eq!((descriptor.pixel_w, descriptor.pixel_h), (640, 480));
+    // Each chunk has a credential and an identifier of its own (`ATT-036`,
+    // `ATT-055`), and one relay made two copies of each.
+    assert_eq!(uploaded.credentials.len(), 4);
+    assert_eq!(mesh.pushes, 8);
+    for (index, credential) in uploaded.credentials.iter().enumerate() {
+        assert!(uploaded.credentials[..index]
+            .iter()
+            .all(|other| other.chunk_id != credential.chunk_id
+                && other.cred.expose() != credential.cred.expose()));
+    }
+
+    // ATT-161: the sender erases the first chunk at the relay of its ref.
+    // The receiver gets that chunk from a copy (`ATT-019`).
+    let first = &uploaded.credentials[0];
+    let erase = ChunkJob::Erase {
+        cred: StaticSecret::from(*first.cred.expose()),
+    };
+    let lost_at = descriptor.refs[0].relay_id;
+    let handle = mesh.clients[SENDER]
+        .chunk(lost_at, first.chunk_id, erase, &mut rng)
+        .unwrap();
+    assert_eq!(outcome_of(&mut mesh, SENDER, handle), ChunkOutcome::Erased);
+
+    // The descriptor travels in a record, thus the receiver reads its bytes.
+    let mut encoded = vec![0u8; descriptor.len()];
+    descriptor.encode(&mut encoded).unwrap();
+    let received = umbra_wire::descriptor::FileDescriptor::parse(&encoded).unwrap();
+    let mut rng = Rng(12);
+    let mut download = Download::new(&received, &relays, &mut rng).unwrap();
+    download
+        .tick(&mut mesh.clients[RECEIVER], &mut rng)
+        .unwrap();
+    let mut fetched = None;
+    for _ in 0..400 {
+        for (handle, outcome) in chunk_answers(&mut mesh, RECEIVER) {
+            let node = &mut mesh.clients[RECEIVER];
+            if let Progress::Done(bytes) = download
+                .on_outcome(node, handle, outcome, &mut rng)
+                .unwrap()
+            {
+                fetched = Some(bytes);
+            }
+        }
+        if fetched.is_some() {
+            break;
+        }
+    }
+    assert_eq!(fetched.expect("the download ends"), plain);
 }
 
 /// The seed of the root identity of a client of the mesh of this test.

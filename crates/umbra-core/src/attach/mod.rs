@@ -12,6 +12,7 @@ pub mod place;
 pub mod seal;
 pub mod segment;
 pub mod store;
+pub mod transfer;
 pub mod upload;
 
 /// `CHUNK_SIZE`.
