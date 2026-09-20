@@ -1,7 +1,6 @@
 package org.umbra.app
 
 import android.text.format.DateUtils
-import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -40,13 +39,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 
 @Composable
-fun ChatScreen(chat: Chat, onBack: () -> Unit) {
-    var isRenaming by remember { mutableStateOf(false) }
-    if (isRenaming) {
-        BackHandler { isRenaming = false }
-        RenameContactScreen(chat) { isRenaming = false }
-        return
-    }
+fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
     var lines by remember { mutableStateOf(emptyList<Line>()) }
     val listState = rememberLazyListState()
     val conversation = chat.conversation
@@ -82,11 +75,14 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit) {
     }
     val composer = rememberPlatformField()
     Column(Modifier.fillMaxSize()) {
-        BackBar(chat.title, onBack = onBack) {
+        val details = { push(Screen.ContactDetails(chat.conversation)) }
+        BackBar(chat.title, onBack = onBack, isVerified = chat.isVerified, onTitle = details) {
             OverflowSheet(
                 chat.title,
                 listOf(
-                    RowEntry("pen", "Edit name") { isRenaming = true },
+                    RowEntry("circle-info", "Contact details", onClick = details),
+                    RowEntry("pen", "Edit name") { push(Screen.EditName(chat.conversation)) },
+                    RowEntry("shield-check", "Verify contact") { push(Screen.Verify(chat.conversation)) },
                 ),
             )
         }

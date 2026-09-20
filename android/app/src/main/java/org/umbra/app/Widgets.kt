@@ -251,6 +251,8 @@ fun BackBar(
     title: String,
     subtitle: String? = null,
     onBack: () -> Unit,
+    isVerified: Boolean = false,
+    onTitle: (() -> Unit)? = null,
     actions: @Composable () -> Unit = {},
 ) {
     Row(
@@ -259,13 +261,21 @@ fun BackBar(
     ) {
         IconAction("arrow-left", "Back", onBack)
         Spacer(Modifier.width(4.dp))
-        Column(Modifier.weight(1f)) {
-            Text(
-                title,
-                style = MaterialTheme.typography.titleLarge,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+        val titleArea = Modifier.weight(1f).clip(RoundedCornerShape(12.dp))
+        Column(if (onTitle == null) titleArea else titleArea.clickable(onClick = onTitle)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    title,
+                    style = MaterialTheme.typography.titleLarge,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                if (isVerified) {
+                    Spacer(Modifier.width(8.dp))
+                    FaIcon("shield-check", label = "Verified", size = 16.dp, tint = Palette.Action)
+                }
+            }
             subtitle?.let {
                 Text(
                     it,

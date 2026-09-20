@@ -42,6 +42,7 @@ ICONS = [
     "qrcode",
     "rotate",
     "share-nodes",
+    "shield-check",
     "shield-halved",
     "signal",
     "triangle-exclamation",
@@ -49,6 +50,10 @@ ICONS = [
     "user-plus",
     "xmark",
 ]
+
+# An icon that the Free set does not hold, and the Free icon that stands in
+# for it under its name.
+FREE_STAND_IN = {"shield-check": "shield-halved"}
 
 ASSETS = pathlib.Path(__file__).resolve().parent.parent / "android/app/src/main/assets"
 
@@ -67,11 +72,17 @@ def main() -> int:
     target.mkdir(parents=True, exist_ok=True)
     missing = []
     for name in ICONS:
-        sources = [package / "svgs" / style / f"{name}.svg" for style in styles]
+        wanted = name if is_pro else FREE_STAND_IN.get(name, name)
+        sources = [package / "svgs" / style / f"{wanted}.svg" for style in styles]
         source = next((path for path in sources if path.is_file()), None)
         if source is None:
             missing.append(name)
             continue
+        # The repository holds the Free set. A Pro package holds each icon
+        # under the Pro license, thus a Free run takes no file from it.
+        if not is_pro and "Font Awesome Free" not in source.read_text(encoding="utf-8"):
+            print(f"{source} is not a Free file. Give the Free package, or use --pro.")
+            return 1
         shutil.copyfile(source, target / f"{name}.svg")
     if not is_pro:
         shutil.copyfile(package / "LICENSE.txt", target / "LICENSE.txt")

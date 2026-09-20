@@ -55,6 +55,23 @@ sealed interface Screen {
     data object AutoLock : Screen
     data object ChangePassphrase : Screen
     data class Chat(val conversation: Conversation) : Screen
+    data class ContactDetails(val conversation: Conversation) : Screen
+    data class EditName(val conversation: Conversation) : Screen
+    data class Verify(val conversation: Conversation) : Screen
+    data class VerifyCode(val conversation: Conversation, val starts: Boolean) : Screen
+    data class SafetyNumber(val conversation: Conversation) : Screen
+
+    /** The conversation of a view of one contact. */
+    val contact: Conversation?
+        get() = when (this) {
+            is Chat -> conversation
+            is ContactDetails -> conversation
+            is EditName -> conversation
+            is Verify -> conversation
+            is VerifyCode -> conversation
+            is SafetyNumber -> conversation
+            else -> null
+        }
 }
 
 enum class Tab(val label: String, val icon: String) {
@@ -100,19 +117,54 @@ private fun OpenApp() {
         )
         return
     }
-    when (val top = stack.lastOrNull()) {
-        null -> TabsScreen(tab, onTab = { tab = it }, push)
-        Screen.AddContact -> AddContactScreen(pop, push)
-        Screen.YourInvitation -> YourInvitationScreen(pop)
-        Screen.UseInvitation -> UseInvitationScreen(pop)
-        Screen.AppLock -> AppLockScreen(pop, push)
-        Screen.AutoLock -> AutoLockScreen(pop)
-        Screen.ChangePassphrase -> ChangePassphraseScreen(pop)
-        is Screen.Chat -> {
-            val chat = Core.chats.firstOrNull { it.conversation == top.conversation }
-            // The list loads again after a lock or a new run.
-            if (chat == null) LaunchedEffect(Unit) { pop() } else ChatScreen(chat, pop)
+    val top = stack.lastOrNull()
+    Column(Modifier.fillMaxSize()) {
+        if (top !is Screen.VerifyCode) VerifyPrompt(push)
+        when (top) {
+            null -> TabsScreen(tab, onTab = { tab = it }, push)
+            Screen.AddContact -> AddContactScreen(pop, push)
+            Screen.YourInvitation -> YourInvitationScreen(pop)
+            Screen.UseInvitation -> UseInvitationScreen(pop)
+            Screen.AppLock -> AppLockScreen(pop, push)
+            Screen.AutoLock -> AutoLockScreen(pop)
+            Screen.ChangePassphrase -> ChangePassphraseScreen(pop)
+            else -> {
+                val chat = Core.chats.firstOrNull { it.conversation == top.contact }
+                // The list loads again after a lock or a new run.
+                if (chat == null) LaunchedEffect(Unit) { pop() } else ContactView(top, chat, stack, pop, push) { stack = it }
+            }
         }
+    }
+}
+
+/** A view of one contact. */
+@Composable
+private fun ContactView(
+    top: Screen,
+    chat: Chat,
+    stack: List<Screen>,
+    pop: () -> Unit,
+    push: (Screen) -> Unit,
+    setStack: (List<Screen>) -> Unit,
+) {
+    when (top) {
+        is Screen.Chat -> ChatScreen(chat, pop, push)
+        is Screen.ContactDetails -> ContactDetailsScreen(
+            chat,
+            onBack = pop,
+            onMessage = {
+                // The details of a conversation lead back to it, and the
+                // details of the contact list lead into it.
+                val opened = Screen.Chat(chat.conversation)
+                if (stack.dropLast(1).lastOrNull() == opened) pop() else setStack(listOf(opened))
+            },
+            push = push,
+        )
+        is Screen.EditName -> RenameContactScreen(chat, pop)
+        is Screen.Verify -> VerifyScreen(chat, pop, push)
+        is Screen.VerifyCode -> VerifyCodeScreen(chat, top.starts, pop)
+        is Screen.SafetyNumber -> SafetyNumberScreen(chat, pop)
+        else -> Unit
     }
 }
 
@@ -352,13 +404,17 @@ private fun ContactsTab(push: (Screen) -> Unit) {
                 Row(
                     Modifier
                         .fillMaxWidth()
-                        .clickable { push(Screen.Chat(chat.conversation)) }
+                        .clickable { push(Screen.ContactDetails(chat.conversation)) }
                         .padding(horizontal = 20.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Avatar(chat)
                     Spacer(Modifier.width(14.dp))
                     Text(chat.title, fontWeight = FontWeight.SemiBold)
+                    if (chat.isVerified) {
+                        Spacer(Modifier.width(8.dp))
+                        FaIcon("shield-check", label = "Verified", size = 14.dp, tint = Palette.Action)
+                    }
                 }
             }
         }

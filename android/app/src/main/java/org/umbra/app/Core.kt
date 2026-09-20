@@ -45,6 +45,7 @@ class Chat(
     val isPreviewOutgoing: Boolean,
     val lastAtMs: Long,
     val unread: Int,
+    val isVerified: Boolean,
 ) {
     /** What each list shows: the name of the user, or a stable short label. */
     val title: String
@@ -69,6 +70,18 @@ object Core {
 
     /** The idle time of the auto-lock, in seconds. Zero locks when the app leaves the screen. */
     var autoLockSeconds by mutableStateOf(15 * 60L)
+        private set
+
+    /** The short code of a ceremony that runs, and its conversation. */
+    var verifyCode by mutableStateOf<Pair<Conversation, String>?>(null)
+        private set
+
+    /** The words of a ceremony that did not start or did not finish. */
+    var verifyFault by mutableStateOf<String?>(null)
+        private set
+
+    /** The conversation that the user verified a moment ago. */
+    var verifiedNow by mutableStateOf<Conversation?>(null)
         private set
 
     /** A contact that is new in this run and has no name yet. */
@@ -192,6 +205,18 @@ object Core {
                     if (!isNamed) toName = conversation
                 }
             }
+            is FfiEvent.VerificationCode ->
+                verifyCode = Conversation(event.conversation) to event.code
+            is FfiEvent.Verified -> {
+                verifyCode = null
+                verifiedNow = Conversation(event.conversation)
+                refreshChats()
+            }
+            // The view of the ceremony starts again from its own state.
+            is FfiEvent.VerificationRefused -> {
+                verifyCode = null
+                verifyFault = "The two devices made no code."
+            }
             is FfiEvent.Message -> {
                 revision++
                 refreshChats()
@@ -205,6 +230,8 @@ object Core {
                 online = false
                 invitation = null
                 toName = null
+                verifyCode = null
+                verifiedNow = null
                 chats.clear()
                 phase = Phase.Locked
                 // A locked client holds no key that reads a queue, thus the
@@ -314,6 +341,35 @@ object Core {
         refreshChats()
     }
 
+    /** The 60 digits of the two keys of a conversation. It needs no network. */
+    fun safetyNumber(conversation: Conversation, onLoaded: (String) -> Unit) = call { client ->
+        val number = client.safetyNumber(conversation.id)
+        main.post { onLoaded(number) }
+    }
+
+    /** Starts a ceremony. A fault goes to `verifyFault`. */
+    fun startVerification(conversation: Conversation) {
+        endVerification()
+        val client = handle ?: return
+        worker.execute {
+            try {
+                client.startVerification(conversation.id)
+            } catch (failure: FfiException) {
+                main.post { verifyFault = "A short code needs a connection." }
+            }
+        }
+    }
+
+    /** The user says that the two codes match. */
+    fun confirmVerification(conversation: Conversation) = call { it.confirmVerification(conversation.id) }
+
+    /** The user left the ceremony, thus its code shows no more. */
+    fun endVerification() {
+        verifyCode = null
+        verifiedNow = null
+        verifyFault = null
+    }
+
     /** The user looks at the conversation, thus its messages are seen. */
     fun markRead(conversation: Conversation) = call { client ->
         client.markRead(conversation.id)
@@ -374,6 +430,7 @@ object Core {
             isPreviewOutgoing = isOutgoing,
             lastAtMs = summary.lastAtMs.toLong(),
             unread = summary.unread.toInt(),
+            isVerified = summary.verified,
         )
     }
 

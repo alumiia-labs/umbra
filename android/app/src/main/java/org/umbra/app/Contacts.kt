@@ -141,9 +141,9 @@ fun YourInvitationScreen(onBack: () -> Unit) {
     }
 }
 
-/** The link as a QR code. The reader of the other device gets the same text. */
+/** A text as a QR code. The reader of the other device gets the same text. */
 @Composable
-private fun QrCode(link: String) {
+fun QrCode(link: String, description: String = "The invitation as a QR code") {
     val matrix: BitMatrix = remember(link) {
         val hints = mapOf(
             EncodeHintType.ERROR_CORRECTION to ErrorCorrectionLevel.M,
@@ -157,7 +157,7 @@ private fun QrCode(link: String) {
             .background(Color.White, RoundedCornerShape(16.dp))
             .border(1.dp, Palette.Divider, RoundedCornerShape(16.dp))
             .padding(10.dp)
-            .semantics { contentDescription = "The invitation as a QR code" },
+            .semantics { contentDescription = description },
     ) {
         val cell = size.minDimension / matrix.width
         for (y in 0 until matrix.height) {
