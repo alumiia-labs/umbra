@@ -69,6 +69,13 @@ pub enum Command {
         /// A value of the caller, which comes back in the update.
         tag: u64,
     },
+    /// Start a verification ceremony with a contact (Part 4 §4.5.2). An
+    /// [`Update::VerificationCode`] follows at the two devices.
+    Verify(ContactId),
+    /// The user says that the two codes match. An [`Update::Verified`]
+    /// follows, or an [`Update::VerificationRefused`] with no complete
+    /// ceremony.
+    ConfirmVerified(ContactId),
 }
 
 /// The store of the client, as the runtime sees it.
@@ -113,6 +120,23 @@ pub enum Update {
         contact: ContactId,
         /// The encoded `AppMessage`.
         app: Vec<u8>,
+    },
+    /// The six-digit code of a ceremony, which the two users compare.
+    VerificationCode {
+        /// The contact.
+        contact: ContactId,
+        /// The code.
+        code: u32,
+    },
+    /// A ceremony did not start, or the node holds no complete ceremony to
+    /// confirm.
+    VerificationRefused(ContactId),
+    /// The user confirmed a complete ceremony (`IDN-147`).
+    Verified {
+        /// The contact.
+        contact: ContactId,
+        /// The pairwise identity key of the peer, which the state names.
+        peer_static: [u8; 32],
     },
     /// A relay acknowledged the record with this tag.
     Sent(u64),
@@ -165,11 +189,20 @@ fn settle(
     if changes.is_empty() && received.is_empty() {
         return Ok(());
     }
+    // A record that the node used itself, such as a record of a ceremony,
+    // gives no message. Its channel moved, and its ACK is due also.
+    let moved: Vec<ContactId> = changes
+        .iter()
+        .filter_map(|change| match change {
+            StateChange::Contact { contact, .. } => Some(*contact),
+            _ => None,
+        })
+        .collect();
     if !persist.commit(changes, &received) {
         return Err(Ended::StoreFault);
     }
     let mut acknowledged = Vec::new();
-    for (contact, _) in &received {
+    for contact in received.iter().map(|(contact, _)| contact).chain(&moved) {
         if acknowledged.contains(contact) {
             continue;
         }
@@ -263,6 +296,9 @@ pub async fn run_client(
                     peer_static,
                 },
                 ClientEvent::Message { contact, app } => Update::Message { contact, app },
+                ClientEvent::VerificationCode { contact, code } => {
+                    Update::VerificationCode { contact, code }
+                }
                 ClientEvent::Accepted { handle } => match tags.remove(&handle) {
                     Some(tag) => Update::Sent(tag),
                     None => continue,
@@ -297,6 +333,21 @@ pub async fn run_client(
                     if accepted.is_err() {
                         let _ = updates.send(Update::Refused);
                     }
+                }
+                Command::Verify(contact) => {
+                    if node.start_verification(&contact, now, &mut rng).is_err() {
+                        let _ = updates.send(Update::VerificationRefused(contact));
+                    }
+                }
+                Command::ConfirmVerified(contact) => {
+                    let update = match node.confirm_verification(&contact) {
+                        Ok(peer_static) => Update::Verified {
+                            contact,
+                            peer_static,
+                        },
+                        Err(_) => Update::VerificationRefused(contact),
+                    };
+                    let _ = updates.send(update);
                 }
                 Command::Send { contact, app, tag } => {
                     match node.send(&contact, &app, now, &mut rng) {

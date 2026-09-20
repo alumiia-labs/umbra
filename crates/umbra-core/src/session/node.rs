@@ -57,7 +57,10 @@ use super::{
 };
 use crate::{
     attach::seal::relay_hint,
-    identity::invitation::{Bundle, Fragment, FRAGMENT_LEN},
+    identity::{
+        invitation::{Bundle, Fragment, FRAGMENT_LEN},
+        verify::Ceremony,
+    },
     Error,
 };
 
@@ -94,6 +97,15 @@ pub enum ClientEvent {
     InvitationGone {
         /// The handle of the call that gave the link.
         handle: u64,
+    },
+    /// The two nonces of a verification ceremony are here, and the two
+    /// users compare this code (Part 4 §4.5.2). The code alone verifies
+    /// nothing (`IDN-148`).
+    VerificationCode {
+        /// The contact.
+        contact: ContactId,
+        /// The six-digit code.
+        code: u32,
     },
     /// The handshake with a contact finished on this side.
     ContactReady {
@@ -253,6 +265,25 @@ struct Contact {
     /// its handle. An inviter holds no chain before the first record of
     /// the invitee arrives.
     waiting_sends: VecDeque<(Vec<u8>, u64)>,
+    /// The verification ceremony of this run. A ceremony has no stored
+    /// form, because its nonce serves one comparison (`IDN-145`).
+    ceremony: Option<Ceremony>,
+}
+
+/// The two pairwise identity keys of a stored contact: the key of this
+/// device and the key of the peer. The safety number and the verification
+/// state rest on them, and they need no network and no node.
+pub fn stored_contact_keys(
+    state: &[u8],
+    root: &RootIdentity,
+) -> Result<([u8; 32], [u8; 32]), Error> {
+    let mut reader = Reader::new(state);
+    if reader.u8()? != STORED_VERSION {
+        return Err(Error::Malformed);
+    }
+    let salt: [u8; 16] = reader.array()?;
+    let peer_static: [u8; 32] = reader.array()?;
+    Ok((root.pairwise_identity(&salt).x25519_public(), peer_static))
 }
 
 /// A change of the state that a client keeps between two runs. The runtime
@@ -382,6 +413,7 @@ impl ClientNode {
                 peer_static,
                 salt,
                 waiting_sends: VecDeque::new(),
+                ceremony: None,
             },
         );
         Ok(ContactId(id))
@@ -815,6 +847,127 @@ impl ClientNode {
         Ok(user_handle)
     }
 
+    /// Sends one record of a kind that the node makes itself.
+    fn send_control<R: CryptoRng + ?Sized>(
+        &mut self,
+        contact: [u8; 32],
+        kind: AppKind,
+        body: &[u8],
+        now: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let record = AppMessage {
+            kind,
+            msg_id: random(rng),
+            sent_at: now.saturating_mul(1_000),
+            body,
+        };
+        let mut app = alloc::vec![0u8; record.len()];
+        record.encode(&mut app)?;
+        self.send_now(contact, &app, Waiting::Other, now, rng)
+    }
+
+    /// Starts a verification ceremony with a contact (Part 4 §4.5.2): a
+    /// fresh nonce, and its commit to the peer. A ceremony that ran before
+    /// ends, and its code shows no more (`IDN-145`, `IDN-146`). A
+    /// [`ClientEvent::VerificationCode`] follows the two reveals.
+    pub fn start_verification<R: CryptoRng + ?Sized>(
+        &mut self,
+        contact: &ContactId,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let held = self.contacts.get_mut(&contact.0).ok_or(Error::NoPath)?;
+        if !held.channel.can_send() {
+            return Err(Error::NoPath);
+        }
+        let mut ceremony = Ceremony::new(random(rng));
+        let commit = ceremony.commit_to_send();
+        held.ceremony = Some(ceremony);
+        // A commit that answers nothing is a start.
+        let body = [commit, [0; 32]].concat();
+        self.send_control(contact.0, AppKind::VerifyCommit, &body, now, rng)
+    }
+
+    /// The user says that the two codes match (`IDN-147`). The result is
+    /// the pairwise identity key of the peer, which the verification state
+    /// names. With no complete ceremony it is an error, because the
+    /// exchange alone sets no state and no exchange sets none (`IDN-148`).
+    pub fn confirm_verification(&mut self, contact: &ContactId) -> Result<[u8; 32], Error> {
+        let held = self.contacts.get_mut(&contact.0).ok_or(Error::NoPath)?;
+        let ceremony = held.ceremony.as_mut().ok_or(Error::Unverified)?;
+        ceremony.user_confirmed()?;
+        held.ceremony = None;
+        Ok(held.peer_static)
+    }
+
+    /// A `VerifyCommit` or a `VerifyReveal` of the peer arrived. `answers`
+    /// is the second field of a commit, and it is zero for a reveal.
+    fn on_verification<R: CryptoRng + ?Sized>(
+        &mut self,
+        contact: [u8; 32],
+        kind: AppKind,
+        value: [u8; 32],
+        answers: [u8; 32],
+        now: u64,
+        rng: &mut R,
+    ) -> Result<Vec<ClientEvent>, Error> {
+        let own_pk = {
+            let held = self.contacts.get(&contact).ok_or(Error::NoPath)?;
+            self.root.pairwise_identity(&held.salt).x25519_public()
+        };
+        let held = self.contacts.get_mut(&contact).ok_or(Error::NoPath)?;
+        if kind == AppKind::VerifyCommit {
+            let waiting = held
+                .ceremony
+                .as_ref()
+                .filter(|ceremony| ceremony.awaits_commit())
+                .map(Ceremony::own_commit);
+            let mut own_commit = None;
+            if answers == [0; 32] {
+                // The two clients started at one time. The lower commit
+                // stays a start, and the client of the other one answers.
+                if waiting.is_some_and(|own| own < value) {
+                    return Ok(Vec::new());
+                }
+                let mut ceremony = Ceremony::new(random(rng));
+                own_commit = Some(ceremony.commit_to_send());
+                held.ceremony = Some(ceremony);
+            } else if waiting != Some(answers) {
+                // An answer to a start that this client replaced.
+                return Ok(Vec::new());
+            }
+            let ceremony = held.ceremony.as_mut().ok_or(Error::Unverified)?;
+            ceremony.peer_committed(value);
+            // IDN-143: the reveal goes after the commit of the peer is here.
+            let reveal = ceremony.reveal_to_send()?;
+            if let Some(commit) = own_commit {
+                let body = [commit, value].concat();
+                self.send_control(contact, AppKind::VerifyCommit, &body, now, rng)?;
+            }
+            self.send_control(contact, AppKind::VerifyReveal, &reveal, now, rng)?;
+            return Ok(Vec::new());
+        }
+        let Some(ceremony) = held.ceremony.as_mut() else {
+            return Ok(Vec::new());
+        };
+        // IDN-144: a reveal that does not match the commit gives no code. The
+        // ceremony stays, because a reveal of an earlier ceremony can be late.
+        if ceremony.code(&own_pk, &held.peer_static).is_some()
+            || ceremony.peer_revealed(value).is_err()
+        {
+            return Ok(Vec::new());
+        }
+        let code = ceremony.code(&own_pk, &held.peer_static);
+        Ok(code
+            .map(|code| ClientEvent::VerificationCode {
+                contact: ContactId(contact),
+                code,
+            })
+            .into_iter()
+            .collect())
+    }
+
     /// Seals one application record for a contact and puts its `SEND` on a
     /// circuit.
     fn send_now<R: CryptoRng + ?Sized>(
@@ -1157,21 +1310,40 @@ impl ClientNode {
             // Each outcome moves the cursor of the queue.
             self.moved.insert(queue_id);
             let mut out = Vec::new();
+            let mut ceremony_record = None;
             if let Received::App { bytes, .. } = held.channel.receive(payload, bucket, now, rng)? {
-                let address = AppMessage::parse(&bytes, Channel::Pairwise)
-                    .ok()
-                    .filter(|parsed| parsed.kind == AppKind::QueueAddress)
-                    .map(|parsed| QueueAddress::parse(parsed.body));
-                match address {
+                let parsed = AppMessage::parse(&bytes, Channel::Pairwise).ok();
+                match parsed.as_ref().map(|parsed| parsed.kind) {
                     // NET-179, WIR-330: the receiving chain gave the address.
-                    Some(Ok(address)) => held.channel.accept_address(&address),
-                    Some(Err(_)) => {}
-                    None => out.push(ClientEvent::Message {
+                    Some(AppKind::QueueAddress) => {
+                        let address =
+                            parsed.and_then(|parsed| QueueAddress::parse(parsed.body).ok());
+                        if let Some(address) = address {
+                            held.channel.accept_address(&address);
+                        }
+                    }
+                    // The records of a ceremony are for the node, and the
+                    // conversation shows none of them.
+                    Some(kind @ (AppKind::VerifyCommit | AppKind::VerifyReveal)) => {
+                        let field = |at: usize| -> Option<[u8; 32]> {
+                            let body = parsed.as_ref()?.body;
+                            body.get(at..at.checked_add(32)?)?.try_into().ok()
+                        };
+                        let answers = field(32).unwrap_or([0; 32]);
+                        ceremony_record = field(0).map(|value| (kind, value, answers));
+                    }
+                    _ => out.push(ClientEvent::Message {
                         contact: ContactId(queue_id),
                         app: bytes,
                     }),
                 }
             }
+            if let Some((kind, value, answers)) = ceremony_record {
+                out.extend(self.on_verification(queue_id, kind, value, answers, now, rng)?);
+            }
+            let Some(held) = self.contacts.get_mut(&queue_id) else {
+                return Ok(out);
+            };
             // The record opened the sending chain of an inviter.
             let waiting = if held.channel.can_send() {
                 core::mem::take(&mut held.waiting_sends)
@@ -1287,6 +1459,7 @@ impl ClientNode {
                 peer_static,
                 salt: half.salt,
                 waiting_sends: VecDeque::new(),
+                ceremony: None,
             },
         );
         self.moved.insert(queue_id);

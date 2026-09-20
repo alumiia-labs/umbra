@@ -60,6 +60,16 @@ impl Ceremony {
         commit(&self.own_nonce)
     }
 
+    /// The commit of this client, which the answer of the peer names.
+    pub fn own_commit(&self) -> [u8; 32] {
+        commit(&self.own_nonce)
+    }
+
+    /// Whether this client sent its commit and holds no commit of the peer.
+    pub fn awaits_commit(&self) -> bool {
+        self.sent_commit && self.peer_commit.is_none()
+    }
+
     /// The peer's `VerifyCommit` arrived.
     pub fn peer_committed(&mut self, peer_commit: [u8; 32]) {
         self.peer_commit = Some(peer_commit);

@@ -111,6 +111,9 @@ pub struct ConversationSummary {
     pub last_at_ms: u64,
     /// The received messages that the user did not see yet.
     pub unread: u32,
+    /// Whether the user verified the pairwise identity key that the
+    /// contact holds now (Part 4 §4.5).
+    pub verified: bool,
 }
 
 /// One event of the stream from Rust to the platform. An event carries a

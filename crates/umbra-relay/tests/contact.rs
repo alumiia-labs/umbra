@@ -883,3 +883,135 @@ fn the_relays_restart_and_each_contact_continues() {
     contact_of(&network.take_events(carol));
     assert_eq!(network.clients[ALICE].contacts().count(), 2);
 }
+
+fn code_of(events: &[ClientEvent]) -> Option<u32> {
+    events.iter().find_map(|event| match event {
+        ClientEvent::VerificationCode { code, .. } => Some(*code),
+        _ => None,
+    })
+}
+
+fn control(kind: AppKind, body: &[u8]) -> Vec<u8> {
+    let message = AppMessage {
+        kind,
+        msg_id: [0x77; 16],
+        sent_at: 0,
+        body,
+    };
+    let mut out = vec![0u8; message.len()];
+    message.encode(&mut out).unwrap();
+    out
+}
+
+#[test]
+fn a_ceremony_gives_one_code_and_only_the_user_verifies() {
+    const ALICE: usize = 0;
+    const BOB: usize = 1;
+    let mut network = Network::new();
+    network.settle();
+    network.clients[ALICE].invite(&mut Rng(1)).unwrap();
+    network.settle();
+    let bundle = invitations_of(network.take_events(ALICE)).remove(0);
+    network.clients[BOB].accept(bundle, &mut Rng(2)).unwrap();
+    network.settle();
+    let (alice_contact, bob_static) = contact_of(&network.take_events(ALICE));
+    let (bob_contact, alice_static) = contact_of(&network.take_events(BOB));
+
+    // No ceremony ran, and a confirmation sets nothing (IDN-148).
+    assert!(network.clients[ALICE]
+        .confirm_verification(&alice_contact)
+        .is_err());
+
+    // Alice starts. The two devices get one code, and no record of the
+    // ceremony shows as a message.
+    let now = network.now;
+    network.clients[ALICE]
+        .start_verification(&alice_contact, now, &mut Rng(3))
+        .unwrap();
+    // The commit went, and the reveal of Bob is not here yet.
+    assert!(network.clients[ALICE]
+        .confirm_verification(&alice_contact)
+        .is_err());
+    network.settle();
+    let alice_events = network.take_events(ALICE);
+    let bob_events = network.take_events(BOB);
+    let code = code_of(&alice_events).expect("a code at Alice");
+    assert_eq!(code_of(&bob_events), Some(code));
+    assert!(code < 1_000_000);
+    assert!(messages_of(alice_events).is_empty());
+    assert!(messages_of(bob_events).is_empty());
+
+    // The confirmation gives the key that the handshake gave, one time.
+    assert_eq!(
+        network.clients[ALICE]
+            .confirm_verification(&alice_contact)
+            .unwrap(),
+        bob_static
+    );
+    assert!(network.clients[ALICE]
+        .confirm_verification(&alice_contact)
+        .is_err());
+    assert_eq!(
+        network.clients[BOB]
+            .confirm_verification(&bob_contact)
+            .unwrap(),
+        alice_static
+    );
+
+    // A second ceremony uses new nonces, and its code is its own.
+    let now = network.now;
+    network.clients[BOB]
+        .start_verification(&bob_contact, now, &mut Rng(4))
+        .unwrap();
+    network.settle();
+    let second = code_of(&network.take_events(BOB)).expect("a code at Bob");
+    assert_eq!(code_of(&network.take_events(ALICE)), Some(second));
+    assert_ne!(second, code);
+
+    // The user starts two times in a row. The answer to the first start
+    // pairs with nothing, and the two devices end with one code.
+    for seed in [5, 6] {
+        let now = network.now;
+        network.clients[ALICE]
+            .start_verification(&alice_contact, now, &mut Rng(seed))
+            .unwrap();
+    }
+    network.settle();
+    let third = code_of(&network.take_events(ALICE)).expect("a code at Alice");
+    assert_eq!(code_of(&network.take_events(BOB)), Some(third));
+
+    // The two users start at one time, and one start becomes the answer.
+    let now = network.now;
+    network.clients[ALICE]
+        .start_verification(&alice_contact, now, &mut Rng(7))
+        .unwrap();
+    network.clients[BOB]
+        .start_verification(&bob_contact, now, &mut Rng(8))
+        .unwrap();
+    network.settle();
+    let alice_events = network.take_events(ALICE);
+    let fourth = code_of(&alice_events).expect("a code at Alice");
+    assert_eq!(code_of(&network.take_events(BOB)), Some(fourth));
+    let codes = alice_events
+        .iter()
+        .filter(|event| matches!(event, ClientEvent::VerificationCode { .. }))
+        .count();
+    assert_eq!(codes, 1);
+
+    // IDN-144: a reveal that does not match its commit gives no code.
+    let forged_start = [[0x11; 32], [0; 32]].concat();
+    for (seed, kind, body) in [
+        (9, AppKind::VerifyCommit, forged_start.as_slice()),
+        (10, AppKind::VerifyReveal, [0x22; 32].as_slice()),
+    ] {
+        let now = network.now;
+        network.clients[BOB]
+            .send(&bob_contact, &control(kind, body), now, &mut Rng(seed))
+            .unwrap();
+        network.settle();
+    }
+    assert_eq!(code_of(&network.take_events(ALICE)), None);
+    assert!(network.clients[ALICE]
+        .confirm_verification(&alice_contact)
+        .is_err());
+}

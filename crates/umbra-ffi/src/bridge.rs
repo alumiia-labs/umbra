@@ -33,6 +33,13 @@ pub enum NetEvent {
     Invitation(Vec<u8>),
     /// The relay holds no blob for a link that the user accepted.
     InvitationGone,
+    /// The code of a verification ceremony, which the two users compare.
+    VerificationCode(ConversationId, u32),
+    /// The user confirmed a ceremony, and the store holds the state.
+    Verified(ConversationId),
+    /// A ceremony did not start, or no complete ceremony was there to
+    /// confirm.
+    VerificationRefused(ConversationId),
     /// A contact is ready, and its conversation takes drafts.
     Contact(ConversationId),
     /// The client refused an invitation command, such as a bundle that does
@@ -78,6 +85,25 @@ impl Bridge {
         self.command(Command::Accept(fragment))
     }
 
+    fn contact_of(&self, conversation: &ConversationId) -> Result<ContactId, Error> {
+        self.contacts
+            .get(conversation)
+            .copied()
+            .ok_or(Error::NotFound)
+    }
+
+    /// Starts a verification ceremony. A [`NetEvent::VerificationCode`]
+    /// follows at the two devices.
+    pub fn verify(&self, conversation: &ConversationId) -> Result<(), Error> {
+        self.command(Command::Verify(self.contact_of(conversation)?))
+    }
+
+    /// The user says that the two codes match. A [`NetEvent::Verified`]
+    /// follows.
+    pub fn confirm_verified(&self, conversation: &ConversationId) -> Result<(), Error> {
+        self.command(Command::ConfirmVerified(self.contact_of(conversation)?))
+    }
+
     /// Gives each record that waits in the client to the runtime. A record
     /// for a conversation with no contact in this session fails.
     pub fn flush<B: Backend, E: SecureElement, R: CryptoRng + ?Sized>(
@@ -113,6 +139,7 @@ impl Bridge {
         &mut self,
         client: &mut Client<B, E>,
         update: Update,
+        now_ms: u64,
         rng: &mut R,
     ) -> Result<Option<NetEvent>, Error> {
         Ok(match update {
@@ -128,6 +155,21 @@ impl Bridge {
             }
             // The store took the record in the batch of its ratchet state.
             Update::Message { .. } => None,
+            Update::VerificationCode { contact, code } => Some(NetEvent::VerificationCode(
+                client.conversation_for(&contact.0)?,
+                code,
+            )),
+            Update::VerificationRefused(contact) => Some(NetEvent::VerificationRefused(
+                client.conversation_for(&contact.0)?,
+            )),
+            Update::Verified {
+                contact,
+                peer_static,
+            } => {
+                let conversation = client.conversation_for(&contact.0)?;
+                client.set_verified(conversation, &peer_static, now_ms, rng)?;
+                Some(NetEvent::Verified(conversation))
+            }
             Update::Sent(tag) => {
                 if let Some(message) = self.sent.remove(&tag) {
                     client.set_delivery(&message, Delivery::Accepted, rng)?;

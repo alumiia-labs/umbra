@@ -10,7 +10,8 @@
 use std::collections::VecDeque;
 
 use umbra_core::{
-    session::node::{ContactId, StateChange},
+    identity::address::safety_number,
+    session::node::{stored_contact_keys, ContactId, StateChange},
     store::{
         engine::{Backend, Store},
         record::{RowId, TableId},
@@ -510,6 +511,83 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         self.header = header;
     }
 
+    /// The two pairwise identity keys of a conversation: the key of this
+    /// device, and the key of the contact.
+    fn identity_keys(&self, conversation: ConversationId) -> Result<([u8; 32], [u8; 32]), Error> {
+        let store = &self.open_ref()?.store;
+        let plain = store
+            .get(TableId::CONTACT, &conversation.0)?
+            .ok_or(Error::NotFound)?;
+        let plain = Zeroizing::new(plain);
+        let state = plain.get(QUEUE_ID_LEN..).ok_or(Error::Integrity)?;
+        Ok(stored_contact_keys(state, &self.root_identity()?)?)
+    }
+
+    /// The 60-digit safety number of a conversation, in groups of five
+    /// (Part 4 §4.5). It needs no network.
+    pub fn safety_number(&self, conversation: ConversationId) -> Result<String, Error> {
+        let (own, peer) = self.identity_keys(conversation)?;
+        Ok(safety_number(&own, &peer))
+    }
+
+    /// Records that the user verified `peer_static` for a conversation
+    /// (`IDN-147`). The caller is the ceremony of the node after a user
+    /// confirmation, or [`Client::verify_by_number`].
+    pub fn set_verified<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        peer_static: &[u8; 32],
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let open = self.open_mut()?;
+        let row = open.store.row_id(TableId::VERIFICATION, &conversation.0);
+        let plain = [
+            conversation.0.as_slice(),
+            peer_static,
+            &now_ms.to_be_bytes(),
+        ]
+        .concat();
+        let mut batch = open.store.begin();
+        batch.put(TableId::VERIFICATION, row, None, &plain, rng)?;
+        Ok(batch.commit()?)
+    }
+
+    /// Whether the user verified the key that the contact holds now. A
+    /// state for an earlier key of the contact counts for nothing
+    /// (`IDN-026`).
+    pub fn is_verified(&self, conversation: ConversationId) -> Result<bool, Error> {
+        let store = &self.open_ref()?.store;
+        let row = store.row_id(TableId::VERIFICATION, &conversation.0);
+        let Some(plain) = store.get(TableId::VERIFICATION, &row)? else {
+            return Ok(false);
+        };
+        if plain.get(..16) != Some(conversation.0.as_slice()) {
+            return Err(Error::Integrity);
+        }
+        let (_, peer) = self.identity_keys(conversation)?;
+        Ok(plain.get(16..48) == Some(peer.as_slice()))
+    }
+
+    /// Compares a safety number that the user scanned or typed with the
+    /// number of this device, by its digits alone. A match is a
+    /// verification by the user, and the store takes the state.
+    pub fn verify_by_number<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        given: &str,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<bool, Error> {
+        let digits = |text: &str| -> Vec<u8> { text.bytes().filter(u8::is_ascii_digit).collect() };
+        let (own, peer) = self.identity_keys(conversation)?;
+        if digits(given) != digits(&safety_number(&own, &peer)) {
+            return Ok(false);
+        }
+        self.set_verified(conversation, &peer, now_ms, rng)?;
+        Ok(true)
+    }
+
     /// The read marker and the local name of a conversation. A
     /// conversation with no row has the marker zero and no name.
     fn conversation_meta(&self, conversation: ConversationId) -> Result<(u64, String), Error> {
@@ -608,6 +686,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 last: last.map(|(_, _, row)| MsgRef(row)),
                 last_at_ms: last.map_or(0, |(stored_at, _, _)| stored_at),
                 unread,
+                verified: self.is_verified(conversation)?,
             });
         }
         out.sort_by_key(|summary| core::cmp::Reverse(summary.last_at_ms));
@@ -878,6 +957,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             TableId::MESSAGE,
             TableId::LOCAL_IDENTITY,
             TableId::CONTACT,
+            TableId::VERIFICATION,
             OUTBOX,
             INVITATION,
             CONVERSATION,

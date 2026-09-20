@@ -95,7 +95,7 @@ pub enum AppKind {
     KeyRequest = 0x34,
     /// A `KeySupply`.
     KeySupply = 0x35,
-    /// A `VerifyCommit`, 32 bytes.
+    /// A `VerifyCommit`, 64 bytes: the commit, and the commit that it answers.
     VerifyCommit = 0x36,
     /// A `VerifyReveal`, 32 bytes.
     VerifyReveal = 0x37,
@@ -240,10 +240,11 @@ impl<'a> AppMessage<'a> {
             AppKind::Text => {
                 core::str::from_utf8(body).map_err(|_| Error::Malformed)?;
             }
-            AppKind::VerifyCommit | AppKind::VerifyReveal => {
-                if body.len() != 32 {
-                    return Err(Error::Malformed);
-                }
+            AppKind::VerifyCommit if body.len() != 64 => {
+                return Err(Error::Malformed);
+            }
+            AppKind::VerifyReveal if body.len() != 32 => {
+                return Err(Error::Malformed);
             }
             AppKind::QueueAddress
                 if body.len() != crate::address::LEN || channel != Channel::Pairwise =>

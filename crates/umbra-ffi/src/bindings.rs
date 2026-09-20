@@ -280,6 +280,8 @@ pub struct Summary {
     pub last_at_ms: u64,
     /// The received messages that the user did not see yet.
     pub unread: u32,
+    /// Whether the user verified the key that the contact holds now.
+    pub verified: bool,
 }
 
 /// One event of the stream.
@@ -314,6 +316,25 @@ pub enum FfiEvent {
     /// The client refused an invitation command, such as a bundle that does
     /// not parse.
     Refused,
+    /// The code of a verification ceremony. The two users compare it by
+    /// voice or in person (Part 4 §4.5.2).
+    VerificationCode {
+        /// The conversation.
+        conversation: Vec<u8>,
+        /// The six digits.
+        code: String,
+    },
+    /// The user confirmed a ceremony, and the store holds the state.
+    Verified {
+        /// The conversation.
+        conversation: Vec<u8>,
+    },
+    /// A ceremony did not start, or no complete ceremony was there to
+    /// confirm. The store holds no new state.
+    VerificationRefused {
+        /// The conversation.
+        conversation: Vec<u8>,
+    },
     /// A message arrived.
     Message {
         /// The conversation.
@@ -422,6 +443,16 @@ impl Inner {
                 }
             }
             NetEvent::InvitationGone => FfiEvent::InvitationGone,
+            NetEvent::VerificationCode(conversation, code) => FfiEvent::VerificationCode {
+                conversation: conversation.0.to_vec(),
+                code: umbra_core::identity::verify::digits(code),
+            },
+            NetEvent::Verified(conversation) => FfiEvent::Verified {
+                conversation: conversation.0.to_vec(),
+            },
+            NetEvent::VerificationRefused(conversation) => FfiEvent::VerificationRefused {
+                conversation: conversation.0.to_vec(),
+            },
             NetEvent::Contact(conversation) => FfiEvent::Contact {
                 conversation: conversation.0.to_vec(),
             },
@@ -572,7 +603,7 @@ impl Handle {
         if let Some(running) = bridge {
             // A fault of the store shows in the event stream of the client,
             // and such an update gives no event of the network.
-            if let Ok(Some(event)) = running.on_update(client, update, &mut OsRng) {
+            if let Ok(Some(event)) = running.on_update(client, update, unix_now_ms(), &mut OsRng) {
                 net_events.push_back(event);
             }
         } else if let Update::Offline(cause) = update {
@@ -715,6 +746,41 @@ impl Handle {
             .collect())
     }
 
+    /// The 60-digit safety number of a conversation, in groups of five. It
+    /// is a public value of the two devices and no secret.
+    pub fn safety_number(&self, conversation: Vec<u8>) -> Result<String, FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        Ok(locked(&self.inner).client.safety_number(conversation)?)
+    }
+
+    /// Compares a safety number that the user scanned with the number of
+    /// this device. A match records the verification.
+    pub fn verify_by_number(&self, conversation: Vec<u8>, given: String) -> Result<bool, FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        let mut inner = locked(&self.inner);
+        Ok(inner
+            .client
+            .verify_by_number(conversation, &given, unix_now_ms(), &mut OsRng)?)
+    }
+
+    /// Starts a verification ceremony. A [`FfiEvent::VerificationCode`]
+    /// follows at the two devices.
+    pub fn start_verification(&self, conversation: Vec<u8>) -> Result<(), FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        let inner = locked(&self.inner);
+        let bridge = inner.bridge.as_ref().ok_or(FfiError::Offline)?;
+        Ok(bridge.verify(&conversation)?)
+    }
+
+    /// The user says that the two codes match. A [`FfiEvent::Verified`]
+    /// follows.
+    pub fn confirm_verification(&self, conversation: Vec<u8>) -> Result<(), FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        let inner = locked(&self.inner);
+        let bridge = inner.bridge.as_ref().ok_or(FfiError::Offline)?;
+        Ok(bridge.confirm_verified(&conversation)?)
+    }
+
     /// One summary for each contact, the newest conversation first.
     pub fn summaries(&self) -> Result<Vec<Summary>, FfiError> {
         let found = locked(&self.inner).client.summaries()?;
@@ -726,6 +792,7 @@ impl Handle {
                 last_message: summary.last.map(|last| Arc::new(MsgHandle(last))),
                 last_at_ms: summary.last_at_ms,
                 unread: summary.unread,
+                verified: summary.verified,
             })
             .collect())
     }

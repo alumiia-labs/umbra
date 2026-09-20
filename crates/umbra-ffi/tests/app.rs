@@ -398,6 +398,49 @@ fn two_apps_meet_and_talk_through_the_exported_surface() {
         .is_err());
     assert_eq!(alice.summaries().unwrap()[0].name, "");
 
+    // The two devices hold one safety number, and no contact is verified.
+    let number = alice.safety_number(alice_conversation.clone()).unwrap();
+    assert_eq!(number.len(), 71);
+    assert_eq!(bob.safety_number(bob_conversation.clone()).unwrap(), number);
+    assert!(!bob.summaries().unwrap()[0].verified);
+
+    // Alice starts a ceremony, and the two devices show one code. The code
+    // alone verifies nothing (`IDN-148`). Bob confirms, and his store holds
+    // the state. Alice did not confirm, and her store holds none.
+    alice
+        .start_verification(alice_conversation.clone())
+        .unwrap();
+    let code = |event| match event {
+        FfiEvent::VerificationCode { code, .. } => Some(code),
+        _ => None,
+    };
+    let alice_code = wait_for(&alice, code);
+    let bob_code = wait_for(&bob, code);
+    assert_eq!(alice_code, bob_code);
+    assert_eq!(alice_code.len(), 6);
+    assert!(!bob.summaries().unwrap()[0].verified);
+    bob.confirm_verification(bob_conversation.clone()).unwrap();
+    wait_for(&bob, |event| match event {
+        FfiEvent::Verified { .. } => Some(()),
+        _ => None,
+    });
+    assert!(bob.summaries().unwrap()[0].verified);
+    assert!(!alice.summaries().unwrap()[0].verified);
+    // A confirmation with no ceremony is refused.
+    bob.confirm_verification(bob_conversation.clone()).unwrap();
+    wait_for(&bob, |event| match event {
+        FfiEvent::VerificationRefused { .. } => Some(()),
+        _ => None,
+    });
+    // A scanned number that matches verifies, and a wrong one does not.
+    assert!(!alice
+        .verify_by_number(alice_conversation.clone(), "12345 67890".into())
+        .unwrap());
+    assert!(alice
+        .verify_by_number(alice_conversation.clone(), number.replace(' ', ""))
+        .unwrap());
+    assert!(alice.summaries().unwrap()[0].verified);
+
     // The view of Bob holds the two messages in the order of their store.
     let shown = bob.messages(bob_conversation.clone()).unwrap();
     assert_eq!(shown.len(), 2);
