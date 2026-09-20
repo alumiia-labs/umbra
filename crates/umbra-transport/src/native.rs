@@ -143,6 +143,98 @@ fn socket_addr(dial: &Dial, prefer_v6: bool) -> Option<SocketAddr> {
     }
 }
 
+/// The path of the relay manifest at an HTTPS carrier (Part 3 §3.10).
+pub const MANIFEST_PATH: &str = "/.well-known/umbra/manifest";
+/// The largest manifest that a client reads: 3 000 proven entries are below
+/// 18 MiB (Part 10 §10.5.5).
+pub const MANIFEST_MAX: usize = 32 << 20;
+const MANIFEST_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// The head of a response to a manifest request, for a carrier that holds
+/// `len` bytes.
+pub fn manifest_response_head(len: usize) -> String {
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\
+         Content-Length: {len}\r\nConnection: close\r\n\r\n"
+    )
+}
+
+/// Whether a complete request head asks for the relay manifest.
+pub fn asks_manifest(head: &[u8]) -> bool {
+    head.starts_with(format!("GET {MANIFEST_PATH} HTTP/1.1\r\n").as_bytes())
+}
+
+/// Reads the relay manifest from an HTTPS carrier. The bytes are under the
+/// signatures of the directory, thus the caller verifies them and trusts
+/// this carrier with nothing (Part 10 §10.5).
+pub async fn fetch_manifest(
+    dial: &Dial,
+    config: Arc<ClientConfig>,
+) -> Result<Vec<u8>, NativeError> {
+    timeout(MANIFEST_TIMEOUT, fetch_manifest_now(dial, config))
+        .await
+        .map_err(|_| NativeError::Timeout)?
+}
+
+async fn fetch_manifest_now(
+    dial: &Dial,
+    config: Arc<ClientConfig>,
+) -> Result<Vec<u8>, NativeError> {
+    let addr = socket_addr(dial, false).ok_or(Error::Refused)?;
+    let tcp = TcpStream::connect(addr).await?;
+    let name = ServerName::try_from(dial.host.clone()).map_err(|_| Error::Refused)?;
+    let mut stream = tokio_rustls::TlsConnector::from(config)
+        .connect(name, tcp)
+        .await?;
+    let request = format!(
+        "GET {MANIFEST_PATH} HTTP/1.1\r\nHost: {}\r\nAccept: application/octet-stream\r\n\
+         Connection: close\r\n\r\n",
+        dial.host
+    );
+    stream.write_all(request.as_bytes()).await?;
+    let mut inbound = Vec::with_capacity(65_536);
+    let mut chunk = vec![0u8; 16_384];
+    loop {
+        // A carrier that closes with no TLS close is at its end too, and the
+        // length of the head tests what came.
+        let n = stream.read(&mut chunk).await.unwrap_or(0);
+        if n == 0 {
+            break;
+        }
+        inbound.extend_from_slice(chunk.get(..n).unwrap_or(&[]));
+        if inbound.len() > MANIFEST_MAX {
+            return Err(Error::Refused.into());
+        }
+    }
+    let head_end = inbound
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or(Error::Refused)?;
+    let head =
+        core::str::from_utf8(inbound.get(..head_end).unwrap_or(&[])).map_err(|_| Error::Refused)?;
+    let mut lines = head.split("\r\n");
+    let status = lines.next().unwrap_or_default();
+    if !status.starts_with("HTTP/1.1 200") {
+        return Err(Error::Refused.into());
+    }
+    let body = inbound.get(head_end.saturating_add(4)..).unwrap_or(&[]);
+    for line in lines {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        // This client reads a body of a plain length alone.
+        if name.eq_ignore_ascii_case("Transfer-Encoding") {
+            return Err(Error::Refused.into());
+        }
+        if name.eq_ignore_ascii_case("Content-Length")
+            && value.trim().parse::<usize>().ok() != Some(body.len())
+        {
+            return Err(Error::Refused.into());
+        }
+    }
+    Ok(body.to_vec())
+}
+
 /// A TCP connection after the TLS handshake and the upgrade. Each capsule
 /// travels in one masked WebSocket frame.
 pub struct TcpLink {

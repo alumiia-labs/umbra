@@ -34,8 +34,8 @@ use umbra_crypto::{
     x25519::{PublicKey as XPublic, StaticSecret},
 };
 use umbra_ffi::bindings::{
-    init, parse_network, Config, FfiError, FfiEvent, Handle, MsgHandle, Network, RelayEndpoint,
-    SecureElementCallback, TextSink,
+    fetch_manifest, init, parse_network, Config, FfiError, FfiEvent, Handle, MsgHandle, Network,
+    RelayEndpoint, SecureElementCallback, TextSink,
 };
 use umbra_relay::{
     node::{Config as RelayConfig, RelayNode},
@@ -211,6 +211,7 @@ fn start_relays(
             client_tls.clone(),
             PACING_MEAN_MS,
             store,
+            None,
         ));
     }
     (relays, ports)
@@ -693,6 +694,10 @@ fn two_apps_take_their_network_from_a_signed_manifest() {
     // Each relay reads its layer and its next hops from the manifest.
     let client_tls = native::tls_config_with_root_file(CA).unwrap();
     let mut layers = Vec::new();
+    let ports: Vec<u16> = listeners
+        .iter()
+        .map(|listener| listener.local_addr().unwrap().port())
+        .collect();
     for (listener, (relay_id, static_key, static_secret)) in listeners.into_iter().zip(identities) {
         let placed = placement(&manifest, &keyset, &relay_id, &static_key, now).unwrap();
         layers.push(placed.layer);
@@ -715,9 +720,28 @@ fn two_apps_take_their_network_from_a_signed_manifest() {
             client_tls.clone(),
             PACING_MEAN_MS,
             store,
+            // The ingress relay is the carrier of the manifest.
+            (placed.layer == 1).then(|| manifest.clone()),
         ));
     }
     assert_eq!(layers, [1, 2, 3, 2, 3]);
+
+    // A client reads the manifest over HTTPS from the ingress relay. A relay
+    // that holds none gives none.
+    let fetched = fetch_manifest(
+        "localhost".into(),
+        vec![127, 1, 0, 1],
+        ports[0],
+        Some(CA.into()),
+    );
+    assert_eq!(fetched.as_ref(), Ok(&manifest));
+    let absent = fetch_manifest(
+        "localhost".into(),
+        vec![127, 2, 0, 1],
+        ports[1],
+        Some(CA.into()),
+    );
+    assert_eq!(absent, Err(FfiError::Offline));
 
     let directory = std::env::temp_dir().join(format!("umbra-manifest-{}", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap();

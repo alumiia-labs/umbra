@@ -110,6 +110,9 @@ struct Settings {
     next: BTreeMap<[u8; 32], Dial>,
     /// The key that signs the descriptor of this relay.
     identity: Option<SigningKey>,
+    /// The manifest that gave this relay its place. The relay serves it to
+    /// a client that asks over HTTPS (Part 3 §3.10).
+    manifest: Option<Vec<u8>>,
     /// What this relay declares of itself for a network descriptor: the
     /// operator, the country, the autonomous system, and the IPv4 /16.
     facts: BTreeMap<String, String>,
@@ -178,7 +181,7 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
             let manifest = std::fs::read(manifest).ok()?;
             let keyset = std::fs::read(keyset).ok()?;
             match placement(&manifest, &keyset, &relay.relay_id, &relay.s, now) {
-                Ok(placed) => Some(placed),
+                Ok(placed) => Some((placed, manifest)),
                 Err(cause) => {
                     eprintln!("the manifest gives this relay no place: {cause:?}");
                     return None;
@@ -188,6 +191,7 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
         (None, None) => None,
         _ => return None,
     };
+    let (placed, manifest) = placed.unzip();
     let layer = match &placed {
         Some(placed) => placed.layer,
         None if !takes_place => 0,
@@ -214,6 +218,7 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
         },
         next,
         identity,
+        manifest,
         facts: [
             "operator", "country", "asn", "prefix", "family", "class", "roles",
         ]
@@ -447,6 +452,7 @@ async fn run() -> ExitCode {
         client_tls,
         PACING_MEAN_MS,
         store,
+        settings.manifest,
     )
     .await;
     ExitCode::SUCCESS

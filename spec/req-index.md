@@ -67,7 +67,7 @@ each column when a crate implements the requirement and a test covers it.
 | --- | --- | --- | --- | --- | --- | --- |
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
-| `NET` | 221 | 84 | 1 | 0 | 8 | **314** |
+| `NET` | 224 | 84 | 1 | 0 | 8 | **317** |
 | `IDN` | 120 | 43 | 1 | 0 | 5 | **169** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
 | `WIR` | 385 | 84 | 0 | 0 | 6 | **475** |
@@ -81,7 +81,7 @@ each column when a crate implements the requirement and a test covers it.
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
 | `IMP` | 106 | 41 | 0 | 0 | 1 | **148** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2177 | 705 | 7 | 0 | 51 | **2940** |
+| **All** | 2180 | 705 | 7 | 0 | 51 | **2943** |
 
 ## SCP — Scope and Conventions
 
@@ -453,6 +453,9 @@ Source: `spec/03-network-architecture.md`
 | `NET-313` | §3.2.5 | MUST | A client | A client MUST take the first relay of layer 1 as its pinned ingress of `NET-022`. |  |  |
 | `NET-314` | §3.2.5 | MUST | A client | A client MUST read a descriptor with the first line `umbra-network 1`. |  |  |
 | `NET-315` | §3.2.5 | MUST | (unstated) | A stored queue can name a relay that the relay set holds no more, or a relay that no conformant chain reaches. |  |  |
+| `NET-316` | §3.10 | MUST | An HTTPS carrier | An HTTPS carrier MUST give the `RelayManifest` at the path `/.well-known/umbra/manifest`, as the body of a `200` response with a `Content-Length`. |  |  |
+| `NET-317` | §3.10 | MUST | A client | A client MUST make that request under the TLS configuration of §3.8, with no cookie and no header that names the device or the user. |  |  |
+| `NET-318` | §3.10 | MUST | A client | A client MUST verify the bytes under Part 10 §10.5.5 before it uses one relay of them, and it MUST keep the last manifest that verified. |  |  |
 
 ## IDN — Identity
 

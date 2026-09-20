@@ -185,8 +185,12 @@ the key set, which its build ships.
 The address of a descriptor serves the clients and the relays of the layer
 before, and the /16 of that address is the network that a client tests. Thus
 two relays on one machine need two loopback networks, as `127.2.0.1` and
-`127.3.0.1`. `scripts/devnet.sh` runs such a network of five relays, and
-`scripts/devnet-push.sh` gives its manifest to the debug app of an emulator.
+`127.3.0.1`. `scripts/devnet.sh` runs such a network of five relays.
+
+A relay that reads a manifest also gives it to a client that asks over HTTPS
+at `/.well-known/umbra/manifest` (Part 3 rule `NET-316`). The debug build of
+the Android app reads it there from the ingress relay of the devnet. In a
+deployment the co-tenant site of the relay serves that path as a file.
 
 ## What the store file holds
 

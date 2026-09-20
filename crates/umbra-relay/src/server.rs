@@ -213,13 +213,37 @@ pub async fn run_node(
 /// Serves one accepted connection: the HTTP upgrade of Part 6 §6.2.1, and
 /// then one capsule in each WebSocket frame, in both directions. The
 /// function returns when either side closes.
-pub async fn serve_connection<S>(mut stream: S, link: LinkId, node: mpsc::Sender<Input>)
-where
+///
+/// A request for the relay manifest gets `manifest` and the end of the
+/// connection (Part 3 §3.10). In a deployment the co-tenant site of Part 3
+/// §3.8 serves that path, and the relay sees no such request.
+pub async fn serve_connection<S>(
+    mut stream: S,
+    link: LinkId,
+    node: mpsc::Sender<Input>,
+    manifest: Option<Arc<Vec<u8>>>,
+) where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let mut inbound: Vec<u8> = Vec::with_capacity(4_096);
     let mut chunk = vec![0u8; 16_384];
     let request = loop {
+        if native::asks_manifest(&inbound) && inbound.windows(4).any(|w| w == b"\r\n\r\n") {
+            let _ = match manifest {
+                Some(bytes) => {
+                    let head = native::manifest_response_head(bytes.len());
+                    let _ = stream.write_all(head.as_bytes()).await;
+                    stream.write_all(&bytes).await
+                }
+                None => {
+                    stream
+                        .write_all(b"HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n")
+                        .await
+                }
+            };
+            let _ = stream.shutdown().await;
+            return;
+        }
         match upgrade::parse_request(&inbound) {
             Ok(Some((request, used))) => {
                 inbound.drain(..used);
@@ -300,7 +324,12 @@ pub fn tls_acceptor(cert_path: &str, key_path: &str) -> Option<TlsAcceptor> {
 
 /// Accepts connections until the listener fails. Accepted links take the
 /// even identifiers, and dialed links take the odd ones.
-pub async fn accept_loop(listener: TcpListener, tls: TlsAcceptor, node: mpsc::Sender<Input>) {
+pub async fn accept_loop(
+    listener: TcpListener,
+    tls: TlsAcceptor,
+    node: mpsc::Sender<Input>,
+    manifest: Option<Arc<Vec<u8>>>,
+) {
     let mut link: LinkId = 2;
     loop {
         let Ok((tcp, _)) = listener.accept().await else {
@@ -309,11 +338,12 @@ pub async fn accept_loop(listener: TcpListener, tls: TlsAcceptor, node: mpsc::Se
         let _ = tcp.set_nodelay(true);
         let tls = tls.clone();
         let node = node.clone();
+        let manifest = manifest.clone();
         let this_link = link;
         link = link.saturating_add(2);
         tokio::spawn(async move {
             if let Ok(stream) = tls.accept(tcp).await {
-                serve_connection(stream, this_link, node).await;
+                serve_connection(stream, this_link, node, manifest).await;
             }
         });
     }
@@ -371,6 +401,8 @@ pub async fn dial_next(
 /// accept loop. `next_hops` names each relay of the next layer, and
 /// `client_tls` is the configuration that the dialer trusts them under. A
 /// deployment passes [`PACING_MEAN_MS`] (`NET-077`), and a test passes less.
+/// With a `manifest` the relay is an HTTPS carrier of it.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_relay(
     node: RelayNode,
     listener: TcpListener,
@@ -379,7 +411,9 @@ pub async fn run_relay(
     client_tls: Arc<rustls::ClientConfig>,
     pacing_mean_ms: u64,
     store: Box<dyn RelayStore>,
+    manifest: Option<Vec<u8>>,
 ) {
+    let manifest = manifest.map(Arc::new);
     let (inputs, node_inputs) = mpsc::channel::<Input>(1_024);
     let (requests, mut node_requests) = mpsc::unbounded_channel::<Request>();
     let node_task = tokio::spawn(run_node(node, node_inputs, requests, pacing_mean_ms, store));
@@ -424,7 +458,7 @@ pub async fn run_relay(
     });
     // The node task ends when the store fails, and the relay ends with it.
     tokio::select! {
-        () = accept_loop(listener, tls, inputs) => {}
+        () = accept_loop(listener, tls, inputs, manifest) => {}
         _ = node_task => {}
     }
 }

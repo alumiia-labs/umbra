@@ -308,8 +308,7 @@ command for that queue reaches it through a circuit that ends at that relay.
 
 The reference client of 0.2.0-draft takes its relay set from a relay manifest
 of Part 10 §10.5.5, and it verifies that manifest under the key set of its
-build. No bootstrap carrier of §3.10 is built yet: the debug build reads the
-manifest from a file of the developer. A build for a deployed test network
+build. The HTTPS form of §3.10 carries it. A build for a deployed test network
 reads the descriptor below in the place of a manifest. It meets `NET-022`,
 `NET-023`, and the invariants of §3.4.6 over that descriptor, and it does not
 verify it.
@@ -1832,6 +1831,28 @@ manifest. The carriers are:
 
 UMBRA distributes the relay list as a multi-signed, Merkle-rooted, and
 timestamped manifest. Thus a carrier can deliver the list without trust.
+Part 10 §10.5.5 gives its bytes.
+
+**The HTTPS form.** Carrier 4 and the co-tenant site of a relay (§3.8) give
+the manifest as one HTTP object.
+
+- **[NET-316]** An HTTPS carrier MUST give the `RelayManifest` at the path
+  `/.well-known/umbra/manifest`, as the body of a `200` response with a
+  `Content-Length`. **[NET-317]** A client MUST make that request under the
+  TLS configuration of §3.8, with no cookie and no header that names the
+  device or the user. It MUST NOT read a body above 32 MiB, and it MUST stop
+  after 20 seconds.
+- **[NET-318]** A client MUST verify the bytes under Part 10 §10.5.5 before
+  it uses one relay of them, and it MUST keep the last manifest that
+  verified. With no carrier in reach the client uses that one, and rule
+  `REL-035` of Part 10 bounds its age.
+- A carrier learns the address of the client and the time of the request. An
+  ingress relay learns the same from the link of §3.8. Thus the pinned
+  ingress of a client is the carrier that adds no party.
+
+The reference client of 0.2.0-draft builds the HTTPS form alone. Its debug
+build asks the ingress relay of its test network, and a relay of that
+network answers the path itself.
 
 ### 3.10.1 One relay population
 

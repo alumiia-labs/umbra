@@ -159,6 +159,7 @@ async fn two_clients_meet_and_talk_over_real_sockets() {
             client_tls.clone(),
             PACING_MEAN_MS,
             Box::new(MemoryStore::default()),
+            None,
         ));
     }
 

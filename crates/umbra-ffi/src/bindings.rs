@@ -202,6 +202,44 @@ pub struct Network {
     pub invitation_host: String,
 }
 
+/// Reads the relay manifest from an HTTPS carrier of Part 3 §3.10: the host
+/// of a relay or of its co-tenant site. The call blocks for up to 20
+/// seconds. The carrier learns the address of this device and nothing else,
+/// and [`Handle::network_of_manifest`] verifies what it gave.
+///
+/// `root_ca_path` is the authority of a test network, or none for the web
+/// roots.
+#[uniffi::export]
+pub fn fetch_manifest(
+    host: String,
+    ipv4: Vec<u8>,
+    port: u16,
+    root_ca_path: Option<String>,
+) -> Result<Vec<u8>, FfiError> {
+    let address: [u8; 4] = ipv4
+        .as_slice()
+        .try_into()
+        .map_err(|_| FfiError::Malformed)?;
+    let dial = Dial {
+        host,
+        addr_v4: Some(address),
+        addr_v6: None,
+        port,
+    };
+    let tls = match &root_ca_path {
+        Some(path) => native::tls_config_with_root_file(path),
+        None => native::tls_config(),
+    }
+    .map_err(|_| FfiError::Malformed)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| FfiError::Offline)?;
+    runtime
+        .block_on(native::fetch_manifest(&dial, tls))
+        .map_err(|_| FfiError::Offline)
+}
+
 /// A network that a signed relay manifest gave.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct VerifiedNetwork {

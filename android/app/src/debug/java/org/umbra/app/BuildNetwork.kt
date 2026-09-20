@@ -24,16 +24,17 @@ import java.io.File
 import uniffi.umbra_ffi.FfiException
 import uniffi.umbra_ffi.Handle
 import uniffi.umbra_ffi.Network
+import uniffi.umbra_ffi.fetchManifest
 import uniffi.umbra_ffi.parseNetwork
 
 /**
  * The network of the debug build. With no descriptor it is the five relays
  * of `scripts/devnet.sh` on the machine of the developer. The seven test
- * authorities of that script sign a relay manifest at each start, and
- * `scripts/devnet-push.sh` puts it into the files of this app. The client
- * verifies it under the key set of those authorities, which this build
- * ships. An emulator reaches the ingress relay at 10.0.2.2, under the test
- * authority of the repository. The seeds of those relays and authorities are
+ * authorities of that script sign a relay manifest at each start, and the
+ * ingress relay gives it over HTTPS. The client verifies it under the key
+ * set of those authorities, which this build ships. With no answer the
+ * client takes the manifest of the last run. An emulator reaches the
+ * ingress relay at 10.0.2.2, under the test authority of the repository. The seeds of those relays and authorities are
  * in the repository, thus that network protects nothing.
  *
  * A tester pastes the descriptor of a deployed test network, and the build
@@ -48,6 +49,11 @@ object BuildNetwork {
 
     // No party serves this host.
     private const val INVITATION_HOST = "invite.umbra.test"
+
+    // The carrier of the manifest: the ingress relay of the devnet.
+    private const val CARRIER_HOST = "localhost"
+    private val CARRIER_ADDRESS = byteArrayOf(10, 0, 2, 2)
+    private const val CARRIER_PORT: UShort = 7441u
 
     /** Whether the time of the last manifest differs from the device clock. */
     var isClockCorrected = false
@@ -76,29 +82,39 @@ object BuildNetwork {
 
     fun network(context: Context, client: Handle): Network? {
         imported(context)?.let { return parseNetwork(it, null) }
-        val manifest = File(context.filesDir, MANIFEST)
-        if (!manifest.exists()) return null
         // The TLS stack of the Rust side reads a file, and an asset is none.
         val authority = File(context.filesDir, AUTHORITY)
         context.assets.open(AUTHORITY).use { source ->
             authority.outputStream().use { source.copyTo(it) }
         }
         val keyset = context.assets.open(KEYSET).use { it.readBytes() }
-        val verified = try {
-            // The debug build ships no epoch, thus the store alone bounds the
-            // age of a manifest.
-            client.networkOfManifest(
-                manifest.readBytes(),
-                keyset,
-                0uL,
-                INVITATION_HOST,
-                authority.absolutePath,
-            )
-        } catch (refused: FfiException) {
-            return null
+        val kept = File(context.filesDir, MANIFEST)
+        val fresh = try {
+            fetchManifest(CARRIER_HOST, CARRIER_ADDRESS, CARRIER_PORT, authority.absolutePath)
+        } catch (offline: FfiException) {
+            null
         }
-        isClockCorrected = verified.isClockCorrected
-        return verified.network
+        // The fresh manifest first, and then the one of the last run. The
+        // file takes a manifest that verified alone (`NET-318`).
+        for (manifest in listOfNotNull(fresh, kept.takeIf { it.exists() }?.readBytes())) {
+            val verified = try {
+                // The debug build ships no epoch, thus the store alone bounds
+                // the age of a manifest.
+                client.networkOfManifest(
+                    manifest,
+                    keyset,
+                    0uL,
+                    INVITATION_HOST,
+                    authority.absolutePath,
+                )
+            } catch (refused: FfiException) {
+                continue
+            }
+            if (manifest === fresh) kept.writeBytes(manifest)
+            isClockCorrected = verified.isClockCorrected
+            return verified.network
+        }
+        return null
     }
 
     /** The panel of the unlock view that takes a descriptor. */
