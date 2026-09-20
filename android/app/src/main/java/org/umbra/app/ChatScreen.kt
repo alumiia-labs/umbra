@@ -40,6 +40,16 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.border
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.animateColorAsState
 
 @Composable
 fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
@@ -81,6 +91,21 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
     // The message under the finger, and the message that the composer answers.
     var chosen by remember(conversation) { mutableStateOf<Line?>(null) }
     var answered by remember(conversation) { mutableStateOf<Line?>(null) }
+    // The message that a jump from an answer shows for a moment.
+    var flashed by remember(conversation) { mutableStateOf<List<Byte>?>(null) }
+    val scope = rememberCoroutineScope()
+    val jumpTo = { target: List<Byte> ->
+        val at = lines.indexOfFirst { it.key == target }
+        if (at >= 0) {
+            scope.launch {
+                // The first item of the list is the chip of the view.
+                listState.animateScrollToItem(at + 1)
+                flashed = target
+                delay(900)
+                flashed = null
+            }
+        }
+    }
     chosen?.let { line ->
         ActionSheet(
             "Message",
@@ -127,14 +152,20 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                     DayLabel(line.info.storedAtMs.toLong())
                 }
                 if (!line.info.outgoing && line.info.storedAtMs == newFrom) NewLabel()
-                Bubble(line, chat) { chosen = line }
+                Bubble(
+                    line,
+                    chat,
+                    isFlashed = flashed == line.key,
+                    onQuote = line.quote?.let { quote -> { jumpTo(quote.key) } },
+                    onLongPress = { chosen = line },
+                )
                 // The contact saw each message up to this one. The mark
                 // sits under it and under no other, as a read marker does.
                 if (index == readUpTo) ReadMark(chat)
             }
         }
         answered?.let { line ->
-            ReplyStrip(if (line.info.outgoing) "yourself" else chat.title, line.text) { answered = null }
+            ReplyStrip(if (line.info.outgoing) "You" else chat.title, line.text) { answered = null }
         }
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
@@ -214,16 +245,36 @@ private fun NewLabel() {
 }
 
 @Composable
-private fun Bubble(line: Line, chat: Chat, onLongPress: () -> Unit) {
+private fun Bubble(
+    line: Line,
+    chat: Chat,
+    isFlashed: Boolean,
+    onQuote: (() -> Unit)?,
+    onLongPress: () -> Unit,
+) {
     val isOutgoing = line.info.outgoing
+    // A jump to a message shows it for a moment, and the mark fades.
+    val flash by animateColorAsState(
+        if (isFlashed) Palette.Action.copy(alpha = 0.22f) else Color.Transparent,
+        tween(durationMillis = if (isFlashed) 120 else 700),
+        label = "jump flash",
+    )
     Row(
         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
         horizontalArrangement = if (isOutgoing) Arrangement.End else Arrangement.Start,
     ) {
         // The text is a view of the platform, thus the press area lies above
-        // the content, as in a row of the chat list.
+        // the content, as in a row of the chat list. A press on an answer
+        // leads to the message that it answers.
         PressOver(
-            Modifier.widthIn(max = 300.dp).clip(RoundedCornerShape(16.dp)),
+            Modifier
+                .widthIn(max = 300.dp)
+                .clip(RoundedCornerShape(16.dp))
+                .drawWithContent {
+                    drawContent()
+                    drawRect(flash)
+                },
+            onClick = onQuote,
             longLabel = "Message actions",
             onLongClick = onLongPress,
         ) { BubbleContent(line, chat) }
@@ -236,81 +287,96 @@ private fun BubbleContent(line: Line, chat: Chat) {
     Column(
         modifier = Modifier
             .background(if (isOutgoing) Palette.Container else Palette.Incoming)
+            // The quote spans the bubble, thus the bubble is as wide as its
+            // widest part.
+            .width(IntrinsicSize.Max)
             .padding(horizontal = 14.dp, vertical = 10.dp),
         horizontalAlignment = Alignment.End,
     ) {
-            // The quote starts at the left edge of the bubble, as a line of text does.
-            if (line.isReply) Quote(line.quote, Modifier.align(Alignment.Start))
-            // The text starts at the left edge, and the time sits at the right.
-            PlatformText(line.text, Palette.Text, modifier = Modifier.align(Alignment.Start))
-            Spacer(Modifier.height(2.dp))
-            val clock = DateUtils.formatDateTime(
-                LocalContext.current,
-                line.info.storedAtMs.toLong(),
-                DateUtils.FORMAT_SHOW_TIME,
+        if (line.isReply) {
+            val quote = line.quote
+            QuoteBlock(
+                author = quote?.let { if (it.isOutgoing) "You" else chat.title },
+                text = quote?.text,
+                modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
             )
-            // A read message carries no word: the mark under the newest
-            // one says it for each of them.
-            val state = line.info.delivery.toInt()
-            Text(
-                if (isOutgoing && state != READ) "$clock · ${deliveryLabel(line.info.delivery)}" else clock,
-                style = MaterialTheme.typography.labelSmall,
-                color = if (line.info.delivery.toInt() == FAILED) Palette.Error else Palette.TextSecondary,
-                modifier = Modifier.subline(),
-            )
+        }
+        // The text starts at the left edge, and the time sits at the right.
+        PlatformText(line.text, Palette.Text, modifier = Modifier.align(Alignment.Start))
+        Spacer(Modifier.height(2.dp))
+        val clock = DateUtils.formatDateTime(
+            LocalContext.current,
+            line.info.storedAtMs.toLong(),
+            DateUtils.FORMAT_SHOW_TIME,
+        )
+        // A read message carries no word: the mark under the newest
+        // one says it for each of them.
+        val state = line.info.delivery.toInt()
+        Text(
+            if (isOutgoing && state != READ) "$clock · ${deliveryLabel(line.info.delivery)}" else clock,
+            style = MaterialTheme.typography.labelSmall,
+            color = if (state == FAILED) Palette.Error else Palette.TextSecondary,
+            modifier = Modifier.subline(),
+        )
     }
 }
 
-private const val FAILED = 4
-private const val READ = 3
-
-/** The message that a bubble answers, above its text. */
+/**
+ * The message that a message answers, as each messenger shows it: a bar in
+ * the accent colour, the name of the author, and the start of the text. An
+ * answer to a message that this device does not hold has no author
+ * (`WIR-173`).
+ */
 @Composable
-private fun Quote(quote: CharArray?, modifier: Modifier = Modifier) {
+private fun QuoteBlock(author: String?, text: CharArray?, modifier: Modifier = Modifier) {
     Row(
         modifier
-            .padding(bottom = 6.dp)
-            .background(Palette.Pressed, RoundedCornerShape(10.dp))
-            .padding(horizontal = 10.dp, vertical = 6.dp),
+            .height(IntrinsicSize.Min)
+            .clip(RoundedCornerShape(10.dp))
+            .background(Palette.Pressed),
     ) {
-        if (quote == null) {
-            // WIR-173: the answer stays, and its target is not here.
-            Text(
-                "A message that is not on this device",
-                style = MaterialTheme.typography.bodySmall,
-                color = Palette.TextSecondary,
-            )
-        } else {
-            PlatformText(quote, Palette.TextSecondary, sizeSp = 13f, maxLines = 2)
+        Box(Modifier.width(4.dp).fillMaxHeight().background(Palette.Action))
+        Column(Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
+            if (author != null) {
+                Text(
+                    author,
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Palette.Action,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (text == null) {
+                Text(
+                    "Message not on this device",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Palette.TextSecondary,
+                )
+            } else {
+                PlatformText(text, Palette.TextSecondary, sizeSp = 13f, maxLines = 2)
+            }
         }
     }
 }
 
 /** What the composer answers, above the field, with a way to take it back. */
 @Composable
-private fun ReplyStrip(to: String, text: CharArray, onCancel: () -> Unit) {
+private fun ReplyStrip(author: String, text: CharArray, onCancel: () -> Unit) {
     Row(
-        Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp)
-            .background(Color.White, RoundedCornerShape(20.dp))
-            .border(1.dp, Palette.Divider, RoundedCornerShape(20.dp))
-            .padding(start = 16.dp, top = 8.dp, bottom = 8.dp),
+        Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Column(Modifier.weight(1f)) {
-            Text("Replying to $to", style = MaterialTheme.typography.labelMedium)
-            PlatformText(
-                text,
-                Palette.TextSecondary,
-                modifier = Modifier.subline(),
-                sizeSp = 13f,
-                maxLines = 2,
-            )
-        }
+        // The arrow says what the block is, before a user reads the name.
+        FaIcon("reply", size = 18.dp, tint = Palette.Action)
+        Spacer(Modifier.width(12.dp))
+        QuoteBlock(author, text, Modifier.weight(1f))
         IconAction("xmark", "Cancel the reply", onCancel)
     }
 }
+
+private const val FAILED = 4
+private const val READ = 3
 
 /** The small picture of the contact under the newest message that it saw. */
 @Composable

@@ -375,6 +375,16 @@ pub enum FfiEvent {
 #[derive(uniffi::Object)]
 pub struct MsgHandle(MsgRef);
 
+#[uniffi::export]
+impl MsgHandle {
+    /// The identity of the message for the platform: two handles of one
+    /// message give one value. It is the surrogate of the row under the
+    /// store key, and it is no `msg_id` and no `msg_ref` (`IMP-150`).
+    pub fn key(&self) -> Vec<u8> {
+        self.0.to_bytes().to_vec()
+    }
+}
+
 /// A draft, as an opaque handle. The buffer behind it is zero bytes after
 /// the send and after the drop (`IMP-039`).
 #[derive(uniffi::Object)]

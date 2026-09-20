@@ -42,11 +42,20 @@ class Line(
     val handle: MsgHandle,
     val text: CharArray,
     val info: MsgInfo,
-    val quote: CharArray?,
+    val quote: Quoted?,
 ) {
+    /**
+     * The identity of the message: two loads of one message give one key. A
+     * byte array compares by identity, thus the key is a list.
+     */
+    val key: List<Byte> = handle.key().toList()
+
     val isReply: Boolean
         get() = info.isReply
 }
+
+/** The message that a line answers: its identity, its author, and its text. */
+class Quoted(val key: List<Byte>, val isOutgoing: Boolean, val text: CharArray)
 
 /**
  * One row of the chat list and of the contact list. The name is a label of
@@ -452,7 +461,7 @@ object Core {
                 } catch (noText: FfiException) {
                     quoted.chars = CharArray(0)
                 }
-                quoted.chars
+                Quoted(target.key().toList(), client.msgInfo(target).outgoing, quoted.chars)
             }
             Line(message, sink.chars, info, quote)
         }
