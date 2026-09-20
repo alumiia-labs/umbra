@@ -79,9 +79,9 @@ each column when a crate implements the requirement and a test covers it.
 | `COM` | 299 | 96 | 0 | 0 | 5 | **400** |
 | `ATT` | 134 | 46 | 1 | 0 | 2 | **183** |
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
-| `IMP` | 95 | 38 | 0 | 0 | 1 | **134** |
+| `IMP` | 96 | 39 | 0 | 0 | 1 | **136** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2151 | 699 | 7 | 0 | 51 | **2908** |
+| **All** | 2152 | 700 | 7 | 0 | 51 | **2910** |
 
 ## SCP — Scope and Conventions
 
@@ -3074,6 +3074,8 @@ Source: `spec/15-implementation.md`
 | `IMP-143` | §15.6.4 | MUST | (unstated) | A record that the client uses itself gives no message: a queue address, a record of a ceremony. |  |  |
 | `IMP-144` | §15.6.1 | MUST | A client | A client MUST ask for the camera of the platform at the moment the user opens a scanner, and at no other time. |  |  |
 | `IMP-145` | §15.6.4 | MUST | The surface | The surface MUST take the state of the app, on the screen or not, from the platform layer, and the runtime MUST select the cover tier of Part 3 §3.6.2 from that state alone. |  |  |
+| `IMP-146` | §15.6.1 | MUST | A client | A client MUST hold a receipt in table `0x0B` from the commit of the message that it reports, or from the move of the read marker of `IMP-139`, to the slot that carries it (`NET-053`). |  |  |
+| `IMP-147` | §15.6.1 | MUST NOT | A receipt is no message of a conversation, and a client | A receipt is no message of a conversation, and a client MUST NOT store it as one. |  |  |
 
 ## SEC — Security Considerations
 

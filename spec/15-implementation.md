@@ -496,6 +496,20 @@ that draft is dropped, and it MUST do that whether the send succeeded or failed.
   that marker when the user looks at the conversation and at no other time.
   The marker sends nothing: a read receipt is a record of Part 6 §6.6.9 with
   its own setting.
+- **[IMP-146]** A client MUST hold a receipt in table `0x0B` from the commit
+  of the message that it reports, or from the move of the read marker of
+  `IMP-139`, to the slot that carries it (`NET-053`). It MUST erase the rows
+  of a batch after the slot carried that batch, and not at the moment it
+  made the batch: a slot that an acknowledgment took leaves the batch in the
+  store. A kind that the user turns off MUST erase each held receipt of that
+  kind for that contact. The move of the read marker is the one source of a
+  read receipt, thus a notification gives none (`NET-043`).
+- **[IMP-147]** A receipt is no message of a conversation, and a client MUST
+  NOT store it as one. A receipt MUST change the delivery state of a message
+  only when this device sent that message in the conversation of the peer
+  that sent the receipt, and only upward in the order Accepted, Delivered,
+  Read. A receipt whose body does not parse MUST change nothing, and it MUST
+  NOT end the batch of the records that arrived with it.
 - **[IMP-142]** The short code and the safety number of Part 4 §4.5 are
   public values of the two devices, and they cross the surface as strings. The
   surface MUST give the safety number with no network, from the stored
@@ -764,7 +778,8 @@ flight 1, with its one-time prekey.
 | `0x07` | Send queue | One record that waits for the send path (`IMP-126`) |
 | `0x08` | Invitations | One invitation that waits: the `RecipientId` of its queue, the fragment of its link or its bundle, the queue end, and the prekey seed |
 | `0x09` | Conversations | What this device alone knows of one conversation: the time up to which the user saw its messages, and the name that the user gave the contact |
-| `0x0A` | Settings | One setting of this device under its name, such as the idle time of the auto-lock |
+| `0x0A` | Settings | One setting of this device under its name, such as the idle time of the auto-lock, or the receipts of one conversation |
+| `0x0B` | Held receipts | One receipt that waits for a slot: the conversation, the kind, the `msg_id` of its target, and the time that it reports (Part 3 §3.5.4) |
 
 The stored form of a row is local to one device, and no peer reads it. This
 part gives it no byte layout. **[IMP-130]** A stored object MUST start with a
