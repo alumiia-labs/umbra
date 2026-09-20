@@ -267,6 +267,11 @@ impl ChunkStore {
             .map(|h| seal::proof(nonce, &h.bytes))
     }
 
+    /// The bytes of a held chunk, for the copy that a `CREP` asks for.
+    pub fn bytes(&self, chunk_id: &[u8; 32]) -> Option<&[u8]> {
+        self.held.get(chunk_id).map(|h| h.bytes.as_slice())
+    }
+
     /// The erase time of a held chunk.
     pub fn erase_at(&self, chunk_id: &[u8; 32]) -> Option<u64> {
         self.held.get(chunk_id).map(|h| h.erase_at)

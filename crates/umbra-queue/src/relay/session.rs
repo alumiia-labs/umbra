@@ -84,12 +84,23 @@ impl Session {
     /// for its sender, and refuses a `corr_id` this session accepted before
     /// (`NET-121`, `NET-122`).
     pub fn accept(&mut self, command: &Command<'_>, auth_pk: &[u8; 32]) -> Result<(), Reject> {
+        self.accept_bound(command, auth_pk, b"")
+    }
+
+    /// As [`Session::accept`], for a command whose authorized bytes hold a
+    /// `bind` value (`NET-120`), as the `storage_token` of a `CPUT`.
+    pub fn accept_bound(
+        &mut self,
+        command: &Command<'_>,
+        auth_pk: &[u8; 32],
+        bind: &[u8],
+    ) -> Result<(), Reject> {
         if self.seen.contains(&command.corr_id) {
             return Err(Reject::Rejected);
         }
         let key = CommandAuthKey::derive(&self.relay_session_sk, auth_pk)
             .map_err(|_| Reject::Rejected)?;
-        command.verify(&key, b"").map_err(|_| Reject::Rejected)?;
+        command.verify(&key, bind).map_err(|_| Reject::Rejected)?;
         self.seen.push(command.corr_id);
         Ok(())
     }

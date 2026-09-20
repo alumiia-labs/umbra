@@ -360,7 +360,8 @@ community channel. `ATT-018` requires three references on those channels.
 ### 13.3.3 The chunk commands
 
 Part 6 §6.4 gives the command header. An attachment command uses that header,
-and it puts the `chunk_id` in the `queue_id` field. Four of the twelve commands
+and it puts the `chunk_id` in the `queue_id` field. A `CPRF` also answers each
+accepted write, and item 11 gives that answer. Four of the twelve commands
 belong to the replication of §13.4.1, and one registers a backup-class chunk.
 Part 3 §3.2.3 gives the deniable authenticator that the `auth` field carries.
 **[ATT-033]** An attachment command MUST NOT carry a signature.
@@ -494,6 +495,25 @@ read_sk    := HKDF-SHA3-256("umbra/v1/chunk-read", file_key, chunk_index_be32)
     > registration command carries it, and a relay that holds no `BNEW` for a
     > `chunk_id` applies `CHUNK_TTL`. No `BGET` exists, because a `CGET` against
     > `read_pk` reads a chunk of each class.
+
+11. **The answer to a write.** `ATT-099` sends a `CREP` after the `CPUT`
+    succeeds, and a client that erases a chunk must learn that the relay did
+    it. A `CPRF` carries each of the three answers, under the `corr_id` of
+    the command (Part 6 rule `WIR-494`), thus no new command exists.
+    **[ATT-186]** A relay MUST answer an accepted `CPUT` and an accepted
+    `CREP` with a `CPRF` whose `proof` is `SHA3-256(corr_id || chunk)`, where
+    `corr_id` is the 16 bytes of that command and `chunk` is what the relay
+    holds. **[ATT-187]** A relay MUST answer an accepted `CDEL` with a `CPRF`
+    of 32 zero bytes. **[ATT-188]** A client MUST compare the `proof` of
+    `ATT-186` against the value from its own copy, and it MUST take a
+    difference as a failed `CPUT` under `ATT-118`.
+
+    > *Cause.* An earlier draft gave a `CPUT`, a `CREP` and a `CDEL` no answer
+    > but a `NACK`. A client then read the absence of a `NACK` as success, and
+    > no time bounds an absence. The `corr_id` comes from the CSPRNG of the
+    > client for each command (`WIR-498`), thus it is a nonce of the form
+    > that `ATT-114` asks for. The answer to a `CPUT` is then a first proof
+    > of possession at no extra command.
 
 ### 13.3.4 The manifest level
 

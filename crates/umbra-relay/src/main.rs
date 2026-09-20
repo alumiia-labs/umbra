@@ -13,6 +13,7 @@
 //! key=/etc/umbra/key.pem
 //! issuer_modulus=<512 hex characters>
 //! community_capacity=1073741824
+//! chunk_capacity=107374182400
 //! next=<relay_id hex>,<host name>,<IPv4 address>,<port>
 //! trust=/etc/umbra/test-authority.pem
 //! store=/var/lib/umbra/relay.db
@@ -215,6 +216,11 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
             layer,
             issuer_key: PublicKey2048::from_modulus(&hex(values.get("issuer_modulus")?)?).ok()?,
             community_capacity: values.get("community_capacity")?.parse().ok()?,
+            // A relay with no such line has no attachment role.
+            chunk_capacity: match values.get("chunk_capacity") {
+                Some(bytes) => bytes.parse().ok()?,
+                None => 0,
+            },
         },
         next,
         identity,

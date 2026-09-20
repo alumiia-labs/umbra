@@ -1,0 +1,472 @@
+//! The chunk service of Part 13: the registration of a chunk, its bytes, a
+//! fetch, a proof of possession, and the erase. The store of
+//! `umbra_core::attach` holds the rules of the two classes, of the quota,
+//! and of the egress budget. This service authorizes each command and gives
+//! the answer.
+//!
+//! The chunks sit in RAM, thus a restart of the relay ends them. A client
+//! reads a lost chunk from another replica (§13.4).
+
+use umbra_core::{
+    abuse::admission::{Accepts, RelayGate},
+    attach::{
+        command::{
+            chunk_payload, fixed_payload, ChunkCmd, CrepPayload, CrputPayload, RegisterPayload,
+            ReplicaTarget, NONCE_LEN, PROOF_LEN,
+        },
+        store::{ChunkStore, Class, Credentials},
+    },
+};
+use umbra_crypto::rand_core::CryptoRng;
+use umbra_queue::{relay::session::Session, Reject};
+use umbra_wire::command::{Cmd, Command};
+
+use super::{answer, Reply};
+use crate::circuits::CircuitKey;
+
+/// One copy that this relay owes to a target of a `CREP` (`ATT-102`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Push {
+    /// The chunk.
+    pub chunk_id: [u8; 32],
+    /// The relay that takes the copy, and the token that it issued.
+    pub target: ReplicaTarget,
+    /// The bytes that the `CPUT` gave, without a change (`ATT-104`).
+    pub chunk: Vec<u8>,
+}
+
+/// The chunk service of one relay.
+pub struct ChunkService {
+    store: ChunkStore,
+    pushes: Vec<Push>,
+}
+
+impl ChunkService {
+    /// A service over a store of `capacity` bytes.
+    pub const fn new(capacity: u64) -> Self {
+        ChunkService {
+            store: ChunkStore::new(capacity),
+            pushes: Vec::new(),
+        }
+    }
+
+    /// The chunks held.
+    pub fn held_count(&self) -> usize {
+        self.store.held_count()
+    }
+
+    /// The copies that wait for a link to their target. The caller sends one
+    /// `CRPUT` for each, and it keeps no token after that (`ATT-106`).
+    pub fn take_pushes(&mut self) -> Vec<Push> {
+        core::mem::take(&mut self.pushes)
+    }
+
+    /// Erases what passed its time, and trims the store to its target.
+    pub fn sweep(&mut self, now: u64) {
+        self.store.sweep(now);
+        self.store.trim();
+    }
+
+    /// The proof that answers an accepted `CPUT` and an accepted `CREP`
+    /// (`ATT-186`): the `corr_id` of the command is the nonce, thus the
+    /// answer shows that the relay holds the bytes.
+    fn held_proof(&self, command: &Command<'_>) -> Result<[u8; PROOF_LEN], Reject> {
+        self.store
+            .prove(&command.queue_id, &command.corr_id)
+            .ok_or(Reject::Rejected)
+    }
+
+    /// Serves one command of a client at the end of a circuit.
+    #[allow(clippy::too_many_arguments)]
+    pub fn handle<R: CryptoRng + ?Sized>(
+        &mut self,
+        circuit: CircuitKey,
+        session: &mut Session,
+        gate: &mut RelayGate,
+        accepts: &Accepts<'_>,
+        command: &Command<'_>,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<Vec<Reply>, Reject> {
+        let Cmd::Attachment(byte) = command.cmd else {
+            return Err(Reject::Rejected);
+        };
+        let cmd = ChunkCmd::from_byte(byte).map_err(|_| Reject::Rejected)?;
+        let chunk_id = command.queue_id;
+        let reply = |cmd: ChunkCmd, payload: &[u8]| {
+            vec![answer(
+                circuit,
+                command,
+                Cmd::Attachment(cmd.to_byte()),
+                payload,
+            )]
+        };
+        match cmd {
+            ChunkCmd::Cnew | ChunkCmd::Bnew => {
+                let register =
+                    RegisterPayload::parse(command.payload).map_err(|_| Reject::Rejected)?;
+                // ATT-180: the key of the payload authorizes its own command.
+                session.accept(command, &register.cred_pk)?;
+                gate.admit(&register.admission, accepts, now)?;
+                let mut storage_token = [0u8; 32];
+                rng.fill_bytes(&mut storage_token);
+                let class = if cmd == ChunkCmd::Bnew {
+                    Class::Backup
+                } else {
+                    Class::Attachment
+                };
+                // An admission holds no credential that this relay can name,
+                // thus one counter holds the quota of each free upload.
+                self.store.register(
+                    chunk_id,
+                    class,
+                    Credentials {
+                        cred_pk: register.cred_pk,
+                        read_pk: register.read_pk,
+                    },
+                    [0; 32],
+                    storage_token,
+                    now,
+                )?;
+                Ok(reply(ChunkCmd::Cid, &storage_token))
+            }
+            ChunkCmd::Cput => {
+                // WIR-317: an unknown chunk and a failed auth give one reason.
+                let registration = self.store.registration(&chunk_id).ok_or(Reject::Rejected)?;
+                let (cred_pk, token) =
+                    (registration.credentials.cred_pk, registration.storage_token);
+                // ATT-042: the authorized bytes hold the token.
+                session.accept_bound(command, &cred_pk, &token)?;
+                let chunk = chunk_payload(command.payload).map_err(|_| Reject::Rejected)?;
+                self.store.put(chunk_id, chunk, now)?;
+                Ok(reply(ChunkCmd::Cprf, &self.held_proof(command)?))
+            }
+            ChunkCmd::Cget => {
+                let read_pk = self.credentials(&chunk_id)?.read_pk;
+                session.accept(command, &read_pk)?;
+                let chunk = self.store.get(&chunk_id, now)?.to_vec();
+                Ok(reply(ChunkCmd::Cdat, &chunk))
+            }
+            ChunkCmd::Crnw => {
+                let read_pk = self.credentials(&chunk_id)?.read_pk;
+                session.accept(command, &read_pk)?;
+                // ATT-126: a renewal has no answer, and a refused one has
+                // none too.
+                let _ = self.store.renew(&chunk_id, now);
+                Ok(Vec::new())
+            }
+            ChunkCmd::Cvfy => {
+                let cred_pk = self.credentials(&chunk_id)?.cred_pk;
+                session.accept(command, &cred_pk)?;
+                let nonce: [u8; NONCE_LEN] =
+                    fixed_payload(command.payload).map_err(|_| Reject::Rejected)?;
+                let proof = self
+                    .store
+                    .prove(&chunk_id, &nonce)
+                    .ok_or(Reject::Rejected)?;
+                Ok(reply(ChunkCmd::Cprf, &proof))
+            }
+            ChunkCmd::Crep => {
+                let cred_pk = self.credentials(&chunk_id)?.cred_pk;
+                session.accept(command, &cred_pk)?;
+                let targets = CrepPayload::parse(command.payload).map_err(|_| Reject::Rejected)?;
+                let proof = self.held_proof(command)?;
+                // A copy for a replica is no fetch, thus it takes nothing from
+                // the egress budget of §13.11.
+                let chunk = self
+                    .store
+                    .bytes(&chunk_id)
+                    .ok_or(Reject::Rejected)?
+                    .to_vec();
+                for target in targets.targets {
+                    self.pushes.push(Push {
+                        chunk_id,
+                        target,
+                        chunk: chunk.clone(),
+                    });
+                }
+                Ok(reply(ChunkCmd::Cprf, &proof))
+            }
+            ChunkCmd::Cdel => {
+                // A registration with no bytes has its credential too.
+                let cred_pk = match self.store.registration(&chunk_id) {
+                    Some(registration) => registration.credentials.cred_pk,
+                    None => self.credentials(&chunk_id)?.cred_pk,
+                };
+                session.accept(command, &cred_pk)?;
+                self.store.delete(&chunk_id)?;
+                // ATT-187: the relay holds no byte of the chunk.
+                Ok(reply(ChunkCmd::Cprf, &[0; PROOF_LEN]))
+            }
+            // A relay sends these, and a client sends none of them.
+            ChunkCmd::Cid | ChunkCmd::Cdat | ChunkCmd::Cprf | ChunkCmd::Crput => {
+                Err(Reject::Rejected)
+            }
+        }
+    }
+
+    /// Takes the copy of another relay, on the token that the `CID` of this
+    /// relay gave (`ATT-107` to `ATT-112`).
+    pub fn replica_put(
+        &mut self,
+        chunk_id: [u8; 32],
+        payload: &[u8],
+        now: u64,
+    ) -> Result<(), Reject> {
+        let copy = CrputPayload::parse(payload).map_err(|_| Reject::Rejected)?;
+        self.store
+            .replica_put(chunk_id, &copy.storage_token, copy.chunk, now)
+    }
+
+    fn credentials(&self, chunk_id: &[u8; 32]) -> Result<Credentials, Reject> {
+        self.store.credentials(chunk_id).ok_or(Reject::Rejected)
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::panic
+)]
+mod tests {
+    use super::*;
+    use umbra_core::attach::{seal, CHUNK_SIZE};
+    use umbra_crypto::{
+        auth::CommandAuthKey,
+        rand_core::{TryCryptoRng, TryRng},
+        rsabssa::PublicKey2048,
+        x25519::{PublicKey as XPublic, StaticSecret},
+    };
+    use umbra_wire::admission::Admission;
+
+    struct Rng(u8);
+    impl TryRng for Rng {
+        type Error = core::convert::Infallible;
+        fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+            Ok(0)
+        }
+        fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+            Ok(0)
+        }
+        fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+            self.0 = self.0.wrapping_add(1);
+            dst.fill(self.0);
+            Ok(())
+        }
+    }
+    impl TryCryptoRng for Rng {}
+
+    /// A relay with one circuit, and a client that signs for it.
+    struct Bench {
+        service: ChunkService,
+        session: Session,
+        gate: RelayGate,
+        issuer: PublicKey2048,
+        rng: Rng,
+        corr: u8,
+    }
+
+    const CIRCUIT: CircuitKey = CircuitKey {
+        link: 2,
+        circ_id: [7; 16],
+    };
+
+    impl Bench {
+        fn new() -> Self {
+            Bench {
+                service: ChunkService::new(1 << 24),
+                session: Session::for_circuit(&[7; 16], StaticSecret::from([9; 32])),
+                gate: RelayGate::new([1; 32]),
+                issuer: PublicKey2048::from_modulus(&[0xFF; 256]).unwrap(),
+                rng: Rng(0),
+                corr: 0,
+            }
+        }
+
+        /// Sends one command under the secret `signer`, with `bind` in the
+        /// authorized bytes. Gives the answers and the `corr_id`.
+        fn send(
+            &mut self,
+            cmd: ChunkCmd,
+            chunk_id: [u8; 32],
+            payload: &[u8],
+            signer: &StaticSecret,
+            bind: &[u8],
+        ) -> (Result<Vec<Reply>, Reject>, [u8; 16]) {
+            self.corr += 1;
+            let corr_id = [self.corr; 16];
+            let mut command = Command {
+                cmd: Cmd::Attachment(cmd.to_byte()),
+                corr_id,
+                queue_id: chunk_id,
+                auth: [0; 32],
+                payload,
+            };
+            let key = CommandAuthKey::derive(signer, &self.session.relay_session_pk()).unwrap();
+            command.sign(&key, bind).unwrap();
+            let accepts = Accepts::CrossRelay(&self.issuer);
+            let result = self.service.handle(
+                CIRCUIT,
+                &mut self.session,
+                &mut self.gate,
+                &accepts,
+                &command,
+                1_000,
+                &mut self.rng,
+            );
+            (result, corr_id)
+        }
+    }
+
+    /// The payload of the one answer of a command.
+    fn payload_of(result: Result<Vec<Reply>, Reject>, cmd: ChunkCmd) -> Vec<u8> {
+        let replies = result.unwrap();
+        assert_eq!(replies.len(), 1);
+        let (command, _) =
+            Command::parse(&replies[0].outbound.encoded, replies[0].outbound.bucket).unwrap();
+        assert_eq!(command.cmd, Cmd::Attachment(cmd.to_byte()));
+        command.payload.to_vec()
+    }
+
+    fn register_payload(cred: &StaticSecret, read: &StaticSecret) -> Vec<u8> {
+        let payload = RegisterPayload {
+            cred_pk: *XPublic::from(cred).as_bytes(),
+            read_pk: *XPublic::from(read).as_bytes(),
+            admission: Admission::NONE,
+        };
+        let mut out = vec![0u8; 64 + Admission::NONE.len()];
+        let used = payload.encode(&mut out).unwrap();
+        out.truncate(used);
+        out
+    }
+
+    #[test]
+    fn a_chunk_goes_in_with_its_credential_and_out_with_the_other_one() {
+        let mut bench = Bench::new();
+        let cred = StaticSecret::from([3; 32]);
+        let read = StaticSecret::from([4; 32]);
+        let chunk_id = [0xC1; 32];
+        let chunk = vec![0x5A; CHUNK_SIZE];
+        let register = register_payload(&cred, &read);
+
+        let (cid, _) = bench.send(ChunkCmd::Cnew, chunk_id, &register, &cred, b"");
+        let token = payload_of(cid, ChunkCmd::Cid);
+        assert_eq!(token.len(), 32);
+        // ATT-058: a second registration of the identifier.
+        let (again, _) = bench.send(ChunkCmd::Cnew, chunk_id, &register, &cred, b"");
+        assert_eq!(again, Err(Reject::Rejected));
+
+        // ATT-042: a `CPUT` with no token in its authorized bytes, one under
+        // the read credential, and one of a wrong length.
+        let (no_bind, _) = bench.send(ChunkCmd::Cput, chunk_id, &chunk, &cred, b"");
+        assert_eq!(no_bind, Err(Reject::Rejected));
+        let (wrong_key, _) = bench.send(ChunkCmd::Cput, chunk_id, &chunk, &read, &token);
+        assert_eq!(wrong_key, Err(Reject::Rejected));
+        let (short, _) = bench.send(ChunkCmd::Cput, chunk_id, &chunk[1..], &cred, &token);
+        assert_eq!(short, Err(Reject::Rejected));
+        assert_eq!(bench.service.held_count(), 0);
+
+        // ATT-186: the answer of the `CPUT` proves the bytes under its
+        // `corr_id`.
+        let (put, corr_id) = bench.send(ChunkCmd::Cput, chunk_id, &chunk, &cred, &token);
+        assert_eq!(
+            payload_of(put, ChunkCmd::Cprf),
+            seal::proof(&corr_id, &chunk)
+        );
+        assert_eq!(bench.service.held_count(), 1);
+
+        // ATT-040, ATT-041: each credential opens its own commands alone.
+        let (by_cred, _) = bench.send(ChunkCmd::Cget, chunk_id, &[], &cred, b"");
+        assert_eq!(by_cred, Err(Reject::Rejected));
+        let (got, _) = bench.send(ChunkCmd::Cget, chunk_id, &[], &read, b"");
+        assert_eq!(payload_of(got, ChunkCmd::Cdat), chunk);
+        let (by_read, _) = bench.send(ChunkCmd::Cvfy, chunk_id, &[8; 16], &read, b"");
+        assert_eq!(by_read, Err(Reject::Rejected));
+        let (proof, _) = bench.send(ChunkCmd::Cvfy, chunk_id, &[8; 16], &cred, b"");
+        assert_eq!(
+            payload_of(proof, ChunkCmd::Cprf),
+            seal::proof(&[8; 16], &chunk)
+        );
+        // ATT-126: a renewal has no answer.
+        let (renewed, _) = bench.send(ChunkCmd::Crnw, chunk_id, &[], &read, b"");
+        assert_eq!(renewed, Ok(Vec::new()));
+
+        // A `CREP` gives one copy for each target, and a proof as its answer.
+        let targets = CrepPayload {
+            targets: vec![
+                ReplicaTarget {
+                    relay_id: [0xB1; 32],
+                    storage_token: [0xB2; 32],
+                },
+                ReplicaTarget {
+                    relay_id: [0xC1; 32],
+                    storage_token: [0xC2; 32],
+                },
+            ],
+        };
+        let mut crep = vec![0u8; targets.len()];
+        targets.encode(&mut crep).unwrap();
+        let (replicated, corr_id) = bench.send(ChunkCmd::Crep, chunk_id, &crep, &cred, b"");
+        assert_eq!(
+            payload_of(replicated, ChunkCmd::Cprf),
+            seal::proof(&corr_id, &chunk)
+        );
+        let pushes = bench.service.take_pushes();
+        assert_eq!(pushes.len(), 2);
+        assert!(pushes
+            .iter()
+            .all(|push| push.chunk == chunk && push.chunk_id == chunk_id));
+        assert_eq!(pushes[1].target.storage_token, [0xC2; 32]);
+        assert!(bench.service.take_pushes().is_empty());
+
+        // ATT-187: the erase, and then the chunk is unknown.
+        let (erased, _) = bench.send(ChunkCmd::Cdel, chunk_id, &[], &cred, b"");
+        assert_eq!(payload_of(erased, ChunkCmd::Cprf), [0; PROOF_LEN]);
+        let (gone, _) = bench.send(ChunkCmd::Cget, chunk_id, &[], &read, b"");
+        assert_eq!(gone, Err(Reject::Rejected));
+    }
+
+    #[test]
+    fn a_copy_of_another_relay_goes_in_on_the_token_alone() {
+        let mut bench = Bench::new();
+        let cred = StaticSecret::from([3; 32]);
+        let read = StaticSecret::from([4; 32]);
+        let chunk_id = [0xD1; 32];
+        let chunk = vec![0x77; CHUNK_SIZE];
+        let register = register_payload(&cred, &read);
+        let (cid, _) = bench.send(ChunkCmd::Cnew, chunk_id, &register, &cred, b"");
+        let token: [u8; 32] = payload_of(cid, ChunkCmd::Cid).try_into().unwrap();
+
+        let copy = |token: [u8; 32], chunk: &[u8]| {
+            let mut out = vec![0u8; 32 + CHUNK_SIZE];
+            CrputPayload {
+                storage_token: token,
+                chunk,
+            }
+            .encode(&mut out)
+            .unwrap();
+            out
+        };
+        // ATT-107: another token opens nothing. ATT-111: the length is fixed.
+        let wrong_token = copy([0; 32], &chunk);
+        assert_eq!(
+            bench.service.replica_put(chunk_id, &wrong_token, 1_000),
+            Err(Reject::Rejected)
+        );
+        let good = copy(token, &chunk);
+        assert_eq!(
+            bench.service.replica_put(chunk_id, &good[1..], 1_000),
+            Err(Reject::Rejected)
+        );
+        bench.service.replica_put(chunk_id, &good, 1_000).unwrap();
+        // ATT-110: one copy for each registration.
+        assert_eq!(
+            bench.service.replica_put(chunk_id, &good, 1_000),
+            Err(Reject::Rejected)
+        );
+        let (got, _) = bench.send(ChunkCmd::Cget, chunk_id, &[], &read, b"");
+        assert_eq!(payload_of(got, ChunkCmd::Cdat), chunk);
+    }
+}

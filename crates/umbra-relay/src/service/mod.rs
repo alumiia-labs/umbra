@@ -1,5 +1,5 @@
-//! The services of a relay at the end of a circuit: the pairwise queues
-//! and the community caches. Each service takes one command and gives the
+//! The services of a relay at the end of a circuit: the pairwise queues,
+//! the community caches, and the chunk store. Each service takes one command and gives the
 //! commands that go back, to the circuit of the command or to the circuit
 //! of a subscriber.
 
@@ -12,6 +12,7 @@ use umbra_wire::{
 
 use crate::circuits::CircuitKey;
 
+pub mod chunk;
 pub mod community;
 pub mod queue;
 

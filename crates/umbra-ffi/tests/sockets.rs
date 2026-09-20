@@ -143,6 +143,7 @@ async fn two_clients_meet_and_talk_over_real_sockets() {
             layer,
             issuer_key: PublicKey2048::from_modulus(&[0xFF; 256]).unwrap(),
             community_capacity: 1 << 20,
+            chunk_capacity: 1 << 26,
         });
         let mut next_hops = BTreeMap::new();
         if layer < 3 {

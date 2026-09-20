@@ -100,6 +100,7 @@ impl Network {
             layer,
             issuer_key: PublicKey2048::from_modulus(&[0xFF; 256]).unwrap(),
             community_capacity: 1 << 20,
+            chunk_capacity: 1 << 26,
         }
     }
 

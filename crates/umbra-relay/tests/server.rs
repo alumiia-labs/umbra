@@ -73,6 +73,7 @@ async fn a_client_upgrades_opens_a_session_and_builds_one_hop() {
         layer: 1,
         issuer_key: PublicKey2048::from_modulus(&[0xFF; 256]).unwrap(),
         community_capacity: 1 << 20,
+        chunk_capacity: 1 << 26,
     });
     let (inputs, node_inputs) = mpsc::channel(64);
     let (requests, _node_requests) = mpsc::unbounded_channel();

@@ -184,6 +184,7 @@ fn start_relays(
             layer,
             issuer_key: PublicKey2048::from_modulus(&[0xFF; 256]).unwrap(),
             community_capacity: 1 << 20,
+            chunk_capacity: 1 << 26,
         };
         let mut store: Box<dyn RelayStore> = match directory {
             Some(directory) => {
@@ -710,6 +711,7 @@ fn two_apps_take_their_network_from_a_signed_manifest() {
             layer: placed.layer,
             issuer_key: PublicKey2048::from_modulus(&[0xFF; 256]).unwrap(),
             community_capacity: 1 << 20,
+            chunk_capacity: 1 << 26,
         };
         let mut store: Box<dyn RelayStore> = Box::new(MemoryStore::default());
         relays.spawn(run_relay(

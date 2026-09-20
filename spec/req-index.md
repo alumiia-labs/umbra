@@ -77,11 +77,11 @@ each column when a crate implements the requirement and a test covers it.
 | `REL` | 122 | 30 | 1 | 0 | 2 | **155** |
 | `GRP` | 204 | 56 | 0 | 0 | 5 | **265** |
 | `COM` | 299 | 96 | 0 | 0 | 5 | **400** |
-| `ATT` | 134 | 46 | 1 | 0 | 2 | **183** |
+| `ATT` | 137 | 46 | 1 | 0 | 2 | **186** |
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
 | `IMP` | 106 | 41 | 0 | 0 | 1 | **148** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2182 | 706 | 7 | 0 | 51 | **2946** |
+| **All** | 2185 | 706 | 7 | 0 | 51 | **2949** |
 
 ## SCP — Scope and Conventions
 
@@ -2855,6 +2855,9 @@ Source: `spec/13-attachments.md`
 | `ATT-183` | §13.3.4 | MUST | A client | A client MUST derive `K_manifest` as `HKDF-SHA3-256(salt = "", ikm = file_key, info = "umbra/v1/file-manifest" || file_nonce, L = 32)`. |  |  |
 | `ATT-184` | §13.3.4 | MUST | (unstated) | A manifest carries no digest of its own: the tag of each manifest chunk under `K_manifest` authenticates it, and a receiver MUST accept a manifest whose chunks each verify under §13.3.1 and whose ref count equals the data chunk count of `padded_size`. |  |  |
 | `ATT-185` | §13.4.1 | MUST | A relay | A relay MUST reject a `CREP` whose `target_count` is 0 or above `HOT_REPLICAS` − 1. |  |  |
+| `ATT-186` | §13.3.3 | MUST | A relay | A relay MUST answer an accepted `CPUT` and an accepted `CREP` with a `CPRF` whose `proof` is `SHA3-256(corr_id || chunk)`, where `corr_id` is the 16 bytes of that command and `chunk` is what the relay holds. |  |  |
+| `ATT-187` | §13.3.3 | MUST | A relay | A relay MUST answer an accepted `CDEL` with a `CPRF` of 32 zero bytes. |  |  |
+| `ATT-188` | §13.3.3 | MUST | A client | A client MUST compare the `proof` of `ATT-186` against the value from its own copy, and it MUST take a difference as a failed `CPUT` under `ATT-118`. |  |  |
 
 ## ABU — Anti-Abuse Without Identifiers
 

@@ -29,6 +29,7 @@ use umbra_wire::{
 use crate::{
     circuits::{Action, CircuitKey, CircuitTable, LinkId},
     service::{
+        chunk::ChunkService,
         community::{CommunityService, DigestDue},
         nack,
         queue::QueueService,
@@ -78,6 +79,9 @@ pub struct Config {
     pub issuer_key: PublicKey2048,
     /// The bytes of post records that each community cache holds.
     pub community_capacity: usize,
+    /// The bytes of the chunk store of Part 13, or zero for a relay with no
+    /// attachment role.
+    pub chunk_capacity: u64,
 }
 
 enum Framing {
@@ -104,6 +108,7 @@ pub struct RelayNode {
     gate: RelayGate,
     queues: QueueService,
     communities: CommunityService,
+    chunks: ChunkService,
 }
 
 impl RelayNode {
@@ -119,6 +124,7 @@ impl RelayNode {
             gate: RelayGate::new(relay_id),
             queues: QueueService::default(),
             communities: CommunityService::new(config.community_capacity),
+            chunks: ChunkService::new(config.chunk_capacity),
         }
     }
 
@@ -412,9 +418,21 @@ impl RelayNode {
                 command,
                 now,
             ),
-            // The chunk store and the group queues attach here in the same
-            // manner. Until they do, the relay serves neither range.
-            Range::Attachment | Range::Group => Err(Reject::Rejected),
+            Range::Attachment => self
+                .chunks
+                .handle(
+                    circuit,
+                    &mut endpoint.session,
+                    &mut self.gate,
+                    &accepts,
+                    command,
+                    now,
+                    rng,
+                )
+                .map(|replies| (replies, Vec::new())),
+            // The group queues attach here in the same manner. Until they
+            // do, the relay serves no command of that range.
+            Range::Group => Err(Reject::Rejected),
         }
     }
 
