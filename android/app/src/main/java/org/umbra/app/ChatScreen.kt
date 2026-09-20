@@ -63,6 +63,11 @@ import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.AnimatedVisibility
 
 @Composable
 fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
@@ -178,29 +183,42 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                 if (index == readUpTo) ReadMark(chat)
             }
         }
-        answered?.let { line ->
-            ReplyStrip(if (line.info.outgoing) "You" else chat.title) { answered = null }
-        }
+        // An answer starts with the keyboard open, as a user expects it.
+        LaunchedEffect(answered) { if (answered != null) composer.focus() }
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
+            // The send button stays beside the line of the text.
+            verticalAlignment = Alignment.Bottom,
         ) {
-            Box(
-                Modifier
-                    .weight(1f)
-                    .heightIn(min = 48.dp)
-                    .background(Palette.Incoming, RoundedCornerShape(24.dp))
-                    .padding(horizontal = 18.dp, vertical = 12.dp),
-                contentAlignment = Alignment.CenterStart,
-            ) {
-                // With no network the record waits in the store.
-                PlatformInput(
-                    composer,
-                    hint = "Message",
-                    isPassphrase = false,
-                    modifier = Modifier.fillMaxWidth(),
-                    maxLines = 5,
-                )
+            // The answer is a part of the composer: the box of the field
+            // grows upward and holds the name at its top.
+            Column(Modifier.weight(1f).background(Palette.Incoming, RoundedCornerShape(24.dp))) {
+                AnimatedVisibility(
+                    visible = answered != null,
+                    enter = expandVertically() + fadeIn(),
+                    exit = shrinkVertically() + fadeOut(),
+                ) {
+                    // The name stays for the time of the exit.
+                    val author = remember { mutableStateOf("") }
+                    answered?.let { author.value = if (it.info.outgoing) "You" else chat.title }
+                    ReplyHeader(author.value) { answered = null }
+                }
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp)
+                        .padding(horizontal = 18.dp, vertical = 12.dp),
+                    contentAlignment = Alignment.CenterStart,
+                ) {
+                    // With no network the record waits in the store.
+                    PlatformInput(
+                        composer,
+                        hint = "Message",
+                        isPassphrase = false,
+                        modifier = Modifier.fillMaxWidth(),
+                        maxLines = 5,
+                    )
+                }
             }
             Spacer(Modifier.width(8.dp))
             Box(
@@ -423,26 +441,19 @@ private fun QuoteBlock(author: String?, text: CharArray?, modifier: Modifier = M
 }
 
 /**
- * Whom the composer answers, above the field, with a way to take it back.
- * The name alone: the message is a few lines above, and the user chose it.
+ * Whom the composer answers, at the top of the box of the field: the reply
+ * arrow, the name, and a small way to take it back. A line divides it from
+ * the text.
  */
 @Composable
-private fun ReplyStrip(author: String, onCancel: () -> Unit) {
-    Row(
-        Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        // The arrow says what the block is, before a user reads the name.
-        FaIcon("reply", size = 18.dp, tint = Palette.Action)
-        Spacer(Modifier.width(12.dp))
+private fun ReplyHeader(author: String, onCancel: () -> Unit) {
+    Column {
         Row(
-            Modifier
-                .weight(1f)
-                .height(IntrinsicSize.Min)
-                .clip(RoundedCornerShape(10.dp))
-                .background(Palette.Pressed),
+            Modifier.fillMaxWidth().padding(start = 18.dp, end = 6.dp, top = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Box(Modifier.width(4.dp).fillMaxHeight().background(Palette.Action))
+            FaIcon("reply", size = 14.dp, tint = Palette.Action)
+            Spacer(Modifier.width(8.dp))
             Text(
                 author,
                 style = MaterialTheme.typography.labelLarge,
@@ -450,10 +461,14 @@ private fun ReplyStrip(author: String, onCancel: () -> Unit) {
                 color = Palette.Action,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(horizontal = 10.dp, vertical = 9.dp),
+                modifier = Modifier.weight(1f),
             )
+            Box(
+                Modifier.size(36.dp).clip(CircleShape).press(role = Role.Button, label = "Cancel the reply", onClick = onCancel),
+                contentAlignment = Alignment.Center,
+            ) { FaIcon("xmark", label = "Cancel the reply", size = 14.dp, tint = Palette.TextSecondary) }
         }
-        IconAction("xmark", "Cancel the reply", onCancel)
+        HorizontalDivider(Modifier.padding(horizontal = 18.dp), color = Palette.Outline.copy(alpha = 0.5f))
     }
 }
 

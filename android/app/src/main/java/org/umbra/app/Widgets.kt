@@ -68,6 +68,7 @@ import androidx.compose.ui.semantics.onLongClick
 import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.semantics
+import android.view.inputmethod.InputMethodManager
 
 /**
  * The holder of a text field of the platform. A composable field holds its
@@ -77,6 +78,14 @@ import androidx.compose.ui.semantics.semantics
  */
 class PlatformFieldState {
     internal var view: EditText? = null
+
+    /** Puts the cursor into the field and opens the keyboard. */
+    fun focus() {
+        val field = view ?: return
+        field.requestFocus()
+        field.context.getSystemService(InputMethodManager::class.java)
+            .showSoftInput(field, InputMethodManager.SHOW_IMPLICIT)
+    }
 
     /** The text, or null for an empty field. The field is empty after the call. */
     fun take(): CharArray? {
