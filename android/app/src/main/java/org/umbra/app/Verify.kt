@@ -39,6 +39,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import uniffi.umbra_ffi.Receipts
 
 /** The details of one contact: who it is, and what the user can do with it. */
 @Composable
@@ -67,6 +68,36 @@ fun ContactDetailsScreen(chat: Chat, onBack: () -> Unit, onMessage: () -> Unit, 
                     push(Screen.Verify(chat.conversation))
                 },
             )
+            HorizontalDivider(color = Palette.Divider)
+            EntryRow(
+                RowEntry("gear", "Conversation settings") {
+                    push(Screen.ConversationSettings(chat.conversation))
+                },
+            )
+        }
+    }
+}
+
+/** The settings of one conversation: the receipts that this device sends. */
+@Composable
+fun ConversationSettingsScreen(chat: Chat, onBack: () -> Unit) {
+    var receipts by remember { mutableStateOf<Receipts?>(null) }
+    LaunchedEffect(chat.conversation) { Core.receipts(chat.conversation) { receipts = it } }
+    val change = { next: Receipts ->
+        receipts = next
+        Core.setReceipts(chat.conversation, next)
+    }
+    Column(Modifier.fillMaxSize()) {
+        BackBar("Conversation settings", onBack = onBack)
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
+            receipts?.let { now ->
+                ToggleRow("Send delivery receipts", now.delivery) { change(Receipts(it, now.read)) }
+                HorizontalDivider(color = Palette.Divider)
+                ToggleRow("Send read receipts", now.read) { change(Receipts(now.delivery, it)) }
+                Spacer(Modifier.height(12.dp))
+                // A fact that a user cannot know, and that explains a wait.
+                Note("A receipt leaves 30 seconds or more after the message, so its time tells a relay less.")
+            }
         }
     }
 }

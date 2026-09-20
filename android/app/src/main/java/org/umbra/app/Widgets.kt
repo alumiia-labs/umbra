@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
@@ -361,6 +362,34 @@ fun EntryRow(entry: RowEntry, afterClick: () -> Unit = {}) {
             }
         }
         FaIcon("chevron-right", size = 14.dp, tint = Palette.TextSecondary)
+    }
+}
+
+/**
+ * A row with a title and a switch, in the look of the mockups: an outlined
+ * track, and a knob that moves to the right on a green track.
+ */
+@Composable
+fun ToggleRow(title: String, isOn: Boolean, onChange: (Boolean) -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .toggleable(value = isOn, role = Role.Switch, onValueChange = onChange)
+            .padding(vertical = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(title, Modifier.weight(1f))
+        val track = if (isOn) Palette.Action else Palette.Incoming
+        Box(
+            Modifier
+                .size(width = 44.dp, height = 26.dp)
+                .background(track, CircleShape)
+                .border(1.dp, if (isOn) Palette.Action else Palette.Outline, CircleShape)
+                .padding(horizontal = 4.dp),
+            contentAlignment = if (isOn) Alignment.CenterEnd else Alignment.CenterStart,
+        ) {
+            Box(Modifier.size(17.dp).background(if (isOn) Color.White else Palette.TextSecondary, CircleShape))
+        }
     }
 }
 

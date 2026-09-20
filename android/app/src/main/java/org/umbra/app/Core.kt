@@ -17,6 +17,7 @@ import uniffi.umbra_ffi.FfiEvent
 import uniffi.umbra_ffi.FfiException
 import uniffi.umbra_ffi.Handle
 import uniffi.umbra_ffi.MsgInfo
+import uniffi.umbra_ffi.Receipts
 import uniffi.umbra_ffi.TextSink
 import uniffi.umbra_ffi.init
 import uniffi.umbra_ffi.measureArgon2FloorMs
@@ -350,6 +351,15 @@ object Core {
         client.setContactName(conversation.id, name)
         refreshChats()
     }
+
+    /** Which receipts this device sends to the contact of a conversation. */
+    fun receipts(conversation: Conversation, onLoaded: (Receipts) -> Unit) = call { client ->
+        val settings = client.receiptSettings(conversation.id)
+        main.post { onLoaded(settings) }
+    }
+
+    fun setReceipts(conversation: Conversation, settings: Receipts) =
+        call { it.setReceiptSettings(conversation.id, settings) }
 
     /** The 60 digits of the two keys of a conversation. It needs no network. */
     fun safetyNumber(conversation: Conversation, onLoaded: (String) -> Unit) = call { client ->
