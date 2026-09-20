@@ -1,3 +1,7 @@
 __pycache__/
 .claude/
 target/
+
+# The Font Awesome Pro download of the owner. A Pro file must not sit in a
+# public repository.
+/fontawesome-pro-*/
