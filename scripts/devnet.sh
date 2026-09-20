@@ -3,8 +3,11 @@
 # 7445, under the test authority of tests/fixtures/tls: one ingress relay,
 # two relays of layer 2, and two queue relays. Thus the circuits of a client
 # take chains that differ, and two clients can hold their queues at two
-# relays. An Android
-# emulator reaches them at 10.0.2.2. The secrets of these relays are in the
+# relays. An Android emulator reaches the ingress at 10.0.2.2.
+#
+# Each relay signs its descriptor, and the seven test authorities sign a
+# manifest of the five (Part 10 §10.5.5). A relay reads its layer from that
+# manifest. The seeds of the relays and of the authorities are in the
 # repository, thus this network protects nothing.
 set -euo pipefail
 
@@ -14,10 +17,17 @@ cargo build -p umbra-relay --features native
 # ends no contact. Delete the directory for an empty network.
 mkdir -p target/devnet
 
+for relay in 1 2 3 4 5; do
+    target/debug/umbra-relay sign-descriptor \
+        "tests/fixtures/devnet/relay$relay.conf" "target/devnet/relay$relay.desc"
+done
+# The manifest holds the present epoch, thus each start signs a new one.
+target/debug/umbra-test-authority tests/fixtures/devnet/authority.conf target/devnet
+
 pids=()
 trap 'kill "${pids[@]}" 2>/dev/null || true' EXIT INT TERM
 # The queue relays start first, thus each dial of a lower layer finds a port
-# that accepts. Relays 3 and 5 are of layer 3, and relays 2 and 4 of layer 2.
+# that accepts.
 for relay in 3 5 2 4 1; do
     target/debug/umbra-relay "tests/fixtures/devnet/relay$relay.conf" &
     pids+=($!)

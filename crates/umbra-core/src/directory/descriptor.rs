@@ -162,6 +162,33 @@ impl<'a> RelayDescriptor<'a> {
         Ok(out)
     }
 
+    /// Signs the descriptor under the identity key of the relay, and gives
+    /// its bytes. It sets `identity_pk` and `relay_id` from `key`, and it
+    /// reads neither those two fields nor `sig` of `self`.
+    pub fn sign<R: umbra_crypto::rand_core::TryCryptoRng + ?Sized>(
+        &self,
+        key: &umbra_crypto::sign::SigningKey,
+        rng: &mut R,
+    ) -> Result<alloc::vec::Vec<u8>, Error> {
+        let identity_pk = key.verifying_key().to_bytes();
+        let unsigned = RelayDescriptor {
+            relay_id: sha3_256(&[&identity_pk]),
+            identity_pk: &identity_pk,
+            sig: &[0; SIGNATURE_LEN],
+            ..self.clone()
+        };
+        let sig = key.sign(&unsigned.preimage()?, rng)?.to_bytes();
+        let signed = RelayDescriptor {
+            sig: &sig,
+            ..unsigned
+        };
+        let mut out = alloc::vec![0u8; DESCRIPTOR_LEN];
+        signed.encode(&mut out)?;
+        // A descriptor that this relay could not read back helps no party.
+        RelayDescriptor::parse(&out)?;
+        Ok(out)
+    }
+
     /// The preimage a relay signs (`REL-048`).
     pub fn preimage(&self) -> Result<alloc::vec::Vec<u8>, Error> {
         let mut body = [0u8; SIGNED_LEN];

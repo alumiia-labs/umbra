@@ -19,12 +19,30 @@
 //! public=relay1.example.org,203.0.113.7,443
 //! ```
 //!
-//! Two more forms of the command line help an operator:
+//! A relay of a signed directory (Part 10) has these lines in the place of
+//! `layer`, `relay_id` and `next`:
 //!
 //! ```text
-//! umbra-relay keygen                 # a new relay_id and static_secret
-//! umbra-relay descriptor <settings>  # the line of this relay for a client
+//! identity_seed=<64 hex characters>
+//! manifest=/var/lib/umbra/manifest.bin
+//! keyset=/etc/umbra/keyset.bin
 //! ```
+//!
+//! The identity seed gives the ML-DSA-65 key that signs the descriptor, and
+//! `relay_id` is the hash of its public half. The manifest gives the layer
+//! of this relay and each relay of the next layer.
+//!
+//! More forms of the command line help an operator:
+//!
+//! ```text
+//! umbra-relay keygen                            # a new identity
+//! umbra-relay descriptor <settings>             # the line of this relay for a client
+//! umbra-relay sign-descriptor <settings> <file> # the descriptor for the authorities
+//! ```
+//!
+//! The `sign-descriptor` form reads `public`, `country` and `asn`, and also
+//! `family=<64 hex characters>`, `class=<0 to 3>` and
+//! `roles=<queue,chain,ingress,attachment>`.
 //!
 //! The `public` line gives the host name of the certificate, the address,
 //! and the port that a client dials. The `descriptor` form reads it.
@@ -42,14 +60,22 @@
 use std::{collections::BTreeMap, process::ExitCode};
 
 use tokio::net::TcpListener;
+use umbra_core::directory::{
+    descriptor::{roles, RelayDescriptor, HOST_LEN},
+    EPOCH_SECONDS,
+};
 use umbra_crypto::{
     handshake::nk::RelayStatic,
+    hash::sha3_256,
     rsabssa::PublicKey2048,
+    secret::Secret,
+    sign::SigningKey,
     x25519::{PublicKey as XPublic, StaticSecret},
 };
 use umbra_relay::{
     node::{Config, RelayNode},
-    server::{run_relay, tls_acceptor, PACING_MEAN_MS},
+    placement::placement,
+    server::{run_relay, tls_acceptor, OsRng, PACING_MEAN_MS},
     sqlite_store::SqliteStore,
     store::{MemoryStore, RelayStore},
 };
@@ -82,12 +108,16 @@ struct Settings {
     public: Option<String>,
     config: Config,
     next: BTreeMap<[u8; 32], Dial>,
+    /// The key that signs the descriptor of this relay.
+    identity: Option<SigningKey>,
     /// What this relay declares of itself for a network descriptor: the
     /// operator, the country, the autonomous system, and the IPv4 /16.
     facts: BTreeMap<String, String>,
 }
 
-fn read_settings(path: &str) -> Option<Settings> {
+/// Reads the settings file. With `takes_place` the relay reads its layer
+/// from the manifest, when the file names one.
+fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
     let text = std::fs::read_to_string(path).ok()?;
     let mut values: BTreeMap<&str, &str> = BTreeMap::new();
     let mut next = BTreeMap::new();
@@ -113,10 +143,61 @@ fn read_settings(path: &str) -> Option<Settings> {
         );
     }
     let static_secret = StaticSecret::from(hex32(values.get("static_secret")?)?);
+    let identity = match values.get("identity_seed") {
+        Some(seed) => Some(SigningKey::from_seed(Secret::new(hex32(seed)?))),
+        None => None,
+    };
+    // The identity key gives the identifier (`REL-049`). A settings file
+    // with the two lines must not name another one.
+    let derived = identity
+        .as_ref()
+        .map(|key| sha3_256(&[&key.verifying_key().to_bytes()]));
+    let written = match values.get("relay_id") {
+        Some(text) => Some(hex32(text)?),
+        None => None,
+    };
+    if derived.is_some() && written.is_some() && derived != written {
+        return None;
+    }
     let relay = RelayStatic {
         s: *XPublic::from(&static_secret).as_bytes(),
-        relay_id: hex32(values.get("relay_id")?)?,
+        relay_id: derived.or(written)?,
     };
+    // The manifest gives the layer and the next hops, and the settings file
+    // then gives neither.
+    let placed = match (values.get("manifest"), values.get("keyset")) {
+        (Some(_), Some(_)) if values.contains_key("layer") || !next.is_empty() => return None,
+        // The descriptor of a relay comes before the first manifest that
+        // lists it, thus that form of the command line reads no manifest.
+        (Some(_), Some(_)) if !takes_place => None,
+        (Some(manifest), Some(keyset)) => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?
+                .as_secs();
+            let manifest = std::fs::read(manifest).ok()?;
+            let keyset = std::fs::read(keyset).ok()?;
+            match placement(&manifest, &keyset, &relay.relay_id, &relay.s, now) {
+                Ok(placed) => Some(placed),
+                Err(cause) => {
+                    eprintln!("the manifest gives this relay no place: {cause:?}");
+                    return None;
+                }
+            }
+        }
+        (None, None) => None,
+        _ => return None,
+    };
+    let layer = match &placed {
+        Some(placed) => placed.layer,
+        None if !takes_place => 0,
+        None => values
+            .get("layer")?
+            .parse()
+            .ok()
+            .filter(|l| (1..=3).contains(l))?,
+    };
+    let next = placed.map_or(next, |placed| placed.next);
     Some(Settings {
         listen: (*values.get("listen")?).to_owned(),
         cert: (*values.get("cert")?).to_owned(),
@@ -127,34 +208,105 @@ fn read_settings(path: &str) -> Option<Settings> {
         config: Config {
             relay,
             static_secret,
-            layer: values
-                .get("layer")?
-                .parse()
-                .ok()
-                .filter(|l| (1..=3).contains(l))?,
+            layer,
             issuer_key: PublicKey2048::from_modulus(&hex(values.get("issuer_modulus")?)?).ok()?,
             community_capacity: values.get("community_capacity")?.parse().ok()?,
         },
         next,
-        facts: ["operator", "country", "asn", "prefix"]
-            .iter()
-            .filter_map(|name| Some(((*name).to_owned(), (*values.get(name)?).to_owned())))
-            .collect(),
+        identity,
+        facts: [
+            "operator", "country", "asn", "prefix", "family", "class", "roles",
+        ]
+        .iter()
+        .filter_map(|name| Some(((*name).to_owned(), (*values.get(name)?).to_owned())))
+        .collect(),
     })
 }
 
-/// Prints a new identity for a settings file. The secret shows on the
-/// terminal of the operator one time, and no file of this program holds it.
+/// Prints a new identity for a settings file. The secrets show on the
+/// terminal of the operator one time, and no file of this program holds
+/// them.
 fn keygen() -> ExitCode {
-    let mut relay_id = [0u8; 32];
+    let mut identity_seed = [0u8; 32];
     let mut static_secret = [0u8; 32];
-    if getrandom::fill(&mut relay_id).is_err() || getrandom::fill(&mut static_secret).is_err() {
+    if getrandom::fill(&mut identity_seed).is_err() || getrandom::fill(&mut static_secret).is_err()
+    {
         eprintln!("the operating system gave no random bytes");
         return ExitCode::from(1);
     }
-    println!("relay_id={}", to_hex(&relay_id));
+    let identity = SigningKey::from_seed(Secret::new(identity_seed));
+    println!("identity_seed={}", to_hex(&identity_seed));
     println!("static_secret={}", to_hex(&static_secret));
+    println!(
+        "# relay_id {}",
+        to_hex(&sha3_256(&[&identity.verifying_key().to_bytes()]))
+    );
     ExitCode::SUCCESS
+}
+
+/// Writes the signed descriptor of this relay (`REL-047`, `REL-048`) to
+/// `out`. The operator gives that file to the directory authorities.
+fn sign_descriptor(settings: &Settings, out: &str) -> ExitCode {
+    let Some(bytes) = signed_descriptor(settings) else {
+        eprintln!(
+            "the settings file needs: identity_seed=, public=<host>,<IPv4 address>,<port>, \
+             country=, asn=, family=<64 hex characters>, class=<0 to 3>, \
+             roles=<queue,chain,ingress,attachment>"
+        );
+        return ExitCode::from(2);
+    };
+    if std::fs::write(out, bytes).is_err() {
+        eprintln!("the descriptor file does not write");
+        return ExitCode::from(1);
+    }
+    ExitCode::SUCCESS
+}
+
+fn signed_descriptor(settings: &Settings) -> Option<Vec<u8>> {
+    let identity = settings.identity.as_ref()?;
+    let [name, address, port]: [&str; 3] = settings
+        .public
+        .as_deref()?
+        .split(',')
+        .collect::<Vec<_>>()
+        .try_into()
+        .ok()?;
+    let mut host = [0u8; HOST_LEN];
+    host.get_mut(..name.len())?.copy_from_slice(name.as_bytes());
+    let fact = |name: &str| settings.facts.get(name).map(String::as_str);
+    let mut role_bits = 0u8;
+    for role in fact("roles")?.split(',') {
+        role_bits |= match role {
+            "queue" => roles::QUEUE,
+            "chain" => roles::CHAIN,
+            "ingress" => roles::INGRESS_OFFERED,
+            "attachment" => roles::ATTACHMENT,
+            _ => return None,
+        };
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    RelayDescriptor {
+        relay_id: [0; 32],
+        identity_pk: &[],
+        ntor_pk: settings.config.relay.s,
+        addr_v4: address.parse::<std::net::Ipv4Addr>().ok()?.octets(),
+        addr_v6: [0; 16],
+        port: port.parse().ok()?,
+        host,
+        asn: fact("asn")?.parse().ok()?,
+        jurisdiction: fact("country")?.as_bytes().try_into().ok()?,
+        family_id: hex32(fact("family")?)?,
+        capacity_class: fact("class")?.parse().ok()?,
+        roles: role_bits,
+        chunk_store_gib: 0,
+        valid_after: now / EPOCH_SECONDS,
+        sig: &[],
+    }
+    .sign(identity, &mut OsRng)
+    .ok()
 }
 
 /// Prints the line of this relay in a network descriptor, which holds the
@@ -190,25 +342,55 @@ fn descriptor(settings: &Settings) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+/// The stack of each thread of this program. An ML-DSA-65 signature needs
+/// more than the 1 MiB that the main thread of Windows has.
+const STACK_BYTES: usize = 16 << 20;
+
+fn main() -> ExitCode {
+    let work = || {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .thread_stack_size(STACK_BYTES)
+            .build();
+        match runtime {
+            Ok(runtime) => runtime.block_on(run()),
+            Err(_) => {
+                eprintln!("the runtime does not start");
+                ExitCode::from(1)
+            }
+        }
+    };
+    std::thread::Builder::new()
+        .stack_size(STACK_BYTES)
+        .spawn(work)
+        .ok()
+        .and_then(|thread| thread.join().ok())
+        .unwrap_or(ExitCode::from(1))
+}
+
+async fn run() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
-    let (path, only_descriptor) = match arguments.as_slice() {
+    let path = match arguments.as_slice() {
         ["keygen"] => return keygen(),
-        ["descriptor", path] => (*path, true),
-        [path] => (*path, false),
+        ["descriptor", path] | ["sign-descriptor", path, _] | [path] => *path,
         _ => {
-            eprintln!("usage: umbra-relay <settings file> | keygen | descriptor <settings file>");
+            eprintln!(
+                "usage: umbra-relay <settings file> | keygen | descriptor <settings file> \
+                 | sign-descriptor <settings file> <descriptor file>"
+            );
             return ExitCode::from(2);
         }
     };
-    let Some(settings) = read_settings(path) else {
+    let takes_place = !matches!(arguments.as_slice(), ["sign-descriptor", ..]);
+    let Some(settings) = read_settings(path, takes_place) else {
         eprintln!("the settings file does not parse");
         return ExitCode::from(2);
     };
-    if only_descriptor {
-        return descriptor(&settings);
+    match arguments.as_slice() {
+        ["descriptor", _] => return descriptor(&settings),
+        ["sign-descriptor", _, out] => return sign_descriptor(&settings, out),
+        _ => {}
     }
     let Some(tls) = tls_acceptor(&settings.cert, &settings.key) else {
         eprintln!("the certificate or the key does not load");

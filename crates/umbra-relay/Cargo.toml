@@ -34,3 +34,9 @@ getrandom = { version = "0.4", optional = true }
 name = "umbra-relay"
 path = "src/main.rs"
 required-features = ["native"]
+
+# The seven directory authorities of a test network, in one process.
+[[bin]]
+name = "umbra-test-authority"
+path = "src/bin/test_authority.rs"
+required-features = ["native"]

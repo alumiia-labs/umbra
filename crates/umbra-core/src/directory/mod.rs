@@ -1,5 +1,6 @@
 //! The relay directory of Part 10, on the client side.
 
+pub mod authority;
 pub mod bloc;
 pub mod descriptor;
 pub mod diff;

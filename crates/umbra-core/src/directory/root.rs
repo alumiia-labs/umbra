@@ -195,7 +195,7 @@ pub struct DirectoryRoot<'a> {
 }
 
 impl<'a> DirectoryRoot<'a> {
-    fn preimage(&self) -> Vec<u8> {
+    pub(crate) fn preimage(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(160);
         out.extend_from_slice(labels::DIRECTORY_ROOT);
         out.push(0x01);
