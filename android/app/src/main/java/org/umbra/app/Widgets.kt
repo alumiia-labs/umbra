@@ -45,6 +45,7 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -284,6 +285,21 @@ fun Modifier.pressShadeInColumn(): Modifier = layout { measurable, constraints -
     layout(placeable.width - extra, placeable.height) { placeable.place(-PressInset.roundToPx(), 0) }
 }.clip(PressShape)
 
+/** How far the shade of a bar title reaches into the side of the back button. */
+private val TitleOutset = 6.dp
+
+/** Places an element `by` to the left of its place, and makes it wider by the same. */
+private fun Modifier.outsetStart(by: Dp): Modifier = layout { measurable, constraints ->
+    val extra = by.roundToPx()
+    val placeable = measurable.measure(
+        constraints.copy(
+            minWidth = constraints.minWidth + extra,
+            maxWidth = constraints.maxWidth + extra,
+        ),
+    )
+    layout(placeable.width - extra, placeable.height) { placeable.place(-extra, 0) }
+}
+
 /**
  * The shade of a row that spans the screen. The caller adds [press] and
  * then `padding(horizontal = PressInset)`, which puts the content 20 dp from
@@ -405,9 +421,12 @@ fun BackBar(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         IconAction("arrow-left", "Back", onBack)
-        Spacer(Modifier.width(4.dp))
-        val titleArea = Modifier.weight(1f).clip(RoundedCornerShape(12.dp))
-        Column(if (onTitle == null) titleArea else titleArea.clickable(onClick = onTitle)) {
+        // The shade of a title that leads somewhere has the room of each
+        // other press shade around the text. It starts a little inside the
+        // empty side of the back button, thus the title keeps its place.
+        val shade = Modifier.weight(1f).outsetStart(TitleOutset).clip(PressShape)
+        val titleArea = if (onTitle == null) shade else shade.press(role = Role.Button, onClick = onTitle)
+        Column(titleArea.padding(horizontal = PressInset, vertical = 6.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     title,
