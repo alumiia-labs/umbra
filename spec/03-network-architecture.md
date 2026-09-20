@@ -299,10 +299,20 @@ command for that queue reaches it through a circuit that ends at that relay.
   build each chain again at the start of a run, and it MUST NOT store a
   chain: the store names the relay of a queue, and no relay of a path to it.
 
-The reference client of 0.2.0-draft takes its relay set from a descriptor of
-its build and not from the signed directory of Part 10. Thus it meets
-`NET-022`, `NET-023`, and the invariants of §3.4.6 over that set, and it does
-not verify the set.
+- **[NET-315]** A stored queue can name a relay that the relay set holds no
+  more, or a relay that no conformant chain reaches. A client MUST NOT build
+  a circuit for that queue, and it MUST build each other circuit of the run.
+  A record for a queue at such a relay waits. With no other circuit the
+  client MUST build one with no required last relay, thus the user can make
+  a queue for a new contact.
+
+The reference client of 0.2.0-draft takes its relay set from a relay manifest
+of Part 10 §10.5.5, and it verifies that manifest under the key set of its
+build. No bootstrap carrier of §3.10 is built yet: the debug build reads the
+manifest from a file of the developer. A build for a deployed test network
+reads the descriptor below in the place of a manifest. It meets `NET-022`,
+`NET-023`, and the invariants of §3.4.6 over that descriptor, and it does not
+verify it.
 
 That descriptor is a text of lines. The first line is `umbra-network 2`. Each
 relay has one line, and the last line names the host of the invitation links.

@@ -67,7 +67,7 @@ each column when a crate implements the requirement and a test covers it.
 | --- | --- | --- | --- | --- | --- | --- |
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
-| `NET` | 220 | 84 | 1 | 0 | 8 | **313** |
+| `NET` | 221 | 84 | 1 | 0 | 8 | **314** |
 | `IDN` | 120 | 43 | 1 | 0 | 5 | **169** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
 | `WIR` | 385 | 84 | 0 | 0 | 6 | **475** |
@@ -79,9 +79,9 @@ each column when a crate implements the requirement and a test covers it.
 | `COM` | 299 | 96 | 0 | 0 | 5 | **400** |
 | `ATT` | 134 | 46 | 1 | 0 | 2 | **183** |
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
-| `IMP` | 105 | 41 | 0 | 0 | 1 | **147** |
+| `IMP` | 106 | 41 | 0 | 0 | 1 | **148** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2175 | 705 | 7 | 0 | 51 | **2938** |
+| **All** | 2177 | 705 | 7 | 0 | 51 | **2940** |
 
 ## SCP — Scope and Conventions
 
@@ -452,6 +452,7 @@ Source: `spec/03-network-architecture.md`
 | `NET-312` | §3.2.5 | MUST | A client | A client MUST reject a descriptor that has a relay line with no `layer`, no `operator`, no `country` or no `asn`, with one fact two times, or with a word that is no fact. |  |  |
 | `NET-313` | §3.2.5 | MUST | A client | A client MUST take the first relay of layer 1 as its pinned ingress of `NET-022`. |  |  |
 | `NET-314` | §3.2.5 | MUST | A client | A client MUST read a descriptor with the first line `umbra-network 1`. |  |  |
+| `NET-315` | §3.2.5 | MUST | (unstated) | A stored queue can name a relay that the relay set holds no more, or a relay that no conformant chain reaches. |  |  |
 
 ## IDN — Identity
 
@@ -3104,6 +3105,7 @@ Source: `spec/15-implementation.md`
 | `IMP-156` | §15.6.1 | MUST | A client | A client MUST reject a reaction whose `emoji` holds a code point that no emoji sequence uses, from a contact and from its own surface. |  |  |
 | `IMP-157` | §15.6.1 | MUST | A client | A client MUST take a reaction only for a message that it holds in the conversation of the sender (`WIR-282`), and it MUST drop each other one. |  |  |
 | `IMP-158` | §15.6.4 | MUST | The stored form of a contact and of an invitation | The stored form of a contact and of an invitation MUST name the relay that holds its inbound queue, because a new run builds a circuit to that relay before it subscribes (`NET-308`). |  |  |
+| `IMP-159` | §15.6.4 | MUST | A client | A client MUST keep the highest epoch of a `DirectoryRoot` that it verified in the settings table, and it MUST give the larger of that value and the shipped epoch of `REL-045` to the consensus at each start. |  |  |
 
 ## SEC — Security Considerations
 

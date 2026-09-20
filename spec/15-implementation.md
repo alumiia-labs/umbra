@@ -867,6 +867,11 @@ version byte, and a client MUST reject a row whose version it does not read.
   relay of the outbound queue as the relay of the inbound queue of a
   contact, and the relay that the stored bundle names as the relay of the
   queue of an invitation.
+- **[IMP-159]** A client MUST keep the highest epoch of a `DirectoryRoot`
+  that it verified in the settings table, and it MUST give the larger of
+  that value and the shipped epoch of `REL-045` to the consensus at each
+  start. Rule `REL-034` of Part 10 binds nothing in a run that forgot the
+  last one. The stored value MUST NOT go down.
 - **[IMP-131]** A client MUST commit each change of a channel to the store
   before it writes a byte of that call to the link. A ratchet record that
   left the device under a state that the store does not hold lets a restart

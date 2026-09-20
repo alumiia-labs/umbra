@@ -6,9 +6,11 @@ cache of Part 12. The node is a plain state machine. The binary puts TLS 1.3,
 the WebSocket framing of Part 6 §6.2.1, a pacing clock, and an SQLite store
 around it.
 
-This revision serves a test network. It has no relay directory, no attachment
-service, no group queue, and no push path, and the issuer key of its settings
-admits nothing.
+This revision serves a test network. It has no attachment service, no group
+queue, and no push path, and the issuer key of its settings admits nothing.
+It reads a signed relay manifest of Part 10, and section 7 shows that form.
+No real directory authority exists yet, thus one process holds the seven test
+keys.
 
 ## A test network of three relays
 
@@ -136,6 +138,55 @@ A tester pastes that text into the panel "Test network" on the unlock view of
 a debug build of the Android app. The invitation host is a name inside each
 link. No party has to serve it for a test, because a client never opens it
 (`IDN-124`).
+
+### 7. A network under a signed manifest
+
+The descriptor of section 6 is a text that no party signs. The relay
+directory of Part 10 replaces it: each relay signs a descriptor, and the
+directory authorities sign a manifest over the relay set.
+
+A relay of that form has an identity key, and its `relay_id` is the hash of
+that key. Its settings file holds these lines in the place of `relay_id`,
+`layer` and `next`:
+
+```text
+identity_seed=<from umbra-relay keygen>
+family=<64 hex characters, one value for each family of relays>
+class=<0 to 3>
+roles=<queue,chain for a chain relay; chain,ingress for an ingress relay>
+manifest=/var/lib/umbra/manifest.bin
+keyset=/etc/umbra/keyset.bin
+```
+
+```sh
+umbra-relay sign-descriptor /etc/umbra/relay.conf relay.desc
+```
+
+The operator gives `relay.desc` to the authority. The test authority takes
+each descriptor and the facts that a real authority verifies:
+
+```text
+seed=<64 hex characters>
+relay=relay1.desc,north,2,ingress
+relay=relay2.desc,alps,2,chain
+```
+
+```sh
+umbra-test-authority authority.conf /var/lib/umbra
+```
+
+It writes `manifest.bin` and `keyset.bin`. The layer of a chain relay with
+the queue role comes from a hash that no operator selects (`REL-060`), thus a
+small network can come out with no relay in one layer. The program prints the
+layer of each relay. A relay reads its own layer and the relays of the next
+layer from the manifest at its start. A client verifies the manifest under
+the key set, which its build ships.
+
+The address of a descriptor serves the clients and the relays of the layer
+before, and the /16 of that address is the network that a client tests. Thus
+two relays on one machine need two loopback networks, as `127.2.0.1` and
+`127.3.0.1`. `scripts/devnet.sh` runs such a network of five relays, and
+`scripts/devnet-push.sh` gives its manifest to the debug app of an emulator.
 
 ## What the store file holds
 
