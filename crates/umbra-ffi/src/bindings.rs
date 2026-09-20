@@ -280,6 +280,16 @@ pub struct MsgInfo {
     pub reply_to: Option<Arc<MsgHandle>>,
 }
 
+/// One reaction to a message. The emoji holds emoji code points and no
+/// other text, thus it crosses as a string.
+#[derive(uniffi::Record)]
+pub struct MsgReaction {
+    /// The emoji.
+    pub emoji: String,
+    /// Whether this device sent it.
+    pub mine: bool,
+}
+
 /// Which receipts this device sends to one contact.
 #[derive(uniffi::Record)]
 pub struct Receipts {
@@ -357,6 +367,11 @@ pub enum FfiEvent {
     /// A ceremony did not start, or no complete ceremony was there to
     /// confirm. The store holds no new state.
     VerificationRefused {
+        /// The conversation.
+        conversation: Vec<u8>,
+    },
+    /// The contact added or removed a reaction in a conversation.
+    Reacted {
         /// The conversation.
         conversation: Vec<u8>,
     },
@@ -479,6 +494,9 @@ impl Inner {
                 Event::Delivery { message, delivery } => FfiEvent::Delivery {
                     message: Arc::new(MsgHandle(message)),
                     state: delivery as u8,
+                },
+                Event::Reacted { conversation, .. } => FfiEvent::Reacted {
+                    conversation: conversation.0.to_vec(),
                 },
                 Event::Edited { conversation, .. } => FfiEvent::Edited {
                     conversation: conversation.0.to_vec(),
@@ -1013,6 +1031,31 @@ impl Handle {
                 _ => None,
             },
         })
+    }
+
+    /// The reactions to a message, those of this device first.
+    pub fn reactions(&self, message: Arc<MsgHandle>) -> Result<Vec<MsgReaction>, FfiError> {
+        let found = locked(&self.inner).client.reactions(&message.0)?;
+        Ok(found
+            .into_iter()
+            .map(|reaction| MsgReaction {
+                emoji: reaction.emoji,
+                mine: reaction.mine,
+            })
+            .collect())
+    }
+
+    /// Adds the reaction of this device to a message, or removes it when
+    /// the device holds it already. A value that is no emoji is `Malformed`.
+    pub fn react(&self, message: Arc<MsgHandle>, emoji: String) -> Result<(), FfiError> {
+        let mut inner = locked(&self.inner);
+        let Inner { client, bridge, .. } = &mut *inner;
+        client.react(&message.0, &emoji, unix_now_ms(), &mut OsRng)?;
+        // With no network the reaction waits in the store.
+        if let Some(running) = bridge {
+            running.flush(client, &mut OsRng)?;
+        }
+        Ok(())
     }
 
     /// Changes the text of a message that this device sent, to the text of

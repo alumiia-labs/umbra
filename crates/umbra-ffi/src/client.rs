@@ -24,14 +24,14 @@ use umbra_wire::app::{
     edit::{DeleteBody, DeleteScope, EditBody},
     msg_ref,
     rich::RichRecord,
-    signal::ReceiptBody,
+    signal::{ReactionAction, ReactionBody, ReceiptBody},
     AppKind, AppMessage, Channel,
 };
 use zeroize::Zeroizing;
 
 use crate::{
     draft::Draft, ConversationId, ConversationSummary, Delivery, DueReceipt, Error, Event,
-    MessageInfo, MsgRef, ReceiptSettings, ReplyTarget, Sink, CONTACT_NAME_MAX,
+    MessageInfo, MsgRef, Reaction, ReceiptSettings, ReplyTarget, Sink, CONTACT_NAME_MAX,
 };
 
 const ROOT_KEY: &[u8] = b"root";
@@ -75,6 +75,53 @@ const SENDS_READ: u8 = 0x02;
 /// `msg_ref` of the target, and the time of the deletion, in seconds.
 const PENDING: TableId = TableId(0x0C);
 const PENDING_ROW_LEN: usize = 16 + 16 + 8;
+/// The table of the reactions. A row holds the conversation, the `msg_ref`
+/// of the target (`WIR-280`), the direction, and the emoji. One party holds
+/// one row for one emoji on one message.
+const REACTION: TableId = TableId(0x0E);
+const REACTION_PREFIX: usize = 16 + 16 + 1;
+/// The most emoji that one party holds on one message. A contact cannot
+/// grow the table past this count for each message that the device holds.
+pub const REACTIONS_MAX: usize = 16;
+
+/// Whether each code point of `emoji` is one that an emoji sequence uses. The
+/// wire checks UTF-8 alone, thus 64 bytes of a reaction could carry a text.
+/// This check keeps a reaction a reaction: no letter of a script passes, and
+/// no digit, because a keycap sequence starts with one.
+pub fn is_emoji(emoji: &str) -> bool {
+    !emoji.is_empty()
+        && emoji.chars().all(|c| {
+            matches!(
+                u32::from(c),
+                0x00A9 | 0x00AE | 0x200D | 0x203C | 0x2049 | 0x2122 | 0x2139 | 0x24C2
+                    | 0x3030 | 0x303D | 0x3297 | 0x3299 | 0xFE0F
+                    | 0x2190..=0x21FF
+                    | 0x2300..=0x23FF
+                    | 0x25A0..=0x25FF
+                    | 0x2600..=0x27BF
+                    | 0x2934..=0x2935
+                    | 0x2B00..=0x2BFF
+                    | 0x1F000..=0x1FAFF
+                    | 0xE0020..=0xE007F
+            )
+        })
+}
+
+fn reaction_row(
+    conversation: ConversationId,
+    reference: &[u8; 16],
+    direction: u8,
+    emoji: &str,
+) -> Vec<u8> {
+    [
+        conversation.0.as_slice(),
+        reference,
+        &[direction],
+        emoji.as_bytes(),
+    ]
+    .concat()
+}
+
 /// The table of the edits of a message: the row of the message, and how
 /// many times its sender changed the text. A message with no row here shows
 /// no edited mark.
@@ -637,6 +684,58 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
                 continue;
             }
+            if parsed.kind == AppKind::Reaction {
+                // A reaction is no message. One that does not parse, one
+                // with a text in the place of an emoji, and one to a message
+                // that this device does not hold change nothing (`WIR-282`).
+                let Ok(reaction) = ReactionBody::parse(parsed.body) else {
+                    continue;
+                };
+                if !is_emoji(reaction.emoji) {
+                    continue;
+                }
+                let reference = msg_ref(&open.device_set_key, &reaction.target);
+                let natural = [conversation.0.as_slice(), &reference].concat();
+                let target = open.store.row_id(TableId::MESSAGE, &natural);
+                let Some(held) = open.store.get(TableId::MESSAGE, &target)? else {
+                    continue;
+                };
+                if info_of(&held)?.deleted || is_request(&held)? {
+                    continue;
+                }
+                let plain = reaction_row(conversation, &reference, INCOMING, reaction.emoji);
+                let row = open.store.row_id(REACTION, &plain);
+                let exists = open.store.get(REACTION, &row)?.is_some();
+                match reaction.action {
+                    ReactionAction::Add if !exists => {
+                        let mut of_contact = 0usize;
+                        for (_, other) in open.store.list(REACTION, Some(&conversation.0))? {
+                            let same = other.get(16..REACTION_PREFIX)
+                                == Some([reference.as_slice(), &[INCOMING]].concat().as_slice());
+                            of_contact = of_contact.saturating_add(usize::from(same));
+                        }
+                        if of_contact >= REACTIONS_MAX {
+                            continue;
+                        }
+                        planned.push(Planned::Put(
+                            REACTION,
+                            row,
+                            Some(conversation.0),
+                            Zeroizing::new(plain),
+                        ));
+                    }
+                    // WIR-281: the same sender, emoji, and target.
+                    ReactionAction::Remove if exists => {
+                        planned.push(Planned::Delete(REACTION, row))
+                    }
+                    _ => continue,
+                }
+                events.push(Event::Reacted {
+                    conversation,
+                    message: MsgRef(target),
+                });
+                continue;
+            }
             if parsed.kind == AppKind::Edit {
                 // An edit is no message. A body that does not parse
                 // changes nothing.
@@ -738,6 +837,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                                 Some(conversation.0),
                                 placeholder_of(&plain)?,
                             ));
+                            // A placeholder holds no reaction.
+                            for (held, other) in open.store.list(REACTION, Some(&conversation.0))? {
+                                if other.get(16..32) == Some(reference.as_slice()) {
+                                    planned.push(Planned::Delete(REACTION, held));
+                                }
+                            }
+                            planned.push(Planned::Delete(REVISION, row));
                             events.push(Event::Deleted {
                                 conversation,
                                 message: MsgRef(row),
@@ -1168,15 +1274,157 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// the row and its key.
     pub fn delete_for_me(&mut self, message: &MsgRef) -> Result<(), Error> {
         self.outgoing.retain(|waiting| waiting.message != *message);
+        let conversation = self.conversation_of_message(message)?;
+        let reactions = self.reaction_rows(message, conversation)?;
         let open = self.open_mut()?;
-        if open.store.get(TableId::MESSAGE, &message.0)?.is_none() {
-            return Err(Error::NotFound);
-        }
         let mut batch = open.store.begin();
+        for row in reactions {
+            batch.delete(REACTION, row);
+        }
         batch.delete(TableId::MESSAGE, message.0);
         batch.delete(OUTBOX, message.0);
         batch.delete(REVISION, message.0);
         Ok(batch.commit()?)
+    }
+
+    /// The reactions to a message: those of this device first, and each
+    /// party in the order of its emoji.
+    pub fn reactions(&self, message: &MsgRef) -> Result<Vec<Reaction>, Error> {
+        let open = self.open_ref()?;
+        let plain = Zeroizing::new(
+            open.store
+                .get(TableId::MESSAGE, &message.0)?
+                .ok_or(Error::NotFound)?,
+        );
+        let conversation = conversation_of(&plain)?;
+        let mut found = Vec::new();
+        for (_, row) in open.store.list(REACTION, Some(&conversation.0))? {
+            let reference = row.get(16..32).ok_or(Error::Integrity)?;
+            let natural = [conversation.0.as_slice(), reference].concat();
+            if open.store.row_id(TableId::MESSAGE, &natural) != message.0 {
+                continue;
+            }
+            let emoji = row.get(REACTION_PREFIX..).ok_or(Error::Integrity)?;
+            found.push(Reaction {
+                emoji: core::str::from_utf8(emoji)
+                    .map_err(|_| Error::Integrity)?
+                    .to_owned(),
+                mine: row.get(32) == Some(&OUTGOING),
+            });
+        }
+        found.sort_by(|a, b| (!a.mine, &a.emoji).cmp(&(!b.mine, &b.emoji)));
+        Ok(found)
+    }
+
+    /// Adds the reaction of this device to a message, or removes it when the
+    /// device holds it already. The table changes at once, and one record of
+    /// kind `0x03` waits for the send path.
+    pub fn react<R: CryptoRng + ?Sized>(
+        &mut self,
+        message: &MsgRef,
+        emoji: &str,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        if !is_emoji(emoji) {
+            return Err(Error::Malformed);
+        }
+        let open = self.open_mut()?;
+        let plain = Zeroizing::new(
+            open.store
+                .get(TableId::MESSAGE, &message.0)?
+                .ok_or(Error::NotFound)?,
+        );
+        if info_of(&plain)?.deleted || is_request(&plain)? {
+            return Err(Error::Malformed);
+        }
+        let conversation = conversation_of(&plain)?;
+        let app = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
+        let target = AppMessage::parse(app, Channel::Pairwise)?.msg_id;
+        let reference = msg_ref(&open.device_set_key, &target);
+        let held = reaction_row(conversation, &reference, OUTGOING, emoji);
+        let held_row = open.store.row_id(REACTION, &held);
+        let exists = open.store.get(REACTION, &held_row)?.is_some();
+        if !exists {
+            let mut mine = 0usize;
+            for (_, other) in open.store.list(REACTION, Some(&conversation.0))? {
+                let same = other.get(16..REACTION_PREFIX)
+                    == Some([reference.as_slice(), &[OUTGOING]].concat().as_slice());
+                mine = mine.saturating_add(usize::from(same));
+            }
+            if mine >= REACTIONS_MAX {
+                return Err(Error::TooLong);
+            }
+        }
+
+        let body = ReactionBody {
+            target,
+            action: if exists {
+                ReactionAction::Remove
+            } else {
+                ReactionAction::Add
+            },
+            emoji,
+        };
+        let mut encoded = vec![0u8; 19usize.saturating_add(emoji.len())];
+        body.encode(&mut encoded)?;
+        let mut msg_id = [0u8; 16];
+        rng.fill_bytes(&mut msg_id);
+        let record = AppMessage {
+            kind: AppKind::Reaction,
+            msg_id,
+            sent_at: now_ms,
+            body: &encoded,
+        };
+        let mut request = vec![0u8; record.len()];
+        record.encode(&mut request)?;
+        let request_ref = msg_ref(&open.device_set_key, &msg_id);
+        let natural = [conversation.0.as_slice(), &request_ref].concat();
+        let request_row = open.store.row_id(TableId::MESSAGE, &natural);
+        let stored = stored_message(OUTGOING, Delivery::Queued, conversation, now_ms, &request);
+
+        let mut batch = open.store.begin();
+        if exists {
+            batch.delete(REACTION, held_row);
+        } else {
+            batch.put(REACTION, held_row, Some(conversation.0), &held, rng)?;
+        }
+        batch.put(
+            TableId::MESSAGE,
+            request_row,
+            Some(conversation.0),
+            &stored,
+            rng,
+        )?;
+        batch.put(OUTBOX, request_row, None, &outbox_row(&[])?, rng)?;
+        batch.commit()?;
+
+        self.outgoing.push_back(Outgoing {
+            message: MsgRef(request_row),
+            conversation,
+            app: request,
+            attachments: Vec::new(),
+        });
+        self.auto_lock.touch(now_ms / 1_000);
+        Ok(())
+    }
+
+    /// Erases each reaction to a message, in a batch of the caller.
+    fn reaction_rows(
+        &self,
+        message: &MsgRef,
+        conversation: ConversationId,
+    ) -> Result<Vec<RowId>, Error> {
+        let open = self.open_ref()?;
+        let mut rows = Vec::new();
+        for (row, plain) in open.store.list(REACTION, Some(&conversation.0))? {
+            let reference = plain.get(16..32).ok_or(Error::Integrity)?;
+            let natural = [conversation.0.as_slice(), reference].concat();
+            if open.store.row_id(TableId::MESSAGE, &natural) == message.0 {
+                rows.push(row);
+            }
+        }
+        Ok(rows)
     }
 
     /// Changes the text of a message that this device sent, to the text of
@@ -1311,6 +1559,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             return Err(Error::Malformed);
         }
         let conversation = conversation_of(&plain)?;
+        let reactions = self.reaction_rows(message, conversation)?;
+        let open = self.open_mut()?;
         let limit = [LAST_DELETE_SETTING, conversation.0.as_slice()].concat();
         let limit_row = open.store.row_id(SETTINGS, &limit);
         let now = now_ms / 1_000;
@@ -1339,9 +1589,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             rng,
         )?;
         // The message itself waits for no relay now, and a placeholder has
-        // no edited mark.
+        // no edited mark and no reaction.
         batch.delete(OUTBOX, message.0);
         batch.delete(REVISION, message.0);
+        for row in reactions {
+            batch.delete(REACTION, row);
+        }
         batch.put(
             TableId::MESSAGE,
             request_row,
@@ -1884,6 +2137,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             RECEIPT,
             PENDING,
             REVISION,
+            REACTION,
             OUTBOX,
             INVITATION,
             CONVERSATION,
@@ -1926,7 +2180,9 @@ fn info_of(plain: &[u8]) -> Result<MessageInfo, Error> {
 fn is_request(plain: &[u8]) -> Result<bool, Error> {
     let app = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
     let parsed = AppMessage::parse(app, Channel::Pairwise)?;
-    Ok(parsed.kind == AppKind::Edit || tombstone_of(&parsed)? == Some(Tombstone::Request))
+    // A reaction of the contact changes the reaction table and is never a row.
+    Ok(matches!(parsed.kind, AppKind::Edit | AppKind::Reaction)
+        || tombstone_of(&parsed)? == Some(Tombstone::Request))
 }
 
 fn conversation_of(plain: &[u8]) -> Result<ConversationId, Error> {

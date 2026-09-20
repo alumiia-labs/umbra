@@ -103,6 +103,16 @@ impl Delivery {
     }
 }
 
+/// One reaction to a message (Part 6 §6.6.9).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reaction {
+    /// The emoji. It holds emoji code points and no other text, thus it is
+    /// no message text under `IMP-037`.
+    pub emoji: String,
+    /// Whether this device sent it.
+    pub mine: bool,
+}
+
 /// The message that a message answers (Part 6 §6.6.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplyTarget {
@@ -200,6 +210,13 @@ pub enum Event {
         message: MsgRef,
         /// The new state.
         delivery: Delivery,
+    },
+    /// The contact added or removed a reaction to a message.
+    Reacted {
+        /// The conversation.
+        conversation: ConversationId,
+        /// The message.
+        message: MsgRef,
     },
     /// The contact changed the text of a message.
     Edited {
@@ -1021,6 +1038,182 @@ mod tests {
             .delete_for_everyone(&answer, 4_000_000, &mut rng)
             .unwrap();
         assert_eq!(alice.info(&answer).unwrap().revisions, 0);
+        alice.audit().unwrap();
+        bob.audit().unwrap();
+    }
+
+    #[test]
+    fn a_reaction_is_an_emoji_on_a_held_message_and_a_second_one_takes_it_away() {
+        use crate::client::{is_emoji, REACTIONS_MAX};
+        use umbra_wire::app::{
+            signal::{ReactionAction, ReactionBody},
+            AppKind, AppMessage, Channel,
+        };
+
+        // An emoji sequence passes, and a text in any script does not.
+        for emoji in [
+            "\u{2764}\u{FE0F}",
+            "\u{1F44D}",
+            "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}",
+        ] {
+            assert!(is_emoji(emoji), "{emoji}");
+        }
+        for text in [
+            "",
+            "ok",
+            "1\u{FE0F}\u{20E3}",
+            "\u{43F}\u{440}\u{438}",
+            "\u{1F44D} yes",
+        ] {
+            assert!(!is_emoji(text), "{text}");
+        }
+
+        let mut rng = Rng(31);
+        let (mut alice, contact, conversation) = client_with_contact(32);
+        let (mut bob, _, bob_conversation) = client_with_contact(33);
+
+        let mut draft = alice.new_draft(conversation);
+        draft.set_text(&units("dinner at seven?")).unwrap();
+        let sent = alice.send_draft(draft, 2_000_000, &mut rng).unwrap();
+        let outgoing = alice.take_outgoing().unwrap();
+        let sent_id = AppMessage::parse(&outgoing.app, Channel::Pairwise)
+            .unwrap()
+            .msg_id;
+        alice
+            .set_delivery(&sent, Delivery::Accepted, &mut rng)
+            .unwrap();
+        bob.commit_network(&[], &[(contact, outgoing.app)], 2_100_000, &mut rng)
+            .unwrap();
+        let at_bob = bob.messages(bob_conversation).unwrap()[0];
+        while alice.next_event().is_some() {}
+        while bob.next_event().is_some() {}
+
+        // Bob reacts. His table holds it at once, one record waits, and no
+        // view shows that record.
+        let thumb = "\u{1F44D}";
+        bob.react(&at_bob, thumb, 2_200_000, &mut rng).unwrap();
+        assert_eq!(
+            bob.reactions(&at_bob).unwrap(),
+            [Reaction {
+                emoji: thumb.to_owned(),
+                mine: true
+            }]
+        );
+        let request = bob.take_outgoing().unwrap();
+        let parsed = AppMessage::parse(&request.app, Channel::Pairwise).unwrap();
+        assert_eq!(parsed.kind, AppKind::Reaction);
+        let body = ReactionBody::parse(parsed.body).unwrap();
+        assert_eq!(
+            (body.target, body.action, body.emoji),
+            (sent_id, ReactionAction::Add, thumb)
+        );
+        assert_eq!(bob.messages(bob_conversation).unwrap(), [at_bob]);
+
+        // Alice gets it: an event, the reaction of the contact, no message.
+        alice
+            .commit_network(&[], &[(contact, request.app.clone())], 2_300_000, &mut rng)
+            .unwrap();
+        assert_eq!(
+            alice.next_event(),
+            Some(Event::Reacted {
+                conversation,
+                message: sent
+            })
+        );
+        assert_eq!(
+            alice.reactions(&sent).unwrap(),
+            [Reaction {
+                emoji: thumb.to_owned(),
+                mine: false
+            }]
+        );
+        assert_eq!(alice.messages(conversation).unwrap(), [sent]);
+        // The same record a second time changes nothing.
+        alice
+            .commit_network(&[], &[(contact, request.app)], 2_310_000, &mut rng)
+            .unwrap();
+        assert_eq!(alice.next_event(), None);
+
+        // Alice adds the same emoji: two parties, two rows, hers first.
+        alice.react(&sent, thumb, 2_400_000, &mut rng).unwrap();
+        alice.take_outgoing().unwrap();
+        let both = alice.reactions(&sent).unwrap();
+        assert_eq!(both.len(), 2);
+        assert!(both[0].mine && !both[1].mine);
+
+        // A second reaction of Bob with the same emoji takes it away, and
+        // the record says Remove (WIR-281).
+        bob.react(&at_bob, thumb, 2_500_000, &mut rng).unwrap();
+        assert!(bob.reactions(&at_bob).unwrap().is_empty());
+        let removal = bob.take_outgoing().unwrap();
+        let parsed = AppMessage::parse(&removal.app, Channel::Pairwise).unwrap();
+        assert_eq!(
+            ReactionBody::parse(parsed.body).unwrap().action,
+            ReactionAction::Remove
+        );
+        alice
+            .commit_network(&[], &[(contact, removal.app)], 2_600_000, &mut rng)
+            .unwrap();
+        assert_eq!(alice.reactions(&sent).unwrap().len(), 1);
+        assert!(alice.reactions(&sent).unwrap()[0].mine);
+        assert!(matches!(alice.next_event(), Some(Event::Reacted { .. })));
+
+        // A text in the place of an emoji changes nothing, from the contact
+        // and from the surface. A reaction to an unknown message is dropped.
+        let reaction = |target: [u8; 16], emoji: &str, id: u8| {
+            let body = ReactionBody {
+                target,
+                action: ReactionAction::Add,
+                emoji,
+            };
+            let mut encoded = vec![0u8; 19 + emoji.len()];
+            body.encode(&mut encoded).unwrap();
+            (contact, record(AppKind::Reaction, [id; 16], &encoded))
+        };
+        alice
+            .commit_network(
+                &[],
+                &[reaction(sent_id, "call me", 0xA1)],
+                2_700_000,
+                &mut rng,
+            )
+            .unwrap();
+        alice
+            .commit_network(
+                &[],
+                &[reaction([0x44; 16], thumb, 0xA2)],
+                2_710_000,
+                &mut rng,
+            )
+            .unwrap();
+        assert_eq!(alice.next_event(), None);
+        assert_eq!(alice.reactions(&sent).unwrap().len(), 1);
+        assert_eq!(
+            alice.react(&sent, "nice", 2_720_000, &mut rng),
+            Err(Error::Malformed)
+        );
+
+        // A contact holds at most REACTIONS_MAX emoji on one message.
+        for n in 0..=REACTIONS_MAX {
+            let emoji = char::from_u32(0x1F600 + u32::try_from(n).unwrap())
+                .unwrap()
+                .to_string();
+            let id = 0xB0 + u8::try_from(n).unwrap();
+            alice
+                .commit_network(&[], &[reaction(sent_id, &emoji, id)], 2_800_000, &mut rng)
+                .unwrap();
+        }
+        let of_contact = alice
+            .reactions(&sent)
+            .unwrap()
+            .iter()
+            .filter(|reaction| !reaction.mine)
+            .count();
+        assert_eq!(of_contact, REACTIONS_MAX);
+
+        // A deleted message holds no reaction.
+        alice.delete_for_me(&sent).unwrap();
+        assert_eq!(alice.reactions(&sent), Err(Error::NotFound));
         alice.audit().unwrap();
         bob.audit().unwrap();
     }
