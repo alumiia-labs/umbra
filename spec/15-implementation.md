@@ -510,6 +510,25 @@ that draft is dropped, and it MUST do that whether the send succeeded or failed.
   that sent the receipt, and only upward in the order Accepted, Delivered,
   Read. A receipt whose body does not parse MUST change nothing, and it MUST
   NOT end the batch of the records that arrived with it.
+- **[IMP-151]** The placeholder of Part 7 §7.5.6 MUST be the row of the
+  deleted message itself: the client overwrites the content of that row with
+  a record of kind `0x05` that names the `msg_id` of the row, under a new
+  record key (`DEV-099`, `DEV-100`). The row keeps its direction, its
+  conversation, and its store time, thus the placeholder stands at the
+  position of the message. A deletion for the devices of one user, on a
+  device set of one device, erases the row and sends nothing.
+- **[IMP-152]** A deletion request of this device is a record that waits for
+  the send path as each other record does (`DEV-112`). It holds a raw
+  `msg_id` under `WIR-070`. A client MUST show it in no view and in no
+  summary, and it MUST erase it in the batch that records that a relay took
+  it (`WIR-071`). A client MUST keep the time of the last request of each
+  conversation in the store, and it MUST refuse a request inside
+  `DELETE_RATE_LIMIT` with no change to the store. A lock and a new run do
+  not reset that time.
+- **[IMP-153]** The surface MUST give a deleted state of a message and no
+  text for it, and the event of a deletion MUST carry the conversation and
+  no content. The platform MUST NOT raise an alert for that event: a
+  deletion is no arrival.
 - **[IMP-149]** A stored record MUST hold its `reply_target` as the `msg_ref`
   of Part 6 §6.6 (`WIR-170`). A client MUST make that replacement in the batch
   that stores a received record. A record of this device that waits for a
@@ -799,6 +818,7 @@ flight 1, with its one-time prekey.
 | `0x09` | Conversations | What this device alone knows of one conversation: the time up to which the user saw its messages, and the name that the user gave the contact |
 | `0x0A` | Settings | One setting of this device under its name, such as the idle time of the auto-lock, or the receipts of one conversation |
 | `0x0B` | Held receipts | One receipt that waits for a slot: the conversation, the kind, the `msg_id` of its target, and the time that it reports (Part 3 §3.5.4) |
+| `0x0C` | Pending references | One deletion of a contact whose target did not arrive yet: the conversation, the `msg_ref` of the target, and the time of the deletion (Part 7 §7.5.6) |
 
 The stored form of a row is local to one device, and no peer reads it. This
 part gives it no byte layout. **[IMP-130]** A stored object MUST start with a

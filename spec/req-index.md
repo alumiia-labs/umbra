@@ -79,9 +79,9 @@ each column when a crate implements the requirement and a test covers it.
 | `COM` | 299 | 96 | 0 | 0 | 5 | **400** |
 | `ATT` | 134 | 46 | 1 | 0 | 2 | **183** |
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
-| `IMP` | 97 | 41 | 0 | 0 | 1 | **139** |
+| `IMP` | 100 | 41 | 0 | 0 | 1 | **142** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2155 | 702 | 7 | 0 | 51 | **2915** |
+| **All** | 2158 | 702 | 7 | 0 | 51 | **2918** |
 
 ## SCP — Scope and Conventions
 
@@ -3081,6 +3081,9 @@ Source: `spec/15-implementation.md`
 | `IMP-148` | §15.6.1 | MUST NOT | (unstated) | A conversation view MUST show the read state as one mark of the contact at the newest message that the contact saw, and it MUST NOT write a word for that state on each message. |  |  |
 | `IMP-149` | §15.6.1 | MUST | A stored record | A stored record MUST hold its `reply_target` as the `msg_ref` of Part 6 §6.6 (`WIR-170`). |  |  |
 | `IMP-150` | §15.6.1 | MUST NOT | (unstated) | The surface MUST give the target of a reply as a handle of a message of the same conversation, or as absent (`WIR-173`), and it MUST NOT give a `msg_id` or a `msg_ref`. |  |  |
+| `IMP-151` | §15.6.1 | MUST | The placeholder of Part 7 §7.5.6 | The placeholder of Part 7 §7.5.6 MUST be the row of the deleted message itself: the client overwrites the content of that row with a record of kind `0x05` that names the `msg_id` of the row, under a new record key (`DEV-099`, `DEV-100`). |  |  |
+| `IMP-152` | §15.6.1 | MUST | (unstated) | A deletion request of this device is a record that waits for the send path as each other record does (`DEV-112`). |  |  |
+| `IMP-153` | §15.6.1 | MUST | The surface | The surface MUST give a deleted state of a message and no text for it, and the event of a deletion MUST carry the conversation and no content. |  |  |
 
 ## SEC — Security Considerations
 
