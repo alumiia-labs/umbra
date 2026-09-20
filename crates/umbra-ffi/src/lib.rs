@@ -445,10 +445,11 @@ mod tests {
             .set_receipt_settings(conversation, both, &mut rng)
             .unwrap();
         assert_eq!(client.receipt_settings(conversation).unwrap(), both);
-        let arrivals: Vec<_> = (2..=12).map(text).collect();
-        client
-            .commit_network(&[], &arrivals, 3_000_000, &mut rng)
-            .unwrap();
+        for id in 2..=12 {
+            client
+                .commit_network(&[], &[text(id)], 3_000_000 + u64::from(id), &mut rng)
+                .unwrap();
+        }
 
         // NET-050 and NET-045: the floor, and nine targets in one batch. A
         // batch that did not leave comes again.
@@ -473,10 +474,8 @@ mod tests {
             .due_receipt(4_000 + RECEIPT_MIN_DELAY, &mut rng)
             .unwrap()
             .unwrap();
-        assert_eq!(
-            targets_of(&read, AppKind::ReadReceipt).len(),
-            RECEIPT_BATCH_MAX
-        );
+        // WIR-514: one target, the newest message that the user saw.
+        assert_eq!(targets_of(&read, AppKind::ReadReceipt), [[12; 16]]);
         let delivery_only = ReceiptSettings {
             delivery: true,
             read: false,
@@ -508,6 +507,19 @@ mod tests {
             None
         );
 
+        // A read receipt covers each earlier message that a relay took, and
+        // no message that waits.
+        let mut early = Vec::new();
+        for (words, at) in [("first", 5_800_000), ("still waits", 5_900_000)] {
+            let mut draft = client.new_draft(conversation);
+            draft.set_text(&units(words)).unwrap();
+            early.push(client.send_draft(draft, at, &mut rng).unwrap());
+            client.take_outgoing().unwrap();
+        }
+        client
+            .set_delivery(&early[0], Delivery::Accepted, &mut rng)
+            .unwrap();
+
         // A receipt of the peer moves a sent message up, and never down.
         let mut draft = client.new_draft(conversation);
         draft.set_text(&units("are you there")).unwrap();
@@ -538,13 +550,16 @@ mod tests {
                 &mut rng,
             )
             .unwrap();
-        assert_eq!(
-            client.next_event(),
-            Some(Event::Delivery {
-                message: sent,
-                delivery: Delivery::Read
-            })
-        );
+        let mut moved = Vec::new();
+        while let Some(Event::Delivery { message, delivery }) = client.next_event() {
+            assert_eq!(delivery, Delivery::Read);
+            moved.push(message);
+        }
+        moved.sort();
+        let mut expected = vec![sent, early[0]];
+        expected.sort();
+        assert_eq!(moved, expected);
+        assert_eq!(client.info(&early[1]).unwrap().delivery, Delivery::Queued);
         client
             .commit_network(
                 &[],

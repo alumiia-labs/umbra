@@ -410,6 +410,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 // changes nothing, and it ends no batch.
                 let targets =
                     ReceiptBody::parse(parsed.body).map_or(Vec::new(), |body| body.targets);
+                let mut named = Vec::new();
                 for target in targets {
                     let reference = msg_ref(&open.device_set_key, &target);
                     let natural = [conversation.0.as_slice(), &reference].concat();
@@ -417,11 +418,33 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     let Some(plain) = open.store.get(TableId::MESSAGE, &row)? else {
                         continue;
                     };
-                    let mut plain = Zeroizing::new(plain);
-                    let info = info_of(&plain)?;
                     // WIR-293: a receipt names a message of this device to
-                    // this peer, and a state goes up only.
-                    if !info.outgoing || !info.delivery.is_below(reported) {
+                    // this peer.
+                    if info_of(&plain)?.outgoing {
+                        named.push((row, Zeroizing::new(plain)));
+                    }
+                }
+                if reported == Delivery::Read {
+                    // WIR-514: the peer saw each message up to the newest
+                    // one that the receipt names. A message that no relay
+                    // took is not one of them.
+                    let mut up_to = 0;
+                    for (_, plain) in &named {
+                        up_to = up_to.max(info_of(plain)?.stored_at_ms);
+                    }
+                    for (row, plain) in open.store.list(TableId::MESSAGE, Some(&conversation.0))? {
+                        let info = info_of(&plain)?;
+                        let is_sent =
+                            matches!(info.delivery, Delivery::Accepted | Delivery::Delivered);
+                        let is_named = named.iter().any(|(held, _)| *held == row);
+                        if info.outgoing && is_sent && info.stored_at_ms <= up_to && !is_named {
+                            named.push((row, Zeroizing::new(plain)));
+                        }
+                    }
+                }
+                for (row, mut plain) in named {
+                    // A state goes up only.
+                    if !info_of(&plain)?.delivery.is_below(reported) {
                         continue;
                     }
                     *plain.get_mut(1).ok_or(Error::Integrity)? = reported as u8;
@@ -765,25 +788,42 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         rng: &mut R,
     ) -> Result<(), Error> {
         let open = self.open_mut()?;
-        let mut rows = Vec::new();
-        for (_, plain) in open.store.list(TableId::MESSAGE, Some(&conversation.0))? {
+        // WIR-514: a read receipt names the newest message that the user
+        // saw, and it covers each earlier one.
+        // The order of a conversation view: two messages of one batch hold
+        // one store time.
+        let mut newest: Option<((u64, u64, RowId), [u8; 16])> = None;
+        for (row, plain) in open.store.list(TableId::MESSAGE, Some(&conversation.0))? {
             let plain = Zeroizing::new(plain);
             let info = info_of(&plain)?;
             if info.outgoing || info.stored_at_ms <= read_up_to {
                 continue;
             }
-            let app = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
-            let target = AppMessage::parse(app, Channel::Pairwise)?.msg_id;
-            let key = held_receipt_key(conversation, AppKind::ReadReceipt, &target);
-            rows.push((
-                open.store.row_id(RECEIPT, &key),
-                held_receipt(conversation, AppKind::ReadReceipt, &target, now),
-            ));
+            let order = (info.stored_at_ms, info.sent_at_ms, row);
+            if newest.is_none_or(|(held, _)| order > held) {
+                let app = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
+                let target = AppMessage::parse(app, Channel::Pairwise)?.msg_id;
+                newest = Some((order, target));
+            }
         }
+        let Some((_, target)) = newest else {
+            return Ok(());
+        };
+        // NET-307: the one that waited names an older message, and it goes.
+        let mut earlier = Vec::new();
+        for (row, plain) in open.store.list(RECEIPT, Some(&conversation.0))? {
+            if plain.get(16) == Some(&(AppKind::ReadReceipt as u8)) {
+                earlier.push(row);
+            }
+        }
+        let key = held_receipt_key(conversation, AppKind::ReadReceipt, &target);
+        let row = open.store.row_id(RECEIPT, &key);
+        let plain = held_receipt(conversation, AppKind::ReadReceipt, &target, now);
         let mut batch = open.store.begin();
-        for (row, plain) in &rows {
-            batch.put(RECEIPT, *row, Some(conversation.0), plain, rng)?;
+        for held in earlier {
+            batch.delete(RECEIPT, held);
         }
+        batch.put(RECEIPT, row, Some(conversation.0), &plain, rng)?;
         Ok(batch.commit()?)
     }
 
