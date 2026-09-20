@@ -111,6 +111,13 @@ pub enum Request {
     Dial([u8; 32]),
     /// Write a digest into a notify queue, as a sender.
     Digest(DigestDue),
+    /// Send one copy of a chunk to a replica relay.
+    Push {
+        /// The relay that takes the copy.
+        relay_id: [u8; 32],
+        /// One `UMBRA_REPLICA` capsule.
+        capsule: Vec<u8>,
+    },
 }
 
 fn unix_now() -> u64 {
@@ -205,8 +212,29 @@ pub async fn run_node(
                 Output::Digest(digest) => {
                     let _ = requests.send(Request::Digest(digest));
                 }
+                Output::Push { relay_id, capsule } => {
+                    let _ = requests.send(Request::Push { relay_id, capsule });
+                }
             }
         }
+    }
+}
+
+/// Sends one copy of a chunk on a connection of its own, and ends that
+/// connection (`WIR-211`). A copy that does not arrive gets no second send:
+/// the uploader finds it with its sample, and it names another relay
+/// (`ATT-113`, `ATT-118`).
+async fn push_copy(target: Dial, tls: Arc<rustls::ClientConfig>, capsule: Vec<u8>) {
+    let mut rng = OsRng;
+    let mut key = [0u8; 16];
+    let mut mask = [0u8; 4];
+    let _ = rng.try_fill_bytes(&mut key);
+    let _ = rng.try_fill_bytes(&mut mask);
+    let plan = Plan::Only(Wire::Tcp);
+    if let Ok(mut connection) =
+        native::connect(&target, tls, plan, key, mask, Duration::from_secs(10)).await
+    {
+        let _ = connection.send(&capsule).await;
     }
 }
 
@@ -401,13 +429,16 @@ pub async fn dial_next(
 /// accept loop. `next_hops` names each relay of the next layer, and
 /// `client_tls` is the configuration that the dialer trusts them under. A
 /// deployment passes [`PACING_MEAN_MS`] (`NET-077`), and a test passes less.
-/// With a `manifest` the relay is an HTTPS carrier of it.
+/// With a `manifest` the relay is an HTTPS carrier of it. `replicas` names
+/// each other relay with the attachment role, for the copies of Part 13
+/// §13.4.1.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_relay(
     node: RelayNode,
     listener: TcpListener,
     tls: TlsAcceptor,
     next_hops: BTreeMap<[u8; 32], Dial>,
+    replicas: BTreeMap<[u8; 32], Dial>,
     client_tls: Arc<rustls::ClientConfig>,
     pacing_mean_ms: u64,
     store: Box<dyn RelayStore>,
@@ -447,6 +478,12 @@ pub async fn run_relay(
                             dial_inputs.clone(),
                         ));
                         link = link.saturating_add(2);
+                    }
+                }
+                // ATT-105: a relay that the set does not name gets no copy.
+                Request::Push { relay_id, capsule } => {
+                    if let Some(target) = replicas.get(&relay_id) {
+                        tokio::spawn(push_copy(target.clone(), client_tls.clone(), capsule));
                     }
                 }
                 // The write of a digest needs a circuit of this relay to the

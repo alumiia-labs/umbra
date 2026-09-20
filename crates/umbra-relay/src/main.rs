@@ -109,6 +109,8 @@ struct Settings {
     public: Option<String>,
     config: Config,
     next: BTreeMap<[u8; 32], Dial>,
+    /// Each other relay with the attachment role, from the manifest.
+    replicas: BTreeMap<[u8; 32], Dial>,
     /// The key that signs the descriptor of this relay.
     identity: Option<SigningKey>,
     /// The manifest that gave this relay its place. The relay serves it to
@@ -202,7 +204,10 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
             .ok()
             .filter(|l| (1..=3).contains(l))?,
     };
-    let next = placed.map_or(next, |placed| placed.next);
+    let (next, replicas) = match placed {
+        Some(placed) => (placed.next, placed.replicas),
+        None => (next, BTreeMap::new()),
+    };
     Some(Settings {
         listen: (*values.get("listen")?).to_owned(),
         cert: (*values.get("cert")?).to_owned(),
@@ -223,6 +228,7 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
             },
         },
         next,
+        replicas,
         identity,
         manifest,
         facts: [
@@ -455,6 +461,7 @@ async fn run() -> ExitCode {
         listener,
         tls,
         settings.next,
+        settings.replicas,
         client_tls,
         PACING_MEAN_MS,
         store,

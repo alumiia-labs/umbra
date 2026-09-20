@@ -157,6 +157,7 @@ async fn two_clients_meet_and_talk_over_real_sockets() {
             listener,
             tls_acceptor(LEAF, LEAF_KEY).unwrap(),
             next_hops,
+            BTreeMap::new(),
             client_tls.clone(),
             PACING_MEAN_MS,
             Box::new(MemoryStore::default()),

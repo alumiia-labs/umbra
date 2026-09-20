@@ -22,13 +22,20 @@ pub enum CapsuleType {
     Cell = 0x0B52,
     /// A session control record of §6.2.3.
     Session = 0x0B53,
+    /// One `CRPUT` between two relays, outside each session (`WIR-211`).
+    Replica = 0x0B54,
 }
+
+/// The value of an `UMBRA_REPLICA` capsule: the command header, and the
+/// 32 682 bytes of a `CRPUT` payload (`WIR-213`).
+pub const REPLICA_LEN: usize = crate::bucket::COMMAND_HEADER + 32 + 32_650;
 
 impl CapsuleType {
     const fn from_value(v: u64) -> Result<Self, Error> {
         match v {
             0x0B52 => Ok(CapsuleType::Cell),
             0x0B53 => Ok(CapsuleType::Session),
+            0x0B54 => Ok(CapsuleType::Replica),
             _ => Err(Error::Malformed),
         }
     }
@@ -79,6 +86,14 @@ fn check_value_len(kind: CapsuleType, len: usize) -> Result<(), Error> {
         // WIR-221: the session parser checks the length against its op.
         CapsuleType::Session => {
             if crate::session::CONTROL_LENS.contains(&len) {
+                Ok(())
+            } else {
+                Err(Error::Malformed)
+            }
+        }
+        // WIR-213: one length.
+        CapsuleType::Replica => {
+            if len == REPLICA_LEN {
                 Ok(())
             } else {
                 Err(Error::Malformed)

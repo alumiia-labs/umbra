@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, VecDeque};
 
 use umbra_core::{
     abuse::admission::{Accepts, RelayGate},
+    attach::command::{CrputPayload, CRPUT_LEN},
     session::batch::{unpack, Range},
 };
 use umbra_crypto::{
@@ -29,7 +30,7 @@ use umbra_wire::{
 use crate::{
     circuits::{Action, CircuitKey, CircuitTable, LinkId},
     service::{
-        chunk::ChunkService,
+        chunk::{ChunkService, Push},
         community::{CommunityService, DigestDue},
         nack,
         queue::QueueService,
@@ -60,11 +61,52 @@ pub enum Output {
     },
     /// Write a digest into a notify queue, as a sender.
     Digest(DigestDue),
+    /// Send one copy of a chunk to a replica relay, on a connection of its
+    /// own (`WIR-211`). The runtime keeps nothing of it after the send.
+    Push {
+        /// The relay that takes the copy.
+        relay_id: [u8; 32],
+        /// One `UMBRA_REPLICA` capsule.
+        capsule: Vec<u8>,
+    },
     /// Close the link.
     Close {
         /// The link.
         link: LinkId,
     },
+}
+
+/// The byte of a `CRPUT` (Part 13 §13.3.3).
+const CRPUT: u8 = 0x77;
+
+/// The capsule of one copy. The header carries no authenticator, because
+/// the token of the payload authorizes a copy (`ATT-107`, `ATT-108`).
+fn push_output(push: &Push) -> Option<Output> {
+    let mut payload = vec![0u8; CRPUT_LEN];
+    CrputPayload {
+        storage_token: push.target.storage_token,
+        chunk: &push.chunk,
+    }
+    .encode(&mut payload)
+    .ok()?;
+    let command = Command {
+        cmd: Cmd::Attachment(CRPUT),
+        // No answer names this value, and a fixed one keeps a relay from a
+        // draw that it does not need.
+        corr_id: [0; 16],
+        queue_id: push.chunk_id,
+        auth: [0; 32],
+        payload: &payload,
+    };
+    let mut encoded = vec![0u8; command.len()];
+    command.encode(&mut encoded).ok()?;
+    let mut capsule = vec![0u8; capsule::HEADER_LEN + encoded.len()];
+    let used = capsule::encode(CapsuleType::Replica, &encoded, &mut capsule).ok()?;
+    capsule.truncate(used);
+    Some(Output::Push {
+        relay_id: push.target.relay_id,
+        capsule,
+    })
 }
 
 /// The settings of one relay.
@@ -186,6 +228,20 @@ impl RelayNode {
         };
         match kind {
             CapsuleType::Session => self.on_control(link, value, now),
+            CapsuleType::Replica => {
+                // ATT-107: the token of the payload is the one authority of
+                // a copy, thus the link needs no session. The pushing relay
+                // gets no answer, and the sample of the uploader finds a
+                // copy that did not arrive (`ATT-113`).
+                if let Ok((command, _)) = Command::parse(value, Bucket::B3) {
+                    if command.cmd == Cmd::Attachment(CRPUT) {
+                        let _ = self
+                            .chunks
+                            .replica_put(command.queue_id, command.payload, now);
+                    }
+                }
+                Vec::new()
+            }
             CapsuleType::Cell => {
                 let cell = match self.links.get_mut(&link) {
                     Some(Framing::Accepted(framing)) => framing.receive(value),
@@ -287,6 +343,8 @@ impl RelayNode {
                 } => {
                     let (paced, unpaced, digests) = self.serve(circuit, bucket, &content, now, rng);
                     outputs.extend(digests.into_iter().map(Output::Digest));
+                    // ATT-102: one copy for each target of a `CREP`.
+                    outputs.extend(self.chunks.take_pushes().iter().filter_map(push_output));
                     for reply in unpaced {
                         work.extend(self.circuits.originate(
                             &reply.circuit,
@@ -509,5 +567,80 @@ impl RelayNode {
             .into_iter()
             .map(Output::Digest)
             .collect()
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::panic
+)]
+mod tests {
+    use super::*;
+    use umbra_core::attach::{command::ReplicaTarget, CHUNK_SIZE};
+    use umbra_crypto::x25519::PublicKey as XPublic;
+
+    struct Rng;
+    impl umbra_crypto::rand_core::TryRng for Rng {
+        type Error = core::convert::Infallible;
+        fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+            Ok(4)
+        }
+        fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+            Ok(4)
+        }
+        fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+            dst.fill(4);
+            Ok(())
+        }
+    }
+    impl umbra_crypto::rand_core::TryCryptoRng for Rng {}
+
+    #[test]
+    fn a_copy_is_one_replica_capsule_and_a_relay_takes_it_with_no_session() {
+        let push = Push {
+            chunk_id: [0xC7; 32],
+            target: ReplicaTarget {
+                relay_id: [0xB1; 32],
+                storage_token: [0xB2; 32],
+            },
+            chunk: vec![0x3C; CHUNK_SIZE],
+        };
+        let Some(Output::Push { relay_id, capsule }) = push_output(&push) else {
+            panic!("no capsule");
+        };
+        assert_eq!(relay_id, [0xB1; 32]);
+        let (kind, value, used) = capsule::parse(&capsule).unwrap();
+        assert_eq!((kind, used), (CapsuleType::Replica, capsule.len()));
+        assert_eq!(value.len(), capsule::REPLICA_LEN);
+        let (command, _) = Command::parse(value, Bucket::B3).unwrap();
+        assert_eq!(command.cmd, Cmd::Attachment(CRPUT));
+        assert_eq!(command.queue_id, [0xC7; 32]);
+        let copy = CrputPayload::parse(command.payload).unwrap();
+        assert_eq!(copy.storage_token, [0xB2; 32]);
+        assert_eq!(copy.chunk, push.chunk);
+
+        // A relay that holds no registration for the chunk drops the copy.
+        // It gives no answer, and it keeps the link (`ATT-107`).
+        let static_secret = StaticSecret::from([7; 32]);
+        let mut node = RelayNode::new(Config {
+            relay: RelayStatic {
+                s: *XPublic::from(&static_secret).as_bytes(),
+                relay_id: [0xB1; 32],
+            },
+            static_secret,
+            layer: 3,
+            issuer_key: PublicKey2048::from_modulus(&[0xFF; 256]).unwrap(),
+            community_capacity: 1 << 20,
+            chunk_capacity: 1 << 24,
+        });
+        assert!(node.on_capsule(2, &capsule, 1_000, &mut Rng).is_empty());
+        assert_eq!(node.chunks.held_count(), 0);
+        // A capsule of that type with another length does not parse, and the
+        // link ends.
+        let outputs = node.on_capsule(2, &capsule[..capsule.len() - 1], 1_000, &mut Rng);
+        assert!(matches!(outputs[..], [Output::Close { link: 2 }]));
     }
 }

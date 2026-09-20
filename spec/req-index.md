@@ -70,7 +70,7 @@ each column when a crate implements the requirement and a test covers it.
 | `NET` | 224 | 84 | 1 | 0 | 8 | **317** |
 | `IDN` | 120 | 43 | 1 | 0 | 5 | **169** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
-| `WIR` | 385 | 84 | 0 | 0 | 6 | **475** |
+| `WIR` | 386 | 85 | 0 | 0 | 6 | **477** |
 | `DEV` | 179 | 87 | 2 | 0 | 7 | **275** |
 | `NTF` | 67 | 30 | 0 | 0 | 2 | **99** |
 | `DIS` | 123 | 37 | 0 | 0 | 1 | **161** |
@@ -81,7 +81,7 @@ each column when a crate implements the requirement and a test covers it.
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
 | `IMP` | 106 | 41 | 0 | 0 | 1 | **148** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2185 | 706 | 7 | 0 | 51 | **2949** |
+| **All** | 2186 | 707 | 7 | 0 | 51 | **2951** |
 
 ## SCP — Scope and Conventions
 
@@ -1268,6 +1268,8 @@ Source: `spec/06-wire-format.md`
 | `WIR-512` | §6.4 | MUST NOT | A relay | A relay MUST NOT answer a `COVER` of a client. |  |  |
 | `WIR-513` | §6.4 | MUST NOT | A client | A client MUST NOT hold a `COVER`, an `ACK`, a `SUB`, an `UNSUB`, or a `DEL` in the table of the commands that wait for an answer. |  |  |
 | `WIR-514` | §6.6.9 | MUST | (unstated) | A read receipt, kind `0x07`, is a marker that moves forward. |  |  |
+| `WIR-515` | §6.4 | MUST | A relay | A relay MUST send a `CRPUT` as the value of one `UMBRA_REPLICA` capsule, on a connection of §6.2.1 that it opens for that copy. |  |  |
+| `WIR-516` | §6.4 | MUST NOT | (unstated) | The sender MUST set `corr_id` and `auth` of that command to zero bytes, and the receiver MUST NOT read them. |  |  |
 
 ## DEV — Device Sets
 

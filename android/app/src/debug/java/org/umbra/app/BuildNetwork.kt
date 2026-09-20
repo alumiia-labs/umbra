@@ -28,7 +28,7 @@ import uniffi.umbra_ffi.fetchManifest
 import uniffi.umbra_ffi.parseNetwork
 
 /**
- * The network of the debug build. With no descriptor it is the six relays
+ * The network of the debug build. With no descriptor it is the seven relays
  * of `scripts/devnet.sh` on the machine of the developer. The seven test
  * authorities of that script sign a relay manifest at each start, and the
  * ingress relay gives it over HTTPS. The client verifies it under the key

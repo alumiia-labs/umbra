@@ -8,7 +8,7 @@ use umbra_wire::codec::{Reader, Writer};
 
 use super::{
     bloc::BlocList,
-    descriptor::{RelayEntry, ENTRY_LEN},
+    descriptor::{roles, RelayEntry, ENTRY_LEN},
     path::Candidate,
     root::{Consensus, DirectoryRoot},
     tree::{self, Step},
@@ -133,6 +133,8 @@ pub struct ListedRelay {
     pub host: alloc::string::String,
     /// ISO 3166-1 alpha-2.
     pub jurisdiction: [u8; 2],
+    /// Whether the descriptor offers the attachment role.
+    pub has_attachment_role: bool,
     /// The verified class, 0 to 3.
     pub class: u8,
 }
@@ -192,6 +194,7 @@ impl RelaySet {
                 port: descriptor.port,
                 host: descriptor.host_str().into(),
                 jurisdiction: descriptor.jurisdiction,
+                has_attachment_role: descriptor.roles & roles::ATTACHMENT != 0,
                 class: entry.class,
             });
         }

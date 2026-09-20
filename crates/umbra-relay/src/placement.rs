@@ -28,6 +28,11 @@ pub struct Placement {
     pub layer: u8,
     /// Where to dial each relay of the next layer (`NET-167`).
     pub next: BTreeMap<[u8; 32], Dial>,
+    /// Where to dial each other relay with the attachment role, for the
+    /// copy of a chunk (Part 13 §13.4.1).
+    pub replicas: BTreeMap<[u8; 32], Dial>,
+    /// Whether this relay has the attachment role.
+    pub has_attachment_role: bool,
     /// The epoch of the root.
     pub epoch: u64,
 }
@@ -78,9 +83,17 @@ pub fn placement(
         .filter(|relay| relay.candidate.chain && layer_of(relay) == layer.saturating_add(1))
         .map(|relay| (relay.candidate.relay_id, dial_of(relay)))
         .collect();
+    let replicas = set
+        .relays
+        .iter()
+        .filter(|relay| relay.has_attachment_role && relay.candidate.relay_id != *relay_id)
+        .map(|relay| (relay.candidate.relay_id, dial_of(relay)))
+        .collect();
     Ok(Placement {
         layer,
         next,
+        replicas,
+        has_attachment_role: own.has_attachment_role,
         epoch: set.epoch,
     })
 }

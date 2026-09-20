@@ -114,10 +114,11 @@ receiver the length of the frame that it carries.
 
 ```
 Capsule {
-    type      varint      // 0x0B52 UMBRA_CELL, or 0x0B53 UMBRA_SESSION
+    type      varint      // 0x0B52 UMBRA_CELL, 0x0B53 UMBRA_SESSION, or
+                          // 0x0B54 UMBRA_REPLICA
     length    varint      // the byte count of value, in the 4-byte form
-    value     [length]u8  // a SessionFrame (§6.2.2), or a session control
-                          // record (§6.2.3)
+    value     [length]u8  // a SessionFrame (§6.2.2), a session control
+                          // record (§6.2.3), or one CRPUT command (§6.4)
 }
 ```
 
@@ -126,7 +127,7 @@ sender MUST encode `type` in the 2-byte form. **[WIR-217]** A sender MUST encode
 `length` in the 4-byte form. Thus the capsule header is 6 bytes at each bucket.
 RFC 9000 §16 permits a longer form than the minimum, and §6.1.1 rule 4 permits
 one form only. **[WIR-218]** A receiver MUST reject a capsule whose `type` is
-not `0x0B52` or `0x0B53`.
+not `0x0B52`, `0x0B53`, or `0x0B54`.
 
 **The cell length comes from the capsule.** **[WIR-219]** A receiver MUST take
 the cell length from `length`, and that length is `length` minus 12.
@@ -598,7 +599,24 @@ exactly as to a queue session.
   payload of §6.9, and a `CRPUT` sits in no cell and in no bucket.
 - **[WIR-214]** A client MUST NOT send a `CRPUT`. **[WIR-215]** A relay MUST
   reject a `CRPUT` that arrives over a circuit.
+- **[WIR-515]** A relay MUST send a `CRPUT` as the value of one
+  `UMBRA_REPLICA` capsule, on a connection of §6.2.1 that it opens for that
+  copy. The value is the command of §6.4 with its header, 32 766 bytes, and
+  a receiver MUST reject each other length. The capsule is outside the
+  session of §6.2.3: it has no sequence number, no resend, and no answer.
+  **[WIR-516]** The sender MUST set `corr_id` and `auth` of that command to
+  zero bytes, and the receiver MUST NOT read them. The `storage_token` of the
+  payload is the one authority of a copy (Part 13 rules `ATT-107` and
+  `ATT-108`).
 
+> *Cause of the capsule.* An earlier draft put the `CRPUT` on "a direct
+> transport session" and gave it no frame. A `SessionFrame` holds a cell of
+> one bucket, and `WIR-213` puts a `CRPUT` in no cell. The session adds a
+> resend window, and a copy needs none: rule `ATT-113` of Part 13 makes the
+> uploader find a copy that did not arrive. A token holder that is no relay
+> can send the capsule, and it then stores the chunk that it registered,
+> which a `CPUT` gives it too.
+>
 > *Cause.* A relay-to-relay transfer has a relay at each end, thus no party of
 > that transfer is a user. Part 3 §3.3 pads a cell to hide a user record, and
 > that measure buys nothing here. The direct session also keeps the 2 hops of
