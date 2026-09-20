@@ -67,10 +67,10 @@ each column when a crate implements the requirement and a test covers it.
 | --- | --- | --- | --- | --- | --- | --- |
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
-| `NET` | 213 | 83 | 1 | 0 | 8 | **305** |
+| `NET` | 214 | 83 | 1 | 0 | 8 | **306** |
 | `IDN` | 120 | 43 | 1 | 0 | 5 | **169** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
-| `WIR` | 384 | 84 | 0 | 0 | 6 | **474** |
+| `WIR` | 385 | 84 | 0 | 0 | 6 | **475** |
 | `DEV` | 179 | 87 | 2 | 0 | 7 | **275** |
 | `NTF` | 67 | 30 | 0 | 0 | 2 | **99** |
 | `DIS` | 123 | 37 | 0 | 0 | 1 | **161** |
@@ -79,9 +79,9 @@ each column when a crate implements the requirement and a test covers it.
 | `COM` | 299 | 96 | 0 | 0 | 5 | **400** |
 | `ATT` | 134 | 46 | 1 | 0 | 2 | **183** |
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
-| `IMP` | 96 | 39 | 0 | 0 | 1 | **136** |
+| `IMP` | 96 | 40 | 0 | 0 | 1 | **137** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2152 | 700 | 7 | 0 | 51 | **2910** |
+| **All** | 2154 | 701 | 7 | 0 | 51 | **2913** |
 
 ## SCP — Scope and Conventions
 
@@ -444,6 +444,7 @@ Source: `spec/03-network-architecture.md`
 | `NET-304` | §3.6.2 | MUST | Each other cover cell of a client | Each other cover cell of a client MUST carry one `COVER` command of Part 6 §6.3 to the queue relay of the circuit, in the shape of a `B0` `SEND`. |  |  |
 | `NET-305` | §3.6.2 | MUST | A client | A client MUST draw the time to the next slot from an exponential distribution with the mean of the tier, and it MUST draw it again at each slot, whether or not the slot carried an item. |  |  |
 | `NET-306` | §3.6.2 | MUST | A client in the background that holds an open session | A client in the background that holds an open session MUST keep the slot clock for the items 1 to 6 of `NET-065`, and it MUST make no cover cell. |  |  |
+| `NET-307` | §3.5.4 | MUST | A client | A client MUST hold at most one read receipt for each peer. |  |  |
 
 ## IDN — Identity
 
@@ -1255,6 +1256,7 @@ Source: `spec/06-wire-format.md`
 | `WIR-511` | §6.4 | MUST | A relay | A relay MUST answer an `IGET` for an identifier that it does not hold with the `NACK` reason `REJECTED`, and `WIR-317` gives that one reason to an unknown link, to a link with no blob, and to an `auth` that does not verify. |  |  |
 | `WIR-512` | §6.4 | MUST NOT | A relay | A relay MUST NOT answer a `COVER` of a client. |  |  |
 | `WIR-513` | §6.4 | MUST NOT | A client | A client MUST NOT hold a `COVER`, an `ACK`, a `SUB`, an `UNSUB`, or a `DEL` in the table of the commands that wait for an answer. |  |  |
+| `WIR-514` | §6.6.9 | MUST | (unstated) | A read receipt, kind `0x07`, is a marker that moves forward. |  |  |
 
 ## DEV — Device Sets
 
@@ -3076,6 +3078,7 @@ Source: `spec/15-implementation.md`
 | `IMP-145` | §15.6.4 | MUST | The surface | The surface MUST take the state of the app, on the screen or not, from the platform layer, and the runtime MUST select the cover tier of Part 3 §3.6.2 from that state alone. |  |  |
 | `IMP-146` | §15.6.1 | MUST | A client | A client MUST hold a receipt in table `0x0B` from the commit of the message that it reports, or from the move of the read marker of `IMP-139`, to the slot that carries it (`NET-053`). |  |  |
 | `IMP-147` | §15.6.1 | MUST NOT | A receipt is no message of a conversation, and a client | A receipt is no message of a conversation, and a client MUST NOT store it as one. |  |  |
+| `IMP-148` | §15.6.1 | MUST NOT | (unstated) | A conversation view MUST show the read state as one mark of the contact at the newest message that the contact saw, and it MUST NOT write a word for that state on each message. |  |  |
 
 ## SEC — Security Considerations
 

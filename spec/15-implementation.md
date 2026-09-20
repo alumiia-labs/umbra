@@ -510,6 +510,11 @@ that draft is dropped, and it MUST do that whether the send succeeded or failed.
   that sent the receipt, and only upward in the order Accepted, Delivered,
   Read. A receipt whose body does not parse MUST change nothing, and it MUST
   NOT end the batch of the records that arrived with it.
+- **[IMP-148]** A conversation view MUST show the read state as one mark of
+  the contact at the newest message that the contact saw, and it MUST NOT
+  write a word for that state on each message. The states Queued, Accepted,
+  Delivered and Failed stay a word on their message, because each is a fact
+  of that one message.
 - **[IMP-142]** The short code and the safety number of Part 4 §4.5 are
   public values of the two devices, and they cross the surface as strings. The
   surface MUST give the safety number with no network, from the stored

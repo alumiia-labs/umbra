@@ -2265,6 +2265,13 @@ off by default.
   not equal 2 plus `count` times 16. **[WIR-290]** A parser MUST reject a target
   list that is not in strictly increasing byte order. **[WIR-291]** A parser
   MUST reject a repeated target.
+- **[WIR-514]** A read receipt, kind `0x07`, is a marker that moves forward. A
+  sender MUST name in it the newest message of the conversation that the user
+  saw, and it MUST NOT name an earlier one beside it. A receiver MUST take
+  each message that it sent in that conversation at or before the newest
+  named target, and that a relay accepted, as read. A delivery receipt, kind
+  `0x06`, names each message that it reports, because an arrival is a fact
+  of one message and the order of two arrivals is not the order of two sends.
 - **[WIR-292]** A client MUST store each target as the `msg_ref` of §6.6.
   **[WIR-293]** A receiver MUST resolve each target under the rules of
   `WIR-171` and `WIR-172`.

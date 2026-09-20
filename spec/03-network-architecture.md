@@ -1312,6 +1312,12 @@ time and the read time of each message, thus a seized device gives that record
 to A6. **[NET-053]** The client MUST hold a receipt in the encrypted store only. **[NET-054]** The client
 MUST erase a receipt when it emits or discards it.
 
+**[NET-307]** A client MUST hold at most one read receipt for each peer. A
+read that follows replaces the receipt that waits, and the time of the hold
+starts again at that read. Under `WIR-514` the later receipt covers the
+earlier one, thus a user that reads 50 messages costs one target in one cell,
+and not six cells.
+
 **Padding.** **[NET-055]** The client MUST pad a receipt cell to `B0` at each receipt count.
 **[NET-056]** If the queued receipts do not fit the current bucket, the client MUST split them
 across two opportunities. **[NET-057]** A client MUST NOT select a larger bucket to carry more
