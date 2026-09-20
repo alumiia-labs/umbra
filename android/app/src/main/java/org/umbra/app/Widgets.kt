@@ -432,7 +432,7 @@ class RowEntry(
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ActionSheet(title: String, entries: List<RowEntry>, onDismiss: () -> Unit) {
+fun ActionSheet(title: String, entries: List<RowEntry>, note: String? = null, onDismiss: () -> Unit) {
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         containerColor = Palette.Surface,
@@ -452,6 +452,10 @@ fun ActionSheet(title: String, entries: List<RowEntry>, onDismiss: () -> Unit) {
             entries.forEachIndexed { index, entry ->
                 if (index > 0) HorizontalDivider(color = Palette.Divider)
                 EntryRow(entry, afterClick = onDismiss)
+            }
+            if (note != null) {
+                Spacer(Modifier.height(12.dp))
+                Note(note)
             }
         }
     }

@@ -252,6 +252,11 @@ object Core {
                 revision++
                 refreshChats()
             }
+            // A deletion is no arrival, thus it raises no alert.
+            is FfiEvent.Deleted -> {
+                revision++
+                refreshChats()
+            }
             is FfiEvent.Locked -> {
                 online = false
                 invitation = null
@@ -445,14 +450,42 @@ object Core {
         refreshChats()
     }
 
+    /** Removes a message, or a placeholder, from this device alone. */
+    fun deleteForMe(message: MsgHandle) = call { client ->
+        client.deleteForMe(message)
+        main.post { revision++ }
+        refreshChats()
+    }
+
+    /**
+     * Asks the contact to delete a message of this device. One request goes
+     * in 10 seconds for one conversation, and `onBusy` tells a user who is
+     * faster than that.
+     */
+    fun deleteForEveryone(message: MsgHandle, onBusy: () -> Unit) {
+        val client = handle ?: return
+        worker.execute {
+            try {
+                client.deleteForEveryone(message)
+                main.post { revision++ }
+                refreshChats()
+            } catch (busy: FfiException.Busy) {
+                main.post(onBusy)
+            } catch (failure: FfiException) {
+                main.post { fault = "That did not work: ${failure.javaClass.simpleName}." }
+            }
+        }
+    }
+
     /** Loads the lines of a conversation, and gives them on the main thread. */
     fun load(conversation: Conversation, onLoaded: (List<Line>) -> Unit) = call { client ->
         // A line keeps the handle of its message, because the user can
         // answer it. The collector frees a handle that no line holds.
         val lines = client.messages(conversation.id).map { message ->
             val sink = CharSink()
-            client.msgRender(message, sink)
             val info = client.msgInfo(message)
+            // A placeholder of a deleted message has no text.
+            if (!info.deleted) client.msgRender(message, sink)
             val quote = info.replyTo?.let { target ->
                 val quoted = CharSink()
                 // A target of a kind with no text gives an empty quote.
@@ -485,8 +518,10 @@ object Core {
         last?.use {
             // A record of a kind with no text gives no preview.
             try {
-                client.msgRender(it, sink)
-                isOutgoing = client.msgInfo(it).outgoing
+                val info = client.msgInfo(it)
+                isOutgoing = info.outgoing
+                // The words of a placeholder are words of the interface.
+                if (info.deleted) sink.chars = "Message deleted".toCharArray() else client.msgRender(it, sink)
             } catch (noText: FfiException) {
                 sink.chars = CharArray(0)
             }

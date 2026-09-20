@@ -43,6 +43,7 @@ import androidx.compose.foundation.border
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.runtime.rememberCoroutineScope
@@ -124,11 +125,49 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
             }
         }
     }
+    // The message that the user wants to delete, and a word for a user who
+    // deletes faster than the rate limit permits.
+    var deleting by remember(conversation) { mutableStateOf<Line?>(null) }
+    var notice by remember(conversation) { mutableStateOf<String?>(null) }
+    LaunchedEffect(notice) {
+        if (notice != null) {
+            delay(4_000)
+            notice = null
+        }
+    }
     chosen?.let { line ->
+        val entries = if (line.info.deleted) {
+            // DEV-105: the user can clear a placeholder.
+            listOf(RowEntry("trash-can", "Remove") { Core.deleteForMe(line.handle) })
+        } else {
+            listOf(
+                RowEntry("reply", "Reply") { answered = line },
+                RowEntry("trash-can", "Delete") { deleting = line },
+            )
+        }
+        ActionSheet("Message", entries, onDismiss = { chosen = null })
+    }
+    deleting?.let { line ->
+        val entries = buildList {
+            add(RowEntry("trash-can", "Delete for me") { Core.deleteForMe(line.handle) })
+            // A contact takes a deletion for a message of this device alone.
+            if (line.info.outgoing) {
+                add(
+                    RowEntry("trash-can", "Delete for everyone") {
+                        if (answered?.key == line.key) answered = null
+                        Core.deleteForEveryone(line.handle) {
+                            notice = "Wait 10 seconds between two deletions for everyone."
+                        }
+                    },
+                )
+            }
+        }
         ActionSheet(
-            "Message",
-            listOf(RowEntry("reply", "Reply") { answered = line }),
-            onDismiss = { chosen = null },
+            "Delete this message?",
+            entries,
+            // A fact that a user cannot know, and that decides the choice.
+            note = if (line.info.outgoing) "${chat.title} can hold a copy." else null,
+            onDismiss = { deleting = null },
         )
     }
     Column(Modifier.fillMaxSize()) {
@@ -176,12 +215,16 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                     isFlashed = flashed == line.key,
                     onQuote = line.quote?.let { quote -> { jumpTo(quote.key) } },
                     onLongPress = { chosen = line },
-                    onReply = { answered = line },
+                    // A placeholder has no content to answer.
+                    onReply = if (line.info.deleted) null else ({ answered = line }),
                 )
                 // The contact saw each message up to this one. The mark
                 // sits under it and under no other, as a read marker does.
                 if (index == readUpTo) ReadMark(chat)
             }
+        }
+        notice?.let {
+            Box(Modifier.padding(horizontal = 12.dp)) { Note(it) }
         }
         // An answer starts with the keyboard open, as a user expects it.
         LaunchedEffect(answered) { if (answered != null) composer.focus() }
@@ -283,7 +326,7 @@ private fun Bubble(
     isFlashed: Boolean,
     onQuote: (() -> Unit)?,
     onLongPress: () -> Unit,
-    onReply: () -> Unit,
+    onReply: (() -> Unit)?,
 ) {
     val isOutgoing = line.info.outgoing
     // A slide to the right answers the message. The bubble follows the
@@ -311,9 +354,10 @@ private fun Bubble(
     Box(
         Modifier.fillMaxWidth().draggable(
             state = drag,
+            enabled = onReply != null,
             orientation = Orientation.Horizontal,
             onDragStopped = {
-                if (slide.value >= reach * SLIDE_POINT) onReply()
+                if (slide.value >= reach * SLIDE_POINT) onReply?.invoke()
                 slide.animateTo(0f, spring(stiffness = Spring.StiffnessMediumLow))
             },
         ),
@@ -373,7 +417,20 @@ private fun BubbleContent(line: Line, chat: Chat) {
             .padding(horizontal = 14.dp, vertical = 10.dp),
         horizontalAlignment = Alignment.End,
     ) {
-        if (line.isReply) {
+        if (line.info.deleted) {
+            // The placeholder of Part 7 §7.5.6. It names the party only
+            // where this device held the message (DEV-102, DEV-103).
+            Row(Modifier.align(Alignment.Start), verticalAlignment = Alignment.CenterVertically) {
+                FaIcon("ban", size = 13.dp, tint = Palette.TextSecondary)
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    if (isOutgoing) "You deleted this message" else "This message was deleted",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontStyle = FontStyle.Italic,
+                    color = Palette.TextSecondary,
+                )
+            }
+        } else if (line.isReply) {
             val quote = line.quote
             QuoteBlock(
                 author = quote?.let { if (it.isOutgoing) "You" else chat.title },
@@ -382,7 +439,9 @@ private fun BubbleContent(line: Line, chat: Chat) {
             )
         }
         // The text starts at the left edge, and the time sits at the right.
-        PlatformText(line.text, Palette.Text, modifier = Modifier.align(Alignment.Start))
+        if (!line.info.deleted) {
+            PlatformText(line.text, Palette.Text, modifier = Modifier.align(Alignment.Start))
+        }
         Spacer(Modifier.height(2.dp))
         val clock = DateUtils.formatDateTime(
             LocalContext.current,
@@ -393,7 +452,12 @@ private fun BubbleContent(line: Line, chat: Chat) {
         // one says it for each of them.
         val state = line.info.delivery.toInt()
         Text(
-            if (isOutgoing && state != READ) "$clock · ${deliveryLabel(line.info.delivery)}" else clock,
+            // A placeholder shows its time and no state of a delivery.
+            if (isOutgoing && state != READ && !line.info.deleted) {
+                "$clock · ${deliveryLabel(line.info.delivery)}"
+            } else {
+                clock
+            },
             style = MaterialTheme.typography.labelSmall,
             color = if (state == FAILED) Palette.Error else Palette.TextSecondary,
             modifier = Modifier.subline(),
