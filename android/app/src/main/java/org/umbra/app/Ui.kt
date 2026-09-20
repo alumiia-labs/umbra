@@ -310,6 +310,13 @@ private fun ConnectionNote() {
         fault != null -> Box(Modifier.padding(horizontal = 20.dp, vertical = 6.dp)) {
             Note(fault, isError = true)
         }
+        // The degraded state `corrected clock` of Part 15 §15.9.2. It stops
+        // nothing, thus it is no error (`IMP-078`).
+        Core.online && BuildNetwork.isClockCorrected -> Box(
+            Modifier.padding(horizontal = 20.dp, vertical = 6.dp),
+        ) {
+            Note("The clock of this device differs from the network time by more than one hour.")
+        }
         !Core.online -> Row(
             Modifier.padding(horizontal = 20.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,

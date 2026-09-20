@@ -367,6 +367,7 @@ adds a trade MUST add a row to this table.
 | A community defaults to `mentions` with a digest queue. Thus the device wakes at most `COMMUNITY_DIGEST_BUDGET` times a day for each community, and the community relay counts the registered queues | Part 8 §8.5.1, Part 12 §12.6.4 |
 | A message push lives 24 hours at the provider, thus a seizure there exposes one day of 69-byte blobs in place of one hour | Part 8 §8.4.3 |
 | A device that fails three consecutive blob opens shows a clock state. Thus a wrong clock is visible, and a preview stops until the root is fresh | Part 8 §8.2.3, Part 15 §15.9.2 |
+| A client takes its time from the signed directory root. Thus a device clock that is wrong by more than one hour stops nothing, and the client shows one line for it | Part 10 §10.5.2, Part 15 §15.9.2 |
 | A sender re-encodes each media object and removes its metadata fields. Thus a recipient gets a smaller file with no location, and the original needs one selection for each send | Part 13 §13.3 |
 | A forward is a new upload under a fresh key. Thus a relay joins no two conversations at one chunk, and the sender pays the upload again | Part 13 §13.3 |
 | A receiver renders the verified segments of a media object before the digest check. Thus a player starts early, and a truncated object shows its end late | Part 13 §13.3.1 |

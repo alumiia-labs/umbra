@@ -1218,7 +1218,7 @@ closed. Part 7 §7.5.3 converges the state across the device set.
 - **[IMP-076]** A client MUST NOT show a `queued` record as a failure. A queued
   record waits for a connection, and U6 counts it as deliverable.
 
-### 15.9.2 The seven degraded states
+### 15.9.2 The eight degraded states
 
 A client is in one or more of the states below, or in none. Each state names
 its condition, its end, and the one line that the client shows.
@@ -1231,6 +1231,7 @@ its condition, its end, and the one line that the client shows.
 | `admission surge` | The newest `PowChallenge` of a relay in use holds `effort` above 0, under Part 14 §14.8 | The effort returns to 0, or the client spends a token | A progress indicator during each solve, under `ABU-008` |
 | `recipient queue full` | A `QUOTA` of Part 3 rule `NET-017` names the queue of a contact | The relay stops the signal | "This contact has not collected messages for a while." |
 | `notification carrier absent` | The build holds no carrier of Part 8 rule `NTF-040` for the selected mode | The user selects a mode that the build carries | The line of `NTF-040` |
+| `corrected clock` | The clock state of Part 10 §10.5.2 is `corrected` (`REL-116`) | A root gives a correction at or below `CLOCK_SKEW`, or a clock movement discards the correction | "The clock of this device differs from the network time by more than one hour." |
 | `clock` | `NTF_FAIL_MAX` consecutive notification blobs failed to open inside the window of Part 8 rule `NTF-075` | One blob opens after a fresh `k_ntf_root` | "The device clock may be wrong. Notifications show no preview until it is checked." |
 
 - **[IMP-077]** A client MUST show each current degraded state in one line at
