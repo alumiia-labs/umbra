@@ -79,9 +79,9 @@ each column when a crate implements the requirement and a test covers it.
 | `COM` | 299 | 96 | 0 | 0 | 5 | **400** |
 | `ATT` | 134 | 46 | 1 | 0 | 2 | **183** |
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
-| `IMP` | 100 | 41 | 0 | 0 | 1 | **142** |
+| `IMP` | 102 | 41 | 0 | 0 | 1 | **144** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2158 | 702 | 7 | 0 | 51 | **2918** |
+| **All** | 2160 | 702 | 7 | 0 | 51 | **2920** |
 
 ## SCP — Scope and Conventions
 
@@ -3084,6 +3084,8 @@ Source: `spec/15-implementation.md`
 | `IMP-151` | §15.6.1 | MUST | The placeholder of Part 7 §7.5.6 | The placeholder of Part 7 §7.5.6 MUST be the row of the deleted message itself: the client overwrites the content of that row with a record of kind `0x05` that names the `msg_id` of the row, under a new record key (`DEV-099`, `DEV-100`). |  |  |
 | `IMP-152` | §15.6.1 | MUST | (unstated) | A deletion request of this device is a record that waits for the send path as each other record does (`DEV-112`). |  |  |
 | `IMP-153` | §15.6.1 | MUST | The surface | The surface MUST give a deleted state of a message and no text for it, and the event of a deletion MUST carry the conversation and no content. |  |  |
+| `IMP-154` | §15.6.1 | MUST | An edit | An edit MUST change the row of its target in place, under a new record key, and the client MUST keep no earlier text. |  |  |
+| `IMP-155` | §15.6.1 | MUST | An edit that arrives before its target | An edit that arrives before its target MUST wait in table `0x0C` with its new text, and the target takes that text and the edited mark in the batch that stores it. |  |  |
 
 ## SEC — Security Considerations
 

@@ -510,6 +510,20 @@ that draft is dropped, and it MUST do that whether the send succeeded or failed.
   that sent the receipt, and only upward in the order Accepted, Delivered,
   Read. A receipt whose body does not parse MUST change nothing, and it MUST
   NOT end the batch of the records that arrived with it.
+- **[IMP-154]** An edit MUST change the row of its target in place, under a
+  new record key, and the client MUST keep no earlier text. The count of the
+  revisions sits in table `0x0D`, and a count above zero is the edited mark
+  of `DEV-090`, which a view MUST show beside the time of the message. The
+  new text crosses the surface in a draft, as each message text does
+  (`IMP-037`). An edit request of this device is a waiting record under the
+  rules of `IMP-152`. A sender MUST refuse its own edit after `EDIT_WINDOW`
+  of its own store time of the target and after `EDIT_MAX` revisions: the
+  contact would discard that edit, and the two devices would then show two
+  texts.
+- **[IMP-155]** An edit that arrives before its target MUST wait in table
+  `0x0C` with its new text, and the target takes that text and the edited
+  mark in the batch that stores it. A deletion that waits for the same target
+  MUST stay, and a later edit MUST NOT replace it.
 - **[IMP-151]** The placeholder of Part 7 §7.5.6 MUST be the row of the
   deleted message itself: the client overwrites the content of that row with
   a record of kind `0x05` that names the `msg_id` of the row, under a new
@@ -818,7 +832,8 @@ flight 1, with its one-time prekey.
 | `0x09` | Conversations | What this device alone knows of one conversation: the time up to which the user saw its messages, and the name that the user gave the contact |
 | `0x0A` | Settings | One setting of this device under its name, such as the idle time of the auto-lock, or the receipts of one conversation |
 | `0x0B` | Held receipts | One receipt that waits for a slot: the conversation, the kind, the `msg_id` of its target, and the time that it reports (Part 3 §3.5.4) |
-| `0x0C` | Pending references | One deletion of a contact whose target did not arrive yet: the conversation, the `msg_ref` of the target, and the time of the deletion (Part 7 §7.5.6) |
+| `0x0C` | Pending references | One deletion or one edit of a contact whose target did not arrive yet: the conversation, the `msg_ref` of the target, the time of the record, and the new text of an edit. An entry with no text is a deletion (Part 7 §7.5.6) |
+| `0x0D` | Revisions | How many times the sender of a message changed its text, under the row of that message. A message with no row here shows no edited mark |
 
 The stored form of a row is local to one device, and no peer reads it. This
 part gives it no byte layout. **[IMP-130]** A stored object MUST start with a
@@ -860,6 +875,12 @@ version byte, and a client MUST reject a row whose version it does not read.
 - **[IMP-137]** A record that waits in the send queue at the start of a run
   MUST go again under its `msg_id`. The receiver drops the second copy by
   that `msg_id`.
+
+The high-water mark of `DEV-089` rests on the sender-chain position of a
+record. The node of 0.2.0-draft gives the store a record and no position,
+thus the store applies each edit in the order of its arrival on the one
+receiving chain of a pairwise channel. A second device of a sender, which
+Part 7 adds, needs that position on the surface of the node first.
 
 A handshake between its flight 1 and its flight 3 has no stored form in
 0.2.0-draft. A run that ends inside that window loses that one handshake: the
