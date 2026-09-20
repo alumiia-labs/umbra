@@ -102,16 +102,35 @@ nothing then (`NET-299`). `Restart=on-failure` brings it back.
 umbra-relay descriptor /etc/umbra/relay.conf
 ```
 
-Each relay prints one `relay` line. Put the three lines under a header, the
-guard first, and add the invitation host:
+Each relay prints one `relay` line with its facts. The settings file of a
+relay declares them:
 
 ```text
-umbra-network 1
-relay relay1.example.org 203.0.113.7 443 <static key> <relay id>
-relay relay2.example.org 203.0.113.8 443 <static key> <relay id>
-relay relay3.example.org 203.0.113.9 443 <static key> <relay id>
+operator=<a name for the party that runs this relay>
+country=<the two letters of its jurisdiction>
+asn=<the number of its autonomous system>
+```
+
+A client puts no two relays of one operator, of one jurisdiction bloc, of one
+autonomous system, or of one IPv4 /16 into one chain (Part 3 §3.4.6), and it
+builds no chain when the set permits none. Thus a useful network holds one or
+more relays of each layer, under operators and in places that differ. Two
+relays of layer 2 and two of layer 3 let the circuits of one client take
+chains that differ. A `prefix=<a.b>` line names the /16 for a test network on
+one machine, where each relay has one address.
+
+Put the lines under a header, and add the invitation host:
+
+```text
+umbra-network 2
+relay relay1.example.org 203.0.113.7 443 <static key> <relay id> layer=1 operator=north country=SE asn=64501
+relay relay2.example.org 198.51.100.8 443 <static key> <relay id> layer=2 operator=alps country=CH asn=64502
+relay relay3.example.org 192.0.2.9 443 <static key> <relay id> layer=3 operator=geyser country=IS asn=64503
 invite invite.example.org
 ```
+
+The first relay of layer 1 is the ingress that a client dials. A header
+`umbra-network 1` with three lines and no facts still reads, as one path.
 
 A tester pastes that text into the panel "Test network" on the unlock view of
 a debug build of the Android app. The invitation host is a name inside each

@@ -14,11 +14,11 @@
     missing_docs
 )]
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 use umbra_core::{
     directory::{bloc::BlocId, path::Candidate},
-    session::node::{ClientEvent, ClientNode, ContactId, RelayInfo},
+    session::node::{ClientEvent, ClientNode, ContactId, RelayInfo, StateChange},
 };
 use umbra_crypto::{
     handshake::nk::RelayStatic,
@@ -110,10 +110,16 @@ struct Mesh {
     relays: Vec<RelayNode>,
     peers: Vec<Vec<(LinkId, Peer)>>,
     clients: Vec<ClientNode>,
+    /// The link of each client at the ingress. A new run takes a new one.
+    links: Vec<LinkId>,
+    /// The stored contacts of each client, as the at-rest store holds them.
+    stored: Vec<BTreeMap<ContactId, Vec<u8>>>,
     inboxes: Vec<VecDeque<Vec<u8>>>,
     events: Vec<Vec<ClientEvent>>,
     rng: Rng,
     now: u64,
+    /// The seed of the root identity of each client.
+    seeds: Vec<u8>,
 }
 
 impl Mesh {
@@ -136,10 +142,13 @@ impl Mesh {
             relays,
             peers: vec![Vec::new(); 5],
             clients: Vec::new(),
+            links: Vec::new(),
+            stored: Vec::new(),
             inboxes: Vec::new(),
             events: Vec::new(),
             rng: Rng(7),
             now: 1_000,
+            seeds: seeds.to_vec(),
         };
         for from in 0..5usize {
             for to in (0..5usize).filter(|to| LAYERS[*to] == LAYERS[from] + 1) {
@@ -159,6 +168,8 @@ impl Mesh {
             let mut node = client(*seed);
             node.connected(&mut Rng(100 + u64::from(*seed))).unwrap();
             mesh.clients.push(node);
+            mesh.links.push(index as LinkId + 1);
+            mesh.stored.push(BTreeMap::new());
             mesh.inboxes.push(VecDeque::new());
             mesh.events.push(Vec::new());
             mesh.peers[0].push((index as LinkId + 1, Peer::Client(index)));
@@ -169,10 +180,16 @@ impl Mesh {
     fn route(&mut self, relay: usize, outputs: Vec<Output>) {
         let mut work: VecDeque<(usize, Output)> = outputs.into_iter().map(|o| (relay, o)).collect();
         while let Some((at, output)) = work.pop_front() {
-            let Output::Send { link, capsule } = output else {
-                panic!("an unexpected output: {output:?}");
+            let (link, capsule) = match output {
+                Output::Send { link, capsule } => (link, capsule),
+                // The link of a client that stopped.
+                Output::Close { .. } => continue,
+                other => panic!("an unexpected output: {other:?}"),
             };
-            let peer = self.peers[at].iter().find(|(l, _)| *l == link).unwrap().1;
+            let Some(peer) = self.peers[at].iter().find(|(l, _)| *l == link) else {
+                continue;
+            };
+            let peer = peer.1;
             match peer {
                 Peer::Client(client) => self.inboxes[client].push_back(capsule),
                 Peer::Relay(next, next_link) => {
@@ -186,12 +203,23 @@ impl Mesh {
 
     fn settle(&mut self) {
         for _ in 0..16 {
+            self.step();
+        }
+    }
+
+    /// One turn of each party.
+    fn step(&mut self) {
+        {
             for client in 0..self.clients.len() {
-                // This test keeps no store, and it takes the changes away.
-                self.clients[client].take_changes().unwrap();
+                // The store takes each change before a capsule leaves.
+                for change in self.clients[client].take_changes().unwrap() {
+                    if let StateChange::Contact { contact, state } = change {
+                        self.stored[client].insert(contact, state.to_vec());
+                    }
+                }
                 for capsule in self.clients[client].take_capsules() {
                     let outputs = self.relays[0].on_capsule(
-                        client as LinkId + 1,
+                        self.links[client],
                         &capsule,
                         self.now,
                         &mut self.rng,
@@ -216,6 +244,23 @@ impl Mesh {
             }
             self.now += 1;
         }
+    }
+
+    /// Ends the run of a client and starts a new one from its store.
+    fn restart(&mut self, client: usize, seed: u8) {
+        let old_link = self.links[client];
+        let closed = self.relays[0].link_closed(old_link, self.now);
+        self.route(0, closed);
+        self.peers[0].retain(|(link, _)| *link != old_link);
+        self.inboxes[client].clear();
+        let mut node = self::client(seed);
+        for state in self.stored[client].values() {
+            node.restore_contact(state).unwrap();
+        }
+        node.connected(&mut Rng(300 + u64::from(seed))).unwrap();
+        self.clients[client] = node;
+        self.links[client] = old_link + 100;
+        self.peers[0].push((self.links[client], Peer::Client(client)));
     }
 
     fn take_events(&mut self, client: usize) -> Vec<ClientEvent> {
@@ -344,6 +389,49 @@ fn two_clients_at_two_queue_relays_meet_and_talk() {
     mesh.settle();
     assert_eq!(texts_of(mesh.take_events(ALICE)), [b"hello alice"]);
     assert_eq!(texts_of(mesh.take_events(BOB)), [b"hello bob"]);
+
+    // A new run of Alice holds one circuit, to the relay of her own queue.
+    // A record for Bob waits for a circuit to his relay, and it goes when
+    // that circuit holds its three hops (`NET-309`).
+    // The record of Bob has no ACK yet, thus the relay of Alice sends it
+    // again at her `SUB`. It arrives while her record for Bob still waits,
+    // and an arrival must not end a run for the lack of a circuit.
+    let alice_seed = mesh_seed_of(&mesh, ALICE);
+    mesh.restart(ALICE, alice_seed);
+    // Alice writes at the moment her first circuit holds its three hops:
+    // the `SUB` left, the record of Bob is on its way to her, and the
+    // circuit to the relay of Bob does not exist yet.
+    while mesh.clients[ALICE].chains().is_empty() {
+        mesh.step();
+    }
+    let now = mesh.now;
+    let sent = mesh.clients[ALICE]
+        .send(
+            &alice_contact,
+            &text(3, "after a new run"),
+            now,
+            &mut Rng(5),
+        )
+        .unwrap();
+    assert_eq!(mesh.clients[ALICE].chains().len(), 1);
+    mesh.settle();
+    assert!(mesh.clients[ALICE].chains().contains(
+        &mesh.clients[ALICE]
+            .chains()
+            .into_iter()
+            .find(|chain| chain[2] == alice_exit)
+            .expect("a circuit to the relay of the queue of Alice")
+    ));
+    assert_eq!(texts_of(mesh.take_events(BOB)), [b"after a new run"]);
+    assert!(mesh
+        .take_events(ALICE)
+        .contains(&ClientEvent::Accepted { handle: sent }));
+    assert_eq!(mesh.clients[ALICE].chains().len(), 2);
+}
+
+/// The seed of the root identity of a client of the mesh of this test.
+fn mesh_seed_of(mesh: &Mesh, client: usize) -> u8 {
+    mesh.seeds[client]
 }
 
 #[test]

@@ -219,6 +219,15 @@ impl Slot {
     }
 }
 
+/// A link that the user accepted, before its first fetch.
+struct LinkFetch {
+    fragment: Fragment,
+    /// The relay that holds the blob.
+    relay: [u8; 32],
+    /// The handle of the caller.
+    handle: u64,
+}
+
 /// Why the client made a queue.
 enum Purpose {
     /// The bundle goes to the caller.
@@ -305,7 +314,7 @@ struct Contact {
     /// The records of the user that wait for the sending chain, each with
     /// its handle. An inviter holds no chain before the first record of
     /// the invitee arrives.
-    waiting_sends: VecDeque<(Vec<u8>, u64)>,
+    waiting_sends: VecDeque<(Vec<u8>, Option<u64>)>,
     /// The verification ceremony of this run. A ceremony has no stored
     /// form, because its nonce serves one comparison (`IDN-145`).
     ceremony: Option<Ceremony>,
@@ -401,6 +410,8 @@ pub struct ClientNode {
     /// The handshake records that wait for a circuit to the relay of their
     /// queue.
     held_records: Vec<Sealed>,
+    /// The links that wait for a circuit to the relay of their blob.
+    held_fetches: Vec<LinkFetch>,
     capsules: VecDeque<Vec<u8>>,
     next_handle: u64,
     waiting: BTreeMap<u64, Waiting>,
@@ -493,6 +504,7 @@ impl ClientNode {
             current: 0,
             deferred: VecDeque::new(),
             held_records: Vec::new(),
+            held_fetches: Vec::new(),
             capsules: VecDeque::new(),
             next_handle: 1,
             waiting: BTreeMap::new(),
@@ -992,30 +1004,57 @@ impl ClientNode {
     ) -> Result<u64, Error> {
         let bytes: &[u8; FRAGMENT_LEN] = fragment.try_into().map_err(|_| Error::Malformed)?;
         let fragment = Fragment::from_bytes(bytes)?;
-        // The hint names the relay of the blob, and a circuit that ends at
-        // that relay carries the fetch.
-        let at_blob = |slot: &Slot| {
-            let exit = slot.chain.and_then(|chain| chain.last().copied());
-            slot.is_ready() && exit.is_some_and(|exit| relay_hint(&exit) == fragment.relay_ref)
+        // The hint names the relay of the blob among the relays of layer 3.
+        // A link to a relay that the set does not hold leads nowhere.
+        let relay = self
+            .relays
+            .iter()
+            .map(|relay| relay.candidate)
+            .find(|candidate| {
+                candidate.layer == 3 && relay_hint(&candidate.relay_id) == fragment.relay_ref
+            })
+            .ok_or(Error::NoPath)?
+            .relay_id;
+        let handle = self.handle();
+        let fetch = LinkFetch {
+            fragment,
+            relay,
+            handle,
         };
-        let ready = self.slots.iter().position(at_blob);
-        self.current = ready.ok_or(Error::NoPath)?;
+        // A circuit that ends at that relay carries the fetch (`NET-308`),
+        // and with none the fetch waits for one.
+        if self.ready_slot_to(&relay, None).is_some() {
+            self.fetch_link(fetch, rng)?;
+        } else {
+            self.held_fetches.push(fetch);
+            self.circuit_to(relay, rng)?;
+        }
+        Ok(handle)
+    }
+
+    /// Sends the first fetch of a link on a circuit to the relay of its blob.
+    fn fetch_link<R: CryptoRng + ?Sized>(
+        &mut self,
+        fetch: LinkFetch,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        self.current = self
+            .ready_slot_to(&fetch.relay, None)
+            .ok_or(Error::NoPath)?;
         let lock: [u8; 32] = random(rng);
         let command = get_blob_command(
-            &fragment.link_id,
+            &fetch.fragment.link_id,
             &StaticSecret::from(lock),
             &self.session_pk()?,
             random(rng),
         )?;
-        let handle = self.handle();
         let wait = BlobWait {
-            fragment,
+            fragment: fetch.fragment,
             lock,
-            handle,
+            handle: fetch.handle,
         };
         self.queue_command(command, Waiting::Blob(Box::new(wait)))?;
-        self.pump()?;
-        Ok(handle)
+        self.pump()
     }
 
     /// The relay answered the `IRES` or the `IPUT` of an invitation.
@@ -1110,7 +1149,8 @@ impl ClientNode {
             // The first record of the invitee opens the chain (`NET-292`),
             // and a record goes on a circuit to the relay of its queue.
             let held = self.contacts.get_mut(&contact.0).ok_or(Error::NoPath)?;
-            held.waiting_sends.push_back((app.to_vec(), user_handle));
+            held.waiting_sends
+                .push_back((app.to_vec(), Some(user_handle)));
             if !has_circuit {
                 self.circuit_to(relay, rng)?;
             }
@@ -1262,8 +1302,16 @@ impl ClientNode {
             .outbound()
             .relay_id();
         let Some(slot) = self.ready_slot_to(&relay, self.slot_of(&contact)) else {
-            self.circuit_to(relay, rng)?;
-            return Err(Error::NoPath);
+            // No circuit ends at the relay of the queue. The record waits
+            // for one, in its order, and the call is no fault: a record
+            // that arrives must never end a run for the lack of a circuit.
+            let user_handle = match waiting {
+                Waiting::UserSend(handle) => Some(handle),
+                _ => None,
+            };
+            let held = self.contacts.get_mut(&contact).ok_or(Error::NoPath)?;
+            held.waiting_sends.push_back((app.to_vec(), user_handle));
+            return self.circuit_to(relay, rng);
         };
         self.current = slot;
         let session_pk = self.session_pk()?;
@@ -1408,6 +1456,15 @@ impl ClientNode {
         for sealed in due {
             self.send_sealed(sealed, rng)?;
         }
+        let (due, held): (Vec<LinkFetch>, Vec<LinkFetch>) = core::mem::take(&mut self.held_fetches)
+            .into_iter()
+            .partition(|fetch| fetch.relay == exit);
+        self.held_fetches = held;
+        let ready = self.current;
+        for fetch in due {
+            self.fetch_link(fetch, rng)?;
+        }
+        self.current = ready;
         let waiting: Vec<[u8; 32]> = self
             .contacts
             .iter()
@@ -1419,12 +1476,29 @@ impl ClientNode {
             .map(|(id, _)| *id)
             .collect();
         for contact in waiting {
-            let Some(held) = self.contacts.get_mut(&contact) else {
-                continue;
-            };
-            for (app, user_handle) in core::mem::take(&mut held.waiting_sends) {
-                self.send_now(contact, &app, Waiting::UserSend(user_handle), now, rng)?;
-            }
+            self.send_waiting(contact, now, rng)?;
+        }
+        Ok(())
+    }
+
+    /// Sends each record that waits for a contact, in its order, when the
+    /// chain of the ratchet is open. A record with no circuit to the relay
+    /// of its queue goes back into the wait.
+    fn send_waiting<R: CryptoRng + ?Sized>(
+        &mut self,
+        contact: [u8; 32],
+        now: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let Some(held) = self.contacts.get_mut(&contact) else {
+            return Ok(());
+        };
+        if !held.channel.can_send() {
+            return Ok(());
+        }
+        for (app, user_handle) in core::mem::take(&mut held.waiting_sends) {
+            let waiting = user_handle.map_or(Waiting::Other, Waiting::UserSend);
+            self.send_now(contact, &app, waiting, now, rng)?;
         }
         Ok(())
     }
@@ -1710,18 +1784,8 @@ impl ClientNode {
             if let Some((kind, value, answers)) = ceremony_record {
                 out.extend(self.on_verification(queue_id, kind, value, answers, now, rng)?);
             }
-            let Some(held) = self.contacts.get_mut(&queue_id) else {
-                return Ok(out);
-            };
             // The record opened the sending chain of an inviter.
-            let waiting = if held.channel.can_send() {
-                core::mem::take(&mut held.waiting_sends)
-            } else {
-                VecDeque::new()
-            };
-            for (app, user_handle) in waiting {
-                self.send_now(queue_id, &app, Waiting::UserSend(user_handle), now, rng)?;
-            }
+            self.send_waiting(queue_id, now, rng)?;
             return Ok(out);
         }
         let Some(mut half) = self.halves.remove(&queue_id) else {

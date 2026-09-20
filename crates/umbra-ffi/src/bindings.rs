@@ -20,8 +20,9 @@ use std::{
 
 use tokio::sync::mpsc;
 use umbra_core::{
+    directory::{bloc::BlocList, path::Candidate},
     identity::invitation::{Fragment, FRAGMENT_LEN},
-    session::node::{ClientNode, ContactId, StateChange},
+    session::node::{ClientNode, ContactId, RelayInfo, StateChange},
     store::wrap::{Cost, SecureElement, WrapHeader, M_KIB_FLOOR, T_FLOOR},
 };
 use umbra_crypto::handshake::nk::RelayStatic;
@@ -146,7 +147,8 @@ pub struct Config {
     pub argon2_floor_ms: u64,
 }
 
-/// One relay of the path of the client.
+/// One relay of the set of the client, with the facts that the invariants
+/// of Part 3 §3.4.6 test.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct RelayEndpoint {
     /// The host name that the TLS certificate names.
@@ -159,13 +161,27 @@ pub struct RelayEndpoint {
     pub static_key: Vec<u8>,
     /// The 32 bytes of the relay identifier.
     pub relay_id: Vec<u8>,
+    /// The layer: 1 for an ingress relay, 2, or 3 for a queue relay.
+    pub layer: u8,
+    /// The name of the operator. Two relays of one operator share no chain.
+    pub operator: String,
+    /// The two letters of the jurisdiction. Two relays of one jurisdiction
+    /// bloc share no chain.
+    pub country: String,
+    /// The autonomous system. Two relays of one system share no chain.
+    pub asn: u32,
+    /// The 2 bytes of the IPv4 /16, or none for the /16 of `ipv4`. A test
+    /// network on one machine names a network for each relay here, because
+    /// each of its relays has the address of that machine.
+    pub prefix: Option<Vec<u8>>,
 }
 
-/// The network of the client: the guard, the middle relay, and the queue
-/// relay. The relay directory of Part 10 replaces this record later.
+/// The network of the client: a set of relays for its chains. The first
+/// relay of layer 1 is the pinned ingress. The signed relay directory of
+/// Part 10 replaces this record later.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct Network {
-    /// The three relays of the path, the guard first.
+    /// The relays, with one or more of each layer.
     pub relays: Vec<RelayEndpoint>,
     /// A PEM file of the one authority that the client trusts, for a test
     /// network. With no file the client trusts the web roots.
@@ -174,8 +190,10 @@ pub struct Network {
     pub invitation_host: String,
 }
 
-/// The first line of a network descriptor.
-const DESCRIPTOR_HEADER: &str = "umbra-network 1";
+/// The first line of a network descriptor. Version 1 holds three relay
+/// lines with no facts: one path, the guard first.
+const DESCRIPTOR_HEADER: &str = "umbra-network 2";
+const DESCRIPTOR_HEADER_V1: &str = "umbra-network 1";
 
 fn hex_bytes(text: &str) -> Option<Vec<u8>> {
     if !text.len().is_multiple_of(2) || !text.is_ascii() {
@@ -191,15 +209,16 @@ fn hex_bytes(text: &str) -> Option<Vec<u8>> {
 /// gives to a tester. The relay directory of Part 10 replaces it later.
 ///
 /// ```text
-/// umbra-network 1
-/// relay <host> <IPv4 address> <port> <static key, hex> <relay id, hex>
-/// relay ...                            # the middle relay
-/// relay ...                            # the queue relay
+/// umbra-network 2
+/// relay <host> <IPv4 address> <port> <static key, hex> <relay id, hex> \
+///       layer=<1|2|3> operator=<name> country=<two letters> asn=<number> [prefix=<a.b>]
+/// relay ...
 /// invite <invitation host>
 /// ```
 ///
-/// The three `relay` lines come from `umbra-relay descriptor`, the guard
-/// first. A line that starts with `#` and an empty line carry nothing.
+/// Each `relay` line comes from `umbra-relay descriptor`. The set holds one
+/// or more relays of each layer. A line that starts with `#` and an empty
+/// line carry nothing.
 /// `root_ca_path` is the authority of a test network, or none for the web
 /// roots.
 #[uniffi::export]
@@ -208,25 +227,48 @@ pub fn parse_network(text: String, root_ca_path: Option<String>) -> Result<Netwo
         .lines()
         .map(|line| line.split('#').next().unwrap_or_default().trim())
         .filter(|line| !line.is_empty());
-    if lines.next() != Some(DESCRIPTOR_HEADER) {
-        return Err(FfiError::Malformed);
-    }
+    let has_facts = match lines.next() {
+        Some(DESCRIPTOR_HEADER) => true,
+        Some(DESCRIPTOR_HEADER_V1) => false,
+        _ => return Err(FfiError::Malformed),
+    };
     let mut relays = Vec::new();
     let mut invitation_host = None;
     for line in lines {
         let words: Vec<&str> = line.split_whitespace().collect();
         match words.as_slice() {
-            ["relay", host, address, port, static_key, relay_id] => {
+            ["relay", host, address, port, static_key, relay_id, facts @ ..] => {
                 let address: std::net::Ipv4Addr =
                     address.parse().map_err(|_| FfiError::Malformed)?;
                 let key = |text: &str| hex_bytes(text).filter(|bytes| bytes.len() == 32);
-                relays.push(RelayEndpoint {
+                let mut relay = RelayEndpoint {
                     host: (*host).to_owned(),
                     ipv4: address.octets().to_vec(),
                     port: port.parse().map_err(|_| FfiError::Malformed)?,
                     static_key: key(static_key).ok_or(FfiError::Malformed)?,
                     relay_id: key(relay_id).ok_or(FfiError::Malformed)?,
-                });
+                    layer: 0,
+                    operator: String::new(),
+                    country: String::new(),
+                    asn: 0,
+                    prefix: None,
+                };
+                if has_facts {
+                    read_facts(&mut relay, facts)?;
+                } else if facts.is_empty() {
+                    // The one path of version 1: three operators in three
+                    // places, each line one layer.
+                    let place = u8::try_from(relays.len().saturating_add(1))
+                        .map_err(|_| FfiError::Malformed)?;
+                    relay.layer = place;
+                    relay.operator = format!("relay-{place}");
+                    relay.country = format!("Z{}", char::from(b'A'.saturating_add(place)));
+                    relay.asn = u32::from(place);
+                    relay.prefix = Some(vec![0, place]);
+                } else {
+                    return Err(FfiError::Malformed);
+                }
+                relays.push(relay);
             }
             ["invite", host] if invitation_host.is_none() => {
                 invitation_host = Some((*host).to_owned());
@@ -234,13 +276,99 @@ pub fn parse_network(text: String, root_ca_path: Option<String>) -> Result<Netwo
             _ => return Err(FfiError::Malformed),
         }
     }
-    if relays.len() != 3 {
+    if !has_facts && relays.len() != 3 {
+        return Err(FfiError::Malformed);
+    }
+    // A chain holds one relay of each layer.
+    if (1..=3u8).any(|layer| !relays.iter().any(|relay| relay.layer == layer)) {
         return Err(FfiError::Malformed);
     }
     Ok(Network {
         relays,
         root_ca_path,
         invitation_host: invitation_host.ok_or(FfiError::Malformed)?,
+    })
+}
+
+/// Reads the `key=value` words of a relay line of version 2. Each of the
+/// four facts is there one time, and `prefix` is there at most one time.
+fn read_facts(relay: &mut RelayEndpoint, facts: &[&str]) -> Result<(), FfiError> {
+    let mut seen = Vec::new();
+    for fact in facts {
+        let (name, value) = fact.split_once('=').ok_or(FfiError::Malformed)?;
+        if seen.contains(&name) {
+            return Err(FfiError::Malformed);
+        }
+        seen.push(name);
+        match name {
+            "layer" => {
+                relay.layer = value.parse().map_err(|_| FfiError::Malformed)?;
+                if !(1..=3).contains(&relay.layer) {
+                    return Err(FfiError::Malformed);
+                }
+            }
+            "operator" if !value.is_empty() => value.clone_into(&mut relay.operator),
+            "country" if value.len() == 2 && value.bytes().all(|b| b.is_ascii_uppercase()) => {
+                value.clone_into(&mut relay.country);
+            }
+            "asn" => relay.asn = value.parse().map_err(|_| FfiError::Malformed)?,
+            "prefix" => {
+                let octets: Vec<u8> = value
+                    .split('.')
+                    .map(str::parse)
+                    .collect::<Result<_, _>>()
+                    .map_err(|_| FfiError::Malformed)?;
+                if octets.len() != 2 {
+                    return Err(FfiError::Malformed);
+                }
+                relay.prefix = Some(octets);
+            }
+            _ => return Err(FfiError::Malformed),
+        }
+    }
+    let has_each = ["layer", "operator", "country", "asn"]
+        .iter()
+        .all(|name| seen.contains(name));
+    if has_each {
+        Ok(())
+    } else {
+        Err(FfiError::Malformed)
+    }
+}
+
+/// The facts of a relay of the set, for the selection of a chain. The
+/// operator is its own family, because a descriptor holds no family
+/// certificate.
+fn relay_info(endpoint: &RelayEndpoint) -> Result<RelayInfo, FfiError> {
+    let key = relay_static(endpoint)?;
+    let operator =
+        umbra_crypto::hash::sha3_256(&[b"umbra/test/operator", endpoint.operator.as_bytes()]);
+    let country: [u8; 2] = endpoint
+        .country
+        .as_bytes()
+        .try_into()
+        .map_err(|_| FfiError::Malformed)?;
+    let prefix = match &endpoint.prefix {
+        Some(prefix) => prefix.as_slice().try_into().ok(),
+        None => endpoint
+            .ipv4
+            .get(..2)
+            .and_then(|octets| octets.try_into().ok()),
+    };
+    Ok(RelayInfo {
+        candidate: Candidate {
+            relay_id: key.relay_id,
+            operator_id: operator,
+            family_id: operator,
+            bloc: BlocList::v1().bloc_of(&country),
+            asn: endpoint.asn,
+            v4_prefix: Some(prefix.ok_or(FfiError::Malformed)?),
+            v6_prefix: None,
+            ingress: endpoint.layer == 1,
+            chain: endpoint.layer != 1,
+            layer: endpoint.layer,
+        },
+        key,
     })
 }
 
@@ -724,14 +852,20 @@ impl Handle {
     /// Starts the network of an unlocked client. A [`FfiEvent::Online`]
     /// follows the build of the circuit. A second call ends the first run.
     pub fn connect(self: Arc<Self>, network: Network) -> Result<(), FfiError> {
-        let [guard, middle, queue_relay] = network.relays.as_slice() else {
-            return Err(FfiError::Malformed);
-        };
-        let path = [
-            relay_static(guard)?,
-            relay_static(middle)?,
-            relay_static(queue_relay)?,
-        ];
+        // The first relay of layer 1 is the pinned ingress of this client
+        // (Part 10 §10.6.1), and each other relay is a candidate of a chain.
+        let guard = network
+            .relays
+            .iter()
+            .find(|relay| relay.layer == 1)
+            .ok_or(FfiError::Malformed)?;
+        let ingress = relay_info(guard)?;
+        let candidates = network
+            .relays
+            .iter()
+            .filter(|relay| relay.layer != 1)
+            .map(relay_info)
+            .collect::<Result<Vec<_>, _>>()?;
         let address = guard.ipv4.as_slice().try_into();
         let dial = Dial {
             host: guard.host.clone(),
@@ -763,7 +897,7 @@ impl Handle {
             } = &mut *inner;
             // The node continues each contact and each invitation of the
             // earlier runs.
-            let mut node = ClientNode::new(path, client.root_identity()?);
+            let mut node = ClientNode::with_relays(ingress, candidates, client.root_identity()?);
             let stored = client.stored_network()?;
             let mut contacts = BTreeMap::new();
             for (conversation, state) in &stored.contacts {

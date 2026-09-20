@@ -27,7 +27,7 @@ use umbra_crypto::{
     x25519::{PublicKey as XPublic, StaticSecret},
 };
 use umbra_ffi::bindings::{
-    init, Config, FfiError, FfiEvent, Handle, MsgHandle, Network, RelayEndpoint,
+    init, parse_network, Config, FfiError, FfiEvent, Handle, MsgHandle, Network, RelayEndpoint,
     SecureElementCallback, TextSink,
 };
 use umbra_relay::{
@@ -78,11 +78,16 @@ fn units(text: &str) -> Vec<u16> {
     text.encode_utf16().collect()
 }
 
-fn relay_static(layer: u8) -> (RelayStatic, StaticSecret) {
-    let secret = StaticSecret::from([layer; 32]);
+/// The layer of each relay of the test network, by its index: one ingress,
+/// two relays of layer 2, and two queue relays. Thus the chains of the two
+/// apps can differ, and a record can need a circuit to a second queue relay.
+const LAYERS: [u8; 5] = [1, 2, 2, 3, 3];
+
+fn relay_static(number: u8) -> (RelayStatic, StaticSecret) {
+    let secret = StaticSecret::from([number; 32]);
     let relay = RelayStatic {
         s: *XPublic::from(&secret).as_bytes(),
-        relay_id: [0x10 + layer; 32],
+        relay_id: [0x10 + number; 32],
     };
     (relay, secret)
 }
@@ -150,7 +155,7 @@ fn start_relays(
     let relays = tokio::runtime::Runtime::new().unwrap();
     let client_tls = native::tls_config_with_root_file(CA).unwrap();
     let mut listeners = Vec::new();
-    for index in 0..3 {
+    for index in 0..LAYERS.len() {
         let port = ports.map_or(0, |ports| ports[index]);
         let listener = relays
             .block_on(TcpListener::bind(("127.0.0.1", port)))
@@ -162,8 +167,9 @@ fn start_relays(
         .map(|listener| listener.local_addr().unwrap().port())
         .collect();
     for (index, listener) in listeners.into_iter().enumerate() {
-        let layer = index as u8 + 1;
-        let (relay, static_secret) = relay_static(layer);
+        let number = index as u8 + 1;
+        let layer = LAYERS[index];
+        let (relay, static_secret) = relay_static(number);
         let config = RelayConfig {
             relay,
             static_secret,
@@ -173,19 +179,22 @@ fn start_relays(
         };
         let mut store: Box<dyn RelayStore> = match directory {
             Some(directory) => {
-                let path = directory.join(format!("relay{layer}.db"));
+                let path = directory.join(format!("relay{number}.db"));
                 Box::new(SqliteStore::open(path.to_str().unwrap()).unwrap())
             }
             None => Box::new(MemoryStore::default()),
         };
         let node = RelayNode::restored(config, store.load().unwrap());
-        let mut next_hops = BTreeMap::new();
-        if layer < 3 {
-            next_hops.insert(
-                relay_static(layer + 1).0.relay_id,
-                localhost(ports[index + 1]),
-            );
-        }
+        // A relay dials each relay of the next layer.
+        let next_hops: BTreeMap<_, _> = (0..LAYERS.len())
+            .filter(|next| LAYERS[*next] == layer + 1)
+            .map(|next| {
+                (
+                    relay_static(next as u8 + 1).0.relay_id,
+                    localhost(ports[next]),
+                )
+            })
+            .collect();
         relays.spawn(run_relay(
             node,
             listener,
@@ -201,15 +210,24 @@ fn start_relays(
 
 fn network_of(ports: &[u16]) -> Network {
     Network {
-        relays: (1..=3u8)
-            .map(|layer| {
-                let relay = relay_static(layer).0;
+        relays: (0..LAYERS.len())
+            .map(|index| {
+                let number = index as u8 + 1;
+                let relay = relay_static(number).0;
                 RelayEndpoint {
                     host: "localhost".into(),
                     ipv4: vec![127, 0, 0, 1],
-                    port: ports[usize::from(layer) - 1],
+                    port: ports[index],
                     static_key: relay.s.to_vec(),
                     relay_id: relay.relay_id.to_vec(),
+                    layer: LAYERS[index],
+                    // Five operators in five places. Each relay of this test
+                    // has the address of one machine, thus each names a
+                    // network of its own.
+                    operator: format!("operator-{number}"),
+                    country: format!("Z{}", char::from(b'A' + number)),
+                    asn: 64_500 + u32::from(number),
+                    prefix: Some(vec![10, number]),
                 }
             })
             .collect(),
@@ -519,4 +537,66 @@ fn two_apps_meet_and_talk_through_the_exported_surface() {
     alice.disconnect();
     bob.disconnect();
     std::fs::remove_dir_all(&directory).ok();
+}
+
+#[test]
+fn a_descriptor_names_the_facts_of_each_relay_and_the_first_version_reads() {
+    let key = "ab".repeat(32);
+    let line =
+        |port: u16, facts: &str| format!("relay localhost 127.0.0.1 {port} {key} {key} {facts}");
+    let facts = |layer: u8, place: &str| {
+        format!("layer={layer} operator=op-{place} country={place} asn=6450{layer}")
+    };
+    let text = [
+        "umbra-network 2".to_owned(),
+        line(7441, &facts(1, "SE")),
+        line(7442, &format!("{} prefix=10.2", facts(2, "CH"))),
+        line(7443, &facts(3, "IS")),
+        line(7445, &facts(3, "NO")),
+        "invite invite.umbra.test".to_owned(),
+    ]
+    .join("\n");
+    let network = parse_network(text.clone(), None).unwrap();
+    assert_eq!(network.relays.len(), 4);
+    assert_eq!(network.relays[1].prefix, Some(vec![10, 2]));
+    assert_eq!(network.relays[3].country, "NO");
+    assert_eq!(network.relays[0].layer, 1);
+
+    // A set with no relay of one layer holds no chain, and a line with a
+    // fact two times, with no operator, or with a word that is no fact does
+    // not parse.
+    for wrong in [
+        text.replace("layer=2", "layer=3"),
+        text.replace("asn=64501", "asn=64501 asn=64501"),
+        text.replace("operator=op-SE ", ""),
+        text.replace("country=SE", "country=se"),
+        text.replace("layer=1", "layer=4"),
+        text.replace("prefix=10.2", "prefix=10.2.3"),
+        text.replace("asn=64503", "weight=9"),
+    ] {
+        assert!(matches!(
+            parse_network(wrong, None),
+            Err(FfiError::Malformed)
+        ));
+    }
+
+    // Version 1 is one path of three lines with no facts.
+    let first = [
+        "umbra-network 1".to_owned(),
+        line(7441, ""),
+        line(7442, ""),
+        line(7443, ""),
+        "invite invite.umbra.test".to_owned(),
+    ]
+    .join("\n");
+    let network = parse_network(first.clone(), None).unwrap();
+    assert_eq!(
+        network
+            .relays
+            .iter()
+            .map(|relay| relay.layer)
+            .collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
+    assert!(parse_network(first.replace("umbra-network 1", "umbra-network 3"), None).is_err());
 }

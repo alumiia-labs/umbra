@@ -82,6 +82,9 @@ struct Settings {
     public: Option<String>,
     config: Config,
     next: BTreeMap<[u8; 32], Dial>,
+    /// What this relay declares of itself for a network descriptor: the
+    /// operator, the country, the autonomous system, and the IPv4 /16.
+    facts: BTreeMap<String, String>,
 }
 
 fn read_settings(path: &str) -> Option<Settings> {
@@ -133,6 +136,10 @@ fn read_settings(path: &str) -> Option<Settings> {
             community_capacity: values.get("community_capacity")?.parse().ok()?,
         },
         next,
+        facts: ["operator", "country", "asn", "prefix"]
+            .iter()
+            .filter_map(|name| Some(((*name).to_owned(), (*values.get(name)?).to_owned())))
+            .collect(),
     })
 }
 
@@ -161,10 +168,24 @@ fn descriptor(settings: &Settings) -> ExitCode {
         eprintln!("the settings file needs a line: public=<host>,<IPv4 address>,<port>");
         return ExitCode::from(2);
     };
+    // The facts that a client tests before it puts two relays into one
+    // chain (Part 3 §3.4.6). The operator of a relay declares them.
+    let facts = ["operator", "country", "asn", "prefix"]
+        .iter()
+        .filter_map(|name| Some(format!(" {name}={}", settings.facts.get(*name)?)))
+        .collect::<String>();
+    if ["operator", "country", "asn"]
+        .iter()
+        .any(|name| !settings.facts.contains_key(*name))
+    {
+        eprintln!("the settings file needs the lines: operator=, country=, asn=");
+        return ExitCode::from(2);
+    }
     println!(
-        "relay {host} {address} {port} {} {}",
+        "relay {host} {address} {port} {} {} layer={}{facts}",
         to_hex(&settings.config.relay.s),
         to_hex(&settings.config.relay.relay_id),
+        settings.config.layer,
     );
     ExitCode::SUCCESS
 }
