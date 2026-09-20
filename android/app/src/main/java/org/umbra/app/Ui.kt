@@ -64,6 +64,7 @@ sealed interface Screen {
     data class VerifyCode(val conversation: Conversation, val starts: Boolean) : Screen
     data class SafetyNumber(val conversation: Conversation) : Screen
     data class ScanSafetyNumber(val conversation: Conversation) : Screen
+    data class Photo(val conversation: Conversation, val line: Line) : Screen
 
     /** The conversation of a view of one contact. */
     val contact: Conversation?
@@ -76,6 +77,7 @@ sealed interface Screen {
             is VerifyCode -> conversation
             is SafetyNumber -> conversation
             is ScanSafetyNumber -> conversation
+            is Photo -> conversation
             else -> null
         }
 }
@@ -89,7 +91,8 @@ enum class Tab(val label: String, val icon: String) {
 @Composable
 fun UmbraApp() {
     UmbraTheme {
-        Surface(Modifier.fillMaxSize(), color = Palette.Surface) {
+        // A photo on the whole screen has a dark ground under each bar.
+        Surface(Modifier.fillMaxSize(), color = if (Viewer.isOpen) Color.Black else Palette.Surface) {
             Box(Modifier.safeDrawingPadding().imePadding()) {
                 if (Core.phase != Core.Phase.Open) {
                     UnlockScreen()
@@ -173,6 +176,7 @@ private fun ContactView(
         is Screen.Verify -> VerifyScreen(chat, pop, push)
         is Screen.VerifyCode -> VerifyCodeScreen(chat, top.starts, pop)
         is Screen.SafetyNumber -> SafetyNumberScreen(chat, pop)
+        is Screen.Photo -> PhotoScreen(top.line, chat, pop)
         is Screen.ScanSafetyNumber -> ScanSafetyNumberScreen(chat, pop)
         else -> Unit
     }

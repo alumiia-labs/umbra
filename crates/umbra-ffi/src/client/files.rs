@@ -380,7 +380,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(())
     }
 
-    /// Asks again for the file of a received message whose download failed.
+    /// Starts the transfer of the file of a message again after it failed:
+    /// the download of a received file, or the upload of a file of this
+    /// device.
     pub fn fetch_file<R: CryptoRng + ?Sized>(
         &mut self,
         message: &MsgRef,
@@ -393,8 +395,21 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .get(TableId::MESSAGE, &message.0)?
                 .ok_or(Error::NotFound)?,
         );
-        if info.state != FileState::Failed || info_of(&plain)?.outgoing {
+        if info.state != FileState::Failed {
             return Err(Error::Malformed);
+        }
+        if info_of(&plain)?.outgoing {
+            // The store holds the file of this device from the send, thus a
+            // second upload needs no second read of its source (`IMP-160`).
+            let file = self.file_bytes(message)?;
+            self.set_file_state(message, FileState::Uploading, rng)?;
+            self.set_delivery(message, Delivery::Queued, rng)?;
+            self.files.uploads.push_back(UploadJob {
+                message: *message,
+                plain: file,
+                shape: info.shape,
+            });
+            return Ok(());
         }
         let app = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
         let parsed = AppMessage::parse(app, Channel::Pairwise)?;

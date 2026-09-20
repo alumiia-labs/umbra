@@ -287,7 +287,15 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                     line,
                     chat,
                     isFlashed = flashed == line.key,
-                    onQuote = line.quote?.let { quote -> { jumpTo(quote.key) } },
+                    // A press opens a photo that is there, and it starts a
+                    // transfer that failed again. A press on an answer leads to
+                    // the message that it answers.
+                    onQuote = when {
+                        line.info.deleted -> null
+                        line.info.file?.state?.toInt() == FILE_FAILED -> ({ Core.fetchFile(line.handle) })
+                        line.info.file?.state?.toInt() == FILE_READY -> ({ push(Screen.Photo(conversation, line)) })
+                        else -> line.quote?.let { quote -> { jumpTo(quote.key) } }
+                    },
                     onLongPress = { chosen = line },
                     // A placeholder has no content to answer.
                     onReply = if (line.info.deleted) null else ({ answered = line }),

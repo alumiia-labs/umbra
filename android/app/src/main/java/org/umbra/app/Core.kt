@@ -612,7 +612,10 @@ object Core {
                 } catch (noText: FfiException) {
                     quoted.chars = CharArray(0)
                 }
-                Quoted(target.key().toList(), client.msgInfo(target).outgoing, quoted.chars)
+                val of = client.msgInfo(target)
+                // The quote of a photo is a word of the interface.
+                if (of.file != null && !of.deleted) quoted.chars = "Photo".toCharArray()
+                Quoted(target.key().toList(), of.outgoing, quoted.chars)
             }
             Line(message, sink.chars, info, quote, client.reactions(message))
         }

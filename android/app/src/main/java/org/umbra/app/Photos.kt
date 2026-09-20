@@ -10,22 +10,32 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import java.io.ByteArrayOutputStream
 import kotlin.concurrent.thread
@@ -152,24 +162,18 @@ fun PhotoTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
     val height = file.pixelH.toInt().coerceAtLeast(1)
     // A very tall or a very wide image keeps a shape that a bubble can hold.
     val ratio = (width.toFloat() / height).coerceIn(0.5f, 2f)
-    val image = if (state == FILE_READY || state == FILE_UPLOADING) Core.image(line) else null
-    val canRetry = state == FILE_FAILED && !line.info.outgoing
+    // The sender holds its photo in each state. The press of the bubble
+    // starts a failed transfer again, and it opens a photo that is there.
+    val isHeld = state == FILE_READY || line.info.outgoing
+    val image = if (isHeld) Core.image(line) else null
+    val canRetry = state == FILE_FAILED
     Box(
         modifier
             .width(if (ratio >= 1f) 240.dp else 200.dp)
             .aspectRatio(ratio)
             // The corner of the bubble less the rim.
-            .clip(RoundedCornerShape(16.dp))
-            .background(Palette.Pressed)
-            .then(
-                if (canRetry) {
-                    Modifier.press(role = Role.Button, label = "Get the photo again") {
-                        Core.fetchFile(line.handle)
-                    }
-                } else {
-                    Modifier
-                },
-            ),
+            .clip(RoundedCornerShape(12.dp))
+            .background(Palette.Pressed),
         contentAlignment = Alignment.Center,
     ) {
         if (image != null) {
@@ -177,8 +181,9 @@ fun PhotoTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
                 image,
                 contentDescription = "Photo",
                 contentScale = ContentScale.Crop,
-                modifier = Modifier.matchParentSize().alpha(if (state == FILE_UPLOADING) 0.55f else 1f),
+                modifier = Modifier.matchParentSize().alpha(if (state == FILE_READY) 1f else 0.55f),
             )
+            if (canRetry) FaIcon("rotate", label = "Send the photo again", size = 22.dp, tint = Palette.Text)
         } else {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 FaIcon(if (canRetry) "rotate" else "image", size = 22.dp, tint = Palette.TextSecondary)
@@ -192,6 +197,115 @@ fun PhotoTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
                     style = MaterialTheme.typography.labelSmall,
                     color = Palette.TextSecondary,
                 )
+            }
+        }
+    }
+}
+
+/** Whether a dark view covers the screen, thus the ground under it is dark. */
+object Viewer {
+    var isOpen by androidx.compose.runtime.mutableStateOf(false)
+}
+
+/**
+ * One photo on the whole screen, as each messenger shows one: a dark ground,
+ * the image at its full fit, a zoom with two fingers or a double tap, and a
+ * bar that a tap takes away.
+ */
+@Composable
+fun PhotoScreen(line: Line, chat: Chat, onBack: () -> Unit) {
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        Viewer.isOpen = true
+        onDispose { Viewer.isOpen = false }
+    }
+    var scale by androidx.compose.runtime.remember { androidx.compose.runtime.mutableFloatStateOf(1f) }
+    var offset by androidx.compose.runtime.remember {
+        androidx.compose.runtime.mutableStateOf(androidx.compose.ui.geometry.Offset.Zero)
+    }
+    var showsBar by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(true) }
+    val image = Core.image(line)
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(androidx.compose.ui.graphics.Color.Black)
+            .pointerInput(Unit) {
+                detectTapGestures(
+                    onTap = { showsBar = !showsBar },
+                    onDoubleTap = {
+                        scale = if (scale > 1f) 1f else 2.5f
+                        offset = androidx.compose.ui.geometry.Offset.Zero
+                    },
+                )
+            }
+            .pointerInput(Unit) {
+                detectTransformGestures { _, pan, zoom, _ ->
+                    scale = (scale * zoom).coerceIn(1f, 5f)
+                    // An image at its fit has no place to move to.
+                    offset = if (scale == 1f) androidx.compose.ui.geometry.Offset.Zero else offset + pan
+                }
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        if (image != null) {
+            Image(
+                image,
+                contentDescription = "Photo",
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxSize().graphicsLayer {
+                    scaleX = scale
+                    scaleY = scale
+                    translationX = offset.x
+                    translationY = offset.y
+                },
+            )
+        }
+        if (showsBar) {
+            Row(
+                Modifier
+                    .align(Alignment.TopStart)
+                    .fillMaxWidth()
+                    .background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.45f))
+                    .padding(start = 4.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                androidx.compose.runtime.CompositionLocalProvider(
+                    androidx.compose.material3.LocalContentColor provides androidx.compose.ui.graphics.Color.White,
+                ) {
+                    // The shared icon button has the ink of a light view.
+                    Box(
+                        Modifier
+                            .size(48.dp)
+                            .clip(androidx.compose.foundation.shape.CircleShape)
+                            .press(role = androidx.compose.ui.semantics.Role.Button, label = "Back", onClick = onBack),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        FaIcon(
+                            "arrow-left",
+                            label = "Back",
+                            size = 20.dp,
+                            tint = androidx.compose.ui.graphics.Color.White,
+                        )
+                    }
+                    Spacer(Modifier.width(6.dp))
+                    Column {
+                        Text(
+                            if (line.info.outgoing) "You" else chat.title,
+                            style = MaterialTheme.typography.titleMedium,
+                            color = androidx.compose.ui.graphics.Color.White,
+                        )
+                        Text(
+                            android.text.format.DateUtils.formatDateTime(
+                                androidx.compose.ui.platform.LocalContext.current,
+                                line.info.storedAtMs.toLong(),
+                                android.text.format.DateUtils.FORMAT_SHOW_DATE or
+                                    android.text.format.DateUtils.FORMAT_SHOW_TIME,
+                            ),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = androidx.compose.ui.graphics.Color.White.copy(alpha = 0.8f),
+                            modifier = Modifier.subline(),
+                        )
+                    }
+                }
             }
         }
     }

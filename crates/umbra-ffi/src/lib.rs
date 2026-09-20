@@ -901,6 +901,27 @@ mod tests {
         );
         assert!(bob.take_download().is_none());
 
+        // An upload that failed makes the message fail. A second attempt
+        // takes the file from the store, and the message waits again.
+        let mut again = alice.new_draft(conversation);
+        again.attach(photo.clone(), shape).unwrap();
+        let retried = alice.send_draft(again, 1_200_000, &mut rng).unwrap();
+        assert_eq!(alice.take_upload().unwrap().message, retried);
+        alice.upload_failed(&retried, &mut rng).unwrap();
+        let info = alice.info(&retried).unwrap();
+        assert_eq!(info.file.unwrap().state, FileState::Failed);
+        assert_eq!(info.delivery, Delivery::Failed);
+        alice.fetch_file(&retried, &mut rng).unwrap();
+        let info = alice.info(&retried).unwrap();
+        assert_eq!(info.file.unwrap().state, FileState::Uploading);
+        assert_eq!(info.delivery, Delivery::Queued);
+        let job = alice.take_upload().unwrap();
+        assert_eq!(
+            (job.message, job.plain.as_slice()),
+            (retried, photo.as_slice())
+        );
+        while alice.next_event().is_some() {}
+
         // ATT-161: the deletion of the message erases each chunk of its file
         // at each relay, and the store holds no row of the file.
         alice.delete_for_me(&sent).unwrap();
