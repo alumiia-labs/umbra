@@ -78,8 +78,12 @@ dependencies {
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.compose.ui)
-    // The QR code of an invitation link. The core has no camera part.
+    // The QR code of an invitation link and of a safety number. The core of
+    // ZXing writes and reads a code, and CameraX gives the frames.
     implementation(libs.zxing.core)
+    implementation(libs.androidx.camera.camera2)
+    implementation(libs.androidx.camera.lifecycle)
+    implementation(libs.androidx.camera.view)
     // The generated bindings call the shared library through JNA.
     implementation("${libs.jna.get()}@aar")
 }

@@ -59,7 +59,7 @@ fun AddContactScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
     Column(Modifier.fillMaxSize()) {
         BackBar("Add contact", onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
-            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { HeroIcon("link") }
+            HeroIcon("link")
             Spacer(Modifier.height(24.dp))
             Headline("A private way to say hello.")
             Spacer(Modifier.height(20.dp))
@@ -171,18 +171,32 @@ fun QrCode(link: String, description: String = "The invitation as a QR code") {
 }
 
 @Composable
-fun UseInvitationScreen(onBack: () -> Unit) {
+fun UseInvitationScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
     var pasted by remember { mutableStateOf("") }
     var isWaiting by remember { mutableStateOf(false) }
+    val open = { link: String ->
+        Core.fault = null
+        Core.accept(link)
+        isWaiting = true
+    }
+    // The scanner gives the link of a code to this view.
+    LaunchedEffect(Core.scannedInvitation) {
+        Core.scannedInvitation?.let(open)
+        Core.scannedInvitation = null
+    }
     // A contact or a fault ends the wait. The naming view opens by itself.
     LaunchedEffect(Core.fault) { if (Core.fault != null) isWaiting = false }
     Column(Modifier.fillMaxSize()) {
         BackBar("Use invitation", onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
-            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { HeroIcon("qrcode") }
+            HeroIcon("qrcode")
             Spacer(Modifier.height(24.dp))
             Headline("Someone invited you?")
             Spacer(Modifier.height(20.dp))
+            if (!isWaiting) {
+                PrimaryButton("Scan a QR code", enabled = Core.online) { push(Screen.ScanInvitation) }
+                Spacer(Modifier.height(16.dp))
+            }
             // An invitation is no message text, thus a composable field holds it.
             OutlinedTextField(
                 value = pasted,
@@ -205,11 +219,9 @@ fun UseInvitationScreen(onBack: () -> Unit) {
                     Text("Opening the invitation through three relays.")
                 }
             } else {
-                PrimaryButton("Continue", enabled = Core.online && pasted.isNotBlank()) {
-                    Core.fault = null
-                    Core.accept(pasted)
+                SecondaryButton("Continue", enabled = Core.online && pasted.isNotBlank()) {
+                    open(pasted)
                     pasted = ""
-                    isWaiting = true
                 }
             }
             Core.fault?.let {

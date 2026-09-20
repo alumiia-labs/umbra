@@ -208,13 +208,15 @@ fun Note(text: String, isError: Boolean = false) {
     }
 }
 
-/** The large rounded icon above the headline of a full view. */
+/** The large rounded icon above the headline of a full view, in the middle of its row. */
 @Composable
 fun HeroIcon(name: String) {
-    Box(
-        Modifier.size(84.dp).background(Palette.Container, RoundedCornerShape(24.dp)),
-        contentAlignment = Alignment.Center,
-    ) { FaIcon(name, size = 30.dp, tint = Palette.Action) }
+    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+        Box(
+            Modifier.size(84.dp).background(Palette.Container, RoundedCornerShape(24.dp)),
+            contentAlignment = Alignment.Center,
+        ) { FaIcon(name, size = 30.dp, tint = Palette.Action) }
+    }
 }
 
 /** A letter on a pastel ground. The ground comes from the conversation. */

@@ -3,6 +3,7 @@ agp = "9.4.1"
 kotlin = "2.4.20"
 composeBom = "2026.09.00"
 activityCompose = "1.13.0"
+camerax = "1.6.2"
 jna = "5.19.1"
 zxing = "3.5.4"
 
@@ -11,6 +12,9 @@ androidx-activity-compose = { group = "androidx.activity", name = "activity-comp
 androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
 androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3" }
 androidx-compose-ui = { group = "androidx.compose.ui", name = "ui" }
+androidx-camera-camera2 = { group = "androidx.camera", name = "camera-camera2", version.ref = "camerax" }
+androidx-camera-lifecycle = { group = "androidx.camera", name = "camera-lifecycle", version.ref = "camerax" }
+androidx-camera-view = { group = "androidx.camera", name = "camera-view", version.ref = "camerax" }
 jna = { group = "net.java.dev.jna", name = "jna", version.ref = "jna" }
 zxing-core = { group = "com.google.zxing", name = "core", version.ref = "zxing" }
 

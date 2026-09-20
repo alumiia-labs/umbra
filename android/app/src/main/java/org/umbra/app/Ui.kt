@@ -51,6 +51,7 @@ sealed interface Screen {
     data object AddContact : Screen
     data object YourInvitation : Screen
     data object UseInvitation : Screen
+    data object ScanInvitation : Screen
     data object AppLock : Screen
     data object AutoLock : Screen
     data object ChangePassphrase : Screen
@@ -60,6 +61,7 @@ sealed interface Screen {
     data class Verify(val conversation: Conversation) : Screen
     data class VerifyCode(val conversation: Conversation, val starts: Boolean) : Screen
     data class SafetyNumber(val conversation: Conversation) : Screen
+    data class ScanSafetyNumber(val conversation: Conversation) : Screen
 
     /** The conversation of a view of one contact. */
     val contact: Conversation?
@@ -70,6 +72,7 @@ sealed interface Screen {
             is Verify -> conversation
             is VerifyCode -> conversation
             is SafetyNumber -> conversation
+            is ScanSafetyNumber -> conversation
             else -> null
         }
 }
@@ -124,7 +127,8 @@ private fun OpenApp() {
             null -> TabsScreen(tab, onTab = { tab = it }, push)
             Screen.AddContact -> AddContactScreen(pop, push)
             Screen.YourInvitation -> YourInvitationScreen(pop)
-            Screen.UseInvitation -> UseInvitationScreen(pop)
+            Screen.UseInvitation -> UseInvitationScreen(pop, push)
+            Screen.ScanInvitation -> ScanInvitationScreen(pop)
             Screen.AppLock -> AppLockScreen(pop, push)
             Screen.AutoLock -> AutoLockScreen(pop)
             Screen.ChangePassphrase -> ChangePassphraseScreen(pop)
@@ -164,6 +168,7 @@ private fun ContactView(
         is Screen.Verify -> VerifyScreen(chat, pop, push)
         is Screen.VerifyCode -> VerifyCodeScreen(chat, top.starts, pop)
         is Screen.SafetyNumber -> SafetyNumberScreen(chat, pop)
+        is Screen.ScanSafetyNumber -> ScanSafetyNumberScreen(chat, pop)
         else -> Unit
     }
 }
@@ -190,7 +195,7 @@ private fun UnlockScreen() {
         // The block starts at one height in each state, thus nothing jumps
         // when the field gives way to the progress bar.
         Spacer(Modifier.height(132.dp))
-        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { HeroIcon("lock") }
+        HeroIcon("lock")
         Spacer(Modifier.height(28.dp))
         when {
             isOpening -> Headline("Opening UMBRA")

@@ -97,7 +97,10 @@ fun VerifyScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                 }
                 Spacer(Modifier.height(20.dp))
             }
-            PrimaryButton("Compare a short code") { push(Screen.VerifyCode(chat.conversation, starts = true)) }
+            // IDN-140: the scan is the first way, and the short code the second.
+            PrimaryButton("Scan the code of ${chat.title}") { push(Screen.ScanSafetyNumber(chat.conversation)) }
+            Spacer(Modifier.height(8.dp))
+            SecondaryButton("Compare a short code") { push(Screen.VerifyCode(chat.conversation, starts = true)) }
             Spacer(Modifier.height(8.dp))
             EntryRow(RowEntry("key", "Full safety number") { push(Screen.SafetyNumber(chat.conversation)) })
         }
@@ -127,7 +130,7 @@ fun VerifyCodeScreen(chat: Chat, starts: Boolean, onBack: () -> Unit) {
     Column(Modifier.fillMaxSize()) {
         BackBar("Verify ${chat.title}", onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
-            HeroIcon("shield-check")
+            HeroIcon(if (isMismatch) "triangle-exclamation" else "shield-check")
             Spacer(Modifier.height(20.dp))
             when {
                 isDone -> {

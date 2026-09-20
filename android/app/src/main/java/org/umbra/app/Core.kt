@@ -72,6 +72,9 @@ object Core {
     var autoLockSeconds by mutableStateOf(15 * 60L)
         private set
 
+    /** The text of a scanned invitation, which the view of the link takes. */
+    var scannedInvitation by mutableStateOf<String?>(null)
+
     /** The short code of a ceremony that runs, and its conversation. */
     var verifyCode by mutableStateOf<Pair<Conversation, String>?>(null)
         private set
@@ -346,6 +349,17 @@ object Core {
         val number = client.safetyNumber(conversation.id)
         main.post { onLoaded(number) }
     }
+
+    /**
+     * Compares a scanned safety number with the number of this device. A
+     * match records the verification, and `onResult` gets the answer.
+     */
+    fun verifyByNumber(conversation: Conversation, scanned: String, onResult: (Boolean) -> Unit) =
+        call { client ->
+            val isMatch = client.verifyByNumber(conversation.id, scanned)
+            if (isMatch) refreshChats()
+            main.post { onResult(isMatch) }
+        }
 
     /** Starts a ceremony. A fault goes to `verifyFault`. */
     fun startVerification(conversation: Conversation) {
