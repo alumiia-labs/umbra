@@ -86,6 +86,7 @@ fn relay_info(index: usize) -> RelayInfo {
             v6_prefix: None,
             ingress: LAYERS[index] == 1,
             chain: LAYERS[index] != 1,
+            queue: LAYERS[index] == 3,
             layer: LAYERS[index],
         },
         key,

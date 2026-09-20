@@ -348,6 +348,15 @@ impl<'a> Consensus<'a> {
     /// Accepts a root under the rules of §10.5.2 at the device clock
     /// `device_clock`, and records or refreshes the correction.
     pub fn accept(&mut self, root: DirectoryRoot<'a>, device_clock: u64) -> Result<(), Error> {
+        self.verify(&root, device_clock)?;
+        self.commit(root, device_clock);
+        Ok(())
+    }
+
+    /// Tests a root under the rules of §10.5.2, and changes nothing. A caller
+    /// that must verify more under the root does that between this test and
+    /// `commit`.
+    pub fn verify(&self, root: &DirectoryRoot<'_>, device_clock: u64) -> Result<(), Error> {
         if root.keyset_hash != self.keyset_hash {
             return Err(Error::Unverified);
         }
@@ -357,23 +366,29 @@ impl<'a> Consensus<'a> {
             return Err(Error::Stale);
         }
         self.keyset.verify_multi(&root.preimage(), &root.sigs)?;
-        if let Some(clock) = self.client_clock(device_clock) {
-            // REL-035: not older than the validity plus the skew.
-            if clock.saturating_sub(root.epoch_start_unix)
+        // REL-035: not older than the validity plus the skew.
+        let is_stale = self.client_clock(device_clock).is_some_and(|clock| {
+            clock.saturating_sub(root.epoch_start_unix)
                 > CONSENSUS_VALIDITY.saturating_add(CLOCK_SKEW)
-            {
-                return Err(Error::Stale);
-            }
-            // REL-044: a root further ahead than the skew gives a new correction.
-            if root.epoch_start_unix.saturating_sub(clock) > CLOCK_SKEW {
-                self.correction = Some(correction(root.epoch_start_unix, device_clock));
-            }
-        } else {
+        });
+        if is_stale {
+            return Err(Error::Stale);
+        }
+        Ok(())
+    }
+
+    /// Takes a root that `verify` passed, and records or refreshes the
+    /// correction.
+    pub(crate) fn commit(&mut self, root: DirectoryRoot<'a>, device_clock: u64) {
+        // REL-044: a root further ahead than the skew gives a new correction.
+        let is_ahead = self
+            .client_clock(device_clock)
+            .is_none_or(|clock| root.epoch_start_unix.saturating_sub(clock) > CLOCK_SKEW);
+        if is_ahead {
             self.correction = Some(correction(root.epoch_start_unix, device_clock));
         }
         self.highest_epoch = root.epoch;
         self.accepted = Some(root);
-        Ok(())
     }
 }
 

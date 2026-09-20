@@ -34,6 +34,9 @@ pub struct Candidate {
     pub ingress: bool,
     /// Whether the descriptor offers the chain role.
     pub chain: bool,
+    /// Whether the descriptor offers the queue role. The last relay of a
+    /// circuit serves the commands of a client, thus it needs this role.
+    pub queue: bool,
     /// The layer under the accepted root, for a chain relay.
     pub layer: u8,
 }
@@ -63,8 +66,16 @@ impl Candidate {
             v6_prefix,
             ingress: entry.ingress(),
             chain: d.roles & roles::CHAIN != 0,
+            queue: d.roles & roles::QUEUE != 0,
             layer: layer(root, epoch, &d.relay_id),
         }
+    }
+
+    /// Whether the relay can be the last relay of a circuit: a chain relay of
+    /// layer 3 with the queue role, and no ingress. The layer function gives
+    /// each relay a layer, and an ingress relay can thus read as layer 3.
+    pub fn is_exit(&self) -> bool {
+        self.layer == 3 && self.chain && self.queue && !self.ingress
     }
 
     /// Whether two relays may share a chain under invariants 1 and 3.
@@ -100,7 +111,7 @@ pub fn check(
     if !hop1.ingress || hop2.ingress || hop3.ingress || !hop2.chain || !hop3.chain {
         return Err(Error::NoPath);
     }
-    if hop2.layer != 2 || hop3.layer != 3 {
+    if hop2.layer != 2 || hop3.layer != 3 || !hop3.queue {
         return Err(Error::NoPath);
     }
     // Invariants 1 and 3 at every pair.
@@ -128,7 +139,7 @@ pub fn check(
 pub fn select(ingress: &Candidate, candidates: &[Candidate]) -> Result<Chain, Error> {
     for relax in [false, true] {
         for hop2 in candidates.iter().filter(|c| c.layer == 2) {
-            for hop3 in candidates.iter().filter(|c| c.layer == 3) {
+            for hop3 in candidates.iter().filter(|c| c.is_exit()) {
                 if let Ok(chain) = check(ingress, hop2, hop3, relax) {
                     return Ok(chain);
                 }
@@ -233,6 +244,7 @@ mod tests {
             v6_prefix: None,
             ingress,
             chain: true,
+            queue: true,
             layer,
         }
     }

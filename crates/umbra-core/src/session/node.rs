@@ -445,6 +445,7 @@ fn unreachable_ingress(root: RootIdentity) -> ClientNode {
             v6_prefix: None,
             ingress: false,
             chain: false,
+            queue: false,
             layer: 0,
         },
         key: RelayStatic {
@@ -478,6 +479,7 @@ impl ClientNode {
                 v6_prefix: None,
                 ingress: layer == 1,
                 chain: layer != 1,
+                queue: layer == 3,
                 layer,
             },
             key,
@@ -776,7 +778,7 @@ impl ClientNode {
             .iter()
             .map(|relay| relay.candidate)
             .filter(|candidate| {
-                candidate.layer != 3 || exit.is_none_or(|exit| exit == candidate.relay_id)
+                !candidate.is_exit() || exit.is_none_or(|exit| exit == candidate.relay_id)
             })
             .map(|candidate| {
                 let draw = u32::from_be_bytes(random(rng));
@@ -1025,7 +1027,7 @@ impl ClientNode {
             .iter()
             .map(|relay| relay.candidate)
             .find(|candidate| {
-                candidate.layer == 3 && relay_hint(&candidate.relay_id) == fragment.relay_ref
+                candidate.is_exit() && relay_hint(&candidate.relay_id) == fragment.relay_ref
             })
             .ok_or(Error::NoPath)?
             .relay_id;

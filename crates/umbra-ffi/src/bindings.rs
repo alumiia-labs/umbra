@@ -366,6 +366,7 @@ fn relay_info(endpoint: &RelayEndpoint) -> Result<RelayInfo, FfiError> {
             v6_prefix: None,
             ingress: endpoint.layer == 1,
             chain: endpoint.layer != 1,
+            queue: endpoint.layer == 3,
             layer: endpoint.layer,
         },
         key,

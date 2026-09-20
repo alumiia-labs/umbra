@@ -5,6 +5,7 @@ pub mod descriptor;
 pub mod diff;
 pub mod family;
 pub mod layer;
+pub mod manifest;
 pub mod path;
 pub mod root;
 pub mod tree;
