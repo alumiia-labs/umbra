@@ -167,6 +167,19 @@ impl Outbound {
         corr_id: [u8; 16],
         nonce: [u8; 12],
     ) -> Result<(Bucket, Vec<u8>), Error> {
+        let sealed = self.seal_record(kind, inner, nonce)?;
+        Ok((sealed.bucket, sealed.sign(relay_session_pk, corr_id)?))
+    }
+
+    /// Seals one inner record for the queue, with no session yet. A `SEND`
+    /// is signed for the session of one circuit, and a record can wait for
+    /// a circuit that ends at the relay of its queue.
+    pub fn seal_record(
+        &self,
+        kind: L6Kind,
+        inner: &[u8],
+        nonce: [u8; 12],
+    ) -> Result<Sealed, Error> {
         let bucket = BUCKETS
             .into_iter()
             .find(|bucket| inner.len() <= bucket.l7_record())
@@ -181,15 +194,41 @@ impl Outbound {
             bucket,
             &mut payload,
         )?;
-        let encoded = signed(
+        Ok(Sealed {
+            bucket,
+            payload,
+            sender_id: self.sender_id,
+            auth_secret: self.auth_secret.clone(),
+            relay_id: self.relay_id,
+        })
+    }
+}
+
+/// A sealed record for a queue, which needs the signature for one session.
+pub struct Sealed {
+    bucket: Bucket,
+    payload: Vec<u8>,
+    sender_id: [u8; 32],
+    auth_secret: StaticSecret,
+    relay_id: [u8; 32],
+}
+
+impl Sealed {
+    /// The relay that holds the queue.
+    pub fn relay_id(&self) -> &[u8; 32] {
+        &self.relay_id
+    }
+
+    /// The encoded `SEND` for the session of one circuit.
+    pub fn sign(&self, relay_session_pk: &[u8; 32], corr_id: [u8; 16]) -> Result<Vec<u8>, Error> {
+        signed(
             Cmd::Send,
             self.sender_id,
             corr_id,
-            &payload,
+            &self.payload,
             &self.auth_secret,
             relay_session_pk,
-        )?;
-        Ok((bucket, encoded))
+        )
     }
 }
 

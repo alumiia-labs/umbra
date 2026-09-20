@@ -51,6 +51,7 @@ use super::{
     batch::Range,
     channel::{
         get_blob_command, new_queue_command, Inbound, Opened, Outbound, PairwiseChannel, Received,
+        Sealed,
     },
     circuit::{CircuitSession, Event as CircuitEvent},
     contact::{Invitee, Inviter, FLIGHT_1, FLIGHT_2},
@@ -397,6 +398,9 @@ pub struct ClientNode {
     current: usize,
     /// The queues that wait for a circuit with room.
     deferred: VecDeque<(Purpose, u64)>,
+    /// The handshake records that wait for a circuit to the relay of their
+    /// queue.
+    held_records: Vec<Sealed>,
     capsules: VecDeque<Vec<u8>>,
     next_handle: u64,
     waiting: BTreeMap<u64, Waiting>,
@@ -488,6 +492,7 @@ impl ClientNode {
             slots: Vec::new(),
             current: 0,
             deferred: VecDeque::new(),
+            held_records: Vec::new(),
             capsules: VecDeque::new(),
             next_handle: 1,
             waiting: BTreeMap::new(),
@@ -757,6 +762,63 @@ impl ClientNode {
         let chain = select(&self.ingress.candidate, &candidates)?;
         self.slot_mut()?.chain = Some(chain.hops);
         Ok(())
+    }
+
+    /// A circuit that holds its three hops and ends at `relay`. One that
+    /// does not serve `avoid` comes first, thus one session shows a relay
+    /// one queue of a pair where the circuits permit it.
+    fn ready_slot_to(&self, relay: &[u8; 32], avoid: Option<usize>) -> Option<usize> {
+        let ends_here = |(index, slot): (usize, &Slot)| {
+            let exit = slot.chain.and_then(|chain| chain.last().copied());
+            (slot.is_ready() && exit == Some(*relay)).then_some(index)
+        };
+        let mut found = self.slots.iter().enumerate().filter_map(ends_here);
+        let other = found.clone().find(|index| Some(*index) != avoid);
+        other.or_else(|| found.next())
+    }
+
+    /// Starts a circuit that ends at `relay`, when no circuit of this client
+    /// ends there or will end there.
+    fn circuit_to<R: CryptoRng + ?Sized>(
+        &mut self,
+        relay: [u8; 32],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let ends_there = |slot: &Slot| match slot.chain {
+            Some(chain) => chain.last() == Some(&relay),
+            None => slot.exit == Some(relay),
+        };
+        if self.slots.iter().any(ends_there) {
+            return Ok(());
+        }
+        let current = self.current;
+        let started = self.add_circuit(Some(relay), rng);
+        self.current = current;
+        started
+    }
+
+    /// Sends a sealed handshake record on a circuit that ends at the relay
+    /// of its queue. With no such circuit the record waits, and the circuit
+    /// starts.
+    fn send_sealed<R: CryptoRng + ?Sized>(
+        &mut self,
+        sealed: Sealed,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let Some(slot) = self.ready_slot_to(sealed.relay_id(), None) else {
+            let relay = *sealed.relay_id();
+            self.held_records.push(sealed);
+            return self.circuit_to(relay, rng);
+        };
+        let current = self.current;
+        self.current = slot;
+        let sent = self
+            .session_pk()
+            .and_then(|session_pk| sealed.sign(&session_pk, random(rng)))
+            .and_then(|encoded| self.queue_command(encoded, Waiting::Other));
+        self.current = current;
+        sent?;
+        self.pump()
     }
 
     /// The static key of a relay of the set.
@@ -1041,10 +1103,17 @@ impl ClientNode {
         rng: &mut R,
     ) -> Result<u64, Error> {
         let user_handle = self.handle();
-        let held = self.contacts.get_mut(&contact.0).ok_or(Error::NoPath)?;
-        if !held.channel.can_send() {
-            // The first record of the invitee opens the chain (`NET-292`).
+        let held = self.contacts.get(&contact.0).ok_or(Error::NoPath)?;
+        let relay = *held.channel.outbound().relay_id();
+        let has_circuit = self.ready_slot_to(&relay, None).is_some();
+        if !held.channel.can_send() || !has_circuit {
+            // The first record of the invitee opens the chain (`NET-292`),
+            // and a record goes on a circuit to the relay of its queue.
+            let held = self.contacts.get_mut(&contact.0).ok_or(Error::NoPath)?;
             held.waiting_sends.push_back((app.to_vec(), user_handle));
+            if !has_circuit {
+                self.circuit_to(relay, rng)?;
+            }
             return Ok(user_handle);
         }
         self.send_now(contact.0, app, Waiting::UserSend(user_handle), now, rng)?;
@@ -1182,14 +1251,21 @@ impl ClientNode {
         now: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
-        // A `SEND` binds no queue to a session. It goes on a circuit that
-        // does not serve the inbound queue of the contact when one is
-        // ready, thus one session shows a relay one queue of the pair.
-        let inbound = self.slot_of(&contact);
-        let ready = |(index, slot): (usize, &Slot)| slot.is_ready().then_some(index);
-        let mut candidates = self.slots.iter().enumerate().filter_map(ready);
-        let other = candidates.clone().find(|index| Some(*index) != inbound);
-        self.current = other.or_else(|| candidates.next()).ok_or(Error::NoPath)?;
+        // A `SEND` binds no queue to a session. It goes on a circuit to the
+        // relay of the queue, and on one that does not serve the inbound
+        // queue of the contact when one is ready.
+        let relay = *self
+            .contacts
+            .get(&contact)
+            .ok_or(Error::NoPath)?
+            .channel
+            .outbound()
+            .relay_id();
+        let Some(slot) = self.ready_slot_to(&relay, self.slot_of(&contact)) else {
+            self.circuit_to(relay, rng)?;
+            return Err(Error::NoPath);
+        };
+        self.current = slot;
         let session_pk = self.session_pk()?;
         let held = self.contacts.get_mut(&contact).ok_or(Error::NoPath)?;
         let (_, encoded) =
@@ -1304,7 +1380,7 @@ impl ClientNode {
         match circuit {
             Circuit::None => Ok(Vec::new()),
             Circuit::Building { build, pending } => {
-                self.on_build_cell(*build, *pending, &cell, rng)
+                self.on_build_cell(*build, *pending, &cell, now, rng)
             }
             Circuit::Ready(mut session) => {
                 let received = session.receive_cell(&cell);
@@ -1321,11 +1397,44 @@ impl ClientNode {
         }
     }
 
+    /// Sends what waited for a circuit to the relay at the end of the
+    /// current one: the handshake records, and the records of the user.
+    fn flush_to_exit<R: CryptoRng + ?Sized>(&mut self, now: u64, rng: &mut R) -> Result<(), Error> {
+        let exit = self.exit_of(self.current)?;
+        let (due, held): (Vec<Sealed>, Vec<Sealed>) = core::mem::take(&mut self.held_records)
+            .into_iter()
+            .partition(|sealed| *sealed.relay_id() == exit);
+        self.held_records = held;
+        for sealed in due {
+            self.send_sealed(sealed, rng)?;
+        }
+        let waiting: Vec<[u8; 32]> = self
+            .contacts
+            .iter()
+            .filter(|(_, held)| {
+                held.channel.can_send()
+                    && !held.waiting_sends.is_empty()
+                    && *held.channel.outbound().relay_id() == exit
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for contact in waiting {
+            let Some(held) = self.contacts.get_mut(&contact) else {
+                continue;
+            };
+            for (app, user_handle) in core::mem::take(&mut held.waiting_sends) {
+                self.send_now(contact, &app, Waiting::UserSend(user_handle), now, rng)?;
+            }
+        }
+        Ok(())
+    }
+
     fn on_build_cell<R: CryptoRng + ?Sized>(
         &mut self,
         mut build: CircuitBuild,
         pending: Pending,
         cell: &[u8],
+        now: u64,
         rng: &mut R,
     ) -> Result<Vec<ClientEvent>, Error> {
         let lost = Ok(alloc::vec![ClientEvent::CircuitLost]);
@@ -1371,6 +1480,8 @@ impl ClientNode {
         if !self.deferred.is_empty() {
             self.add_circuit(None, rng)?;
         }
+        self.current = ready;
+        self.flush_to_exit(now, rng)?;
         // The runtime learns of the first circuit, which takes its commands.
         let is_first = !self
             .slots
@@ -1526,14 +1637,8 @@ impl ClientNode {
                     Some(lock) => Outbound::locked(&to, StaticSecret::from(lock)),
                     None => Outbound::new(&to),
                 };
-                let (_, encoded) = outbound.send_record(
-                    L6Kind::Handshake,
-                    &flight1,
-                    &session_pk,
-                    random(rng),
-                    random(rng),
-                )?;
-                self.queue_command(encoded, Waiting::Other)?;
+                let sealed = outbound.seal_record(L6Kind::Handshake, &flight1, random(rng))?;
+                self.send_sealed(sealed, rng)?;
                 (
                     Setup::Accepting(Box::new(invitee)),
                     Some(outbound),
@@ -1677,14 +1782,8 @@ impl ClientNode {
                     self.changes
                         .push(StateChange::InvitationEnded { queue: queue_id });
                     let outbound = Outbound::new(reply_to);
-                    let (_, encoded) = outbound.send_record(
-                        L6Kind::Handshake,
-                        &flight2,
-                        &session_pk,
-                        random(rng),
-                        random(rng),
-                    )?;
-                    self.queue_command(encoded, Waiting::Other)?;
+                    let sealed = outbound.seal_record(L6Kind::Handshake, &flight2, random(rng))?;
+                    self.send_sealed(sealed, rng)?;
                     half.setup = Setup::Inviting(inviter);
                     self.halves.insert(queue_id, half);
                     return Ok(Vec::new());
@@ -1703,14 +1802,8 @@ impl ClientNode {
                     return Ok(Vec::new());
                 };
                 let outbound = half.outbound.take().ok_or(Error::NoPath)?;
-                let (_, encoded) = outbound.send_record(
-                    L6Kind::Handshake,
-                    &flight3,
-                    &session_pk,
-                    random(rng),
-                    random(rng),
-                )?;
-                self.queue_command(encoded, Waiting::Other)?;
+                let sealed = outbound.seal_record(L6Kind::Handshake, &flight3, random(rng))?;
+                self.send_sealed(sealed, rng)?;
                 (keys, half.peer_static, outbound, Role::Initiator)
             }
         };
@@ -1746,6 +1839,15 @@ impl ClientNode {
             contact: ContactId(queue_id),
             peer_static,
         }])
+    }
+
+    /// The chain of each circuit that holds its three hops.
+    pub fn chains(&self) -> Vec<[[u8; 32]; HOPS]> {
+        self.slots
+            .iter()
+            .filter(|slot| slot.is_ready())
+            .filter_map(|slot| slot.chain)
+            .collect()
     }
 
     /// The relays of the circuit, for a runtime that dials the guard.
