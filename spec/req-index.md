@@ -67,7 +67,7 @@ each column when a crate implements the requirement and a test covers it.
 | --- | --- | --- | --- | --- | --- | --- |
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
-| `NET` | 217 | 84 | 1 | 0 | 8 | **310** |
+| `NET` | 220 | 84 | 1 | 0 | 8 | **313** |
 | `IDN` | 120 | 43 | 1 | 0 | 5 | **169** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
 | `WIR` | 385 | 84 | 0 | 0 | 6 | **475** |
@@ -81,7 +81,7 @@ each column when a crate implements the requirement and a test covers it.
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
 | `IMP` | 105 | 41 | 0 | 0 | 1 | **147** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2166 | 703 | 7 | 0 | 51 | **2927** |
+| **All** | 2169 | 703 | 7 | 0 | 51 | **2930** |
 
 ## SCP — Scope and Conventions
 
@@ -449,6 +449,9 @@ Source: `spec/03-network-architecture.md`
 | `NET-309` | §3.2.5 | MUST | A client that holds no such circuit | A client that holds no such circuit MUST build one, and the command MUST wait for it. |  |  |
 | `NET-310` | §3.2.5 | MUST | A client | A client MUST give the candidates of §3.4.6 to the selection in a random order, and a relay that no other circuit of that client uses MUST come before a relay that one uses. |  |  |
 | `NET-311` | §3.2.5 | MUST NOT | (unstated) | A client MUST build each chain again at the start of a run, and it MUST NOT store a chain: the store names the relay of a queue, and no relay of a path to it. |  |  |
+| `NET-312` | §3.2.5 | MUST | A client | A client MUST reject a descriptor that has a relay line with no `layer`, no `operator`, no `country` or no `asn`, with one fact two times, or with a word that is no fact. |  |  |
+| `NET-313` | §3.2.5 | MUST | A client | A client MUST take the first relay of layer 1 as its pinned ingress of `NET-022`. |  |  |
+| `NET-314` | §3.2.5 | MUST | A client | A client MUST read a descriptor with the first line `umbra-network 1`. |  |  |
 
 ## IDN — Identity
 

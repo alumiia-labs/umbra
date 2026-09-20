@@ -861,9 +861,12 @@ version byte, and a client MUST reject a row whose version it does not read.
   the relay that holds its inbound queue, because a new run builds a circuit
   to that relay before it subscribes (`NET-308`). The stored channel names the
   relay of the outbound queue. Version `0x01` of the two forms named no
-  relay of the inbound queue. A client MUST read that version, MUST give its
-  queue to a circuit with each last relay, and MUST write the present
-  version at the next commit of the row.
+  relay of the inbound queue. A client MUST read that version and MUST write
+  the present version at the next commit of the row. A store of that version
+  came from a network with one queue relay. Thus the client MUST take the
+  relay of the outbound queue as the relay of the inbound queue of a
+  contact, and the relay that the stored bundle names as the relay of the
+  queue of an invitation.
 - **[IMP-131]** A client MUST commit each change of a channel to the store
   before it writes a byte of that call to the link. A ratchet record that
   left the device under a state that the store does not hold lets a restart

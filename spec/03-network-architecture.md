@@ -304,6 +304,35 @@ its build and not from the signed directory of Part 10. Thus it meets
 `NET-022`, `NET-023`, and the invariants of §3.4.6 over that set, and it does
 not verify the set.
 
+That descriptor is a text of lines. The first line is `umbra-network 2`. Each
+relay has one line, and the last line names the host of the invitation links.
+
+```
+relay <host> <ipv4> <port> <static key, hex> <relay_id, hex> layer=<1..3>
+      operator=<name> country=<two capital letters> asn=<number> [prefix=<a.b>]
+invite <host>
+```
+
+The facts of a relay line are the inputs of the selection of §3.4.6. The
+`prefix` is the `/16` of the relay, and a line with no `prefix` takes the
+first two bytes of its address.
+
+- **[NET-312]** A client MUST reject a descriptor that has a relay line with
+  no `layer`, no `operator`, no `country` or no `asn`, with one fact two
+  times, or with a word that is no fact. It MUST reject a descriptor that
+  holds no relay of one of the three layers. A fact that is absent must not
+  become a default, because a default would let two relays of one operator
+  look like two operators.
+- **[NET-313]** A client MUST take the first relay of layer 1 as its pinned
+  ingress of `NET-022`. It dials no other relay.
+- **[NET-314]** A client MUST read a descriptor with the first line
+  `umbra-network 1`. That version holds three relay lines with no facts, and
+  the lines are the layers 1, 2 and 3 in their order. Such a set holds one
+  chain. The client gives each of its lines an operator, a bloc and a
+  network of its own, thus that chain satisfies §3.4.6. A client MUST reject
+  a descriptor of that version with a count of relay lines that is not
+  three, and it MUST reject each other first line.
+
 > *Rationale.* This leak is the largest unfixed leak in the system that UMBRA
 > inherits. The overview of SimpleX states that a malicious router "records all
 > queues ... sent via the same transport connection to gain a partial knowledge
