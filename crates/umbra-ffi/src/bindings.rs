@@ -264,6 +264,15 @@ pub struct MsgInfo {
     pub stored_at_ms: u64,
 }
 
+/// Which receipts this device sends to one contact.
+#[derive(uniffi::Record)]
+pub struct Receipts {
+    /// A delivery receipt follows each message that this device holds.
+    pub delivery: bool,
+    /// A read receipt follows each message that the user saw.
+    pub read: bool,
+}
+
 /// What a conversation list shows for one conversation.
 #[derive(uniffi::Record)]
 pub struct Summary {
@@ -570,11 +579,15 @@ fn conversation_of(bytes: &[u8]) -> Result<ConversationId, FfiError> {
 
 /// The store of the client, as the runtime of one run sees it. It holds a
 /// weak reference, thus a handle that the platform drops ends the run.
-struct HandleStore(Weak<Handle>);
+struct HandleStore {
+    handle: Weak<Handle>,
+    /// The batch of receipts that the last slot got.
+    given: Option<crate::DueReceipt>,
+}
 
 impl Persist for HandleStore {
     fn commit(&mut self, changes: Vec<StateChange>, received: &[(ContactId, Vec<u8>)]) -> bool {
-        let Some(handle) = self.0.upgrade() else {
+        let Some(handle) = self.handle.upgrade() else {
             return false;
         };
         let mut inner = locked(&handle.inner);
@@ -586,6 +599,24 @@ impl Persist for HandleStore {
         drop(inner);
         handle.changed.notify_all();
         committed
+    }
+
+    fn due_receipt(&mut self, now: u64) -> Option<(ContactId, Vec<u8>)> {
+        let handle = self.handle.upgrade()?;
+        let mut inner = locked(&handle.inner);
+        // A locked client gives none, and its receipts wait in the store.
+        let due = inner.client.due_receipt(now, &mut OsRng).ok()??;
+        let contact = inner.bridge.as_ref()?.contact_for(&due.conversation)?;
+        let app = due.app.clone();
+        self.given = Some(due);
+        Some((contact, app))
+    }
+
+    fn receipt_sent(&mut self) {
+        let (Some(handle), Some(given)) = (self.handle.upgrade(), self.given.take()) else {
+            return;
+        };
+        let _ = locked(&handle.inner).client.receipt_sent(&given);
     }
 }
 
@@ -688,7 +719,10 @@ impl Handle {
                 tls,
                 runtime_commands,
                 runtime_updates,
-                Box::new(HandleStore(Arc::downgrade(&self))),
+                Box::new(HandleStore {
+                    handle: Arc::downgrade(&self),
+                    given: None,
+                }),
             ));
         }
         // The task holds a weak reference, thus a handle that the platform
@@ -744,6 +778,33 @@ impl Handle {
             .into_iter()
             .map(|conversation| conversation.0.to_vec())
             .collect())
+    }
+
+    /// Which receipts this device sends to the contact of a conversation.
+    /// The two are off for a new contact (`NET-059`).
+    pub fn receipt_settings(&self, conversation: Vec<u8>) -> Result<Receipts, FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        let settings = locked(&self.inner).client.receipt_settings(conversation)?;
+        Ok(Receipts {
+            delivery: settings.delivery,
+            read: settings.read,
+        })
+    }
+
+    /// Sets the receipts of one contact.
+    pub fn set_receipt_settings(
+        &self,
+        conversation: Vec<u8>,
+        settings: Receipts,
+    ) -> Result<(), FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        let settings = crate::ReceiptSettings {
+            delivery: settings.delivery,
+            read: settings.read,
+        };
+        Ok(locked(&self.inner)
+            .client
+            .set_receipt_settings(conversation, settings, &mut OsRng)?)
     }
 
     /// Tells the client whether a view of the app is on the screen. A

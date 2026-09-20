@@ -1608,6 +1608,7 @@ dependencies = [
  "tokio",
  "umbra-core",
  "umbra-crypto",
+ "umbra-queue",
  "umbra-relay",
  "umbra-transport",
  "umbra-wire",

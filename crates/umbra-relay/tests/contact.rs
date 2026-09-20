@@ -380,14 +380,14 @@ fn two_clients_become_contacts_and_exchange_text() {
     // background, and a relay gives a cover cell no answer.
     let now = network.now;
     let slot = network.clients[ALICE]
-        .on_cover_slot(false, now, &mut Rng(4))
+        .on_cover_slot(false, None, now, &mut Rng(4))
         .unwrap();
     assert_eq!(slot, CoverSlot::Nothing);
     let mut kinds = Vec::new();
     for seed in 0..24 {
         kinds.push(
             network.clients[ALICE]
-                .on_cover_slot(true, now, &mut Rng(40 + seed))
+                .on_cover_slot(true, None, now, &mut Rng(40 + seed))
                 .unwrap(),
         );
     }
@@ -400,11 +400,11 @@ fn two_clients_become_contacts_and_exchange_text() {
     network.now += RECEIPT_MIN_DELAY;
     let now = network.now;
     let slot = network.clients[ALICE]
-        .on_cover_slot(false, now, &mut Rng(90))
+        .on_cover_slot(false, None, now, &mut Rng(90))
         .unwrap();
     assert_eq!(slot, CoverSlot::Acknowledgment);
     let slot = network.clients[ALICE]
-        .on_cover_slot(false, now, &mut Rng(91))
+        .on_cover_slot(false, None, now, &mut Rng(91))
         .unwrap();
     assert_eq!(slot, CoverSlot::Nothing);
     network.settle();
@@ -428,6 +428,35 @@ fn two_clients_become_contacts_and_exchange_text() {
         .filter(|event| matches!(event, ClientEvent::Message { .. }))
         .collect();
     assert_eq!(received.len(), 3);
+
+    // NET-065: the records of the handshake are older than the floor, and
+    // their ACK goes before a receipt. The receipt takes the next slot, in
+    // the background also.
+    let receipt = control(
+        AppKind::DeliveryReceipt,
+        &[[0x01u8, 0x01].as_slice(), &[10; 16]].concat(),
+    );
+    let now = network.now;
+    for (seed, carried) in [(92, CoverSlot::Acknowledgment), (94, CoverSlot::Receipt)] {
+        let slot = network.clients[BOB]
+            .on_cover_slot(false, Some((&bob_contact, &receipt)), now, &mut Rng(seed))
+            .unwrap();
+        assert_eq!(slot, carried);
+    }
+    network.settle();
+    let receipt_body = AppMessage::parse(&receipt, Channel::Pairwise)
+        .unwrap()
+        .body
+        .to_vec();
+    assert_eq!(messages_of(network.take_events(ALICE)), [receipt_body]);
+    // The three records of Alice are now older than the floor.
+    network.now += RECEIPT_MIN_DELAY;
+    let now = network.now;
+    let slot = network.clients[BOB]
+        .on_cover_slot(false, Some((&bob_contact, &receipt)), now, &mut Rng(93))
+        .unwrap();
+    assert_eq!(slot, CoverSlot::Acknowledgment);
+    network.settle();
 
     // A second use of the bundle gets no contact, because its prekey served.
     let carol = network.add_client(0x50);

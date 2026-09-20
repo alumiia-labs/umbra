@@ -66,6 +66,29 @@ pub enum Delivery {
 }
 
 impl Delivery {
+    /// The state that a receipt of `kind` reports, or `None` for a record
+    /// of another kind.
+    pub fn of_receipt(kind: umbra_wire::app::AppKind) -> Option<Self> {
+        match kind {
+            umbra_wire::app::AppKind::DeliveryReceipt => Some(Delivery::Delivered),
+            umbra_wire::app::AppKind::ReadReceipt => Some(Delivery::Read),
+            _ => None,
+        }
+    }
+
+    /// Whether a receipt that reports `reported` moves this state up. A
+    /// state goes up only: a delivery receipt after a read receipt changes
+    /// nothing.
+    pub fn is_below(self, reported: Delivery) -> bool {
+        let rank = |state| match state {
+            Delivery::Queued | Delivery::Failed => 0,
+            Delivery::Accepted => 1,
+            Delivery::Delivered => 2,
+            Delivery::Read => 3,
+        };
+        rank(self) < rank(reported)
+    }
+
     /// The state of a stored byte.
     pub fn from_byte(byte: u8) -> Option<Self> {
         [
@@ -96,6 +119,28 @@ pub struct MessageInfo {
 
 /// The longest local name of a contact, in bytes of UTF-8.
 pub const CONTACT_NAME_MAX: usize = 120;
+
+/// Which receipts this device sends to one contact. The two are off for a
+/// new contact (`NET-059`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ReceiptSettings {
+    /// A delivery receipt follows each message that this device holds.
+    pub delivery: bool,
+    /// A read receipt follows each message that the user saw in its
+    /// conversation.
+    pub read: bool,
+}
+
+/// A batch of receipts that may leave in a slot of the cover clock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DueReceipt {
+    /// The conversation of the peer.
+    pub conversation: ConversationId,
+    /// The application record, a `ReceiptBody` of one kind.
+    pub app: Vec<u8>,
+    /// The rows of the store that the batch came from.
+    pub(crate) rows: Vec<[u8; 16]>,
+}
 
 /// What a conversation list shows for one conversation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -342,6 +387,177 @@ mod tests {
         assert_eq!(String::from_utf16(&view.0).unwrap(), "hello 👋");
         assert_eq!(peer.messages(conversation).unwrap(), [received]);
         peer.audit().unwrap();
+    }
+
+    fn record(kind: umbra_wire::app::AppKind, msg_id: [u8; 16], body: &[u8]) -> Vec<u8> {
+        let message = umbra_wire::app::AppMessage {
+            kind,
+            msg_id,
+            sent_at: 0,
+            body,
+        };
+        let mut out = vec![0u8; message.len()];
+        message.encode(&mut out).unwrap();
+        out
+    }
+
+    fn targets_of(due: &DueReceipt, kind: umbra_wire::app::AppKind) -> Vec<[u8; 16]> {
+        use umbra_wire::app::{signal::ReceiptBody, AppMessage, Channel};
+        let parsed = AppMessage::parse(&due.app, Channel::Pairwise).unwrap();
+        assert_eq!(parsed.kind, kind);
+        ReceiptBody::parse(parsed.body).unwrap().targets
+    }
+
+    #[test]
+    fn receipts_wait_in_the_store_and_a_receipt_moves_a_sent_message_up() {
+        use umbra_core::session::node::{ContactId, StateChange};
+        use umbra_queue::params::{RECEIPT_BATCH_MAX, RECEIPT_MAX_HOLD, RECEIPT_MIN_DELAY};
+        use umbra_wire::app::{signal::ReceiptBody, AppKind};
+
+        let mut rng = Rng(5);
+        let mut client = new_client(&mut rng);
+        let contact = ContactId([9; 32]);
+        let change = StateChange::Contact {
+            contact,
+            state: zeroize::Zeroizing::new(vec![1, 2, 3]),
+        };
+        client
+            .commit_network(&[change], &[], 1_000_000, &mut rng)
+            .unwrap();
+        let conversation = client.conversation_for(&contact.0).unwrap();
+        let text = |id: u8| (contact, record(AppKind::Text, [id; 16], b"hi"));
+
+        // NET-059: a new contact gets no receipt.
+        assert_eq!(
+            client.receipt_settings(conversation).unwrap(),
+            ReceiptSettings::default()
+        );
+        client
+            .commit_network(&[], &[text(1)], 2_000_000, &mut rng)
+            .unwrap();
+        assert_eq!(client.due_receipt(2_100, &mut rng).unwrap(), None);
+
+        let both = ReceiptSettings {
+            delivery: true,
+            read: true,
+        };
+        client
+            .set_receipt_settings(conversation, both, &mut rng)
+            .unwrap();
+        assert_eq!(client.receipt_settings(conversation).unwrap(), both);
+        let arrivals: Vec<_> = (2..=12).map(text).collect();
+        client
+            .commit_network(&[], &arrivals, 3_000_000, &mut rng)
+            .unwrap();
+
+        // NET-050 and NET-045: the floor, and nine targets in one batch. A
+        // batch that did not leave comes again.
+        let floor = 3_000 + RECEIPT_MIN_DELAY;
+        assert_eq!(client.due_receipt(floor - 1, &mut rng).unwrap(), None);
+        let first = client.due_receipt(floor, &mut rng).unwrap().unwrap();
+        assert_eq!(first.conversation, conversation);
+        let first_targets = targets_of(&first, AppKind::DeliveryReceipt);
+        assert_eq!(first_targets.len(), RECEIPT_BATCH_MAX);
+        let again = client.due_receipt(floor, &mut rng).unwrap().unwrap();
+        assert_eq!(targets_of(&again, AppKind::DeliveryReceipt), first_targets);
+        client.receipt_sent(&first).unwrap();
+        let second = client.due_receipt(floor, &mut rng).unwrap().unwrap();
+        assert_eq!(targets_of(&second, AppKind::DeliveryReceipt).len(), 2);
+        client.receipt_sent(&second).unwrap();
+        assert_eq!(client.due_receipt(floor, &mut rng).unwrap(), None);
+
+        // NET-042: the user opens the conversation. A kind that goes off
+        // erases what waits.
+        client.mark_read(conversation, 4_000_000, &mut rng).unwrap();
+        let read = client
+            .due_receipt(4_000 + RECEIPT_MIN_DELAY, &mut rng)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            targets_of(&read, AppKind::ReadReceipt).len(),
+            RECEIPT_BATCH_MAX
+        );
+        let delivery_only = ReceiptSettings {
+            delivery: true,
+            read: false,
+        };
+        client
+            .set_receipt_settings(conversation, delivery_only, &mut rng)
+            .unwrap();
+        assert_eq!(
+            client
+                .due_receipt(4_000 + RECEIPT_MIN_DELAY, &mut rng)
+                .unwrap(),
+            None
+        );
+
+        // NET-052: a receipt that waited too long goes to no peer.
+        client
+            .commit_network(&[], &[text(13)], 5_000_000, &mut rng)
+            .unwrap();
+        assert_eq!(
+            client
+                .due_receipt(5_000 + RECEIPT_MAX_HOLD, &mut rng)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            client
+                .due_receipt(5_000 + RECEIPT_MIN_DELAY, &mut rng)
+                .unwrap(),
+            None
+        );
+
+        // A receipt of the peer moves a sent message up, and never down.
+        let mut draft = client.new_draft(conversation);
+        draft.set_text(&units("are you there")).unwrap();
+        let sent = client.send_draft(draft, 6_000_000, &mut rng).unwrap();
+        let outgoing = client.take_outgoing().unwrap();
+        let sent_id =
+            umbra_wire::app::AppMessage::parse(&outgoing.app, umbra_wire::app::Channel::Pairwise)
+                .unwrap()
+                .msg_id;
+        client
+            .set_delivery(&sent, Delivery::Accepted, &mut rng)
+            .unwrap();
+        while client.next_event().is_some() {}
+        let receipt = |kind, id: u8| {
+            let body = ReceiptBody {
+                targets: vec![sent_id],
+            };
+            let mut encoded = vec![0u8; 18];
+            body.encode(&mut encoded).unwrap();
+            (contact, record(kind, [id; 16], &encoded))
+        };
+        let before = client.messages(conversation).unwrap().len();
+        client
+            .commit_network(
+                &[],
+                &[receipt(AppKind::ReadReceipt, 0xA1)],
+                6_100_000,
+                &mut rng,
+            )
+            .unwrap();
+        assert_eq!(
+            client.next_event(),
+            Some(Event::Delivery {
+                message: sent,
+                delivery: Delivery::Read
+            })
+        );
+        client
+            .commit_network(
+                &[],
+                &[receipt(AppKind::DeliveryReceipt, 0xA2)],
+                6_200_000,
+                &mut rng,
+            )
+            .unwrap();
+        assert_eq!(client.next_event(), None);
+        assert_eq!(client.info(&sent).unwrap().delivery, Delivery::Read);
+        // A receipt is no message of the conversation.
+        assert_eq!(client.messages(conversation).unwrap().len(), before);
+        client.audit().unwrap();
     }
 
     #[test]

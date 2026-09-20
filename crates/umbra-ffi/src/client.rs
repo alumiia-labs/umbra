@@ -19,12 +19,13 @@ use umbra_core::{
     },
 };
 use umbra_crypto::{hierarchy::RootIdentity, rand_core::CryptoRng, secret::Secret};
-use umbra_wire::app::{msg_ref, AppKind, AppMessage, Channel};
+use umbra_queue::client::receipts::ReceiptHold;
+use umbra_wire::app::{msg_ref, signal::ReceiptBody, AppKind, AppMessage, Channel};
 use zeroize::Zeroizing;
 
 use crate::{
-    draft::Draft, ConversationId, ConversationSummary, Delivery, Error, Event, MessageInfo, MsgRef,
-    Sink, CONTACT_NAME_MAX,
+    draft::Draft, ConversationId, ConversationSummary, Delivery, DueReceipt, Error, Event,
+    MessageInfo, MsgRef, ReceiptSettings, Sink, CONTACT_NAME_MAX,
 };
 
 const ROOT_KEY: &[u8] = b"root";
@@ -52,6 +53,16 @@ const INVITATION: TableId = TableId(0x08);
 const CONVERSATION: TableId = TableId(0x09);
 const READ_UP_TO: core::ops::Range<usize> = 16..24;
 const CONVERSATION_PREFIX: usize = 16 + 8;
+
+/// The table of the receipts that wait for a slot of the cover clock
+/// (`NET-053`). A row holds the conversation, the kind of the receipt, the
+/// `msg_id` of its target, and the time that it reports.
+const RECEIPT: TableId = TableId(0x0B);
+const RECEIPT_ROW_LEN: usize = 16 + 1 + 16 + 8;
+/// The name of the receipt setting of a conversation, before its identifier.
+const RECEIPT_SETTING: &[u8] = b"receipts/";
+const SENDS_DELIVERY: u8 = 0x01;
+const SENDS_READ: u8 = 0x02;
 
 /// The table of the settings of this device. A row holds one value under
 /// the name of its setting.
@@ -153,6 +164,31 @@ fn attachments_of(row: &[u8]) -> Result<Vec<String>, Error> {
         at = at.saturating_add(2).saturating_add(len);
     }
     Ok(out)
+}
+
+/// The held receipts of one peer and one kind: the conversation, the hold,
+/// and the row of each target.
+type PeerHold = (ConversationId, ReceiptHold, Vec<(RowId, [u8; 16])>);
+
+fn held_receipt(
+    conversation: ConversationId,
+    kind: AppKind,
+    target: &[u8; 16],
+    at: u64,
+) -> Vec<u8> {
+    [
+        conversation.0.as_slice(),
+        &[kind as u8],
+        target,
+        &at.to_be_bytes(),
+    ]
+    .concat()
+}
+
+/// The natural key of a held receipt. One target holds one receipt of each
+/// kind.
+fn held_receipt_key(conversation: ConversationId, kind: AppKind, target: &[u8; 16]) -> Vec<u8> {
+    [conversation.0.as_slice(), &[kind as u8], target].concat()
 }
 
 fn stored_message(
@@ -331,6 +367,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
+        let mut sends_delivery = Vec::new();
+        for (contact, _) in received {
+            let conversation = self.conversation_for(&contact.0)?;
+            if self.receipt_settings(conversation)?.delivery {
+                sends_delivery.push(conversation);
+            }
+        }
         let open = self.open_mut()?;
         // The batch borrows the store, thus each row identifier and each
         // duplicate check comes first.
@@ -362,6 +405,40 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for (contact, app) in received {
             let parsed = AppMessage::parse(app, Channel::Pairwise)?;
             let conversation = ConversationId(open.store.row_id(TableId::CONTACT, &contact.0));
+            if let Some(reported) = Delivery::of_receipt(parsed.kind) {
+                // A receipt is no message. A body that does not parse
+                // changes nothing, and it ends no batch.
+                let targets =
+                    ReceiptBody::parse(parsed.body).map_or(Vec::new(), |body| body.targets);
+                for target in targets {
+                    let reference = msg_ref(&open.device_set_key, &target);
+                    let natural = [conversation.0.as_slice(), &reference].concat();
+                    let row = open.store.row_id(TableId::MESSAGE, &natural);
+                    let Some(plain) = open.store.get(TableId::MESSAGE, &row)? else {
+                        continue;
+                    };
+                    let mut plain = Zeroizing::new(plain);
+                    let info = info_of(&plain)?;
+                    // WIR-293: a receipt names a message of this device to
+                    // this peer, and a state goes up only.
+                    if !info.outgoing || !info.delivery.is_below(reported) {
+                        continue;
+                    }
+                    *plain.get_mut(1).ok_or(Error::Integrity)? = reported as u8;
+                    planned.push(Planned::Put(
+                        TableId::MESSAGE,
+                        row,
+                        Some(conversation.0),
+                        plain,
+                    ));
+                    planned.push(Planned::Delete(OUTBOX, row));
+                    events.push(Event::Delivery {
+                        message: MsgRef(row),
+                        delivery: reported,
+                    });
+                }
+                continue;
+            }
             let reference = msg_ref(&open.device_set_key, &parsed.msg_id);
             let natural = [conversation.0.as_slice(), &reference].concat();
             let row = open.store.row_id(TableId::MESSAGE, &natural);
@@ -382,6 +459,21 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 conversation,
                 message,
             });
+            // NET-041: this device holds the message now.
+            if sends_delivery.contains(&conversation) {
+                let key = held_receipt_key(conversation, AppKind::DeliveryReceipt, &parsed.msg_id);
+                planned.push(Planned::Put(
+                    RECEIPT,
+                    open.store.row_id(RECEIPT, &key),
+                    Some(conversation.0),
+                    Zeroizing::new(held_receipt(
+                        conversation,
+                        AppKind::DeliveryReceipt,
+                        &parsed.msg_id,
+                        now_ms / 1_000,
+                    )),
+                ));
+            }
         }
         let mut batch = open.store.begin();
         for write in &planned {
@@ -655,9 +747,188 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if now_ms <= read_up_to {
             return Ok(());
         }
+        // NET-042: the user opened the conversation, and no other act gives
+        // a read receipt.
+        if self.receipt_settings(conversation)?.read {
+            self.hold_read_receipts(conversation, read_up_to, now_ms / 1_000, rng)?;
+        }
         self.put_conversation_meta(conversation, now_ms, &name, rng)?;
         self.auto_lock.touch(now_ms / 1_000);
         Ok(())
+    }
+
+    fn hold_read_receipts<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        read_up_to: u64,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let open = self.open_mut()?;
+        let mut rows = Vec::new();
+        for (_, plain) in open.store.list(TableId::MESSAGE, Some(&conversation.0))? {
+            let plain = Zeroizing::new(plain);
+            let info = info_of(&plain)?;
+            if info.outgoing || info.stored_at_ms <= read_up_to {
+                continue;
+            }
+            let app = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
+            let target = AppMessage::parse(app, Channel::Pairwise)?.msg_id;
+            let key = held_receipt_key(conversation, AppKind::ReadReceipt, &target);
+            rows.push((
+                open.store.row_id(RECEIPT, &key),
+                held_receipt(conversation, AppKind::ReadReceipt, &target, now),
+            ));
+        }
+        let mut batch = open.store.begin();
+        for (row, plain) in &rows {
+            batch.put(RECEIPT, *row, Some(conversation.0), plain, rng)?;
+        }
+        Ok(batch.commit()?)
+    }
+
+    /// Which receipts this device sends to the contact of a conversation.
+    pub fn receipt_settings(&self, conversation: ConversationId) -> Result<ReceiptSettings, Error> {
+        let store = &self.open_ref()?.store;
+        let name = [RECEIPT_SETTING, conversation.0.as_slice()].concat();
+        let flags = match store.get(SETTINGS, &store.row_id(SETTINGS, &name))? {
+            None => 0,
+            Some(plain) => *plain.first().ok_or(Error::Integrity)?,
+        };
+        Ok(ReceiptSettings {
+            delivery: flags & SENDS_DELIVERY != 0,
+            read: flags & SENDS_READ != 0,
+        })
+    }
+
+    /// Sets the receipts of one contact. A kind that goes off erases each
+    /// receipt of that kind that waits (`NET-054`).
+    pub fn set_receipt_settings<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        settings: ReceiptSettings,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let open = self.open_mut()?;
+        let name = [RECEIPT_SETTING, conversation.0.as_slice()].concat();
+        let row = open.store.row_id(SETTINGS, &name);
+        let flags =
+            (u8::from(settings.delivery) * SENDS_DELIVERY) | (u8::from(settings.read) * SENDS_READ);
+        let mut ended = Vec::new();
+        for (held, plain) in open.store.list(RECEIPT, Some(&conversation.0))? {
+            let kind = plain.get(16).copied();
+            let is_on = match kind {
+                Some(kind) if kind == AppKind::DeliveryReceipt as u8 => settings.delivery,
+                Some(kind) if kind == AppKind::ReadReceipt as u8 => settings.read,
+                _ => false,
+            };
+            if !is_on {
+                ended.push(held);
+            }
+        }
+        let mut batch = open.store.begin();
+        batch.put(SETTINGS, row, None, &[flags], rng)?;
+        for held in ended {
+            batch.delete(RECEIPT, held);
+        }
+        Ok(batch.commit()?)
+    }
+
+    /// The batch of receipts that may leave at `now`, or `None`. A receipt
+    /// that waited for longer than `RECEIPT_MAX_HOLD` leaves the store here
+    /// and goes to no peer (`NET-052`).
+    pub fn due_receipt<R: CryptoRng + ?Sized>(
+        &mut self,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<Option<DueReceipt>, Error> {
+        let open = self.open_mut()?;
+        let mut stale = Vec::new();
+        let mut due = None;
+        for kind in [AppKind::DeliveryReceipt, AppKind::ReadReceipt] {
+            // One hold for each peer and each kind: the rows of one batch.
+            let mut holds: Vec<PeerHold> = Vec::new();
+            for (row, plain) in open.store.list(RECEIPT, None)? {
+                if plain.len() != RECEIPT_ROW_LEN {
+                    return Err(Error::Integrity);
+                }
+                if plain.get(16) != Some(&(kind as u8)) {
+                    continue;
+                }
+                let field = |at: usize, len: usize| plain.get(at..at.saturating_add(len));
+                let conversation: [u8; 16] = field(0, 16)
+                    .and_then(|bytes| bytes.try_into().ok())
+                    .ok_or(Error::Integrity)?;
+                let target: [u8; 16] = field(17, 16)
+                    .and_then(|bytes| bytes.try_into().ok())
+                    .ok_or(Error::Integrity)?;
+                let at: [u8; 8] = field(33, 8)
+                    .and_then(|bytes| bytes.try_into().ok())
+                    .ok_or(Error::Integrity)?;
+                let at = u64::from_be_bytes(at);
+                if now.saturating_sub(at) >= umbra_queue::params::RECEIPT_MAX_HOLD {
+                    stale.push(row);
+                    continue;
+                }
+                let conversation = ConversationId(conversation);
+                let at_peer = holds.iter().position(|(held, _, _)| *held == conversation);
+                let index = at_peer.unwrap_or_else(|| {
+                    holds.push((conversation, ReceiptHold::default(), Vec::new()));
+                    holds.len().saturating_sub(1)
+                });
+                if let Some((_, hold, rows)) = holds.get_mut(index) {
+                    hold.push(target, at);
+                    rows.push((row, target));
+                }
+            }
+            for (conversation, mut hold, rows) in holds {
+                let targets = hold.take_batch(now);
+                if due.is_some() || targets.is_empty() {
+                    continue;
+                }
+                let body = ReceiptBody { targets };
+                let mut encoded =
+                    vec![0u8; 2usize.saturating_add(body.targets.len().saturating_mul(16))];
+                body.encode(&mut encoded)?;
+                let mut msg_id = [0u8; 16];
+                rng.fill_bytes(&mut msg_id);
+                let record = AppMessage {
+                    kind,
+                    msg_id,
+                    sent_at: now.saturating_mul(1_000),
+                    body: &encoded,
+                };
+                let mut app = vec![0u8; record.len()];
+                record.encode(&mut app)?;
+                due = Some(DueReceipt {
+                    conversation,
+                    app,
+                    rows: rows
+                        .iter()
+                        .filter(|(_, target)| body.targets.contains(target))
+                        .map(|(row, _)| *row)
+                        .collect(),
+                });
+            }
+        }
+        if !stale.is_empty() {
+            let mut batch = open.store.begin();
+            for row in stale {
+                batch.delete(RECEIPT, row);
+            }
+            batch.commit()?;
+        }
+        Ok(due)
+    }
+
+    /// The batch left in a slot, and the store erases its rows (`NET-054`).
+    pub fn receipt_sent(&mut self, receipt: &DueReceipt) -> Result<(), Error> {
+        let open = self.open_mut()?;
+        let mut batch = open.store.begin();
+        for row in &receipt.rows {
+            batch.delete(RECEIPT, *row);
+        }
+        Ok(batch.commit()?)
     }
 
     /// One summary for each contact, the newest conversation first. The
@@ -958,6 +1229,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             TableId::LOCAL_IDENTITY,
             TableId::CONTACT,
             TableId::VERIFICATION,
+            RECEIPT,
             OUTBOX,
             INVITATION,
             CONVERSATION,

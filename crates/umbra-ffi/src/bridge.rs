@@ -91,6 +91,11 @@ impl Bridge {
         self.command(Command::Foreground(is_foreground))
     }
 
+    /// The contact of a conversation, for a record that the store made.
+    pub fn contact_for(&self, conversation: &ConversationId) -> Option<ContactId> {
+        self.contacts.get(conversation).copied()
+    }
+
     fn contact_of(&self, conversation: &ConversationId) -> Result<ContactId, Error> {
         self.contacts
             .get(conversation)

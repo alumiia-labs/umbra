@@ -12,7 +12,7 @@ use std::{
 use tokio::sync::mpsc;
 use umbra_core::{
     identity::invitation::FRAGMENT_LEN,
-    session::node::{ClientEvent, ClientNode, ContactId, StateChange},
+    session::node::{ClientEvent, ClientNode, ContactId, CoverSlot, StateChange},
 };
 use umbra_crypto::rand_core::{TryCryptoRng, TryRng};
 use umbra_transport::{
@@ -88,6 +88,17 @@ pub trait Persist: Send {
     /// did not take the batch, and the run then ends with no capsule of
     /// that call on the link.
     fn commit(&mut self, changes: Vec<StateChange>, received: &[(ContactId, Vec<u8>)]) -> bool;
+
+    /// A batch of receipts that may leave at `now`, in seconds, and the
+    /// contact that gets it (Part 3 §3.5.4). The store holds the batch
+    /// until [`Persist::receipt_sent`].
+    fn due_receipt(&mut self, _now: u64) -> Option<(ContactId, Vec<u8>)> {
+        None
+    }
+
+    /// The batch of the last [`Persist::due_receipt`] left in a slot, and
+    /// the store erases it (`NET-054`).
+    fn receipt_sent(&mut self) {}
 }
 
 /// A store that keeps nothing, for a run whose state ends with it.
@@ -280,7 +291,12 @@ pub async fn run_client(
             // waits (`NET-049`). A fault of one slot ends no run.
             () = tokio::time::sleep_until(next_slot) => {
                 next_slot = tokio::time::Instant::now() + cover_delay(&mut rng);
-                let _ = node.on_cover_slot(is_foreground, unix_now(), &mut rng);
+                let now = unix_now();
+                let receipt = persist.due_receipt(now);
+                let given = receipt.as_ref().map(|(contact, app)| (contact, app.as_slice()));
+                if node.on_cover_slot(is_foreground, given, now, &mut rng) == Ok(CoverSlot::Receipt) {
+                    persist.receipt_sent();
+                }
                 Vec::new()
             }
         };

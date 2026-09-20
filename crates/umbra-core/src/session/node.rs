@@ -318,6 +318,8 @@ pub enum StateChange {
 pub enum CoverSlot {
     /// An `ACK` that was due.
     Acknowledgment,
+    /// The batch of receipts that the caller gave.
+    Receipt,
     /// A loop cell, which comes back and measures the path (`NET-060`).
     Loop,
     /// A `COVER` command.
@@ -1018,9 +1020,13 @@ impl ClientNode {
     /// is due takes the slot (`NET-064`). With none, a client in the
     /// foreground makes a cover cell, and about one in five is a loop
     /// (`NET-063`). A client in the background makes no cover cell.
+    /// `receipt` is a batch that is due for one contact, as an application
+    /// record. It takes the slot when no `ACK` is due (`NET-065`), and the
+    /// result says so, thus the caller erases it then and at no other time.
     pub fn on_cover_slot<R: CryptoRng + ?Sized>(
         &mut self,
         makes_cover: bool,
+        receipt: Option<(&ContactId, &[u8])>,
         now: u64,
         rng: &mut R,
     ) -> Result<CoverSlot, Error> {
@@ -1030,6 +1036,16 @@ impl ClientNode {
                 && self.acknowledge(&ContactId(contact), now, rng)?
             {
                 return Ok(CoverSlot::Acknowledgment);
+            }
+        }
+        if let Some((contact, app)) = receipt {
+            let can_send = self
+                .contacts
+                .get(&contact.0)
+                .is_some_and(|held| held.channel.can_send());
+            if can_send && self.slot_of(&contact.0).is_some() {
+                self.send_now(contact.0, app, Waiting::Other, now, rng)?;
+                return Ok(CoverSlot::Receipt);
             }
         }
         let ready = self
