@@ -132,6 +132,11 @@ pub struct MessageInfo {
     /// Whether a deletion took the content, and the row is its placeholder
     /// (Part 7 §7.5.6).
     pub deleted: bool,
+    /// Whether the record holds a text: a text, or a rich record around one.
+    pub has_text: bool,
+    /// How many times its sender changed the text. A value above zero is
+    /// the edited mark of `DEV-090`.
+    pub revisions: u8,
 }
 
 /// The longest local name of a contact, in bytes of UTF-8.
@@ -195,6 +200,13 @@ pub enum Event {
         message: MsgRef,
         /// The new state.
         delivery: Delivery,
+    },
+    /// The contact changed the text of a message.
+    Edited {
+        /// The conversation.
+        conversation: ConversationId,
+        /// The message.
+        message: MsgRef,
     },
     /// The contact deleted a message, and its row is a placeholder now.
     Deleted {
@@ -837,6 +849,178 @@ mod tests {
         bob.delete_for_me(&at_bob[1]).unwrap();
         assert_eq!(bob.messages(bob_conversation).unwrap(), [mine]);
         assert_eq!(bob.delete_for_me(&at_bob[1]), Err(Error::NotFound));
+        alice.audit().unwrap();
+        bob.audit().unwrap();
+    }
+
+    fn edit_record(target: [u8; 16], text: &str, msg_id: u8) -> Vec<u8> {
+        let body = umbra_wire::app::edit::EditBody {
+            target,
+            new_body: text,
+        };
+        let mut encoded = vec![0u8; body.len()];
+        body.encode(&mut encoded).unwrap();
+        record(umbra_wire::app::AppKind::Edit, [msg_id; 16], &encoded)
+    }
+
+    #[test]
+    fn an_edit_changes_the_text_of_its_sender_alone_inside_the_window() {
+        use crate::client::{EDIT_MAX, EDIT_WINDOW_MS};
+        use umbra_wire::app::{edit::EditBody, AppKind, AppMessage, Channel};
+
+        let mut rng = Rng(21);
+        let (mut alice, contact, conversation) = client_with_contact(22);
+        let (mut bob, _, bob_conversation) = client_with_contact(23);
+        let text_of = |client: &Client<MemoryBackend, Element>, message: &MsgRef| {
+            let mut view = View::default();
+            client.render(message, &mut view).unwrap();
+            String::from_utf16(&view.0).unwrap()
+        };
+
+        // Bob asks, Alice answers with a reply, and Bob holds the answer.
+        let question = record(AppKind::Text, [0x61; 16], b"when?");
+        alice
+            .commit_network(&[], &[(contact, question)], 2_000_000, &mut rng)
+            .unwrap();
+        let asked = alice.messages(conversation).unwrap()[0];
+        let mut draft = alice.new_draft(conversation);
+        draft.set_text(&units("at fuor")).unwrap();
+        draft.set_reply_to(Some(asked));
+        let answer = alice.send_draft(draft, 2_100_000, &mut rng).unwrap();
+        let outgoing = alice.take_outgoing().unwrap();
+        let answer_id = AppMessage::parse(&outgoing.app, Channel::Pairwise)
+            .unwrap()
+            .msg_id;
+        alice
+            .set_delivery(&answer, Delivery::Accepted, &mut rng)
+            .unwrap();
+        bob.commit_network(&[], &[(contact, outgoing.app)], 2_200_000, &mut rng)
+            .unwrap();
+        let at_bob = bob.messages(bob_conversation).unwrap()[0];
+        while alice.next_event().is_some() {}
+        while bob.next_event().is_some() {}
+
+        // Alice corrects the text. Her row changes at once, the reply keeps
+        // its target (WIR-262), and one record of kind 0x04 waits.
+        let mut fixed = alice.new_draft(conversation);
+        fixed.set_text(&units("at four")).unwrap();
+        alice.edit(&answer, fixed, 2_300_000, &mut rng).unwrap();
+        assert_eq!(text_of(&alice, &answer), "at four");
+        let info = alice.info(&answer).unwrap();
+        assert_eq!(info.revisions, 1);
+        assert_eq!(info.reply, ReplyTarget::Message(asked));
+        let request = alice.take_outgoing().unwrap();
+        let parsed = AppMessage::parse(&request.app, Channel::Pairwise).unwrap();
+        assert_eq!(parsed.kind, AppKind::Edit);
+        let sent_edit = EditBody::parse(parsed.body).unwrap();
+        assert_eq!(
+            (sent_edit.target, sent_edit.new_body),
+            (answer_id, "at four")
+        );
+        // No view shows the request, and it goes when a relay took it.
+        assert_eq!(alice.messages(conversation).unwrap(), [asked, answer]);
+        alice
+            .set_delivery(&request.message, Delivery::Accepted, &mut rng)
+            .unwrap();
+        assert_eq!(alice.info(&request.message), Err(Error::NotFound));
+
+        // Bob applies it, with the mark and an event, and no new message.
+        bob.commit_network(&[], &[(contact, request.app.clone())], 2_400_000, &mut rng)
+            .unwrap();
+        assert_eq!(
+            bob.next_event(),
+            Some(Event::Edited {
+                conversation: bob_conversation,
+                message: at_bob
+            })
+        );
+        assert_eq!(text_of(&bob, &at_bob), "at four");
+        assert_eq!(bob.info(&at_bob).unwrap().revisions, 1);
+        assert_eq!(bob.messages(bob_conversation).unwrap(), [at_bob]);
+
+        // WIR-082: a contact edits no message of this device. An edit on the
+        // receiving chain of Alice that names her own answer changes nothing.
+        alice
+            .commit_network(
+                &[],
+                &[(contact, edit_record(answer_id, "forged", 0xE1))],
+                2_500_000,
+                &mut rng,
+            )
+            .unwrap();
+        assert_eq!(text_of(&alice, &answer), "at four");
+        assert_eq!(alice.next_event(), None);
+
+        // DEV-087: Bob measures the window from his own store time, and an
+        // edit after it changes nothing.
+        bob.commit_network(
+            &[],
+            &[(contact, edit_record(answer_id, "too late", 0xE2))],
+            2_200_000 + EDIT_WINDOW_MS,
+            &mut rng,
+        )
+        .unwrap();
+        assert_eq!(text_of(&bob, &at_bob), "at four");
+        assert_eq!(bob.next_event(), None);
+
+        // Alice refuses her own edit after the window, and after EDIT_MAX.
+        let mut draft = alice.new_draft(conversation);
+        draft.set_text(&units("no")).unwrap();
+        assert_eq!(
+            alice.edit(&answer, draft, 2_100_000 + EDIT_WINDOW_MS, &mut rng),
+            Err(Error::TooLong)
+        );
+        for n in 1..EDIT_MAX {
+            let mut draft = alice.new_draft(conversation);
+            draft.set_text(&units("again")).unwrap();
+            alice
+                .edit(&answer, draft, 2_600_000 + u64::from(n), &mut rng)
+                .unwrap();
+            alice.take_outgoing().unwrap();
+        }
+        assert_eq!(alice.info(&answer).unwrap().revisions, EDIT_MAX);
+        let mut draft = alice.new_draft(conversation);
+        draft.set_text(&units("one more")).unwrap();
+        assert_eq!(
+            alice.edit(&answer, draft, 2_700_000, &mut rng),
+            Err(Error::TooLong)
+        );
+        // A message of the contact takes no edit of this device.
+        let mut draft = alice.new_draft(conversation);
+        draft.set_text(&units("not mine")).unwrap();
+        assert_eq!(
+            alice.edit(&asked, draft, 2_800_000, &mut rng),
+            Err(Error::Malformed)
+        );
+
+        // DEV-093: an edit that comes before its target gives the target
+        // its text and its mark at the arrival.
+        bob.commit_network(
+            &[],
+            &[(
+                contact,
+                edit_record([0x71; 16], "fixed before it came", 0xE3),
+            )],
+            3_000_000,
+            &mut rng,
+        )
+        .unwrap();
+        bob.commit_network(
+            &[],
+            &[(contact, record(AppKind::Text, [0x71; 16], b"first form"))],
+            3_100_000,
+            &mut rng,
+        )
+        .unwrap();
+        let arrived = *bob.messages(bob_conversation).unwrap().last().unwrap();
+        assert_eq!(text_of(&bob, &arrived), "fixed before it came");
+        assert_eq!(bob.info(&arrived).unwrap().revisions, 1);
+
+        // A deletion takes the mark with the content.
+        alice
+            .delete_for_everyone(&answer, 4_000_000, &mut rng)
+            .unwrap();
+        assert_eq!(alice.info(&answer).unwrap().revisions, 0);
         alice.audit().unwrap();
         bob.audit().unwrap();
     }

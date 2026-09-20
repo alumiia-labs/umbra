@@ -21,7 +21,7 @@ use umbra_core::{
 use umbra_crypto::{hierarchy::RootIdentity, rand_core::CryptoRng, secret::Secret};
 use umbra_queue::client::receipts::ReceiptHold;
 use umbra_wire::app::{
-    edit::{DeleteBody, DeleteScope},
+    edit::{DeleteBody, DeleteScope, EditBody},
     msg_ref,
     rich::RichRecord,
     signal::ReceiptBody,
@@ -75,6 +75,15 @@ const SENDS_READ: u8 = 0x02;
 /// `msg_ref` of the target, and the time of the deletion, in seconds.
 const PENDING: TableId = TableId(0x0C);
 const PENDING_ROW_LEN: usize = 16 + 16 + 8;
+/// The table of the edits of a message: the row of the message, and how
+/// many times its sender changed the text. A message with no row here shows
+/// no edited mark.
+const REVISION: TableId = TableId(0x0D);
+/// `EDIT_WINDOW`, in milliseconds. A receiver measures it from its own store
+/// time of the target (`DEV-087`).
+pub const EDIT_WINDOW_MS: u64 = 24 * 3_600 * 1_000;
+/// `EDIT_MAX`: the revisions of one message.
+pub const EDIT_MAX: u8 = 8;
 /// `REF_ORPHAN_TTL`.
 const REF_ORPHAN_TTL: u64 = 45 * 24 * 3_600;
 /// `REF_ORPHAN_MAX`, for each conversation.
@@ -227,6 +236,48 @@ fn deletion_record(msg_id: [u8; 16], sent_at: u64, target: [u8; 16]) -> Result<V
     let mut app = vec![0u8; record.len()];
     record.encode(&mut app)?;
     Ok(app)
+}
+
+/// The record with a new innermost text (`WIR-261`). A reply keeps its
+/// target and each other field (`WIR-262`), and a record of another kind
+/// takes no edit (`WIR-260`, `WIR-081`).
+fn with_text(app: &[u8], text: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error> {
+    let parsed = AppMessage::parse(app, Channel::Pairwise)?;
+    let body = match parsed.kind {
+        AppKind::Text => Zeroizing::new(text.to_vec()),
+        AppKind::Rich => {
+            let rich = RichRecord::parse(parsed.body, Channel::Pairwise)?;
+            if rich.inner_kind != AppKind::Text {
+                return Err(Error::Malformed);
+            }
+            let changed = RichRecord {
+                inner_body: text,
+                ..rich
+            };
+            let mut encoded = Zeroizing::new(vec![0u8; changed.len()]);
+            changed.encode(Channel::Pairwise, &mut encoded)?;
+            encoded
+        }
+        _ => return Err(Error::Malformed),
+    };
+    let record = AppMessage {
+        kind: parsed.kind,
+        msg_id: parsed.msg_id,
+        sent_at: parsed.sent_at,
+        body: &body,
+    };
+    let mut changed = Zeroizing::new(vec![0u8; record.len()]);
+    record.encode(&mut changed)?;
+    Ok(changed)
+}
+
+/// A stored message with a new text, under the same header.
+fn row_with_text(plain: &[u8], text: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error> {
+    let prefix = plain.get(..MESSAGE_PREFIX).ok_or(Error::Integrity)?;
+    let app = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
+    Ok(Zeroizing::new(
+        [prefix, with_text(app, text)?.as_slice()].concat(),
+    ))
 }
 
 /// The placeholder of a stored message: the same row with the same header,
@@ -586,6 +637,81 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
                 continue;
             }
+            if parsed.kind == AppKind::Edit {
+                // An edit is no message. A body that does not parse
+                // changes nothing.
+                let Ok(edit) = EditBody::parse(parsed.body) else {
+                    continue;
+                };
+                let reference = msg_ref(&open.device_set_key, &edit.target);
+                let natural = [conversation.0.as_slice(), &reference].concat();
+                let row = open.store.row_id(TableId::MESSAGE, &natural);
+                match open.store.get(TableId::MESSAGE, &row)? {
+                    Some(plain) => {
+                        let plain = Zeroizing::new(plain);
+                        let info = info_of(&plain)?;
+                        let count = match open.store.get(REVISION, &row)? {
+                            None => 0,
+                            Some(count) => *count.first().ok_or(Error::Integrity)?,
+                        };
+                        // WIR-082: the sender of the target alone. DEV-087:
+                        // inside the window from the store time of this
+                        // device. DEV-088: below the limit.
+                        let in_window = now_ms.saturating_sub(info.stored_at_ms) < EDIT_WINDOW_MS;
+                        if info.outgoing || info.deleted || !in_window || count >= EDIT_MAX {
+                            continue;
+                        }
+                        // WIR-260: a target with no text takes no edit.
+                        let Ok(changed) = row_with_text(&plain, edit.new_body.as_bytes()) else {
+                            continue;
+                        };
+                        // The earlier text goes: the row gets a new key.
+                        planned.push(Planned::Put(
+                            TableId::MESSAGE,
+                            row,
+                            Some(conversation.0),
+                            changed,
+                        ));
+                        planned.push(Planned::Put(
+                            REVISION,
+                            row,
+                            None,
+                            Zeroizing::new(vec![count.saturating_add(1)]),
+                        ));
+                        events.push(Event::Edited {
+                            conversation,
+                            message: MsgRef(row),
+                        });
+                    }
+                    // DEV-093: the target did not arrive yet. A deletion
+                    // that waits for the same target stays.
+                    None => {
+                        let pending = open.store.row_id(PENDING, &natural);
+                        let is_deleted = open
+                            .store
+                            .get(PENDING, &pending)?
+                            .is_some_and(|entry| entry.len() == PENDING_ROW_LEN);
+                        let held = open.store.list(PENDING, Some(&conversation.0))?.len();
+                        if is_deleted || held >= REF_ORPHAN_MAX {
+                            continue;
+                        }
+                        let entry = [
+                            conversation.0.as_slice(),
+                            &reference,
+                            &(now_ms / 1_000).to_be_bytes(),
+                            edit.new_body.as_bytes(),
+                        ]
+                        .concat();
+                        planned.push(Planned::Put(
+                            PENDING,
+                            pending,
+                            Some(conversation.0),
+                            Zeroizing::new(entry),
+                        ));
+                    }
+                }
+                continue;
+            }
             if parsed.kind == AppKind::Delete {
                 // A deletion is no message. WIR-084: a contact deletes for
                 // the other party, and a record of another scope, or one
@@ -648,18 +774,22 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             // A deletion that came first takes the message at its arrival:
             // the view shows nothing at that position (Part 7 §7.5.6).
             let pending = open.store.row_id(PENDING, &natural);
+            let mut edited_text = None;
             if let Some(entry) = open.store.get(PENDING, &pending)? {
-                if entry.len() != PENDING_ROW_LEN {
-                    return Err(Error::Integrity);
-                }
+                let entry = Zeroizing::new(entry);
                 let at: [u8; 8] = entry
-                    .get(32..)
+                    .get(32..PENDING_ROW_LEN)
                     .and_then(|bytes| bytes.try_into().ok())
                     .ok_or(Error::Integrity)?;
                 planned.push(Planned::Delete(PENDING, pending));
                 // DEV-095: an entry above its time counts for nothing.
                 if (now_ms / 1_000).saturating_sub(u64::from_be_bytes(at)) < REF_ORPHAN_TTL {
-                    continue;
+                    let text = entry.get(PENDING_ROW_LEN..).ok_or(Error::Integrity)?;
+                    // An entry with no text is a deletion.
+                    if text.is_empty() {
+                        continue;
+                    }
+                    edited_text = Some(Zeroizing::new(text.to_vec()));
                 }
             }
             let in_batch = events
@@ -669,6 +799,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 continue;
             }
             let mut kept = Zeroizing::new(app.clone());
+            // An edit that came first gives the message its text and the
+            // edited mark. A target with no text keeps what it has.
+            if let Some(text) = edited_text {
+                if let Ok(changed) = with_text(&kept, &text) {
+                    kept = changed;
+                    planned.push(Planned::Put(REVISION, row, None, Zeroizing::new(vec![1])));
+                }
+            }
             keep_reply_as_reference(&mut kept, &open.device_set_key)?;
             planned.push(Planned::Put(
                 TableId::MESSAGE,
@@ -1037,7 +1175,116 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut batch = open.store.begin();
         batch.delete(TableId::MESSAGE, message.0);
         batch.delete(OUTBOX, message.0);
+        batch.delete(REVISION, message.0);
         Ok(batch.commit()?)
+    }
+
+    /// Changes the text of a message that this device sent, to the text of
+    /// `draft` (Part 7 §7.5.6). The row takes the new text at once, under a
+    /// new key, and the earlier text goes. One record of kind `0x04` waits
+    /// for the send path. The contact applies it inside `EDIT_WINDOW` of its
+    /// own receive time, thus this device refuses an edit after that time
+    /// of its own send, and after `EDIT_MAX` revisions.
+    pub fn edit<R: CryptoRng + ?Sized>(
+        &mut self,
+        message: &MsgRef,
+        draft: Draft,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        if draft.is_empty() || draft.conversation() != self.conversation_of_message(message)? {
+            return Err(Error::Malformed);
+        }
+        let open = self.open_mut()?;
+        let plain = Zeroizing::new(
+            open.store
+                .get(TableId::MESSAGE, &message.0)?
+                .ok_or(Error::NotFound)?,
+        );
+        let info = info_of(&plain)?;
+        if !info.outgoing || info.deleted || !info.has_text || is_request(&plain)? {
+            return Err(Error::Malformed);
+        }
+        let count = match open.store.get(REVISION, &message.0)? {
+            None => 0,
+            Some(count) => *count.first().ok_or(Error::Integrity)?,
+        };
+        if count >= EDIT_MAX || now_ms.saturating_sub(info.stored_at_ms) >= EDIT_WINDOW_MS {
+            return Err(Error::TooLong);
+        }
+        let conversation = conversation_of(&plain)?;
+        let app = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
+        let target = AppMessage::parse(app, Channel::Pairwise)?.msg_id;
+        let text = core::str::from_utf8(draft.text()).map_err(|_| Error::Malformed)?;
+
+        let body = EditBody {
+            target,
+            new_body: text,
+        };
+        let mut encoded = Zeroizing::new(vec![0u8; body.len()]);
+        body.encode(&mut encoded)?;
+        let mut msg_id = [0u8; 16];
+        rng.fill_bytes(&mut msg_id);
+        let record = AppMessage {
+            kind: AppKind::Edit,
+            msg_id,
+            sent_at: now_ms,
+            body: &encoded,
+        };
+        let mut request = Zeroizing::new(vec![0u8; record.len()]);
+        record.encode(&mut request)?;
+        let reference = msg_ref(&open.device_set_key, &msg_id);
+        let natural = [conversation.0.as_slice(), &reference].concat();
+        let request_row = open.store.row_id(TableId::MESSAGE, &natural);
+        let stored = stored_message(OUTGOING, Delivery::Queued, conversation, now_ms, &request);
+        let changed = row_with_text(&plain, draft.text())?;
+        let changed_app = changed
+            .get(MESSAGE_PREFIX..)
+            .ok_or(Error::Integrity)?
+            .to_vec();
+
+        let mut batch = open.store.begin();
+        batch.put(
+            TableId::MESSAGE,
+            message.0,
+            Some(conversation.0),
+            &changed,
+            rng,
+        )?;
+        batch.put(REVISION, message.0, None, &[count.saturating_add(1)], rng)?;
+        batch.put(
+            TableId::MESSAGE,
+            request_row,
+            Some(conversation.0),
+            &stored,
+            rng,
+        )?;
+        batch.put(OUTBOX, request_row, None, &outbox_row(&[])?, rng)?;
+        batch.commit()?;
+
+        // A message that the send path did not take yet goes with its new
+        // text, and the edit follows it.
+        for waiting in self.outgoing.iter_mut().filter(|w| w.message == *message) {
+            waiting.app.clone_from(&changed_app);
+        }
+        self.outgoing.push_back(Outgoing {
+            message: MsgRef(request_row),
+            conversation,
+            app: request.to_vec(),
+            attachments: Vec::new(),
+        });
+        self.auto_lock.touch(now_ms / 1_000);
+        Ok(())
+    }
+
+    fn conversation_of_message(&self, message: &MsgRef) -> Result<ConversationId, Error> {
+        let plain = Zeroizing::new(
+            self.open_ref()?
+                .store
+                .get(TableId::MESSAGE, &message.0)?
+                .ok_or(Error::NotFound)?,
+        );
+        conversation_of(&plain)
     }
 
     /// Asks the contact to delete a message that this device sent. The
@@ -1091,8 +1338,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             &placeholder_of(&plain)?,
             rng,
         )?;
-        // The message itself waits for no relay now.
+        // The message itself waits for no relay now, and a placeholder has
+        // no edited mark.
         batch.delete(OUTBOX, message.0);
+        batch.delete(REVISION, message.0);
         batch.put(
             TableId::MESSAGE,
             request_row,
@@ -1573,6 +1822,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .ok_or(Error::NotFound)?,
         );
         let mut info = info_of(&plain)?;
+        info.revisions = match open.store.get(REVISION, &message.0)? {
+            None => 0,
+            Some(count) => *count.first().ok_or(Error::Integrity)?,
+        };
         let app = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
         if let Some(field) = reply_field(app)? {
             let held: [u8; 16] = app
@@ -1630,6 +1883,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             TableId::VERIFICATION,
             RECEIPT,
             PENDING,
+            REVISION,
             OUTBOX,
             INVITATION,
             CONVERSATION,
@@ -1660,14 +1914,19 @@ fn info_of(plain: &[u8]) -> Result<MessageInfo, Error> {
         // The store resolves the target: see `Client::info`.
         reply: ReplyTarget::None,
         deleted: tombstone_of(&parsed)? == Some(Tombstone::Placeholder),
+        has_text: text_of(&parsed).is_ok(),
+        // The store holds the count: see `Client::info`.
+        revisions: 0,
     })
 }
 
-/// Whether a stored row is a deletion request of this device.
+/// Whether a stored row is a request of this device to its contact: a
+/// deletion or an edit that waits for its relay. No view shows such a row.
+/// An edit of the contact changes its target and is never a row.
 fn is_request(plain: &[u8]) -> Result<bool, Error> {
     let app = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
     let parsed = AppMessage::parse(app, Channel::Pairwise)?;
-    Ok(tombstone_of(&parsed)? == Some(Tombstone::Request))
+    Ok(parsed.kind == AppKind::Edit || tombstone_of(&parsed)? == Some(Tombstone::Request))
 }
 
 fn conversation_of(plain: &[u8]) -> Result<ConversationId, Error> {

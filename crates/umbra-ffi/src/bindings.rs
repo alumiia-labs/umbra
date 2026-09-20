@@ -268,6 +268,11 @@ pub struct MsgInfo {
     /// Whether a deletion took the content. The row is a placeholder, and
     /// it has no text.
     pub deleted: bool,
+    /// Whether its sender changed the text (`DEV-090`).
+    pub edited: bool,
+    /// Whether this device can change the text now: a text of this device,
+    /// inside `EDIT_WINDOW`, below `EDIT_MAX`.
+    pub editable: bool,
     /// Whether the message answers a message (Part 6 §6.6.5).
     pub is_reply: bool,
     /// The message that it answers. With `is_reply` and no handle here, the
@@ -352,6 +357,11 @@ pub enum FfiEvent {
     /// A ceremony did not start, or no complete ceremony was there to
     /// confirm. The store holds no new state.
     VerificationRefused {
+        /// The conversation.
+        conversation: Vec<u8>,
+    },
+    /// The contact changed the text of a message of a conversation.
+    Edited {
         /// The conversation.
         conversation: Vec<u8>,
     },
@@ -469,6 +479,9 @@ impl Inner {
                 Event::Delivery { message, delivery } => FfiEvent::Delivery {
                     message: Arc::new(MsgHandle(message)),
                     state: delivery as u8,
+                },
+                Event::Edited { conversation, .. } => FfiEvent::Edited {
+                    conversation: conversation.0.to_vec(),
                 },
                 Event::Deleted { conversation, .. } => FfiEvent::Deleted {
                     conversation: conversation.0.to_vec(),
@@ -988,12 +1001,36 @@ impl Handle {
             sent_at_ms: info.sent_at_ms,
             stored_at_ms: info.stored_at_ms,
             deleted: info.deleted,
+            edited: info.revisions > 0,
+            editable: info.outgoing
+                && !info.deleted
+                && info.has_text
+                && info.revisions < crate::client::EDIT_MAX
+                && unix_now_ms().saturating_sub(info.stored_at_ms) < crate::client::EDIT_WINDOW_MS,
             is_reply: info.reply != crate::ReplyTarget::None,
             reply_to: match info.reply {
                 crate::ReplyTarget::Message(target) => Some(Arc::new(MsgHandle(target))),
                 _ => None,
             },
         })
+    }
+
+    /// Changes the text of a message that this device sent, to the text of
+    /// a draft. The handle of the draft is empty after this call.
+    pub fn edit_message(
+        &self,
+        message: Arc<MsgHandle>,
+        draft: Arc<DraftHandle>,
+    ) -> Result<(), FfiError> {
+        let draft = locked(&draft.0).take().ok_or(FfiError::NotFound)?;
+        let mut inner = locked(&self.inner);
+        let Inner { client, bridge, .. } = &mut *inner;
+        client.edit(&message.0, draft, unix_now_ms(), &mut OsRng)?;
+        // With no network the edit waits in the store.
+        if let Some(running) = bridge {
+            running.flush(client, &mut OsRng)?;
+        }
+        Ok(())
     }
 
     /// Removes a message, or the placeholder of a deleted one, from this
