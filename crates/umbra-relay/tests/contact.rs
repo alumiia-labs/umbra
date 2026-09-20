@@ -1075,3 +1075,39 @@ fn a_ceremony_gives_one_code_and_only_the_user_verifies() {
         .confirm_verification(&alice_contact)
         .is_err());
 }
+
+#[test]
+fn a_stored_contact_of_the_first_version_continues() {
+    const ALICE: usize = 0;
+    const BOB: usize = 1;
+    let mut network = Network::new();
+    network.settle();
+    network.clients[ALICE].invite(&mut Rng(1)).unwrap();
+    network.settle();
+    let bundle = invitations_of(network.take_events(ALICE)).remove(0);
+    network.clients[BOB].accept(bundle, &mut Rng(2)).unwrap();
+    network.settle();
+    let (bob_contact, _) = contact_of(&network.take_events(BOB));
+    network.take_events(ALICE);
+
+    // Version 0x01 named no relay of the inbound queue: the version byte,
+    // the salt, the key of the peer, and then the channel. Such a contact
+    // goes to a circuit with each exit.
+    for state in network.stored[ALICE].contacts.values_mut() {
+        assert_eq!(state[0], 0x02);
+        state[0] = 0x01;
+        state.drain(1 + 16 + 32..1 + 16 + 32 + 32);
+    }
+    network.restart(ALICE, 0x41);
+    let now = network.now;
+    network.clients[BOB]
+        .send(&bob_contact, &text(1, "still here"), now, &mut Rng(3))
+        .unwrap();
+    network.settle();
+    assert_eq!(messages_of(network.take_events(ALICE)), [b"still here"]);
+    // The next store of the contact is of the present version.
+    assert!(network.stored[ALICE]
+        .contacts
+        .values()
+        .all(|state| state[0] == 0x02));
+}

@@ -57,6 +57,10 @@ use super::{
 };
 use crate::{
     attach::seal::relay_hint,
+    directory::{
+        bloc::BlocId,
+        path::{select, Candidate},
+    },
     identity::{
         invitation::{Bundle, Fragment, FRAGMENT_LEN},
         verify::Ceremony,
@@ -155,14 +159,45 @@ struct Slot {
     queues: BTreeSet<[u8; 32]>,
     /// The `NEW` commands of this circuit that wait for their `IDS`.
     reserved: usize,
+    /// The relay at which the chain must end, for a circuit that serves a
+    /// queue of a known relay. A circuit with none ends at each relay of
+    /// layer 3.
+    exit: Option<[u8; 32]>,
+    /// The three relays of the chain, from the first build of this run.
+    chain: Option<[[u8; 32]; HOPS]>,
 }
 
+/// A relay that a client can put into a chain: the facts that the
+/// invariants of Part 3 §3.4.6 test, and the static key of the handshake.
+pub struct RelayInfo {
+    /// The facts of the directory entry.
+    pub candidate: Candidate,
+    /// The static key and the identifier.
+    pub key: RelayStatic,
+}
+
+/// The relay of a stored queue whose form names none. Such a queue comes
+/// from a store of version `0x01`, and it goes to each exit.
+const ANY_RELAY: [u8; 32] = [0; 32];
+
 impl Slot {
-    fn empty() -> Self {
+    fn empty(exit: Option<[u8; 32]>) -> Self {
         Slot {
             circuit: Circuit::None,
             queues: BTreeSet::new(),
             reserved: 0,
+            exit,
+            chain: None,
+        }
+    }
+
+    /// Whether this circuit can serve a queue at `relay`.
+    fn ends_at(&self, relay: &[u8; 32]) -> bool {
+        match (self.chain, self.exit) {
+            _ if *relay == ANY_RELAY => true,
+            (Some(chain), _) => chain.last() == Some(relay),
+            (None, Some(exit)) => exit == *relay,
+            (None, None) => true,
         }
     }
 
@@ -255,10 +290,15 @@ struct Half {
     opening: Vec<u8>,
     /// The store of the blob, while it runs.
     link: Option<LinkSetup>,
+    /// The relay of the inbound queue.
+    inbound_relay: [u8; 32],
 }
 
 struct Contact {
     channel: PairwiseChannel,
+    /// The relay of the inbound queue. The channel stores the relay of the
+    /// outbound one.
+    inbound_relay: [u8; 32],
     peer_static: [u8; 32],
     salt: [u8; 16],
     /// The records of the user that wait for the sending chain, each with
@@ -278,12 +318,20 @@ pub fn stored_contact_keys(
     root: &RootIdentity,
 ) -> Result<([u8; 32], [u8; 32]), Error> {
     let mut reader = Reader::new(state);
-    if reader.u8()? != STORED_VERSION {
-        return Err(Error::Malformed);
-    }
+    stored_version(&mut reader)?;
     let salt: [u8; 16] = reader.array()?;
     let peer_static: [u8; 32] = reader.array()?;
     Ok((root.pairwise_identity(&salt).x25519_public(), peer_static))
+}
+
+/// Reads the version byte of a stored form, and says whether the form names
+/// the relay of its inbound queue. Version `0x01` names none.
+fn stored_version(reader: &mut Reader<'_>) -> Result<bool, Error> {
+    match reader.u8()? {
+        STORED_VERSION => Ok(true),
+        0x01 => Ok(false),
+        _ => Err(Error::Malformed),
+    }
 }
 
 /// A change of the state that a client keeps between two runs. The runtime
@@ -333,11 +381,14 @@ pub enum CoverSlot {
 const LOOP_SHARE: u8 = 51;
 
 /// The version byte of a stored contact and of a stored invitation.
-const STORED_VERSION: u8 = 0x01;
+const STORED_VERSION: u8 = 0x02;
 
 /// One client.
 pub struct ClientNode {
-    relays: [RelayStatic; HOPS],
+    /// The pinned ingress relay, which is hop 1 of each chain.
+    ingress: RelayInfo,
+    /// The relays of layer 2 and of layer 3.
+    relays: Vec<RelayInfo>,
     root: RootIdentity,
     link: Option<ClientLink>,
     slots: Vec<Slot>,
@@ -364,6 +415,31 @@ fn random<const N: usize, R: CryptoRng + ?Sized>(rng: &mut R) -> [u8; N] {
     bytes
 }
 
+/// `ClientNode::new` takes an array of three, thus this path never runs. It
+/// gives a node with no relay, which builds no chain, in the place of a
+/// panic.
+fn unreachable_ingress(root: RootIdentity) -> ClientNode {
+    let nowhere = RelayInfo {
+        candidate: Candidate {
+            relay_id: ANY_RELAY,
+            operator_id: ANY_RELAY,
+            family_id: ANY_RELAY,
+            bloc: BlocId::Own([0; 2]),
+            asn: 0,
+            v4_prefix: None,
+            v6_prefix: None,
+            ingress: false,
+            chain: false,
+            layer: 0,
+        },
+        key: RelayStatic {
+            s: [0; 32],
+            relay_id: ANY_RELAY,
+        },
+    };
+    ClientNode::with_relays(nowhere, Vec::new(), root)
+}
+
 fn copy_static(relay: &RelayStatic) -> RelayStatic {
     RelayStatic {
         s: relay.s,
@@ -372,10 +448,40 @@ fn copy_static(relay: &RelayStatic) -> RelayStatic {
 }
 
 impl ClientNode {
-    /// A client that reaches its queues through `relays`, hop 1 first.
+    /// A client with one chain: `relays`, hop 1 first. The three count as
+    /// three operators in three blocs, thus the chain obeys each invariant.
     /// Each pairwise identity comes from `root` (Part 5 §5.2).
     pub fn new(relays: [RelayStatic; HOPS], root: RootIdentity) -> Self {
+        let mut infos = relays.into_iter().zip(1u8..).map(|(key, layer)| RelayInfo {
+            candidate: Candidate {
+                relay_id: key.relay_id,
+                operator_id: key.relay_id,
+                family_id: key.relay_id,
+                bloc: BlocId::Own([b'A', layer]),
+                asn: u32::from(layer),
+                v4_prefix: None,
+                v6_prefix: None,
+                ingress: layer == 1,
+                chain: layer != 1,
+                layer,
+            },
+            key,
+        });
+        let ingress = infos.next();
+        let rest = infos.collect();
+        // The array holds three relays, thus the first one is there.
+        match ingress {
+            Some(ingress) => Self::with_relays(ingress, rest, root),
+            None => unreachable_ingress(root),
+        }
+    }
+
+    /// A client that builds each chain from `ingress` and two of `relays`
+    /// under the invariants of Part 3 §3.4.6. The caller gives the relays of
+    /// a verified directory.
+    pub fn with_relays(ingress: RelayInfo, relays: Vec<RelayInfo>, root: RootIdentity) -> Self {
         ClientNode {
+            ingress,
             relays,
             root,
             link: None,
@@ -403,6 +509,7 @@ impl ClientNode {
             writer.u8(STORED_VERSION);
             writer.bytes(&contact.salt);
             writer.bytes(&contact.peer_static);
+            writer.bytes(&contact.inbound_relay);
             writer.var(&contact.channel.export()?)?;
             changes.push(StateChange::Contact {
                 contact: ContactId(id),
@@ -416,19 +523,23 @@ impl ClientNode {
     /// subscribes to its queue when the circuit is ready.
     pub fn restore_contact(&mut self, state: &[u8]) -> Result<ContactId, Error> {
         let mut reader = Reader::new(state);
-        if reader.u8()? != STORED_VERSION {
-            return Err(Error::Malformed);
-        }
+        let names_relay = stored_version(&mut reader)?;
         let salt = reader.array()?;
         let peer_static = reader.array()?;
+        let inbound_relay = if names_relay {
+            reader.array()?
+        } else {
+            ANY_RELAY
+        };
         let channel = PairwiseChannel::restore(reader.var()?)?;
         reader.end()?;
         let id = *channel.inbound().recipient_id();
-        self.assign(id);
+        self.assign(id, inbound_relay);
         self.contacts.insert(
             id,
             Contact {
                 channel,
+                inbound_relay,
                 peer_static,
                 salt,
                 waiting_sends: VecDeque::new(),
@@ -442,15 +553,18 @@ impl ClientNode {
     /// returns its bundle.
     pub fn restore_invitation(&mut self, state: &[u8]) -> Result<Vec<u8>, Error> {
         let mut reader = Reader::new(state);
-        if reader.u8()? != STORED_VERSION {
-            return Err(Error::Malformed);
-        }
+        let names_relay = stored_version(&mut reader)?;
         let salt = reader.array()?;
+        let inbound_relay = if names_relay {
+            reader.array()?
+        } else {
+            ANY_RELAY
+        };
         let bundle = reader.var()?.to_vec();
         let inbound = Inbound::restore(&mut reader)?;
         let inviter = Inviter::from_prekey_seed(Secret::new(reader.array()?));
         reader.end()?;
-        self.assign(*inbound.recipient_id());
+        self.assign(*inbound.recipient_id(), inbound_relay);
         self.halves.insert(
             *inbound.recipient_id(),
             Half {
@@ -463,6 +577,7 @@ impl ClientNode {
                 bundle: bundle.clone(),
                 opening: Vec::new(),
                 link: None,
+                inbound_relay,
             },
         );
         Ok(bundle)
@@ -479,6 +594,7 @@ impl ClientNode {
         let mut writer = Writer::new();
         writer.u8(STORED_VERSION);
         writer.bytes(&half.salt);
+        writer.bytes(&half.inbound_relay);
         writer.var(&half.bundle)?;
         half.inbound.export(&mut writer)?;
         writer.bytes(seed.expose());
@@ -492,17 +608,22 @@ impl ClientNode {
     /// Gives a stored queue to a circuit with room, and adds a circuit when
     /// each one is full (`NET-022`). The division runs again at each run
     /// (`NET-024`), thus the store holds no circuit of a queue.
-    fn assign(&mut self, queue: [u8; 32]) {
-        let slot = match self.slots.iter_mut().find(|slot| slot.has_room()) {
+    fn assign(&mut self, queue: [u8; 32], relay: [u8; 32]) {
+        let serves = |slot: &&mut Slot| slot.has_room() && slot.ends_at(&relay);
+        let slot = match self.slots.iter_mut().find(serves) {
             Some(slot) => slot,
             None => {
-                self.slots.push(Slot::empty());
+                self.slots.push(Slot::empty(None));
                 match self.slots.last_mut() {
                     Some(slot) => slot,
                     None => return,
                 }
             }
         };
+        // The chain of this circuit ends at the relay of its queues.
+        if relay != ANY_RELAY {
+            slot.exit = Some(relay);
+        }
         slot.queues.insert(queue);
     }
 
@@ -576,22 +697,82 @@ impl ClientNode {
         self.capsules.push_back(capsule);
         self.link = Some(link);
         if self.slots.is_empty() {
-            self.slots.push(Slot::empty());
+            self.slots.push(Slot::empty(None));
         }
-        // The builds run side by side, and the `circ_id` of a cell names
-        // its circuit.
+        // A new run builds each chain again (`NET-024`). The builds run side
+        // by side, and the `circ_id` of a cell names its circuit.
+        for slot in &mut self.slots {
+            slot.chain = None;
+        }
         for slot in 0..self.slots.len() {
             self.current = slot;
+            self.choose_chain(rng)?;
             self.extend(CircuitBuild::new(random(rng)), rng)?;
         }
         Ok(())
     }
 
-    /// Adds one circuit, and starts its build.
-    fn add_circuit<R: CryptoRng + ?Sized>(&mut self, rng: &mut R) -> Result<(), Error> {
-        self.slots.push(Slot::empty());
+    /// Adds one circuit, and starts its build. `exit` is the relay at which
+    /// the chain must end, or none.
+    fn add_circuit<R: CryptoRng + ?Sized>(
+        &mut self,
+        exit: Option<[u8; 32]>,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        self.slots.push(Slot::empty(exit));
         self.current = self.slots.len().saturating_sub(1);
+        self.choose_chain(rng)?;
         self.extend(CircuitBuild::new(random(rng)), rng)
+    }
+
+    /// Gives the current circuit its chain (Part 3 §3.4.6): the pinned
+    /// ingress, then one relay of layer 2, then one of layer 3, under each
+    /// invariant. The order of the candidates is random, and a relay that
+    /// no other circuit of this client uses comes first, thus the circuits
+    /// take chains that differ where the relay set permits it (`NET-023`).
+    /// With no conformant chain the build fails closed (`NET-033`).
+    fn choose_chain<R: CryptoRng + ?Sized>(&mut self, rng: &mut R) -> Result<(), Error> {
+        let exit = self.slot()?.exit;
+        let uses = |relay: &[u8; 32]| {
+            self.slots
+                .iter()
+                .filter_map(|slot| slot.chain)
+                .filter(|chain| chain.contains(relay))
+                .count()
+        };
+        let mut order: Vec<(usize, u32, Candidate)> = self
+            .relays
+            .iter()
+            .map(|relay| relay.candidate)
+            .filter(|candidate| {
+                candidate.layer != 3 || exit.is_none_or(|exit| exit == candidate.relay_id)
+            })
+            .map(|candidate| {
+                let draw = u32::from_be_bytes(random(rng));
+                (uses(&candidate.relay_id), draw, candidate)
+            })
+            .collect();
+        order.sort_by_key(|(used, draw, _)| (*used, *draw));
+        let candidates: Vec<Candidate> = order.into_iter().map(|(_, _, c)| c).collect();
+        let chain = select(&self.ingress.candidate, &candidates)?;
+        self.slot_mut()?.chain = Some(chain.hops);
+        Ok(())
+    }
+
+    /// The static key of a relay of the set.
+    fn key_of(&self, relay_id: &[u8; 32]) -> Option<&RelayStatic> {
+        core::iter::once(&self.ingress)
+            .chain(&self.relays)
+            .map(|relay| &relay.key)
+            .find(|key| key.relay_id == *relay_id)
+    }
+
+    /// The relay at the end of the chain of a circuit, which holds its queues.
+    fn exit_of(&self, slot: usize) -> Result<[u8; 32], Error> {
+        let chain = self.slots.get(slot).and_then(|slot| slot.chain);
+        chain
+            .and_then(|chain| chain.last().copied())
+            .ok_or(Error::NoPath)
     }
 
     /// Sends the `EXTEND` cell for the next hop of `build`.
@@ -600,7 +781,9 @@ impl ClientNode {
         mut build: CircuitBuild,
         rng: &mut R,
     ) -> Result<(), Error> {
-        let relay = self.relays.get(build.built()).ok_or(Error::NoPath)?;
+        let chain = self.slot()?.chain.ok_or(Error::NoPath)?;
+        let hop = chain.get(build.built()).ok_or(Error::NoPath)?;
+        let relay = self.key_of(hop).ok_or(Error::NoPath)?;
         let mut hello = [0u8; HELLO_LEN];
         let pending = Pending::hello(relay, rng, &mut hello).map_err(|_| Error::NoPath)?;
         let mut body = alloc::vec![0u8; BUILD_BUCKET.body_len()];
@@ -664,7 +847,7 @@ impl ClientNode {
             self.deferred.push_back((purpose, user_handle));
             let is_building = |slot: &Slot| matches!(slot.circuit, Circuit::Building { .. });
             if !self.slots.iter().any(is_building) {
-                self.add_circuit(rng)?;
+                self.add_circuit(None, rng)?;
             }
             return Ok(user_handle);
         };
@@ -747,12 +930,13 @@ impl ClientNode {
     ) -> Result<u64, Error> {
         let bytes: &[u8; FRAGMENT_LEN] = fragment.try_into().map_err(|_| Error::Malformed)?;
         let fragment = Fragment::from_bytes(bytes)?;
-        // Each circuit of this revision ends at one queue relay.
-        let queue_relay = self.relays.last().ok_or(Error::NoPath)?.relay_id;
-        if fragment.relay_ref != relay_hint(&queue_relay) {
-            return Err(Error::NoPath);
-        }
-        let ready = self.slots.iter().position(Slot::is_ready);
+        // The hint names the relay of the blob, and a circuit that ends at
+        // that relay carries the fetch.
+        let at_blob = |slot: &Slot| {
+            let exit = slot.chain.and_then(|chain| chain.last().copied());
+            slot.is_ready() && exit.is_some_and(|exit| relay_hint(&exit) == fragment.relay_ref)
+        };
+        let ready = self.slots.iter().position(at_blob);
         self.current = ready.ok_or(Error::NoPath)?;
         let lock: [u8; 32] = random(rng);
         let command = get_blob_command(
@@ -781,7 +965,7 @@ impl ClientNode {
     ) -> Result<Vec<ClientEvent>, Error> {
         let link_id: [u8; LINK_ID_LEN] = payload.try_into().map_err(|_| Error::Malformed)?;
         let session_pk = self.session_pk()?;
-        let queue_relay = self.relays.last().ok_or(Error::NoPath)?.relay_id;
+        let queue_relay = self.exit_of(self.current)?;
         let Some(half) = self.halves.get_mut(&queue) else {
             return Ok(Vec::new());
         };
@@ -1185,7 +1369,7 @@ impl ClientNode {
             self.make_queue_here(purpose, user_handle, rng)?;
         }
         if !self.deferred.is_empty() {
-            self.add_circuit(rng)?;
+            self.add_circuit(None, rng)?;
         }
         // The runtime learns of the first circuit, which takes its commands.
         let is_first = !self
@@ -1292,7 +1476,8 @@ impl ClientNode {
             slot.reserved = slot.reserved.saturating_sub(1);
             slot.queues.insert(ids.recipient_id);
         }
-        let queue_relay = self.relays.last().ok_or(Error::NoPath)?.relay_id;
+        // The queue lives at the end of the chain that carried its `NEW`.
+        let queue_relay = self.exit_of(keys.slot)?;
         let own_address = || QueueAddress {
             relay_id: queue_relay,
             sender_id: ids.sender_id,
@@ -1367,6 +1552,7 @@ impl ClientNode {
             bundle: issued,
             opening,
             link,
+            inbound_relay: queue_relay,
         };
         // An invitation with a link waits for the store of its blob.
         if half.link.is_none() {
@@ -1534,6 +1720,7 @@ impl ClientNode {
             queue_id,
             Contact {
                 channel: PairwiseChannel::new(ratchet, outbound, half.inbound),
+                inbound_relay: half.inbound_relay,
                 peer_static,
                 salt: half.salt,
                 waiting_sends: VecDeque::new(),
@@ -1563,12 +1750,6 @@ impl ClientNode {
 
     /// The relays of the circuit, for a runtime that dials the guard.
     pub fn guard(&self) -> RelayStatic {
-        self.relays.first().map_or(
-            RelayStatic {
-                s: [0; 32],
-                relay_id: [0; 32],
-            },
-            copy_static,
-        )
+        copy_static(&self.ingress.key)
     }
 }
