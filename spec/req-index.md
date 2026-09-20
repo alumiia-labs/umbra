@@ -79,9 +79,9 @@ each column when a crate implements the requirement and a test covers it.
 | `COM` | 299 | 96 | 0 | 0 | 5 | **400** |
 | `ATT` | 134 | 46 | 1 | 0 | 2 | **183** |
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
-| `IMP` | 93 | 38 | 0 | 0 | 1 | **132** |
+| `IMP` | 94 | 38 | 0 | 0 | 1 | **133** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2146 | 697 | 7 | 0 | 51 | **2901** |
+| **All** | 2147 | 697 | 7 | 0 | 51 | **2902** |
 
 ## SCP — Scope and Conventions
 
@@ -3067,6 +3067,7 @@ Source: `spec/15-implementation.md`
 | `IMP-141` | §15.6.4 | MUST | A client | A client MUST ask for the current passphrase before a passphrase change. |  |  |
 | `IMP-142` | §15.6.1 | MUST | (unstated) | The short code and the safety number of Part 4 §4.5 are public values of the two devices, and they cross the surface as strings. |  |  |
 | `IMP-143` | §15.6.4 | MUST | (unstated) | A record that the client uses itself gives no message: a queue address, a record of a ceremony. |  |  |
+| `IMP-144` | §15.6.1 | MUST | A client | A client MUST ask for the camera of the platform at the moment the user opens a scanner, and at no other time. |  |  |
 
 ## SEC — Security Considerations
 

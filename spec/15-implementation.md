@@ -502,6 +502,12 @@ that draft is dropped, and it MUST do that whether the send succeeded or failed.
   channel alone. The confirmation of a short code MUST be a call of its own
   that follows an act of the user, and the event that carries the code MUST
   set no state (`IDN-148`).
+- **[IMP-144]** A client MUST ask for the camera of the platform at the moment
+  the user opens a scanner, and at no other time. It MUST read a code from a
+  frame on the device, and it MUST NOT store a frame or send one. A scanner
+  serves the link of an invitation (Part 4 §4.3) and the safety number of
+  `IDN-140`, and a device with no camera keeps the pasted link and the short
+  code.
 - The bundle of an invitation crosses as bytes in an event and in `accept`.
   The bundle holds the send key and the end-to-end key of one queue (Part 6
   §6.6.10), thus this is an exception to `IMP-037`. The platform shows the
