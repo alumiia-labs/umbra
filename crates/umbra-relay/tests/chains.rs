@@ -430,6 +430,51 @@ fn two_clients_at_two_queue_relays_meet_and_talk() {
     assert_eq!(mesh.clients[ALICE].chains().len(), 2);
 }
 
+#[test]
+fn a_queue_at_a_relay_that_left_the_set_does_not_end_the_run() {
+    const ALICE: usize = 0;
+    const BOB: usize = 1;
+    let mut mesh = Mesh::new(&[0x41, 0x42]);
+    mesh.settle();
+    mesh.clients[ALICE].invite(&mut Rng(1)).unwrap();
+    mesh.settle();
+    let bundle = mesh
+        .take_events(ALICE)
+        .into_iter()
+        .find_map(|event| match event {
+            ClientEvent::Invitation { bundle, .. } => Some(bundle),
+            _ => None,
+        })
+        .expect("an invitation");
+    mesh.clients[BOB].accept(bundle, &mut Rng(2)).unwrap();
+    mesh.settle();
+    mesh.settle();
+    let alice_contact = contact_of(&mesh.take_events(ALICE));
+    mesh.take_events(BOB);
+
+    // The store of Alice names a relay for her inbound queue that the relay
+    // set does not hold: the version byte, the salt, the key of the peer,
+    // and then that relay.
+    for state in mesh.stored[ALICE].values_mut() {
+        state[1 + 16 + 32..1 + 16 + 32 + 32].fill(0xEE);
+    }
+    let alice_seed = mesh_seed_of(&mesh, ALICE);
+    mesh.restart(ALICE, alice_seed);
+    mesh.settle();
+    // No circuit ends at that relay. One circuit is there for a new queue.
+    let chains = mesh.clients[ALICE].chains();
+    assert_eq!(chains.len(), 1);
+    assert_ne!(chains[0][2], [0xEE; 32]);
+
+    // The queue of Bob is in reach, thus a record for him arrives.
+    let now = mesh.now;
+    mesh.clients[ALICE]
+        .send(&alice_contact, &text(1, "still there"), now, &mut Rng(3))
+        .unwrap();
+    mesh.settle();
+    assert_eq!(texts_of(mesh.take_events(BOB)), [b"still there"]);
+}
+
 /// The seed of the root identity of a client of the mesh of this test.
 fn mesh_seed_of(mesh: &Mesh, client: usize) -> u8 {
     mesh.seeds[client]

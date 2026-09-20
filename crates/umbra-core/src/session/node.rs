@@ -737,12 +737,33 @@ impl ClientNode {
         for slot in &mut self.slots {
             slot.chain = None;
         }
+        let mut built = 0usize;
         for slot in 0..self.slots.len() {
             self.current = slot;
-            self.choose_chain(rng)?;
+            // A circuit to a relay that left the relay set, or to one that
+            // no conformant chain reaches, builds nothing (`NET-033`). Its
+            // queues are out of reach in this run. That must not end the
+            // run, because each other circuit serves its own contacts.
+            if self.choose_chain(rng).is_err() {
+                continue;
+            }
             self.extend(CircuitBuild::new(random(rng)), rng)?;
+            built = built.saturating_add(1);
         }
-        Ok(())
+        if built > 0 {
+            return Ok(());
+        }
+        // With no circuit the client cannot make a queue for a new contact,
+        // thus it builds one that can end at each relay. A circuit of that
+        // kind that found no chain above finds none now.
+        if self.slots.iter().any(|slot| slot.exit.is_none()) {
+            return Err(Error::NoPath);
+        }
+        self.add_circuit(None, rng)?;
+        match self.slot()?.chain {
+            Some(_) => Ok(()),
+            None => Err(Error::NoPath),
+        }
     }
 
     /// Adds one circuit, and starts its build. `exit` is the relay at which
@@ -754,7 +775,12 @@ impl ClientNode {
     ) -> Result<(), Error> {
         self.slots.push(Slot::empty(exit));
         self.current = self.slots.len().saturating_sub(1);
-        self.choose_chain(rng)?;
+        // With no conformant chain the circuit stays with no build, and
+        // what waits for it waits (`NET-033`). The slot stays, thus a later
+        // call for the same relay does not select again in this run.
+        if self.choose_chain(rng).is_err() {
+            return Ok(());
+        }
         self.extend(CircuitBuild::new(random(rng)), rng)
     }
 
