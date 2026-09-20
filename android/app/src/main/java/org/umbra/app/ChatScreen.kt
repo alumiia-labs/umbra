@@ -78,17 +78,14 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
     val readUpTo = lines.indexOfLast { it.info.outgoing && it.info.delivery.toInt() == READ }
     val composer = rememberPlatformField()
     Column(Modifier.fillMaxSize()) {
-        val details = { push(Screen.ContactDetails(chat.conversation)) }
-        BackBar(chat.title, onBack = onBack, isVerified = chat.isVerified, onTitle = details) {
-            OverflowSheet(
-                chat.title,
-                listOf(
-                    RowEntry("circle-info", "Contact details", onClick = details),
-                    RowEntry("pen", "Edit name") { push(Screen.EditName(chat.conversation)) },
-                    RowEntry("shield-check", "Verify contact") { push(Screen.Verify(chat.conversation)) },
-                ),
-            )
-        }
+        // The name leads to the details of the contact, and that view holds
+        // each action of a conversation. The bar needs no menu beside it.
+        BackBar(
+            chat.title,
+            onBack = onBack,
+            isVerified = chat.isVerified,
+            onTitle = { push(Screen.ContactDetails(chat.conversation)) },
+        )
         LazyColumn(
             state = listState,
             modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp),

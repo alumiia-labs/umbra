@@ -79,8 +79,9 @@ fun AutoLockScreen(onBack: () -> Unit) {
                 Row(
                     Modifier
                         .fillMaxWidth()
-                        .clickable(role = Role.RadioButton) { chosen = seconds }
-                        .padding(vertical = 14.dp),
+                        .pressShadeInColumn()
+                        .press(role = Role.RadioButton) { chosen = seconds }
+                        .padding(horizontal = PressInset, vertical = 14.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     RadioMark(isChosen = chosen == seconds)

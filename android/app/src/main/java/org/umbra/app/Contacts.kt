@@ -84,8 +84,9 @@ fun AddContactScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .clickable { push(Screen.UseInvitation) }
-                    .padding(vertical = 14.dp),
+                    .pressShadeInColumn()
+                    .press { push(Screen.UseInvitation) }
+                    .padding(horizontal = PressInset, vertical = 14.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 FaIcon("qrcode", size = 20.dp, tint = Palette.Text)

@@ -27,9 +27,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -41,6 +39,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.semantics.Role
@@ -54,6 +53,12 @@ import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.animateColorAsState
 
 /**
  * The holder of a text field of the platform. A composable field holds its
@@ -156,12 +161,12 @@ fun PlatformText(
                 view.setText(chars, 0, chars.size)
             } else {
                 // The prefix is a word of the interface. The message text
-                // joins it in a buffer of the view, and in no `String`.
+                // joins it in a buffer, and in no `String`. The view keeps that
+                // array and makes no copy, thus a wipe here shows an empty line.
                 val joined = CharArray(prefix.length + chars.size)
                 prefix.toCharArray(joined, 0, 0, prefix.length)
                 chars.copyInto(joined, prefix.length)
                 view.setText(joined, 0, joined.size)
-                joined.fill('\u0000')
             }
         },
     )
@@ -174,6 +179,84 @@ fun PlatformText(
  * inset.
  */
 fun Modifier.subline(): Modifier = padding(horizontal = 3.dp)
+
+/**
+ * The press shade of each row: round, with room around its content, as the
+ * press shade of a tab is. The content of a row starts `PressInset` inside
+ * the shade.
+ */
+val PressShape = RoundedCornerShape(16.dp)
+val PressInset = 12.dp
+
+/**
+ * The press of a row or a tab, with a shade that the app draws itself. The
+ * ripple of the platform does not draw in a row that holds a platform text
+ * view, thus one row of the app had a shade and the next had none. The shade
+ * comes at once and fades, thus a short tap shows it also.
+ */
+@Composable
+fun Modifier.press(role: Role? = null, label: String? = null, onClick: () -> Unit): Modifier {
+    val source = remember { MutableInteractionSource() }
+    return pressShade(source).clickable(
+        interactionSource = source,
+        indication = null,
+        role = role,
+        onClickLabel = label,
+        onClick = onClick,
+    )
+}
+
+/** The same press for a switch. */
+@Composable
+fun Modifier.pressToggle(isOn: Boolean, onChange: (Boolean) -> Unit): Modifier {
+    val source = remember { MutableInteractionSource() }
+    return pressShade(source).toggleable(
+        value = isOn,
+        interactionSource = source,
+        indication = null,
+        role = Role.Switch,
+        onValueChange = onChange,
+    )
+}
+
+@Composable
+private fun Modifier.pressShade(source: MutableInteractionSource): Modifier {
+    val isPressed by source.collectIsPressedAsState()
+    val shade by animateColorAsState(
+        if (isPressed) Palette.Pressed else Color.Transparent,
+        if (isPressed) snap() else tween(durationMillis = 260),
+        label = "press shade",
+    )
+    // The shade lies above the content, as the press shade of a tab does.
+    return drawWithContent {
+        drawContent()
+        drawRect(shade)
+    }
+}
+
+/**
+ * The shade of a row in a column with side padding. The shade reaches past
+ * the column by `PressInset` on each side, thus the text of the row stays in
+ * line with the text above it. The caller adds [press] and then
+ * `padding(horizontal = PressInset)`.
+ */
+fun Modifier.pressShadeInColumn(): Modifier = layout { measurable, constraints ->
+    val extra = PressInset.roundToPx() * 2
+    val placeable = measurable.measure(
+        constraints.copy(
+            minWidth = constraints.minWidth + extra,
+            maxWidth = constraints.maxWidth + extra,
+        ),
+    )
+    layout(placeable.width - extra, placeable.height) { placeable.place(-PressInset.roundToPx(), 0) }
+}.clip(PressShape)
+
+/**
+ * The shade of a row that spans the screen. The caller adds [press] and
+ * then `padding(horizontal = PressInset)`, which puts the content 20 dp from
+ * the edge.
+ */
+fun Modifier.pressShadeInList(): Modifier = padding(horizontal = 8.dp).clip(PressShape)
 
 @Composable
 fun PrimaryButton(label: String, enabled: Boolean = true, onClick: () -> Unit) {
@@ -325,52 +408,18 @@ class RowEntry(
     val onClick: () -> Unit,
 )
 
-/**
- * The three dots of a bar. They open a sheet from the bottom with a handle, a
- * title, and one row for each entry, as `design/mockups/light` has it. The
- * mockups use no popup menu.
- */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun OverflowSheet(title: String, entries: List<RowEntry>) {
-    var isOpen by remember { mutableStateOf(false) }
-    IconAction("ellipsis-vertical", "More options") { isOpen = true }
-    if (!isOpen) return
-    ModalBottomSheet(
-        onDismissRequest = { isOpen = false },
-        containerColor = Palette.Surface,
-        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
-        dragHandle = {
-            Box(
-                Modifier
-                    .padding(top = 12.dp, bottom = 8.dp)
-                    .size(width = 32.dp, height = 4.dp)
-                    .background(Palette.Outline, CircleShape),
-            )
-        },
-    ) {
-        Column(Modifier.padding(start = 20.dp, end = 20.dp, bottom = 24.dp)) {
-            Text(title, style = MaterialTheme.typography.headlineSmall)
-            Spacer(Modifier.height(12.dp))
-            entries.forEachIndexed { index, entry ->
-                if (index > 0) HorizontalDivider(color = Palette.Divider)
-                EntryRow(entry) { isOpen = false }
-            }
-        }
-    }
-}
-
 /** A row with a line icon, a title, a smaller line, and a chevron. */
 @Composable
 fun EntryRow(entry: RowEntry, afterClick: () -> Unit = {}) {
     Row(
         Modifier
             .fillMaxWidth()
-            .clickable(role = Role.Button) {
+            .pressShadeInColumn()
+            .press(role = Role.Button) {
                 afterClick()
                 entry.onClick()
             }
-            .padding(vertical = 14.dp),
+            .padding(horizontal = PressInset, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         FaIcon(entry.icon, size = 20.dp, tint = Palette.Text)
@@ -399,8 +448,9 @@ fun ToggleRow(title: String, isOn: Boolean, onChange: (Boolean) -> Unit) {
     Row(
         Modifier
             .fillMaxWidth()
-            .toggleable(value = isOn, role = Role.Switch, onValueChange = onChange)
-            .padding(vertical = 16.dp),
+            .pressShadeInColumn()
+            .pressToggle(isOn, onChange)
+            .padding(horizontal = PressInset, vertical = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(title, Modifier.weight(1f))

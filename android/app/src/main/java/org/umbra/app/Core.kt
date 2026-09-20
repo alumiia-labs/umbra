@@ -316,8 +316,8 @@ object Core {
         worker.execute {
             val currentUnits = current.map { it.code.toUShort() }
             val newUnits = new.map { it.code.toUShort() }
-            current.fill(' ')
-            new.fill(' ')
+            current.fill('\u0000')
+            new.fill('\u0000')
             val failure = try {
                 client.changePassphrase(currentUnits, newUnits)
                 null

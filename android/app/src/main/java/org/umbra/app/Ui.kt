@@ -42,6 +42,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -270,7 +271,7 @@ private fun TabsScreen(tab: Tab, onTab: (Tab) -> Unit, push: (Screen) -> Unit) {
                 Column(
                     Modifier
                         .clip(RoundedCornerShape(20.dp))
-                        .clickable(role = Role.Tab) { onTab(entry) }
+                        .press(role = Role.Tab) { onTab(entry) }
                         .padding(horizontal = 22.dp, vertical = 6.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
@@ -345,11 +346,19 @@ private fun ChatsTab(push: (Screen) -> Unit) {
 
 @Composable
 private fun ChatRow(chat: Chat, onOpen: () -> Unit) {
+    // The preview is a view of the platform, and such a view takes a touch
+    // before the row does: a press above it gave no shade. The press area
+    // thus lies above the content, and the two are one node for a reader.
+    Box(Modifier.fillMaxWidth().pressShadeInList().semantics(mergeDescendants = true) {}) {
+        ChatRowContent(chat)
+        Box(Modifier.matchParentSize().press(role = Role.Button, onClick = onOpen))
+    }
+}
+
+@Composable
+private fun ChatRowContent(chat: Chat) {
     Row(
-        Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onOpen)
-            .padding(horizontal = 20.dp, vertical = 12.dp),
+        Modifier.fillMaxWidth().padding(horizontal = PressInset, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Avatar(chat)
@@ -412,8 +421,9 @@ private fun ContactsTab(push: (Screen) -> Unit) {
                 Row(
                     Modifier
                         .fillMaxWidth()
-                        .clickable { push(Screen.ContactDetails(chat.conversation)) }
-                        .padding(horizontal = 20.dp, vertical = 12.dp),
+                        .pressShadeInList()
+                        .press { push(Screen.ContactDetails(chat.conversation)) }
+                        .padding(horizontal = PressInset, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Avatar(chat)
@@ -484,8 +494,9 @@ private fun SettingRow(icon: String, title: String, detail: String, onClick: (()
     Row(
         Modifier
             .fillMaxWidth()
-            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
-            .padding(horizontal = 20.dp, vertical = 14.dp),
+            .pressShadeInList()
+            .then(if (onClick != null) Modifier.press(onClick = onClick) else Modifier)
+            .padding(horizontal = PressInset, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         FaIcon(icon, size = 20.dp, tint = Palette.Text)

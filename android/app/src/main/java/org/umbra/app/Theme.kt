@@ -16,6 +16,9 @@ object Palette {
     val Incoming = Color(0xFFE9EEE3)
     val Outline = Color(0xFFB4BFB3)
     val Divider = Color(0xFFE1E6DB)
+
+    /** The shade of a row or a tab under a finger, above its content. */
+    val Pressed = Color(0x14202B25)
     val Error = Color(0xFF963A36)
 
     /** The pastel grounds of the letter avatars. */
