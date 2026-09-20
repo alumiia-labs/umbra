@@ -881,6 +881,66 @@ MUST NOT declare its own layer, and a descriptor carries no layer field.
 > that this part does not hold. The two tree prefixes `0x00` and `0x01` stay in
 > §10.5.3, and they separate a leaf from a node inside the tree.
 
+**[REL-150]** A client MUST NOT use a relay at hop 3 when `roles` bit 0 of its
+descriptor is not set. The last relay of a circuit serves the commands of the
+client, and a relay with no queue role serves none. The layer function gives
+each relay a value, thus a client MUST NOT read the layer of a relay with
+`flags` bit 0 as a place in the chain population.
+
+### 10.5.5 The relay manifest
+
+§10.5 and Part 3 §3.10 move a signed relay manifest over each bootstrap
+carrier. The manifest is one root and a set of entries, each with its proof
+under that root. A carrier gives the whole relay set, or a part of it: an
+invitation of a contact carries the few relays that the first circuits need.
+
+```
+RelayManifest {
+    version       u8              // 0x01
+    root_len      u16
+    root          [root_len]u8    // a DirectoryRoot of §10.5.2
+    entry_count   u16
+    entries       [entry_count]ProvenEntry
+}
+
+ProvenEntry {
+    entry         RelayEntry      // 5 498 bytes, §10.5.3
+    step_count    u8              // 0 to 16
+    steps         [step_count]{ side u8, sibling [32]u8 }
+}
+```
+
+The steps go from the leaf to the root. A `side` of `0x00` puts the sibling
+on the left of the running hash, and `0x01` puts it on the right. Part 9 §9.5
+uses the same form. A tree of 3 000 leaves gives 12 steps, thus one proven
+entry is 5 895 bytes. The five relays of a first contact are about 29 KB, and
+the root adds 17 KB to 24 KB.
+
+- **[REL-145]** A carrier MUST give the manifest in the encoding above, with
+  the entries in ascending order of `relay_id`. **[REL-146]** A client MUST
+  verify the root under §10.5.2 before it verifies one entry. The signature
+  of an entry costs an ML-DSA-65 verification, and a carrier must not spend
+  that work of a client under a root that no authority signed.
+- **[REL-147]** A client MUST reject the whole manifest when one entry fails
+  `REL-050`, `REL-051`, `REL-057` or `REL-144`, when two entries are not in
+  ascending order of `relay_id`, when a `step_count` is above 16, or when a
+  `side` is not `0x00` or `0x01`. A manifest that the client rejects MUST
+  leave the accepted root, the highest epoch and the clock correction of
+  §10.5.2 as they were.
+- **[REL-148]** A client MUST reject an entry whose `valid_after` is above
+  the `epoch` of the root.
+- **[REL-149]** A client MUST reject a manifest whose root names a
+  `bloc_hash` that differs from the hash of the `BlocList` that the client
+  holds. The blocs decide invariant 2 of Part 3 §3.4.6, and a client that
+  tests a chain under another list tests another rule. The `BlocList` moves
+  beside the manifest, under §10.5.
+
+> *Cause.* An earlier draft named a "signed relay manifest" in three parts
+> and gave it no bytes. A client held a rule for a root and a rule for one
+> entry, and it held no object that a carrier could hand to it. A manifest
+> with proofs serves both uses of Part 3 §3.10 with one form: the full set
+> from an HTTPS endpoint, and the few relays inside an invitation.
+
 ## 10.6 Path selection: hard constraints, not soft weights
 
 **[REL-011]** A client MUST reject a chain if two of its relays share one of these items:

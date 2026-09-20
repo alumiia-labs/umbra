@@ -74,14 +74,14 @@ each column when a crate implements the requirement and a test covers it.
 | `DEV` | 179 | 87 | 2 | 0 | 7 | **275** |
 | `NTF` | 67 | 30 | 0 | 0 | 2 | **99** |
 | `DIS` | 123 | 37 | 0 | 0 | 1 | **161** |
-| `REL` | 114 | 27 | 1 | 0 | 2 | **144** |
+| `REL` | 119 | 28 | 1 | 0 | 2 | **150** |
 | `GRP` | 204 | 56 | 0 | 0 | 5 | **265** |
 | `COM` | 299 | 96 | 0 | 0 | 5 | **400** |
 | `ATT` | 134 | 46 | 1 | 0 | 2 | **183** |
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
 | `IMP` | 105 | 41 | 0 | 0 | 1 | **147** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2169 | 703 | 7 | 0 | 51 | **2930** |
+| **All** | 2174 | 704 | 7 | 0 | 51 | **2936** |
 
 ## SCP — Scope and Conventions
 
@@ -1971,6 +1971,12 @@ Source: `spec/10-relay-directory.md`
 | `REL-142` | §10.6.3 | MUST NOT | A directory authority | A directory authority MUST NOT publish a `BlocList` under which the current relay set does not reach the floor. |  |  |
 | `REL-143` | §10.5.3 | MUST | A relay | A relay MUST set `host` to the DNS name that the TLS certificate of its co-tenant site names, in ASCII, with zero bytes after the name. |  |  |
 | `REL-144` | §10.5.3 | MUST | A client | A client MUST reject a descriptor whose `host` is empty, holds a byte outside the DNS name characters, or holds a non-zero byte after a zero byte. |  |  |
+| `REL-145` | §10.5.5 | MUST | A carrier | A carrier MUST give the manifest in the encoding above, with the entries in ascending order of `relay_id`. |  |  |
+| `REL-146` | §10.5.5 | MUST | A client | A client MUST verify the root under §10.5.2 before it verifies one entry. |  |  |
+| `REL-147` | §10.5.5 | MUST | A client | A client MUST reject the whole manifest when one entry fails `REL-050`, `REL-051`, `REL-057` or `REL-144`, when two entries are not in ascending order of `relay_id`, when a `step_count` is above 16, or when a `side` is not `0x00` or `0x01`. |  |  |
+| `REL-148` | §10.5.5 | MUST | A client | A client MUST reject an entry whose `valid_after` is above the `epoch` of the root. |  |  |
+| `REL-149` | §10.5.5 | MUST | A client | A client MUST reject a manifest whose root names a `bloc_hash` that differs from the hash of the `BlocList` that the client holds. |  |  |
+| `REL-150` | §10.5.4 | MUST NOT | A client | A client MUST NOT use a relay at hop 3 when `roles` bit 0 of its descriptor is not set. |  |  |
 
 ## GRP — Private Groups
 
