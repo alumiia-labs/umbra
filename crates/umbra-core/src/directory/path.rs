@@ -8,7 +8,6 @@ use alloc::vec::Vec;
 use super::{
     bloc::{BlocId, BlocList},
     descriptor::{roles, RelayEntry},
-    layer::layer,
     INGRESS_PIN_CONFIRMED, INGRESS_PIN_UNCONFIRMED,
 };
 use crate::Error;
@@ -42,13 +41,8 @@ pub struct Candidate {
 }
 
 impl Candidate {
-    /// Reads the facts from a verified entry under the accepted root.
-    pub fn from_entry(
-        entry: &RelayEntry<'_>,
-        blocs: &BlocList,
-        root: &[u8; 32],
-        epoch: u64,
-    ) -> Self {
+    /// Reads the facts from a verified entry.
+    pub fn from_entry(entry: &RelayEntry<'_>, blocs: &BlocList) -> Self {
         let d = &entry.descriptor;
         let v4_prefix = (d.addr_v4 != [0; 4]).then(|| [d.addr_v4[0], d.addr_v4[1]]);
         let v6_prefix = (d.addr_v6 != [0; 16]).then(|| {
@@ -67,13 +61,12 @@ impl Candidate {
             ingress: entry.ingress(),
             chain: d.roles & roles::CHAIN != 0,
             queue: d.roles & roles::QUEUE != 0,
-            layer: layer(root, epoch, &d.relay_id),
+            layer: entry.layer(),
         }
     }
 
     /// Whether the relay can be the last relay of a circuit: a chain relay of
-    /// layer 3 with the queue role, and no ingress. The layer function gives
-    /// each relay a layer, and an ingress relay can thus read as layer 3.
+    /// layer 3 with the queue role, and no ingress.
     pub fn is_exit(&self) -> bool {
         self.layer == 3 && self.chain && self.queue && !self.ingress
     }

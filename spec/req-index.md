@@ -74,14 +74,14 @@ each column when a crate implements the requirement and a test covers it.
 | `DEV` | 179 | 87 | 2 | 0 | 7 | **275** |
 | `NTF` | 67 | 30 | 0 | 0 | 2 | **99** |
 | `DIS` | 123 | 37 | 0 | 0 | 1 | **161** |
-| `REL` | 119 | 28 | 1 | 0 | 2 | **150** |
+| `REL` | 120 | 29 | 1 | 0 | 2 | **152** |
 | `GRP` | 204 | 56 | 0 | 0 | 5 | **265** |
 | `COM` | 299 | 96 | 0 | 0 | 5 | **400** |
 | `ATT` | 134 | 46 | 1 | 0 | 2 | **183** |
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
 | `IMP` | 105 | 41 | 0 | 0 | 1 | **147** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2174 | 704 | 7 | 0 | 51 | **2936** |
+| **All** | 2175 | 705 | 7 | 0 | 51 | **2938** |
 
 ## SCP — Scope and Conventions
 
@@ -1977,6 +1977,8 @@ Source: `spec/10-relay-directory.md`
 | `REL-148` | §10.5.5 | MUST | A client | A client MUST reject an entry whose `valid_after` is above the `epoch` of the root. |  |  |
 | `REL-149` | §10.5.5 | MUST | A client | A client MUST reject a manifest whose root names a `bloc_hash` that differs from the hash of the `BlocList` that the client holds. |  |  |
 | `REL-150` | §10.5.4 | MUST NOT | A client | A client MUST NOT use a relay at hop 3 when `roles` bit 0 of its descriptor is not set. |  |  |
+| `REL-151` | §10.5.4 | MUST | A client | A client MUST reject an entry that sets bit 1 with bit 0, that sets bit 1 with no queue role or no chain role in `roles`, or that sets a bit above bit 1. |  |  |
+| `REL-152` | §10.5.4 | MUST NOT | A directory authority | A directory authority MUST NOT sign a root over an entry whose bit 1 differs from the function. |  |  |
 
 ## GRP — Private Groups
 

@@ -707,7 +707,7 @@ RelayEntry {
     descriptor     RelayDescriptor
     operator_id    [32]u8      // one opaque value for each beneficial control
     class          u8          // the verified class of §10.2, 0 to 3
-    flags          u8          // bit 0 ingress
+    flags          u8          // bit 0 ingress, bit 1 layer 3 (§10.5.4)
 }
 ```
 
@@ -833,20 +833,33 @@ prohibits an operator from selecting that layer. Layer 1 is the **ingress
 population**, which is the set of relays with `flags` bit 0 in the entry of
 §10.5.3. The **chain population** is the set of relays with `roles` bit 1 and
 without that flag. The assignment over the chain population is a public
-function of the consensus:
+function of the consensus at the **admission** of the relay:
 
 ```
 layer(relay_id) = 2 + ( SHA3-256( "umbra/v1/relay-layer"
                                 || root || BE64(epoch) || relay_id ) mod 2 )
 ```
 
-Here `root` and `epoch` are the fields of the most recent `DirectoryRoot` that
-the client accepted.
+Here `root` and `epoch` are the fields of the last `DirectoryRoot` before the
+first root that lists the relay. The relay is not in that tree, and its
+operator made `relay_id` before the authorities signed that root.
 
-**[REL-060]** A client MUST compute the layer of each candidate for hop 2 and
-hop 3 with the function above. **[REL-061]** A client MUST compute
-the layer again each time it accepts a `DirectoryRoot`. **[REL-062]** A relay
-MUST NOT declare its own layer, and a descriptor carries no layer field.
+- **[REL-060]** A directory authority MUST compute the layer of a relay of
+  the chain population one time, with the function above, when it admits the
+  relay. It MUST set `flags` bit 1 of the entry when the value is 3, and it
+  MUST keep that bit in each later entry of that `relay_id`. A relay with no
+  queue role serves no last hop (`REL-150`), thus the authority MUST clear
+  bit 1 for it, and that relay is of layer 2.
+- **[REL-061]** A client MUST take the layer of a candidate for hop 2 and hop
+  3 from `flags` bit 1 of its entry, and a relay MUST take its own layer from
+  its own entry. **[REL-151]** A client MUST reject an entry that sets bit 1
+  with bit 0, that sets bit 1 with no queue role or no chain role in `roles`,
+  or that sets a bit above bit 1.
+- **[REL-062]** A relay MUST NOT declare its own layer, and a descriptor
+  carries no layer field.
+- The roots are a public record, thus each party can compute the function
+  again for each listed relay. **[REL-152]** A directory authority MUST NOT
+  sign a root over an entry whose bit 1 differs from the function.
 
 > *Cause.* An earlier draft named a **verifiable random function** here. A VRF
 > proves that a holder of a secret key produced an output, and this assignment
@@ -861,10 +874,22 @@ MUST NOT declare its own layer, and a descriptor carries no layer field.
 > layer 1 that the two rules then rejected. The function now covers hops 2 and
 > 3, and the directory sets the ingress flag. That draft also bound the
 > function to "the root of that epoch". A client with a 3-hour-old root then
-> had no rule for the current epoch. The function now takes the root that the
-> client holds. Two clients on different fetch cadences may place one relay in
-> different layers for an hour. That difference is harmless, because a relay
-> enforces no layer and `REL-011` holds at each placement.
+> had no rule for the current epoch.
+>
+> A later draft made each client compute the function under the most recent
+> root that it held, again at each root. The epoch is 1 hour, thus a relay
+> changed its layer at about each second root. A queue lives at one relay for
+> weeks, Part 3 rules `NET-166` and `NET-167` make a relay enforce its layer,
+> and the key schedule of Part 3 §3.4.4 takes the layer as `hop_index`. Thus a
+> queue relay that the hash moved to layer 2 refused each circuit that ended
+> at it, and its queues were out of reach for that hour. That draft also said
+> that "a relay enforces no layer", which those two rules contradict. The
+> layer is now a fact of the admission. The entry carries it under the 5-of-7
+> multi-signature, as it carries the ingress flag. The operator still selects
+> no position: the root of the function comes after the key of the relay. An
+> operator can select layer 2 with a descriptor that offers no queue role.
+> Layer 2 sees no client address and no queue, thus that choice gives the
+> least.
 >
 > This change also keeps the primitive register closed. Part 5 §5.1 registers
 > `ECVRF-Edwards25519-SHA512-TAI` as AUX-3 for two uses, and neither one is this
@@ -963,8 +988,8 @@ A family declaration uses the **family certificate of §10.6.3**, which has the
 shape of Tor proposal 321. That certificate is mandatory in v1. UMBRA does not
 use an O(n²) list in the `MyFamily` style.
 
-The layer assignment comes from the consensus root (§10.5.4), and the directory
-sets the ingress flag (§10.5.3). Thus an operator **cannot select its
+The layer assignment comes from the consensus root at the admission of the
+relay (§10.5.4), and the directory sets the ingress flag (§10.5.3). Thus an operator **cannot select its
 position**. This property removes the KAX17 strategy, which collects the
 ingress positions and the middle positions.
 

@@ -183,14 +183,33 @@ pub struct RelayEntry<'a> {
     pub operator_id: [u8; 32],
     /// The verified class, 0 to 3.
     pub class: u8,
-    /// Bit 0: ingress eligible.
+    /// Bit 0: ingress eligible. Bit 1: layer 3.
     pub flags: u8,
+}
+
+/// The flag bits of an entry.
+pub mod flags {
+    /// The relay may serve at hop 1.
+    pub const INGRESS: u8 = 0x01;
+    /// The admission put the relay in layer 3 (`REL-060`).
+    pub const LAYER_3: u8 = 0x02;
 }
 
 impl<'a> RelayEntry<'a> {
     /// Whether the entry may serve at hop 1 (`REL-133`).
     pub fn ingress(&self) -> bool {
-        self.flags & 0x01 != 0
+        self.flags & flags::INGRESS != 0
+    }
+
+    /// The layer of the relay, from 1 to 3 (`REL-061`).
+    pub fn layer(&self) -> u8 {
+        if self.ingress() {
+            1
+        } else if self.flags & flags::LAYER_3 != 0 {
+            3
+        } else {
+            2
+        }
     }
 
     /// Writes the entry.
@@ -219,6 +238,16 @@ impl<'a> RelayEntry<'a> {
         };
         r.finish()?;
         if out.class > 3 || out.class > out.descriptor.capacity_class {
+            return Err(Error::Malformed);
+        }
+        // REL-151: layer 3 needs the queue role and the chain role, it is no
+        // ingress, and no other bit exists.
+        let exit_roles = roles::QUEUE | roles::CHAIN;
+        let is_layer_3 = out.flags & flags::LAYER_3 != 0;
+        if out.flags & !(flags::INGRESS | flags::LAYER_3) != 0
+            || (is_layer_3 && out.ingress())
+            || (is_layer_3 && out.descriptor.roles & exit_roles != exit_roles)
+        {
             return Err(Error::Malformed);
         }
         Ok(out)
@@ -311,5 +340,17 @@ pub(crate) mod tests {
         bad_host[1 + 32 + 1952 + 32 + 4 + 16 + 2] = b' ';
         assert!(RelayEntry::parse(&bad_host).is_err());
         assert!(RelayEntry::parse(&bytes[..ENTRY_LEN - 1]).is_err());
+    }
+
+    #[test]
+    fn the_flags_of_an_entry_give_one_layer() {
+        for (flags, layer) in [(0u8, 2u8), (1, 1), (2, 3)] {
+            let bytes = entry_bytes(2, *b"SE", 64_501, flags);
+            assert_eq!(RelayEntry::parse(&bytes).unwrap().layer(), layer);
+        }
+        // An ingress relay of layer 3, and a bit that does not exist.
+        for flags in [3u8, 4, 0x80] {
+            assert!(RelayEntry::parse(&entry_bytes(2, *b"SE", 64_501, flags)).is_err());
+        }
     }
 }

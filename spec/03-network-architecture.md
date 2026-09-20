@@ -743,10 +743,11 @@ one relay from layer 2, and one relay from layer 3.
 
 Layer 1 is the ingress population of Part 10 §10.5.4. That population is the
 set of relays whose entry carries the ingress flag of Part 10 §10.5.3. The
-directory sets that flag from three verified facts. A public hash over the most
-recent accepted consensus root assigns each other chain relay to layer 2 or to
-layer 3. Part 10 §10.5.4 gives that function. Each party computes the same
-value, and no party predicts the root before the authorities sign it.
+directory sets that flag from three verified facts. A public hash over the
+consensus root at the admission of a relay assigns each other chain relay to
+layer 2 or to layer 3, and the entry of the relay carries that layer. Part 10
+§10.5.4 gives that function. Each party computes the same value, and no party
+predicts the root before the authorities sign it.
 **[NET-027]** The operator MUST NOT select the layer (§10.5).
 
 > *Rationale.* Piotrowska (arXiv 2107.12172) shows that a stratified topology
@@ -968,7 +969,8 @@ T              <- t[192..208]   // the tweak of the layer, both directions
 ```
 
 The value `hop_index` is the layer of the relay under §3.4.1, from 1 to 3.
-Part 10 §10.5.4 gives each party that value, thus no cell carries it.
+The entry of Part 10 §10.5.3 gives each party that value, thus no cell
+carries it.
 
 **[NET-107]** An implementation MUST use a different key set for each direction,
 and it MUST NOT use one key set for the two directions.

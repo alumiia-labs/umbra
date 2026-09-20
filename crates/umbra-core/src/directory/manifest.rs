@@ -183,7 +183,7 @@ impl RelaySet {
                 return Err(Error::Malformed);
             }
             relays.push(ListedRelay {
-                candidate: Candidate::from_entry(&entry, blocs, &merkle_root, epoch),
+                candidate: Candidate::from_entry(&entry, blocs),
                 ntor_pk: descriptor.ntor_pk,
                 addr_v4: descriptor.addr_v4,
                 addr_v6: descriptor.addr_v6,
@@ -222,7 +222,16 @@ mod tests {
     fn sorted_entries(seeds: &[u8]) -> Vec<Vec<u8>> {
         let mut entries: Vec<Vec<u8>> = seeds
             .iter()
-            .map(|seed| entry_bytes(*seed, [b'A' + *seed, b'A'], 64_500 + u32::from(*seed), 0))
+            // The flags go 1, 2, 0 in turn: an ingress, a last relay, and a
+            // relay of layer 2.
+            .map(|seed| {
+                entry_bytes(
+                    *seed,
+                    [b'A' + *seed, b'A'],
+                    64_500 + u32::from(*seed),
+                    *seed % 3,
+                )
+            })
             .collect();
         entries.sort_by_key(|entry| entry[1..33].to_vec());
         entries
@@ -256,14 +265,14 @@ mod tests {
             keys: pks.iter().map(|key| &key[..]).collect(),
         };
         let keyset_hash = keyset().hash().unwrap();
-        let entries = sorted_entries(&[1, 2, 3, 4, 5]);
+        let entries = sorted_entries(&[1, 2, 3, 4, 5, 6]);
         let leaves: Vec<[u8; 32]> = entries.iter().map(|entry| tree::leaf(entry)).collect();
         let merkle_root = tree::root(&leaves).unwrap();
         let root = signed_root(&keys, &[0, 2, 3, 5, 6], 200, keyset_hash, merkle_root);
         let blocs = BlocList::v1();
 
         // The whole set, and then a part of it: each entry has its proof.
-        for listed in [&[0usize, 1, 2, 3, 4][..], &[1, 3][..]] {
+        for listed in [&[0usize, 1, 2, 3, 4, 5][..], &[1, 3][..]] {
             let manifest = manifest_of(&root, &entries, listed);
             let bytes = manifest.encode().unwrap();
             assert_eq!(bytes.len(), manifest.len());
@@ -274,10 +283,19 @@ mod tests {
             assert_eq!(set.relays.len(), listed.len());
             assert_eq!(set.epoch, 200);
             assert!(set.relays.iter().all(|relay| relay.host == "relay.example"));
+            for layer in 1..=3u8 {
+                let of_layer = set
+                    .relays
+                    .iter()
+                    .filter(|relay| relay.candidate.layer == layer);
+                if listed.len() == entries.len() {
+                    assert_eq!(of_layer.count(), 2, "layer {layer}");
+                }
+            }
             assert!(set
                 .relays
                 .iter()
-                .all(|relay| relay.candidate.layer == 2 || relay.candidate.layer == 3));
+                .all(|relay| relay.candidate.is_exit() == (relay.candidate.layer == 3)));
             assert!(consensus.accepted().is_some());
         }
 
@@ -290,7 +308,7 @@ mod tests {
         };
         // An entry of another tree, an order that is not ascending, the same
         // entry two times, and a proof that lost a step.
-        let others = sorted_entries(&[6, 7]);
+        let others = sorted_entries(&[7, 8]);
         let mut foreign = manifest_of(&root, &entries, &[0, 1]);
         foreign.entries[1].entry = &others[0];
         assert!(refused(&foreign));
