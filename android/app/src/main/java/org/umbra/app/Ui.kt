@@ -4,7 +4,6 @@ import android.text.format.DateUtils
 import android.view.inputmethod.InputMethodManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -451,41 +450,11 @@ private fun EmptyState(title: String) {
 
 @Composable
 private fun SettingsTab(push: (Screen) -> Unit) {
-    val context = LocalContext.current
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
         TabTitle("Settings")
         // Mockup 105: this row leads to the settings of the lock. The lock
         // itself is the icon of the bar.
         SettingRow("lock", "App lock", "Passphrase and auto-lock") { push(Screen.AppLock) }
-        Spacer(Modifier.height(16.dp))
-        // The state of the connection is a fact and no setting, thus it is
-        // an info area. It gains a button when the user can act.
-        Column(
-            Modifier
-                .padding(horizontal = 20.dp)
-                .fillMaxWidth()
-                .background(Palette.Raised, RoundedCornerShape(16.dp))
-                .border(1.dp, Palette.Divider, RoundedCornerShape(16.dp))
-                .padding(16.dp),
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                FaIcon("signal", size = 20.dp, tint = Palette.Text)
-                Spacer(Modifier.width(14.dp))
-                Column {
-                    Text(if (Core.online) "Connected" else "Not connected")
-                    Text(
-                        if (Core.online) "Through three relays" else "UMBRA tries again by itself.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Palette.TextSecondary,
-                        modifier = Modifier.subline(),
-                    )
-                }
-            }
-            if (!Core.online) {
-                Spacer(Modifier.height(12.dp))
-                SecondaryButton("Reconnect") { Core.connect(context) }
-            }
-        }
     }
 }
 
