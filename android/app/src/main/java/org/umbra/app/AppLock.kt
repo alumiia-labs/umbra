@@ -33,8 +33,8 @@ import androidx.compose.ui.unit.dp
 private val AutoLockChoices = listOf(
     0L to ("Immediately" to "When you leave the app"),
     5 * 60L to ("5 minutes" to null),
-    15 * 60L to ("15 minutes" to "Default"),
-    30 * 60L to ("30 minutes" to "Maximum"),
+    15 * 60L to ("15 minutes" to null),
+    30 * 60L to ("30 minutes" to null),
 )
 
 private fun autoLockLabel(seconds: Long): String = when (seconds) {
@@ -60,10 +60,8 @@ fun AppLockScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
             Spacer(Modifier.height(14.dp))
             SecondaryButton("Lock now") { Core.lock() }
             Spacer(Modifier.height(14.dp))
-            Note(
-                "When UMBRA locks, no message arrives until you unlock it. " +
-                    "This build holds one connection and uses no push service.",
-            )
+            // A fact that a user cannot know, and that decides the choice above.
+            Note("While UMBRA is locked, no message arrives.")
         }
     }
 }
@@ -75,9 +73,7 @@ fun AutoLockScreen(onBack: () -> Unit) {
     Column(Modifier.fillMaxSize()) {
         BackBar("Auto-lock", onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
-            Spacer(Modifier.height(12.dp))
-            Text("Lock after this much inactivity.", color = Palette.TextSecondary)
-            Spacer(Modifier.height(4.dp))
+            Spacer(Modifier.height(8.dp))
             for ((seconds, words) in AutoLockChoices) {
                 val (title, detail) = words
                 Row(
@@ -168,10 +164,7 @@ fun ChangePassphraseScreen(onBack: () -> Unit) {
                 Note(it, isError = true)
             }
             Spacer(Modifier.height(12.dp))
-            Note(
-                "This changes how this device opens. Your contacts and messages stay. " +
-                    "Nobody can reset a passphrase that you forget.",
-            )
+            Note("Nobody can reset a passphrase that you forget.")
         }
     }
 }

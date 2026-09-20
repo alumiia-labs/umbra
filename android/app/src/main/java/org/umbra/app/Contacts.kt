@@ -61,7 +61,7 @@ fun AddContactScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
         Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
             Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { HeroIcon("link") }
             Spacer(Modifier.height(24.dp))
-            Headline("A private way to say hello.", "Send a one-time invitation to someone you trust.")
+            Headline("A private way to say hello.")
             Spacer(Modifier.height(20.dp))
             Column(
                 Modifier
@@ -70,12 +70,6 @@ fun AddContactScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                     .border(1.dp, Palette.Divider, RoundedCornerShape(16.dp))
                     .padding(16.dp),
             ) {
-                Text(
-                    "No phone number or public handle needed.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Palette.TextSecondary,
-                )
-                Spacer(Modifier.height(10.dp))
                 PrimaryButton("Create invitation", enabled = Core.online) {
                     Core.invitation = null
                     Core.invite()
@@ -84,7 +78,7 @@ fun AddContactScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
             }
             if (!Core.online) {
                 Spacer(Modifier.height(10.dp))
-                Note("An invitation needs a connection. UMBRA is connecting.")
+                Note("Connecting. An invitation needs a connection.")
             }
             Spacer(Modifier.height(12.dp))
             Row(
@@ -96,15 +90,7 @@ fun AddContactScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
             ) {
                 FaIcon("qrcode", size = 20.dp, tint = Palette.Text)
                 Spacer(Modifier.width(16.dp))
-                Column {
-                    Text("Use an invitation instead")
-                    Text(
-                        "Paste a link that someone gave you",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Palette.TextSecondary,
-                        modifier = Modifier.subline(),
-                    )
-                }
+                Text("Use an invitation instead")
             }
         }
     }
@@ -150,7 +136,7 @@ fun YourInvitationScreen(onBack: () -> Unit) {
             Spacer(Modifier.height(8.dp))
             SecondaryButton("Copy link") { copySensitive(context, link) }
             Spacer(Modifier.height(12.dp))
-            Note("Share this link privately with the person you want to reach. The first person who opens it becomes the contact.")
+            Note("The first person who opens this link becomes the contact.")
         }
     }
 }
@@ -195,7 +181,7 @@ fun UseInvitationScreen(onBack: () -> Unit) {
         Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
             Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { HeroIcon("qrcode") }
             Spacer(Modifier.height(24.dp))
-            Headline("Someone invited you?", "Paste the link they shared.")
+            Headline("Someone invited you?")
             Spacer(Modifier.height(20.dp))
             // An invitation is no message text, thus a composable field holds it.
             OutlinedTextField(
@@ -230,8 +216,6 @@ fun UseInvitationScreen(onBack: () -> Unit) {
                 Spacer(Modifier.height(12.dp))
                 Note(it, isError = true)
             }
-            Spacer(Modifier.height(12.dp))
-            Note("The link works for the first person who opens it. If it fails here, tell the person who sent it.")
         }
     }
 }
@@ -254,22 +238,17 @@ fun NameContactScreen(conversation: Conversation, onDone: () -> Unit) {
                 }
             }
             Spacer(Modifier.height(20.dp))
-            Headline(
-                "Make it familiar.",
-                "Choose a name for this contact. Only you see this name, and it stays on this device.",
-            )
+            Headline("Name this contact.")
             Spacer(Modifier.height(16.dp))
             // A name is a label of the user and no message text.
             OutlinedTextField(
                 value = name,
                 onValueChange = { name = it.take(60) },
-                label = { Text("Name for this contact") },
+                label = { Text("Name") },
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words),
                 modifier = Modifier.fillMaxWidth(),
             )
-            Spacer(Modifier.height(12.dp))
-            Note("An invitation does not prove who is holding the other device.")
             Spacer(Modifier.height(16.dp))
             PrimaryButton("Save and open chat") {
                 if (name.isNotBlank()) Core.setName(conversation, name)
@@ -292,13 +271,11 @@ fun RenameContactScreen(chat: Chat, onDone: () -> Unit) {
             OutlinedTextField(
                 value = name,
                 onValueChange = { name = it.take(60) },
-                label = { Text("Name only you see") },
+                label = { Text("Name") },
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words),
                 modifier = Modifier.fillMaxWidth(),
             )
-            Spacer(Modifier.height(12.dp))
-            Note("This name stays on this device. It is not shared with your contact.")
             Spacer(Modifier.height(16.dp))
             PrimaryButton("Save") {
                 Core.setName(chat.conversation, name)

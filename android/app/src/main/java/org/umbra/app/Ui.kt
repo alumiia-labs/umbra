@@ -141,13 +141,10 @@ private fun UnlockScreen() {
         Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { HeroIcon("lock") }
         Spacer(Modifier.height(28.dp))
         when {
-            isOpening -> Headline("Opening UMBRA", "Your conversations will be ready in a moment.")
-            isFirst -> Headline(
-                "Protect this device.",
-                "Choose a passphrase. It opens your conversations on this device, and " +
-                    "nobody can reset it for you.",
-            )
-            else -> Headline("Welcome back.", "Enter your passphrase to open your conversations.")
+            isOpening -> Headline("Opening UMBRA")
+            // The one fact that a user cannot know: no party resets it.
+            isFirst -> Headline("Choose a passphrase.", "Nobody can reset it for you.")
+            else -> Headline("Welcome back.")
         }
         Spacer(Modifier.height(20.dp))
         if (isOpening) {
@@ -275,11 +272,7 @@ private fun ChatsTab(push: (Screen) -> Unit) {
         ConnectionNote()
         val withMessages = Core.chats.filter { it.preview != null }
         if (withMessages.isEmpty()) {
-            EmptyState(
-                "No conversations yet.",
-                "Add a contact with a one-time invitation. No phone number and no " +
-                    "public name is needed.",
-            )
+            EmptyState("No conversations yet.")
             return
         }
         LazyColumn {
@@ -350,7 +343,7 @@ private fun ContactsTab(push: (Screen) -> Unit) {
     Column(Modifier.fillMaxSize()) {
         TabTitle("Contacts")
         if (Core.chats.isEmpty()) {
-            EmptyState("No contacts yet.", "An invitation works one time, for one person.")
+            EmptyState("No contacts yet.")
             return
         }
         val byName = Core.chats.sortedBy { it.title.lowercase() }
@@ -365,15 +358,7 @@ private fun ContactsTab(push: (Screen) -> Unit) {
                 ) {
                     Avatar(chat)
                     Spacer(Modifier.width(14.dp))
-                    Column {
-                        Text(chat.title, fontWeight = FontWeight.SemiBold)
-                        Text(
-                            if (chat.name.isEmpty()) "No name yet" else "Name only you see",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = Palette.TextSecondary,
-                            modifier = Modifier.subline(),
-                        )
-                    }
+                    Text(chat.title, fontWeight = FontWeight.SemiBold)
                 }
             }
         }
@@ -381,12 +366,13 @@ private fun ContactsTab(push: (Screen) -> Unit) {
 }
 
 @Composable
-private fun EmptyState(title: String, body: String) {
-    Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 24.dp)) {
-        Text(title, style = MaterialTheme.typography.titleMedium)
-        Spacer(Modifier.height(6.dp))
-        Text(body, style = MaterialTheme.typography.bodyMedium, color = Palette.TextSecondary)
-    }
+private fun EmptyState(title: String) {
+    Text(
+        title,
+        style = MaterialTheme.typography.bodyLarge,
+        color = Palette.TextSecondary,
+        modifier = Modifier.padding(horizontal = 20.dp, vertical = 24.dp),
+    )
 }
 
 @Composable

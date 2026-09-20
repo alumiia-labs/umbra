@@ -86,7 +86,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit) {
             OverflowSheet(
                 chat.title,
                 listOf(
-                    RowEntry("pen", "Edit name", "Only visible to you") { isRenaming = true },
+                    RowEntry("pen", "Edit name") { isRenaming = true },
                 ),
             )
         }
