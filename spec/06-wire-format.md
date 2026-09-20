@@ -540,6 +540,18 @@ plus the length of its `Admission`, and an `IDS` whose `payload_len` is not
 > parameter that a recipient requests, thus the field does not exist, and a
 > parser needs one canonical length under §6.1.1 rule 4.
 
+**[WIR-512]** A relay MUST NOT answer a `COVER` of a client. An accepted
+`ACK`, `SUB`, `UNSUB`, or `DEL` has no answer command: the records of a `SUB`
+are its effect, and a `NACK` reports a refusal.
+**[WIR-513]** A client MUST NOT hold a `COVER`, an `ACK`, a `SUB`, an `UNSUB`,
+or a `DEL` in the table of the commands that wait for an answer. A `NACK` for
+one of them then names no command of the session, and `WIR-323` drops it. A
+lost `ACK` costs a second delivery, which the cursor of `IMP-135` drops.
+
+> *Cause.* An earlier draft gave no answer to these commands and no rule for
+> the table of the client. A client that held each `ACK` until an answer held
+> it for the life of the session.
+
 **[WIR-015]** `COVER` MUST be bit-indistinguishable from a real command after the L4
 encryption. A relay that makes inbound pacing cover (Part 3 §3.5.2) emits cells
 with the shape of `MSG` in a queue session, and with the shape of `GMSG` in a

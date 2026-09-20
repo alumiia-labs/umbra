@@ -1369,6 +1369,20 @@ the cover rate because of the mode. §3.9.1 forbids a mode that is visible in th
 cell count.
 
 **[NET-063]** About 20 % of the cover cells in tier A MUST be loops.
+**[NET-304]** Each other cover cell of a client MUST carry one `COVER` command
+of Part 6 §6.3 to the queue relay of the circuit, in the shape of a `B0`
+`SEND`. `NET-060` names the cover cell that measures a path and `NET-063`
+gives its share. An earlier draft gave the other cells no shape.
+
+**[NET-305]** A client MUST draw the time to the next slot from an exponential
+distribution with the mean of the tier, and it MUST draw it again at each
+slot, whether or not the slot carried an item.
+
+**[NET-306]** A client in the background that holds an open session MUST keep
+the slot clock for the items 1 to 6 of `NET-065`, and it MUST make no cover
+cell. An acknowledgment that never leaves fills the queue of the peer's
+records at the relay under `QUEUE_QUOTA`. Such a cell is a real event, as each
+background cell is, and the loss that this section states below covers it.
 
 **[NET-064]** A client MUST carry a queued acknowledgment, a queued receipt, a
 queued transparency digest, or a queued link-fault report in a scheduled cover

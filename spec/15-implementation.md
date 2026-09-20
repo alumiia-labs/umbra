@@ -792,9 +792,14 @@ version byte, and a client MUST reject a row whose version it does not read.
   cursor, or at a stored sequence number above it, MUST NOT reach the
   ratchet. The cursor drops it, and the `ACK` covers it.
 - **[IMP-143]** A record that the client uses itself gives no message: a
-  queue address, a record of a ceremony. A client MUST send the `ACK` of such
-  a record after the commit of the channel state that it moved, in the same
-  manner as the `ACK` of a message.
+  queue address, a record of a ceremony. The cursor of its queue covers it,
+  thus its `ACK` follows the commit of the channel state that it moved, in
+  the same slot and under the same floor as the `ACK` of a message (Part 3
+  §3.5.4).
+- **[IMP-145]** The surface MUST take the state of the app, on the screen or
+  not, from the platform layer, and the runtime MUST select the cover tier of
+  Part 3 §3.6.2 from that state alone. A lock, a privacy mode, and a setting
+  of the user MUST NOT change the tier (`NET-061`).
 - **[IMP-136]** A client MUST delete the row of an invitation in the batch
   that follows the flight 1 that consumed its prekey, before flight 2
   leaves. Part 5 rule `CRY-089` erases the prekey at that point.

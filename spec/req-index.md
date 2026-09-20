@@ -67,10 +67,10 @@ each column when a crate implements the requirement and a test covers it.
 | --- | --- | --- | --- | --- | --- | --- |
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
-| `NET` | 210 | 83 | 1 | 0 | 8 | **302** |
+| `NET` | 213 | 83 | 1 | 0 | 8 | **305** |
 | `IDN` | 120 | 43 | 1 | 0 | 5 | **169** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
-| `WIR` | 384 | 82 | 0 | 0 | 6 | **472** |
+| `WIR` | 384 | 84 | 0 | 0 | 6 | **474** |
 | `DEV` | 179 | 87 | 2 | 0 | 7 | **275** |
 | `NTF` | 67 | 30 | 0 | 0 | 2 | **99** |
 | `DIS` | 123 | 37 | 0 | 0 | 1 | **161** |
@@ -79,9 +79,9 @@ each column when a crate implements the requirement and a test covers it.
 | `COM` | 299 | 96 | 0 | 0 | 5 | **400** |
 | `ATT` | 134 | 46 | 1 | 0 | 2 | **183** |
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
-| `IMP` | 94 | 38 | 0 | 0 | 1 | **133** |
+| `IMP` | 95 | 38 | 0 | 0 | 1 | **134** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2147 | 697 | 7 | 0 | 51 | **2902** |
+| **All** | 2151 | 699 | 7 | 0 | 51 | **2908** |
 
 ## SCP — Scope and Conventions
 
@@ -441,6 +441,9 @@ Source: `spec/03-network-architecture.md`
 | `NET-301` | §3.2.4 | MUST | A relay | A relay MUST write each time to its store as a multiple of `STORE_TIME_GRAIN`, which is 3 600 s. |  |  |
 | `NET-302` | §3.2.4 | MUST | A relay | A relay MUST erase from its storage a record that an `ACK` covers, a record past `MSG_TTL`, a queue after its `DEL` or its idle lifetime, and an invitation after its first fetch or its lifetime. |  |  |
 | `NET-303` | §3.2.4 | MUST | At its start a relay | At its start a relay MUST drop a stored queue whose form does not parse, whose record sits at or below its last `ACK`, or whose record sits at or above its next sequence number. |  |  |
+| `NET-304` | §3.6.2 | MUST | Each other cover cell of a client | Each other cover cell of a client MUST carry one `COVER` command of Part 6 §6.3 to the queue relay of the circuit, in the shape of a `B0` `SEND`. |  |  |
+| `NET-305` | §3.6.2 | MUST | A client | A client MUST draw the time to the next slot from an exponential distribution with the mean of the tier, and it MUST draw it again at each slot, whether or not the slot carried an item. |  |  |
+| `NET-306` | §3.6.2 | MUST | A client in the background that holds an open session | A client in the background that holds an open session MUST keep the slot clock for the items 1 to 6 of `NET-065`, and it MUST make no cover cell. |  |  |
 
 ## IDN — Identity
 
@@ -1250,6 +1253,8 @@ Source: `spec/06-wire-format.md`
 | `WIR-509` | §6.4 | MUST | (unstated) | The party that fetches signs an `IGET` under the private half of `lock_pk`, with a `queue_id` of zero, as a `NEW` signs under its new `QR_auth`. |  |  |
 | `WIR-510` | §6.4 | MUST | At the first `IGET` that verifies, a relay | At the first `IGET` that verifies, a relay MUST answer with the blob, delete the blob and the link identifier, and put `lock_pk` in the place of the `QS_auth` of the queue. |  |  |
 | `WIR-511` | §6.4 | MUST | A relay | A relay MUST answer an `IGET` for an identifier that it does not hold with the `NACK` reason `REJECTED`, and `WIR-317` gives that one reason to an unknown link, to a link with no blob, and to an `auth` that does not verify. |  |  |
+| `WIR-512` | §6.4 | MUST NOT | A relay | A relay MUST NOT answer a `COVER` of a client. |  |  |
+| `WIR-513` | §6.4 | MUST NOT | A client | A client MUST NOT hold a `COVER`, an `ACK`, a `SUB`, an `UNSUB`, or a `DEL` in the table of the commands that wait for an answer. |  |  |
 
 ## DEV — Device Sets
 
@@ -3068,6 +3073,7 @@ Source: `spec/15-implementation.md`
 | `IMP-142` | §15.6.1 | MUST | (unstated) | The short code and the safety number of Part 4 §4.5 are public values of the two devices, and they cross the surface as strings. |  |  |
 | `IMP-143` | §15.6.4 | MUST | (unstated) | A record that the client uses itself gives no message: a queue address, a record of a ceremony. |  |  |
 | `IMP-144` | §15.6.1 | MUST | A client | A client MUST ask for the camera of the platform at the moment the user opens a scanner, and at no other time. |  |  |
+| `IMP-145` | §15.6.4 | MUST | The surface | The surface MUST take the state of the app, on the screen or not, from the platform layer, and the runtime MUST select the cover tier of Part 3 §3.6.2 from that state alone. |  |  |
 
 ## SEC — Security Considerations
 
