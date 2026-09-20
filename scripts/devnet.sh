@@ -23,6 +23,12 @@ for relay in 1 2 3 4 5; do
 done
 # The manifest holds the present epoch, thus each start signs a new one.
 target/debug/umbra-test-authority tests/fixtures/devnet/authority.conf target/devnet
+# The relays and the debug build of the Android app hold the key set of the
+# repository. The seed of the authorities gives the same one at each start.
+cmp -s target/devnet/keyset.bin tests/fixtures/devnet/keyset.bin || {
+    echo "the key set differs from tests/fixtures/devnet/keyset.bin"
+    exit 1
+}
 
 pids=()
 trap 'kill "${pids[@]}" 2>/dev/null || true' EXIT INT TERM

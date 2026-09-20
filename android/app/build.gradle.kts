@@ -50,6 +50,10 @@ abstract class CopyTestAuthority : DefaultTask() {
     @get:InputFile
     abstract val authority: RegularFileProperty
 
+    /** The key set of the seven test authorities of the relay directory. */
+    @get:InputFile
+    abstract val keyset: RegularFileProperty
+
     @get:OutputDirectory
     abstract val output: DirectoryProperty
 
@@ -57,11 +61,14 @@ abstract class CopyTestAuthority : DefaultTask() {
     fun copy() {
         val target = output.get().file("devnet-ca.pem").asFile
         authority.get().asFile.copyTo(target, overwrite = true)
+        val keys = output.get().file("devnet-keyset.bin").asFile
+        keyset.get().asFile.copyTo(keys, overwrite = true)
     }
 }
 
 val copyTestAuthority = tasks.register<CopyTestAuthority>("copyTestAuthority") {
     authority.set(rootProject.layout.projectDirectory.file("../tests/fixtures/tls/ca.pem"))
+    keyset.set(rootProject.layout.projectDirectory.file("../tests/fixtures/devnet/keyset.bin"))
 }
 
 androidComponents {

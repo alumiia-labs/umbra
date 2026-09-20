@@ -20,7 +20,12 @@ use std::{
 
 use tokio::sync::mpsc;
 use umbra_core::{
-    directory::{bloc::BlocList, path::Candidate},
+    directory::{
+        bloc::BlocList,
+        manifest::{RelayManifest, RelaySet},
+        path::Candidate,
+        root::{ClockState, Consensus, DirectoryKeySet},
+    },
     identity::invitation::{Fragment, FRAGMENT_LEN},
     session::node::{ClientNode, ContactId, RelayInfo, StateChange},
     store::wrap::{Cost, SecureElement, WrapHeader, M_KIB_FLOOR, T_FLOOR},
@@ -73,6 +78,10 @@ pub enum FfiError {
     Offline,
     /// A limit on the rate of an act holds it back for a short time.
     Busy,
+    /// A signed object does not verify under the keys that the build holds.
+    Unverified,
+    /// A signed object is older than one that the client verified already.
+    Stale,
 }
 
 impl core::fmt::Display for FfiError {
@@ -165,6 +174,9 @@ pub struct RelayEndpoint {
     pub layer: u8,
     /// The name of the operator. Two relays of one operator share no chain.
     pub operator: String,
+    /// The name of the family, or none for a family of the operator alone.
+    /// Two relays of one family share no chain.
+    pub family: Option<String>,
     /// The two letters of the jurisdiction. Two relays of one jurisdiction
     /// bloc share no chain.
     pub country: String,
@@ -188,6 +200,45 @@ pub struct Network {
     pub root_ca_path: Option<String>,
     /// The invitation host of Part 4 §4.3.1, which each link names.
     pub invitation_host: String,
+}
+
+/// A network that a signed relay manifest gave.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct VerifiedNetwork {
+    /// The network, for [`Handle::connect`].
+    pub network: Network,
+    /// The epoch of the root of the manifest.
+    pub epoch: u64,
+    /// Whether the time of the root is more than one hour from the clock of
+    /// the device. The interface shows that state (`REL-116`).
+    pub is_clock_corrected: bool,
+}
+
+fn to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// The relays of a verified set in the form of a network. A relay with no
+/// IPv4 address stays out, because this client dials IPv4 alone.
+fn endpoints_of(set: &RelaySet) -> Vec<RelayEndpoint> {
+    set.relays
+        .iter()
+        .filter(|relay| relay.addr_v4 != [0; 4])
+        .map(|relay| RelayEndpoint {
+            host: relay.host.clone(),
+            ipv4: relay.addr_v4.to_vec(),
+            port: relay.port,
+            static_key: relay.ntor_pk.to_vec(),
+            relay_id: relay.candidate.relay_id.to_vec(),
+            layer: relay.candidate.layer,
+            // The two values are opaque, and a network compares them alone.
+            operator: to_hex(&relay.candidate.operator_id),
+            family: Some(to_hex(&relay.candidate.family_id)),
+            country: String::from_utf8_lossy(&relay.jurisdiction).into_owned(),
+            asn: relay.candidate.asn,
+            prefix: None,
+        })
+        .collect()
 }
 
 /// The first line of a network descriptor. Version 1 holds three relay
@@ -249,6 +300,7 @@ pub fn parse_network(text: String, root_ca_path: Option<String>) -> Result<Netwo
                     relay_id: key(relay_id).ok_or(FfiError::Malformed)?,
                     layer: 0,
                     operator: String::new(),
+                    family: None,
                     country: String::new(),
                     asn: 0,
                     prefix: None,
@@ -343,6 +395,9 @@ fn relay_info(endpoint: &RelayEndpoint) -> Result<RelayInfo, FfiError> {
     let key = relay_static(endpoint)?;
     let operator =
         umbra_crypto::hash::sha3_256(&[b"umbra/test/operator", endpoint.operator.as_bytes()]);
+    let family = endpoint.family.as_ref().map_or(operator, |family| {
+        umbra_crypto::hash::sha3_256(&[b"umbra/test/family", family.as_bytes()])
+    });
     let country: [u8; 2] = endpoint
         .country
         .as_bytes()
@@ -359,7 +414,7 @@ fn relay_info(endpoint: &RelayEndpoint) -> Result<RelayInfo, FfiError> {
         candidate: Candidate {
             relay_id: key.relay_id,
             operator_id: operator,
-            family_id: operator,
+            family_id: family,
             bloc: BlocList::v1().bloc_of(&country),
             asn: endpoint.asn,
             v4_prefix: Some(prefix.ok_or(FfiError::Malformed)?),
@@ -850,6 +905,47 @@ impl Handle {
 
 #[uniffi::export]
 impl Handle {
+    /// Verifies a relay manifest of Part 10 §10.5.5 under the key set that
+    /// the build ships (`REL-039`), and gives its relays as a network.
+    /// `shipped_epoch` is the epoch at the time of the build (`REL-045`). The
+    /// store keeps the highest epoch that the device verified, thus an
+    /// older manifest gives [`FfiError::Stale`] in each later run.
+    pub fn network_of_manifest(
+        &self,
+        manifest: Vec<u8>,
+        keyset: Vec<u8>,
+        shipped_epoch: u64,
+        invitation_host: String,
+        root_ca_path: Option<String>,
+    ) -> Result<VerifiedNetwork, FfiError> {
+        let mut inner = locked(&self.inner);
+        let floor = inner.client.directory_epoch()?.max(shipped_epoch);
+        let (keyset, _) = DirectoryKeySet::parse(&keyset).map_err(|_| FfiError::Malformed)?;
+        let mut consensus = Consensus::new(keyset, floor).map_err(|_| FfiError::Malformed)?;
+        let manifest = RelayManifest::parse(&manifest).map_err(|_| FfiError::Malformed)?;
+        let set = RelaySet::accept(&mut consensus, &manifest, &BlocList::v1(), unix_now())
+            .map_err(|cause| match cause {
+                umbra_core::Error::Stale => FfiError::Stale,
+                umbra_core::Error::Malformed => FfiError::Malformed,
+                _ => FfiError::Unverified,
+            })?;
+        let relays = endpoints_of(&set);
+        // A chain holds one relay of each layer.
+        if (1..=3u8).any(|layer| !relays.iter().any(|relay| relay.layer == layer)) {
+            return Err(FfiError::Malformed);
+        }
+        inner.client.set_directory_epoch(set.epoch, &mut OsRng)?;
+        Ok(VerifiedNetwork {
+            network: Network {
+                relays,
+                root_ca_path,
+                invitation_host,
+            },
+            epoch: set.epoch,
+            is_clock_corrected: consensus.clock_state() == ClockState::Corrected,
+        })
+    }
+
     /// Starts the network of an unlocked client. A [`FfiEvent::Online`]
     /// follows the build of the circuit. A second call ends the first run.
     pub fn connect(self: Arc<Self>, network: Network) -> Result<(), FfiError> {

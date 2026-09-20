@@ -146,6 +146,9 @@ const LAST_DELETE_SETTING: &[u8] = b"last-delete/";
 /// the name of its setting.
 const SETTINGS: TableId = TableId(0x0A);
 const AUTO_LOCK_SETTING: &[u8] = b"auto-lock";
+/// The highest epoch of a directory root that this device verified
+/// (Part 10 rule `REL-034`).
+const DIRECTORY_EPOCH_SETTING: &[u8] = b"directory-epoch";
 /// The idle limit under the setting "when the app leaves the screen". The
 /// platform locks at that moment, and this limit covers a device that stays
 /// on the screen with no action.
@@ -1001,6 +1004,36 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         };
         let seconds: [u8; 8] = plain.as_slice().try_into().map_err(|_| Error::Integrity)?;
         Ok(u64::from_be_bytes(seconds))
+    }
+
+    /// The highest epoch of a directory root that this device verified, or
+    /// zero before the first one.
+    pub fn directory_epoch(&self) -> Result<u64, Error> {
+        let store = &self.open_ref()?.store;
+        let row = store.row_id(SETTINGS, DIRECTORY_EPOCH_SETTING);
+        let Some(plain) = store.get(SETTINGS, &row)? else {
+            return Ok(0);
+        };
+        let epoch: [u8; 8] = plain.as_slice().try_into().map_err(|_| Error::Integrity)?;
+        Ok(u64::from_be_bytes(epoch))
+    }
+
+    /// Keeps the epoch of a root that the device verified. The value only
+    /// goes up, thus a root that a later run gets cannot be an older one.
+    pub fn set_directory_epoch<R: CryptoRng + ?Sized>(
+        &mut self,
+        epoch: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        if epoch <= self.directory_epoch()? {
+            return Ok(());
+        }
+        let open = self.open_mut()?;
+        let row = open.store.row_id(SETTINGS, DIRECTORY_EPOCH_SETTING);
+        let mut batch = open.store.begin();
+        batch.put(SETTINGS, row, None, &epoch.to_be_bytes(), rng)?;
+        batch.commit()?;
+        Ok(())
     }
 
     /// Sets the idle time of the auto-lock. `IMP-119` bounds it at 30

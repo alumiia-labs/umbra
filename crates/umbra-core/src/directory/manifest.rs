@@ -131,6 +131,8 @@ pub struct ListedRelay {
     pub port: u16,
     /// The co-tenant host name.
     pub host: alloc::string::String,
+    /// ISO 3166-1 alpha-2.
+    pub jurisdiction: [u8; 2],
     /// The verified class, 0 to 3.
     pub class: u8,
 }
@@ -189,6 +191,7 @@ impl RelaySet {
                 addr_v6: descriptor.addr_v6,
                 port: descriptor.port,
                 host: descriptor.host_str().into(),
+                jurisdiction: descriptor.jurisdiction,
                 class: entry.class,
             });
         }

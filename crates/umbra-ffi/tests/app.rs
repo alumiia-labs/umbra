@@ -19,11 +19,18 @@ use std::{
 };
 
 use tokio::net::TcpListener;
+use umbra_core::directory::{
+    authority::{entry_of, keyset_bytes, sign_manifest, Listing, GENESIS_ROOT},
+    bloc::BlocList,
+    descriptor::{roles, RelayDescriptor, RelayEntry, HOST_LEN},
+};
 use umbra_crypto::{
     handshake::nk::RelayStatic,
     hmac::{digest::KeyInit, Hmac, Mac},
     rsabssa::PublicKey2048,
+    secret::Secret,
     sha2::Sha256,
+    sign::SigningKey,
     x25519::{PublicKey as XPublic, StaticSecret},
 };
 use umbra_ffi::bindings::{
@@ -32,7 +39,8 @@ use umbra_ffi::bindings::{
 };
 use umbra_relay::{
     node::{Config as RelayConfig, RelayNode},
-    server::{run_relay, tls_acceptor},
+    placement::placement,
+    server::{run_relay, tls_acceptor, OsRng},
     sqlite_store::SqliteStore,
     store::{MemoryStore, RelayStore},
 };
@@ -225,6 +233,7 @@ fn network_of(ports: &[u16]) -> Network {
                     // has the address of one machine, thus each names a
                     // network of its own.
                     operator: format!("operator-{number}"),
+                    family: None,
                     country: format!("Z{}", char::from(b'A' + number)),
                     asn: 64_500 + u32::from(number),
                     prefix: Some(vec![10, number]),
@@ -599,4 +608,203 @@ fn a_descriptor_names_the_facts_of_each_relay_and_the_first_version_reads() {
         [1, 2, 3]
     );
     assert!(parse_network(first.replace("umbra-network 1", "umbra-network 3"), None).is_err());
+}
+
+/// The identity seed of each relay of the manifest test. Under the genesis
+/// root the layer function puts them in the layers 1, 2, 3, 2 and 3, with
+/// the first one as the ingress.
+const IDENTITY_SEEDS: [u8; 5] = [0x65, 0x66, 0x61, 0x68, 0x63];
+
+#[test]
+fn two_apps_take_their_network_from_a_signed_manifest() {
+    let relays = tokio::runtime::Runtime::new().unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let epoch = now / 3_600;
+
+    // Each relay has a loopback address in a /16 of its own, because a
+    // manifest gives no prefix but the one of the address.
+    let mut listeners = Vec::new();
+    let mut entries = Vec::new();
+    let mut identities = Vec::new();
+    for (index, seed) in IDENTITY_SEEDS.iter().enumerate() {
+        let number = index as u8 + 1;
+        let address = [127, number, 0, 1];
+        let listener = relays
+            .block_on(TcpListener::bind((std::net::Ipv4Addr::from(address), 0)))
+            .unwrap();
+        let (relay, static_secret) = relay_static(number);
+        let mut host = [0u8; HOST_LEN];
+        host[..9].copy_from_slice(b"localhost");
+        let is_ingress = index == 0;
+        let descriptor = RelayDescriptor {
+            relay_id: [0; 32],
+            identity_pk: &[],
+            ntor_pk: relay.s,
+            addr_v4: address,
+            addr_v6: [0; 16],
+            port: listener.local_addr().unwrap().port(),
+            host,
+            asn: 64_500 + u32::from(number),
+            jurisdiction: [b'Z', b'A' + number],
+            family_id: [number; 32],
+            capacity_class: 2,
+            roles: if is_ingress {
+                roles::INGRESS_OFFERED | roles::CHAIN
+            } else {
+                roles::QUEUE | roles::CHAIN
+            },
+            chunk_store_gib: 0,
+            // One epoch back, thus a manifest of that epoch can list it.
+            valid_after: epoch - 1,
+            sig: &[],
+        }
+        .sign(&SigningKey::from_seed(Secret::new([*seed; 32])), &mut OsRng)
+        .unwrap();
+        let listing = Listing {
+            descriptor: &descriptor,
+            operator_id: [number; 32],
+            class: 2,
+            is_ingress,
+        };
+        let entry = entry_of(&listing, &GENESIS_ROOT, 0).unwrap();
+        let relay_id = RelayEntry::parse(&entry).unwrap().descriptor.relay_id;
+        identities.push((relay_id, relay.s, static_secret));
+        entries.push(entry);
+        listeners.push(listener);
+    }
+    let authorities: Vec<SigningKey> = (0..7u8)
+        .map(|index| SigningKey::from_seed(Secret::new([0xD0 + index; 32])))
+        .collect();
+    let manifest = sign_manifest(
+        &authorities,
+        &[0, 1, 2, 4, 6],
+        1,
+        epoch,
+        entries.clone(),
+        &BlocList::v1(),
+        &mut OsRng,
+    )
+    .unwrap();
+    let keyset = keyset_bytes(&authorities, 1).unwrap();
+
+    // Each relay reads its layer and its next hops from the manifest.
+    let client_tls = native::tls_config_with_root_file(CA).unwrap();
+    let mut layers = Vec::new();
+    for (listener, (relay_id, static_key, static_secret)) in listeners.into_iter().zip(identities) {
+        let placed = placement(&manifest, &keyset, &relay_id, &static_key, now).unwrap();
+        layers.push(placed.layer);
+        let config = RelayConfig {
+            relay: RelayStatic {
+                s: static_key,
+                relay_id,
+            },
+            static_secret,
+            layer: placed.layer,
+            issuer_key: PublicKey2048::from_modulus(&[0xFF; 256]).unwrap(),
+            community_capacity: 1 << 20,
+        };
+        let mut store: Box<dyn RelayStore> = Box::new(MemoryStore::default());
+        relays.spawn(run_relay(
+            RelayNode::restored(config, store.load().unwrap()),
+            listener,
+            tls_acceptor(LEAF, LEAF_KEY).unwrap(),
+            placed.next,
+            client_tls.clone(),
+            PACING_MEAN_MS,
+            store,
+        ));
+    }
+    assert_eq!(layers, [1, 2, 3, 2, 3]);
+
+    let directory = std::env::temp_dir().join(format!("umbra-manifest-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    for name in ["alice.db", "bob.db", "carol.db"] {
+        let _ = std::fs::remove_file(directory.join(name));
+    }
+    let alice = launch(&directory, "alice.db", 1);
+    let bob = launch(&directory, "bob.db", 2);
+    let network_of = |handle: &Handle, manifest: &[u8], shipped_epoch: u64| {
+        handle.network_of_manifest(
+            manifest.to_vec(),
+            keyset.clone(),
+            shipped_epoch,
+            HOST.into(),
+            Some(CA.into()),
+        )
+    };
+
+    // A build that is newer than the manifest refuses it, a changed byte
+    // fails under the root, and another key set signs nothing here.
+    assert_eq!(
+        network_of(&alice, &manifest, epoch + 1).err(),
+        Some(FfiError::Stale)
+    );
+    let mut changed = manifest.clone();
+    *changed.last_mut().unwrap() ^= 1;
+    assert_eq!(
+        network_of(&alice, &changed, 0).err(),
+        Some(FfiError::Unverified)
+    );
+    let others: Vec<SigningKey> = (0..7u8)
+        .map(|index| SigningKey::from_seed(Secret::new([0xE0 + index; 32])))
+        .collect();
+    let other_keyset = keyset_bytes(&others, 1).unwrap();
+    let refused = alice.network_of_manifest(
+        manifest.clone(),
+        other_keyset,
+        0,
+        HOST.into(),
+        Some(CA.into()),
+    );
+    assert_eq!(refused.err(), Some(FfiError::Unverified));
+
+    let verified = network_of(&alice, &manifest, 0).unwrap();
+    assert_eq!(verified.epoch, epoch);
+    assert!(!verified.is_clock_corrected);
+    assert_eq!(verified.network.relays.len(), 5);
+    alice.clone().connect(verified.network).unwrap();
+    bob.clone()
+        .connect(network_of(&bob, &manifest, 0).unwrap().network)
+        .unwrap();
+
+    alice.invite().unwrap();
+    let link = wait_for(&alice, |event| match event {
+        FfiEvent::Invitation { link } => Some(link),
+        _ => None,
+    });
+    bob.accept(link).unwrap();
+    let alice_conversation = wait_for_contact(&alice);
+    let bob_conversation = wait_for_contact(&bob);
+    for (from, to, conversation, text) in [
+        (&bob, &alice, &bob_conversation, "over a signed set"),
+        (&alice, &bob, &alice_conversation, "and back"),
+    ] {
+        let draft = from.new_draft(conversation.clone()).unwrap();
+        draft.set_text(units(text)).unwrap();
+        from.send_draft(draft).unwrap();
+        let (_, message) = wait_for_message(to);
+        assert_eq!(rendered(to, message), text);
+    }
+
+    // The store holds the epoch, thus a later run refuses an older root.
+    let older = sign_manifest(
+        &authorities,
+        &[0, 1, 2, 3, 4],
+        1,
+        epoch - 1,
+        entries,
+        &BlocList::v1(),
+        &mut OsRng,
+    )
+    .unwrap();
+    assert_eq!(network_of(&alice, &older, 0).err(), Some(FfiError::Stale));
+    // A device with no verified root takes it.
+    let carol = launch(&directory, "carol.db", 3);
+    assert_eq!(network_of(&carol, &older, 0).unwrap().epoch, epoch - 1);
+    alice.disconnect();
+    bob.disconnect();
+    let _ = std::fs::remove_dir_all(&directory);
 }

@@ -156,7 +156,7 @@ object Core {
                 // The store holds each contact, thus the list needs no network.
                 val stored = summaries(opened)
                 val idleSeconds = opened.autoLockSeconds().toLong()
-                BuildNetwork.network(app)?.let(opened::connect)
+                BuildNetwork.network(app, opened)?.let(opened::connect)
                 drain(opened, app)
                 main.post {
                     chats.clear()
@@ -369,7 +369,7 @@ object Core {
     fun connect(context: Context) {
         val app = context.applicationContext
         call { client ->
-            BuildNetwork.network(app)?.let(client::connect)
+            BuildNetwork.network(app, client)?.let(client::connect)
             // A run starts in the foreground tier, thus it takes the state
             // of this moment.
             client.setForeground(isVisible)

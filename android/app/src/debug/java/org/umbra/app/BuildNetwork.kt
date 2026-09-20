@@ -22,15 +22,19 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import java.io.File
 import uniffi.umbra_ffi.FfiException
+import uniffi.umbra_ffi.Handle
 import uniffi.umbra_ffi.Network
 import uniffi.umbra_ffi.parseNetwork
 
 /**
- * The network of the debug build. With no descriptor it is the three relays
- * of `scripts/devnet.sh` on the machine of the developer, which an emulator
- * reaches at 10.0.2.2, under the test authority of the repository. The
- * secrets of those relays are in the repository, thus that network protects
- * nothing.
+ * The network of the debug build. With no descriptor it is the five relays
+ * of `scripts/devnet.sh` on the machine of the developer. The seven test
+ * authorities of that script sign a relay manifest at each start, and
+ * `scripts/devnet-push.sh` puts it into the files of this app. The client
+ * verifies it under the key set of those authorities, which this build
+ * ships. An emulator reaches the ingress relay at 10.0.2.2, under the test
+ * authority of the repository. The seeds of those relays and authorities are
+ * in the repository, thus that network protects nothing.
  *
  * A tester pastes the descriptor of a deployed test network, and the build
  * then dials that network under the web roots. The release build has no such
@@ -38,18 +42,16 @@ import uniffi.umbra_ffi.parseNetwork
  */
 object BuildNetwork {
     private const val AUTHORITY = "devnet-ca.pem"
+    private const val KEYSET = "devnet-keyset.bin"
+    private const val MANIFEST = "devnet-manifest.bin"
     private const val DESCRIPTOR = "network-descriptor.txt"
 
-    private val LOCAL = """
-        umbra-network 2
-        relay localhost 10.0.2.2 7441 ad908a8a708aca07588cda7c4ed3e44d4966a80a9abb2f1e4bbac53c67414e34 ${"a1".repeat(32)} layer=1 operator=north country=SE asn=64501 prefix=10.1
-        relay localhost 10.0.2.2 7442 f68b05ba03f7185e1ba88878682f8dd0b15158f6050889c9481d79c2d7d2fa07 ${"a2".repeat(32)} layer=2 operator=alps country=CH asn=64502 prefix=10.2
-        relay localhost 10.0.2.2 7443 261cd9cd2e935f9c2455876a80f02a4d6786b8ab877f07227737ca0b577bf161 ${"a3".repeat(32)} layer=3 operator=geyser country=IS asn=64503 prefix=10.3
-        relay localhost 10.0.2.2 7444 94e9c71ccacddd2c6fbf529e263f0d39baf0fed469de0d227d24ad81a4394b70 ${"a4".repeat(32)} layer=2 operator=fjord country=NO asn=64504 prefix=10.4
-        relay localhost 10.0.2.2 7445 38ab664bd86f77d7e66bdd9ae0792913a94fd8b33a1260027e4b46c1f4884c67 ${"a5".repeat(32)} layer=3 operator=maple country=CA asn=64505 prefix=10.5
-        # No party serves this host.
-        invite invite.umbra.test
-    """.trimIndent()
+    // No party serves this host.
+    private const val INVITATION_HOST = "invite.umbra.test"
+
+    /** Whether the time of the last manifest differs from the device clock. */
+    var isClockCorrected = false
+        private set
 
     private fun descriptorFile(context: Context) = File(context.filesDir, DESCRIPTOR)
 
@@ -72,14 +74,31 @@ object BuildNetwork {
         }
     }
 
-    fun network(context: Context): Network? {
+    fun network(context: Context, client: Handle): Network? {
         imported(context)?.let { return parseNetwork(it, null) }
+        val manifest = File(context.filesDir, MANIFEST)
+        if (!manifest.exists()) return null
         // The TLS stack of the Rust side reads a file, and an asset is none.
         val authority = File(context.filesDir, AUTHORITY)
         context.assets.open(AUTHORITY).use { source ->
             authority.outputStream().use { source.copyTo(it) }
         }
-        return parseNetwork(LOCAL, authority.absolutePath)
+        val keyset = context.assets.open(KEYSET).use { it.readBytes() }
+        val verified = try {
+            // The debug build ships no epoch, thus the store alone bounds the
+            // age of a manifest.
+            client.networkOfManifest(
+                manifest.readBytes(),
+                keyset,
+                0uL,
+                INVITATION_HOST,
+                authority.absolutePath,
+            )
+        } catch (refused: FfiException) {
+            return null
+        }
+        isClockCorrected = verified.isClockCorrected
+        return verified.network
     }
 
     /** The panel of the unlock view that takes a descriptor. */
