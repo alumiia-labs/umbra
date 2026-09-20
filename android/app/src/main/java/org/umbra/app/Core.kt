@@ -252,7 +252,11 @@ object Core {
                 revision++
                 refreshChats()
             }
-            // A deletion is no arrival, thus it raises no alert.
+            // An edit and a deletion are no arrival, thus they raise no alert.
+            is FfiEvent.Edited -> {
+                revision++
+                refreshChats()
+            }
             is FfiEvent.Deleted -> {
                 revision++
                 refreshChats()
@@ -445,6 +449,18 @@ object Core {
             draft.setText(units)
             draft.setReplyTo(replyTo)
             client.sendDraft(draft).destroy()
+        }
+        main.post { revision++ }
+        refreshChats()
+    }
+
+    /** Changes the text of a message of this device. This call overwrites `text`. */
+    fun edit(conversation: Conversation, message: MsgHandle, text: CharArray) = call { client ->
+        val units = text.map { it.code.toUShort() }
+        text.fill('\u0000')
+        client.newDraft(conversation.id).use { draft ->
+            draft.setText(units)
+            client.editMessage(message, draft)
         }
         main.post { revision++ }
         refreshChats()

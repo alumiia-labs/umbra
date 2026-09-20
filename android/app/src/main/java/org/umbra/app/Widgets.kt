@@ -79,6 +79,21 @@ import android.view.inputmethod.InputMethodManager
 class PlatformFieldState {
     internal var view: EditText? = null
 
+    /**
+     * Puts a text into the field, with the cursor at its end. The field
+     * copies the characters into its own buffer.
+     */
+    fun set(chars: CharArray) {
+        val field = view ?: return
+        field.setText(chars, 0, chars.size)
+        field.setSelection(field.length())
+    }
+
+    /** Makes the field empty. */
+    fun clear() {
+        view?.editableText?.clear()
+    }
+
     /** Puts the cursor into the field and opens the keyboard. */
     fun focus() {
         val field = view ?: return

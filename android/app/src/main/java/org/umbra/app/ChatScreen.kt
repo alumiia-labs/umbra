@@ -69,6 +69,8 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.foundation.gestures.scrollBy
 
 @Composable
 fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
@@ -105,6 +107,17 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
         val isFirstPlacement = listState.firstVisibleItemIndex == 0 && firstNew >= 0
         listState.scrollToItem(if (isFirstPlacement) firstNew else lines.lastIndex + 1)
     }
+    // The keyboard takes the lower part of the list, over several frames.
+    // The list moves by each height that it loses, thus the messages that
+    // the user looked at stay above the keyboard, as in each messenger.
+    LaunchedEffect(listState) {
+        var before = listState.layoutInfo.viewportSize.height
+        snapshotFlow { listState.layoutInfo.viewportSize.height }.collect { height ->
+            val lost = before - height
+            before = height
+            if (lost > 0) listState.scrollBy(lost.toFloat())
+        }
+    }
     val readUpTo = lines.indexOfLast { it.info.outgoing && it.info.delivery.toInt() == READ }
     val composer = rememberPlatformField()
     // The message under the finger, and the message that the composer answers.
@@ -125,6 +138,8 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
             }
         }
     }
+    // The message whose text the composer changes.
+    var edited by remember(conversation) { mutableStateOf<Line?>(null) }
     // The message that the user wants to delete, and a word for a user who
     // deletes faster than the rate limit permits.
     var deleting by remember(conversation) { mutableStateOf<Line?>(null) }
@@ -140,10 +155,26 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
             // DEV-105: the user can clear a placeholder.
             listOf(RowEntry("trash-can", "Remove") { Core.deleteForMe(line.handle) })
         } else {
-            listOf(
-                RowEntry("reply", "Reply") { answered = line },
-                RowEntry("trash-can", "Delete") { deleting = line },
-            )
+            buildList {
+                add(
+                    RowEntry("reply", "Reply") {
+                        edited = null
+                        answered = line
+                    },
+                )
+                // The core says whether the text can change: a text of this
+                // device, inside 24 hours, below the limit of revisions.
+                if (line.info.editable) {
+                    add(
+                        RowEntry("pen", "Edit") {
+                            answered = null
+                            edited = line
+                            composer.set(line.text.copyOf())
+                        },
+                    )
+                }
+                add(RowEntry("trash-can", "Delete") { deleting = line })
+            }
         }
         ActionSheet("Message", entries, onDismiss = { chosen = null })
     }
@@ -226,8 +257,9 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
         notice?.let {
             Box(Modifier.padding(horizontal = 12.dp)) { Note(it) }
         }
-        // An answer starts with the keyboard open, as a user expects it.
-        LaunchedEffect(answered) { if (answered != null) composer.focus() }
+        // An answer and an edit start with the keyboard open, as a user
+        // expects it.
+        LaunchedEffect(answered, edited) { if (answered != null || edited != null) composer.focus() }
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
             // The send button stays beside the line of the text.
@@ -237,14 +269,19 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
             // grows upward and holds the name at its top.
             Column(Modifier.weight(1f).background(Palette.Incoming, RoundedCornerShape(24.dp))) {
                 AnimatedVisibility(
-                    visible = answered != null,
+                    visible = answered != null || edited != null,
                     enter = expandVertically() + fadeIn(),
                     exit = shrinkVertically() + fadeOut(),
                 ) {
-                    // The name stays for the time of the exit.
-                    val author = remember { mutableStateOf("") }
-                    answered?.let { author.value = if (it.info.outgoing) "You" else chat.title }
-                    ReplyHeader(author.value) { answered = null }
+                    // The words stay for the time of the exit.
+                    val header = remember { mutableStateOf("reply" to "") }
+                    answered?.let { header.value = "reply" to if (it.info.outgoing) "You" else chat.title }
+                    if (edited != null) header.value = "pen" to "Edit message"
+                    ComposerHeader(header.value.first, header.value.second) {
+                        if (edited != null) composer.clear()
+                        answered = null
+                        edited = null
+                    }
                 }
                 Box(
                     Modifier
@@ -270,13 +307,23 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                     .clip(CircleShape)
                     .background(Palette.Action)
                     .clickable(role = Role.Button, onClickLabel = "Send") {
-                        composer.take()?.let {
-                            Core.send(conversation, it, answered?.handle)
+                        composer.take()?.let { text ->
+                            val target = edited
+                            if (target != null) {
+                                Core.edit(conversation, target.handle, text)
+                            } else {
+                                Core.send(conversation, text, answered?.handle)
+                            }
                             answered = null
+                            edited = null
                         }
                     },
                 contentAlignment = Alignment.Center,
-            ) { FaIcon("paper-plane", label = "Send", size = 18.dp, tint = Color.White) }
+            ) {
+                // An edit ends with a check, and a message with the plane.
+                val icon = if (edited != null) "check" else "paper-plane"
+                FaIcon(icon, label = "Send", size = 18.dp, tint = Color.White)
+            }
         }
     }
 }
@@ -452,11 +499,14 @@ private fun BubbleContent(line: Line, chat: Chat) {
         // one says it for each of them.
         val state = line.info.delivery.toInt()
         Text(
-            // A placeholder shows its time and no state of a delivery.
-            if (isOutgoing && state != READ && !line.info.deleted) {
-                "$clock · ${deliveryLabel(line.info.delivery)}"
-            } else {
-                clock
+            // A placeholder shows its time and no state of a delivery. DEV-090:
+            // an edited message says so, on the two devices.
+            buildString {
+                if (line.info.edited) append("Edited · ")
+                append(clock)
+                if (isOutgoing && state != READ && !line.info.deleted) {
+                    append(" · ").append(deliveryLabel(line.info.delivery))
+                }
             },
             style = MaterialTheme.typography.labelSmall,
             color = if (state == FAILED) Palette.Error else Palette.TextSecondary,
@@ -505,21 +555,22 @@ private fun QuoteBlock(author: String?, text: CharArray?, modifier: Modifier = M
 }
 
 /**
- * Whom the composer answers, at the top of the box of the field: the reply
- * arrow, the name, and a small way to take it back. A line divides it from
- * the text.
+ * What the composer does beside a new message, at the top of the box of the
+ * field: the reply arrow with the name of the author, or the pen with "Edit
+ * message", and a small way to take it back. A line divides it from the
+ * text.
  */
 @Composable
-private fun ReplyHeader(author: String, onCancel: () -> Unit) {
+private fun ComposerHeader(icon: String, words: String, onCancel: () -> Unit) {
     Column {
         Row(
             Modifier.fillMaxWidth().padding(start = 18.dp, end = 6.dp, top = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            FaIcon("reply", size = 14.dp, tint = Palette.Action)
+            FaIcon(icon, size = 14.dp, tint = Palette.Action)
             Spacer(Modifier.width(8.dp))
             Text(
-                author,
+                words,
                 style = MaterialTheme.typography.labelLarge,
                 fontWeight = FontWeight.SemiBold,
                 color = Palette.Action,
@@ -528,9 +579,9 @@ private fun ReplyHeader(author: String, onCancel: () -> Unit) {
                 modifier = Modifier.weight(1f),
             )
             Box(
-                Modifier.size(36.dp).clip(CircleShape).press(role = Role.Button, label = "Cancel the reply", onClick = onCancel),
+                Modifier.size(36.dp).clip(CircleShape).press(role = Role.Button, label = "Cancel", onClick = onCancel),
                 contentAlignment = Alignment.Center,
-            ) { FaIcon("xmark", label = "Cancel the reply", size = 14.dp, tint = Palette.TextSecondary) }
+            ) { FaIcon("xmark", label = "Cancel", size = 14.dp, tint = Palette.TextSecondary) }
         }
         HorizontalDivider(Modifier.padding(horizontal = 18.dp), color = Palette.Outline.copy(alpha = 0.5f))
     }
