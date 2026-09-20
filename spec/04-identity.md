@@ -547,6 +547,14 @@ Requirements:
   continue through a queue rotation, a relay change, and a device link. A user
   that verified Bob does not verify Bob again after Bob adds a tablet
   (usability goal U7).
+- **[IDN-175]** A client MUST keep the verification state as the pairwise
+  identity public key of the contact that the user verified. The contact
+  counts as verified only while that key is equal to the key that the
+  channel holds. Thus the state of an earlier key gives nothing to a later
+  key, and the notice of §4.5.1 needs no separate step that clears it.
+- **[IDN-176]** A scan or an entry of a safety number that is equal to the
+  number of the device, by its digits alone, MUST set the same state as a
+  confirmed short code. A number that is not equal MUST set nothing.
 - **[IDN-028]** The UI MUST NOT imply that unverified conversations are insecure. Such
   conversations are protected against each adversary but an active
   man-in-the-middle at the first contact.
@@ -641,6 +649,8 @@ code, and the users compare that code by voice or in person.
 ```
 VerifyCommit {                    // kind 0x36, Part 6 §6.6
     commit    [32]u8              // SHA3-256("umbra/v1/sas-commit" || nonce)
+    answers   [32]u8              // the commit of the peer that this commit
+                                  // answers, or 32 zero bytes for a start
 }
 
 VerifyReveal {                    // kind 0x37, Part 6 §6.6
@@ -663,10 +673,36 @@ value needs one. Part 5 §5.11 holds the two labels.
   holds.
 - **[IDN-145]** A client MUST draw a fresh nonce for each ceremony.
   **[IDN-146]** A client MUST NOT show a code from an earlier ceremony.
+- **The pairing of two commits.** A commit with a zero `answers` field is a
+  **start**, and each other commit is an **answer**. **[IDN-170]** A client
+  that gets a start MUST end the ceremony that it holds, draw a fresh nonce,
+  and send an answer that names that start. **[IDN-171]** A client MUST take
+  an answer only while it holds a start of its own with no commit of the
+  peer, and only when `answers` is equal to the commit of that start. It MUST
+  drop each other answer. **[IDN-172]** A client that gets a start while its
+  own start has no answer MUST compare the two commits as byte strings. It
+  MUST drop the start of the peer when its own commit is the lower one, and
+  it MUST obey `IDN-170` when its own commit is the higher one. Thus two
+  starts that cross give one ceremony, and the two clients select the same
+  one.
+- **[IDN-173]** A `VerifyReveal` that `IDN-144` rejects MUST NOT end the
+  ceremony. The reveal of a ceremony that a later start replaced can arrive
+  late, and it gives an adversary nothing: the commit that the client holds
+  binds the one nonce that gives a code.
+- **[IDN-174]** A ceremony MUST NOT continue after the run of the client that
+  holds it. A nonce serves one comparison between two persons, thus it has no
+  stored form.
 - **[IDN-147]** A client MUST set the verification state of §4.5 at a user
   confirmation that the two codes match. **[IDN-148]** A client MUST NOT set
   that state from the exchange alone. The exchange gives two clients one
   number, and the comparison between two persons is the verification.
+
+> *Cause of the `answers` field.* An earlier draft held the commit alone.
+> A user that starts two times in a row then gets the answer to the first
+> start while the second start waits. The client cannot tell that answer from
+> a new start of the peer, and each of the two clients starts again at each
+> commit of the other one, without an end. The field names the start, thus a
+> late answer pairs with nothing and the client drops it.
 
 > *Cause.* An active adversary at the first contact holds two channels, one to
 > each party, and two pairwise key sets. That adversary needs the two codes to

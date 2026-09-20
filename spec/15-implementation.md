@@ -496,6 +496,12 @@ that draft is dropped, and it MUST do that whether the send succeeded or failed.
   that marker when the user looks at the conversation and at no other time.
   The marker sends nothing: a read receipt is a record of Part 6 §6.6.9 with
   its own setting.
+- **[IMP-142]** The short code and the safety number of Part 4 §4.5 are
+  public values of the two devices, and they cross the surface as strings. The
+  surface MUST give the safety number with no network, from the stored
+  channel alone. The confirmation of a short code MUST be a call of its own
+  that follows an act of the user, and the event that carries the code MUST
+  set no state (`IDN-148`).
 - The bundle of an invitation crosses as bytes in an event and in `accept`.
   The bundle holds the send key and the end-to-end key of one queue (Part 6
   §6.6.10), thus this is an exception to `IMP-037`. The platform shows the
@@ -779,6 +785,10 @@ version byte, and a client MUST reject a row whose version it does not read.
 - **[IMP-135]** A record that arrives a second time at or below the stored
   cursor, or at a stored sequence number above it, MUST NOT reach the
   ratchet. The cursor drops it, and the `ACK` covers it.
+- **[IMP-143]** A record that the client uses itself gives no message: a
+  queue address, a record of a ceremony. A client MUST send the `ACK` of such
+  a record after the commit of the channel state that it moved, in the same
+  manner as the `ACK` of a message.
 - **[IMP-136]** A client MUST delete the row of an invitation in the batch
   that follows the flight 1 that consumed its prekey, before flight 2
   leaves. Part 5 rule `CRY-089` erases the prekey at that point.

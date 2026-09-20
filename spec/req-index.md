@@ -68,7 +68,7 @@ each column when a crate implements the requirement and a test covers it.
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
 | `NET` | 210 | 83 | 1 | 0 | 8 | **302** |
-| `IDN` | 115 | 41 | 1 | 0 | 5 | **162** |
+| `IDN` | 120 | 43 | 1 | 0 | 5 | **169** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
 | `WIR` | 384 | 82 | 0 | 0 | 6 | **472** |
 | `DEV` | 179 | 87 | 2 | 0 | 7 | **275** |
@@ -79,9 +79,9 @@ each column when a crate implements the requirement and a test covers it.
 | `COM` | 299 | 96 | 0 | 0 | 5 | **400** |
 | `ATT` | 134 | 46 | 1 | 0 | 2 | **183** |
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
-| `IMP` | 91 | 38 | 0 | 0 | 1 | **130** |
+| `IMP` | 93 | 38 | 0 | 0 | 1 | **132** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2139 | 695 | 7 | 0 | 51 | **2892** |
+| **All** | 2146 | 697 | 7 | 0 | 51 | **2901** |
 
 ## SCP — Scope and Conventions
 
@@ -610,6 +610,13 @@ Source: `spec/04-identity.md`
 | `IDN-167` | §4.3.1 | MUST | (unstated) | A client whose `IGET` gets a `NACK`, or whose blob does not open under the fragment, MUST tell the user that the link gives no invitation. |  |  |
 | `IDN-168` | §4.3.1 | MUST | A client | A client MUST resolve the `RelayRef` of the fragment before the `IGET`, and it MUST send the `IGET` on a circuit whose last hop is that relay. |  |  |
 | `IDN-169` | §4.3.1 | MUST | The store of an inviter | The store of an inviter MUST hold the fragment of an invitation that waits, thus the client shows the link again after a restart. |  |  |
+| `IDN-170` | §4.5.2 | MUST | A client that gets a start | A client that gets a start MUST end the ceremony that it holds, draw a fresh nonce, and send an answer that names that start. |  |  |
+| `IDN-171` | §4.5.2 | MUST | A client | A client MUST take an answer only while it holds a start of its own with no commit of the peer, and only when `answers` is equal to the commit of that start. |  |  |
+| `IDN-172` | §4.5.2 | MUST | A client that gets a start while its own start has no answer | A client that gets a start while its own start has no answer MUST compare the two commits as byte strings. |  |  |
+| `IDN-173` | §4.5.2 | MUST NOT | A `VerifyReveal` that `IDN-144` rejects | A `VerifyReveal` that `IDN-144` rejects MUST NOT end the ceremony. |  |  |
+| `IDN-174` | §4.5.2 | MUST NOT | A ceremony | A ceremony MUST NOT continue after the run of the client that holds it. |  |  |
+| `IDN-175` | §4.5 | MUST | A client | A client MUST keep the verification state as the pairwise identity public key of the contact that the user verified. |  |  |
+| `IDN-176` | §4.5 | MUST | (unstated) | A scan or an entry of a safety number that is equal to the number of the device, by its digits alone, MUST set the same state as a confirmed short code. |  |  |
 
 ## CRY — Cryptographic Core
 
@@ -3058,6 +3065,8 @@ Source: `spec/15-implementation.md`
 | `IMP-139` | §15.6.1 | MUST | A client | A client MUST count a received message as not seen while its store time is above the read marker of its conversation, and it MUST move that marker when the user looks at the conversation and at no other time. |  |  |
 | `IMP-140` | §15.6.4 | MUST | A client | A client MUST keep that setting in the store, under the record encryption of this section. |  |  |
 | `IMP-141` | §15.6.4 | MUST | A client | A client MUST ask for the current passphrase before a passphrase change. |  |  |
+| `IMP-142` | §15.6.1 | MUST | (unstated) | The short code and the safety number of Part 4 §4.5 are public values of the two devices, and they cross the surface as strings. |  |  |
+| `IMP-143` | §15.6.4 | MUST | (unstated) | A record that the client uses itself gives no message: a queue address, a record of a ceremony. |  |  |
 
 ## SEC — Security Considerations
 
