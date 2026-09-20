@@ -1091,8 +1091,8 @@ fn a_stored_contact_of_the_first_version_continues() {
     network.take_events(ALICE);
 
     // Version 0x01 named no relay of the inbound queue: the version byte,
-    // the salt, the key of the peer, and then the channel. Such a contact
-    // goes to a circuit with each exit.
+    // the salt, the key of the peer, and then the channel. The two queues
+    // of such a contact live at one relay, and the channel names it.
     for state in network.stored[ALICE].contacts.values_mut() {
         assert_eq!(state[0], 0x02);
         state[0] = 0x01;
@@ -1105,9 +1105,11 @@ fn a_stored_contact_of_the_first_version_continues() {
         .unwrap();
     network.settle();
     assert_eq!(messages_of(network.take_events(ALICE)), [b"still here"]);
-    // The next store of the contact is of the present version.
+    // The next store of the contact is of the present version, and it names
+    // the relay of the inbound queue.
+    let queue_relay = relay_static(3).0.relay_id;
     assert!(network.stored[ALICE]
         .contacts
         .values()
-        .all(|state| state[0] == 0x02));
+        .all(|state| state[0] == 0x02 && state[49..81] == queue_relay));
 }

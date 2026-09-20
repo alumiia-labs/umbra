@@ -550,6 +550,14 @@ impl ClientNode {
         };
         let channel = PairwiseChannel::restore(reader.var()?)?;
         reader.end()?;
+        // A store of version 0x01 came from a network with one queue relay,
+        // thus the two queues of its contact live at one relay, and the
+        // channel names the relay of the outbound one.
+        let inbound_relay = if names_relay {
+            inbound_relay
+        } else {
+            *channel.outbound().relay_id()
+        };
         let id = *channel.inbound().recipient_id();
         self.assign(id, inbound_relay);
         self.contacts.insert(
@@ -581,6 +589,12 @@ impl ClientNode {
         let inbound = Inbound::restore(&mut reader)?;
         let inviter = Inviter::from_prekey_seed(Secret::new(reader.array()?));
         reader.end()?;
+        // The bundle of an invitation names the relay of its queue.
+        let inbound_relay = if names_relay {
+            inbound_relay
+        } else {
+            Bundle::parse(&bundle)?.queue_address.relay_id
+        };
         self.assign(*inbound.recipient_id(), inbound_relay);
         self.halves.insert(
             *inbound.recipient_id(),
