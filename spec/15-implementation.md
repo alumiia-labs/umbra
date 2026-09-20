@@ -510,6 +510,20 @@ that draft is dropped, and it MUST do that whether the send succeeded or failed.
   that sent the receipt, and only upward in the order Accepted, Delivered,
   Read. A receipt whose body does not parse MUST change nothing, and it MUST
   NOT end the batch of the records that arrived with it.
+- **[IMP-149]** A stored record MUST hold its `reply_target` as the `msg_ref`
+  of Part 6 §6.6 (`WIR-170`). A client MUST make that replacement in the batch
+  that stores a received record. A record of this device that waits for a
+  relay holds the raw value under `WIR-070`, because the send needs it again,
+  and the client MUST make the replacement in the batch that records the
+  first delivery state above Queued (`WIR-071`). The raw `msg_id` of a record
+  stays in the header of its own row and in no other row (`WIR-073`): a reply,
+  a receipt, and a deletion each need it for the wire.
+- **[IMP-150]** The surface MUST give the target of a reply as a handle of a
+  message of the same conversation, or as absent (`WIR-173`), and it MUST NOT
+  give a `msg_id` or a `msg_ref`. The text of the target is message text, thus
+  the platform renders it through a sink under `IMP-037`. A draft takes its
+  target as a handle, and a client MUST refuse a target of another
+  conversation (`WIR-171`).
 - **[IMP-148]** A conversation view MUST show the read state as one mark of
   the contact at the newest message that the contact saw, and it MUST NOT
   write a word for that state on each message. The states Queued, Accepted,

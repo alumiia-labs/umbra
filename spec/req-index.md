@@ -79,9 +79,9 @@ each column when a crate implements the requirement and a test covers it.
 | `COM` | 299 | 96 | 0 | 0 | 5 | **400** |
 | `ATT` | 134 | 46 | 1 | 0 | 2 | **183** |
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
-| `IMP` | 96 | 40 | 0 | 0 | 1 | **137** |
+| `IMP` | 97 | 41 | 0 | 0 | 1 | **139** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2154 | 701 | 7 | 0 | 51 | **2913** |
+| **All** | 2155 | 702 | 7 | 0 | 51 | **2915** |
 
 ## SCP — Scope and Conventions
 
@@ -3079,6 +3079,8 @@ Source: `spec/15-implementation.md`
 | `IMP-146` | §15.6.1 | MUST | A client | A client MUST hold a receipt in table `0x0B` from the commit of the message that it reports, or from the move of the read marker of `IMP-139`, to the slot that carries it (`NET-053`). |  |  |
 | `IMP-147` | §15.6.1 | MUST NOT | A receipt is no message of a conversation, and a client | A receipt is no message of a conversation, and a client MUST NOT store it as one. |  |  |
 | `IMP-148` | §15.6.1 | MUST NOT | (unstated) | A conversation view MUST show the read state as one mark of the contact at the newest message that the contact saw, and it MUST NOT write a word for that state on each message. |  |  |
+| `IMP-149` | §15.6.1 | MUST | A stored record | A stored record MUST hold its `reply_target` as the `msg_ref` of Part 6 §6.6 (`WIR-170`). |  |  |
+| `IMP-150` | §15.6.1 | MUST NOT | (unstated) | The surface MUST give the target of a reply as a handle of a message of the same conversation, or as absent (`WIR-173`), and it MUST NOT give a `msg_id` or a `msg_ref`. |  |  |
 
 ## SEC — Security Considerations
 
