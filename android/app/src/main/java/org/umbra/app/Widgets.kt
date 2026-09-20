@@ -49,6 +49,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.LineHeightStyle
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.PlatformTextStyle
+import androidx.compose.ui.platform.LocalDensity
 
 /**
  * The holder of a text field of the platform. A composable field holds its
@@ -228,7 +233,27 @@ fun Avatar(chat: Chat, size: Int = 44) {
     Box(
         Modifier.size(size.dp).clip(CircleShape).background(ground),
         contentAlignment = Alignment.Center,
-    ) { Text(letter, fontSize = (size * 0.42f).sp, color = Palette.Text) }
+    ) {
+        // The letter takes its size from the circle and not from the font
+        // scale of the system. Its line box is the glyph alone: the line
+        // height of the theme is taller than a small circle, and the letter
+        // then hangs at the bottom.
+        val letterSize = with(LocalDensity.current) { (size * 0.46f).dp.toSp() }
+        Text(
+            letter,
+            color = Palette.Text,
+            textAlign = TextAlign.Center,
+            style = TextStyle(
+                fontSize = letterSize,
+                lineHeight = letterSize,
+                platformStyle = PlatformTextStyle(includeFontPadding = false),
+                lineHeightStyle = LineHeightStyle(
+                    alignment = LineHeightStyle.Alignment.Center,
+                    trim = LineHeightStyle.Trim.Both,
+                ),
+            ),
+        )
+    }
 }
 
 /** The bar of a view under the tabs: the word mark and the lock. */
