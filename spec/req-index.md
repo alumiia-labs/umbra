@@ -79,9 +79,9 @@ each column when a crate implements the requirement and a test covers it.
 | `COM` | 299 | 96 | 0 | 0 | 5 | **400** |
 | `ATT` | 134 | 46 | 1 | 0 | 2 | **183** |
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
-| `IMP` | 102 | 41 | 0 | 0 | 1 | **144** |
+| `IMP` | 104 | 41 | 0 | 0 | 1 | **146** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2160 | 702 | 7 | 0 | 51 | **2920** |
+| **All** | 2162 | 702 | 7 | 0 | 51 | **2922** |
 
 ## SCP — Scope and Conventions
 
@@ -3086,6 +3086,8 @@ Source: `spec/15-implementation.md`
 | `IMP-153` | §15.6.1 | MUST | The surface | The surface MUST give a deleted state of a message and no text for it, and the event of a deletion MUST carry the conversation and no content. |  |  |
 | `IMP-154` | §15.6.1 | MUST | An edit | An edit MUST change the row of its target in place, under a new record key, and the client MUST keep no earlier text. |  |  |
 | `IMP-155` | §15.6.1 | MUST | An edit that arrives before its target | An edit that arrives before its target MUST wait in table `0x0C` with its new text, and the target takes that text and the edited mark in the batch that stores it. |  |  |
+| `IMP-156` | §15.6.1 | MUST | A client | A client MUST reject a reaction whose `emoji` holds a code point that no emoji sequence uses, from a contact and from its own surface. |  |  |
+| `IMP-157` | §15.6.1 | MUST | A client | A client MUST take a reaction only for a message that it holds in the conversation of the sender (`WIR-282`), and it MUST drop each other one. |  |  |
 
 ## SEC — Security Considerations
 

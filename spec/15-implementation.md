@@ -510,6 +510,23 @@ that draft is dropped, and it MUST do that whether the send succeeded or failed.
   that sent the receipt, and only upward in the order Accepted, Delivered,
   Read. A receipt whose body does not parse MUST change nothing, and it MUST
   NOT end the batch of the records that arrived with it.
+- **[IMP-156]** A client MUST reject a reaction whose `emoji` holds a code
+  point that no emoji sequence uses, from a contact and from its own
+  surface. Part 6 §6.6.9 checks UTF-8 and a length, thus 64 bytes of a
+  reaction could carry a text that no view treats as a message, no edit
+  window covers, and no deletion reaches. The permitted code points are the
+  emoji blocks, the arrows, the symbols, the joiner U+200D, the selector
+  U+FE0F, and the tag characters of a flag. A letter of a script and a digit
+  are not among them. An emoji that passes is no message text under
+  `IMP-037`, and it crosses the surface as a string.
+- **[IMP-157]** A client MUST take a reaction only for a message that it
+  holds in the conversation of the sender (`WIR-282`), and it MUST drop each
+  other one. One party holds at most 16 emoji on one message, and a client
+  MUST drop an addition above that count. Thus a contact cannot grow table
+  `0x0E` past a bound that the messages of the conversation set. A message
+  that a deletion takes MUST lose its reactions in the same batch. A reaction
+  of this device is a waiting record under the rules of `IMP-152`, and the
+  event of a reaction raises no alert.
 - **[IMP-154]** An edit MUST change the row of its target in place, under a
   new record key, and the client MUST keep no earlier text. The count of the
   revisions sits in table `0x0D`, and a count above zero is the edited mark
@@ -834,6 +851,7 @@ flight 1, with its one-time prekey.
 | `0x0B` | Held receipts | One receipt that waits for a slot: the conversation, the kind, the `msg_id` of its target, and the time that it reports (Part 3 §3.5.4) |
 | `0x0C` | Pending references | One deletion or one edit of a contact whose target did not arrive yet: the conversation, the `msg_ref` of the target, the time of the record, and the new text of an edit. An entry with no text is a deletion (Part 7 §7.5.6) |
 | `0x0D` | Revisions | How many times the sender of a message changed its text, under the row of that message. A message with no row here shows no edited mark |
+| `0x0E` | Reactions | One reaction: the conversation, the `msg_ref` of its target, the direction, and the emoji. One party holds one row for one emoji on one message (Part 6 §6.6.9) |
 
 The stored form of a row is local to one device, and no peer reads it. This
 part gives it no byte layout. **[IMP-130]** A stored object MUST start with a
