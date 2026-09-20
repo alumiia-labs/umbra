@@ -4,6 +4,7 @@ import android.text.format.DateUtils
 import android.view.inputmethod.InputMethodManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -23,7 +24,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -204,14 +204,17 @@ private fun TabsScreen(tab: Tab, onTab: (Tab) -> Unit, push: (Screen) -> Unit) {
                 ) { FaIcon("user-plus", label = "Add a contact", tint = Palette.Action) }
             }
         }
-        Row(Modifier.fillMaxWidth().background(Palette.Incoming).padding(vertical = 8.dp)) {
+        Row(Modifier.fillMaxWidth().background(Palette.Incoming).padding(vertical = 6.dp)) {
             for (entry in Tab.entries) {
                 val isSelected = entry == tab
+                // The press shade takes the shape of the item with room
+                // around it, and not the whole third of the bar.
+                Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
                 Column(
                     Modifier
-                        .weight(1f)
+                        .clip(RoundedCornerShape(20.dp))
                         .clickable(role = Role.Tab) { onTab(entry) }
-                        .padding(vertical = 4.dp),
+                        .padding(horizontal = 22.dp, vertical = 6.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     Box(
@@ -220,11 +223,13 @@ private fun TabsScreen(tab: Tab, onTab: (Tab) -> Unit, push: (Screen) -> Unit) {
                             .background(if (isSelected) Palette.Container else Color.Transparent)
                             .padding(horizontal = 18.dp, vertical = 5.dp),
                     ) { FaIcon(entry.icon, size = 18.dp, tint = Palette.Text) }
+                    Spacer(Modifier.height(2.dp))
                     Text(
                         entry.label,
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
                     )
+                }
                 }
             }
         }
@@ -392,24 +397,35 @@ private fun SettingsTab(push: (Screen) -> Unit) {
         // Mockup 105: this row leads to the settings of the lock. The lock
         // itself is the icon of the bar.
         SettingRow("lock", "App lock", "Passphrase and auto-lock") { push(Screen.AppLock) }
-        SettingRow(
-            "signal",
-            "Connection",
-            if (Core.online) "Connected through three relays" else "Not connected. Tap to try now.",
-        ) { Core.connect(context) }
-        SettingRow(
-            "bell",
-            "Notifications",
-            "Alerts show no text and no name. They arrive until the app locks.",
-            onClick = null,
-        )
-        SettingRow(
-            "shield-halved",
-            "About this build",
-            "Test build. Contacts and messages stay on this device. " +
-                "Icons by Font Awesome, CC BY 4.0.",
-            onClick = null,
-        )
+        Spacer(Modifier.height(16.dp))
+        // The state of the connection is a fact and no setting, thus it is
+        // an info area. It gains a button when the user can act.
+        Column(
+            Modifier
+                .padding(horizontal = 20.dp)
+                .fillMaxWidth()
+                .background(Palette.Raised, RoundedCornerShape(16.dp))
+                .border(1.dp, Palette.Divider, RoundedCornerShape(16.dp))
+                .padding(16.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                FaIcon("signal", size = 20.dp, tint = Palette.Text)
+                Spacer(Modifier.width(14.dp))
+                Column {
+                    Text(if (Core.online) "Connected" else "Not connected")
+                    Text(
+                        if (Core.online) "Through three relays" else "UMBRA tries again by itself.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Palette.TextSecondary,
+                        modifier = Modifier.subline(),
+                    )
+                }
+            }
+            if (!Core.online) {
+                Spacer(Modifier.height(12.dp))
+                SecondaryButton("Reconnect") { Core.connect(context) }
+            }
+        }
     }
 }
 
@@ -434,7 +450,6 @@ private fun SettingRow(icon: String, title: String, detail: String, onClick: (()
             )
         }
     }
-    HorizontalDivider(Modifier.padding(start = 58.dp, end = 20.dp), color = Palette.Divider)
 }
 
 /**
