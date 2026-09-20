@@ -36,6 +36,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 
 @Composable
@@ -73,6 +75,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
         val isFirstPlacement = listState.firstVisibleItemIndex == 0 && firstNew >= 0
         listState.scrollToItem(if (isFirstPlacement) firstNew else lines.lastIndex + 1)
     }
+    val readUpTo = lines.indexOfLast { it.info.outgoing && it.info.delivery.toInt() == READ }
     val composer = rememberPlatformField()
     Column(Modifier.fillMaxSize()) {
         val details = { push(Screen.ContactDetails(chat.conversation)) }
@@ -117,6 +120,9 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                 }
                 if (!line.info.outgoing && line.info.storedAtMs == newFrom) NewLabel()
                 Bubble(line)
+                // The contact saw each message up to this one. The mark
+                // sits under it and under no other, as a read marker does.
+                if (index == readUpTo) ReadMark(chat)
             }
         }
         Row(
@@ -217,8 +223,11 @@ private fun Bubble(line: Line) {
                 line.info.storedAtMs.toLong(),
                 DateUtils.FORMAT_SHOW_TIME,
             )
+            // A read message carries no word: the mark under the newest
+            // one says it for each of them.
+            val state = line.info.delivery.toInt()
             Text(
-                if (isOutgoing) "$clock · ${deliveryLabel(line.info.delivery)}" else clock,
+                if (isOutgoing && state != READ) "$clock · ${deliveryLabel(line.info.delivery)}" else clock,
                 style = MaterialTheme.typography.labelSmall,
                 color = if (line.info.delivery.toInt() == FAILED) Palette.Error else Palette.TextSecondary,
                 modifier = Modifier.subline(),
@@ -228,6 +237,16 @@ private fun Bubble(line: Line) {
 }
 
 private const val FAILED = 4
+private const val READ = 3
+
+/** The small picture of the contact under the newest message that it saw. */
+@Composable
+private fun ReadMark(chat: Chat) {
+    Row(
+        Modifier.fillMaxWidth().padding(end = 4.dp, bottom = 2.dp).semantics { contentDescription = "Read" },
+        horizontalArrangement = Arrangement.End,
+    ) { Avatar(chat, size = 16) }
+}
 
 /**
  * The closed list of Part 15 §15.9.1. "Accepted" means that a relay took the
@@ -237,6 +256,7 @@ private fun deliveryLabel(state: UByte): String = when (state.toInt()) {
     0 -> "Waiting"
     1 -> "Accepted"
     2 -> "Delivered"
-    3 -> "Read"
-    else -> "Not sent"
+    FAILED -> "Not sent"
+    // A read message shows the mark of the contact and no word.
+    else -> ""
 }
