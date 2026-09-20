@@ -857,6 +857,13 @@ The stored form of a row is local to one device, and no peer reads it. This
 part gives it no byte layout. **[IMP-130]** A stored object MUST start with a
 version byte, and a client MUST reject a row whose version it does not read.
 
+- **[IMP-158]** The stored form of a contact and of an invitation MUST name
+  the relay that holds its inbound queue, because a new run builds a circuit
+  to that relay before it subscribes (`NET-308`). The stored channel names the
+  relay of the outbound queue. Version `0x01` of the two forms named no
+  relay of the inbound queue. A client MUST read that version, MUST give its
+  queue to a circuit with each last relay, and MUST write the present
+  version at the next commit of the row.
 - **[IMP-131]** A client MUST commit each change of a channel to the store
   before it writes a byte of that call to the link. A ratchet record that
   left the device under a state that the store does not hold lets a restart

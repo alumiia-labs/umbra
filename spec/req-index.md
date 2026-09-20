@@ -67,7 +67,7 @@ each column when a crate implements the requirement and a test covers it.
 | --- | --- | --- | --- | --- | --- | --- |
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
-| `NET` | 214 | 83 | 1 | 0 | 8 | **306** |
+| `NET` | 217 | 84 | 1 | 0 | 8 | **310** |
 | `IDN` | 120 | 43 | 1 | 0 | 5 | **169** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
 | `WIR` | 385 | 84 | 0 | 0 | 6 | **475** |
@@ -79,9 +79,9 @@ each column when a crate implements the requirement and a test covers it.
 | `COM` | 299 | 96 | 0 | 0 | 5 | **400** |
 | `ATT` | 134 | 46 | 1 | 0 | 2 | **183** |
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
-| `IMP` | 104 | 41 | 0 | 0 | 1 | **146** |
+| `IMP` | 105 | 41 | 0 | 0 | 1 | **147** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2162 | 702 | 7 | 0 | 51 | **2922** |
+| **All** | 2166 | 703 | 7 | 0 | 51 | **2927** |
 
 ## SCP — Scope and Conventions
 
@@ -445,6 +445,10 @@ Source: `spec/03-network-architecture.md`
 | `NET-305` | §3.6.2 | MUST | A client | A client MUST draw the time to the next slot from an exponential distribution with the mean of the tier, and it MUST draw it again at each slot, whether or not the slot carried an item. |  |  |
 | `NET-306` | §3.6.2 | MUST | A client in the background that holds an open session | A client in the background that holds an open session MUST keep the slot clock for the items 1 to 6 of `NET-065`, and it MUST make no cover cell. |  |  |
 | `NET-307` | §3.5.4 | MUST | A client | A client MUST hold at most one read receipt for each peer. |  |  |
+| `NET-308` | §3.2.5 | MUST | A client | A client MUST put each command for a queue on a circuit whose last relay holds that queue: the `NEW`, the `SUB`, and the `ACK` of its own queue, and the `SEND` to the queue of a peer. |  |  |
+| `NET-309` | §3.2.5 | MUST | A client that holds no such circuit | A client that holds no such circuit MUST build one, and the command MUST wait for it. |  |  |
+| `NET-310` | §3.2.5 | MUST | A client | A client MUST give the candidates of §3.4.6 to the selection in a random order, and a relay that no other circuit of that client uses MUST come before a relay that one uses. |  |  |
+| `NET-311` | §3.2.5 | MUST NOT | (unstated) | A client MUST build each chain again at the start of a run, and it MUST NOT store a chain: the store names the relay of a queue, and no relay of a path to it. |  |  |
 
 ## IDN — Identity
 
@@ -3088,6 +3092,7 @@ Source: `spec/15-implementation.md`
 | `IMP-155` | §15.6.1 | MUST | An edit that arrives before its target | An edit that arrives before its target MUST wait in table `0x0C` with its new text, and the target takes that text and the edited mark in the batch that stores it. |  |  |
 | `IMP-156` | §15.6.1 | MUST | A client | A client MUST reject a reaction whose `emoji` holds a code point that no emoji sequence uses, from a contact and from its own surface. |  |  |
 | `IMP-157` | §15.6.1 | MUST | A client | A client MUST take a reaction only for a message that it holds in the conversation of the sender (`WIR-282`), and it MUST drop each other one. |  |  |
+| `IMP-158` | §15.6.4 | MUST | The stored form of a contact and of an invitation | The stored form of a contact and of an invitation MUST name the relay that holds its inbound queue, because a new run builds a circuit to that relay before it subscribes (`NET-308`). |  |  |
 
 ## SEC — Security Considerations
 

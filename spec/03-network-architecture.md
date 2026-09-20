@@ -280,10 +280,29 @@ that circuit. **[NET-297]** A client SHOULD put the `SEND` to a contact on a
 circuit that does not serve the inbound queue of that contact. Thus one
 session shows a relay one queue of the pair, and not the two.
 
-The reference client of 0.2.0-draft gives each circuit the one path of its
-configuration, thus it meets the bound of `NET-022` and not the chains of
-`NET-023`. The chains need the path selection of §3.4.6 over the relay
-directory of Part 10.
+**The chains of one client.** A queue lives at one relay of layer 3, and a
+command for that queue reaches it through a circuit that ends at that relay.
+
+- **[NET-308]** A client MUST put each command for a queue on a circuit whose
+  last relay holds that queue: the `NEW`, the `SUB`, and the `ACK` of its own
+  queue, and the `SEND` to the queue of a peer. A queue that a `NEW` makes
+  lives at the last relay of the circuit that carried the `NEW`. **[NET-309]**
+  A client that holds no such circuit MUST build one, and the command MUST
+  wait for it. A handshake flight and a record of the user wait in the same
+  manner. A `SEND` is signed for the session of one circuit, thus a client
+  seals a record when it makes it and signs it when the circuit is ready.
+- **[NET-310]** A client MUST give the candidates of §3.4.6 to the selection
+  in a random order, and a relay that no other circuit of that client uses
+  MUST come before a relay that one uses. Thus two circuits of one client
+  share no relay but the pinned ingress where the relay set permits it, and
+  that is the independence that `NET-023` asks for. **[NET-311]** A client MUST
+  build each chain again at the start of a run, and it MUST NOT store a
+  chain: the store names the relay of a queue, and no relay of a path to it.
+
+The reference client of 0.2.0-draft takes its relay set from a descriptor of
+its build and not from the signed directory of Part 10. Thus it meets
+`NET-022`, `NET-023`, and the invariants of §3.4.6 over that set, and it does
+not verify the set.
 
 > *Rationale.* This leak is the largest unfixed leak in the system that UMBRA
 > inherits. The overview of SimpleX states that a malicious router "records all
