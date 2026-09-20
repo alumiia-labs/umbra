@@ -149,6 +149,8 @@ pub struct MessageInfo {
     /// How many times its sender changed the text. A value above zero is
     /// the edited mark of `DEV-090`.
     pub revisions: u8,
+    /// The file of the message, or none for a message with no file.
+    pub file: Option<client::FileInfo>,
 }
 
 /// The longest local name of a contact, in bytes of UTF-8.
@@ -224,6 +226,12 @@ pub enum Event {
     Edited {
         /// The conversation.
         conversation: ConversationId,
+        /// The message.
+        message: MsgRef,
+    },
+    /// The state of the file of a message changed: the relays hold it, the
+    /// store holds it, or its transfer failed.
+    File {
         /// The message.
         message: MsgRef,
     },
@@ -740,6 +748,176 @@ mod tests {
         (client, contact, conversation)
     }
 
+    /// A descriptor of one chunk, as an upload gives it.
+    fn uploaded_file(seed: u8) -> umbra_core::attach::transfer::Uploaded {
+        use umbra_core::attach::transfer::{ChunkCredential, Uploaded};
+        use umbra_crypto::secret::Secret;
+        use umbra_wire::descriptor::{ChunkRef, FileDescriptor, Level};
+        let file_key = Secret::new([seed; 32]);
+        let file_nonce = [seed; 24];
+        Uploaded {
+            descriptor: FileDescriptor {
+                level: Level::Data,
+                commit: umbra_core::attach::seal::commit(&file_key, &file_nonce),
+                file_key,
+                file_nonce,
+                digest: [seed; 32],
+                media_seconds: 0,
+                padded_size: 32_650,
+                mime_class: 1,
+                pixel_w: 640,
+                pixel_h: 480,
+                refs: vec![ChunkRef {
+                    relay_id: [0x31; 32],
+                    chunk_id: [seed; 32],
+                    cred_pk: [0x33; 32],
+                    replicas: [[0x34; 12], [0x35; 12]],
+                }],
+            },
+            credentials: vec![ChunkCredential {
+                chunk_id: [seed; 32],
+                cred: Secret::new([0x36; 32]),
+                relays: vec![[0x31; 32], [0x37; 32], [0x38; 32]],
+            }],
+        }
+    }
+
+    #[test]
+    fn a_file_waits_in_the_store_goes_out_after_its_upload_and_leaves_with_its_message() {
+        use client::FileState;
+        use umbra_core::attach::transfer::Shape;
+        use umbra_wire::app::{AppKind, AppMessage, Channel};
+
+        let mut rng = Rng(21);
+        let (mut alice, _, conversation) = client_with_contact(22);
+        let (mut bob, bob_contact, _) = client_with_contact(23);
+        let shape = Shape {
+            mime_class: 1,
+            pixel_w: 640,
+            pixel_h: 480,
+            media_seconds: 0,
+        };
+        let photo = zeroize::Zeroizing::new(vec![0x5A; 50_000]);
+
+        // The record of a file holds no text and answers no message.
+        let mut both = alice.new_draft(conversation);
+        both.set_text(&units("a caption")).unwrap();
+        both.attach(photo.clone(), shape).unwrap();
+        assert_eq!(
+            alice.send_draft(both, 1_000_000, &mut rng),
+            Err(Error::Malformed)
+        );
+
+        let mut draft = alice.new_draft(conversation);
+        draft.attach(photo.clone(), shape).unwrap();
+        let sent = alice.send_draft(draft, 1_000_000, &mut rng).unwrap();
+        // The record waits for its descriptor, thus the send path has none.
+        assert!(alice.take_outgoing().is_none());
+        let info = alice.info(&sent).unwrap();
+        assert_eq!(info.file.unwrap().state, FileState::Uploading);
+        assert_eq!(info.file.unwrap().shape, shape);
+        assert!(!info.has_text);
+        assert_eq!(*alice.file_bytes(&sent).unwrap(), *photo);
+
+        // A lock takes the job out of the memory, and the unlock brings the
+        // file back from the store.
+        alice.lock();
+        assert!(alice.take_upload().is_none());
+        alice.unlock(&units("correct horse"), 5_000).unwrap();
+        while alice.next_event().is_some() {}
+        let job = alice.take_upload().unwrap();
+        assert_eq!(
+            (job.message, job.plain.as_slice()),
+            (sent, photo.as_slice())
+        );
+        assert!(alice.take_upload().is_none());
+
+        // The relays hold each chunk: the record goes out with its descriptor.
+        let uploaded = uploaded_file(0x41);
+        alice.upload_done(&sent, &uploaded, &mut rng).unwrap();
+        assert_eq!(alice.next_event(), Some(Event::File { message: sent }));
+        assert_eq!(
+            alice.info(&sent).unwrap().file.unwrap().state,
+            FileState::Ready
+        );
+        let outgoing = alice.take_outgoing().unwrap();
+        assert_eq!(outgoing.message, sent);
+        let sent_record = AppMessage::parse(&outgoing.app, Channel::Pairwise).unwrap();
+        assert_eq!(sent_record.kind, AppKind::Attachment);
+        let descriptor = umbra_wire::descriptor::FileDescriptor::parse(sent_record.body).unwrap();
+        assert_eq!(descriptor.refs[0].chunk_id, [0x41; 32]);
+
+        // Bob gets the record, and his device wants the file.
+        bob.commit_network(
+            &[],
+            &[(bob_contact, outgoing.app.clone())],
+            2_000_000,
+            &mut rng,
+        )
+        .unwrap();
+        let Some(Event::Message { message: got, .. }) = bob.next_event() else {
+            panic!("no message");
+        };
+        assert_eq!(
+            bob.info(&got).unwrap().file.unwrap().state,
+            FileState::Wanted
+        );
+        assert_eq!(bob.info(&got).unwrap().file.unwrap().shape, shape);
+        let job = bob.take_download().unwrap();
+        assert_eq!(job.message, got);
+        assert_eq!(job.descriptor.refs[0].chunk_id, [0x41; 32]);
+        assert_eq!(bob.file_bytes(&got), Err(Error::NotFound));
+
+        // A download that failed can start again, and one that did not fail
+        // cannot.
+        assert_eq!(bob.fetch_file(&got, &mut rng), Err(Error::Malformed));
+        bob.download_failed(&got, &mut rng).unwrap();
+        assert_eq!(bob.next_event(), Some(Event::File { message: got }));
+        assert_eq!(
+            bob.info(&got).unwrap().file.unwrap().state,
+            FileState::Failed
+        );
+        bob.fetch_file(&got, &mut rng).unwrap();
+        assert_eq!(bob.take_download().unwrap().message, got);
+        bob.download_done(&got, &photo, &mut rng).unwrap();
+        assert_eq!(bob.next_event(), Some(Event::File { message: got }));
+        assert_eq!(
+            bob.info(&got).unwrap().file.unwrap().state,
+            FileState::Ready
+        );
+        assert_eq!(*bob.file_bytes(&got).unwrap(), *photo);
+
+        // A descriptor that this device cannot read is a message with a file
+        // that did not arrive, and no download starts.
+        let unread = record(AppKind::Attachment, [0x77; 16], &[1, 2, 3]);
+        bob.commit_network(&[], &[(bob_contact, unread)], 2_100_000, &mut rng)
+            .unwrap();
+        let Some(Event::Message { message: bad, .. }) = bob.next_event() else {
+            panic!("no message");
+        };
+        assert_eq!(
+            bob.info(&bad).unwrap().file.unwrap().state,
+            FileState::Failed
+        );
+        assert!(bob.take_download().is_none());
+
+        // ATT-161: the deletion of the message erases each chunk of its file
+        // at each relay, and the store holds no row of the file.
+        alice.delete_for_me(&sent).unwrap();
+        let erase = alice.take_erasure().unwrap();
+        assert_eq!(erase.chunk_id, [0x41; 32]);
+        assert_eq!(erase.cred.expose(), &[0x36; 32]);
+        assert_eq!(erase.relays.len(), 3);
+        assert!(alice.take_erasure().is_none());
+        assert_eq!(alice.file_bytes(&sent), Err(Error::NotFound));
+        // Bob uploaded nothing, thus his deletion erases no chunk.
+        bob.delete_for_me(&got).unwrap();
+        assert!(bob.take_erasure().is_none());
+        assert_eq!(bob.file_bytes(&got), Err(Error::NotFound));
+        alice.audit().unwrap();
+        bob.audit().unwrap();
+    }
+
     #[test]
     fn a_deletion_leaves_a_placeholder_and_reaches_the_messages_of_its_sender_alone() {
         use umbra_wire::app::{
@@ -1227,7 +1405,6 @@ mod tests {
         let conversation = ConversationId([7; 16]);
         let mut draft = client.new_draft(conversation);
         draft.set_text(&units("still waiting")).unwrap();
-        draft.attach("content://media/9".into());
         let waiting = client.send_draft(draft, 1_010_000, &mut rng).unwrap();
         let mut gone = client.new_draft(conversation);
         gone.set_text(&units("never mind")).unwrap();
@@ -1253,7 +1430,6 @@ mod tests {
         client.unlock(&units("correct horse"), 5_000).unwrap();
         let outgoing = client.take_outgoing().unwrap();
         assert_eq!(outgoing.message, waiting);
-        assert_eq!(outgoing.attachments, ["content://media/9"]);
         assert!(client.take_outgoing().is_none());
         assert_eq!(client.render(&cancelled, &mut view), Err(Error::NotFound));
     }

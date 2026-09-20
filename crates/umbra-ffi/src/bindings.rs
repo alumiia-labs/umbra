@@ -20,6 +20,7 @@ use std::{
 
 use tokio::sync::mpsc;
 use umbra_core::{
+    attach::{place::AttachmentRelay, transfer::Shape},
     directory::{
         bloc::BlocList,
         manifest::{RelayManifest, RelaySet},
@@ -40,6 +41,7 @@ use crate::{
     draft::Draft,
     runtime::{run_client, Ended, OsRng, Persist, Update},
     sqlite::SqliteBackend,
+    transfers::{run_transfers, TransferCommand, TransferUpdate},
     ConversationId, Delivery, Error, Event, MsgRef, Sink,
 };
 
@@ -186,6 +188,9 @@ pub struct RelayEndpoint {
     /// network on one machine names a network for each relay here, because
     /// each of its relays has the address of that machine.
     pub prefix: Option<Vec<u8>>,
+    /// Whether the relay holds chunks of files (Part 13). A network from a
+    /// descriptor text has no such relay.
+    pub holds_files: bool,
 }
 
 /// The network of the client: a set of relays for its chains. The first
@@ -314,6 +319,7 @@ fn endpoints_of(set: &RelaySet) -> Vec<RelayEndpoint> {
             country: String::from_utf8_lossy(&relay.jurisdiction).into_owned(),
             asn: relay.candidate.asn,
             prefix: None,
+            holds_files: relay.has_attachment_role && relay.candidate.is_exit(),
         })
         .collect()
 }
@@ -381,6 +387,7 @@ pub fn parse_network(text: String, root_ca_path: Option<String>) -> Result<Netwo
                     country: String::new(),
                     asn: 0,
                     prefix: None,
+                    holds_files: false,
                 };
                 if has_facts {
                     read_facts(&mut relay, facts)?;
@@ -539,6 +546,24 @@ pub struct MsgInfo {
     /// The message that it answers. With `is_reply` and no handle here, the
     /// device does not hold that message, and the view says so (`WIR-173`).
     pub reply_to: Option<Arc<MsgHandle>>,
+    /// The file of the message, or none.
+    pub file: Option<MsgFile>,
+}
+
+/// The file of a message, with no byte of it.
+#[derive(uniffi::Record)]
+pub struct MsgFile {
+    /// 1 while this device uploads it, 2 while this device did not fetch it
+    /// yet, 3 when the store holds it, and 4 after a transfer that failed.
+    pub state: u8,
+    /// The media class of the descriptor.
+    pub mime_class: u8,
+    /// The width of an image or a video, else 0.
+    pub pixel_w: u16,
+    /// The height of an image or a video, else 0.
+    pub pixel_h: u16,
+    /// The duration of an audio or a video object, else 0.
+    pub media_seconds: u16,
 }
 
 /// One reaction to a message. The emoji holds emoji code points and no
@@ -587,6 +612,14 @@ pub enum FfiEvent {
     Online,
     /// The set of the circuits changed. [`Handle::connection`] gives it.
     Circuits,
+    /// The state of the file of a message changed. [`Handle::msg_info`]
+    /// gives it.
+    File {
+        /// The conversation.
+        conversation: Vec<u8>,
+        /// The message.
+        message: Arc<MsgHandle>,
+    },
     /// The run of the network ended. The cause is 0 for a stop by the
     /// application, 1 for a dial that failed, 2 for a link that closed, 3
     /// for a circuit that a relay destroyed, 4 for a fault in the client,
@@ -720,13 +753,30 @@ impl DraftHandle {
         Ok(())
     }
 
-    /// Adds a file by its reference on the platform.
-    pub fn attach(&self, file_ref: String) -> Result<(), FfiError> {
-        locked(&self.0)
+    /// Gives the draft its file. The core reads the bytes at `path`, which
+    /// on Android is the path of an open descriptor of this process, thus
+    /// the bytes of the file cross no surface. The four values are the media
+    /// fields of the descriptor of Part 13 §13.3, after the re-encode of
+    /// `ATT-155`.
+    pub fn attach_file(
+        &self,
+        path: String,
+        mime_class: u8,
+        pixel_w: u16,
+        pixel_h: u16,
+        media_seconds: u16,
+    ) -> Result<(), FfiError> {
+        let plain = Zeroizing::new(std::fs::read(&path).map_err(|_| FfiError::NotFound)?);
+        let shape = Shape {
+            mime_class,
+            media_seconds,
+            pixel_w,
+            pixel_h,
+        };
+        Ok(locked(&self.0)
             .as_mut()
             .ok_or(FfiError::NotFound)?
-            .attach(file_ref);
-        Ok(())
+            .attach(plain, shape)?)
     }
 }
 
@@ -748,9 +798,179 @@ struct Inner {
     circuits: Vec<[[u8; 32]; 3]>,
     /// Whether an event tells the platform that the circuits changed.
     circuits_changed: bool,
+    /// This handle, for the task that brings the results of the transfers.
+    me: Weak<Handle>,
+    /// The runtime of the run, which also runs the transfer task.
+    spawner: Option<tokio::runtime::Handle>,
+    /// The authority of a test network, for the link of the transfer task.
+    root_ca_path: Option<String>,
+    /// The commands of the transfer task, or none before the first
+    /// transfer of a run.
+    transfers: Option<mpsc::UnboundedSender<TransferCommand>>,
+    /// The message of each transfer that runs, and whether it is an upload.
+    transfer_tags: BTreeMap<u64, (crate::MsgRef, bool)>,
+    next_transfer_tag: u64,
 }
 
 impl Inner {
+    /// Gives each file job of the store to the transfer task (Part 13
+    /// §13.8). With no run of the network the jobs wait in the store.
+    fn pump_transfers(&mut self) {
+        if self.bridge.is_none() {
+            return;
+        }
+        let mut commands = Vec::new();
+        while let Some(job) = self.client.take_upload() {
+            let tag = self.next_tag(job.message, true);
+            commands.push(TransferCommand::Upload {
+                tag,
+                plain: job.plain,
+                shape: job.shape,
+            });
+        }
+        while let Some(job) = self.client.take_download() {
+            let tag = self.next_tag(job.message, false);
+            commands.push(TransferCommand::Download {
+                tag,
+                descriptor: job.descriptor,
+            });
+        }
+        while let Some(job) = self.client.take_erasure() {
+            commands.push(TransferCommand::Erase {
+                chunk_id: job.chunk_id,
+                cred: job.cred,
+                relays: job.relays,
+            });
+        }
+        for command in commands {
+            self.send_transfer(command);
+        }
+    }
+
+    fn next_tag(&mut self, message: crate::MsgRef, is_upload: bool) -> u64 {
+        self.next_transfer_tag = self.next_transfer_tag.wrapping_add(1);
+        self.transfer_tags
+            .insert(self.next_transfer_tag, (message, is_upload));
+        self.next_transfer_tag
+    }
+
+    /// Sends one command to the transfer task. The task ends after a time
+    /// with no transfer, thus a command can find none, and a new one starts.
+    fn send_transfer(&mut self, command: TransferCommand) {
+        let command = match &self.transfers {
+            Some(sender) => match sender.send(command) {
+                Ok(()) => return,
+                Err(refused) => refused.0,
+            },
+            None => command,
+        };
+        self.transfers = self.start_transfers();
+        let refused = match &self.transfers {
+            Some(sender) => sender.send(command).err().map(|refused| refused.0),
+            None => Some(command),
+        };
+        // No task runs: the transfer fails, and the user can ask again.
+        if let Some(TransferCommand::Upload { tag, .. } | TransferCommand::Download { tag, .. }) =
+            refused
+        {
+            self.end_transfer(TransferUpdate::Failed { tag });
+        }
+    }
+
+    fn start_transfers(&mut self) -> Option<mpsc::UnboundedSender<TransferCommand>> {
+        let spawner = self.spawner.clone()?;
+        let guard_id = self.guard?;
+        let guard = self
+            .relays
+            .iter()
+            .find(|relay| relay.relay_id.as_slice() == guard_id.as_slice())?;
+        let dial = Dial {
+            host: guard.host.clone(),
+            addr_v4: Some(guard.ipv4.as_slice().try_into().ok()?),
+            addr_v6: None,
+            port: guard.port,
+        };
+        let ingress = relay_info(guard).ok()?;
+        let mut candidates = Vec::new();
+        let mut holders = Vec::new();
+        for relay in self.relays.iter().filter(|relay| relay.layer != 1) {
+            let info = relay_info(relay).ok()?;
+            if relay.holds_files {
+                holders.push(AttachmentRelay {
+                    relay_id: info.candidate.relay_id,
+                    operator_id: info.candidate.operator_id,
+                    family_id: info.candidate.family_id,
+                });
+            }
+            candidates.push(info);
+        }
+        let tls = match &self.root_ca_path {
+            Some(path) => native::tls_config_with_root_file(path),
+            None => native::tls_config(),
+        }
+        .ok()?;
+        let node =
+            ClientNode::for_transfers(ingress, candidates, self.client.root_identity().ok()?);
+        let (commands, task_commands) = mpsc::unbounded_channel();
+        let (task_updates, mut updates) = mpsc::unbounded_channel();
+        spawner.spawn(run_transfers(
+            node,
+            dial,
+            tls,
+            holders,
+            task_commands,
+            task_updates,
+        ));
+        let me = self.me.clone();
+        spawner.spawn(async move {
+            while let Some(update) = updates.recv().await {
+                let Some(handle) = me.upgrade() else {
+                    break;
+                };
+                handle.on_transfer_update(update);
+            }
+        });
+        Some(commands)
+    }
+
+    /// Takes the end of one transfer into the store. A message that a
+    /// deletion took since has no row, and its result goes nowhere.
+    fn end_transfer(&mut self, update: TransferUpdate) {
+        let Inner {
+            client,
+            bridge,
+            transfer_tags,
+            ..
+        } = self;
+        match update {
+            TransferUpdate::Progress { .. } => {}
+            TransferUpdate::Uploaded { tag, uploaded } => {
+                if let Some((message, _)) = transfer_tags.remove(&tag) {
+                    if client.upload_done(&message, &uploaded, &mut OsRng).is_ok() {
+                        // The record with the descriptor goes to the send path.
+                        if let Some(running) = bridge {
+                            let _ = running.flush(client, &mut OsRng);
+                        }
+                    }
+                }
+            }
+            TransferUpdate::Downloaded { tag, plain } => {
+                if let Some((message, _)) = transfer_tags.remove(&tag) {
+                    let _ = client.download_done(&message, &plain, &mut OsRng);
+                }
+            }
+            TransferUpdate::Failed { tag } => match transfer_tags.remove(&tag) {
+                Some((message, true)) => {
+                    let _ = client.upload_failed(&message, &mut OsRng);
+                }
+                Some((message, false)) => {
+                    let _ = client.download_failed(&message, &mut OsRng);
+                }
+                None => {}
+            },
+        }
+    }
+
     fn has_event(&self) -> bool {
         self.client.has_event() || !self.net_events.is_empty() || self.circuits_changed
     }
@@ -777,6 +997,15 @@ impl Inner {
                 },
                 Event::Deleted { conversation, .. } => FfiEvent::Deleted {
                     conversation: conversation.0.to_vec(),
+                },
+                Event::File { message } => FfiEvent::File {
+                    // A message that a deletion took since has no
+                    // conversation, and the view of none changes.
+                    conversation: self
+                        .client
+                        .conversation_of_message(&message)
+                        .map_or(Vec::new(), |conversation| conversation.0.to_vec()),
+                    message: Arc::new(MsgHandle(message)),
                 },
                 Event::Locked => FfiEvent::Locked,
                 Event::IntegrityFault => FfiEvent::IntegrityFault,
@@ -918,6 +1147,12 @@ pub fn init(
             relays: Vec::new(),
             circuits: Vec::new(),
             circuits_changed: false,
+            me: Weak::new(),
+            spawner: None,
+            root_ca_path: None,
+            transfers: None,
+            transfer_tags: BTreeMap::new(),
+            next_transfer_tag: 0,
         }),
         changed: Condvar::new(),
         runtime: Mutex::new(None),
@@ -975,6 +1210,11 @@ impl Persist for HandleStore {
 
 impl Handle {
     /// A task of the runtime gives one update of the network to the client.
+    fn on_transfer_update(&self, update: TransferUpdate) {
+        locked(&self.inner).end_transfer(update);
+        self.changed.notify_all();
+    }
+
     fn on_update(&self, update: Update) {
         let mut inner = locked(&self.inner);
         let Inner {
@@ -1025,9 +1265,23 @@ impl Handle {
         }
         if ended {
             *bridge = None;
+            // The transfer task has a link of its own. It ends with the run,
+            // and the store holds what it did not complete.
+            inner.transfers = None;
         }
+        // A record with a descriptor asks for its file.
+        inner.pump_transfers();
         drop(inner);
         self.changed.notify_all();
+    }
+}
+
+impl Handle {
+    /// The file of a message, in the clear, for a caller in Rust. No binding
+    /// exports it: how the bytes of a file reach a platform view is an open
+    /// decision under `IMP-037`.
+    pub fn file_bytes(&self, message: &MsgHandle) -> Result<Zeroizing<Vec<u8>>, FfiError> {
+        Ok(locked(&self.inner).client.file_bytes(&message.0)?)
     }
 }
 
@@ -1203,6 +1457,10 @@ impl Handle {
             inner.relays.clone_from(&network.relays);
             inner.circuits.clear();
             inner.circuits_changed = true;
+            inner.me = Arc::downgrade(&self);
+            inner.spawner = Some(runtime.handle().clone());
+            inner.root_ca_path.clone_from(&network.root_ca_path);
+            inner.transfers = None;
             let Inner {
                 client,
                 bridge,
@@ -1230,6 +1488,8 @@ impl Handle {
             // again. The runtime holds it until the circuit is ready.
             let mut running = Bridge::new(commands, contacts);
             client.requeue_waiting()?;
+            // Each transfer that an earlier run left open starts again.
+            client.requeue_transfers()?;
             running.flush(client, &mut OsRng)?;
             *bridge = Some(running);
             runtime.spawn(run_client(
@@ -1264,7 +1524,12 @@ impl Handle {
     /// Ends the network. Each contact stays in the store, and the next
     /// [`Handle::connect`] continues it.
     pub fn disconnect(&self) {
-        locked(&self.inner).bridge = None;
+        {
+            let mut inner = locked(&self.inner);
+            inner.bridge = None;
+            inner.transfers = None;
+            inner.spawner = None;
+        }
         if let Some(runtime) = locked(&self.runtime).take() {
             runtime.shutdown_background();
         }
@@ -1422,6 +1687,8 @@ impl Handle {
         if let Some(running) = bridge {
             running.flush(client, &mut OsRng)?;
         }
+        // A file goes to the relays first, and its record follows.
+        inner.pump_transfers();
         drop(inner);
         self.changed.notify_all();
         Ok(Arc::new(MsgHandle(message)))
@@ -1478,7 +1745,23 @@ impl Handle {
                 crate::ReplyTarget::Message(target) => Some(Arc::new(MsgHandle(target))),
                 _ => None,
             },
+            file: info.file.map(|file| MsgFile {
+                state: file.state as u8,
+                mime_class: file.shape.mime_class,
+                pixel_w: file.shape.pixel_w,
+                pixel_h: file.shape.pixel_h,
+                media_seconds: file.shape.media_seconds,
+            }),
         })
+    }
+
+    /// Asks again for the file of a received message whose download failed.
+    /// A [`FfiEvent::File`] follows its end.
+    pub fn fetch_file(&self, message: Arc<MsgHandle>) -> Result<(), FfiError> {
+        let mut inner = locked(&self.inner);
+        inner.client.fetch_file(&message.0, &mut OsRng)?;
+        inner.pump_transfers();
+        Ok(())
     }
 
     /// The reactions to a message, those of this device first.
@@ -1527,7 +1810,11 @@ impl Handle {
     /// Removes a message, or the placeholder of a deleted one, from this
     /// device. No record leaves the device.
     pub fn delete_for_me(&self, message: Arc<MsgHandle>) -> Result<(), FfiError> {
-        Ok(locked(&self.inner).client.delete_for_me(&message.0)?)
+        let mut inner = locked(&self.inner);
+        inner.client.delete_for_me(&message.0)?;
+        // ATT-161: the chunks of a file that this device uploaded go too.
+        inner.pump_transfers();
+        Ok(())
     }
 
     /// Asks the contact to delete a message that this device sent, and
@@ -1542,6 +1829,7 @@ impl Handle {
         if let Some(running) = bridge {
             running.flush(client, &mut OsRng)?;
         }
+        inner.pump_transfers();
         Ok(())
     }
 

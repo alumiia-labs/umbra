@@ -413,7 +413,7 @@ init(config, SecureElement, CharArray) -> Handle   // the passphrase, at the fir
 // Rust side, writes into it, and sends the handle.
 new_draft(handle, conv) -> Draft
 draft_set_text(draft, CharArray)          // Android: CharArray, not String
-draft_attach(draft, FileRef)
+draft_attach(draft, path, class, w, h, seconds)   // one file, and no text beside it
 send_draft(handle, Draft) -> MsgId
 cancel_send(handle, MsgId)
 
@@ -422,7 +422,8 @@ cancel_send(handle, MsgId)
 next_event(handle) -> Event               // Event carries a MsgRef, not bytes
 wait_event(handle, timeout_ms) -> Event   // the same, and the call waits
 msg_render(MsgRef, Sink)
-msg_info(handle, MsgRef) -> MsgInfo       // the direction, the delivery state, two times
+msg_info(handle, MsgRef) -> MsgInfo       // the direction, the delivery state, two times, the file state
+fetch_file(handle, MsgRef)                // a second attempt for a file that did not arrive
 messages(handle, conv) -> [MsgRef]        // the handles of one conversation
 
 // The network. The relay directory of Part 10 replaces the Network record.
@@ -449,6 +450,14 @@ exception of §15.4.
 **[IMP-037]** The FFI surface MUST NOT carry message plaintext, key material, or
 a passphrase as a Kotlin `ByteArray` or a Kotlin `String`. §15.4 rule `IMP-017`
 gives that rule, and this section gives the surface that obeys it.
+
+**[IMP-165]** The file of a draft MUST cross the surface as a path that the
+core reads, and not as its bytes. On Android the path names an open descriptor
+of the process, `/proc/self/fd/<n>`, which the platform got from the content
+resolver or from a pipe that carries the re-encode of Part 13 rule `ATT-155`.
+Thus the surface carries no byte of the file, and the device holds no copy of
+it outside the store (`IMP-160`). How the bytes of a received file reach a
+platform view is not decided in 0.2.0-draft, and the surface has no such call.
 
 **[IMP-038]** `Draft` and `MsgRef` MUST be opaque UniFFI object handles.
 **[IMP-039]** An implementation MUST zeroize the buffer behind a `Draft` when
@@ -853,6 +862,9 @@ flight 1, with its one-time prekey.
 | `0x0C` | Pending references | One deletion or one edit of a contact whose target did not arrive yet: the conversation, the `msg_ref` of the target, the time of the record, and the new text of an edit. An entry with no text is a deletion (Part 7 §7.5.6) |
 | `0x0D` | Revisions | How many times the sender of a message changed its text, under the row of that message. A message with no row here shows no edited mark |
 | `0x0E` | Reactions | One reaction: the conversation, the `msg_ref` of its target, the direction, and the emoji. One party holds one row for one emoji on one message (Part 6 §6.6.9) |
+| `0x0F` | File states | The file of one message, under the row of that message: whether this device uploads it, wants it, holds it, or failed at its transfer, and the media fields of its descriptor (Part 13 §13.3) |
+| `0x10` | Files | The plaintext of the file of one message, under the row of that message |
+| `0x11` | Chunk credentials | For a file that this device uploaded: the `chunk_id`, the `cred_sk`, and the relays of each chunk, until the erase (Part 13 rules `ATT-160` and `ATT-161`) |
 
 The stored form of a row is local to one device, and no peer reads it. This
 part gives it no byte layout. **[IMP-130]** A stored object MUST start with a
@@ -868,6 +880,29 @@ version byte, and a client MUST reject a row whose version it does not read.
   relay of the outbound queue as the relay of the inbound queue of a
   contact, and the relay that the stored bundle names as the relay of the
   queue of an invitation.
+- **[IMP-160]** The plaintext of a file MUST sit in the at-rest store and
+  in no other place on the device: no cache file, no temporary file, and no
+  platform media store. A client MUST put the file of a draft into the store
+  at the send, before the first chunk leaves. Thus an upload continues after
+  a new start with no second read of the source, which the platform can
+  take away. **[IMP-161]** A lock MUST take each file job out of the memory,
+  because a job holds its file in the clear, and an unlock MUST make the jobs
+  again from the store.
+- **[IMP-162]** The record of a file holds its descriptor (Part 6 §6.6 kind
+  `0x02`), and the descriptor exists when the relays hold each chunk. Thus a
+  client MUST store the message with no descriptor at the send, MUST NOT
+  give that record to the send path, and MUST write the descriptor into the
+  row and queue the record when the upload ends. An upload that fails MUST
+  give the message the delivery state `failed`.
+- **[IMP-163]** A client MUST start a download for each received record of
+  kind `0x02` whose descriptor it can read. A descriptor that does not parse,
+  or that has a level that the client does not build, MUST show as a file
+  whose transfer failed, and the message MUST stay. A client MUST let the
+  user start a failed download again.
+- **[IMP-164]** A deletion of a message MUST erase its rows in the tables
+  `0x0F`, `0x10` and `0x11` in the batch that takes the message, and for a
+  file that this device uploaded it MUST then send the `CDEL` of `ATT-161`
+  for each chunk to each relay of that chunk.
 - **[IMP-159]** A client MUST keep the highest epoch of a `DirectoryRoot`
   that it verified in the settings table, and it MUST give the larger of
   that value and the shipped epoch of `REL-045` to the consensus at each

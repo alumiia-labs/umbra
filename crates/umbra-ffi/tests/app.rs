@@ -247,6 +247,7 @@ fn network_of(ports: &[u16]) -> Network {
                     country: format!("Z{}", char::from(b'A' + number)),
                     asn: 64_500 + u32::from(number),
                     prefix: Some(vec![10, number]),
+                    holds_files: false,
                 }
             })
             .collect(),
@@ -1078,4 +1079,109 @@ fn a_file_goes_through_the_relays_of_a_signed_network() {
         transfer_end(&mut receiver_updates),
         TransferUpdate::Failed { tag: 10 }
     ));
+}
+
+/// Waits until the file of a message has the state `state`.
+fn wait_for_file(handle: &Handle, message: &Arc<MsgHandle>, state: u8) {
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(60) {
+        let file = handle.msg_info(message.clone()).unwrap().file.unwrap();
+        if file.state == state {
+            return;
+        }
+        assert_ne!(file.state, 4, "the transfer failed");
+        let _ = handle.wait_event(200);
+    }
+    panic!("the file did not reach the state {state} in time");
+}
+
+#[test]
+fn one_app_sends_a_file_and_the_other_app_gets_it() {
+    let relays = tokio::runtime::Runtime::new().unwrap();
+    let network = start_signed_network(&relays);
+    let directory = std::env::temp_dir().join(format!("umbra-files-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    for name in ["alice.db", "bob.db", "photo.bin"] {
+        let _ = std::fs::remove_file(directory.join(name));
+    }
+    let alice = launch(&directory, "alice.db", 1);
+    let bob = launch(&directory, "bob.db", 2);
+    for handle in [&alice, &bob] {
+        let verified = handle
+            .network_of_manifest(
+                network.manifest.clone(),
+                network.keyset.clone(),
+                0,
+                HOST.into(),
+                Some(CA.into()),
+            )
+            .unwrap();
+        // The three relays of layer 3 hold the chunks of a file.
+        let holders = verified
+            .network
+            .relays
+            .iter()
+            .filter(|relay| relay.holds_files);
+        assert_eq!(holders.count(), 3);
+        handle.clone().connect(verified.network).unwrap();
+    }
+    alice.invite().unwrap();
+    let link = wait_for(&alice, |event| match event {
+        FfiEvent::Invitation { link } => Some(link),
+        _ => None,
+    });
+    bob.accept(link).unwrap();
+    let alice_conversation = wait_for_contact(&alice);
+    let bob_conversation = wait_for_contact(&bob);
+
+    // A file of five chunks, which the platform gives by its path.
+    let plain: Vec<u8> = (0..140_000u32).map(|i| (i % 249) as u8).collect();
+    let path = directory.join("photo.bin");
+    std::fs::write(&path, &plain).unwrap();
+    let draft = alice.new_draft(alice_conversation.clone()).unwrap();
+    draft
+        .attach_file(path.to_str().unwrap().to_owned(), 1, 800, 600, 0)
+        .unwrap();
+    // The record of a file holds no text.
+    let both = alice.new_draft(alice_conversation.clone()).unwrap();
+    both.set_text(units("a caption")).unwrap();
+    both.attach_file(path.to_str().unwrap().to_owned(), 1, 800, 600, 0)
+        .unwrap();
+    assert_eq!(alice.send_draft(both).err(), Some(FfiError::Malformed));
+
+    let sent = alice.send_draft(draft).unwrap();
+    let info = alice.msg_info(sent.clone()).unwrap();
+    let file = info.file.unwrap();
+    assert_eq!((file.pixel_w, file.pixel_h, file.mime_class), (800, 600, 1));
+    assert!(file.state == 1 || file.state == 3);
+    // The sender holds its own file from the start.
+    assert_eq!(*alice.file_bytes(&sent).unwrap(), plain);
+
+    // The relays take the chunks, and then the record with the descriptor
+    // goes to Bob. His device fetches the file.
+    let (conversation, received) = wait_for_message(&bob);
+    assert_eq!(conversation, bob_conversation);
+    wait_for_file(&alice, &sent, 3);
+    wait_for_file(&bob, &received, 3);
+    let info = bob.msg_info(received.clone()).unwrap();
+    let file = info.file.unwrap();
+    assert_eq!((file.pixel_w, file.pixel_h, file.mime_class), (800, 600, 1));
+    assert_eq!(*bob.file_bytes(&received).unwrap(), plain);
+    // A file has no text to render.
+    assert_eq!(rendered(&bob, received.clone()), "");
+
+    // ATT-161: Alice deletes the message for each party. Her device erases
+    // the chunks, and the two stores hold the file no more.
+    alice.delete_for_everyone(sent.clone()).unwrap();
+    wait_for(&bob, |event| match event {
+        FfiEvent::Deleted { .. } => Some(()),
+        _ => None,
+    });
+    assert!(bob.msg_info(received.clone()).unwrap().file.is_none());
+    assert_eq!(bob.file_bytes(&received).err(), Some(FfiError::NotFound));
+    assert_eq!(alice.file_bytes(&sent).err(), Some(FfiError::NotFound));
+
+    alice.disconnect();
+    bob.disconnect();
+    let _ = std::fs::remove_dir_all(&directory);
 }

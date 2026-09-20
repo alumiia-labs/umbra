@@ -15,9 +15,9 @@ use umbra_core::{
         place::AttachmentRelay,
         transfer::{Download, Progress, Shape, Upload, Uploaded},
     },
-    session::node::{ClientEvent, ClientNode},
+    session::node::{ChunkJob, ClientEvent, ClientNode},
 };
-use umbra_crypto::rand_core::TryRng;
+use umbra_crypto::{rand_core::TryRng, x25519::StaticSecret};
 use umbra_transport::{
     native::{self, ClientConfig},
     race::{Plan, Wire},
@@ -44,6 +44,16 @@ pub enum TransferCommand {
         plain: Zeroizing<Vec<u8>>,
         /// The descriptor fields that the seal does not fix.
         shape: Shape,
+    },
+    /// Erase one chunk that this device uploaded, at each relay that holds
+    /// a copy (`ATT-161`). No update follows.
+    Erase {
+        /// The chunk.
+        chunk_id: [u8; 32],
+        /// `cred_sk` of the chunk.
+        cred: umbra_crypto::secret::Secret<32>,
+        /// Each relay that holds a copy.
+        relays: Vec<[u8; 32]>,
     },
     /// Fetch the file of one descriptor.
     Download {
@@ -109,9 +119,13 @@ pub async fn run_transfers(
             let _ = updates.send(TransferUpdate::Failed { tag: *tag });
         }
         for command in early {
-            let (TransferCommand::Upload { tag, .. } | TransferCommand::Download { tag, .. }) =
-                command;
-            let _ = updates.send(TransferUpdate::Failed { tag: *tag });
+            // An erase that did not leave is lost with this run. The relays
+            // erase the chunk at the end of its life (`ATT-046`).
+            if let TransferCommand::Upload { tag, .. } | TransferCommand::Download { tag, .. } =
+                command
+            {
+                let _ = updates.send(TransferUpdate::Failed { tag: *tag });
+            }
         }
     };
 
@@ -252,6 +266,21 @@ pub async fn run_transfers(
                             let _ = updates.send(TransferUpdate::Failed { tag });
                         }
                     }
+                }
+                TransferCommand::Erase {
+                    chunk_id,
+                    cred,
+                    relays,
+                } => {
+                    for relay in relays {
+                        let job = ChunkJob::Erase {
+                            cred: StaticSecret::from(*cred.expose()),
+                        };
+                        // No transfer owns the handle, thus the answer goes
+                        // nowhere.
+                        let _ = node.chunk(relay, chunk_id, job, &mut rng);
+                    }
+                    idle_since = tokio::time::Instant::now();
                 }
                 TransferCommand::Download { tag, descriptor } => {
                     let started =

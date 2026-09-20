@@ -3,9 +3,22 @@
 //! and the buffer is zero bytes after the drop, whether the send succeeded
 //! or failed (`IMP-039`).
 
+use umbra_core::attach::{transfer::Shape, MAX_DESCRIPTOR_REFS, SEGMENT_SIZE};
 use zeroize::Zeroizing;
 
 use crate::{ConversationId, Error, MsgRef};
+
+/// The largest file of a draft: what a descriptor of level `0x00` holds.
+/// The padding of the last segment takes one byte or more.
+pub const DRAFT_FILE_MAX: usize = MAX_DESCRIPTOR_REFS * SEGMENT_SIZE - 1;
+
+/// The file of a draft: its bytes, and what the descriptor says of it.
+pub struct DraftFile {
+    /// The file, after the re-encode of `ATT-155`.
+    pub plain: Zeroizing<Vec<u8>>,
+    /// The class and the size of the media.
+    pub shape: Shape,
+}
 
 /// The longest text of one draft, in bytes of UTF-8.
 pub const DRAFT_TEXT_MAX: usize = 32_000;
@@ -14,7 +27,7 @@ pub const DRAFT_TEXT_MAX: usize = 32_000;
 pub struct Draft {
     conversation: ConversationId,
     text: Zeroizing<Vec<u8>>,
-    attachments: Vec<String>,
+    file: Option<DraftFile>,
     reply_to: Option<MsgRef>,
 }
 
@@ -24,7 +37,7 @@ impl Draft {
         Draft {
             conversation,
             text: Zeroizing::new(Vec::new()),
-            attachments: Vec::new(),
+            file: None,
             reply_to: None,
         }
     }
@@ -62,25 +75,37 @@ impl Draft {
         Ok(())
     }
 
-    /// Adds a file by its reference on the platform. The send path reads
-    /// the file, seals it, and uploads it (Part 13).
-    pub fn attach(&mut self, file_ref: String) {
-        self.attachments.push(file_ref);
+    /// Gives the draft its file. The record of an attachment holds the
+    /// descriptor and no text (Part 6 §6.6), thus a draft holds a text or a
+    /// file, and one file.
+    pub fn attach(&mut self, plain: Zeroizing<Vec<u8>>, shape: Shape) -> Result<(), Error> {
+        if plain.is_empty() {
+            return Err(Error::Malformed);
+        }
+        if plain.len() > DRAFT_FILE_MAX {
+            return Err(Error::TooLong);
+        }
+        self.file = Some(DraftFile { plain, shape });
+        Ok(())
     }
 
-    /// The text as UTF-8.
     pub(crate) fn text(&self) -> &[u8] {
         &self.text
     }
 
-    /// The file references.
-    pub(crate) fn attachments(&self) -> &[String] {
-        &self.attachments
+    /// The file of the draft, which leaves the draft with this call.
+    pub(crate) fn take_file(&mut self) -> Option<DraftFile> {
+        self.file.take()
+    }
+
+    /// Whether the draft holds a file.
+    pub fn has_file(&self) -> bool {
+        self.file.is_some()
     }
 
     /// Whether the draft holds no text and no file.
     pub fn is_empty(&self) -> bool {
-        self.text.is_empty() && self.attachments.is_empty()
+        self.text.is_empty() && self.file.is_none()
     }
 }
 
@@ -105,7 +130,22 @@ mod tests {
 
         let long = vec![u16::from(b'a'); DRAFT_TEXT_MAX + 1];
         assert_eq!(draft.set_text(&long), Err(Error::TooLong));
-        draft.attach("content://media/1".into());
-        assert_eq!(draft.attachments().len(), 1);
+
+        // A draft takes one file, and not an empty one or one above the bound.
+        let mut with_file = Draft::new(ConversationId([1; 16]));
+        assert_eq!(
+            with_file.attach(Zeroizing::new(Vec::new()), Shape::default()),
+            Err(Error::Malformed)
+        );
+        let large = Zeroizing::new(vec![0u8; DRAFT_FILE_MAX + 1]);
+        assert_eq!(
+            with_file.attach(large, Shape::default()),
+            Err(Error::TooLong)
+        );
+        assert!(with_file.is_empty());
+        with_file
+            .attach(Zeroizing::new(vec![7; 10]), Shape::default())
+            .unwrap();
+        assert!(with_file.has_file() && !with_file.is_empty());
     }
 }

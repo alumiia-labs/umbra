@@ -9,6 +9,10 @@
 
 use std::collections::VecDeque;
 
+mod files;
+
+pub use files::{DownloadJob, ErasureJob, FileInfo, FileState, UploadJob};
+use files::{FileQueues, CHUNK_CRED, FILE_DATA, FILE_STATE};
 use umbra_core::{
     directory::path::IngressPins,
     identity::address::safety_number,
@@ -178,8 +182,6 @@ pub struct Outgoing {
     pub conversation: ConversationId,
     /// The encoded `AppMessage`.
     pub app: Vec<u8>,
-    /// The file references of the draft, for the attachment path.
-    pub attachments: Vec<String>,
 }
 
 struct Open<B: Backend> {
@@ -201,6 +203,7 @@ pub struct Client<B: Backend, E: SecureElement> {
     state: State<B>,
     events: VecDeque<Event>,
     outgoing: VecDeque<Outgoing>,
+    files: FileQueues,
     auto_lock: AutoLock,
 }
 
@@ -214,40 +217,10 @@ fn passphrase_bytes(code_units: &[u16]) -> Result<Zeroizing<Vec<u8>>, Error> {
     Ok(bytes)
 }
 
-fn outbox_row(attachments: &[String]) -> Result<Vec<u8>, Error> {
-    let mut out = Vec::new();
-    out.extend_from_slice(
-        &u16::try_from(attachments.len())
-            .map_err(|_| Error::TooLong)?
-            .to_be_bytes(),
-    );
-    for file_ref in attachments {
-        out.extend_from_slice(
-            &u16::try_from(file_ref.len())
-                .map_err(|_| Error::TooLong)?
-                .to_be_bytes(),
-        );
-        out.extend_from_slice(file_ref.as_bytes());
-    }
-    Ok(out)
-}
-
-fn attachments_of(row: &[u8]) -> Result<Vec<String>, Error> {
-    let take = |at: usize, len: usize| row.get(at..at.saturating_add(len)).ok_or(Error::Integrity);
-    let u16_at = |at: usize| -> Result<usize, Error> {
-        let bytes: [u8; 2] = take(at, 2)?.try_into().map_err(|_| Error::Integrity)?;
-        Ok(usize::from(u16::from_be_bytes(bytes)))
-    };
-    let mut at = 2usize;
-    let mut out = Vec::new();
-    for _ in 0..u16_at(0)? {
-        let len = u16_at(at)?;
-        let text =
-            core::str::from_utf8(take(at.saturating_add(2), len)?).map_err(|_| Error::Integrity)?;
-        out.push(text.to_owned());
-        at = at.saturating_add(2).saturating_add(len);
-    }
-    Ok(out)
+/// The row of a record that waits for the send path. It holds no value:
+/// the row of the message holds the record.
+fn outbox_row() -> Vec<u8> {
+    vec![0, 0]
 }
 
 /// What a stored record of kind `0x05` is. A placeholder names its own
@@ -478,6 +451,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             })),
             events: VecDeque::new(),
             outgoing: VecDeque::new(),
+            files: FileQueues::default(),
             auto_lock: AutoLock::new(now),
         })
     }
@@ -490,6 +464,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             state: State::Locked(backend),
             events: VecDeque::new(),
             outgoing: VecDeque::new(),
+            files: FileQueues::default(),
             auto_lock: AutoLock::new(now),
         }
     }
@@ -539,6 +514,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }));
         // Each record that waited for the send path at the lock waits again.
         self.requeue_waiting()?;
+        self.requeue_transfers()?;
         let seconds = self.auto_lock_seconds()?;
         self.apply_auto_lock(seconds);
         self.auto_lock.touch(now);
@@ -551,6 +527,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if let State::Unlocked(open) = core::mem::replace(&mut self.state, State::Closed) {
             self.state = State::Locked(open.store.lock());
             self.outgoing.clear();
+            // A file job holds the file in the clear, thus it leaves the
+            // memory with the key. The store brings it back at the unlock.
+            self.files = FileQueues::default();
             self.events.push_back(Event::Locked);
         }
     }
@@ -610,6 +589,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             Delete(TableId, RowId),
         }
         let mut planned = Vec::new();
+        let mut wanted: Vec<DownloadJob> = Vec::new();
         for change in changes {
             planned.push(match change {
                 StateChange::Contact { contact, state } => Planned::Put(
@@ -850,6 +830,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                                 }
                             }
                             planned.push(Planned::Delete(REVISION, row));
+                            // The contact uploaded the file, thus this device
+                            // holds no credential that erases a chunk.
+                            planned.push(Planned::Delete(FILE_STATE, row));
+                            planned.push(Planned::Delete(FILE_DATA, row));
                             events.push(Event::Deleted {
                                 conversation,
                                 message: MsgRef(row),
@@ -926,6 +910,21 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 Some(conversation.0),
                 stored_message(INCOMING, Delivery::Delivered, conversation, now_ms, &kept),
             ));
+            if parsed.kind == AppKind::Attachment {
+                let (state, descriptor) = files::incoming_state_row(parsed.body);
+                planned.push(Planned::Put(
+                    FILE_STATE,
+                    row,
+                    Some(conversation.0),
+                    Zeroizing::new(state),
+                ));
+                if let Some(descriptor) = descriptor {
+                    wanted.push(DownloadJob {
+                        message,
+                        descriptor: Box::new(descriptor),
+                    });
+                }
+            }
             events.push(Event::Message {
                 conversation,
                 message,
@@ -957,6 +956,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
         batch.commit()?;
         self.events.extend(events);
+        self.files.downloads.extend(wanted);
         Ok(())
     }
 
@@ -1335,8 +1335,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// the row and its key.
     pub fn delete_for_me(&mut self, message: &MsgRef) -> Result<(), Error> {
         self.outgoing.retain(|waiting| waiting.message != *message);
+        self.files.uploads.retain(|job| job.message != *message);
+        self.files.downloads.retain(|job| job.message != *message);
         let conversation = self.conversation_of_message(message)?;
         let reactions = self.reaction_rows(message, conversation)?;
+        let erasures = self.file_erasures(message)?;
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         for row in reactions {
@@ -1345,7 +1348,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         batch.delete(TableId::MESSAGE, message.0);
         batch.delete(OUTBOX, message.0);
         batch.delete(REVISION, message.0);
-        Ok(batch.commit()?)
+        for table in [FILE_STATE, FILE_DATA, CHUNK_CRED] {
+            batch.delete(table, message.0);
+        }
+        batch.commit()?;
+        // ATT-161: a deletion of a record with a file that this device
+        // uploaded erases each chunk at its relays.
+        self.files.erasures.extend(erasures);
+        Ok(())
     }
 
     /// The reactions to a message: those of this device first, and each
@@ -1457,14 +1467,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             &stored,
             rng,
         )?;
-        batch.put(OUTBOX, request_row, None, &outbox_row(&[])?, rng)?;
+        batch.put(OUTBOX, request_row, None, &outbox_row(), rng)?;
         batch.commit()?;
 
         self.outgoing.push_back(Outgoing {
             message: MsgRef(request_row),
             conversation,
             app: request,
-            attachments: Vec::new(),
         });
         self.auto_lock.touch(now_ms / 1_000);
         Ok(())
@@ -1568,7 +1577,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             &stored,
             rng,
         )?;
-        batch.put(OUTBOX, request_row, None, &outbox_row(&[])?, rng)?;
+        batch.put(OUTBOX, request_row, None, &outbox_row(), rng)?;
         batch.commit()?;
 
         // A message that the send path did not take yet goes with its new
@@ -1580,13 +1589,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             message: MsgRef(request_row),
             conversation,
             app: request.to_vec(),
-            attachments: Vec::new(),
         });
         self.auto_lock.touch(now_ms / 1_000);
         Ok(())
     }
 
-    fn conversation_of_message(&self, message: &MsgRef) -> Result<ConversationId, Error> {
+    /// The conversation of a message.
+    pub fn conversation_of_message(&self, message: &MsgRef) -> Result<ConversationId, Error> {
         let plain = Zeroizing::new(
             self.open_ref()?
                 .store
@@ -1621,6 +1630,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
         let conversation = conversation_of(&plain)?;
         let reactions = self.reaction_rows(message, conversation)?;
+        let erasures = self.file_erasures(message)?;
         let open = self.open_mut()?;
         let limit = [LAST_DELETE_SETTING, conversation.0.as_slice()].concat();
         let limit_row = open.store.row_id(SETTINGS, &limit);
@@ -1650,9 +1660,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             rng,
         )?;
         // The message itself waits for no relay now, and a placeholder has
-        // no edited mark and no reaction.
+        // no edited mark, no reaction, and no file.
         batch.delete(OUTBOX, message.0);
         batch.delete(REVISION, message.0);
+        for table in [FILE_STATE, FILE_DATA, CHUNK_CRED] {
+            batch.delete(table, message.0);
+        }
         for row in reactions {
             batch.delete(REACTION, row);
         }
@@ -1663,16 +1676,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             &stored,
             rng,
         )?;
-        batch.put(OUTBOX, request_row, None, &outbox_row(&[])?, rng)?;
+        batch.put(OUTBOX, request_row, None, &outbox_row(), rng)?;
         batch.put(SETTINGS, limit_row, None, &now.to_be_bytes(), rng)?;
         batch.commit()?;
 
+        // ATT-161: the chunks of a file that this device uploaded go too.
+        self.files.erasures.extend(erasures);
+        self.files.uploads.retain(|job| job.message != *message);
         self.outgoing.retain(|waiting| waiting.message != *message);
         self.outgoing.push_back(Outgoing {
             message: MsgRef(request_row),
             conversation,
             app: request,
-            attachments: Vec::new(),
         });
         self.auto_lock.touch(now);
         Ok(())
@@ -1865,7 +1880,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         self.outgoing.clear();
         let store = &self.open_ref()?.store;
         let mut waiting_records = Vec::new();
-        for (row, waiting) in store.list(OUTBOX, None)? {
+        for (row, _) in store.list(OUTBOX, None)? {
             let Some(plain) = store.get(TableId::MESSAGE, &row)? else {
                 continue;
             };
@@ -1880,7 +1895,6 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         .get(MESSAGE_PREFIX..)
                         .ok_or(Error::Integrity)?
                         .to_vec(),
-                    attachments: attachments_of(&waiting)?,
                 },
             ));
         }
@@ -1923,7 +1937,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// call succeeds or fails (`IMP-039`).
     pub fn send_draft<R: CryptoRng + ?Sized>(
         &mut self,
-        draft: Draft,
+        mut draft: Draft,
         now_ms: u64,
         rng: &mut R,
     ) -> Result<MsgRef, Error> {
@@ -1933,6 +1947,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut msg_id = [0u8; 16];
         rng.fill_bytes(&mut msg_id);
         let conversation = draft.conversation();
+        if let Some(file) = draft.take_file() {
+            // The record of a file holds the descriptor alone.
+            if !draft.text().is_empty() || draft.reply_to().is_some() {
+                return Err(Error::Malformed);
+            }
+            return self.send_file(conversation, msg_id, file, now_ms, rng);
+        }
         // A reply is a rich record around the text. The wire carries the raw
         // `msg_id` of the target, which the row of the target holds.
         let rich = match draft.reply_to() {
@@ -1974,7 +1995,6 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         };
         let mut app = Zeroizing::new(vec![0u8; message.len()]);
         message.encode(&mut app)?;
-        let attachments = draft.attachments().to_vec();
         drop(rich);
 
         let open = self.open_mut()?;
@@ -1985,7 +2005,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let plain = stored_message(OUTGOING, Delivery::Queued, conversation, now_ms, &app);
         let mut batch = open.store.begin();
         batch.put(TableId::MESSAGE, row, Some(conversation.0), &plain, rng)?;
-        batch.put(OUTBOX, row, None, &outbox_row(&attachments)?, rng)?;
+        batch.put(OUTBOX, row, None, &outbox_row(), rng)?;
         batch.commit()?;
 
         let message = MsgRef(row);
@@ -1993,7 +2013,52 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             message,
             conversation,
             app: app.to_vec(),
-            attachments,
+        });
+        self.auto_lock.touch(now_ms / 1_000);
+        Ok(message)
+    }
+
+    /// Stores a message with a file, and gives the file to the transfer
+    /// task. The record has no descriptor before the relays hold each
+    /// chunk, thus it waits outside the send path until
+    /// [`Client::upload_done`].
+    fn send_file<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        msg_id: [u8; 16],
+        file: crate::draft::DraftFile,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<MsgRef, Error> {
+        let record = AppMessage {
+            kind: AppKind::Attachment,
+            msg_id,
+            sent_at: now_ms,
+            body: &[],
+        };
+        let mut app = vec![0u8; record.len()];
+        record.encode(&mut app)?;
+        let open = self.open_mut()?;
+        let reference = msg_ref(&open.device_set_key, &msg_id);
+        let natural = [conversation.0.as_slice(), &reference].concat();
+        let row = open.store.row_id(TableId::MESSAGE, &natural);
+        let plain = stored_message(OUTGOING, Delivery::Queued, conversation, now_ms, &app);
+        let mut batch = open.store.begin();
+        batch.put(TableId::MESSAGE, row, Some(conversation.0), &plain, rng)?;
+        batch.put(
+            FILE_STATE,
+            row,
+            Some(conversation.0),
+            &files::outgoing_state_row(&file.shape),
+            rng,
+        )?;
+        batch.put(FILE_DATA, row, Some(conversation.0), &file.plain, rng)?;
+        batch.commit()?;
+        let message = MsgRef(row);
+        self.files.uploads.push_back(UploadJob {
+            message,
+            plain: file.plain,
+            shape: file.shape,
         });
         self.auto_lock.touch(now_ms / 1_000);
         Ok(message)
@@ -2120,7 +2185,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         );
         let app = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
         let parsed = AppMessage::parse(app, Channel::Pairwise)?;
-        let text = core::str::from_utf8(text_of(&parsed)?).map_err(|_| Error::Integrity)?;
+        // The record of a file holds no text (Part 6 §6.6), and a view of it
+        // shows the file.
+        let bytes = match parsed.kind {
+            AppKind::Attachment => &[][..],
+            _ => text_of(&parsed)?,
+        };
+        let text = core::str::from_utf8(bytes).map_err(|_| Error::Integrity)?;
         let mut units = Zeroizing::new(Vec::with_capacity(text.len()));
         units.extend(text.encode_utf16());
         sink.put(&units);
@@ -2136,6 +2207,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .ok_or(Error::NotFound)?,
         );
         let mut info = info_of(&plain)?;
+        info.file = self.file_info(message)?;
         info.revisions = match open.store.get(REVISION, &message.0)? {
             None => 0,
             Some(count) => *count.first().ok_or(Error::Integrity)?,
@@ -2191,6 +2263,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     pub fn audit(&mut self) -> Result<(), Error> {
         let open = self.open_ref()?;
         let tables = [
+            FILE_STATE,
+            FILE_DATA,
+            CHUNK_CRED,
             TableId::MESSAGE,
             TableId::LOCAL_IDENTITY,
             TableId::CONTACT,
@@ -2232,6 +2307,8 @@ fn info_of(plain: &[u8]) -> Result<MessageInfo, Error> {
         has_text: text_of(&parsed).is_ok(),
         // The store holds the count: see `Client::info`.
         revisions: 0,
+        // The store holds the state of a file: see `Client::info`.
+        file: None,
     })
 }
 

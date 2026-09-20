@@ -79,9 +79,9 @@ each column when a crate implements the requirement and a test covers it.
 | `COM` | 299 | 96 | 0 | 0 | 5 | **400** |
 | `ATT` | 137 | 46 | 1 | 0 | 2 | **186** |
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
-| `IMP` | 106 | 41 | 0 | 0 | 1 | **148** |
+| `IMP` | 112 | 41 | 0 | 0 | 1 | **154** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2186 | 707 | 7 | 0 | 51 | **2951** |
+| **All** | 2192 | 707 | 7 | 0 | 51 | **2957** |
 
 ## SCP — Scope and Conventions
 
@@ -3117,6 +3117,12 @@ Source: `spec/15-implementation.md`
 | `IMP-157` | §15.6.1 | MUST | A client | A client MUST take a reaction only for a message that it holds in the conversation of the sender (`WIR-282`), and it MUST drop each other one. |  |  |
 | `IMP-158` | §15.6.4 | MUST | The stored form of a contact and of an invitation | The stored form of a contact and of an invitation MUST name the relay that holds its inbound queue, because a new run builds a circuit to that relay before it subscribes (`NET-308`). |  |  |
 | `IMP-159` | §15.6.4 | MUST | A client | A client MUST keep the highest epoch of a `DirectoryRoot` that it verified in the settings table, and it MUST give the larger of that value and the shipped epoch of `REL-045` to the consensus at each start. |  |  |
+| `IMP-160` | §15.6.4 | MUST | The plaintext of a file | The plaintext of a file MUST sit in the at-rest store and in no other place on the device: no cache file, no temporary file, and no platform media store. |  |  |
+| `IMP-161` | §15.6.4 | MUST | A lock | A lock MUST take each file job out of the memory, because a job holds its file in the clear, and an unlock MUST make the jobs again from the store. |  |  |
+| `IMP-162` | §15.6.4 | MUST | (unstated) | The record of a file holds its descriptor (Part 6 §6.6 kind `0x02`), and the descriptor exists when the relays hold each chunk. |  |  |
+| `IMP-163` | §15.6.4 | MUST | A client | A client MUST start a download for each received record of kind `0x02` whose descriptor it can read. |  |  |
+| `IMP-164` | §15.6.4 | MUST | A deletion of a message | A deletion of a message MUST erase its rows in the tables `0x0F`, `0x10` and `0x11` in the batch that takes the message, and for a file that this device uploaded it MUST then send the `CDEL` of `ATT-161` for each chunk to each relay of that chunk. |  |  |
+| `IMP-165` | §15.6.1 | MUST | The file of a draft | The file of a draft MUST cross the surface as a path that the core reads, and not as its bytes. |  |  |
 
 ## SEC — Security Considerations
 
