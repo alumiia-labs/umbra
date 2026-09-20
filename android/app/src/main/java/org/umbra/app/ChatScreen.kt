@@ -1,5 +1,8 @@
 package org.umbra.app
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import android.text.format.DateUtils
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -195,7 +198,9 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                         },
                     )
                 }
-                add(RowEntry("copy", "Copy text") { copyMessage(context, line.text) })
+                if (line.info.file == null) {
+                    add(RowEntry("copy", "Copy text") { copyMessage(context, line.text) })
+                }
                 add(RowEntry("trash-can", "Delete") { deleting = line })
             }
         }
@@ -298,6 +303,12 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
         // An answer and an edit start with the keyboard open, as a user
         // expects it.
         LaunchedEffect(answered, edited) { if (answered != null || edited != null) composer.focus() }
+        val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { picked ->
+            if (picked != null) {
+                Core.sendPhoto(context, conversation, picked)
+                jumpsAtNextLoad = true
+            }
+        }
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
             // The send button stays beside the line of the text.
@@ -321,21 +332,38 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                         edited = null
                     }
                 }
-                Box(
-                    Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = 48.dp)
-                        .padding(horizontal = 18.dp, vertical = 12.dp),
-                    contentAlignment = Alignment.CenterStart,
-                ) {
-                    // With no network the record waits in the store.
-                    PlatformInput(
-                        composer,
-                        hint = "Message",
-                        isPassphrase = false,
-                        modifier = Modifier.fillMaxWidth(),
-                        maxLines = 5,
-                    )
+                Row(verticalAlignment = Alignment.Bottom) {
+                    // Mockup 041: the plus sits inside the box. It opens the
+                    // photo picker of the platform, which gives this app the
+                    // picked image alone and no access to the gallery.
+                    Box(
+                        Modifier
+                            .padding(start = 4.dp)
+                            .size(48.dp)
+                            .clip(CircleShape)
+                            .press(role = Role.Button, label = "Add a photo") {
+                                picker.launch(
+                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                                )
+                            },
+                        contentAlignment = Alignment.Center,
+                    ) { FaIcon("plus", size = 18.dp, tint = Palette.TextSecondary) }
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .heightIn(min = 48.dp)
+                            .padding(start = 2.dp, end = 18.dp, top = 12.dp, bottom = 12.dp),
+                        contentAlignment = Alignment.CenterStart,
+                    ) {
+                        // With no network the record waits in the store.
+                        PlatformInput(
+                            composer,
+                            hint = "Message",
+                            isPassphrase = false,
+                            modifier = Modifier.fillMaxWidth(),
+                            maxLines = 5,
+                        )
+                    }
                 }
             }
             Spacer(Modifier.width(8.dp))
@@ -568,13 +596,15 @@ private const val SLIDE_POINT = 0.8f
 @Composable
 private fun BubbleContent(line: Line, chat: Chat) {
     val isOutgoing = line.info.outgoing
+    // A photo fills its bubble to a thin rim, as each messenger shows one.
+    val isPhoto = line.info.file != null && !line.info.deleted
     Column(
         modifier = Modifier
             .background(if (isOutgoing) Palette.Container else Palette.Incoming)
             // The quote spans the bubble, thus the bubble is as wide as its
             // widest part.
             .width(IntrinsicSize.Max)
-            .padding(horizontal = 14.dp, vertical = 10.dp),
+            .padding(horizontal = if (isPhoto) 4.dp else 14.dp, vertical = if (isPhoto) 4.dp else 10.dp),
         horizontalAlignment = Alignment.End,
     ) {
         if (line.info.deleted) {
@@ -599,7 +629,11 @@ private fun BubbleContent(line: Line, chat: Chat) {
             )
         }
         // The text starts at the left edge, and the time sits at the right.
-        if (!line.info.deleted) {
+        val file = line.info.file
+        if (!line.info.deleted && file != null) {
+            PhotoTile(line, file, Modifier.align(Alignment.Start))
+            Spacer(Modifier.height(4.dp))
+        } else if (!line.info.deleted) {
             PlatformText(line.text, Palette.Text, modifier = Modifier.align(Alignment.Start))
         }
         Spacer(Modifier.height(2.dp))
@@ -618,12 +652,15 @@ private fun BubbleContent(line: Line, chat: Chat) {
                 if (line.info.edited) append("Edited · ")
                 append(clock)
                 if (isOutgoing && state != READ && !line.info.deleted) {
-                    append(" · ").append(deliveryLabel(line.info.delivery))
+                    // A photo goes to the relays first, and its record follows.
+                    val isUploading = file?.state?.toInt() == FILE_UPLOADING
+                    append(" · ").append(if (isUploading) "Sending" else deliveryLabel(line.info.delivery))
                 }
             },
             style = MaterialTheme.typography.labelSmall,
             color = if (state == FAILED) Palette.Error else Palette.TextSecondary,
-            modifier = Modifier.subline(),
+            // The time of a photo keeps the place that the time of a text has.
+            modifier = if (isPhoto) Modifier.padding(end = 10.dp, bottom = 4.dp).subline() else Modifier.subline(),
         )
     }
 }

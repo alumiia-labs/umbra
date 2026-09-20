@@ -288,6 +288,8 @@ object Core {
                 revision++
                 refreshChats()
             }
+            // The file of a message arrived, left, or failed.
+            is FfiEvent.File -> revision++
             // A reaction, an edit, and a deletion are no arrival, thus they
             // raise no alert.
             is FfiEvent.Reacted -> revision++
@@ -300,6 +302,8 @@ object Core {
                 refreshChats()
             }
             is FfiEvent.Locked -> {
+                images.clear()
+                decoding.clear()
                 online = false
                 invitation = null
                 toName = null
@@ -497,6 +501,55 @@ object Core {
         refreshChats()
     }
 
+    /** Sends a picked image as a message of its own. */
+    fun sendPhoto(context: Context, conversation: Conversation, source: android.net.Uri) {
+        val app = context.applicationContext
+        call { client ->
+            client.newDraft(conversation.id).use { draft ->
+                if (!Photos.attach(app, source, draft)) {
+                    main.post { fault = "That image did not open." }
+                    return@call
+                }
+                client.sendDraft(draft).destroy()
+            }
+            main.post { revision++ }
+            refreshChats()
+        }
+    }
+
+    /** Asks again for the file of a message that did not arrive. */
+    fun fetchFile(message: MsgHandle) = call { client ->
+        client.fetchFile(message)
+        main.post { revision++ }
+    }
+
+    /**
+     * The decoded photo of a message, or null while a worker decodes it.
+     * The images live in the memory alone, and a lock drops them
+     * (`IMP-166`).
+     */
+    fun image(line: Line): androidx.compose.ui.graphics.ImageBitmap? {
+        images[line.key]?.let { return it }
+        if (decoding.add(line.key)) {
+            call { client ->
+                val decoder = Photos.Decoder()
+                try {
+                    client.msgFile(line.handle, decoder)
+                } catch (absent: FfiException) {
+                    // The store holds no file yet. A later event asks again.
+                }
+                main.post {
+                    decoding.remove(line.key)
+                    decoder.image?.let { images[line.key] = it }
+                }
+            }
+        }
+        return null
+    }
+
+    private val images = androidx.compose.runtime.mutableStateMapOf<List<Byte>, androidx.compose.ui.graphics.ImageBitmap>()
+    private val decoding = mutableSetOf<List<Byte>>()
+
     /** Adds a reaction of this device to a message, or takes it away. */
     fun react(message: MsgHandle, emoji: String) = call { client ->
         client.react(message, emoji)
@@ -586,7 +639,11 @@ object Core {
                 val info = client.msgInfo(it)
                 isOutgoing = info.outgoing
                 // The words of a placeholder are words of the interface.
-                if (info.deleted) sink.chars = "Message deleted".toCharArray() else client.msgRender(it, sink)
+                when {
+                    info.deleted -> sink.chars = "Message deleted".toCharArray()
+                    info.file != null -> sink.chars = "Photo".toCharArray()
+                    else -> client.msgRender(it, sink)
+                }
             } catch (noText: FfiException) {
                 sink.chars = CharArray(0)
             }

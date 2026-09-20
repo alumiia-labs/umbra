@@ -79,9 +79,9 @@ each column when a crate implements the requirement and a test covers it.
 | `COM` | 299 | 96 | 0 | 0 | 5 | **400** |
 | `ATT` | 137 | 46 | 1 | 0 | 2 | **186** |
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
-| `IMP` | 112 | 41 | 0 | 0 | 1 | **154** |
+| `IMP` | 112 | 41 | 0 | 0 | 2 | **155** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2192 | 707 | 7 | 0 | 51 | **2957** |
+| **All** | 2192 | 707 | 7 | 0 | 52 | **2958** |
 
 ## SCP — Scope and Conventions
 
@@ -3123,6 +3123,7 @@ Source: `spec/15-implementation.md`
 | `IMP-163` | §15.6.4 | MUST | A client | A client MUST start a download for each received record of kind `0x02` whose descriptor it can read. |  |  |
 | `IMP-164` | §15.6.4 | MUST | A deletion of a message | A deletion of a message MUST erase its rows in the tables `0x0F`, `0x10` and `0x11` in the batch that takes the message, and for a file that this device uploaded it MUST then send the `CDEL` of `ATT-161` for each chunk to each relay of that chunk. |  |  |
 | `IMP-165` | §15.6.1 | MUST | The file of a draft | The file of a draft MUST cross the surface as a path that the core reads, and not as its bytes. |  |  |
+| `IMP-166` | §15.6.1 | MAY | The bytes of a file that the store holds | The bytes of a file that the store holds MAY cross the surface one time for each decode, into a sink of the platform. |  |  |
 
 ## SEC — Security Considerations
 

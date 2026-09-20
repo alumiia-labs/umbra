@@ -424,6 +424,7 @@ wait_event(handle, timeout_ms) -> Event   // the same, and the call waits
 msg_render(MsgRef, Sink)
 msg_info(handle, MsgRef) -> MsgInfo       // the direction, the delivery state, two times, the file state
 fetch_file(handle, MsgRef)                // a second attempt for a file that did not arrive
+msg_file(handle, MsgRef, FileSink)        // the bytes of a file, one time for one decode (IMP-166)
 messages(handle, conv) -> [MsgRef]        // the handles of one conversation
 
 // The network. The relay directory of Part 10 replaces the Network record.
@@ -455,9 +456,18 @@ gives that rule, and this section gives the surface that obeys it.
 core reads, and not as its bytes. On Android the path names an open descriptor
 of the process, `/proc/self/fd/<n>`, which the platform got from the content
 resolver or from a pipe that carries the re-encode of Part 13 rule `ATT-155`.
-Thus the surface carries no byte of the file, and the device holds no copy of
-it outside the store (`IMP-160`). How the bytes of a received file reach a
-platform view is not decided in 0.2.0-draft, and the surface has no such call.
+Thus the surface carries no byte of the file on its way in, and the device
+holds no copy of it outside the store (`IMP-160`).
+
+**[IMP-166]** The bytes of a file that the store holds MAY cross the surface
+one time for each decode, into a sink of the platform. This is an exception to
+`IMP-037`, and it has a cause: the image decoder and the media player of the
+platform read a byte array or a stream, and a decoder inside the core would
+hand over pixels, which are the same plaintext. The core MUST overwrite its
+copy after the call. The platform MUST overwrite the array when the decode
+ends, MUST NOT write the bytes to a file or to a platform cache, and MUST drop
+each decoded image at a lock. The exception covers a file alone: a text, a
+passphrase and key material stay under `IMP-037`.
 
 **[IMP-038]** `Draft` and `MsgRef` MUST be opaque UniFFI object handles.
 **[IMP-039]** An implementation MUST zeroize the buffer behind a `Draft` when

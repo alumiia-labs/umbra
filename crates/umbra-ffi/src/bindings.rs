@@ -139,6 +139,16 @@ pub trait TextSink: Send + Sync {
     fn put(&self, code_units: Vec<u16>);
 }
 
+/// The decoder of the platform that takes the file of one message. This is
+/// the one place where the bytes of a file cross the surface (`IMP-166`):
+/// the image decoder of the platform reads a byte array and nothing else.
+/// The platform overwrites the array when the decode ends.
+#[uniffi::export(with_foreign)]
+pub trait FileSink: Send + Sync {
+    /// Takes the bytes of the file.
+    fn put(&self, bytes: Vec<u8>);
+}
+
 struct ForeignSink(Arc<dyn TextSink>);
 
 impl Sink for ForeignSink {
@@ -1277,9 +1287,7 @@ impl Handle {
 }
 
 impl Handle {
-    /// The file of a message, in the clear, for a caller in Rust. No binding
-    /// exports it: how the bytes of a file reach a platform view is an open
-    /// decision under `IMP-037`.
+    /// The file of a message, in the clear, for a caller in Rust.
     pub fn file_bytes(&self, message: &MsgHandle) -> Result<Zeroizing<Vec<u8>>, FfiError> {
         Ok(locked(&self.inner).client.file_bytes(&message.0)?)
     }
@@ -1723,6 +1731,20 @@ impl Handle {
     ) -> Result<(), FfiError> {
         let mut sink = ForeignSink(sink);
         Ok(locked(&self.inner).client.render(&message.0, &mut sink)?)
+    }
+
+    /// Gives the file of a message to a decoder of the platform
+    /// (`IMP-166`). The store must hold the file: a file in another state is
+    /// `NotFound`. The copy of the core is zero bytes after the call.
+    pub fn msg_file(
+        &self,
+        message: Arc<MsgHandle>,
+        sink: Arc<dyn FileSink>,
+    ) -> Result<(), FfiError> {
+        let bytes = locked(&self.inner).client.file_bytes(&message.0)?;
+        // The sink runs with no lock held: a decode takes time.
+        sink.put(bytes.to_vec());
+        Ok(())
     }
 
     /// The direction, the delivery state, and the send time of a message.
