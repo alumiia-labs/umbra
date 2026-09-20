@@ -10,6 +10,7 @@
 use std::collections::VecDeque;
 
 use umbra_core::{
+    directory::path::IngressPins,
     identity::address::safety_number,
     session::node::{stored_contact_keys, ContactId, StateChange},
     store::{
@@ -149,6 +150,8 @@ const AUTO_LOCK_SETTING: &[u8] = b"auto-lock";
 /// The highest epoch of a directory root that this device verified
 /// (Part 10 rule `REL-034`).
 const DIRECTORY_EPOCH_SETTING: &[u8] = b"directory-epoch";
+/// The pinned ingress relays of this device (Part 10 §10.6.1).
+const INGRESS_PINS_SETTING: &[u8] = b"ingress-pins";
 /// The idle limit under the setting "when the app leaves the screen". The
 /// platform locks at that moment, and this limit covers a device that stays
 /// on the screen with no action.
@@ -1032,6 +1035,31 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let row = open.store.row_id(SETTINGS, DIRECTORY_EPOCH_SETTING);
         let mut batch = open.store.begin();
         batch.put(SETTINGS, row, None, &epoch.to_be_bytes(), rng)?;
+        batch.commit()?;
+        Ok(())
+    }
+
+    /// The pinned ingress relays of this device, or none before the first
+    /// relay set.
+    pub fn ingress_pins(&self) -> Result<IngressPins, Error> {
+        let store = &self.open_ref()?.store;
+        let row = store.row_id(SETTINGS, INGRESS_PINS_SETTING);
+        match store.get(SETTINGS, &row)? {
+            Some(plain) => IngressPins::parse(&plain).map_err(|_| Error::Integrity),
+            None => Ok(IngressPins::empty()),
+        }
+    }
+
+    /// Keeps the pinned ingress relays.
+    pub fn set_ingress_pins<R: CryptoRng + ?Sized>(
+        &mut self,
+        pins: &IngressPins,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let open = self.open_mut()?;
+        let row = open.store.row_id(SETTINGS, INGRESS_PINS_SETTING);
+        let mut batch = open.store.begin();
+        batch.put(SETTINGS, row, None, &pins.encode(), rng)?;
         batch.commit()?;
         Ok(())
     }

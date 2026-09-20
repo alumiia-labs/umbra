@@ -165,13 +165,94 @@ impl IngressPin {
     }
 }
 
-/// The two pinned ingress relays.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The count of pins that a client holds (Part 10 §10.6.1).
+pub const INGRESS_PINS: usize = 2;
+/// The stored width of one pin: the relay, the time, and the confirmed byte.
+const PIN_LEN: usize = 32 + 8 + 1;
+
+/// The two pinned ingress relays. A relay set with one eligible relay gives
+/// one pin, and the second place stays open for a later set.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct IngressPins {
     pins: Vec<IngressPin>,
 }
 
 impl IngressPins {
+    /// No pin: the state of a client before its first relay set.
+    pub fn empty() -> Self {
+        IngressPins::default()
+    }
+
+    /// Brings the pins in line with a relay set at `now`. A pin stays while
+    /// its relay is ingress eligible and its lifetime runs (`REL-153`). An
+    /// open place takes the first relay of `eligible` that shares no
+    /// operator and no family with the other pin (`REL-154`). The caller
+    /// gives `eligible` in a random order. The function reads no measure of
+    /// speed (`REL-014`). It returns whether a pin changed.
+    pub fn refresh(&mut self, eligible: &[Candidate], now: u64) -> bool {
+        let before = self.pins.clone();
+        let listed = |pin: &IngressPin| {
+            eligible
+                .iter()
+                .any(|relay| relay.ingress && relay.relay_id == pin.relay_id)
+        };
+        self.pins.retain(|pin| listed(pin) && !pin.expired(now));
+        for relay in eligible.iter().filter(|relay| relay.ingress) {
+            if self.pins.len() >= INGRESS_PINS {
+                break;
+            }
+            let of = |pin: &IngressPin| eligible.iter().find(|c| c.relay_id == pin.relay_id);
+            let is_apart = self.pins.iter().filter_map(of).all(|held| {
+                held.relay_id != relay.relay_id
+                    && held.operator_id != relay.operator_id
+                    && held.family_id != relay.family_id
+            });
+            if is_apart {
+                self.pins.push(IngressPin {
+                    relay_id: relay.relay_id,
+                    pinned_at: now,
+                    confirmed: false,
+                });
+            }
+        }
+        self.pins != before
+    }
+
+    /// The stored form: 41 bytes for each pin.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.pins.len().saturating_mul(PIN_LEN));
+        for pin in &self.pins {
+            out.extend_from_slice(&pin.relay_id);
+            out.extend_from_slice(&pin.pinned_at.to_be_bytes());
+            out.push(u8::from(pin.confirmed));
+        }
+        out
+    }
+
+    /// Reads the stored form.
+    pub fn parse(bytes: &[u8]) -> Result<Self, Error> {
+        if !bytes.len().is_multiple_of(PIN_LEN) || bytes.len() > INGRESS_PINS * PIN_LEN {
+            return Err(Error::Malformed);
+        }
+        let mut pins = Vec::with_capacity(INGRESS_PINS);
+        for pin in bytes.as_chunks::<PIN_LEN>().0 {
+            let mut r = umbra_wire::codec::Reader::new(pin);
+            let relay_id = r.array().map_err(|_| Error::Malformed)?;
+            let pinned_at = u64::from_be_bytes(r.array().map_err(|_| Error::Malformed)?);
+            let confirmed = match r.u8().map_err(|_| Error::Malformed)? {
+                0 => false,
+                1 => true,
+                _ => return Err(Error::Malformed),
+            };
+            pins.push(IngressPin {
+                relay_id,
+                pinned_at,
+                confirmed,
+            });
+        }
+        Ok(IngressPins { pins })
+    }
+
     /// Two pins from the two entries the caller selected at random among
     /// the eligible ones.
     pub fn new(first: [u8; 32], second: [u8; 32], now: u64) -> Self {
@@ -196,10 +277,14 @@ impl IngressPins {
         &self.pins
     }
 
-    /// Marks a pin confirmed.
-    pub fn confirm(&mut self, relay_id: &[u8; 32]) {
-        if let Some(p) = self.pins.iter_mut().find(|p| p.relay_id == *relay_id) {
-            p.confirmed = true;
+    /// Marks a pin confirmed, and returns whether that changed it.
+    pub fn confirm(&mut self, relay_id: &[u8; 32]) -> bool {
+        match self.pins.iter_mut().find(|p| p.relay_id == *relay_id) {
+            Some(pin) if !pin.confirmed => {
+                pin.confirmed = true;
+                true
+            }
+            _ => false,
         }
     }
 
@@ -287,5 +372,54 @@ mod tests {
         pins.replace(&[1; 32], [3; 32], 10);
         assert_eq!(pins.pins()[0].relay_id, [3; 32]);
         assert!(!pins.pins()[0].confirmed);
+    }
+
+    #[test]
+    fn the_pins_follow_the_relay_set_and_no_other_cause() {
+        let list = BlocList::v1();
+        let eu = list.bloc_of(b"DE");
+        let ids = |pins: &IngressPins| -> Vec<u8> {
+            pins.pins().iter().map(|pin| pin.relay_id[0]).collect()
+        };
+        let mut same_operator = cand(2, eu, 0, true);
+        same_operator.operator_id = [1; 32];
+        let set = [
+            cand(1, eu, 0, true),
+            same_operator,
+            cand(9, eu, 2, false),
+            cand(3, eu, 0, true),
+            cand(4, eu, 0, true),
+        ];
+        // The first relay, and then the first one of another operator. A
+        // relay with no ingress flag takes no place.
+        let mut pins = IngressPins::empty();
+        assert!(pins.refresh(&set, 100));
+        assert_eq!(ids(&pins), [1, 3]);
+        // The same set in another order changes nothing.
+        let mut turned = set;
+        turned.reverse();
+        assert!(!pins.refresh(&turned, 200));
+        assert_eq!(ids(&pins), [1, 3]);
+
+        // The stored form gives the same pins.
+        assert!(pins.confirm(&[1; 32]));
+        assert!(!pins.confirm(&[1; 32]));
+        let stored = pins.encode();
+        assert_eq!(stored.len(), 82);
+        assert_eq!(IngressPins::parse(&stored).unwrap(), pins);
+        assert!(IngressPins::parse(&stored[..81]).is_err());
+        assert!(IngressPins::parse(&[stored.clone(), stored.clone()].concat()).is_err());
+        let mut wrong = stored;
+        wrong[40] = 2;
+        assert!(IngressPins::parse(&wrong).is_err());
+
+        // The confirmed pin ends at 60 days, and the other one stays.
+        assert!(pins.refresh(&set, 100 + INGRESS_PIN_CONFIRMED));
+        assert_eq!(ids(&pins), [3, 1]);
+        assert_eq!(pins.pins()[1].pinned_at, 100 + INGRESS_PIN_CONFIRMED);
+        // A relay that left the set loses its pin, and one relay gives one pin.
+        assert!(pins.refresh(&set[..1], 100 + INGRESS_PIN_CONFIRMED + 1));
+        assert_eq!(ids(&pins), [1]);
+        assert!(!pins.refresh(&set[..1], 100 + INGRESS_PIN_CONFIRMED + 2));
     }
 }

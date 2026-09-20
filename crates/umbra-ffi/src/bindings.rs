@@ -23,7 +23,7 @@ use umbra_core::{
     directory::{
         bloc::BlocList,
         manifest::{RelayManifest, RelaySet},
-        path::Candidate,
+        path::{Candidate, INGRESS_PINS},
         root::{ClockState, Consensus, DirectoryKeySet},
     },
     identity::invitation::{Fragment, FRAGMENT_LEN},
@@ -38,7 +38,7 @@ use crate::{
     bridge::{Bridge, NetEvent},
     client::Client,
     draft::Draft,
-    runtime::{run_client, OsRng, Persist, Update},
+    runtime::{run_client, Ended, OsRng, Persist, Update},
     sqlite::SqliteBackend,
     ConversationId, Delivery, Error, Event, MsgRef, Sink,
 };
@@ -250,6 +250,14 @@ pub struct VerifiedNetwork {
     /// Whether the time of the root is more than one hour from the clock of
     /// the device. The interface shows that state (`REL-116`).
     pub is_clock_corrected: bool,
+}
+
+fn random_u64() -> u64 {
+    let mut bytes = [0u8; 8];
+    // With no random bytes the order of the set stands, which pins a relay
+    // that the set lists first. The authorities order the set by a hash.
+    let _ = umbra_crypto::rand_core::TryRng::try_fill_bytes(&mut OsRng, &mut bytes);
+    u64::from_be_bytes(bytes)
 }
 
 fn to_hex(bytes: &[u8]) -> String {
@@ -696,6 +704,11 @@ struct Inner {
     /// The bridge of one run of the network, or none when no run is active.
     bridge: Option<Bridge>,
     net_events: VecDeque<NetEvent>,
+    /// The ingress relay that the run dials, for the confirmation of its pin.
+    guard: Option<[u8; 32]>,
+    /// Whether the next run dials the second pinned ingress relay. A dial
+    /// that failed turns it, thus the loss of one relay stops no delivery.
+    uses_second_pin: bool,
 }
 
 impl Inner {
@@ -858,6 +871,8 @@ pub fn init(
             client,
             bridge: None,
             net_events: VecDeque::new(),
+            guard: None,
+            uses_second_pin: false,
         }),
         changed: Condvar::new(),
         runtime: Mutex::new(None),
@@ -921,9 +936,25 @@ impl Handle {
             client,
             bridge,
             net_events,
+            guard,
+            uses_second_pin,
             ..
         } = &mut *inner;
         let ended = matches!(update, Update::Offline(_));
+        match (&update, *guard) {
+            // The other pin takes the next run (`REL-155`).
+            (Update::Offline(Ended::DialFailed), _) => *uses_second_pin = !*uses_second_pin,
+            // A relay that served a session confirms its pin. A fault of the
+            // store here costs the confirmation alone.
+            (Update::Online, Some(relay_id)) => {
+                if let Ok(mut pins) = client.ingress_pins() {
+                    if pins.confirm(&relay_id) {
+                        let _ = client.set_ingress_pins(&pins, &mut OsRng);
+                    }
+                }
+            }
+            _ => {}
+        }
         if let Some(running) = bridge {
             // A fault of the store shows in the event stream of the client,
             // and such an update gives no event of the network.
@@ -967,7 +998,31 @@ impl Handle {
                 umbra_core::Error::Malformed => FfiError::Malformed,
                 _ => FfiError::Unverified,
             })?;
-        let relays = endpoints_of(&set);
+        // The pins stay while the set lists them and their lifetime runs,
+        // and an open place takes a random eligible relay (Part 10 §10.6.1).
+        let now = consensus.client_clock(unix_now()).unwrap_or_else(unix_now);
+        let mut eligible: Vec<(u64, Candidate)> = set
+            .relays
+            .iter()
+            .filter(|relay| relay.candidate.ingress && relay.addr_v4 != [0; 4])
+            .map(|relay| (random_u64(), relay.candidate))
+            .collect();
+        eligible.sort_by_key(|(draw, _)| *draw);
+        let eligible: Vec<Candidate> = eligible.into_iter().map(|(_, relay)| relay).collect();
+        let mut pins = inner.client.ingress_pins()?;
+        if pins.refresh(&eligible, now) {
+            inner.client.set_ingress_pins(&pins, &mut OsRng)?;
+        }
+        // The network holds the pinned ingress relays, the first pin first,
+        // and no other relay of layer 1: the client dials no other one.
+        let place = |relay: &RelayEndpoint| {
+            pins.pins()
+                .iter()
+                .position(|pin| pin.relay_id.as_slice() == relay.relay_id.as_slice())
+        };
+        let mut relays = endpoints_of(&set);
+        relays.retain(|relay| relay.layer != 1 || place(relay).is_some());
+        relays.sort_by_key(|relay| place(relay).unwrap_or(usize::MAX));
         // A chain holds one relay of each layer.
         if (1..=3u8).any(|layer| !relays.iter().any(|relay| relay.layer == layer)) {
             return Err(FfiError::Malformed);
@@ -987,12 +1042,19 @@ impl Handle {
     /// Starts the network of an unlocked client. A [`FfiEvent::Online`]
     /// follows the build of the circuit. A second call ends the first run.
     pub fn connect(self: Arc<Self>, network: Network) -> Result<(), FfiError> {
-        // The first relay of layer 1 is the pinned ingress of this client
-        // (Part 10 §10.6.1), and each other relay is a candidate of a chain.
-        let guard = network
+        // The first two relays of layer 1 are the pinned ingress relays of
+        // this client (Part 10 §10.6.1), and each relay of another layer is
+        // a candidate of a chain. The run dials the first pin. After a dial
+        // that failed it dials the second one.
+        let pinned: Vec<&RelayEndpoint> = network
             .relays
             .iter()
-            .find(|relay| relay.layer == 1)
+            .filter(|relay| relay.layer == 1)
+            .take(INGRESS_PINS)
+            .collect();
+        let uses_second = locked(&self.inner).uses_second_pin && pinned.len() > 1;
+        let guard = *pinned
+            .get(usize::from(uses_second))
             .ok_or(FfiError::Malformed)?;
         let ingress = relay_info(guard)?;
         let candidates = network
@@ -1024,6 +1086,7 @@ impl Handle {
         {
             let mut inner = locked(&self.inner);
             inner.invitation_host.clone_from(&network.invitation_host);
+            inner.guard = Some(ingress.key.relay_id);
             let Inner {
                 client,
                 bridge,

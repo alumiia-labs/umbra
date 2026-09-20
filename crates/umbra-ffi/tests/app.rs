@@ -611,10 +611,10 @@ fn a_descriptor_names_the_facts_of_each_relay_and_the_first_version_reads() {
     assert!(parse_network(first.replace("umbra-network 1", "umbra-network 3"), None).is_err());
 }
 
-/// The identity seed of each relay of the manifest test. Under the genesis
-/// root the layer function puts them in the layers 1, 2, 3, 2 and 3, with
-/// the first one as the ingress.
-const IDENTITY_SEEDS: [u8; 5] = [0x65, 0x66, 0x61, 0x68, 0x63];
+/// The identity seed of each relay of the manifest test. The first and the
+/// last relay are the two ingress relays. Under the genesis root the layer
+/// function puts the other ones in the layers 2, 3, 2 and 3.
+const IDENTITY_SEEDS: [u8; 6] = [0x65, 0x66, 0x61, 0x68, 0x63, 0x70];
 
 #[test]
 fn two_apps_take_their_network_from_a_signed_manifest() {
@@ -639,7 +639,7 @@ fn two_apps_take_their_network_from_a_signed_manifest() {
         let (relay, static_secret) = relay_static(number);
         let mut host = [0u8; HOST_LEN];
         host[..9].copy_from_slice(b"localhost");
-        let is_ingress = index == 0;
+        let is_ingress = index == 0 || index == 5;
         let descriptor = RelayDescriptor {
             relay_id: [0; 32],
             identity_pk: &[],
@@ -724,7 +724,7 @@ fn two_apps_take_their_network_from_a_signed_manifest() {
             (placed.layer == 1).then(|| manifest.clone()),
         ));
     }
-    assert_eq!(layers, [1, 2, 3, 2, 3]);
+    assert_eq!(layers, [1, 2, 3, 2, 3, 1]);
 
     // A client reads the manifest over HTTPS from the ingress relay. A relay
     // that holds none gives none.
@@ -745,7 +745,7 @@ fn two_apps_take_their_network_from_a_signed_manifest() {
 
     let directory = std::env::temp_dir().join(format!("umbra-manifest-{}", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap();
-    for name in ["alice.db", "bob.db", "carol.db"] {
+    for name in ["alice.db", "bob.db", "carol.db", "dave.db"] {
         let _ = std::fs::remove_file(directory.join(name));
     }
     let alice = launch(&directory, "alice.db", 1);
@@ -788,7 +788,49 @@ fn two_apps_take_their_network_from_a_signed_manifest() {
     let verified = network_of(&alice, &manifest, 0).unwrap();
     assert_eq!(verified.epoch, epoch);
     assert!(!verified.is_clock_corrected);
-    assert_eq!(verified.network.relays.len(), 5);
+    assert_eq!(verified.network.relays.len(), 6);
+    // The two ingress relays are the two pins, and they come first. The
+    // store holds them, thus the next call gives them in the same order.
+    let pins_of = |network: &Network| -> Vec<Vec<u8>> {
+        assert!(network.relays[..2].iter().all(|relay| relay.layer == 1));
+        assert!(network.relays[2..].iter().all(|relay| relay.layer != 1));
+        network.relays[..2]
+            .iter()
+            .map(|relay| relay.relay_id.clone())
+            .collect()
+    };
+    let pins = pins_of(&verified.network);
+    assert_ne!(pins[0], pins[1]);
+    for _ in 0..4 {
+        assert_eq!(
+            pins_of(&network_of(&alice, &manifest, 0).unwrap().network),
+            pins
+        );
+    }
+
+    // The first pin of Dave refuses the dial. The next run takes the second
+    // pin, and the client comes online (Part 10 §10.6.1).
+    let dave = launch(&directory, "dave.db", 4);
+    let mut lame = network_of(&dave, &manifest, 0).unwrap().network;
+    let closed = relays
+        .block_on(TcpListener::bind(("127.0.0.1", 0)))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    lame.relays[0].port = closed;
+    dave.clone().connect(lame.clone()).unwrap();
+    wait_past_faults(&dave, |event| match event {
+        FfiEvent::Offline { .. } => Some(()),
+        _ => None,
+    });
+    dave.clone().connect(lame).unwrap();
+    wait_past_faults(&dave, |event| match event {
+        FfiEvent::Online => Some(()),
+        _ => None,
+    });
+    dave.disconnect();
+
     alice.clone().connect(verified.network).unwrap();
     bob.clone()
         .connect(network_of(&bob, &manifest, 0).unwrap().network)
