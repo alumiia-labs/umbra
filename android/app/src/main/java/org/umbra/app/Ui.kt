@@ -53,6 +53,7 @@ sealed interface Screen {
     data object UseInvitation : Screen
     data object ScanInvitation : Screen
     data object AppLock : Screen
+    data object Connection : Screen
     data object AutoLock : Screen
     data object ChangePassphrase : Screen
     data class Chat(val conversation: Conversation) : Screen
@@ -132,6 +133,7 @@ private fun OpenApp() {
             Screen.UseInvitation -> UseInvitationScreen(pop, push)
             Screen.ScanInvitation -> ScanInvitationScreen(pop)
             Screen.AppLock -> AppLockScreen(pop, push)
+            Screen.Connection -> ConnectionScreen(pop)
             Screen.AutoLock -> AutoLockScreen(pop)
             Screen.ChangePassphrase -> ChangePassphraseScreen(pop)
             else -> {
@@ -239,7 +241,7 @@ private fun UnlockScreen() {
 @Composable
 private fun TabsScreen(tab: Tab, onTab: (Tab) -> Unit, push: (Screen) -> Unit) {
     Column(Modifier.fillMaxSize()) {
-        BrandBar()
+        BrandBar { push(Screen.Connection) }
         Box(Modifier.weight(1f)) {
             when (tab) {
                 Tab.Chats -> ChatsTab(push)
@@ -302,41 +304,32 @@ private fun TabTitle(title: String) {
     )
 }
 
+/**
+ * The one line of each degraded state of Part 15 §15.9.2. A client that
+ * connects shows no line: the top bar holds that state.
+ */
 @Composable
 private fun ConnectionNote() {
-    val context = LocalContext.current
     val fault = Core.fault
-    when {
-        fault != null -> Box(Modifier.padding(horizontal = 20.dp, vertical = 6.dp)) {
-            Note(fault, isError = true)
-        }
-        // The degraded state `corrected clock` of Part 15 §15.9.2. It stops
-        // nothing, thus it is no error (`IMP-078`).
-        Core.online && BuildNetwork.isClockCorrected -> Box(
-            Modifier.padding(horizontal = 20.dp, vertical = 6.dp),
-        ) {
-            Note("The clock of this device differs from the network time by more than one hour.")
-        }
-        !Core.online -> Row(
-            Modifier.padding(horizontal = 20.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                "Connecting through three relays.",
-                style = MaterialTheme.typography.bodySmall,
-                color = Palette.TextSecondary,
-                modifier = Modifier.weight(1f),
-            )
-            TextButton(onClick = { Core.connect(context) }) { Text("Try now") }
-        }
+    // A degraded state stops nothing, thus it is no error (`IMP-078`).
+    val line = when {
+        fault != null -> fault
+        Core.degraded != null -> Core.degraded
+        Core.online && BuildNetwork.isClockCorrected ->
+            "The clock of this device differs from the network time by more than one hour."
+        else -> null
+    } ?: return
+    Box(Modifier.padding(start = 20.dp, end = 20.dp, top = 12.dp)) {
+        Note(line, isError = fault != null)
     }
 }
 
 @Composable
 private fun ChatsTab(push: (Screen) -> Unit) {
     Column(Modifier.fillMaxSize()) {
-        TabTitle("Chats")
+        // Mockup 153: a degraded state has its one line above the title.
         ConnectionNote()
+        TabTitle("Chats")
         val withMessages = Core.chats.filter { it.preview != null }
         if (withMessages.isEmpty()) {
             EmptyState("No conversations yet.")

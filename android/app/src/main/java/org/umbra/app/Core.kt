@@ -13,6 +13,7 @@ import java.io.File
 import java.util.concurrent.Executors
 import kotlin.concurrent.thread
 import uniffi.umbra_ffi.Config
+import uniffi.umbra_ffi.Connection
 import uniffi.umbra_ffi.FfiEvent
 import uniffi.umbra_ffi.FfiException
 import uniffi.umbra_ffi.Handle
@@ -90,6 +91,26 @@ object Core {
     var online by mutableStateOf(false)
         private set
     var fault by mutableStateOf<String?>(null)
+
+    /** The line of a degraded state of the link (Part 15 §15.9.2), which is no error. */
+    var degraded by mutableStateOf<String?>(null)
+        private set
+
+    /** Why the last run of the network ended, for the view of the connection. */
+    var linkFault by mutableStateOf<String?>(null)
+        private set
+
+    /** The circuits of this device and their relays, as the core gave them last. */
+    var connection by mutableStateOf<Connection?>(null)
+        private set
+
+    /** What the top bar shows of the link. */
+    val linkState: LinkState
+        get() = when {
+            online -> LinkState.Connected
+            linkFault != null -> LinkState.Down
+            else -> LinkState.Connecting
+        }
     var invitation by mutableStateOf<String?>(null)
     val chats = mutableStateListOf<Chat>()
 
@@ -135,6 +156,7 @@ object Core {
     private const val FIRST_RETRY_MS = 2_000L
     private const val LAST_RETRY_MS = 30_000L
     private const val STOPPED = 0
+    private const val DIAL_FAILED = 1
 
     /**
      * Opens the client under the passphrase. The first launch makes the
@@ -208,12 +230,24 @@ object Core {
             is FfiEvent.Online -> {
                 online = true
                 fault = null
+                degraded = null
+                linkFault = null
                 retryDelayMs = FIRST_RETRY_MS
+                readConnection()
             }
+            is FfiEvent.Circuits -> readConnection()
             is FfiEvent.Offline -> {
                 online = false
+                readConnection()
                 if (event.cause.toInt() != STOPPED) {
-                    fault = "No connection: ${cause(event.cause)}. UMBRA tries again."
+                    // The two lines of Part 15 §15.9.2. The cause shows in the
+                    // view of the connection.
+                    degraded = if (event.cause.toInt() == DIAL_FAILED) {
+                        "The relays do not answer. Messages wait."
+                    } else {
+                        "No connection. Messages wait."
+                    }
+                    linkFault = cause(event.cause)
                     retryLater(app)
                 }
             }
@@ -285,11 +319,16 @@ object Core {
     }
 
     private fun cause(code: UByte): String = when (code.toInt()) {
-        1 -> "the first relay did not answer"
-        2 -> "the link to the first relay closed"
-        3 -> "a relay ended the circuit"
-        5 -> "the store took no batch"
-        else -> "a fault in the client"
+        DIAL_FAILED -> "The ingress relay did not answer."
+        2 -> "The link to the ingress relay closed."
+        3 -> "A relay ended the circuit."
+        5 -> "The store took no batch."
+        else -> "A fault in the client."
+    }
+
+    private fun readConnection() = call { client ->
+        val read = client.connection()
+        main.post { connection = read }
     }
 
     /**

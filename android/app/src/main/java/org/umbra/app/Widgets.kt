@@ -374,7 +374,7 @@ fun Avatar(chat: Chat, size: Int = 44) {
 
 /** The bar of a view under the tabs: the word mark and the lock. */
 @Composable
-fun BrandBar() {
+fun BrandBar(onConnection: () -> Unit) {
     Row(
         Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, top = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -385,6 +385,7 @@ fun BrandBar() {
             style = MaterialTheme.typography.titleMedium,
             modifier = Modifier.weight(1f),
         )
+        ConnectionStatus(onConnection)
         IconAction("lock", "Lock now") { Core.lock() }
     }
 }

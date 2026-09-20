@@ -897,6 +897,23 @@ fn two_apps_take_their_network_from_a_signed_manifest() {
         assert_eq!(rendered(to, message), text);
     }
 
+    // The view of the connection: each circuit is one relay of each layer,
+    // and the two pins are the ingress relay of the run and its standby.
+    let connection = alice.connection().unwrap();
+    assert!(connection.is_running);
+    assert!(!connection.circuits.is_empty());
+    for circuit in &connection.circuits {
+        let layers: Vec<u8> = circuit.iter().map(|hop| hop.layer).collect();
+        assert_eq!(layers, [1, 2, 3]);
+    }
+    assert!(connection.relays_in_use >= 3);
+    assert_eq!(connection.relays_known, 7);
+    assert_eq!(connection.directory_epoch, epoch);
+    let (ingress, standby) = (connection.ingress.unwrap(), connection.standby.unwrap());
+    assert_eq!((ingress.layer, standby.layer), (1, 1));
+    assert_ne!(ingress.country, standby.country);
+    assert_eq!(connection.circuits[0][0], ingress);
+
     // The store holds the epoch, thus a later run refuses an older root.
     let older = sign_manifest(
         &authorities,

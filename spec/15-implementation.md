@@ -427,6 +427,7 @@ messages(handle, conv) -> [MsgRef]        // the handles of one conversation
 
 // The network. The relay directory of Part 10 replaces the Network record.
 connect(handle, Network)                  // the three relays of the path
+connection(handle) -> Connection          // the circuits and their relays, for the view of the link
 disconnect(handle)
 invite(handle)                            // an Invitation event follows
 accept(handle, bundle)                    // a Contact event follows

@@ -154,6 +154,8 @@ impl Bridge {
         rng: &mut R,
     ) -> Result<Option<NetEvent>, Error> {
         Ok(match update {
+            // The handle keeps the circuits, and the bridge has no part in it.
+            Update::Circuits(_) => None,
             Update::Online => Some(NetEvent::Online),
             Update::Offline(ended) => Some(NetEvent::Offline(ended)),
             Update::Invitation(bundle) => Some(NetEvent::Invitation(bundle)),

@@ -240,6 +240,37 @@ pub fn fetch_manifest(
         .map_err(|_| FfiError::Offline)
 }
 
+/// One relay of a circuit, as the view of the connection shows it.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct Hop {
+    /// The host name of the relay.
+    pub host: String,
+    /// The two letters of its jurisdiction.
+    pub country: String,
+    /// Its layer, from 1 to 3.
+    pub layer: u8,
+}
+
+/// The state of the connection of this device (Part 3 §3.4).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct Connection {
+    /// Whether a run of the network is active.
+    pub is_running: bool,
+    /// Each circuit that holds its three hops, hop 1 first.
+    pub circuits: Vec<Vec<Hop>>,
+    /// The count of the different relays in those circuits.
+    pub relays_in_use: u32,
+    /// The count of the relays of the relay set.
+    pub relays_known: u32,
+    /// The pinned ingress relay that the run dials, or none with no run.
+    pub ingress: Option<Hop>,
+    /// The other pinned ingress relay, or none with one pin.
+    pub standby: Option<Hop>,
+    /// The highest epoch of the relay directory that this device verified,
+    /// or zero for a network with no signed directory.
+    pub directory_epoch: u64,
+}
+
 /// A network that a signed relay manifest gave.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct VerifiedNetwork {
@@ -554,6 +585,8 @@ pub struct Summary {
 pub enum FfiEvent {
     /// The circuit is ready.
     Online,
+    /// The set of the circuits changed. [`Handle::connection`] gives it.
+    Circuits,
     /// The run of the network ended. The cause is 0 for a stop by the
     /// application, 1 for a dial that failed, 2 for a link that closed, 3
     /// for a circuit that a relay destroyed, 4 for a fault in the client,
@@ -709,11 +742,17 @@ struct Inner {
     /// Whether the next run dials the second pinned ingress relay. A dial
     /// that failed turns it, thus the loss of one relay stops no delivery.
     uses_second_pin: bool,
+    /// The relays of the run, for the view of the connection.
+    relays: Vec<RelayEndpoint>,
+    /// The circuits of the run that hold their three hops.
+    circuits: Vec<[[u8; 32]; 3]>,
+    /// Whether an event tells the platform that the circuits changed.
+    circuits_changed: bool,
 }
 
 impl Inner {
     fn has_event(&self) -> bool {
-        self.client.has_event() || !self.net_events.is_empty()
+        self.client.has_event() || !self.net_events.is_empty() || self.circuits_changed
     }
 
     fn next_event(&mut self) -> Option<FfiEvent> {
@@ -742,6 +781,9 @@ impl Inner {
                 Event::Locked => FfiEvent::Locked,
                 Event::IntegrityFault => FfiEvent::IntegrityFault,
             });
+        }
+        if core::mem::take(&mut self.circuits_changed) {
+            return Some(FfiEvent::Circuits);
         }
         Some(match self.net_events.pop_front()? {
             NetEvent::Online => FfiEvent::Online,
@@ -873,6 +915,9 @@ pub fn init(
             net_events: VecDeque::new(),
             guard: None,
             uses_second_pin: false,
+            relays: Vec::new(),
+            circuits: Vec::new(),
+            circuits_changed: false,
         }),
         changed: Condvar::new(),
         runtime: Mutex::new(None),
@@ -938,9 +983,23 @@ impl Handle {
             net_events,
             guard,
             uses_second_pin,
+            circuits,
+            circuits_changed,
             ..
         } = &mut *inner;
         let ended = matches!(update, Update::Offline(_));
+        match &update {
+            Update::Circuits(chains) => {
+                circuits.clone_from(chains);
+                *circuits_changed = true;
+            }
+            // A run that ended holds no circuit.
+            Update::Offline(_) => {
+                circuits.clear();
+                *circuits_changed = true;
+            }
+            _ => {}
+        }
         match (&update, *guard) {
             // The other pin takes the next run (`REL-155`).
             (Update::Offline(Ended::DialFailed), _) => *uses_second_pin = !*uses_second_pin,
@@ -1039,6 +1098,60 @@ impl Handle {
         })
     }
 
+    /// The state of the connection: the circuits and their relays. A
+    /// [`FfiEvent::Circuits`] says that it changed.
+    pub fn connection(&self) -> Result<Connection, FfiError> {
+        let inner = locked(&self.inner);
+        let hop_of = |relay_id: &[u8; 32]| {
+            inner
+                .relays
+                .iter()
+                .find(|relay| relay.relay_id.as_slice() == relay_id.as_slice())
+                .map(|relay| Hop {
+                    host: relay.host.clone(),
+                    country: relay.country.clone(),
+                    layer: relay.layer,
+                })
+        };
+        let mut in_use: Vec<[u8; 32]> = inner.circuits.iter().flatten().copied().collect();
+        in_use.sort_unstable();
+        in_use.dedup();
+        let pins: Vec<&RelayEndpoint> = inner
+            .relays
+            .iter()
+            .filter(|relay| relay.layer == 1)
+            .take(INGRESS_PINS)
+            .collect();
+        let is_guard = |relay: &&&RelayEndpoint| {
+            inner
+                .guard
+                .is_some_and(|guard| relay.relay_id.as_slice() == guard.as_slice())
+        };
+        let as_hop = |relay: &&RelayEndpoint| Hop {
+            host: relay.host.clone(),
+            country: relay.country.clone(),
+            layer: relay.layer,
+        };
+        let is_running = inner.bridge.is_some();
+        Ok(Connection {
+            is_running,
+            circuits: inner
+                .circuits
+                .iter()
+                .map(|chain| chain.iter().filter_map(hop_of).collect())
+                .collect(),
+            relays_in_use: u32::try_from(in_use.len()).unwrap_or(u32::MAX),
+            relays_known: u32::try_from(inner.relays.len()).unwrap_or(u32::MAX),
+            ingress: pins
+                .iter()
+                .find(is_guard)
+                .filter(|_| is_running)
+                .map(as_hop),
+            standby: pins.iter().find(|relay| !is_guard(relay)).map(as_hop),
+            directory_epoch: inner.client.directory_epoch()?,
+        })
+    }
+
     /// Starts the network of an unlocked client. A [`FfiEvent::Online`]
     /// follows the build of the circuit. A second call ends the first run.
     pub fn connect(self: Arc<Self>, network: Network) -> Result<(), FfiError> {
@@ -1087,6 +1200,9 @@ impl Handle {
             let mut inner = locked(&self.inner);
             inner.invitation_host.clone_from(&network.invitation_host);
             inner.guard = Some(ingress.key.relay_id);
+            inner.relays.clone_from(&network.relays);
+            inner.circuits.clear();
+            inner.circuits_changed = true;
             let Inner {
                 client,
                 bridge,

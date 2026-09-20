@@ -115,6 +115,9 @@ impl Persist for NoStore {
 pub enum Update {
     /// The circuit is ready.
     Online,
+    /// The circuits that hold their three hops, each as its three relays.
+    /// It comes at each change of that set.
+    Circuits(Vec<[[u8; 32]; 3]>),
     /// The fragment of an invitation link, which the user gives out of
     /// band.
     Invitation(Vec<u8>),
@@ -259,6 +262,7 @@ pub async fn run_client(
     }
 
     let mut early: VecDeque<Command> = VecDeque::new();
+    let mut shown_chains: Vec<[[u8; 32]; 3]> = Vec::new();
     let mut tags: BTreeMap<u64, u64> = BTreeMap::new();
     let mut is_foreground = true;
     let mut next_slot = tokio::time::Instant::now() + cover_delay(&mut rng);
@@ -335,6 +339,11 @@ pub async fn run_client(
                 ClientEvent::CircuitLost => break 'run Ended::CircuitLost,
             };
             let _ = updates.send(update);
+        }
+        let chains = node.chains();
+        if chains != shown_chains {
+            shown_chains.clone_from(&chains);
+            let _ = updates.send(Update::Circuits(chains));
         }
         while node.is_ready() {
             let Some(command) = early.pop_front() else {
