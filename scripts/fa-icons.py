@@ -32,6 +32,7 @@ ICONS = [
     "ellipsis-vertical",
     "eye",
     "gear",
+    "key",
     "link",
     "lock",
     "magnifying-glass",

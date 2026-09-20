@@ -619,6 +619,14 @@ WrapHeader {                      // 97 bytes
   record key derives from it.
 - **[IMP-119]** A client MUST NOT let the user set an auto-lock above 30
   minutes of idle time, and the default MUST be 15 minutes.
+  **[IMP-140]** A client MUST keep that setting in the store, under the record
+  encryption of this section. A client MAY offer a lock at the moment the
+  application leaves the screen, and it MUST then keep an idle limit too, for
+  a device that stays on the screen with no action.
+- **[IMP-141]** A client MUST ask for the current passphrase before a
+  passphrase change. It MUST write the new header beside the database before
+  it uses that header, because a client that holds a header which the file
+  does not hold locks the user out at the next launch.
 
 > *Cause.* An earlier draft gave this block a second branch for the secure
 > element of a platform that this revision defers, and §15.6.3 records that an
@@ -744,6 +752,7 @@ flight 1, with its one-time prekey.
 | `0x07` | Send queue | One record that waits for the send path (`IMP-126`) |
 | `0x08` | Invitations | One invitation that waits: the `RecipientId` of its queue, the fragment of its link or its bundle, the queue end, and the prekey seed |
 | `0x09` | Conversations | What this device alone knows of one conversation: the time up to which the user saw its messages, and the name that the user gave the contact |
+| `0x0A` | Settings | One setting of this device under its name, such as the idle time of the auto-lock |
 
 The stored form of a row is local to one device, and no peer reads it. This
 part gives it no byte layout. **[IMP-130]** A stored object MUST start with a

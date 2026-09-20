@@ -67,6 +67,10 @@ object Core {
     var invitation by mutableStateOf<String?>(null)
     val chats = mutableStateListOf<Chat>()
 
+    /** The idle time of the auto-lock, in seconds. Zero locks when the app leaves the screen. */
+    var autoLockSeconds by mutableStateOf(15 * 60L)
+        private set
+
     /** A contact that is new in this run and has no name yet. */
     var toName by mutableStateOf<Conversation?>(null)
 
@@ -110,11 +114,13 @@ object Core {
                 handle = opened
                 // The store holds each contact, thus the list needs no network.
                 val stored = summaries(opened)
+                val idleSeconds = opened.autoLockSeconds().toLong()
                 BuildNetwork.network(app)?.let(opened::connect)
                 drain(opened, app)
                 main.post {
                     chats.clear()
                     chats.addAll(stored)
+                    autoLockSeconds = idleSeconds
                     phase = Phase.Open
                     // The user opened the client, thus a view is on the
                     // screen, and the platform permits the start.
@@ -253,6 +259,8 @@ object Core {
     fun visible(context: Context, nowVisible: Boolean) {
         isVisible = nowVisible
         if (nowVisible) Notifier.clear(context)
+        // The setting "Immediately" locks when the last view leaves.
+        if (!nowVisible && autoLockSeconds == 0L && phase == Phase.Open) lock()
         if (nowVisible && !online && phase == Phase.Open) {
             retryDelayMs = FIRST_RETRY_MS
             connect(context)
@@ -260,6 +268,34 @@ object Core {
     }
 
     fun lock() = call { it.lock() }
+
+    fun setAutoLock(seconds: Long) = call { client ->
+        client.setAutoLock(seconds.toULong())
+        main.post { autoLockSeconds = seconds }
+    }
+
+    /**
+     * Changes the passphrase. This call overwrites the two arrays. `onResult`
+     * gets null, or the words of the fault.
+     */
+    fun changePassphrase(current: CharArray, new: CharArray, onResult: (String?) -> Unit) {
+        val client = handle ?: return onResult("UMBRA is locked.")
+        worker.execute {
+            val currentUnits = current.map { it.code.toUShort() }
+            val newUnits = new.map { it.code.toUShort() }
+            current.fill(' ')
+            new.fill(' ')
+            val failure = try {
+                client.changePassphrase(currentUnits, newUnits)
+                null
+            } catch (wrong: FfiException.WrongPassphrase) {
+                "The current passphrase is not right."
+            } catch (other: FfiException) {
+                "The passphrase did not change: ${other.javaClass.simpleName}."
+            }
+            main.post { onResult(failure) }
+        }
+    }
 
     /** Starts the network again after it ended. */
     fun connect(context: Context) {

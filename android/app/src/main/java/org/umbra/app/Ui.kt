@@ -51,6 +51,9 @@ sealed interface Screen {
     data object AddContact : Screen
     data object YourInvitation : Screen
     data object UseInvitation : Screen
+    data object AppLock : Screen
+    data object AutoLock : Screen
+    data object ChangePassphrase : Screen
     data class Chat(val conversation: Conversation) : Screen
 }
 
@@ -102,6 +105,9 @@ private fun OpenApp() {
         Screen.AddContact -> AddContactScreen(pop, push)
         Screen.YourInvitation -> YourInvitationScreen(pop)
         Screen.UseInvitation -> UseInvitationScreen(pop)
+        Screen.AppLock -> AppLockScreen(pop, push)
+        Screen.AutoLock -> AutoLockScreen(pop)
+        Screen.ChangePassphrase -> ChangePassphraseScreen(pop)
         is Screen.Chat -> {
             val chat = Core.chats.firstOrNull { it.conversation == top.conversation }
             // The list loads again after a lock or a new run.
@@ -181,7 +187,7 @@ private fun TabsScreen(tab: Tab, onTab: (Tab) -> Unit, push: (Screen) -> Unit) {
             when (tab) {
                 Tab.Chats -> ChatsTab(push)
                 Tab.Contacts -> ContactsTab(push)
-                Tab.Settings -> SettingsTab()
+                Tab.Settings -> SettingsTab(push)
             }
             if (tab != Tab.Settings) {
                 Box(
@@ -379,13 +385,13 @@ private fun EmptyState(title: String, body: String) {
 }
 
 @Composable
-private fun SettingsTab() {
+private fun SettingsTab(push: (Screen) -> Unit) {
     val context = LocalContext.current
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
         TabTitle("Settings")
-        SettingRow("lock", "App lock", "Locks after 15 minutes with no action. Tap to lock now.") {
-            Core.lock()
-        }
+        // Mockup 105: this row leads to the settings of the lock. The lock
+        // itself is the icon of the bar.
+        SettingRow("lock", "App lock", "Passphrase and auto-lock") { push(Screen.AppLock) }
         SettingRow(
             "signal",
             "Connection",

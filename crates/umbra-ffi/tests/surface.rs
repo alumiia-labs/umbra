@@ -72,6 +72,37 @@ fn the_surface_runs_a_first_launch_a_send_and_a_second_launch() {
     );
     assert_eq!(handle.messages(conversation.clone()).unwrap().len(), 1);
 
+    // The auto-lock time is a stored setting with the bound of `IMP-119`.
+    assert_eq!(handle.auto_lock_seconds().unwrap(), 900);
+    handle.set_auto_lock(300).unwrap();
+    assert_eq!(handle.set_auto_lock(1_801), Err(FfiError::TooLong));
+    assert_eq!(handle.auto_lock_seconds().unwrap(), 300);
+
+    // A passphrase change needs the current passphrase, and it keeps the
+    // store key, thus each record stays (`IMP-118`).
+    assert_eq!(
+        handle.change_passphrase(units("wrong"), units("new passphrase")),
+        Err(FfiError::WrongPassphrase)
+    );
+    assert_eq!(
+        handle.change_passphrase(units("correct horse"), units("")),
+        Err(FfiError::Malformed)
+    );
+    handle
+        .change_passphrase(units("correct horse"), units("new passphrase"))
+        .unwrap();
+
+    handle.lock();
+    assert!(matches!(handle.next_event(), Some(FfiEvent::Locked)));
+    assert_eq!(
+        handle.unlock(units("correct horse")),
+        Err(FfiError::WrongPassphrase)
+    );
+    handle.unlock(units("new passphrase")).unwrap();
+    assert_eq!(handle.auto_lock_seconds().unwrap(), 300);
+    handle
+        .change_passphrase(units("new passphrase"), units("correct horse"))
+        .unwrap();
     handle.lock();
     assert!(matches!(handle.next_event(), Some(FfiEvent::Locked)));
     assert_eq!(

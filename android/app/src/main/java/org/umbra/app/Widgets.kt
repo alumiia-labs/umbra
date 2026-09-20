@@ -7,6 +7,7 @@ import android.util.TypedValue
 import android.view.inputmethod.EditorInfo
 import android.widget.EditText
 import android.widget.TextView
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -24,6 +25,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.ModalBottomSheet
@@ -182,6 +184,10 @@ fun SecondaryButton(label: String, enabled: Boolean = true, onClick: () -> Unit)
         onClick = onClick,
         enabled = enabled,
         modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+        // The mockups give this button the green of an action and a line
+        // that the eye finds on the warm ground.
+        colors = ButtonDefaults.outlinedButtonColors(contentColor = Palette.Action),
+        border = BorderStroke(1.dp, Palette.Outline),
     ) { Text(label, fontWeight = FontWeight.SemiBold) }
 }
 

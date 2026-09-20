@@ -1,0 +1,177 @@
+package org.umbra.app
+
+import androidx.compose.foundation.border
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.unit.dp
+
+/** The choices of mockup 108. `IMP-119` caps the idle time at 30 minutes. */
+private val AutoLockChoices = listOf(
+    0L to ("Immediately" to "When you leave the app"),
+    5 * 60L to ("5 minutes" to null),
+    15 * 60L to ("15 minutes" to "Default"),
+    30 * 60L to ("30 minutes" to "Maximum"),
+)
+
+private fun autoLockLabel(seconds: Long): String = when (seconds) {
+    0L -> "When you leave the app"
+    else -> "After ${seconds / 60} minutes of inactivity"
+}
+
+/** Mockup 106: the settings of the lock. The lock itself is one button of it. */
+@Composable
+fun AppLockScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
+    Column(Modifier.fillMaxSize()) {
+        BackBar("App lock", onBack = onBack)
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
+            Spacer(Modifier.height(8.dp))
+            EntryRow(RowEntry("key", "Change passphrase") { push(Screen.ChangePassphrase) })
+            HorizontalDivider(color = Palette.Divider)
+            EntryRow(
+                RowEntry("clock", "Auto-lock", autoLockLabel(Core.autoLockSeconds)) {
+                    push(Screen.AutoLock)
+                },
+            )
+            HorizontalDivider(color = Palette.Divider)
+            Spacer(Modifier.height(14.dp))
+            SecondaryButton("Lock now") { Core.lock() }
+            Spacer(Modifier.height(14.dp))
+            Note(
+                "When UMBRA locks, no message arrives until you unlock it. " +
+                    "This build holds one connection and uses no push service.",
+            )
+        }
+    }
+}
+
+/** Mockup 108. */
+@Composable
+fun AutoLockScreen(onBack: () -> Unit) {
+    var chosen by remember { mutableStateOf(Core.autoLockSeconds) }
+    Column(Modifier.fillMaxSize()) {
+        BackBar("Auto-lock", onBack = onBack)
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
+            Spacer(Modifier.height(12.dp))
+            Text("Lock after this much inactivity.", color = Palette.TextSecondary)
+            Spacer(Modifier.height(4.dp))
+            for ((seconds, words) in AutoLockChoices) {
+                val (title, detail) = words
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable(role = Role.RadioButton) { chosen = seconds }
+                        .padding(vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    RadioMark(isChosen = chosen == seconds)
+                    Spacer(Modifier.width(14.dp))
+                    Column {
+                        Text(title)
+                        detail?.let {
+                            Text(
+                                it,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Palette.TextSecondary,
+                                modifier = Modifier.subline(),
+                            )
+                        }
+                    }
+                }
+                HorizontalDivider(color = Palette.Divider)
+            }
+            Spacer(Modifier.height(14.dp))
+            PrimaryButton("Save") {
+                Core.setAutoLock(chosen)
+                onBack()
+            }
+        }
+    }
+}
+
+@Composable
+private fun RadioMark(isChosen: Boolean) {
+    Box(
+        Modifier
+            .size(20.dp)
+            .border(2.dp, if (isChosen) Palette.Action else Palette.Outline, CircleShape),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (isChosen) Box(Modifier.size(10.dp).background(Palette.Action, CircleShape))
+    }
+}
+
+/** Mockup 107. Each field gives a `CharArray`, as the unlock field does. */
+@Composable
+fun ChangePassphraseScreen(onBack: () -> Unit) {
+    val current = rememberPlatformField()
+    val new = rememberPlatformField()
+    val confirm = rememberPlatformField()
+    var fault by remember { mutableStateOf<String?>(null) }
+    var isWorking by remember { mutableStateOf(false) }
+    Column(Modifier.fillMaxSize()) {
+        BackBar("Change passphrase", onBack = onBack)
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
+            FramedPlatformField(current, "Current passphrase", isPassphrase = true)
+            Spacer(Modifier.height(14.dp))
+            FramedPlatformField(new, "New passphrase", isPassphrase = true)
+            Spacer(Modifier.height(14.dp))
+            FramedPlatformField(confirm, "Confirm new passphrase", isPassphrase = true)
+            Spacer(Modifier.height(14.dp))
+            PrimaryButton(if (isWorking) "Changing…" else "Change passphrase", enabled = !isWorking) {
+                val old = current.take()
+                val first = new.take()
+                val second = confirm.take()
+                fault = when {
+                    old == null || first == null || second == null -> "Fill in the three fields."
+                    !first.contentEquals(second) -> "The two new passphrases differ."
+                    else -> null
+                }
+                if (fault == null && old != null && first != null) {
+                    isWorking = true
+                    Core.changePassphrase(old, first) { failure ->
+                        isWorking = false
+                        fault = failure
+                        if (failure == null) onBack()
+                    }
+                } else {
+                    old?.fill('\u0000')
+                    first?.fill('\u0000')
+                }
+                second?.fill('\u0000')
+            }
+            fault?.let {
+                Spacer(Modifier.height(12.dp))
+                Note(it, isError = true)
+            }
+            Spacer(Modifier.height(12.dp))
+            Note(
+                "This changes how this device opens. Your contacts and messages stay. " +
+                    "Nobody can reset a passphrase that you forget.",
+            )
+        }
+    }
+}

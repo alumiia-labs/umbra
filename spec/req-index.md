@@ -79,9 +79,9 @@ each column when a crate implements the requirement and a test covers it.
 | `COM` | 299 | 96 | 0 | 0 | 5 | **400** |
 | `ATT` | 134 | 46 | 1 | 0 | 2 | **183** |
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
-| `IMP` | 89 | 38 | 0 | 0 | 1 | **128** |
+| `IMP` | 91 | 38 | 0 | 0 | 1 | **130** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2137 | 695 | 7 | 0 | 51 | **2890** |
+| **All** | 2139 | 695 | 7 | 0 | 51 | **2892** |
 
 ## SCP — Scope and Conventions
 
@@ -3056,6 +3056,8 @@ Source: `spec/15-implementation.md`
 | `IMP-137` | §15.6.4 | MUST | A record that waits in the send queue at the start of a run | A record that waits in the send queue at the start of a run MUST go again under its `msg_id`. |  |  |
 | `IMP-138` | §15.6.1 | MUST NOT | (unstated) | The name that a user gives a contact MUST stay on the devices of that user, and a client MUST NOT send it to a peer or to a relay. |  |  |
 | `IMP-139` | §15.6.1 | MUST | A client | A client MUST count a received message as not seen while its store time is above the read marker of its conversation, and it MUST move that marker when the user looks at the conversation and at no other time. |  |  |
+| `IMP-140` | §15.6.4 | MUST | A client | A client MUST keep that setting in the store, under the record encryption of this section. |  |  |
+| `IMP-141` | §15.6.4 | MUST | A client | A client MUST ask for the current passphrase before a passphrase change. |  |  |
 
 ## SEC — Security Considerations
 

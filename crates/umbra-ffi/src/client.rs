@@ -14,7 +14,7 @@ use umbra_core::{
     store::{
         engine::{Backend, Store},
         record::{RowId, TableId},
-        wrap::{AutoLock, Cost, SecureElement, WrapHeader},
+        wrap::{AutoLock, Cost, SecureElement, WrapHeader, AUTO_LOCK_DEFAULT, AUTO_LOCK_MAX},
     },
 };
 use umbra_crypto::{hierarchy::RootIdentity, rand_core::CryptoRng, secret::Secret};
@@ -51,6 +51,15 @@ const INVITATION: TableId = TableId(0x08);
 const CONVERSATION: TableId = TableId(0x09);
 const READ_UP_TO: core::ops::Range<usize> = 16..24;
 const CONVERSATION_PREFIX: usize = 16 + 8;
+
+/// The table of the settings of this device. A row holds one value under
+/// the name of its setting.
+const SETTINGS: TableId = TableId(0x0A);
+const AUTO_LOCK_SETTING: &[u8] = b"auto-lock";
+/// The idle limit under the setting "when the app leaves the screen". The
+/// platform locks at that moment, and this limit covers a device that stays
+/// on the screen with no action.
+const AUTO_LOCK_ON_LEAVE_IDLE: u64 = 5 * 60;
 
 /// The bytes of a contact row and of an invitation row before the stored
 /// form: the `RecipientId` of the queue.
@@ -265,6 +274,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }));
         // Each record that waited for the send path at the lock waits again.
         self.requeue_waiting()?;
+        let seconds = self.auto_lock_seconds()?;
+        self.apply_auto_lock(seconds);
         self.auto_lock.touch(now);
         Ok(())
     }
@@ -419,6 +430,84 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 ConversationId(row)
             })
             .collect())
+    }
+
+    /// The idle time of the auto-lock, in seconds. Zero means that the
+    /// platform locks when the app leaves the screen. With no stored value
+    /// the default of `IMP-119` holds.
+    pub fn auto_lock_seconds(&self) -> Result<u64, Error> {
+        let store = &self.open_ref()?.store;
+        let row = store.row_id(SETTINGS, AUTO_LOCK_SETTING);
+        let Some(plain) = store.get(SETTINGS, &row)? else {
+            return Ok(AUTO_LOCK_DEFAULT);
+        };
+        let seconds: [u8; 8] = plain.as_slice().try_into().map_err(|_| Error::Integrity)?;
+        Ok(u64::from_be_bytes(seconds))
+    }
+
+    /// Sets the idle time of the auto-lock. `IMP-119` bounds it at 30
+    /// minutes, and a value above that bound is an error and no change.
+    pub fn set_auto_lock<R: CryptoRng + ?Sized>(
+        &mut self,
+        seconds: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        if seconds > AUTO_LOCK_MAX {
+            return Err(Error::TooLong);
+        }
+        let open = self.open_mut()?;
+        let row = open.store.row_id(SETTINGS, AUTO_LOCK_SETTING);
+        let mut batch = open.store.begin();
+        batch.put(SETTINGS, row, None, &seconds.to_be_bytes(), rng)?;
+        batch.commit()?;
+        self.apply_auto_lock(seconds);
+        Ok(())
+    }
+
+    fn apply_auto_lock(&mut self, seconds: u64) {
+        self.auto_lock.set_limit(if seconds == 0 {
+            AUTO_LOCK_ON_LEAVE_IDLE
+        } else {
+            seconds
+        });
+    }
+
+    /// A new header for the same `K_store` under `new` (`IMP-118`). The
+    /// current passphrase proves that the user of the device asks. The
+    /// platform writes the header beside the database, and then it gives it
+    /// to [`Client::set_header`]. Each record key comes from `K_store`,
+    /// thus no record changes.
+    pub fn rewrap<R: CryptoRng + ?Sized>(
+        &self,
+        current: &[u16],
+        new: &[u16],
+        rng: &mut R,
+    ) -> Result<WrapHeader, Error> {
+        self.open_ref()?;
+        if new.is_empty() {
+            return Err(Error::Malformed);
+        }
+        let store_key = self
+            .header
+            .unwrap(&passphrase_bytes(current)?, &self.element)
+            .map_err(|_| Error::WrongPassphrase)?;
+        let mut salt = [0u8; 16];
+        rng.fill_bytes(&mut salt);
+        let mut nonce = [0u8; 24];
+        rng.fill_bytes(&mut nonce);
+        Ok(WrapHeader::wrap(
+            &store_key,
+            &passphrase_bytes(new)?,
+            self.header.cost,
+            salt,
+            nonce,
+            &self.element,
+        )?)
+    }
+
+    /// Takes the header that the platform wrote beside the database.
+    pub fn set_header(&mut self, header: WrapHeader) {
+        self.header = header;
     }
 
     /// The read marker and the local name of a conversation. A
@@ -792,6 +881,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             OUTBOX,
             INVITATION,
             CONVERSATION,
+            SETTINGS,
         ];
         if tables.iter().any(|table| open.store.audit(*table).is_err()) {
             self.events.push_back(Event::IntegrityFault);

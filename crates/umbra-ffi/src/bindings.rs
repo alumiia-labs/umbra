@@ -441,6 +441,8 @@ impl Inner {
 /// The client of the device.
 #[derive(uniffi::Object)]
 pub struct Handle {
+    /// The file of the store, for the write of a new wrap header.
+    database_path: String,
     inner: Mutex<Inner>,
     /// Signals each change of the event stream to [`Handle::wait_event`].
     changed: Condvar,
@@ -517,6 +519,7 @@ pub fn init(
         }
     };
     Ok(Arc::new(Handle {
+        database_path: config.database_path,
         inner: Mutex::new(Inner {
             invitation_host: String::new(),
             client,
@@ -835,6 +838,35 @@ impl Handle {
         let passphrase = Zeroizing::new(passphrase);
         let mut inner = locked(&self.inner);
         Ok(inner.client.unlock(&passphrase, unix_now())?)
+    }
+
+    /// The idle time of the auto-lock, in seconds. Zero means that the
+    /// platform locks when the app leaves the screen.
+    pub fn auto_lock_seconds(&self) -> Result<u64, FfiError> {
+        Ok(locked(&self.inner).client.auto_lock_seconds()?)
+    }
+
+    /// Sets the idle time of the auto-lock: zero, or up to 1 800 seconds
+    /// (`IMP-119`).
+    pub fn set_auto_lock(&self, seconds: u64) -> Result<(), FfiError> {
+        let mut inner = locked(&self.inner);
+        Ok(inner.client.set_auto_lock(seconds, &mut OsRng)?)
+    }
+
+    /// Changes the passphrase of the device (`IMP-118`). The store key and
+    /// each record stay. A wrong current passphrase changes nothing.
+    pub fn change_passphrase(&self, current: Vec<u16>, new: Vec<u16>) -> Result<(), FfiError> {
+        let current = Zeroizing::new(current);
+        let new = Zeroizing::new(new);
+        let mut inner = locked(&self.inner);
+        let header = inner.client.rewrap(&current, &new, &mut OsRng)?;
+        // The file takes the header first. A client that held a header
+        // which the file does not hold would lock the user out at the next
+        // launch.
+        let file = SqliteBackend::open(&self.database_path).map_err(|_| FfiError::Storage)?;
+        file.set_header(&header).map_err(|_| FfiError::Storage)?;
+        inner.client.set_header(header);
+        Ok(())
     }
 
     /// The user acted. The idle time of the auto-lock starts again
