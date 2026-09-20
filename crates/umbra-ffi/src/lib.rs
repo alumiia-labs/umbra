@@ -103,6 +103,18 @@ impl Delivery {
     }
 }
 
+/// The message that a message answers (Part 6 §6.6.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplyTarget {
+    /// The message answers no message.
+    None,
+    /// The message answers this message of its conversation.
+    Message(MsgRef),
+    /// The message answers a message that this device does not hold. The
+    /// view shows it as an answer all the same (`WIR-173`).
+    Absent,
+}
+
 /// What a conversation view shows beside the text of a message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MessageInfo {
@@ -115,6 +127,8 @@ pub struct MessageInfo {
     /// The time of this device at the store of the message, in
     /// milliseconds. A conversation view orders by it.
     pub stored_at_ms: u64,
+    /// The message that this message answers.
+    pub reply: ReplyTarget,
 }
 
 /// The longest local name of a contact, in bytes of UTF-8.
@@ -573,6 +587,90 @@ mod tests {
         // A receipt is no message of the conversation.
         assert_eq!(client.messages(conversation).unwrap().len(), before);
         client.audit().unwrap();
+    }
+
+    #[test]
+    fn a_reply_names_its_target_and_the_store_keeps_the_reference() {
+        use umbra_core::session::node::{ContactId, StateChange};
+        use umbra_wire::app::{rich::RichRecord, AppKind, AppMessage, Channel};
+
+        let mut rng = Rng(7);
+        let mut client = new_client(&mut rng);
+        let contact = ContactId([9; 32]);
+        let change = StateChange::Contact {
+            contact,
+            state: zeroize::Zeroizing::new(vec![1, 2, 3]),
+        };
+        client
+            .commit_network(&[change], &[], 1_000_000, &mut rng)
+            .unwrap();
+        let conversation = client.conversation_for(&contact.0).unwrap();
+
+        // The peer wrote a text, and this device answers it.
+        let question = record(AppKind::Text, [0x51; 16], b"coffee at four?");
+        client
+            .commit_network(&[], &[(contact, question)], 2_000_000, &mut rng)
+            .unwrap();
+        let asked = client.messages(conversation).unwrap()[0];
+        assert_eq!(client.info(&asked).unwrap().reply, ReplyTarget::None);
+
+        let mut draft = client.new_draft(conversation);
+        draft.set_text(&units("yes, at four")).unwrap();
+        draft.set_reply_to(Some(asked));
+        let answer = client.send_draft(draft, 2_100_000, &mut rng).unwrap();
+        let outgoing = client.take_outgoing().unwrap();
+
+        // The wire carries the raw `msg_id` of the target in a rich record.
+        let sent = AppMessage::parse(&outgoing.app, Channel::Pairwise).unwrap();
+        assert_eq!(sent.kind, AppKind::Rich);
+        let rich = RichRecord::parse(sent.body, Channel::Pairwise).unwrap();
+        assert_eq!(rich.reply_target, [0x51; 16]);
+        assert_eq!(rich.thread_root, [0; 16]);
+        assert_eq!(rich.inner_body, b"yes, at four");
+
+        // The view gets the text and the target, before and after a relay
+        // took the record. WIR-071: the raw target then leaves the store.
+        let mut view = View::default();
+        for delivery in [Delivery::Queued, Delivery::Accepted] {
+            if delivery == Delivery::Accepted {
+                client.set_delivery(&answer, delivery, &mut rng).unwrap();
+            }
+            client.render(&answer, &mut view).unwrap();
+            assert_eq!(String::from_utf16(&view.0).unwrap(), "yes, at four");
+            assert_eq!(
+                client.info(&answer).unwrap().reply,
+                ReplyTarget::Message(asked)
+            );
+        }
+
+        // The peer gets the record, and its store resolves the same target
+        // under its own key. A target that it does not hold is absent, and
+        // the record stays (WIR-173).
+        let mut peer = new_client(&mut Rng(8));
+        let peer_change = StateChange::Contact {
+            contact,
+            state: zeroize::Zeroizing::new(vec![1, 2, 3]),
+        };
+        peer.commit_network(&[peer_change], &[], 1_000_000, &mut rng)
+            .unwrap();
+        let peer_conversation = peer.conversation_for(&contact.0).unwrap();
+        peer.commit_network(&[], &[(contact, outgoing.app.clone())], 2_200_000, &mut rng)
+            .unwrap();
+        let arrived = peer.messages(peer_conversation).unwrap()[0];
+        assert_eq!(peer.info(&arrived).unwrap().reply, ReplyTarget::Absent);
+        peer.render(&arrived, &mut view).unwrap();
+        assert_eq!(String::from_utf16(&view.0).unwrap(), "yes, at four");
+
+        // WIR-171: an answer stays inside the conversation of its target.
+        let mut stray = client.new_draft(ConversationId([3; 16]));
+        stray.set_text(&units("wrong place")).unwrap();
+        stray.set_reply_to(Some(asked));
+        assert_eq!(
+            client.send_draft(stray, 2_300_000, &mut rng),
+            Err(Error::Malformed)
+        );
+        client.audit().unwrap();
+        peer.audit().unwrap();
     }
 
     #[test]

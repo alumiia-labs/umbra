@@ -5,7 +5,7 @@
 
 use zeroize::Zeroizing;
 
-use crate::{ConversationId, Error};
+use crate::{ConversationId, Error, MsgRef};
 
 /// The longest text of one draft, in bytes of UTF-8.
 pub const DRAFT_TEXT_MAX: usize = 32_000;
@@ -15,6 +15,7 @@ pub struct Draft {
     conversation: ConversationId,
     text: Zeroizing<Vec<u8>>,
     attachments: Vec<String>,
+    reply_to: Option<MsgRef>,
 }
 
 impl Draft {
@@ -24,7 +25,19 @@ impl Draft {
             conversation,
             text: Zeroizing::new(Vec::new()),
             attachments: Vec::new(),
+            reply_to: None,
         }
+    }
+
+    /// Makes the draft an answer to a message of its conversation
+    /// (Part 6 §6.6.5), or takes that away.
+    pub fn set_reply_to(&mut self, message: Option<MsgRef>) {
+        self.reply_to = message;
+    }
+
+    /// The message that the draft answers.
+    pub fn reply_to(&self) -> Option<MsgRef> {
+        self.reply_to
     }
 
     /// The conversation.

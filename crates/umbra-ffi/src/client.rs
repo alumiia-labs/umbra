@@ -20,12 +20,14 @@ use umbra_core::{
 };
 use umbra_crypto::{hierarchy::RootIdentity, rand_core::CryptoRng, secret::Secret};
 use umbra_queue::client::receipts::ReceiptHold;
-use umbra_wire::app::{msg_ref, signal::ReceiptBody, AppKind, AppMessage, Channel};
+use umbra_wire::app::{
+    msg_ref, rich::RichRecord, signal::ReceiptBody, AppKind, AppMessage, Channel,
+};
 use zeroize::Zeroizing;
 
 use crate::{
     draft::Draft, ConversationId, ConversationSummary, Delivery, DueReceipt, Error, Event,
-    MessageInfo, MsgRef, ReceiptSettings, Sink, CONTACT_NAME_MAX,
+    MessageInfo, MsgRef, ReceiptSettings, ReplyTarget, Sink, CONTACT_NAME_MAX,
 };
 
 const ROOT_KEY: &[u8] = b"root";
@@ -164,6 +166,56 @@ fn attachments_of(row: &[u8]) -> Result<Vec<String>, Error> {
         at = at.saturating_add(2).saturating_add(len);
     }
     Ok(out)
+}
+
+/// The text of a record: the body of a text, or the inner body of a rich
+/// record around a text. Each other kind has no text.
+fn text_of<'a>(parsed: &AppMessage<'a>) -> Result<&'a [u8], Error> {
+    match parsed.kind {
+        AppKind::Text => Ok(parsed.body),
+        AppKind::Rich => {
+            let rich = RichRecord::parse(parsed.body, Channel::Pairwise)?;
+            if rich.inner_kind != AppKind::Text {
+                return Err(Error::Malformed);
+            }
+            Ok(rich.inner_body)
+        }
+        _ => Err(Error::Malformed),
+    }
+}
+
+/// The place of `reply_target` in an encoded record with a rich body, or
+/// `None` for a record that answers no message. The field follows the
+/// version byte of the rich record.
+fn reply_field(app: &[u8]) -> Result<Option<core::ops::Range<usize>>, Error> {
+    let parsed = AppMessage::parse(app, Channel::Pairwise)?;
+    if parsed.kind != AppKind::Rich {
+        return Ok(None);
+    }
+    let rich = RichRecord::parse(parsed.body, Channel::Pairwise)?;
+    if rich.reply_target == [0; 16] {
+        return Ok(None);
+    }
+    let body_at = app.len().saturating_sub(parsed.body.len());
+    let at = body_at.saturating_add(1);
+    Ok(Some(at..at.saturating_add(16)))
+}
+
+/// WIR-170: a stored record holds `reply_target` as the keyed reference, and
+/// not as the raw `msg_id` of the wire.
+fn keep_reply_as_reference(app: &mut [u8], key: &Secret<32>) -> Result<(), Error> {
+    let Some(field) = reply_field(app)? else {
+        return Ok(());
+    };
+    let raw: [u8; 16] = app
+        .get(field.clone())
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or(Error::Integrity)?;
+    let reference = msg_ref(key, &raw);
+    app.get_mut(field)
+        .ok_or(Error::Integrity)?
+        .copy_from_slice(&reference);
+    Ok(())
 }
 
 /// The held receipts of one peer and one kind: the conversation, the hold,
@@ -472,11 +524,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if in_batch || open.store.get(TableId::MESSAGE, &row)?.is_some() {
                 continue;
             }
+            let mut kept = Zeroizing::new(app.clone());
+            keep_reply_as_reference(&mut kept, &open.device_set_key)?;
             planned.push(Planned::Put(
                 TableId::MESSAGE,
                 row,
                 Some(conversation.0),
-                stored_message(INCOMING, Delivery::Delivered, conversation, now_ms, app),
+                stored_message(INCOMING, Delivery::Delivered, conversation, now_ms, &kept),
             ));
             events.push(Event::Message {
                 conversation,
@@ -1078,16 +1132,50 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
         let mut msg_id = [0u8; 16];
         rng.fill_bytes(&mut msg_id);
+        let conversation = draft.conversation();
+        // A reply is a rich record around the text. The wire carries the raw
+        // `msg_id` of the target, which the row of the target holds.
+        let rich = match draft.reply_to() {
+            None => None,
+            Some(target) => {
+                let plain = Zeroizing::new(
+                    self.open_ref()?
+                        .store
+                        .get(TableId::MESSAGE, &target.0)?
+                        .ok_or(Error::NotFound)?,
+                );
+                // WIR-171: an answer stays inside its conversation.
+                if conversation_of(&plain)? != conversation {
+                    return Err(Error::Malformed);
+                }
+                let held = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
+                let record = RichRecord {
+                    reply_target: AppMessage::parse(held, Channel::Pairwise)?.msg_id,
+                    thread_root: [0; 16],
+                    forward_depth: 0,
+                    mentions: Vec::new(),
+                    inner_kind: AppKind::Text,
+                    inner_body: draft.text(),
+                };
+                let mut body = Zeroizing::new(vec![0u8; record.len()]);
+                record.encode(Channel::Pairwise, &mut body)?;
+                Some(body)
+            }
+        };
         let message = AppMessage {
-            kind: AppKind::Text,
+            kind: if rich.is_some() {
+                AppKind::Rich
+            } else {
+                AppKind::Text
+            },
             msg_id,
             sent_at: now_ms,
-            body: draft.text(),
+            body: rich.as_ref().map_or(draft.text(), |body| body.as_slice()),
         };
         let mut app = Zeroizing::new(vec![0u8; message.len()]);
         message.encode(&mut app)?;
-        let conversation = draft.conversation();
         let attachments = draft.attachments().to_vec();
+        drop(rich);
 
         let open = self.open_mut()?;
         // IMP-024, IMP-025: the store holds the keyed form of `msg_id`.
@@ -1145,6 +1233,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .ok_or(Error::NotFound)?,
         );
         let conversation = conversation_of(&plain)?;
+        if info_of(&plain)?.delivery == Delivery::Queued && delivery != Delivery::Queued {
+            // WIR-071: the raw target served the send, and its time ends.
+            let app = plain.get_mut(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
+            keep_reply_as_reference(app, &open.device_set_key)?;
+        }
         *plain.get_mut(1).ok_or(Error::Integrity)? = delivery as u8;
         let mut batch = open.store.begin();
         batch.put(
@@ -1219,10 +1312,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         );
         let app = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
         let parsed = AppMessage::parse(app, Channel::Pairwise)?;
-        if parsed.kind != AppKind::Text {
-            return Err(Error::Malformed);
-        }
-        let text = core::str::from_utf8(parsed.body).map_err(|_| Error::Integrity)?;
+        let text = core::str::from_utf8(text_of(&parsed)?).map_err(|_| Error::Integrity)?;
         let mut units = Zeroizing::new(Vec::with_capacity(text.len()));
         units.extend(text.encode_utf16());
         sink.put(&units);
@@ -1237,7 +1327,28 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .get(TableId::MESSAGE, &message.0)?
                 .ok_or(Error::NotFound)?,
         );
-        info_of(&plain)
+        let mut info = info_of(&plain)?;
+        let app = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
+        if let Some(field) = reply_field(app)? {
+            let held: [u8; 16] = app
+                .get(field)
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or(Error::Integrity)?;
+            // A record that waits for its relay holds the raw target still.
+            let reference = if info.outgoing && info.delivery == Delivery::Queued {
+                msg_ref(&open.device_set_key, &held)
+            } else {
+                held
+            };
+            // WIR-171, WIR-172: the target is a message of this conversation.
+            let natural = [conversation_of(&plain)?.0.as_slice(), &reference].concat();
+            let row = open.store.row_id(TableId::MESSAGE, &natural);
+            info.reply = match open.store.get(TableId::MESSAGE, &row)? {
+                Some(_) => ReplyTarget::Message(MsgRef(row)),
+                None => ReplyTarget::Absent,
+            };
+        }
+        Ok(info)
     }
 
     /// The messages of one conversation, as handles, in the order in which
@@ -1296,6 +1407,8 @@ fn info_of(plain: &[u8]) -> Result<MessageInfo, Error> {
         stored_at_ms: u64::from_be_bytes(stored_at),
         delivery: delivery.ok_or(Error::Integrity)?,
         sent_at_ms: AppMessage::parse(app, Channel::Pairwise)?.sent_at,
+        // The store resolves the target: see `Client::info`.
+        reply: ReplyTarget::None,
     })
 }
 

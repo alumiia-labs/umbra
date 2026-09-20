@@ -251,7 +251,7 @@ fn relay_static(endpoint: &RelayEndpoint) -> Result<RelayStatic, FfiError> {
 }
 
 /// What a conversation view shows beside the text of a message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+#[derive(uniffi::Record)]
 pub struct MsgInfo {
     /// Whether this device sent the message.
     pub outgoing: bool,
@@ -262,6 +262,11 @@ pub struct MsgInfo {
     /// The time of this device at the store of the message, in
     /// milliseconds. The list of [`Handle::messages`] is in this order.
     pub stored_at_ms: u64,
+    /// Whether the message answers a message (Part 6 §6.6.5).
+    pub is_reply: bool,
+    /// The message that it answers. With `is_reply` and no handle here, the
+    /// device does not hold that message, and the view says so (`WIR-173`).
+    pub reply_to: Option<Arc<MsgHandle>>,
 }
 
 /// Which receipts this device sends to one contact.
@@ -393,6 +398,16 @@ impl DraftHandle {
             .ok_or(FfiError::NotFound)?
             .set_text(&code_units)
             .map_err(FfiError::from)
+    }
+
+    /// Makes the draft an answer to a message of its conversation, or takes
+    /// that away.
+    pub fn set_reply_to(&self, message: Option<Arc<MsgHandle>>) -> Result<(), FfiError> {
+        locked(&self.0)
+            .as_mut()
+            .ok_or(FfiError::NotFound)?
+            .set_reply_to(message.map(|handle| handle.0));
+        Ok(())
     }
 
     /// Adds a file by its reference on the platform.
@@ -947,6 +962,11 @@ impl Handle {
             delivery: info.delivery as u8,
             sent_at_ms: info.sent_at_ms,
             stored_at_ms: info.stored_at_ms,
+            is_reply: info.reply != crate::ReplyTarget::None,
+            reply_to: match info.reply {
+                crate::ReplyTarget::Message(target) => Some(Arc::new(MsgHandle(target))),
+                _ => None,
+            },
         })
     }
 
