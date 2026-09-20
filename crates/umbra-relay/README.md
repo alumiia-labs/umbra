@@ -185,7 +185,8 @@ the key set, which its build ships.
 The address of a descriptor serves the clients and the relays of the layer
 before, and the /16 of that address is the network that a client tests. Thus
 two relays on one machine need two loopback networks, as `127.2.0.1` and
-`127.3.0.1`. `scripts/devnet.sh` runs such a network of five relays.
+`127.3.0.1`. `scripts/devnet.sh` runs such a network of six relays, with two ingress
+relays for the two pins of a client.
 
 A relay that reads a manifest also gives it to a client that asks over HTTPS
 at `/.well-known/umbra/manifest` (Part 3 rule `NET-316`). The debug build of

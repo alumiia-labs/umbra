@@ -1029,6 +1029,27 @@ relay claims with no audit.
   1000 relays. It thus makes a Sybil attack at botnet scale too expensive at the
   one position that sees a client IP address.
 
+**The life of a pin.** A pin is the `relay_id` of an ingress relay, the time
+of the pin on the client clock of §10.5.2, and a confirmed flag. A pin is
+**confirmed** when a circuit through that relay held its three hops.
+
+- **[REL-153]** A client MUST keep its pins in the store of Part 15 §15.6.4.
+  At each relay set that it accepts, it MUST keep a pin while the entry of
+  that relay holds `flags` bit 0 and the lifetime of the pin runs. It MUST
+  end a pin for no other cause, and `REL-014` names the cause that tempts.
+- **[REL-154]** A client MUST fill an open place with a random draw from the
+  ingress eligible relays of the accepted set. The two pins MUST NOT share an
+  `operator_id` or a `family_id`, because one operator with the two pins sees
+  each connection of that client for 60 days. A set with one eligible relay
+  gives one pin, and the second place stays open.
+- **[REL-155]** A client MUST NOT dial an ingress relay that is no pin. After
+  a dial of one pin that failed, the next run MUST dial the other pin. Thus
+  the loss of one ingress relay does not stop delivery (U6).
+- The invariants of Part 3 §3.4.6 can forbid a chain from one pin to the
+  relay of one queue. A client that holds a link to each pin builds that
+  circuit from the other one. The reference client of 0.2.0-draft holds one
+  link in a run, and rule `NET-315` of Part 3 makes that queue wait.
+
 ### 10.6.2 Relay replacement does not follow local performance
 
 **[REL-014]** A client MUST NOT replace a relay because of a local performance measurement.

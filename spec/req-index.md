@@ -74,14 +74,14 @@ each column when a crate implements the requirement and a test covers it.
 | `DEV` | 179 | 87 | 2 | 0 | 7 | **275** |
 | `NTF` | 67 | 30 | 0 | 0 | 2 | **99** |
 | `DIS` | 123 | 37 | 0 | 0 | 1 | **161** |
-| `REL` | 120 | 29 | 1 | 0 | 2 | **152** |
+| `REL` | 122 | 30 | 1 | 0 | 2 | **155** |
 | `GRP` | 204 | 56 | 0 | 0 | 5 | **265** |
 | `COM` | 299 | 96 | 0 | 0 | 5 | **400** |
 | `ATT` | 134 | 46 | 1 | 0 | 2 | **183** |
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
 | `IMP` | 106 | 41 | 0 | 0 | 1 | **148** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2180 | 705 | 7 | 0 | 51 | **2943** |
+| **All** | 2182 | 706 | 7 | 0 | 51 | **2946** |
 
 ## SCP — Scope and Conventions
 
@@ -1983,6 +1983,9 @@ Source: `spec/10-relay-directory.md`
 | `REL-150` | §10.5.4 | MUST NOT | A client | A client MUST NOT use a relay at hop 3 when `roles` bit 0 of its descriptor is not set. |  |  |
 | `REL-151` | §10.5.4 | MUST | A client | A client MUST reject an entry that sets bit 1 with bit 0, that sets bit 1 with no queue role or no chain role in `roles`, or that sets a bit above bit 1. |  |  |
 | `REL-152` | §10.5.4 | MUST NOT | A directory authority | A directory authority MUST NOT sign a root over an entry whose bit 1 differs from the function. |  |  |
+| `REL-153` | §10.6.1 | MUST | A client | A client MUST keep its pins in the store of Part 15 §15.6.4. |  |  |
+| `REL-154` | §10.6.1 | MUST | A client | A client MUST fill an open place with a random draw from the ingress eligible relays of the accepted set. |  |  |
+| `REL-155` | §10.6.1 | MUST NOT | A client | A client MUST NOT dial an ingress relay that is no pin. |  |  |
 
 ## GRP — Private Groups
 

@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Runs a test network of five relays on this machine, on the ports 7441 to
-# 7445, under the test authority of tests/fixtures/tls: one ingress relay,
+# Runs a test network of six relays on this machine, on the ports 7441 to
+# 7446, under the test authority of tests/fixtures/tls: two ingress relays,
 # two relays of layer 2, and two queue relays. Thus the circuits of a client
 # take chains that differ, and two clients can hold their queues at two
-# relays. An Android emulator reaches the ingress at 10.0.2.2.
+# relays. A client pins the two ingress relays, and with one of them down it
+# dials the other one. An Android emulator reaches them at 10.0.2.2.
 #
 # Each relay signs its descriptor, and the seven test authorities sign a
-# manifest of the five (Part 10 §10.5.5). A relay reads its layer from that
+# manifest of the six (Part 10 §10.5.5). A relay reads its layer from that
 # manifest. The seeds of the relays and of the authorities are in the
 # repository, thus this network protects nothing.
 set -euo pipefail
@@ -17,7 +18,7 @@ cargo build -p umbra-relay --features native
 # ends no contact. Delete the directory for an empty network.
 mkdir -p target/devnet
 
-for relay in 1 2 3 4 5; do
+for relay in 1 2 3 4 5 6; do
     target/debug/umbra-relay sign-descriptor \
         "tests/fixtures/devnet/relay$relay.conf" "target/devnet/relay$relay.desc"
 done
@@ -34,7 +35,7 @@ pids=()
 trap 'kill "${pids[@]}" 2>/dev/null || true' EXIT INT TERM
 # The queue relays start first, thus each dial of a lower layer finds a port
 # that accepts.
-for relay in 3 5 2 4 1; do
+for relay in 3 5 2 4 1 6; do
     target/debug/umbra-relay "tests/fixtures/devnet/relay$relay.conf" &
     pids+=($!)
 done

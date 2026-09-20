@@ -847,7 +847,7 @@ flight 1, with its one-time prekey.
 | `0x07` | Send queue | One record that waits for the send path (`IMP-126`) |
 | `0x08` | Invitations | One invitation that waits: the `RecipientId` of its queue, the fragment of its link or its bundle, the queue end, and the prekey seed |
 | `0x09` | Conversations | What this device alone knows of one conversation: the time up to which the user saw its messages, and the name that the user gave the contact |
-| `0x0A` | Settings | One setting of this device under its name, such as the idle time of the auto-lock, or the receipts of one conversation |
+| `0x0A` | Settings | One setting of this device under its name, such as the idle time of the auto-lock, the receipts of one conversation, the highest directory epoch (`IMP-159`), or the ingress pins (`REL-153`) |
 | `0x0B` | Held receipts | One receipt that waits for a slot: the conversation, the kind, the `msg_id` of its target, and the time that it reports (Part 3 §3.5.4) |
 | `0x0C` | Pending references | One deletion or one edit of a contact whose target did not arrive yet: the conversation, the `msg_ref` of the target, the time of the record, and the new text of an edit. An entry with no text is a deletion (Part 7 §7.5.6) |
 | `0x0D` | Revisions | How many times the sender of a message changed its text, under the row of that message. A message with no row here shows no edited mark |
