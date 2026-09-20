@@ -313,6 +313,23 @@ pub enum StateChange {
     },
 }
 
+/// What one slot of the cover clock carried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoverSlot {
+    /// An `ACK` that was due.
+    Acknowledgment,
+    /// A loop cell, which comes back and measures the path (`NET-060`).
+    Loop,
+    /// A `COVER` command.
+    Cover,
+    /// No cell: the client is in the background, or no circuit is ready.
+    Nothing,
+}
+
+/// A loop is a cover cell with a first random byte below this value, which
+/// is about 20 % of the cells (`NET-063`).
+const LOOP_SHARE: u8 = 51;
+
 /// The version byte of a stored contact and of a stored invitation.
 const STORED_VERSION: u8 = 0x01;
 
@@ -618,8 +635,9 @@ impl ClientNode {
         let Circuit::Ready(session) = &mut self.slot_mut()?.circuit else {
             return Err(Error::NoPath);
         };
-        session.queue(encoded, handle)?;
-        self.waiting.insert(handle, waiting);
+        if session.queue(encoded, handle)? {
+            self.waiting.insert(handle, waiting);
+        }
         Ok(handle)
     }
 
@@ -996,25 +1014,69 @@ impl ClientNode {
         self.pump()
     }
 
-    /// Acknowledges each record of a contact that the runtime committed.
+    /// One slot of the cover clock (Part 3 §3.6.2). An acknowledgment that
+    /// is due takes the slot (`NET-064`). With none, a client in the
+    /// foreground makes a cover cell, and about one in five is a loop
+    /// (`NET-063`). A client in the background makes no cover cell.
+    pub fn on_cover_slot<R: CryptoRng + ?Sized>(
+        &mut self,
+        makes_cover: bool,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<CoverSlot, Error> {
+        let contacts: Vec<[u8; 32]> = self.contacts.keys().copied().collect();
+        for contact in contacts {
+            if self.slot_of(&contact).is_some()
+                && self.acknowledge(&ContactId(contact), now, rng)?
+            {
+                return Ok(CoverSlot::Acknowledgment);
+            }
+        }
+        let ready = self
+            .slots
+            .iter()
+            .position(|slot| matches!(slot.circuit, Circuit::Ready(_)));
+        let (true, Some(ready)) = (makes_cover, ready) else {
+            return Ok(CoverSlot::Nothing);
+        };
+        let is_loop = random::<1, R>(rng) < [LOOP_SHARE];
+        let corr_id = random(rng);
+        let Some(Circuit::Ready(session)) = self.slots.get_mut(ready).map(|slot| &mut slot.circuit)
+        else {
+            return Ok(CoverSlot::Nothing);
+        };
+        if is_loop {
+            let cell = session.cover_cell(Bucket::B0)?;
+            self.send_cell(&cell)?;
+            return Ok(CoverSlot::Loop);
+        }
+        session.queue_cover(corr_id)?;
+        self.pump()?;
+        Ok(CoverSlot::Cover)
+    }
+
+    /// Acknowledges the records of a contact that the runtime committed and
+    /// that are older than `RECEIPT_MIN_DELAY` (`NET-050`). The result says
+    /// whether an `ACK` left.
     pub fn acknowledge<R: CryptoRng + ?Sized>(
         &mut self,
         contact: &ContactId,
         now: u64,
         rng: &mut R,
-    ) -> Result<(), Error> {
+    ) -> Result<bool, Error> {
         // The `ACK` goes to the session that serves the queue.
         self.current = self.slot_of(&contact.0).ok_or(Error::NoPath)?;
         let session_pk = self.session_pk()?;
         let held = self.contacts.get_mut(&contact.0).ok_or(Error::NoPath)?;
         let channel = &mut held.channel;
-        if let Some((point, encoded)) = channel.acknowledge(&session_pk, random(rng), now)? {
-            channel.acknowledged(point);
-            self.moved.insert(contact.0);
-            self.queue_command(encoded, Waiting::Other)?;
-            self.pump()?;
-        }
-        Ok(())
+        let Some((point, encoded)) = channel.acknowledge(&session_pk, random(rng), now)? else {
+            return Ok(false);
+        };
+        channel.acknowledged(point);
+        self.moved.insert(contact.0);
+        self.queue_command(encoded, Waiting::Other)?;
+        self.pump()?;
+        Ok(true)
     }
 
     /// Takes one capsule from the link.

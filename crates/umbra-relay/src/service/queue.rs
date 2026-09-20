@@ -264,6 +264,9 @@ impl QueueService {
             Cmd::Sub | Cmd::Unsub | Cmd::Ack | Cmd::Del | Cmd::Nkey | Cmd::Ires | Cmd::Iput => {
                 self.recipient_command(circuit, session, command, now, rng)
             }
+            // A cover command of a client names no queue. It gets no answer,
+            // and it is no activity of a queue (`NET-196`).
+            Cmd::Cover => Ok(Vec::new()),
             _ => Err(Reject::Rejected),
         }
     }

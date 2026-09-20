@@ -6,7 +6,7 @@ use alloc::collections::BTreeMap;
 
 use umbra_crypto::stored::{Reader, Writer};
 
-use crate::params::{ACK_HOLE_TIMEOUT, DRAIN_THRESHOLD, IN_FLIGHT_WINDOW};
+use crate::params::{ACK_HOLE_TIMEOUT, DRAIN_THRESHOLD, IN_FLIGHT_WINDOW, RECEIPT_MIN_DELAY};
 
 /// The cursor of one queue.
 pub struct AckCursor {
@@ -122,12 +122,16 @@ impl AckCursor {
 
     /// The `ACK` the cursor can send now, or `None` when nothing new is
     /// contiguous. After `ACK_HOLE_TIMEOUT` the point may cross the hole
-    /// (`WIR-116`), and the point then says so.
+    /// (`WIR-116`), and the point then says so. The point stops below a
+    /// record that arrived less than `RECEIPT_MIN_DELAY` ago (`NET-050`).
     pub fn ack_point(&self, now: u64) -> Option<AckPoint> {
         let mut point = self.acked;
         let mut expect = self.acked.saturating_add(1);
         let mut crosses = false;
-        for seq in self.received.keys() {
+        for (seq, arrived) in &self.received {
+            if now.saturating_sub(*arrived) < RECEIPT_MIN_DELAY {
+                break;
+            }
             if *seq != expect {
                 let stale = self
                     .hole_since
@@ -202,7 +206,9 @@ mod tests {
         assert_eq!(c.ack_point(200), None);
         // The hole closes when 3 arrives.
         assert!(c.receive(3, 300));
-        let p = c.ack_point(300).unwrap();
+        // NET-050: the record at 3 is too new, and the point waits for it.
+        assert_eq!(c.ack_point(300 + RECEIPT_MIN_DELAY - 1), None);
+        let p = c.ack_point(300 + RECEIPT_MIN_DELAY).unwrap();
         assert_eq!(p.seq, 4);
         assert!(!p.crosses_hole);
         c.acknowledged(p);

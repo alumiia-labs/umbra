@@ -117,8 +117,8 @@ impl CircuitSession {
 
     /// Queues an encoded command under a handle of the caller. A `corr_id`
     /// that this session used is rejected, because the relay rejects it
-    /// (`NET-122`).
-    pub fn queue(&mut self, encoded: Vec<u8>, handle: u64) -> Result<(), Error> {
+    /// (`NET-122`). The result says whether an answer will name the handle.
+    pub fn queue(&mut self, encoded: Vec<u8>, handle: u64) -> Result<bool, Error> {
         let (cmd, corr_id) = {
             // A `SEND` fills the command area of its bucket, thus the
             // smallest bucket that holds the command is its bucket.
@@ -133,8 +133,30 @@ impl CircuitSession {
             return Err(Error::Stale);
         }
         self.batcher.push(cmd, encoded)?;
-        self.pending.insert(corr_id, handle);
-        Ok(())
+        // A relay gives these four no answer but a `NACK`, thus nothing
+        // waits for one. A `NACK` of one of them names no command here, and
+        // `WIR-323` drops it: the records of a lost `ACK` come again.
+        let awaits = !matches!(cmd, Cmd::Ack | Cmd::Sub | Cmd::Unsub | Cmd::Del);
+        if awaits {
+            self.pending.insert(corr_id, handle);
+        }
+        Ok(awaits)
+    }
+
+    /// Puts a `COVER` of the shape of a `B0` `SEND` with the ready commands
+    /// (`WIR-015`). A relay gives no answer, thus nothing waits for one.
+    pub fn queue_cover(&mut self, corr_id: [u8; 16]) -> Result<(), Error> {
+        let payload = alloc::vec![0u8; Bucket::B0.l5_payload()];
+        let cover = Command {
+            cmd: Cmd::Cover,
+            corr_id,
+            queue_id: [0; 32],
+            auth: [0; 32],
+            payload: &payload,
+        };
+        let mut encoded = alloc::vec![0u8; cover.len()];
+        cover.encode(&mut encoded)?;
+        self.batcher.push(Cmd::Cover, encoded)
     }
 
     fn seal_cell(

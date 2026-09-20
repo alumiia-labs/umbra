@@ -69,6 +69,9 @@ pub enum Command {
         /// A value of the caller, which comes back in the update.
         tag: u64,
     },
+    /// The app entered or left the screen. A client in the background
+    /// makes no cover cell (Part 3 §3.6.2, tier C).
+    Foreground(bool),
     /// Start a verification ceremony with a contact (Part 4 §4.5.2). An
     /// [`Update::VerificationCode`] follows at the two devices.
     Verify(ContactId),
@@ -169,14 +172,13 @@ pub enum Ended {
     StoreFault = 5,
 }
 
-/// Commits what the last call of the node gave, and acknowledges each
-/// record after its commit (`WIR-115`). The caller writes the capsules of
-/// the node after this function only (`IMP-131`).
+/// Commits what the last call of the node gave. The caller writes the
+/// capsules of the node after this function only (`IMP-131`). The `ACK` of a
+/// record follows its commit (`WIR-115`), in a slot of the cover clock.
 fn settle(
     node: &mut ClientNode,
     persist: &mut dyn Persist,
     events: &[ClientEvent],
-    rng: &mut OsRng,
 ) -> Result<(), Ended> {
     let received: Vec<(ContactId, Vec<u8>)> = events
         .iter()
@@ -189,33 +191,23 @@ fn settle(
     if changes.is_empty() && received.is_empty() {
         return Ok(());
     }
-    // A record that the node used itself, such as a record of a ceremony,
-    // gives no message. Its channel moved, and its ACK is due also.
-    let moved: Vec<ContactId> = changes
-        .iter()
-        .filter_map(|change| match change {
-            StateChange::Contact { contact, .. } => Some(*contact),
-            _ => None,
-        })
-        .collect();
     if !persist.commit(changes, &received) {
         return Err(Ended::StoreFault);
     }
-    let mut acknowledged = Vec::new();
-    for contact in received.iter().map(|(contact, _)| contact).chain(&moved) {
-        if acknowledged.contains(contact) {
-            continue;
-        }
-        acknowledged.push(*contact);
-        // A node with no circuit sends the ACK in its next run.
-        let _ = node.acknowledge(contact, unix_now(), rng);
-    }
-    // The cursor moved at the ACK.
-    let changes = node.take_changes().map_err(|_| Ended::NodeFault)?;
-    if !changes.is_empty() && !persist.commit(changes, &[]) {
-        return Err(Ended::StoreFault);
-    }
     Ok(())
+}
+
+/// The mean time between two slots of the cover clock: λ = 0.05 cells for
+/// each second (Part 3 §3.6.2, tier A).
+const COVER_MEAN: Duration = Duration::from_secs(20);
+
+/// The time to the next slot of a Poisson clock.
+fn cover_delay(rng: &mut OsRng) -> Duration {
+    let mut bytes = [0u8; 4];
+    let _ = rng.try_fill_bytes(&mut bytes);
+    // A value in (0, 1], thus the logarithm is finite.
+    let unit = (f64::from(u32::from_be_bytes(bytes)) + 1.0) / (f64::from(u32::MAX) + 1.0);
+    COVER_MEAN.mul_f64(-unit.ln())
 }
 
 fn unix_now() -> u64 {
@@ -257,6 +249,8 @@ pub async fn run_client(
 
     let mut early: VecDeque<Command> = VecDeque::new();
     let mut tags: BTreeMap<u64, u64> = BTreeMap::new();
+    let mut is_foreground = true;
+    let mut next_slot = tokio::time::Instant::now() + cover_delay(&mut rng);
     let ended = 'run: loop {
         for capsule in node.take_capsules() {
             if link.send(&capsule).await.is_err() {
@@ -273,13 +267,24 @@ pub async fn run_client(
             },
             command = commands.recv() => match command {
                 None => break 'run Ended::Stopped,
+                Some(Command::Foreground(now_foreground)) => {
+                    is_foreground = now_foreground;
+                    Vec::new()
+                }
                 Some(command) => {
                     early.push_back(command);
                     Vec::new()
                 }
             },
+            // The clock is memoryless, and it fires whether or not a cell
+            // waits (`NET-049`). A fault of one slot ends no run.
+            () = tokio::time::sleep_until(next_slot) => {
+                next_slot = tokio::time::Instant::now() + cover_delay(&mut rng);
+                let _ = node.on_cover_slot(is_foreground, unix_now(), &mut rng);
+                Vec::new()
+            }
         };
-        if let Err(ended) = settle(&mut node, persist.as_mut(), &events, &mut rng) {
+        if let Err(ended) = settle(&mut node, persist.as_mut(), &events) {
             break 'run ended;
         }
         for event in events {
@@ -319,6 +324,8 @@ pub async fn run_client(
             // A value of the user ends no runtime: a bad bundle and a send
             // to no contact fail that one command.
             match command {
+                // The loop above takes this command.
+                Command::Foreground(_) => {}
                 Command::Invite => {
                     if node.invite_link(&mut rng).is_err() {
                         let _ = updates.send(Update::Refused);
@@ -360,7 +367,7 @@ pub async fn run_client(
                     }
                 }
             }
-            if let Err(ended) = settle(&mut node, persist.as_mut(), &[], &mut rng) {
+            if let Err(ended) = settle(&mut node, persist.as_mut(), &[]) {
                 break 'run ended;
             }
         }

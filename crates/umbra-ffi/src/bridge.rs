@@ -85,6 +85,12 @@ impl Bridge {
         self.command(Command::Accept(fragment))
     }
 
+    /// Tells the runtime whether a view of the app is on the screen. The
+    /// cover clock makes a cover cell in the foreground only.
+    pub fn set_foreground(&self, is_foreground: bool) -> Result<(), Error> {
+        self.command(Command::Foreground(is_foreground))
+    }
+
     fn contact_of(&self, conversation: &ConversationId) -> Result<ContactId, Error> {
         self.contacts
             .get(conversation)

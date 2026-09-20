@@ -746,6 +746,15 @@ impl Handle {
             .collect())
     }
 
+    /// Tells the client whether a view of the app is on the screen. A
+    /// client in the background makes no cover cell (Part 3 §3.6.2). With
+    /// no network the call does nothing.
+    pub fn set_foreground(&self, is_foreground: bool) {
+        if let Some(bridge) = locked(&self.inner).bridge.as_ref() {
+            let _ = bridge.set_foreground(is_foreground);
+        }
+    }
+
     /// The 60-digit safety number of a conversation, in groups of five. It
     /// is a public value of the two devices and no secret.
     pub fn safety_number(&self, conversation: Vec<u8>) -> Result<String, FfiError> {

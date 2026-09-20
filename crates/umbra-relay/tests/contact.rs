@@ -12,7 +12,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
-use umbra_core::session::node::{ClientEvent, ClientNode, ContactId, StateChange};
+use umbra_core::session::node::{ClientEvent, ClientNode, ContactId, CoverSlot, StateChange};
 use umbra_crypto::{
     handshake::nk::RelayStatic,
     hierarchy::RootIdentity,
@@ -21,6 +21,7 @@ use umbra_crypto::{
     secret::Secret,
     x25519::{PublicKey as XPublic, StaticSecret},
 };
+use umbra_queue::params::RECEIPT_MIN_DELAY;
 use umbra_relay::{
     circuits::LinkId,
     node::{Config, Output, RelayNode},
@@ -374,10 +375,39 @@ fn two_clients_become_contacts_and_exchange_text() {
     assert_eq!(*contact, alice_contact);
     let parsed = AppMessage::parse(app, Channel::Pairwise).unwrap();
     assert_eq!(parsed.body, b"hello alice");
+    // NET-050: the ACK waits for its floor. A slot of the cover clock before
+    // that time makes a cover cell in the foreground and nothing in the
+    // background, and a relay gives a cover cell no answer.
     let now = network.now;
-    network.clients[ALICE]
-        .acknowledge(&alice_contact, now, &mut Rng(4))
+    let slot = network.clients[ALICE]
+        .on_cover_slot(false, now, &mut Rng(4))
         .unwrap();
+    assert_eq!(slot, CoverSlot::Nothing);
+    let mut kinds = Vec::new();
+    for seed in 0..24 {
+        kinds.push(
+            network.clients[ALICE]
+                .on_cover_slot(true, now, &mut Rng(40 + seed))
+                .unwrap(),
+        );
+    }
+    assert!(kinds.contains(&CoverSlot::Loop));
+    assert!(kinds.contains(&CoverSlot::Cover));
+    assert!(!kinds.contains(&CoverSlot::Acknowledgment));
+    network.settle();
+    assert!(network.take_events(ALICE).is_empty());
+    // NET-064: the ACK that is due takes the slot, in the background also.
+    network.now += RECEIPT_MIN_DELAY;
+    let now = network.now;
+    let slot = network.clients[ALICE]
+        .on_cover_slot(false, now, &mut Rng(90))
+        .unwrap();
+    assert_eq!(slot, CoverSlot::Acknowledgment);
+    let slot = network.clients[ALICE]
+        .on_cover_slot(false, now, &mut Rng(91))
+        .unwrap();
+    assert_eq!(slot, CoverSlot::Nothing);
+    network.settle();
 
     // And back, several records in a row.
     for n in 0..3u8 {
@@ -499,9 +529,10 @@ fn a_client_continues_each_contact_after_a_restart() {
         .unwrap();
     network.settle();
     assert_eq!(messages_of(network.take_events(ALICE)), [b"before"]);
-    network.clients[ALICE]
+    network.now += RECEIPT_MIN_DELAY;
+    assert!(network.clients[ALICE]
         .acknowledge(&alice_contact, network.now, &mut Rng(4))
-        .unwrap();
+        .unwrap());
     network.settle();
 
     // Alice stops. Bob writes two records, and the relay holds them.

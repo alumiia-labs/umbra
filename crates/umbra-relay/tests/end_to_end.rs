@@ -421,7 +421,11 @@ fn a_record_travels_between_two_clients_over_three_relays() {
 
     // Bob acknowledges, and a second subscription finds nothing to push.
     let (point, ack) = bob_channel
-        .acknowledge(bob.session.relay_session_pk(), [4; 16], 111)
+        .acknowledge(
+            bob.session.relay_session_pk(),
+            [4; 16],
+            111 + umbra_queue::params::RECEIPT_MIN_DELAY,
+        )
         .unwrap()
         .unwrap();
     bob.session.queue(ack, 4).unwrap();

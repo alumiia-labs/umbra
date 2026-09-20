@@ -30,6 +30,7 @@ mod tests {
     };
     use umbra_onion::circuit::{Circuit, Position, RelayHop};
     use umbra_queue::{
+        params::RECEIPT_MIN_DELAY,
         relay::{
             queue::{Queue, QueueKeys},
             session::Session,
@@ -303,7 +304,11 @@ mod tests {
 
         // Bob acknowledges after the commit, and the relay erases the record.
         let (point, ack) = bob
-            .acknowledge(bob_circuit.relay_session_pk(), [4; 16], 22)
+            .acknowledge(
+                bob_circuit.relay_session_pk(),
+                [4; 16],
+                21 + RECEIPT_MIN_DELAY,
+            )
             .unwrap()
             .unwrap();
         assert_eq!(point.seq, 1);
