@@ -840,26 +840,41 @@ layer(relay_id) = 2 + ( SHA3-256( "umbra/v1/relay-layer"
                                 || root || BE64(epoch) || relay_id ) mod 2 )
 ```
 
-Here `root` and `epoch` are the fields of the last `DirectoryRoot` before the
-first root that lists the relay. The relay is not in that tree, and its
-operator made `relay_id` before the authorities signed that root.
+Here `root` and `epoch` are the fields of the `DirectoryRoot` that first
+lists the relay, and that root lists it as **pending**. An admission takes
+two roots, because a value that already exists when an operator picks
+`relay_id` is a value that the operator grinds against.
+
+**The pending root.** **[REL-156]** A directory authority MUST list a relay
+of the chain population in one root with `flags` bit 2 set and bit 1 clear
+before it places the relay. **[REL-157]** An authority MUST NOT set bit 1 in
+the same root as bit 2. **[REL-158]** A client MUST NOT select a relay whose
+entry sets bit 2 for any hop, and a relay MUST NOT open a circuit to one. A
+pending entry carries the address and the keys of the relay, thus an
+operator tests its relay against the directory, and no client routes
+through it.
 
 - **[REL-060]** A directory authority MUST compute the layer of a relay of
-  the chain population one time, with the function above, when it admits the
-  relay. It MUST set `flags` bit 1 of the entry when the value is 3, and it
-  MUST keep that bit in each later entry of that `relay_id`. A relay with no
-  queue role serves no last hop (`REL-150`), thus the authority MUST clear
-  bit 1 for it, and that relay is of layer 2.
+  the chain population one time, with the function above, under the root
+  that listed the relay as pending. It MUST set `flags` bit 1 of the first
+  entry that clears bit 2 when the value is 3, and it MUST keep that bit in
+  each later entry of that `relay_id`. A relay with no queue role serves no
+  last hop (`REL-150`), thus the authority MUST clear bit 1 for it, and that
+  relay is of layer 2.
 - **[REL-061]** A client MUST take the layer of a candidate for hop 2 and hop
   3 from `flags` bit 1 of its entry, and a relay MUST take its own layer from
   its own entry. **[REL-151]** A client MUST reject an entry that sets bit 1
   with bit 0, that sets bit 1 with no queue role or no chain role in `roles`,
-  or that sets a bit above bit 1.
+  or that sets a bit above bit 2.
 - **[REL-062]** A relay MUST NOT declare its own layer, and a descriptor
   carries no layer field.
 - The roots are a public record, thus each party can compute the function
   again for each listed relay. **[REL-152]** A directory authority MUST NOT
   sign a root over an entry whose bit 1 differs from the function.
+- **[REL-159]** The relays of the first root of a directory MUST take their
+  layer under `GENESIS_ROOT` at epoch 0, with no pending root. That root is
+  the trusted setup of the directory, and no operator submits a relay to it
+  after it exists.
 
 > *Cause.* An earlier draft named a **verifiable random function** here. A VRF
 > proves that a holder of a secret key produced an output, and this assignment
@@ -867,6 +882,14 @@ operator made `relay_id` before the authorities signed that root.
 > computes the same value, thus a plain hash gives the full property and a proof
 > carries no information. The root is multi-signed and no operator predicts
 > it, thus an operator cannot select a position by a choice of `relay_id`.
+> That argument needs the binding root to come after the choice, and the
+> pending root of `REL-156` is what makes it come after.
+>
+> A later draft bound the function to the last root **before** the first root
+> that lists a relay. That root exists while the operator still chooses
+> `relay_id`, and `relay_id` is the hash of a key that the operator makes.
+> One bit costs about two key generations, thus every operator selected its
+> own layer and the sentence above was a claim with no mechanism behind it.
 >
 > A later draft put the ingress layer in this function, at one third of the
 > population. §10.6.1 admits class C2 and above to the ingress role, and

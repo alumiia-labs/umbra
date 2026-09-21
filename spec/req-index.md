@@ -74,14 +74,14 @@ each column when a crate implements the requirement and a test covers it.
 | `DEV` | 179 | 87 | 2 | 0 | 7 | **275** |
 | `NTF` | 67 | 30 | 0 | 0 | 2 | **99** |
 | `DIS` | 123 | 37 | 0 | 0 | 1 | **161** |
-| `REL` | 122 | 30 | 1 | 0 | 2 | **155** |
+| `REL` | 124 | 32 | 1 | 0 | 2 | **159** |
 | `GRP` | 205 | 58 | 0 | 0 | 5 | **268** |
 | `COM` | 299 | 96 | 0 | 0 | 5 | **400** |
 | `ATT` | 139 | 46 | 1 | 0 | 2 | **188** |
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
 | `IMP` | 112 | 41 | 0 | 0 | 2 | **155** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2198 | 711 | 7 | 0 | 52 | **2968** |
+| **All** | 2200 | 713 | 7 | 0 | 52 | **2972** |
 
 ## SCP — Scope and Conventions
 
@@ -1993,6 +1993,10 @@ Source: `spec/10-relay-directory.md`
 | `REL-153` | §10.6.1 | MUST | A client | A client MUST keep its pins in the store of Part 15 §15.6.4. |  |  |
 | `REL-154` | §10.6.1 | MUST | A client | A client MUST fill an open place with a random draw from the ingress eligible relays of the accepted set. |  |  |
 | `REL-155` | §10.6.1 | MUST NOT | A client | A client MUST NOT dial an ingress relay that is no pin. |  |  |
+| `REL-156` | §10.5.4 | MUST | A directory authority | A directory authority MUST list a relay of the chain population in one root with `flags` bit 2 set and bit 1 clear before it places the relay. |  |  |
+| `REL-157` | §10.5.4 | MUST NOT | An authority | An authority MUST NOT set bit 1 in the same root as bit 2. |  |  |
+| `REL-158` | §10.5.4 | MUST NOT | A client | A client MUST NOT select a relay whose entry sets bit 2 for any hop, and a relay MUST NOT open a circuit to one. |  |  |
+| `REL-159` | §10.5.4 | MUST | The relays of the first root of a directory | The relays of the first root of a directory MUST take their layer under `GENESIS_ROOT` at epoch 0, with no pending root. |  |  |
 
 ## GRP — Private Groups
 
