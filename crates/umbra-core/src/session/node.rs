@@ -42,15 +42,19 @@ use umbra_wire::{
     address::{QueueAddress, LEN as QUEUE_ADDRESS_LEN},
     admission::Admission,
     app::{AppKind, AppMessage, Channel},
-    bucket::Bucket,
+    bucket::{Bucket, COMMAND_HEADER},
     capsule,
     cell::{Cell, CellCommand},
     command::{iblob_parse, Cmd, Command, IdsPayload, LINK_ID_LEN},
+    group::{
+        encode_gsub, split_gmsg, GkeyPayload, GnewPayload, GroupCmd, GseqPayload, GKEY_LEN,
+        GNEW_NONE_LEN, NOTIFY_REGISTRATION_LEN,
+    },
     queue::L6Kind,
 };
 
 use super::{
-    batch::Range,
+    batch::{smallest_bucket, Range},
     channel::{
         get_blob_command, new_queue_command, Inbound, Opened, Outbound, PairwiseChannel, Received,
         Sealed,
@@ -153,6 +157,25 @@ pub enum ClientEvent {
         /// What the relay did.
         outcome: ChunkOutcome,
     },
+    /// The answer to a group-queue command of [`ClientNode::group`].
+    Group {
+        /// The handle of the call.
+        handle: u64,
+        /// What the relay did.
+        outcome: GroupOutcome,
+    },
+    /// One record of a group queue that this device subscribed to. The
+    /// relay gives it at the `GSUB` and at each later post (`WIR-387`,
+    /// `WIR-388`).
+    GroupRecord {
+        /// The group queue that carried it.
+        group_queue_id: [u8; 32],
+        /// The sequence of that replica. It is no order across replicas
+        /// and no message identifier (`WIR-382`, `WIR-383`).
+        seq: u32,
+        /// The `GroupQueueRecord` bytes.
+        record: Vec<u8>,
+    },
     /// The circuit failed its check or its build, and the runtime builds a
     /// new one.
     CircuitLost,
@@ -209,6 +232,79 @@ pub enum ChunkJob {
         /// `cred_sk` of the chunk.
         cred: StaticSecret,
     },
+}
+
+/// One group-queue command of Part 6 §6.4.5 for one relay. Each command
+/// carries the credential that authorizes it (`NET-229`).
+pub enum GroupJob {
+    /// `GNEW`. The creator signs it under the `own_sk` of its own payload
+    /// (`WIR-517`), and the relay draws the `GroupQueueId`.
+    Create {
+        /// The reader credential of epoch 1.
+        read_pk: [u8; 32],
+        /// The writer credential of epoch 1.
+        write_pk: [u8; 32],
+        /// The owner credential, which the creator drew (`NET-231`).
+        own: StaticSecret,
+    },
+    /// `GPOST`.
+    Post {
+        /// `write_sk` of the epoch.
+        write: StaticSecret,
+        /// One `GroupQueueRecord`, filled to its bucket (`WIR-370`).
+        record: Vec<u8>,
+    },
+    /// `GSUB`. The relay emits each record above `from_seq`, and then each
+    /// record that it accepts while the session lives.
+    Subscribe {
+        /// `read_sk` of the epoch.
+        read: StaticSecret,
+        /// The cursor of this device for this replica (`NET-236`).
+        from_seq: u32,
+    },
+    /// `GUNSUB`.
+    Unsubscribe {
+        /// `read_sk` of the epoch.
+        read: StaticSecret,
+    },
+    /// `GKEY`, which an admin sends at a rotation.
+    Rotate {
+        /// `own_sk`.
+        own: StaticSecret,
+        /// The reader credential of the new epoch.
+        read_pk: [u8; 32],
+        /// The writer credential of the new epoch.
+        write_pk: [u8; 32],
+    },
+    /// `GDEL`, which an admin sends to close the group.
+    Delete {
+        /// `own_sk`.
+        own: StaticSecret,
+    },
+    /// `GNREG` or `GNUNREG` of the notify queue of this device (`NTF-093`).
+    Notify {
+        /// `read_sk` of the epoch.
+        read: StaticSecret,
+        /// The encoded `QueueAddress` of the notify queue.
+        queue: Vec<u8>,
+        /// Whether the registration starts or ends.
+        on: bool,
+    },
+}
+
+/// What a relay did with a group-queue command. A `GSUB`, a `GUNSUB`, a
+/// `GKEY`, a `GDEL`, and the two notify commands have no answer of their
+/// own, thus only a `NACK` of one of them gives an outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GroupOutcome {
+    /// The relay made the group queue, and this is its `GroupQueueId`.
+    Created([u8; 32]),
+    /// The relay holds the record under this `seq`. The same bytes again
+    /// give the `seq` that it holds (`NET-239`).
+    Posted(u32),
+    /// The relay refused the command. `WIR-317` gives one reason for an
+    /// unknown group queue and for a wrong credential.
+    Refused(Reject),
 }
 
 /// What a relay did with a chunk command.
@@ -308,6 +404,19 @@ impl Slot {
     }
 }
 
+/// The record of a `GMSG`, in the bucket that its payload length gives.
+/// A payload of another length belongs to no bucket and drops.
+fn group_record(group_queue_id: [u8; 32], payload: &[u8]) -> Option<ClientEvent> {
+    let bucket = smallest_bucket(payload.len().saturating_add(COMMAND_HEADER))
+        .filter(|bucket| bucket.l5_payload() == payload.len())?;
+    let (seq, record) = split_gmsg(payload, bucket).ok()?;
+    Some(ClientEvent::GroupRecord {
+        group_queue_id,
+        seq,
+        record: record.to_vec(),
+    })
+}
+
 /// Reads the answer to a chunk command against what the command expects.
 fn chunk_outcome(expect: ChunkExpect, cmd: u8, payload: Vec<u8>) -> ChunkOutcome {
     let refused = ChunkOutcome::Refused(Reject::Rejected);
@@ -403,8 +512,23 @@ struct HeldChunk {
     job: ChunkJob,
 }
 
+struct HeldGroup {
+    relay: [u8; 32],
+    group_queue_id: [u8; 32],
+    handle: u64,
+    job: GroupJob,
+}
+
+/// What a group-queue command waits for.
+struct GroupWait {
+    handle: u64,
+    /// Whether the answer is a `GIDS` or a `GSEQ`.
+    creates: bool,
+}
+
 enum Waiting {
     Chunk(Box<ChunkWait>),
+    Group(Box<GroupWait>),
     Queue(Box<QueueKeys>),
     UserSend(u64),
     /// An `IRES` or an `IPUT` of the invitation on this queue.
@@ -548,6 +672,8 @@ pub struct ClientNode {
     held_fetches: Vec<LinkFetch>,
     /// The chunk commands that wait for a circuit to their relay.
     held_chunks: Vec<HeldChunk>,
+    /// The group-queue commands that wait for a circuit to their relay.
+    held_groups: Vec<HeldGroup>,
     /// The range of each circuit of this node (`WIR-309`). A node for
     /// attachments carries no queue command (Part 13 §13.8).
     range: Range,
@@ -647,6 +773,7 @@ impl ClientNode {
             held_records: Vec::new(),
             held_fetches: Vec::new(),
             held_chunks: Vec::new(),
+            held_groups: Vec::new(),
             range: Range::Queue,
             capsules: VecDeque::new(),
             next_handle: 1,
@@ -1224,6 +1351,180 @@ impl ClientNode {
         node
     }
 
+    /// A node that carries group-queue commands alone (`GRP-186`). One
+    /// circuit of it serves one group queue (`GRP-187`).
+    pub fn for_groups(ingress: RelayInfo, relays: Vec<RelayInfo>, root: RootIdentity) -> Self {
+        let mut node = Self::with_relays(ingress, relays, root);
+        node.range = Range::Group;
+        node
+    }
+
+    /// Sends one group-queue command to `relay` on a circuit that serves
+    /// this group queue and no other. With no such circuit the command
+    /// waits, and a circuit starts. A [`ClientEvent::Group`] with the
+    /// handle follows an answer or a refusal.
+    ///
+    /// `group_queue_id` is zero for a `GroupJob::Create`, because the relay
+    /// draws that value (`NET-224`).
+    pub fn group<R: CryptoRng + ?Sized>(
+        &mut self,
+        relay: [u8; 32],
+        group_queue_id: [u8; 32],
+        job: GroupJob,
+        rng: &mut R,
+    ) -> Result<u64, Error> {
+        if self.range != Range::Group {
+            return Err(Error::Malformed);
+        }
+        let handle = self.handle();
+        let held = HeldGroup {
+            relay,
+            group_queue_id,
+            handle,
+            job,
+        };
+        if self.group_slot(&relay, &group_queue_id).is_some() {
+            self.start_group(held, rng)?;
+        } else {
+            self.held_groups.push(held);
+            self.circuit_for_group(relay, rng)?;
+        }
+        Ok(handle)
+    }
+
+    /// A ready circuit that ends at `relay` and that serves this group
+    /// queue or none at all (`GRP-187`).
+    fn group_slot(&self, relay: &[u8; 32], group_queue_id: &[u8; 32]) -> Option<usize> {
+        self.slots.iter().enumerate().find_map(|(index, slot)| {
+            let exit = slot.chain.and_then(|chain| chain.last().copied());
+            let free = slot.queues.is_empty() && slot.reserved == 0;
+            let serves = free || slot.queues.contains(group_queue_id);
+            (slot.is_ready() && exit == Some(*relay) && serves).then_some(index)
+        })
+    }
+
+    /// Starts a circuit for a group queue at `relay`, when no circuit of
+    /// this client is free for it.
+    fn circuit_for_group<R: CryptoRng + ?Sized>(
+        &mut self,
+        relay: [u8; 32],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let free_for_it = |slot: &Slot| {
+            let ends_there = match slot.chain {
+                Some(chain) => chain.last() == Some(&relay),
+                None => slot.exit == Some(relay),
+            };
+            ends_there && slot.queues.is_empty() && slot.reserved == 0
+        };
+        if self.slots.iter().any(free_for_it) {
+            return Ok(());
+        }
+        let current = self.current;
+        let started = self.add_circuit(Some(relay), rng);
+        self.current = current;
+        started
+    }
+
+    /// Signs a group-queue command for the session of its circuit, and
+    /// queues it.
+    fn start_group<R: CryptoRng + ?Sized>(
+        &mut self,
+        held: HeldGroup,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        self.current = self
+            .group_slot(&held.relay, &held.group_queue_id)
+            .ok_or(Error::NoPath)?;
+        let session_pk = self.session_pk()?;
+        let (cmd, signer, payload) = match held.job {
+            GroupJob::Create {
+                read_pk,
+                write_pk,
+                own,
+            } => {
+                let new = GnewPayload {
+                    read_pk,
+                    write_pk,
+                    own_pk: *umbra_crypto::x25519::PublicKey::from(&own).as_bytes(),
+                    admission: Admission::NONE,
+                };
+                let mut payload = alloc::vec![0u8; GNEW_NONE_LEN];
+                let used = new.encode(&mut payload)?;
+                payload.truncate(used);
+                (GroupCmd::Gnew, own, payload)
+            }
+            GroupJob::Post { write, record } => {
+                // WIR-370: the record fills the row of its bucket.
+                if smallest_bucket(record.len().saturating_add(COMMAND_HEADER))
+                    .is_none_or(|bucket| bucket.group_record() != record.len())
+                {
+                    return Err(Error::Malformed);
+                }
+                (GroupCmd::Gpost, write, record)
+            }
+            GroupJob::Subscribe { read, from_seq } => {
+                let mut payload = alloc::vec![0u8; 4];
+                encode_gsub(from_seq, &mut payload)?;
+                (GroupCmd::Gsub, read, payload)
+            }
+            GroupJob::Unsubscribe { read } => (GroupCmd::Gunsub, read, Vec::new()),
+            GroupJob::Rotate {
+                own,
+                read_pk,
+                write_pk,
+            } => {
+                let mut payload = alloc::vec![0u8; GKEY_LEN];
+                GkeyPayload { read_pk, write_pk }.encode(&mut payload)?;
+                (GroupCmd::Gkey, own, payload)
+            }
+            GroupJob::Delete { own } => (GroupCmd::Gdel, own, Vec::new()),
+            GroupJob::Notify { read, queue, on } => {
+                if queue.len() != NOTIFY_REGISTRATION_LEN.saturating_sub(1) {
+                    return Err(Error::Malformed);
+                }
+                let mut payload = alloc::vec![0x01u8];
+                payload.extend_from_slice(&queue);
+                let cmd = if on {
+                    GroupCmd::Gnreg
+                } else {
+                    GroupCmd::Gnunreg
+                };
+                (cmd, read, payload)
+            }
+        };
+        let creates = cmd == GroupCmd::Gnew;
+        // GRP-187: the circuit serves this group queue from here on.
+        if let Some(slot) = self.slots.get_mut(self.current) {
+            if creates {
+                slot.reserved = slot.reserved.saturating_add(1);
+            } else {
+                slot.queues.insert(held.group_queue_id);
+            }
+        }
+        let mut command = Command {
+            cmd: Cmd::Group(cmd),
+            corr_id: random(rng),
+            queue_id: held.group_queue_id,
+            auth: [0; 32],
+            payload: &payload,
+        };
+        let key = CommandAuthKey::derive(&signer, &session_pk).map_err(|_| Error::Unverified)?;
+        command.sign(&key, &[])?;
+        let mut encoded = alloc::vec![0u8; command.len()];
+        command.encode(&mut encoded)?;
+        let waiting = if creates || cmd == GroupCmd::Gpost {
+            Waiting::Group(Box::new(GroupWait {
+                handle: held.handle,
+                creates,
+            }))
+        } else {
+            Waiting::Other
+        };
+        self.queue_command(encoded, waiting)?;
+        self.pump()
+    }
+
     /// Sends one chunk command to `relay` on a circuit that ends there. With
     /// no such circuit the command waits, and the circuit starts. A
     /// [`ClientEvent::Chunk`] with the handle follows the answer.
@@ -1791,6 +2092,25 @@ impl ClientNode {
         for held in due {
             self.start_chunk(held, rng)?;
         }
+        // GRP-187: one circuit takes one group queue, thus a second group
+        // at this relay waits for a circuit of its own.
+        let mut waits = Vec::new();
+        for held in core::mem::take(&mut self.held_groups) {
+            if held.relay == exit && self.group_slot(&exit, &held.group_queue_id).is_some() {
+                self.start_group(held, rng)?;
+            } else {
+                waits.push(held);
+            }
+        }
+        self.held_groups = waits;
+        for relay in self
+            .held_groups
+            .iter()
+            .map(|held| held.relay)
+            .collect::<Vec<_>>()
+        {
+            self.circuit_for_group(relay, rng)?;
+        }
         self.current = ready;
         let waiting: Vec<[u8; 32]> = self
             .contacts
@@ -1934,6 +2254,9 @@ impl ClientNode {
                             outcome: chunk_outcome(wait.expect, byte, payload),
                         });
                     }
+                    (Some(Waiting::Group(wait)), Cmd::Group(byte)) => {
+                        out.extend(self.on_group_answer(*wait, byte, &payload)?);
+                    }
                     _ => {}
                 },
                 CircuitEvent::Rejected { handle, reason } => {
@@ -1964,6 +2287,13 @@ impl ClientNode {
                             });
                             continue;
                         }
+                        Some(Waiting::Group(wait)) => {
+                            out.push(ClientEvent::Group {
+                                handle: wait.handle,
+                                outcome: GroupOutcome::Refused(reason),
+                            });
+                            continue;
+                        }
                         _ => handle,
                     };
                     out.push(ClientEvent::Rejected {
@@ -1976,11 +2306,48 @@ impl ClientNode {
                     bucket,
                     payload,
                 } => out.extend(self.on_message(queue_id, bucket, &payload, now, rng)?),
-                CircuitEvent::Relay { .. } => {}
+                // A `GMSG` carries a `corr_id` of the relay, thus it names
+                // no command of this session.
+                CircuitEvent::Relay {
+                    cmd,
+                    queue_id,
+                    payload,
+                } => {
+                    if cmd == Cmd::Group(GroupCmd::Gmsg) {
+                        out.extend(group_record(queue_id, &payload));
+                    }
+                }
             }
         }
         self.pump()?;
         Ok(out)
+    }
+
+    /// The relay answered a `GNEW` or a `GPOST`.
+    fn on_group_answer(
+        &mut self,
+        wait: GroupWait,
+        byte: GroupCmd,
+        payload: &[u8],
+    ) -> Result<Vec<ClientEvent>, Error> {
+        let outcome = match (wait.creates, byte) {
+            (true, GroupCmd::Gids) => {
+                let group_queue_id: [u8; 32] = payload.try_into().map_err(|_| Error::Malformed)?;
+                // The circuit that carried the `GNEW` serves this queue.
+                if let Some(slot) = self.slots.get_mut(self.current) {
+                    slot.reserved = slot.reserved.saturating_sub(1);
+                    slot.queues.insert(group_queue_id);
+                }
+                GroupOutcome::Created(group_queue_id)
+            }
+            (false, GroupCmd::Gseq) => GroupOutcome::Posted(GseqPayload::parse(payload)?.seq),
+            // WIR-494: an answer of another kind belongs to no command.
+            _ => return Ok(Vec::new()),
+        };
+        Ok(alloc::vec![ClientEvent::Group {
+            handle: wait.handle,
+            outcome,
+        }])
     }
 
     /// The relay made a queue. The client subscribes to it, and then it

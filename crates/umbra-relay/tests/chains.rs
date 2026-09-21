@@ -25,7 +25,8 @@ use umbra_core::{
     },
     directory::{bloc::BlocId, path::Candidate},
     session::node::{
-        ChunkJob, ChunkOutcome, ClientEvent, ClientNode, ContactId, RelayInfo, StateChange,
+        ChunkJob, ChunkOutcome, ClientEvent, ClientNode, ContactId, GroupJob, GroupOutcome,
+        RelayInfo, StateChange,
     },
 };
 use umbra_crypto::{
@@ -40,7 +41,10 @@ use umbra_relay::{
     circuits::LinkId,
     node::{Config, Output, RelayNode},
 };
-use umbra_wire::app::{AppKind, AppMessage, Channel};
+use umbra_wire::{
+    app::{AppKind, AppMessage, Channel},
+    bucket::Bucket,
+};
 
 struct Rng(u64);
 
@@ -949,4 +953,171 @@ fn a_relay_set_with_no_conformant_chain_builds_none() {
         ClientNode::with_relays(ingress, relays, RootIdentity::new(Secret::new([1; 32])));
     assert!(node.connected(&mut Rng(5)).is_err());
     assert!(node.chains().is_empty());
+}
+
+/// A node for group queues in the place of the node of queues of one client.
+fn use_group_node(mesh: &mut Mesh, client: usize, seed: u8) {
+    let mut node = ClientNode::for_groups(
+        relay_info(0),
+        (1..LAYERS.len()).map(relay_info).collect(),
+        RootIdentity::new(Secret::new([seed; 32])),
+    );
+    node.connected(&mut Rng(u64::from(seed))).unwrap();
+    mesh.clients[client] = node;
+}
+
+/// Each answer to a group command that one client got in one turn.
+fn group_answers(mesh: &mut Mesh, client: usize) -> Vec<(u64, GroupOutcome)> {
+    mesh.step();
+    mesh.take_events(client)
+        .into_iter()
+        .filter_map(|event| match event {
+            ClientEvent::Group { handle, outcome } => Some((handle, outcome)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Turns of the mesh until one answer arrives, or a panic.
+fn one_answer(mesh: &mut Mesh, client: usize) -> GroupOutcome {
+    for _ in 0..40 {
+        if let Some((_, outcome)) = group_answers(mesh, client).into_iter().next() {
+            return outcome;
+        }
+    }
+    panic!("no answer to the group command");
+}
+
+/// Each group record that one client holds after some turns.
+fn group_records(mesh: &mut Mesh, client: usize, turns: usize) -> Vec<(u32, Vec<u8>)> {
+    let mut out = Vec::new();
+    for _ in 0..turns {
+        mesh.step();
+        for event in mesh.take_events(client) {
+            if let ClientEvent::GroupRecord { seq, record, .. } = event {
+                out.push((seq, record));
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn a_group_queue_takes_a_record_at_one_client_and_gives_it_at_another() {
+    const CREATOR: usize = 0;
+    const READER: usize = 1;
+    let mut mesh = Mesh::new(&[0x71, 0x72]);
+    use_group_node(&mut mesh, CREATOR, 0x71);
+    use_group_node(&mut mesh, READER, 0x72);
+    mesh.settle();
+    let relay = relay_info(3).candidate.relay_id;
+    let (read, write, own) = (
+        StaticSecret::from([0x31u8; 32]),
+        StaticSecret::from([0x32u8; 32]),
+        StaticSecret::from([0x33u8; 32]),
+    );
+    let public = |sk: &StaticSecret| *XPublic::from(sk).as_bytes();
+
+    // The creator makes the queue, and the relay names it.
+    mesh.clients[CREATOR]
+        .group(
+            relay,
+            [0; 32],
+            GroupJob::Create {
+                read_pk: public(&read),
+                write_pk: public(&write),
+                own: StaticSecret::from(own.to_bytes()),
+            },
+            &mut Rng(21),
+        )
+        .unwrap();
+    let GroupOutcome::Created(group_queue_id) = one_answer(&mut mesh, CREATOR) else {
+        panic!("the relay made no group queue");
+    };
+
+    // A reader of the epoch subscribes from its cursor at 0.
+    mesh.clients[READER]
+        .group(
+            relay,
+            group_queue_id,
+            GroupJob::Subscribe {
+                read: StaticSecret::from(read.to_bytes()),
+                from_seq: 0,
+            },
+            &mut Rng(22),
+        )
+        .unwrap();
+    mesh.settle();
+
+    // The creator posts one record, and the reader takes it.
+    let record: Vec<u8> = (0..Bucket::B1.group_record())
+        .map(|i| (i % 253) as u8)
+        .collect();
+    mesh.clients[CREATOR]
+        .group(
+            relay,
+            group_queue_id,
+            GroupJob::Post {
+                write: StaticSecret::from(write.to_bytes()),
+                record: record.clone(),
+            },
+            &mut Rng(23),
+        )
+        .unwrap();
+    assert_eq!(one_answer(&mut mesh, CREATOR), GroupOutcome::Posted(1));
+    let held = group_records(&mut mesh, READER, 8);
+    assert_eq!(held, vec![(1, record.clone())]);
+
+    // The same bytes again take the sequence that the relay holds, and the
+    // reader gets no second copy (`WIR-385`, `WIR-519`).
+    mesh.clients[CREATOR]
+        .group(
+            relay,
+            group_queue_id,
+            GroupJob::Post {
+                write: StaticSecret::from(write.to_bytes()),
+                record: record.clone(),
+            },
+            &mut Rng(24),
+        )
+        .unwrap();
+    assert_eq!(one_answer(&mut mesh, CREATOR), GroupOutcome::Posted(1));
+    assert!(group_records(&mut mesh, READER, 8).is_empty());
+
+    // A record under a credential that the queue does not hold is refused.
+    mesh.clients[CREATOR]
+        .group(
+            relay,
+            group_queue_id,
+            GroupJob::Post {
+                write: StaticSecret::from([0x44u8; 32]),
+                record: vec![9u8; Bucket::B1.group_record()],
+            },
+            &mut Rng(25),
+        )
+        .unwrap();
+    assert!(matches!(
+        one_answer(&mut mesh, CREATOR),
+        GroupOutcome::Refused(_)
+    ));
+
+    // GRP-187: a second group at one relay takes a circuit of its own.
+    let before = mesh.clients[CREATOR].chains().len();
+    mesh.clients[CREATOR]
+        .group(
+            relay,
+            [0; 32],
+            GroupJob::Create {
+                read_pk: public(&read),
+                write_pk: public(&write),
+                own: StaticSecret::from(own.to_bytes()),
+            },
+            &mut Rng(26),
+        )
+        .unwrap();
+    let GroupOutcome::Created(second) = one_answer(&mut mesh, CREATOR) else {
+        panic!("the relay made no second group queue");
+    };
+    assert_ne!(second, group_queue_id);
+    assert!(mesh.clients[CREATOR].chains().len() > before);
 }

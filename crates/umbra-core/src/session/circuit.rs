@@ -15,6 +15,7 @@ use umbra_wire::{
     bucket::Bucket,
     cell::{pad_body, unpad_body, Cell, CellCommand},
     command::{Cmd, Command},
+    group::GroupCmd,
     nack::{NackPayload, Reason},
 };
 
@@ -133,14 +134,27 @@ impl CircuitSession {
             return Err(Error::Stale);
         }
         self.batcher.push(cmd, encoded)?;
-        // A relay gives these four no answer but a `NACK`, thus nothing
-        // waits for one. A `NACK` of one of them names no command here, and
+        // A relay gives these no answer but a `NACK`, thus nothing waits
+        // for one. A `NACK` of one of them names no command here, and
         // `WIR-323` drops it: the records of a lost `ACK` come again.
-        // A `CRNW` of Part 13 has no answer at all (`ATT-126`).
+        // A `CRNW` of Part 13 has no answer at all (`ATT-126`). Of the
+        // group range only a `GNEW` and a `GPOST` are answered (§6.4.5).
         const CRNW: u8 = 0x7A;
         let awaits = !matches!(
             cmd,
-            Cmd::Ack | Cmd::Sub | Cmd::Unsub | Cmd::Del | Cmd::Attachment(CRNW)
+            Cmd::Ack
+                | Cmd::Sub
+                | Cmd::Unsub
+                | Cmd::Del
+                | Cmd::Attachment(CRNW)
+                | Cmd::Group(
+                    GroupCmd::Gsub
+                        | GroupCmd::Gunsub
+                        | GroupCmd::Gkey
+                        | GroupCmd::Gdel
+                        | GroupCmd::Gnreg
+                        | GroupCmd::Gnunreg
+                )
         );
         if awaits {
             self.pending.insert(corr_id, handle);

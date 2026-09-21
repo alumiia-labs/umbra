@@ -332,10 +332,14 @@ pub async fn run_client(
                     Some(tag) => Update::Failed(tag),
                     None => continue,
                 },
-                // The node of the queues sends no chunk command, thus it
-                // gets no such answer. The transfer of Part 13 has a node
-                // and a connection of its own (§13.8).
-                ClientEvent::Chunk { .. } => continue,
+                // The node of the queues sends no chunk command and no
+                // group-queue command, thus it gets no such answer. The
+                // transfer of Part 13 has a node and a connection of its
+                // own (§13.8), and a group queue takes a session that
+                // carries no other range (`GRP-186`).
+                ClientEvent::Chunk { .. }
+                | ClientEvent::Group { .. }
+                | ClientEvent::GroupRecord { .. } => continue,
                 ClientEvent::CircuitLost => break 'run Ended::CircuitLost,
             };
             let _ = updates.send(update);
