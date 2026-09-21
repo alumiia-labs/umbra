@@ -25,7 +25,7 @@
 use std::{path::Path, process::ExitCode};
 
 use umbra_core::directory::{
-    authority::{entry_of, keyset_bytes, sign_manifest, Listing, GENESIS_ROOT},
+    authority::{entry_of, keyset_bytes, sign_manifest, Admission, Listing, GENESIS_ROOT},
     bloc::BlocList,
     descriptor::RelayEntry,
     AUTHORITY_COUNT, EPOCH_SECONDS,
@@ -108,8 +108,14 @@ fn run(settings: &str, out: &Path) -> Result<(), &'static str> {
             class: relay.class,
             is_ingress: relay.is_ingress,
         };
-        let entry =
-            entry_of(&listing, &GENESIS_ROOT, 0).map_err(|_| "a descriptor does not verify")?;
+        let entry = entry_of(
+            &listing,
+            Admission::Placed {
+                root: GENESIS_ROOT,
+                epoch: 0,
+            },
+        )
+        .map_err(|_| "a descriptor does not verify")?;
         let read = RelayEntry::parse(&entry).map_err(|_| "an entry does not verify")?;
         println!(
             "relay {} layer={} host={}",

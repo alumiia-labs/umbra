@@ -220,12 +220,21 @@ pub mod flags {
     pub const INGRESS: u8 = 0x01;
     /// The admission put the relay in layer 3 (`REL-060`).
     pub const LAYER_3: u8 = 0x02;
+    /// The root lists the relay and places it in no layer yet (`REL-156`).
+    /// The next root carries its layer, computed under this one.
+    pub const PENDING: u8 = 0x04;
 }
 
 impl<'a> RelayEntry<'a> {
     /// Whether the entry may serve at hop 1 (`REL-133`).
     pub fn ingress(&self) -> bool {
         self.flags & flags::INGRESS != 0
+    }
+
+    /// Whether the root that carries the entry places the relay in no
+    /// layer yet. A client selects such a relay for no hop (`REL-158`).
+    pub fn pending(&self) -> bool {
+        self.flags & flags::PENDING != 0
     }
 
     /// The layer of the relay, from 1 to 3 (`REL-061`).
@@ -268,12 +277,15 @@ impl<'a> RelayEntry<'a> {
             return Err(Error::Malformed);
         }
         // REL-151: layer 3 needs the queue role and the chain role, it is no
-        // ingress, and no other bit exists.
+        // ingress, and no other bit exists. REL-157: a pending entry names
+        // no layer.
         let exit_roles = roles::QUEUE | roles::CHAIN;
         let is_layer_3 = out.flags & flags::LAYER_3 != 0;
-        if out.flags & !(flags::INGRESS | flags::LAYER_3) != 0
+        let is_pending = out.flags & flags::PENDING != 0;
+        if out.flags & !(flags::INGRESS | flags::LAYER_3 | flags::PENDING) != 0
             || (is_layer_3 && out.ingress())
             || (is_layer_3 && out.descriptor.roles & exit_roles != exit_roles)
+            || (is_pending && is_layer_3)
         {
             return Err(Error::Malformed);
         }
@@ -375,8 +387,14 @@ pub(crate) mod tests {
             let bytes = entry_bytes(2, *b"SE", 64_501, flags);
             assert_eq!(RelayEntry::parse(&bytes).unwrap().layer(), layer);
         }
-        // An ingress relay of layer 3, and a bit that does not exist.
-        for flags in [3u8, 4, 0x80] {
+        // A pending entry names no layer of its own (`REL-157`).
+        let bytes = entry_bytes(2, *b"SE", 64_501, 4);
+        let pending = RelayEntry::parse(&bytes).unwrap();
+        assert!(pending.pending());
+        assert_eq!(pending.layer(), 2);
+        // An ingress relay of layer 3, a pending entry of layer 3, and a bit
+        // that does not exist.
+        for flags in [3u8, 6, 0x80] {
             assert!(RelayEntry::parse(&entry_bytes(2, *b"SE", 64_501, flags)).is_err());
         }
     }

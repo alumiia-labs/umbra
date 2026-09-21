@@ -23,6 +23,25 @@ use crate::Error;
 /// a network. No root comes before that one.
 pub const GENESIS_ROOT: [u8; 32] = [0; 32];
 
+/// Where a relay of the chain population stands in its admission
+/// (§10.5.4). An ingress relay takes neither state: `REL-156` names the
+/// chain population alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Admission {
+    /// The root lists the relay and places it in no layer. The layer comes
+    /// from this root, and the next root carries it (`REL-156`).
+    Pending,
+    /// The root places the relay, under the root that listed it as pending
+    /// (`REL-060`). `GENESIS_ROOT` at epoch 0 places the relays of the
+    /// first root of a directory (`REL-159`).
+    Placed {
+        /// The root that listed the relay as pending.
+        root: [u8; 32],
+        /// Its epoch.
+        epoch: u64,
+    },
+}
+
 /// What an authority verified of one relay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Listing<'a> {
@@ -36,13 +55,9 @@ pub struct Listing<'a> {
     pub is_ingress: bool,
 }
 
-/// The entry of a relay that the authority admits after the root
-/// `admit_root` of `admit_epoch` (`REL-060`).
-pub fn entry_of(
-    listing: &Listing<'_>,
-    admit_root: &[u8; 32],
-    admit_epoch: u64,
-) -> Result<Vec<u8>, Error> {
+/// The entry of a relay at one stage of its admission (`REL-060`,
+/// `REL-156`).
+pub fn entry_of(listing: &Listing<'_>, admission: Admission) -> Result<Vec<u8>, Error> {
     let descriptor = RelayDescriptor::parse(listing.descriptor)?;
     let exit_roles = roles::QUEUE | roles::CHAIN;
     let flags = if listing.is_ingress {
@@ -50,12 +65,20 @@ pub fn entry_of(
             return Err(Error::Malformed);
         }
         flags::INGRESS
-    } else if descriptor.roles & exit_roles == exit_roles
-        && layer(admit_root, admit_epoch, &descriptor.relay_id) == 3
-    {
-        flags::LAYER_3
     } else {
-        0
+        match admission {
+            // REL-156: the first root of a chain relay places it nowhere.
+            Admission::Pending => flags::PENDING,
+            Admission::Placed { root, epoch } => {
+                if descriptor.roles & exit_roles == exit_roles
+                    && layer(&root, epoch, &descriptor.relay_id) == 3
+                {
+                    flags::LAYER_3
+                } else {
+                    0
+                }
+            }
+        }
     };
     let entry = RelayEntry {
         descriptor,
@@ -196,17 +219,77 @@ mod tests {
     }
 
     #[test]
+    fn a_pending_relay_carries_no_traffic_and_takes_its_layer_from_that_root() {
+        let exit_roles = roles::QUEUE | roles::CHAIN;
+        let bytes = descriptor(11, exit_roles);
+        let pending = entry_of(&listing(&bytes, false), Admission::Pending).unwrap();
+        let read = RelayEntry::parse(&pending).unwrap();
+        assert!(read.pending());
+        // REL-157: the pending root names no layer.
+        assert_eq!(read.layer(), 2);
+
+        // REL-158: no hop takes it, whatever its descriptor offers.
+        let blocs = BlocList::v1();
+        let candidate = crate::directory::path::Candidate::from_entry(&read, &blocs);
+        assert!(!candidate.chain && !candidate.queue && !candidate.ingress);
+        assert!(!candidate.is_exit());
+
+        // The layer of the next root comes from the pending root, and no
+        // earlier root moves it.
+        let pending_root = [0x5C; 32];
+        let placed = entry_of(
+            &listing(&bytes, false),
+            Admission::Placed {
+                root: pending_root,
+                epoch: 77,
+            },
+        )
+        .unwrap();
+        let read = RelayEntry::parse(&placed).unwrap();
+        assert!(!read.pending());
+        assert_eq!(
+            read.layer(),
+            layer(&pending_root, 77, &read.descriptor.relay_id)
+        );
+
+        // An entry that sets the pending bit with the layer bit is a fault
+        // of the authority, and a client rejects it (`REL-157`).
+        let mut both = placed.clone();
+        let flags = both.len() - 1;
+        both[flags] = flags::PENDING | flags::LAYER_3;
+        assert!(RelayEntry::parse(&both).is_err());
+        both[flags] = flags::PENDING | flags::INGRESS;
+        assert!(RelayEntry::parse(&both).is_ok());
+        both[flags] = 0x08;
+        assert!(RelayEntry::parse(&both).is_err());
+    }
+
+    #[test]
     fn a_client_accepts_what_an_authority_signs() {
         let keys: Vec<SigningKey> = (0..7u8)
             .map(|index| SigningKey::from_seed(Secret::new([0xA0 + index; 32])))
             .collect();
         let exit_roles = roles::QUEUE | roles::CHAIN;
         let ingress = descriptor(1, roles::INGRESS_OFFERED | roles::CHAIN);
-        let mut entries = vec![entry_of(&listing(&ingress, true), &GENESIS_ROOT, 0).unwrap()];
+        let mut entries = vec![entry_of(
+            &listing(&ingress, true),
+            Admission::Placed {
+                root: GENESIS_ROOT,
+                epoch: 0,
+            },
+        )
+        .unwrap()];
         let mut expected_exits = 0;
         for seed in 2..10u8 {
             let bytes = descriptor(seed, exit_roles);
-            let entry = entry_of(&listing(&bytes, false), &GENESIS_ROOT, 0).unwrap();
+            let entry = entry_of(
+                &listing(&bytes, false),
+                Admission::Placed {
+                    root: GENESIS_ROOT,
+                    epoch: 0,
+                },
+            )
+            .unwrap();
             let read = RelayEntry::parse(&entry).unwrap();
             // The flag follows the function, and no party selects it.
             assert_eq!(
@@ -218,11 +301,25 @@ mod tests {
         }
         // A relay with no queue role is of layer 2 under each root.
         let plain = descriptor(10, roles::CHAIN);
-        let entry = entry_of(&listing(&plain, false), &GENESIS_ROOT, 0).unwrap();
+        let entry = entry_of(
+            &listing(&plain, false),
+            Admission::Placed {
+                root: GENESIS_ROOT,
+                epoch: 0,
+            },
+        )
+        .unwrap();
         assert_eq!(RelayEntry::parse(&entry).unwrap().layer(), 2);
         entries.push(entry);
         // An ingress flag needs the offer of the relay.
-        assert!(entry_of(&listing(&plain, true), &GENESIS_ROOT, 0).is_err());
+        assert!(entry_of(
+            &listing(&plain, true),
+            Admission::Placed {
+                root: GENESIS_ROOT,
+                epoch: 0
+            }
+        )
+        .is_err());
 
         let blocs = BlocList::v1();
         let manifest = sign_manifest(

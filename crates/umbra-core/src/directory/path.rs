@@ -50,6 +50,10 @@ impl Candidate {
             p.copy_from_slice(d.addr_v6.get(..6).unwrap_or(&[0; 6]));
             p
         });
+        // REL-158: a pending entry names no layer yet, thus it serves no
+        // hop. The three roles go away together, and each selection path
+        // then passes it by.
+        let placed = !entry.pending();
         Candidate {
             relay_id: d.relay_id,
             operator_id: entry.operator_id,
@@ -58,9 +62,9 @@ impl Candidate {
             asn: d.asn,
             v4_prefix,
             v6_prefix,
-            ingress: entry.ingress(),
-            chain: d.roles & roles::CHAIN != 0,
-            queue: d.roles & roles::QUEUE != 0,
+            ingress: placed && entry.ingress(),
+            chain: placed && d.roles & roles::CHAIN != 0,
+            queue: placed && d.roles & roles::QUEUE != 0,
             layer: entry.layer(),
         }
     }

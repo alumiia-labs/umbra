@@ -22,7 +22,7 @@ use tokio::net::TcpListener;
 use umbra_core::{
     attach::{place::AttachmentRelay, transfer::Shape},
     directory::{
-        authority::{entry_of, keyset_bytes, sign_manifest, Listing, GENESIS_ROOT},
+        authority::{entry_of, keyset_bytes, sign_manifest, Admission, Listing, GENESIS_ROOT},
         bloc::BlocList,
         descriptor::{roles, RelayDescriptor, RelayEntry, HOST_LEN},
         manifest::{ListedRelay, RelayManifest, RelaySet},
@@ -698,7 +698,14 @@ fn start_signed_network(relays: &tokio::runtime::Runtime) -> SignedNetwork {
             class: 2,
             is_ingress,
         };
-        let entry = entry_of(&listing, &GENESIS_ROOT, 0).unwrap();
+        let entry = entry_of(
+            &listing,
+            Admission::Placed {
+                root: GENESIS_ROOT,
+                epoch: 0,
+            },
+        )
+        .unwrap();
         let relay_id = RelayEntry::parse(&entry).unwrap().descriptor.relay_id;
         identities.push((relay_id, relay.s, static_secret));
         entries.push(entry);
