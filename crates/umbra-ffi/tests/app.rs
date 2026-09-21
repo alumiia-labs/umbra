@@ -28,6 +28,13 @@ use umbra_core::{
         manifest::{ListedRelay, RelayManifest, RelaySet},
         root::{Consensus, DirectoryKeySet},
     },
+    group::{
+        join::{accept_admit, JoinKeys},
+        queue::{select_pair, Candidate as GroupRelay},
+        receive::Outcome,
+        roster::Applied,
+        state::Group,
+    },
     session::node::{ClientNode, RelayInfo},
 };
 use umbra_crypto::{
@@ -43,6 +50,7 @@ use umbra_ffi::bindings::{
     fetch_manifest, init, parse_network, Config, FfiError, FfiEvent, Handle, MsgHandle, Network,
     RelayEndpoint, SecureElementCallback, TextSink,
 };
+use umbra_ffi::groups::{run_groups, GroupCommand, GroupUpdate};
 use umbra_ffi::transfers::{run_transfers, TransferCommand, TransferUpdate};
 use umbra_relay::{
     node::{Config as RelayConfig, RelayNode},
@@ -1184,4 +1192,274 @@ fn one_app_sends_a_file_and_the_other_app_gets_it() {
     alice.disconnect();
     bob.disconnect();
     let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// The next update of a group run, or a panic.
+fn group_update(updates: &mut tokio::sync::mpsc::UnboundedReceiver<GroupUpdate>) -> GroupUpdate {
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(60) {
+        match updates.try_recv() {
+            Ok(update) => return update,
+            Err(_) => std::thread::sleep(Duration::from_millis(20)),
+        }
+    }
+    panic!("the group run gave no update in time");
+}
+
+#[test]
+fn two_members_talk_in_a_group_over_the_relays_of_a_signed_network() {
+    let relays = tokio::runtime::Runtime::new().unwrap();
+    let network = start_signed_network(&relays);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let (keyset, _) = DirectoryKeySet::parse(&network.keyset).unwrap();
+    let mut consensus = Consensus::new(keyset, 0).unwrap();
+    let manifest = RelayManifest::parse(&network.manifest).unwrap();
+    let set = RelaySet::accept(&mut consensus, &manifest, &BlocList::v1(), now).unwrap();
+    let info_of = |relay: &ListedRelay| RelayInfo {
+        candidate: relay.candidate,
+        key: RelayStatic {
+            s: relay.ntor_pk,
+            relay_id: relay.candidate.relay_id,
+        },
+    };
+    let ingress = set
+        .relays
+        .iter()
+        .find(|relay| relay.candidate.ingress)
+        .unwrap();
+    let guard = Dial {
+        host: ingress.host.clone(),
+        addr_v4: Some(ingress.addr_v4),
+        addr_v6: None,
+        port: ingress.port,
+    };
+
+    // GRP-191: the two replicas take two operators and two blocs. Each test
+    // relay has a jurisdiction of its own, thus a pair exists.
+    let candidates: Vec<GroupRelay> = set
+        .relays
+        .iter()
+        .filter(|relay| relay.candidate.is_exit())
+        .map(|relay| GroupRelay {
+            relay_id: relay.candidate.relay_id,
+            operator_id: relay.candidate.operator_id,
+            bloc: relay.jurisdiction[1],
+        })
+        .collect();
+    let pair = select_pair(&candidates).unwrap();
+    assert!(!pair.relaxed);
+    let replicas = pair.relays;
+
+    let clients = tokio::runtime::Runtime::new().unwrap();
+    let tls = native::tls_config_with_root_file(CA).unwrap();
+    let start = |seed: u8| {
+        let node = ClientNode::for_groups(
+            info_of(ingress),
+            set.relays
+                .iter()
+                .filter(|relay| !relay.candidate.ingress)
+                .map(info_of)
+                .collect(),
+            umbra_crypto::hierarchy::RootIdentity::new(Secret::new([seed; 32])),
+        );
+        let (commands, task_commands) = tokio::sync::mpsc::unbounded_channel();
+        let (task_updates, updates) = tokio::sync::mpsc::unbounded_channel();
+        clients.spawn(run_groups(
+            node,
+            guard.clone(),
+            tls.clone(),
+            task_commands,
+            task_updates,
+        ));
+        (commands, updates)
+    };
+    let (creator_tx, mut creator_rx) = start(0x91);
+    let (member_tx, mut member_rx) = start(0x92);
+
+    // The creator makes the group and one queue at each replica.
+    let mut rng = OsRng;
+    let creator_keys = umbra_crypto::group::MemberKeys::from_seed(&Secret::new([0x41; 32]));
+    let creator_pk = creator_keys.roster().verifying_key().to_bytes();
+    let mut creator = Group::create([0x77; 32], creator_keys, now, &mut rng).unwrap();
+    let credentials = creator.credentials().unwrap();
+    let (read_pk, write_pk) = (credentials.read_public(), credentials.write_public());
+    let write_sk = credentials.write_secret();
+    for (index, relay) in replicas.iter().enumerate() {
+        creator_tx
+            .send(GroupCommand::Create {
+                tag: index as u64,
+                relay: *relay,
+                read_pk,
+                write_pk,
+                own: Secret::new(*creator.owner(index).unwrap().expose()),
+            })
+            .ok()
+            .unwrap();
+    }
+    let mut queue_ids = [[0u8; 32]; 2];
+    for _ in 0..2 {
+        let GroupUpdate::Created {
+            tag,
+            relay,
+            group_queue_id,
+        } = group_update(&mut creator_rx)
+        else {
+            panic!("a replica made no group queue");
+        };
+        assert_eq!(relay, replicas[tag as usize]);
+        queue_ids[tag as usize] = group_queue_id;
+    }
+    assert_ne!(queue_ids[0], queue_ids[1]);
+    creator.set_replicas([
+        umbra_wire::group::control::ReplicaRef {
+            relay_id: replicas[0],
+            group_queue_id: queue_ids[0],
+            seq_of_add: 0,
+        },
+        umbra_wire::group::control::ReplicaRef {
+            relay_id: replicas[1],
+            group_queue_id: queue_ids[1],
+            seq_of_add: 0,
+        },
+    ]);
+
+    // The add and the admit travel on the pairwise channel, which this test
+    // stands in for. §11.9.1 gives the four steps.
+    let joiner = JoinKeys::make(&mut rng).unwrap();
+    let kem_pk = joiner.keys.kem().public().to_bytes();
+    let join_record = umbra_wire::group::control::JoinRecord {
+        group_id: *creator.group_id(),
+        keys: joiner.wire_keys(&kem_pk),
+    };
+    let add = creator.add_object(&join_record).unwrap();
+    let add_control = umbra_wire::group::control::GroupControl::parse(&add).unwrap();
+    let add_hash = add_control.epoch_hash();
+    assert_eq!(
+        creator.apply_control(&add_control, 0, now).unwrap(),
+        Applied::Added(1)
+    );
+    let admit = creator.admit_for(1, 0, b"", now).unwrap();
+    let admit_control = umbra_wire::group::control::GroupControl::parse(&admit).unwrap();
+    let invitation =
+        umbra_wire::group::control::GroupInvitation::parse(admit_control.payload).unwrap();
+    let snapshot_bytes = creator.snapshot(&[]).unwrap();
+    let snapshot = umbra_wire::group::control::RosterSnapshot::parse(&snapshot_bytes).unwrap();
+    let admitted = accept_admit(&invitation, &snapshot, &add_hash, &creator_pk, now).unwrap();
+    let mut member = Group::joined(admitted, joiner.keys).unwrap();
+
+    // One message of the creator goes to each replica (`GRP-194`).
+    let text_of = |body: &[u8]| {
+        let message = umbra_wire::app::AppMessage {
+            kind: umbra_wire::app::AppKind::Text,
+            msg_id: [0x5A; 16],
+            sent_at: now * 1_000,
+            body,
+        };
+        let mut out = vec![0u8; message.len()];
+        let n = message.encode(&mut out).unwrap();
+        out.truncate(n);
+        out
+    };
+    let mut post = |group: &mut Group, body: &[u8], tag: u64| {
+        let record = group.post(&text_of(body), now, &mut rng).unwrap();
+        for (index, relay) in replicas.iter().enumerate() {
+            creator_tx
+                .send(GroupCommand::Post {
+                    tag: tag + index as u64,
+                    relay: *relay,
+                    group_queue_id: queue_ids[index],
+                    write: Secret::new(*write_sk.expose()),
+                    record: record.clone(),
+                })
+                .ok()
+                .unwrap();
+        }
+        record
+    };
+    let first = post(&mut creator, b"a group of two", 10);
+    for _ in 0..2 {
+        let GroupUpdate::Posted { tag, seq, .. } = group_update(&mut creator_rx) else {
+            panic!("a replica refused the record");
+        };
+        assert!(tag == 10 || tag == 11);
+        assert_eq!(seq, 1);
+    }
+
+    // The member subscribes from the `seq` of its add, which is 0 here
+    // because no roster record went to the queue. The record that waits
+    // comes with the subscription (`WIR-387`).
+    member_tx
+        .send(GroupCommand::Subscribe {
+            relay: replicas[0],
+            group_queue_id: queue_ids[0],
+            read: member.credentials().unwrap().read_secret(),
+            from_seq: 0,
+        })
+        .ok()
+        .unwrap();
+    let mut read_one = |expected: &[u8], body: &[u8]| {
+        let GroupUpdate::Record {
+            group_queue_id,
+            record: carried,
+            ..
+        } = group_update(&mut member_rx)
+        else {
+            panic!("the member got no record");
+        };
+        assert_eq!(group_queue_id, queue_ids[0]);
+        assert_eq!(carried, expected);
+        let Outcome::Content {
+            sender, app: read, ..
+        } = member.receive(&carried, now).unwrap()
+        else {
+            panic!("the record did not open");
+        };
+        assert_eq!(sender, 0);
+        assert_eq!(
+            umbra_wire::app::AppMessage::parse(&read, umbra_wire::app::Channel::Group)
+                .unwrap()
+                .body,
+            body
+        );
+    };
+    read_one(&first, b"a group of two");
+
+    // A record that the relay takes while the session lives reaches the
+    // reader without a second `GSUB` (`WIR-388`).
+    let second = post(&mut creator, b"and a second line", 20);
+    read_one(&second, b"and a second line");
+
+    // A record under a credential that the queue does not hold is refused.
+    creator_tx
+        .send(GroupCommand::Post {
+            tag: 12,
+            relay: replicas[0],
+            group_queue_id: queue_ids[0],
+            write: Secret::new([0x13; 32]),
+            record: second,
+        })
+        .ok()
+        .unwrap();
+    loop {
+        match group_update(&mut creator_rx) {
+            GroupUpdate::Failed { tag: 12, .. } => break,
+            GroupUpdate::Posted { tag, .. } => assert!(tag == 20 || tag == 21),
+            other => panic!("{}", update_name(&other)),
+        }
+    }
+}
+
+/// The name of an update, for a test that met one it did not expect.
+fn update_name(update: &GroupUpdate) -> &'static str {
+    match update {
+        GroupUpdate::Created { .. } => "created",
+        GroupUpdate::Posted { .. } => "posted",
+        GroupUpdate::Record { .. } => "record",
+        GroupUpdate::Failed { .. } => "failed",
+        GroupUpdate::Ended => "ended",
+    }
 }

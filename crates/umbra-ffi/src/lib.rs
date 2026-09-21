@@ -17,6 +17,8 @@ pub mod bridge;
 pub mod client;
 pub mod draft;
 #[cfg(feature = "runtime")]
+pub mod groups;
+#[cfg(feature = "runtime")]
 pub mod runtime;
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
