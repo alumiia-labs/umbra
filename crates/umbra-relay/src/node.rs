@@ -24,6 +24,7 @@ use umbra_wire::{
     capsule::{self, CapsuleType},
     cell::CellCommand,
     command::{Cmd, Command},
+    group::GroupCmd,
     session::SessionControl,
 };
 
@@ -31,10 +32,11 @@ use crate::{
     circuits::{Action, CircuitKey, CircuitTable, LinkId},
     service::{
         chunk::{ChunkService, Push},
-        community::{CommunityService, DigestDue},
+        community::CommunityService,
+        group::GroupService,
         nack,
         queue::QueueService,
-        Outbound, Reply,
+        DigestDue, Outbound, Reply,
     },
     store::{Loaded, StoreChange},
 };
@@ -150,6 +152,7 @@ pub struct RelayNode {
     gate: RelayGate,
     queues: QueueService,
     communities: CommunityService,
+    groups: GroupService,
     chunks: ChunkService,
 }
 
@@ -166,6 +169,7 @@ impl RelayNode {
             gate: RelayGate::new(relay_id),
             queues: QueueService::default(),
             communities: CommunityService::new(config.community_capacity),
+            groups: GroupService::default(),
             chunks: ChunkService::new(config.chunk_capacity),
         }
     }
@@ -368,6 +372,7 @@ impl RelayNode {
                 Action::Closed { circuit } => {
                     self.endpoints.remove(&circuit);
                     self.queues.circuit_closed(&circuit, now);
+                    self.groups.circuit_closed(&circuit);
                 }
             }
         }
@@ -418,7 +423,8 @@ impl RelayNode {
                 Ok((replies, due)) => {
                     digests.extend(due);
                     // NET-037: a drain above the threshold goes at once.
-                    let is_drain = command.cmd == Cmd::Sub && replies.len() > DRAIN_THRESHOLD;
+                    let is_drain = matches!(command.cmd, Cmd::Sub | Cmd::Group(GroupCmd::Gsub))
+                        && replies.len() > DRAIN_THRESHOLD;
                     if is_drain {
                         unpaced.extend(replies);
                     } else {
@@ -488,9 +494,15 @@ impl RelayNode {
                     rng,
                 )
                 .map(|replies| (replies, Vec::new())),
-            // The group queues attach here in the same manner. Until they
-            // do, the relay serves no command of that range.
-            Range::Group => Err(Reject::Rejected),
+            Range::Group => self.groups.handle(
+                circuit,
+                &mut endpoint.session,
+                &mut self.gate,
+                &accepts,
+                command,
+                now,
+                rng,
+            ),
         }
     }
 
@@ -547,6 +559,7 @@ impl RelayNode {
             if let Action::Closed { circuit } = action {
                 self.endpoints.remove(&circuit);
                 self.queues.circuit_closed(&circuit, now);
+                self.groups.circuit_closed(&circuit);
             }
         }
         vec![Output::Close { link }]
@@ -559,14 +572,13 @@ impl RelayNode {
             if let Action::Closed { circuit } = action {
                 self.endpoints.remove(&circuit);
                 self.queues.circuit_closed(&circuit, now);
+                self.groups.circuit_closed(&circuit);
             }
         }
         self.queues.sweep(now);
-        self.communities
-            .sweep(now)
-            .into_iter()
-            .map(Output::Digest)
-            .collect()
+        let mut due = self.communities.sweep(now);
+        due.extend(self.groups.sweep(now));
+        due.into_iter().map(Output::Digest).collect()
     }
 }
 

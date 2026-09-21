@@ -1,12 +1,13 @@
 //! A group queue at a relay: the retained records, the sequence, the post
-//! rate, the two graces of a credential rotation, and the notifier set.
+//! rate, and the two graces of a credential rotation. The notifier set of
+//! Part 8 §8.5.2 sits with the digest gate at the service.
 
 use alloc::{collections::VecDeque, vec::Vec};
 
 use crate::{
     params::{
-        GROUP_IDLE_TTL, GROUP_NOTIFIER_MAX, GROUP_POST_RATE, GROUP_POST_WINDOW, GROUP_QUEUE_QUOTA,
-        GROUP_READ_GRACE, GROUP_RETENTION, GROUP_WRITE_GRACE,
+        GROUP_IDLE_TTL, GROUP_POST_RATE, GROUP_POST_WINDOW, GROUP_QUEUE_QUOTA, GROUP_READ_GRACE,
+        GROUP_RETENTION, GROUP_WRITE_GRACE,
     },
     relay::Stored,
     Reject,
@@ -41,6 +42,14 @@ impl Credential {
         matches!(self.previous, Some((prev, at)) if prev == *pk && now.saturating_sub(at) < self.grace)
     }
 
+    fn pair(&self, now: u64) -> ([u8; 32], Option<[u8; 32]>) {
+        let previous = self
+            .previous
+            .filter(|(_, at)| now.saturating_sub(*at) < self.grace)
+            .map(|(pk, _)| pk);
+        (self.current, previous)
+    }
+
     fn expire(&mut self, now: u64) {
         if let Some((_, at)) = self.previous {
             if now.saturating_sub(at) >= self.grace {
@@ -48,6 +57,16 @@ impl Credential {
             }
         }
     }
+}
+
+/// The result of an accepted `GPOST`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Posted {
+    /// The sequence of the record.
+    pub seq: u32,
+    /// Whether the bytes are new here. A second send of one record is
+    /// idempotent (`NET-239`), and it moves no reader.
+    pub fresh: bool,
 }
 
 /// A group queue.
@@ -60,7 +79,6 @@ pub struct GroupQueue {
     bytes: usize,
     next_seq: u32,
     posts: VecDeque<u64>,
-    notifiers: Vec<[u8; 32]>,
     last_activity: u64,
 }
 
@@ -83,7 +101,6 @@ impl GroupQueue {
             bytes: 0,
             next_seq: 1,
             posts: VecDeque::new(),
-            notifiers: Vec::new(),
             last_activity: now,
         }
     }
@@ -108,6 +125,17 @@ impl GroupQueue {
         self.write.accepts(pk, now)
     }
 
+    /// The reader credentials that authorize a command at `now`: the
+    /// current one, and the previous one while its grace holds.
+    pub fn read_pks(&self, now: u64) -> ([u8; 32], Option<[u8; 32]>) {
+        self.read.pair(now)
+    }
+
+    /// The writer credentials that authorize a `GPOST` at `now`.
+    pub fn write_pks(&self, now: u64) -> ([u8; 32], Option<[u8; 32]>) {
+        self.write.pair(now)
+    }
+
     /// Applies a `GKEY` (`NET-242`).
     pub fn rotate(&mut self, read_pk: [u8; 32], write_pk: [u8; 32], now: u64) {
         self.read.rotate(read_pk, now);
@@ -128,9 +156,12 @@ impl GroupQueue {
     /// relay already holds returns the `seq` it holds (`NET-239`); a post
     /// above `GROUP_POST_RATE` is rejected with `LIMIT` (`NET-241`); the
     /// oldest record leaves at the quota (`NET-247`).
-    pub fn post(&mut self, record: &[u8], now: u64) -> Result<u32, Reject> {
+    pub fn post(&mut self, record: &[u8], now: u64) -> Result<Posted, Reject> {
         if let Some(held) = self.records.iter().find(|r| r.bytes == record) {
-            return Ok(held.seq);
+            return Ok(Posted {
+                seq: held.seq,
+                fresh: false,
+            });
         }
         while self
             .posts
@@ -158,7 +189,7 @@ impl GroupQueue {
             }
         }
         self.last_activity = now;
-        Ok(seq)
+        Ok(Posted { seq, fresh: true })
     }
 
     /// The retained records above `from_seq`, in `seq` order, which a
@@ -194,29 +225,6 @@ impl GroupQueue {
         now.saturating_sub(self.last_activity) >= GROUP_IDLE_TTL
     }
 
-    /// Adds a notifier from a `GNREG`, keyed by the `sender_id` of its
-    /// notify queue. Rejects above `GROUP_NOTIFIER_MAX` (`NET-252`).
-    pub fn register(&mut self, notify_sender_id: [u8; 32]) -> Result<(), Reject> {
-        if self.notifiers.contains(&notify_sender_id) {
-            return Ok(());
-        }
-        if self.notifiers.len() >= GROUP_NOTIFIER_MAX {
-            return Err(Reject::Limit);
-        }
-        self.notifiers.push(notify_sender_id);
-        Ok(())
-    }
-
-    /// Removes a notifier at a `GNUNREG`.
-    pub fn unregister(&mut self, notify_sender_id: &[u8; 32]) {
-        self.notifiers.retain(|n| n != notify_sender_id);
-    }
-
-    /// The count of notifiers.
-    pub fn notifier_count(&self) -> usize {
-        self.notifiers.len()
-    }
-
     /// Erases everything a `GDEL` erases (`NET-244`).
     pub fn delete(self) -> Vec<Vec<u8>> {
         self.records.into_iter().map(|r| r.bytes).collect()
@@ -241,14 +249,26 @@ mod tests {
     #[test]
     fn a_post_is_idempotent_and_the_rate_holds() {
         let mut q = queue();
-        assert_eq!(q.post(b"a", 1_000).unwrap(), 1);
-        assert_eq!(q.post(b"a", 1_001).unwrap(), 1);
-        assert_eq!(q.post(b"b", 1_001).unwrap(), 2);
+        assert_eq!(
+            q.post(b"a", 1_000).unwrap(),
+            Posted {
+                seq: 1,
+                fresh: true
+            }
+        );
+        assert_eq!(
+            q.post(b"a", 1_001).unwrap(),
+            Posted {
+                seq: 1,
+                fresh: false
+            }
+        );
+        assert_eq!(q.post(b"b", 1_001).unwrap().seq, 2);
         for i in 0..(GROUP_POST_RATE - 2) {
             q.post(&[9, i as u8], 1_002).unwrap();
         }
         assert_eq!(q.post(b"z", 1_003), Err(Reject::Limit));
-        assert_eq!(q.post(b"z", 1_000 + GROUP_POST_WINDOW).unwrap(), 61);
+        assert_eq!(q.post(b"z", 1_000 + GROUP_POST_WINDOW).unwrap().seq, 61);
         let since: Vec<u32> = q.since(59).map(|r| r.seq).collect();
         assert_eq!(since, vec![60, 61]);
     }
@@ -269,10 +289,12 @@ mod tests {
         q.rotate([7; 32], [8; 32], 3_000);
         assert!(q.accepts_read(&[5; 32], 3_000));
         assert!(!q.accepts_read(&[2; 32], 3_000));
+        assert_eq!(q.read_pks(3_000), ([7; 32], Some([5; 32])));
+        assert_eq!(q.write_pks(3_000 + GROUP_WRITE_GRACE), ([8; 32], None));
     }
 
     #[test]
-    fn retention_quota_idle_and_notifiers_hold() {
+    fn the_retention_the_quota_and_the_idle_life_hold() {
         let mut q = queue();
         q.post(b"old", 1_000).unwrap();
         q.post(b"new", 1_000 + GROUP_RETENTION - 1).unwrap();
@@ -287,15 +309,8 @@ mod tests {
         assert!(q.idle(5_001 + GROUP_IDLE_TTL));
         q.touch(9_000_000);
         assert!(!q.idle(9_000_000 + GROUP_IDLE_TTL - 1));
-        for i in 0..GROUP_NOTIFIER_MAX {
-            let mut id = [0u8; 32];
-            id[..2].copy_from_slice(&(i as u16).to_be_bytes());
-            q.register(id).unwrap();
-        }
-        assert_eq!(q.register([0xFF; 32]), Err(Reject::Limit));
-        q.unregister(&[0; 32]);
-        assert_eq!(q.notifier_count(), GROUP_NOTIFIER_MAX - 1);
         assert_eq!(q.id(), [1; 32]);
         assert_eq!(q.own_pk(), [4; 32]);
+        assert_eq!(q.delete().len(), 1);
     }
 }

@@ -29,20 +29,8 @@ use umbra_wire::{
     command::{Cmd, Command},
 };
 
-use super::{answer, Reply};
+use super::{answer, DigestDue, Reply};
 use crate::circuits::CircuitKey;
-
-/// A digest for the runtime to write as a `SEND` into a notify queue. The
-/// relay is a sender there, over a circuit of its own.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DigestDue {
-    /// The community.
-    pub community_id: [u8; 32],
-    /// The encoded `QueueAddress` of the notify queue.
-    pub queue: [u8; QUEUE_ADDRESS_LEN],
-    /// The posts since the previous digest.
-    pub post_count: u8,
-}
 
 struct Served {
     cache: CommunityCache,
@@ -206,7 +194,7 @@ impl CommunityService {
             .filter_map(|digest| {
                 // COM-372: the digest names no post, no pseudonym, and no index.
                 served.queues.get(&digest.queue).map(|queue| DigestDue {
-                    community_id,
+                    id: community_id,
                     queue: *queue,
                     post_count: digest.post_count,
                 })

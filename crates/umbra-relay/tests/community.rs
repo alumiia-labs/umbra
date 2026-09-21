@@ -39,10 +39,7 @@ use umbra_crypto::{
 use umbra_queue::{relay::session::Session, Reject};
 use umbra_relay::{
     circuits::CircuitKey,
-    service::{
-        community::{CommunityService, DigestDue},
-        Reply,
-    },
+    service::{community::CommunityService, DigestDue, Reply},
 };
 use umbra_wire::{
     address::{QueueAddress, LEN as QUEUE_ADDRESS_LEN},
@@ -210,10 +207,7 @@ fn a_community_starts_with_an_admitted_roster_and_serves_a_pull() {
     let post = chain.append(&author, NO_INDEX, &body, 200).unwrap();
     let (_, digests) = harness.publish(&post, None, 200).unwrap();
     assert_eq!(digests.len(), 1);
-    assert_eq!(
-        (digests[0].community_id, digests[0].post_count),
-        (community, 1)
-    );
+    assert_eq!((digests[0].id, digests[0].post_count), (community, 1));
     assert_eq!(digests[0].queue, queue);
 
     // A pull gives the roster and the post, and it leaves no state.

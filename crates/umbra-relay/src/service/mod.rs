@@ -1,10 +1,11 @@
 //! The services of a relay at the end of a circuit: the pairwise queues,
-//! the community caches, and the chunk store. Each service takes one command and gives the
-//! commands that go back, to the circuit of the command or to the circuit
-//! of a subscriber.
+//! the community caches, the group queues, and the chunk store. Each
+//! service takes one command and gives the commands that go back, to the
+//! circuit of the command or to the circuit of a subscriber.
 
 use umbra_queue::Reject;
 use umbra_wire::{
+    address::LEN as QUEUE_ADDRESS_LEN,
     bucket::Bucket,
     command::{Cmd, Command},
     nack::{NackPayload, Reason},
@@ -14,9 +15,22 @@ use crate::circuits::CircuitKey;
 
 pub mod chunk;
 pub mod community;
+pub mod group;
 pub mod queue;
 
 const BUCKETS: [Bucket; 4] = [Bucket::B0, Bucket::B1, Bucket::B2, Bucket::B3];
+
+/// A digest for the runtime to write as a `SEND` into a notify queue. The
+/// relay is a sender there, over a circuit of its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DigestDue {
+    /// The `community_id`, or the `GroupQueueId` of a group (`NTF-099`).
+    pub id: [u8; 32],
+    /// The encoded `QueueAddress` of the notify queue.
+    pub queue: [u8; QUEUE_ADDRESS_LEN],
+    /// The posts since the previous digest.
+    pub post_count: u8,
+}
 
 /// One encoded command of the relay, with the bucket of its cell.
 #[derive(Debug, Clone, PartialEq, Eq)]

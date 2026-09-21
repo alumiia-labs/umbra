@@ -31,7 +31,7 @@ use umbra_transport::{upgrade, websocket};
 use crate::{
     circuits::{CircuitKey, LinkId},
     node::{Output, RelayNode},
-    service::community::DigestDue,
+    service::DigestDue,
     store::RelayStore,
 };
 

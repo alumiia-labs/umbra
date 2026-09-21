@@ -1,13 +1,13 @@
 # umbra-relay
 
 The relay of the UMBRA protocol: the circuit hops of Part 3 §3.4, the pairwise
-queues of Part 3 §3.2, the invitations of Part 4 §4.3.1, and the community
-cache of Part 12. The node is a plain state machine. The binary puts TLS 1.3,
-the WebSocket framing of Part 6 §6.2.1, a pacing clock, and an SQLite store
-around it.
+queues of Part 3 §3.2, the invitations of Part 4 §4.3.1, the community cache
+of Part 12, the chunk store of Part 13, and the group queues of Part 3 §3.2.7.
+The node is a plain state machine. The binary puts TLS 1.3, the WebSocket
+framing of Part 6 §6.2.1, a pacing clock, and an SQLite store around it.
 
-This revision serves a test network. It has no attachment service, no group
-queue, and no push path, and the issuer key of its settings admits nothing.
+This revision serves a test network. It has no push path, and the issuer key
+of its settings admits nothing.
 It reads a signed relay manifest of Part 10, and section 7 shows that form.
 No real directory authority exists yet, thus one process holds the seven test
 keys.
@@ -204,3 +204,7 @@ that deletes, thus an acknowledged record leaves no bytes behind (`NET-302`).
 
 Do not copy the file of a live relay. Stop the relay, or use the backup
 command of SQLite.
+
+The chunks of Part 13 and the records of a group queue sit in memory alone.
+A restart drops them, and each client finds them gone. The store of the
+pairwise queues holds neither.

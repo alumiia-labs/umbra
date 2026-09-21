@@ -17,7 +17,8 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum GroupCmd {
-    /// Sent by the creator, no auth key.
+    /// Sent by the creator under the `own_sk` of its own payload
+    /// (`WIR-517`).
     Gnew = 0x90,
     /// Sent by the relay.
     Gids = 0x91,
@@ -173,6 +174,33 @@ pub fn parse_gsub(bytes: &[u8]) -> Result<u32, Error> {
     Ok(from_seq)
 }
 
+/// The payload of `GMSG`: the sequence the relay gave the record, then the
+/// record itself (`WIR-371`, `WIR-372`).
+pub fn encode_gmsg(
+    seq: u32,
+    record: &[u8],
+    bucket: Bucket,
+    out: &mut [u8],
+) -> Result<usize, Error> {
+    if record.len() != bucket.group_record() {
+        return Err(Error::Malformed);
+    }
+    let mut w = Writer::new(out);
+    w.u32(seq)?;
+    w.put(record)?;
+    Ok(w.position())
+}
+
+/// Splits a `GMSG` payload into its sequence number and its record.
+pub fn split_gmsg(payload: &[u8], bucket: Bucket) -> Result<(u32, &[u8]), Error> {
+    if payload.len() != bucket.l5_payload() {
+        return Err(Error::Malformed);
+    }
+    let mut r = Reader::new(payload);
+    let seq = r.u32()?;
+    Ok((seq, r.rest()))
+}
+
 /// The payload of `GKEY`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GkeyPayload {
@@ -239,6 +267,7 @@ impl GroupNotifyRegistration {
 )]
 mod tests {
     use super::*;
+    use alloc::vec;
     use umbra_crypto::secret::Secret;
 
     #[test]
@@ -299,5 +328,15 @@ mod tests {
         }
         assert_eq!(GroupCmd::Gpost.fixed_payload_len(Bucket::B1), Some(1_926));
         assert_eq!(GroupCmd::Gmsg.fixed_payload_len(Bucket::B1), Some(1_930));
+
+        let record = vec![7u8; Bucket::B1.group_record()];
+        let mut msg = vec![0u8; Bucket::B1.l5_payload()];
+        assert_eq!(
+            encode_gmsg(42, &record, Bucket::B1, &mut msg).unwrap(),
+            Bucket::B1.l5_payload()
+        );
+        assert_eq!(split_gmsg(&msg, Bucket::B1).unwrap(), (42, &record[..]));
+        assert!(encode_gmsg(42, &record, Bucket::B2, &mut msg).is_err());
+        assert!(split_gmsg(&msg, Bucket::B2).is_err());
     }
 }
