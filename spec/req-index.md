@@ -70,7 +70,7 @@ each column when a crate implements the requirement and a test covers it.
 | `NET` | 224 | 84 | 1 | 0 | 8 | **317** |
 | `IDN` | 120 | 43 | 1 | 0 | 5 | **169** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
-| `WIR` | 386 | 85 | 0 | 0 | 6 | **477** |
+| `WIR` | 387 | 87 | 0 | 0 | 6 | **480** |
 | `DEV` | 179 | 87 | 2 | 0 | 7 | **275** |
 | `NTF` | 67 | 30 | 0 | 0 | 2 | **99** |
 | `DIS` | 123 | 37 | 0 | 0 | 1 | **161** |
@@ -81,7 +81,7 @@ each column when a crate implements the requirement and a test covers it.
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
 | `IMP` | 112 | 41 | 0 | 0 | 2 | **155** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2194 | 707 | 7 | 0 | 52 | **2960** |
+| **All** | 2195 | 709 | 7 | 0 | 52 | **2963** |
 
 ## SCP — Scope and Conventions
 
@@ -1270,6 +1270,9 @@ Source: `spec/06-wire-format.md`
 | `WIR-514` | §6.6.9 | MUST | (unstated) | A read receipt, kind `0x07`, is a marker that moves forward. |  |  |
 | `WIR-515` | §6.4 | MUST | A relay | A relay MUST send a `CRPUT` as the value of one `UMBRA_REPLICA` capsule, on a connection of §6.2.1 that it opens for that copy. |  |  |
 | `WIR-516` | §6.4 | MUST NOT | (unstated) | The sender MUST set `corr_id` and `auth` of that command to zero bytes, and the receiver MUST NOT read them. |  |  |
+| `WIR-517` | §6.4.5 | MUST | A creator | A creator MUST key the authenticator of a `GNEW` with the `own_sk` whose public half sits in `own_pk` of that same payload. |  |  |
+| `WIR-518` | §6.4.5 | MUST NOT | (unstated) | A relay MUST verify a `GNEW` under the `own_pk` of its payload, and it MUST NOT accept a `GNEW` under `read_pk` or under `write_pk`. |  |  |
+| `WIR-519` | §6.4.5 | MUST NOT | (unstated) | A relay MUST emit a `GMSG` of an accepted `GPOST` to each session that subscribed, and the relay MUST NOT emit a second `GMSG` for a record whose bytes `WIR-385` matched. |  |  |
 
 ## DEV — Device Sets
 

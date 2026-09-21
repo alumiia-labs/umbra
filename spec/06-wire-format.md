@@ -924,7 +924,7 @@ command carries a signature.
 
 | `cmd` | Name | Sent by | Auth key | Payload |
 | --- | --- | --- | --- | --- |
-| `0x90` | `GNEW` | Creator | none, as `NEW` | `GnewPayload`, 99 bytes and the `Admission` body |
+| `0x90` | `GNEW` | Creator | `own_sk` of its own payload, as `NEW` goes under `QR_auth_sk` | `GnewPayload`, 99 bytes and the `Admission` body |
 | `0x91` | `GIDS` | Relay | — | `GroupQueueId`, 32 bytes |
 | `0x92` | `GPOST` | Member | `write_sk` | one `GroupQueueRecord` of §6.4.6, at the "record on a `GMSG`" row of §6.9 |
 | `0x93` | `GSEQ` | Relay | — | `GseqPayload`, 20 bytes |
@@ -992,6 +992,15 @@ writes into it.
 - **[WIR-376]** A relay MUST make `GroupQueueId` from its CSPRNG at each
   accepted `GNEW`. **[WIR-377]** A relay MUST answer an accepted `GNEW` with
   one `GIDS` in the same session.
+- **[WIR-517]** A creator MUST key the authenticator of a `GNEW` with the
+  `own_sk` whose public half sits in `own_pk` of that same payload.
+  **[WIR-518]** A relay MUST verify a `GNEW` under the `own_pk` of its
+  payload, and it MUST NOT accept a `GNEW` under `read_pk` or under
+  `write_pk`. A relay holds no key of the group before the `GNEW`, thus the
+  command carries the key that verifies it, as a `NEW` carries `QR_auth_pk`.
+  `own_pk` is the durable credential of the queue: `read_pk` and `write_pk`
+  leave at the next `GKEY`, and a `GNEW` under one of them would authorize
+  the creation under a key that the group replaces at its first rotation.
 
 **The sequence number.** The relay gives each accepted record a `seq`, in the
 manner of §6.4.3 rule 5.
@@ -1032,6 +1041,10 @@ manner of §6.4.3 rule 5.
   `NET-037`.
 - **[WIR-389]** A relay MUST NOT erase a record on an action of a reader.
   Part 3 §3.2.7 retains by `GROUP_RETENTION` and by `GROUP_QUEUE_QUOTA`.
+- **[WIR-519]** A relay MUST emit a `GMSG` of an accepted `GPOST` to each
+  session that subscribed, and the relay MUST NOT emit a second `GMSG` for a
+  record whose bytes `WIR-385` matched. The reader holds that record already,
+  and `WIR-065` would drop the copy at its `msg_id`.
 
 **The rotation of the credentials.**
 
