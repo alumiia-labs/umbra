@@ -1017,6 +1017,11 @@ impl Inner {
                         .map_or(Vec::new(), |conversation| conversation.0.to_vec()),
                     message: Arc::new(MsgHandle(message)),
                 },
+                // The join flow of Part 11 reaches no view of the app
+                // yet, thus these three change nothing on the screen.
+                Event::GroupOffer { .. } | Event::GroupJoiner { .. } | Event::GroupAdmit { .. } => {
+                    return self.next_event()
+                }
                 Event::Locked => FfiEvent::Locked,
                 Event::IntegrityFault => FfiEvent::IntegrityFault,
             });

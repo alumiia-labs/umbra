@@ -597,6 +597,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
         let mut planned = Vec::new();
         let mut wanted: Vec<DownloadJob> = Vec::new();
+        let mut control: Vec<(ConversationId, Vec<u8>)> = Vec::new();
         for change in changes {
             planned.push(match change {
                 StateChange::Contact { contact, state } => Planned::Put(
@@ -675,6 +676,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         delivery: reported,
                     });
                 }
+                continue;
+            }
+            if parsed.kind == AppKind::GroupControl {
+                // The join flow of Part 11 §11.9.1 runs after this loop,
+                // because it reads and writes groups of its own.
+                control.push((conversation, parsed.body.to_vec()));
                 continue;
             }
             if parsed.kind == AppKind::Reaction {
@@ -964,6 +971,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         batch.commit()?;
         self.events.extend(events);
         self.files.downloads.extend(wanted);
+        for (conversation, body) in control {
+            self.on_pairwise_control(conversation, &body, rng)?;
+        }
         Ok(())
     }
 
@@ -1486,6 +1496,20 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         });
         self.auto_lock.touch(now_ms / 1_000);
         Ok(())
+    }
+
+    /// Puts one record of this device into the pairwise send path.
+    pub(super) fn push_outgoing(
+        &mut self,
+        message: MsgRef,
+        conversation: ConversationId,
+        app: Vec<u8>,
+    ) {
+        self.outgoing.push_back(Outgoing {
+            message,
+            conversation,
+            app,
+        });
     }
 
     /// Erases each reaction to a message, in a batch of the caller.
@@ -2341,8 +2365,12 @@ fn is_request(plain: &[u8]) -> Result<bool, Error> {
     let app = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
     let parsed = AppMessage::parse(app, Channel::Pairwise)?;
     // A reaction of the contact changes the reaction table and is never a row.
-    Ok(matches!(parsed.kind, AppKind::Edit | AppKind::Reaction)
-        || tombstone_of(&parsed)? == Some(Tombstone::Request))
+    // A group control object of Part 11 travels on a pairwise channel and
+    // is no message of that conversation (`GRP-309`, `GRP-312`).
+    Ok(matches!(
+        parsed.kind,
+        AppKind::Edit | AppKind::Reaction | AppKind::GroupControl
+    ) || tombstone_of(&parsed)? == Some(Tombstone::Request))
 }
 
 fn conversation_of(plain: &[u8]) -> Result<ConversationId, Error> {

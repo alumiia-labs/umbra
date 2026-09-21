@@ -244,6 +244,25 @@ pub enum Event {
         /// The message.
         message: MsgRef,
     },
+    /// A contact offered a group of Part 11. The user sees the offers of
+    /// [`client::Client::group_offers`] and answers one of them
+    /// (`GRP-170`).
+    GroupOffer {
+        /// The pairwise conversation that carried it.
+        from: ConversationId,
+    },
+    /// A contact asked to come into a group of an admin of this device.
+    GroupJoiner {
+        /// The pairwise conversation that carried it.
+        from: ConversationId,
+    },
+    /// An admin admitted this device to a group. The client fetches the
+    /// snapshot that the admit names and then calls
+    /// [`client::Client::accept_group_admit`] (`GRP-313`).
+    GroupAdmit {
+        /// The pairwise conversation that carried it.
+        from: ConversationId,
+    },
     /// The client locked itself, or the platform locked it.
     Locked,
     /// A table MAC or a scan does not match. The interface tells the user
@@ -335,6 +354,7 @@ mod tests {
     };
 
     use super::{client::Client, *};
+    use umbra_core::session::node::ContactId;
 
     struct Rng(u64);
 
@@ -528,7 +548,7 @@ mod tests {
             .unwrap();
         let post = client.take_group_post().unwrap();
         assert!(client.take_group_post().is_none());
-        assert_eq!(post.message, sent);
+        assert_eq!(post.message, Some(sent));
         assert_eq!(post.conversation, conversation);
         assert_eq!(post.replicas[0].group_queue_id, [0xC3; 32]);
         assert_eq!(post.replicas[1].group_queue_id, [0xD4; 32]);
@@ -620,6 +640,167 @@ mod tests {
         other
             .adopt_group(admitted, &joiner.seed, "Trail", rng)
             .unwrap()
+    }
+
+    #[test]
+    fn an_offer_a_join_record_an_add_and_an_admit_bring_a_member_in() {
+        let mut rng = Rng(41);
+        let mut admin = new_client(&mut rng);
+        let mut joiner = new_client(&mut rng);
+        // The two hold a pairwise conversation of each other already.
+        let peer_at_admin = ContactId([0x51; 32]);
+        let peer_at_joiner = ContactId([0x52; 32]);
+        let pair_at_admin = admin.conversation_for(&peer_at_admin.0).unwrap();
+        let pair_at_joiner = joiner.conversation_for(&peer_at_joiner.0).unwrap();
+        let relays = [[0xA1; 32], [0xB2; 32]];
+        let group = admin
+            .create_group("Summit", relays, 1_700_000_000, &mut rng)
+            .unwrap();
+        let group_id = admin.group_info(group).unwrap().group_id;
+        admin
+            .group_queue_made(&group_id, 0, relays[0], [0xC3; 32], &mut rng)
+            .unwrap();
+        admin
+            .group_queue_made(&group_id, 1, relays[1], [0xD4; 32], &mut rng)
+            .unwrap();
+
+        // Step 1: the offer goes out on the pairwise channel, and it is no
+        // message of that conversation.
+        admin
+            .offer_group(group, pair_at_admin, 1_700_000_001_000, &mut rng)
+            .unwrap();
+        let offer = admin.take_outgoing().unwrap();
+        assert_eq!(offer.conversation, pair_at_admin);
+        assert!(admin.summaries().unwrap().iter().all(|s| s.last.is_none()));
+        deliver(
+            &mut joiner,
+            &peer_at_joiner,
+            &offer.app,
+            1_700_000_001_500,
+            &mut rng,
+        );
+        assert_eq!(
+            joiner.next_event(),
+            Some(Event::GroupOffer {
+                from: pair_at_joiner
+            })
+        );
+        let held = joiner.group_offers().unwrap();
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].name, "Summit");
+        assert_eq!(held[0].group_id, group_id);
+
+        // Step 2: the user accepted, thus the join record goes back.
+        joiner
+            .accept_group_offer(&held[0], 1_700_000_002_000, &mut rng)
+            .unwrap();
+        assert!(joiner.group_offers().unwrap().is_empty());
+        let asked = joiner.take_outgoing().unwrap();
+        deliver(
+            &mut admin,
+            &peer_at_admin,
+            &asked.app,
+            1_700_000_002_500,
+            &mut rng,
+        );
+        assert_eq!(
+            admin.next_event(),
+            Some(Event::GroupJoiner {
+                from: pair_at_admin
+            })
+        );
+        let joiners = admin.group_joiners().unwrap();
+        assert_eq!(joiners.len(), 1);
+
+        // Step 3: the add goes to each replica as a record with no message.
+        let admission = admin
+            .add_joiner(&joiners[0], 1_700_000_003_000, &mut rng)
+            .unwrap();
+        assert_eq!(admission.index, 1);
+        assert_eq!(admin.group_info(group).unwrap().members, 2);
+        let add = admin.take_group_post().unwrap();
+        assert_eq!(add.message, None);
+        assert!(admin.take_group_post().is_none());
+
+        // Step 4: the admit names the snapshot that the chunk path holds.
+        admin
+            .admit_joiner(
+                &joiners[0],
+                admission.index,
+                b"a descriptor",
+                1_700_000_004_000,
+                &mut rng,
+            )
+            .unwrap();
+        assert!(admin.group_joiners().unwrap().is_empty());
+        let admit = admin.take_outgoing().unwrap();
+        deliver(
+            &mut joiner,
+            &peer_at_joiner,
+            &admit.app,
+            1_700_000_004_500,
+            &mut rng,
+        );
+        assert_eq!(
+            joiner.next_event(),
+            Some(Event::GroupAdmit {
+                from: pair_at_joiner
+            })
+        );
+
+        // Step 5: the joiner fetched the snapshot, thus it holds the group.
+        let member = joiner
+            .accept_group_admit(
+                pair_at_joiner,
+                &group_id,
+                &admission.snapshot,
+                1_700_000_005,
+                &mut rng,
+            )
+            .unwrap();
+        let info = joiner.group_info(member).unwrap();
+        assert_eq!((info.own_index, info.members, info.epoch), (1, 2, 1));
+        assert!(info.is_ready);
+        assert_eq!(info.group_id, group_id);
+
+        // A message of the admin reaches the new member.
+        let mut draft = admin.new_draft(group);
+        draft.set_text(&units("we leave at six")).unwrap();
+        admin
+            .send_draft(draft, 1_700_000_006_000, &mut rng)
+            .unwrap();
+        let post = admin.take_group_post().unwrap();
+        let message = joiner
+            .on_group_record(&[0xC3; 32], &post.record, 1_700_000_006_500, &mut rng)
+            .unwrap()
+            .unwrap();
+        let mut view = View::default();
+        joiner.render(&message, &mut view).unwrap();
+        assert_eq!(String::from_utf16(&view.0).unwrap(), "we leave at six");
+
+        // A second admit of the same group is refused (`GRP-153`).
+        assert!(joiner
+            .accept_group_admit(
+                pair_at_joiner,
+                &group_id,
+                &admission.snapshot,
+                1_700_000_007,
+                &mut rng,
+            )
+            .is_err());
+    }
+
+    /// Puts one record of a contact into a client, as the network would.
+    fn deliver(
+        client: &mut Client<MemoryBackend, Element>,
+        from: &ContactId,
+        app: &[u8],
+        now_ms: u64,
+        rng: &mut Rng,
+    ) {
+        client
+            .commit_network(&[], &[(*from, app.to_vec())], now_ms, rng)
+            .unwrap();
     }
 
     #[test]

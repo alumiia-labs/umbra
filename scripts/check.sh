@@ -40,7 +40,10 @@ step "client runtime over real sockets, host only"
 # Three relay servers on localhost, under two client runtimes and under two
 # handles of the exported surface.
 cargo clippy -p umbra-ffi --features bindings,sockets-test --all-targets -- -D warnings
-cargo test -p umbra-ffi --features bindings,sockets-test
+# Each test of `app` runs a network of seven relays on loopback. Two of them
+# side by side starve each other, and a transfer step then times out. One at
+# a time is slower and it does not fail by chance.
+cargo test -p umbra-ffi --features bindings,sockets-test -- --test-threads=1
 
 step "build, wasm32-unknown-unknown"
 cargo build --workspace --target wasm32-unknown-unknown

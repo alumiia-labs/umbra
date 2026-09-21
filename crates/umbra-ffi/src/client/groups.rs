@@ -12,25 +12,107 @@
 use std::collections::VecDeque;
 
 use umbra_core::{
-    group::{join::Admitted, receive::Outcome, state::Group, GROUP_REPLICAS},
+    group::{
+        join::{accept_admit, Admitted},
+        receive::Outcome,
+        roster::Applied,
+        state::Group,
+        GROUP_REPLICAS,
+    },
     store::{
         engine::Backend,
         record::{RowId, TableId},
         wrap::SecureElement,
     },
 };
-use umbra_crypto::{rand_core::CryptoRng, secret::Secret};
-use umbra_wire::group::control::ReplicaRef;
+use umbra_crypto::{group::MemberKeys, hash::sha3_256, rand_core::CryptoRng, secret::Secret};
+use umbra_wire::{
+    app::{AppKind, AppMessage},
+    group::control::{
+        ControlType, GroupControl, GroupInvitation, InvitationStage, JoinRecord, ReplicaRef, Role,
+    },
+};
 use zeroize::Zeroizing;
 
 use super::{stored_message, Client, MESSAGE_PREFIX, OUTBOX};
 use crate::{ConversationId, Delivery, Error, Event, MsgRef};
+
+/// The byte of an offer that waits for the user.
+const OFFERED: u8 = 1;
+/// The byte of an offer that this device answered with a `JoinRecord`.
+const WAITING: u8 = 2;
+/// The byte of a `JoinRecord` that waits for an admin of this device.
+const ASKED: u8 = 3;
+/// The byte of an admit that waits for the snapshot it names.
+const ADMITTED: u8 = 4;
+
+/// The length of `GroupRosterKey_g.pk`, an ML-DSA-65 verifying key.
+const ROSTER_PK_LEN: usize = 1_952;
+
+/// One row of the join table.
+enum JoinEntry {
+    Offer {
+        from: ConversationId,
+        group_id: [u8; 32],
+        creator_roster_pk: Vec<u8>,
+        name: String,
+    },
+    /// The row key names the group, thus these two hold none.
+    Waiting {
+        creator_roster_pk: Vec<u8>,
+        name: String,
+    },
+    Admitted {
+        creator_roster_pk: Vec<u8>,
+        admit: Vec<u8>,
+        name: String,
+    },
+    Asked {
+        from: ConversationId,
+        group_id: [u8; 32],
+        record: Vec<u8>,
+    },
+}
+
+/// The offer of §11.9.1 step 1, as a device that got one holds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupOffer {
+    /// The pairwise conversation that carried it.
+    pub from: ConversationId,
+    /// The group.
+    pub group_id: [u8; 32],
+    /// The name of the group, as the inviting admin gave it.
+    pub name: String,
+}
+
+/// What an admin must do after it added a joiner (§11.9.1 step 3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupAdmission {
+    /// The `RosterSnapshot` to put on the chunk path (`GRP-323`).
+    pub snapshot: Vec<u8>,
+    /// The member index that the admin gave the joiner.
+    pub index: u16,
+}
+
+/// A joiner that asked to come in, as the inviting admin holds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupJoiner {
+    /// The pairwise conversation that carried the record.
+    pub from: ConversationId,
+    /// The group.
+    pub group_id: [u8; 32],
+}
 
 /// The stored form of a group: its roster, its epochs, and its replicas.
 pub(super) const GROUP: TableId = TableId(0x12);
 /// The group queues that a creator asked for and that no relay named yet.
 /// A row holds the `group_id`, the replica index, and the relay.
 pub(super) const GROUP_QUEUE: TableId = TableId(0x13);
+/// The offers that this device got and that the user did not answer, and
+/// the join records that an admin of this device did not act on. A row
+/// holds the `group_id` and then the `JoinRecord`, or nothing for an
+/// offer. The owner column names the pairwise conversation.
+pub(super) const GROUP_JOIN: TableId = TableId(0x14);
 
 const QUEUE_ROW_LEN: usize = 32 + 1 + 32;
 
@@ -83,8 +165,9 @@ pub struct GroupReplica {
 /// One record that waits for the run of the group queues. The same bytes
 /// go to each replica (`GRP-194`).
 pub struct GroupPost {
-    /// The message of this device that the record carries.
-    pub message: MsgRef,
+    /// The message of this device that the record carries, or none for a
+    /// roster object, which no view shows.
+    pub message: Option<MsgRef>,
     /// The conversation.
     pub conversation: ConversationId,
     /// The two replicas.
@@ -361,6 +444,518 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(true)
     }
 
+    /// Sends one `GroupControl` on the pairwise channel of a contact. The
+    /// record is no message of that conversation.
+    fn send_pairwise_control<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        body: &[u8],
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        if self.is_group(conversation)? {
+            return Err(Error::Malformed);
+        }
+        let mut msg_id = [0u8; 16];
+        rng.fill_bytes(&mut msg_id);
+        let record = AppMessage {
+            kind: AppKind::GroupControl,
+            msg_id,
+            sent_at: now_ms,
+            body,
+        };
+        let mut app = Zeroizing::new(vec![0u8; record.len()]);
+        record.encode(&mut app)?;
+        let open = self.open_mut()?;
+        let reference = super::msg_ref(&open.device_set_key, &msg_id);
+        let natural = [conversation.0.as_slice(), &reference].concat();
+        let row = open.store.row_id(TableId::MESSAGE, &natural);
+        let stored = stored_message(
+            super::OUTGOING,
+            Delivery::Queued,
+            conversation,
+            now_ms,
+            &app,
+        );
+        let mut batch = open.store.begin();
+        batch.put(TableId::MESSAGE, row, Some(conversation.0), &stored, rng)?;
+        batch.put(OUTBOX, row, None, &super::outbox_row(), rng)?;
+        batch.commit()?;
+        self.push_outgoing(MsgRef(row), conversation, app.to_vec());
+        Ok(())
+    }
+
+    /// Step 1 of §11.9.1: an admin of `group` offers it to a contact. The
+    /// offer carries the name, the roster key of this admin, and the
+    /// roster key of the creator.
+    pub fn offer_group<R: CryptoRng + ?Sized>(
+        &mut self,
+        group: ConversationId,
+        to: ConversationId,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let held = self.group_of(group)?;
+        let own = held
+            .roster()
+            .member(held.own_index())
+            .ok_or(Error::Integrity)?;
+        if own.role < Role::Admin {
+            return Err(Error::Malformed);
+        }
+        let admin_roster_pk = own.roster_pk.clone().ok_or(Error::Integrity)?;
+        let creator_roster_pk = held
+            .roster()
+            .member(0)
+            .and_then(|creator| creator.roster_pk.clone())
+            .ok_or(Error::Integrity)?;
+        let (_, name) = self.conversation_meta(group)?;
+        let invitation = GroupInvitation {
+            group_id: *held.group_id(),
+            stage: InvitationStage::Offer {
+                name: &name,
+                admin_roster_pk: &admin_roster_pk,
+                creator_roster_pk: &creator_roster_pk,
+            },
+        };
+        let mut payload = vec![0u8; 4_096];
+        let used = invitation.encode(&mut payload)?;
+        payload.truncate(used);
+        let control = GroupControl {
+            control_type: ControlType::Invitation,
+            payload: &payload,
+        };
+        let mut body = vec![0u8; payload.len().saturating_add(8)];
+        let used = control.encode(&mut body)?;
+        body.truncate(used);
+        self.send_pairwise_control(to, &body, now_ms, rng)
+    }
+
+    /// Step 2 of §11.9.1: the user accepted an offer, thus this device
+    /// makes `GroupRosterSeed_g` and sends its `JoinRecord` (`GRP-309`).
+    pub fn accept_group_offer<R: CryptoRng + ?Sized>(
+        &mut self,
+        offer: &GroupOffer,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        // GRP-153: an offer to a group that this device holds is refused.
+        let conversation = self.conversation_of_group(&offer.group_id)?;
+        if self.is_group(conversation)? {
+            return Err(Error::Malformed);
+        }
+        let row = self.join_row(offer.from, &offer.group_id)?;
+        let held = self.join_entry(&row)?.ok_or(Error::NotFound)?;
+        let JoinEntry::Offer {
+            creator_roster_pk,
+            name,
+            ..
+        } = held
+        else {
+            return Err(Error::Malformed);
+        };
+        // GRP-052: the seed comes from the device CSPRNG, and it stays in
+        // the local identity table until the admit arrives.
+        let mut seed = Secret::<32>::zeroed();
+        rng.fill_bytes(seed.expose_mut());
+        let keys = MemberKeys::from_seed(&seed);
+        let kem_pk = keys.kem().public().to_bytes();
+        let record = JoinRecord {
+            group_id: offer.group_id,
+            keys: umbra_wire::group::control::MemberKeys {
+                pair_pk: keys.pair_public(),
+                roster_pk_hash: sha3_256(&[&keys.roster().verifying_key().to_bytes()]),
+                kem_pk: &kem_pk,
+            },
+        };
+        let mut payload = vec![0u8; 1_400];
+        let used = record.encode(&mut payload)?;
+        payload.truncate(used);
+        let control = GroupControl {
+            control_type: ControlType::Join,
+            payload: &payload,
+        };
+        let mut body = vec![0u8; payload.len().saturating_add(8)];
+        let used = control.encode(&mut body)?;
+        body.truncate(used);
+        self.send_pairwise_control(offer.from, &body, now_ms, rng)?;
+
+        let open = self.open_mut()?;
+        let seed_row = open.store.row_id(TableId::LOCAL_IDENTITY, &offer.group_id);
+        let mut entry = vec![WAITING];
+        entry.extend_from_slice(&offer.from.0);
+        entry.extend_from_slice(&offer.group_id);
+        entry.extend_from_slice(&creator_roster_pk);
+        entry.extend_from_slice(name.as_bytes());
+        let mut batch = open.store.begin();
+        batch.put(TableId::LOCAL_IDENTITY, seed_row, None, seed.expose(), rng)?;
+        batch.put(GROUP_JOIN, row, Some(offer.from.0), &entry, rng)?;
+        batch.commit()?;
+        Ok(())
+    }
+
+    /// An admit of stage `0x02`. The joiner keeps it until it fetched the
+    /// snapshot that it names (`GRP-313`).
+    fn on_admit<R: CryptoRng + ?Sized>(
+        &mut self,
+        from: ConversationId,
+        invitation: &GroupInvitation<'_>,
+        payload: &[u8],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let InvitationStage::Admit(_) = &invitation.stage else {
+            return Ok(());
+        };
+        let row = self.join_row(from, &invitation.group_id)?;
+        // An admit to a group that this device did not ask for is no admit.
+        let Some(JoinEntry::Waiting {
+            creator_roster_pk,
+            name,
+        }) = self.join_entry(&row)?
+        else {
+            return Ok(());
+        };
+        let mut entry = vec![ADMITTED];
+        entry.extend_from_slice(&from.0);
+        entry.extend_from_slice(&invitation.group_id);
+        entry.extend_from_slice(&creator_roster_pk);
+        let control = GroupControl {
+            control_type: ControlType::Invitation,
+            payload,
+        };
+        let mut admit = vec![0u8; payload.len().saturating_add(8)];
+        let used = control.encode(&mut admit)?;
+        entry.extend_from_slice(
+            &u32::try_from(used)
+                .map_err(|_| Error::Malformed)?
+                .to_be_bytes(),
+        );
+        entry.extend_from_slice(admit.get(..used).ok_or(Error::Malformed)?);
+        entry.extend_from_slice(name.as_bytes());
+        let open = self.open_mut()?;
+        let mut batch = open.store.begin();
+        batch.put(GROUP_JOIN, row, Some(from.0), &entry, rng)?;
+        batch.commit()?;
+        self.events.push_back(Event::GroupAdmit { from });
+        Ok(())
+    }
+
+    /// One `GroupControl` that a pairwise channel carried (`GRP-170`,
+    /// `GRP-310`). An object that does not parse changes nothing.
+    pub(super) fn on_pairwise_control<R: CryptoRng + ?Sized>(
+        &mut self,
+        from: ConversationId,
+        body: &[u8],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let Ok(control) = GroupControl::parse(body) else {
+            return Ok(());
+        };
+        match control.control_type {
+            ControlType::Invitation => {
+                let Ok(invitation) = GroupInvitation::parse(control.payload) else {
+                    return Ok(());
+                };
+                let InvitationStage::Offer {
+                    name,
+                    creator_roster_pk,
+                    ..
+                } = invitation.stage
+                else {
+                    return self.on_admit(from, &invitation, control.payload, rng);
+                };
+                // GRP-153: an offer to a group that this device holds is
+                // no offer.
+                let conversation = self.conversation_of_group(&invitation.group_id)?;
+                if self.is_group(conversation)? {
+                    return Ok(());
+                }
+                let name: String = name.chars().take(GROUP_NAME_MAX).collect();
+                let mut entry = vec![OFFERED];
+                entry.extend_from_slice(&from.0);
+                entry.extend_from_slice(&invitation.group_id);
+                entry.extend_from_slice(creator_roster_pk);
+                entry.extend_from_slice(name.as_bytes());
+                let row = self.join_row(from, &invitation.group_id)?;
+                let open = self.open_mut()?;
+                let mut batch = open.store.begin();
+                batch.put(GROUP_JOIN, row, Some(from.0), &entry, rng)?;
+                batch.commit()?;
+                self.events.push_back(Event::GroupOffer { from });
+                Ok(())
+            }
+            ControlType::Join => {
+                let Ok(record) = JoinRecord::parse(control.payload) else {
+                    return Ok(());
+                };
+                // A join record for a group that this device does not hold
+                // names no group of any admin here.
+                let conversation = self.conversation_of_group(&record.group_id)?;
+                if !self.is_group(conversation)? {
+                    return Ok(());
+                }
+                let mut entry = vec![ASKED];
+                entry.extend_from_slice(&from.0);
+                entry.extend_from_slice(&record.group_id);
+                entry.extend_from_slice(control.payload);
+                let row = self.join_row(from, &record.group_id)?;
+                let open = self.open_mut()?;
+                let mut batch = open.store.begin();
+                batch.put(GROUP_JOIN, row, Some(from.0), &entry, rng)?;
+                batch.commit()?;
+                self.events.push_back(Event::GroupJoiner { from });
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Step 3 of §11.9.1: the admin adds the joiner and posts the plain
+    /// epoch that carries the add to each replica. The result holds the
+    /// snapshot that the admin puts on the chunk path (`GRP-323`), which
+    /// the admit of step 4 then names.
+    pub fn add_joiner<R: CryptoRng + ?Sized>(
+        &mut self,
+        joiner: &GroupJoiner,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<GroupAdmission, Error> {
+        let conversation = self.conversation_of_group(&joiner.group_id)?;
+        let row = self.join_row(joiner.from, &joiner.group_id)?;
+        let Some(JoinEntry::Asked { record, .. }) = self.join_entry(&row)? else {
+            return Err(Error::NotFound);
+        };
+        let mut group = self.group_of(conversation)?;
+        let own = group
+            .roster()
+            .member(group.own_index())
+            .ok_or(Error::Integrity)?;
+        if own.role < Role::Admin {
+            return Err(Error::Malformed);
+        }
+        let parsed = JoinRecord::parse(&record)?;
+        let add = group.add_object(&parsed).map_err(|_| Error::Malformed)?;
+        let control = GroupControl::parse(&add)?;
+        let index = match group
+            .apply_control(&control, group.own_index(), now_ms / 1_000)
+            .map_err(|_| Error::Malformed)?
+        {
+            Applied::Added(index) => index,
+            _ => return Err(Error::Malformed),
+        };
+        let snapshot = group.snapshot(&[]).map_err(|_| Error::Malformed)?;
+        self.save_group(conversation, &group, rng)?;
+        // GRP-310: the add goes to each replica as a group record.
+        self.post_group_control(conversation, &add, now_ms, rng)?;
+        Ok(GroupAdmission { snapshot, index })
+    }
+
+    /// Step 4 of §11.9.1: after each replica took the add, the admin sends
+    /// the admit with the descriptor of the snapshot (`GRP-311`,
+    /// `GRP-312`).
+    pub fn admit_joiner<R: CryptoRng + ?Sized>(
+        &mut self,
+        joiner: &GroupJoiner,
+        index: u16,
+        descriptor: &[u8],
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let conversation = self.conversation_of_group(&joiner.group_id)?;
+        let group = self.group_of(conversation)?;
+        let body = group
+            .admit_for(index, 0, descriptor, now_ms / 1_000)
+            .map_err(|_| Error::Malformed)?;
+        self.send_pairwise_control(joiner.from, &body, now_ms, rng)?;
+        let row = self.join_row(joiner.from, &joiner.group_id)?;
+        let open = self.open_mut()?;
+        let mut batch = open.store.begin();
+        batch.delete(GROUP_JOIN, row);
+        Ok(batch.commit()?)
+    }
+
+    /// Step 5 of §11.9.1: the joiner fetched the snapshot that its admit
+    /// named, and this call verifies the two and stores the group
+    /// (`GRP-313`, `GRP-326`).
+    pub fn accept_group_admit<R: CryptoRng + ?Sized>(
+        &mut self,
+        from: ConversationId,
+        group_id: &[u8; 32],
+        snapshot: &[u8],
+        now: u64,
+        rng: &mut R,
+    ) -> Result<ConversationId, Error> {
+        let row = self.join_row(from, group_id)?;
+        let Some(JoinEntry::Admitted {
+            creator_roster_pk,
+            admit,
+            name,
+        }) = self.join_entry(&row)?
+        else {
+            return Err(Error::NotFound);
+        };
+        let seed = {
+            let store = &self.open_ref()?.store;
+            let seed_row = store.row_id(TableId::LOCAL_IDENTITY, group_id);
+            let seed = Zeroizing::new(
+                store
+                    .get(TableId::LOCAL_IDENTITY, &seed_row)?
+                    .ok_or(Error::Integrity)?,
+            );
+            let seed: [u8; 32] = seed.as_slice().try_into().map_err(|_| Error::Integrity)?;
+            Secret::new(seed)
+        };
+        let control = GroupControl::parse(&admit)?;
+        let invitation = GroupInvitation::parse(control.payload)?;
+        let snapshot = umbra_wire::group::control::RosterSnapshot::parse(snapshot)?;
+        // GRP-326: the snapshot verifies against the hash of the add and
+        // the roster key of the creator, which the offer carried.
+        let add_hash = Self::add_hash_of(&invitation, &snapshot)?;
+        let admitted = accept_admit(&invitation, &snapshot, &add_hash, &creator_roster_pk, now)
+            .map_err(|_| Error::Integrity)?;
+        let conversation = self.adopt_group(admitted, &seed, &name, rng)?;
+        let open = self.open_mut()?;
+        let mut batch = open.store.begin();
+        batch.delete(GROUP_JOIN, row);
+        batch.commit()?;
+        Ok(conversation)
+    }
+
+    /// The hash of the add record that the snapshot describes. The
+    /// snapshot carries it, and `accept_admit` tests the two against each
+    /// other (`GRP-326`).
+    fn add_hash_of(
+        invitation: &GroupInvitation<'_>,
+        snapshot: &umbra_wire::group::control::RosterSnapshot<'_>,
+    ) -> Result<[u8; 32], Error> {
+        let InvitationStage::Admit(admit) = &invitation.stage else {
+            return Err(Error::Malformed);
+        };
+        if admit.roster_epoch != snapshot.roster_epoch {
+            return Err(Error::Integrity);
+        }
+        Ok(snapshot.chain_hash)
+    }
+
+    /// The offers that wait for the user (`GRP-170`).
+    pub fn group_offers(&self) -> Result<Vec<GroupOffer>, Error> {
+        let mut out = Vec::new();
+        for row in self.join_rows()? {
+            if let Some(JoinEntry::Offer {
+                from,
+                group_id,
+                name,
+                ..
+            }) = self.join_entry(&row)?
+            {
+                out.push(GroupOffer {
+                    from,
+                    group_id,
+                    name,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// The joiners that wait for an admin of this device (`GRP-310`).
+    pub fn group_joiners(&self) -> Result<Vec<GroupJoiner>, Error> {
+        let mut out = Vec::new();
+        for row in self.join_rows()? {
+            if let Some(JoinEntry::Asked { from, group_id, .. }) = self.join_entry(&row)? {
+                out.push(GroupJoiner { from, group_id });
+            }
+        }
+        Ok(out)
+    }
+
+    fn join_row(&self, from: ConversationId, group_id: &[u8; 32]) -> Result<RowId, Error> {
+        let store = &self.open_ref()?.store;
+        Ok(store.row_id(GROUP_JOIN, &[from.0.as_slice(), group_id].concat()))
+    }
+
+    /// Each row of the join table. Each entry names its own conversation.
+    fn join_rows(&self) -> Result<Vec<RowId>, Error> {
+        let store = &self.open_ref()?.store;
+        Ok(store
+            .list(GROUP_JOIN, None)?
+            .into_iter()
+            .map(|(row, plain)| {
+                drop(Zeroizing::new(plain));
+                row
+            })
+            .collect())
+    }
+
+    fn join_entry(&self, row: &RowId) -> Result<Option<JoinEntry>, Error> {
+        let store = &self.open_ref()?.store;
+        let Some(plain) = store.get(GROUP_JOIN, row)? else {
+            return Ok(None);
+        };
+        let plain = Zeroizing::new(plain);
+        let kind = *plain.first().ok_or(Error::Integrity)?;
+        let from: [u8; 16] = plain
+            .get(1..17)
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or(Error::Integrity)?;
+        let from = ConversationId(from);
+        let group_id: [u8; 32] = plain
+            .get(17..49)
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or(Error::Integrity)?;
+        let rest = plain.get(49..).ok_or(Error::Integrity)?;
+        Ok(Some(match kind {
+            OFFERED => {
+                let (key, name) = rest
+                    .split_at_checked(ROSTER_PK_LEN)
+                    .ok_or(Error::Integrity)?;
+                JoinEntry::Offer {
+                    from,
+                    group_id,
+                    creator_roster_pk: key.to_vec(),
+                    name: core::str::from_utf8(name)
+                        .map_err(|_| Error::Integrity)?
+                        .to_owned(),
+                }
+            }
+            WAITING => {
+                let (key, name) = rest
+                    .split_at_checked(ROSTER_PK_LEN)
+                    .ok_or(Error::Integrity)?;
+                JoinEntry::Waiting {
+                    creator_roster_pk: key.to_vec(),
+                    name: core::str::from_utf8(name)
+                        .map_err(|_| Error::Integrity)?
+                        .to_owned(),
+                }
+            }
+            ADMITTED => {
+                let (key, rest) = rest
+                    .split_at_checked(ROSTER_PK_LEN)
+                    .ok_or(Error::Integrity)?;
+                let (len, rest) = rest.split_at_checked(4).ok_or(Error::Integrity)?;
+                let len = usize::try_from(u32::from_be_bytes(
+                    len.try_into().map_err(|_| Error::Integrity)?,
+                ))
+                .map_err(|_| Error::Integrity)?;
+                let (admit, name) = rest.split_at_checked(len).ok_or(Error::Integrity)?;
+                JoinEntry::Admitted {
+                    creator_roster_pk: key.to_vec(),
+                    admit: admit.to_vec(),
+                    name: core::str::from_utf8(name)
+                        .map_err(|_| Error::Integrity)?
+                        .to_owned(),
+                }
+            }
+            ASKED => JoinEntry::Asked {
+                from,
+                group_id,
+                record: rest.to_vec(),
+            },
+            _ => return Err(Error::Integrity),
+        }))
+    }
+
     /// Stores the group of an admit that a pairwise channel carried
     /// (`GRP-313`). The joiner holds the two queues from the admit, thus
     /// the group is ready at once.
@@ -423,7 +1018,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         batch.put(OUTBOX, row, None, &super::outbox_row(), rng)?;
         batch.commit()?;
         let message = MsgRef(row);
-        self.queue_group_post(conversation, message, app, now_ms, rng)?;
+        self.queue_group_post(conversation, Some(message), app, now_ms, rng)?;
         Ok(message)
     }
 
@@ -432,7 +1027,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     fn queue_group_post<R: CryptoRng + ?Sized>(
         &mut self,
         conversation: ConversationId,
-        message: MsgRef,
+        message: Option<MsgRef>,
         app: &[u8],
         now_ms: u64,
         rng: &mut R,
@@ -472,6 +1067,28 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             record,
         });
         Ok(())
+    }
+
+    /// Seals one roster object for a group and queues it for each replica.
+    /// It carries no message row, thus no view shows it.
+    fn post_group_control<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        body: &[u8],
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let mut msg_id = [0u8; 16];
+        rng.fill_bytes(&mut msg_id);
+        let record = AppMessage {
+            kind: AppKind::GroupControl,
+            msg_id,
+            sent_at: now_ms,
+            body,
+        };
+        let mut app = Zeroizing::new(vec![0u8; record.len()]);
+        record.encode(&mut app)?;
+        self.queue_group_post(conversation, None, &app, now_ms, rng)
     }
 
     /// The next record that waits for the run of the group queues.
@@ -598,7 +1215,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
         waiting.sort_by_key(|(stored_at, _, _, _)| *stored_at);
         for (stored_at, conversation, message, app) in waiting {
-            self.queue_group_post(conversation, message, &app, stored_at, rng)?;
+            self.queue_group_post(conversation, Some(message), &app, stored_at, rng)?;
         }
         Ok(())
     }
