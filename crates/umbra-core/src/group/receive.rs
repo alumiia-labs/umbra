@@ -15,8 +15,13 @@ use umbra_wire::{
     group::record::{open_content, ContentPlain, GroupQueueRecord, RecordKind},
 };
 
+use umbra_crypto::stored::{Reader, Writer};
+
 use super::{
-    epoch::EpochStore, roster::Roster, send::PairCache, GROUP_GAP_TIMEOUT, GROUP_ROSTER_WAIT,
+    epoch::EpochStore,
+    roster::{count, Roster, STORED_VERSION},
+    send::PairCache,
+    GROUP_GAP_TIMEOUT, GROUP_ROSTER_WAIT,
 };
 use crate::Error;
 
@@ -30,6 +35,17 @@ pub struct Context<'a> {
     pub pairs: &'a mut PairCache,
     /// The member's own keys.
     pub own: &'a MemberKeys,
+}
+
+/// The place of a bucket in [`Bucket::ALL`], for a stored record.
+fn bucket_byte(bucket: Bucket) -> u8 {
+    u8::try_from(
+        Bucket::ALL
+            .into_iter()
+            .position(|held| held == bucket)
+            .unwrap_or(0),
+    )
+    .unwrap_or(0)
 }
 
 /// The outcome of one record.
@@ -92,6 +108,67 @@ impl Receiver {
             held: Vec::new(),
             gaps: BTreeMap::new(),
         }
+    }
+
+    /// Writes the receiver to its stored form. The held records travel
+    /// with it, because a roster that has not arrived outlives a run.
+    pub fn export(&self, w: &mut Writer) -> Result<(), Error> {
+        w.u8(STORED_VERSION);
+        w.u16(self.own_index);
+        w.u32(count(self.counters.len())?);
+        for ((sender, epoch), counter) in &self.counters {
+            w.u16(*sender);
+            w.u32(*epoch);
+            w.u32(*counter);
+        }
+        w.u32(count(self.held.len())?);
+        for held in &self.held {
+            w.u8(bucket_byte(held.bucket));
+            w.u64(held.arrived_at);
+            w.var(&held.bytes)?;
+        }
+        w.u32(count(self.gaps.len())?);
+        for (sender, since) in &self.gaps {
+            w.u16(*sender);
+            w.u64(*since);
+        }
+        Ok(())
+    }
+
+    /// Reads a receiver that [`Receiver::export`] wrote.
+    pub fn import(r: &mut Reader<'_>) -> Result<Self, Error> {
+        if r.u8()? != STORED_VERSION {
+            return Err(Error::Stale);
+        }
+        let own_index = r.u16()?;
+        let mut counters = BTreeMap::new();
+        for _ in 0..r.u32()? {
+            let sender = r.u16()?;
+            let epoch = r.u32()?;
+            counters.insert((sender, epoch), r.u32()?);
+        }
+        let mut held = Vec::new();
+        for _ in 0..r.u32()? {
+            let bucket = *Bucket::ALL
+                .get(usize::from(r.u8()?))
+                .ok_or(Error::Malformed)?;
+            let arrived_at = r.u64()?;
+            held.push(HeldRecord {
+                bucket,
+                arrived_at,
+                bytes: r.var()?.to_vec(),
+            });
+        }
+        let mut gaps = BTreeMap::new();
+        for _ in 0..r.u32()? {
+            gaps.insert(r.u16()?, r.u64()?);
+        }
+        Ok(Receiver {
+            own_index,
+            counters,
+            held,
+            gaps,
+        })
     }
 
     /// The roster epoch a plaintext names, before the parse.

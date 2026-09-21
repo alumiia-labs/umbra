@@ -1282,9 +1282,12 @@ fn two_members_talk_in_a_group_over_the_relays_of_a_signed_network() {
 
     // The creator makes the group and one queue at each replica.
     let mut rng = OsRng;
-    let creator_keys = umbra_crypto::group::MemberKeys::from_seed(&Secret::new([0x41; 32]));
-    let creator_pk = creator_keys.roster().verifying_key().to_bytes();
-    let mut creator = Group::create([0x77; 32], creator_keys, now, &mut rng).unwrap();
+    let creator_seed = Secret::new([0x41; 32]);
+    let creator_pk = umbra_crypto::group::MemberKeys::from_seed(&creator_seed)
+        .roster()
+        .verifying_key()
+        .to_bytes();
+    let mut creator = Group::create([0x77; 32], &creator_seed, now, &mut rng).unwrap();
     let credentials = creator.credentials().unwrap();
     let (read_pk, write_pk) = (credentials.read_public(), credentials.write_public());
     let write_sk = credentials.write_secret();
@@ -1349,7 +1352,7 @@ fn two_members_talk_in_a_group_over_the_relays_of_a_signed_network() {
     let snapshot_bytes = creator.snapshot(&[]).unwrap();
     let snapshot = umbra_wire::group::control::RosterSnapshot::parse(&snapshot_bytes).unwrap();
     let admitted = accept_admit(&invitation, &snapshot, &add_hash, &creator_pk, now).unwrap();
-    let mut member = Group::joined(admitted, joiner.keys).unwrap();
+    let mut member = Group::joined(admitted, &joiner.seed).unwrap();
 
     // One message of the creator goes to each replica (`GRP-194`).
     let text_of = |body: &[u8]| {

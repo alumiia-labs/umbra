@@ -5,9 +5,10 @@
 
 use alloc::vec::Vec;
 
+use umbra_crypto::stored::{Reader, Writer};
 use umbra_wire::group::control::ReplicaRef;
 
-use super::GROUP_REPLICAS;
+use super::{roster::STORED_VERSION, GROUP_REPLICAS};
 use crate::Error;
 
 /// A relay a creator may put a group queue on.
@@ -89,6 +90,72 @@ impl Replicas {
             last_subscribed: None,
             reachable: [true, true],
         }
+    }
+
+    /// Writes the replica state to its stored form.
+    pub fn export(&self, w: &mut Writer) {
+        w.u8(STORED_VERSION);
+        for index in 0..GROUP_REPLICAS {
+            let Some(reference) = self.refs.get(index) else {
+                continue;
+            };
+            w.bytes(&reference.relay_id);
+            w.bytes(&reference.group_queue_id);
+            w.u32(reference.seq_of_add);
+            w.u32(self.cursors.get(index).copied().unwrap_or(0));
+            w.option(
+                self.newest_epoch_key.get(index).copied().flatten().as_ref(),
+                |w, seq| w.u32(*seq),
+            );
+            w.flag(self.reachable.get(index).copied().unwrap_or(false));
+        }
+        w.option(self.last_subscribed.as_ref(), |w, which| {
+            w.u8(u8::try_from(*which).unwrap_or(0));
+        });
+    }
+
+    /// Reads a replica state that [`Replicas::export`] wrote.
+    pub fn import(r: &mut Reader<'_>) -> Result<Self, Error> {
+        if r.u8()? != STORED_VERSION {
+            return Err(Error::Stale);
+        }
+        let mut refs = [ReplicaRef {
+            relay_id: [0; 32],
+            group_queue_id: [0; 32],
+            seq_of_add: 0,
+        }; GROUP_REPLICAS];
+        let mut cursors = [0u32; GROUP_REPLICAS];
+        let mut newest_epoch_key = [None; GROUP_REPLICAS];
+        let mut reachable = [false; GROUP_REPLICAS];
+        for index in 0..GROUP_REPLICAS {
+            let reference = ReplicaRef {
+                relay_id: r.array()?,
+                group_queue_id: r.array()?,
+                seq_of_add: r.u32()?,
+            };
+            let cursor = r.u32()?;
+            let newest = r.option(Reader::u32)?;
+            let up = r.flag()?;
+            if let Some(slot) = refs.get_mut(index) {
+                *slot = reference;
+            }
+            if let Some(slot) = cursors.get_mut(index) {
+                *slot = cursor;
+            }
+            if let Some(slot) = newest_epoch_key.get_mut(index) {
+                *slot = newest;
+            }
+            if let Some(slot) = reachable.get_mut(index) {
+                *slot = up;
+            }
+        }
+        Ok(Replicas {
+            refs,
+            cursors,
+            newest_epoch_key,
+            last_subscribed: r.option(|r| Ok(usize::from(r.u8()?)))?,
+            reachable,
+        })
     }
 
     /// The replica to subscribe to in this session: the other one than

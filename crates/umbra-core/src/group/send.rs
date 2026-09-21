@@ -16,7 +16,13 @@ use umbra_wire::{
     },
 };
 
-use super::{epoch::EpochStore, roster::Roster, slot_of};
+use umbra_crypto::stored::{Reader, Writer};
+
+use super::{
+    epoch::EpochStore,
+    roster::{count, Roster, STORED_VERSION},
+    slot_of,
+};
 use crate::Error;
 
 /// The cached `K_ij` of each member (§11.3.3).
@@ -65,6 +71,29 @@ impl Sender {
         if value > *slot {
             *slot = value;
         }
+    }
+
+    /// Writes the counters to their stored form.
+    pub fn export(&self, w: &mut Writer) -> Result<(), Error> {
+        w.u8(STORED_VERSION);
+        w.u32(count(self.counters.len())?);
+        for (epoch, counter) in &self.counters {
+            w.u32(*epoch);
+            w.u32(*counter);
+        }
+        Ok(())
+    }
+
+    /// Reads the counters that [`Sender::export`] wrote.
+    pub fn import(r: &mut Reader<'_>) -> Result<Self, Error> {
+        if r.u8()? != STORED_VERSION {
+            return Err(Error::Stale);
+        }
+        let mut counters = BTreeMap::new();
+        for _ in 0..r.u32()? {
+            counters.insert(r.u32()?, r.u32()?);
+        }
+        Ok(Sender { counters })
     }
 
     fn next_counter(&mut self, epoch: u32) -> Result<u32, Error> {

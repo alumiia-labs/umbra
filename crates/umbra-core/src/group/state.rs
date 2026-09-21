@@ -15,6 +15,8 @@ use umbra_crypto::{
     hash::sha3_256,
     rand_core::{CryptoRng, TryCryptoRng},
     secret::Secret,
+    stored::{Reader, Writer},
+    zeroize::Zeroizing,
 };
 use umbra_wire::{
     bucket::Bucket,
@@ -28,7 +30,7 @@ use super::{
     join::{admit, admit_slot, Admitted},
     queue::Replicas,
     receive::{Context, Outcome, Receiver},
-    roster::{Applied, Member, Roster},
+    roster::{Applied, Member, Roster, STORED_VERSION},
     send::{PairCache, Sender},
     slot_of, GROUP_REPLICAS,
 };
@@ -69,10 +71,11 @@ impl Group {
     /// creator at index 0 (`GRP-220`, `GRP-188`).
     pub fn create<R: CryptoRng + TryCryptoRng + ?Sized>(
         group_id: [u8; 32],
-        keys: MemberKeys,
+        seed: &Secret<32>,
         now: u64,
         rng: &mut R,
     ) -> Result<Self, Error> {
+        let keys = MemberKeys::from_seed(seed);
         let creator = Member {
             index: 0,
             role: Role::Owner,
@@ -114,7 +117,8 @@ impl Group {
 
     /// The group of a member that an admit and a snapshot admitted
     /// (`GRP-313`). It holds no owner credential, thus it rotates nothing.
-    pub fn joined(admitted: Admitted, keys: MemberKeys) -> Result<Self, Error> {
+    pub fn joined(admitted: Admitted, seed: &Secret<32>) -> Result<Self, Error> {
+        let keys = MemberKeys::from_seed(seed);
         let mut epochs = EpochStore::default();
         epochs.install(admitted.epoch)?;
         Ok(Group {
@@ -127,6 +131,67 @@ impl Group {
             pairs: PairCache::default(),
             owners: None,
             replicas: Some(Replicas::from_admit(admitted.replicas)),
+        })
+    }
+
+    /// Writes the group to the stored form of Part 15 §15.6.4. It holds
+    /// no `GroupRosterSeed_g`: the local identity table of Part 4 §4.7.2
+    /// holds that seed (`GRP-055`), and [`Group::restore`] takes it.
+    pub fn export(&self) -> Result<Zeroizing<Vec<u8>>, Error> {
+        let mut w = Writer::new();
+        w.u8(STORED_VERSION);
+        w.u16(self.own_index);
+        self.roster.export(&mut w)?;
+        self.epochs.export(&mut w);
+        self.sender.export(&mut w)?;
+        self.receiver.export(&mut w)?;
+        w.flag(self.owners.is_some());
+        if let Some(owners) = &self.owners {
+            for owner in owners {
+                w.bytes(owner.expose());
+            }
+        }
+        w.flag(self.replicas.is_some());
+        if let Some(replicas) = &self.replicas {
+            replicas.export(&mut w);
+        }
+        Ok(w.finish())
+    }
+
+    /// Reads a group that [`Group::export`] wrote, with the seed of its
+    /// row in the local identity table. The pair keys are a cache, thus
+    /// the restored group derives each one again at its first use.
+    pub fn restore(bytes: &[u8], seed: &Secret<32>) -> Result<Self, Error> {
+        let mut r = Reader::new(bytes);
+        if r.u8()? != STORED_VERSION {
+            return Err(Error::Stale);
+        }
+        let own_index = r.u16()?;
+        let roster = Roster::import(&mut r)?;
+        let epochs = EpochStore::import(&mut r)?;
+        let sender = Sender::import(&mut r)?;
+        let receiver = Receiver::import(&mut r)?;
+        let owners = if r.flag()? {
+            Some([Secret::new(r.array()?), Secret::new(r.array()?)])
+        } else {
+            None
+        };
+        let replicas = if r.flag()? {
+            Some(Replicas::import(&mut r)?)
+        } else {
+            None
+        };
+        r.end()?;
+        Ok(Group {
+            own_index,
+            keys: Box::new(MemberKeys::from_seed(seed)),
+            roster,
+            epochs,
+            sender,
+            receiver,
+            pairs: PairCache::default(),
+            owners,
+            replicas,
         })
     }
 
@@ -350,11 +415,15 @@ mod tests {
         out
     }
 
+    /// The seed of the joiner in [`pair`], which a restore needs again.
+    /// `Rng` is the test generator, thus the value is fixed.
+    const JOINER_SEED: Secret<32> = Secret::new([0x09; 32]);
+
     /// The creator and one member that its add and its admit placed.
     fn pair(now: u64) -> (Group, Group, Vec<u8>) {
         let mut rng = Rng(9);
-        let creator_keys = MemberKeys::from_seed(&Secret::new([0x21; 32]));
-        let mut creator = Group::create([0x55; 32], creator_keys, now, &mut rng).unwrap();
+        let creator_seed = Secret::new([0x21; 32]);
+        let mut creator = Group::create([0x55; 32], &creator_seed, now, &mut rng).unwrap();
         creator.set_replicas([
             ReplicaRef {
                 relay_id: [1; 32],
@@ -368,7 +437,10 @@ mod tests {
             },
         ]);
 
-        let joiner_keys = JoinKeys::make(&mut rng).unwrap();
+        let joiner_keys = JoinKeys {
+            seed: JOINER_SEED,
+            keys: MemberKeys::from_seed(&JOINER_SEED),
+        };
         let kem_pk = joiner_keys.keys.kem().public().to_bytes();
         let record = JoinRecord {
             group_id: *creator.group_id(),
@@ -393,7 +465,7 @@ mod tests {
         let admitted =
             crate::group::join::accept_admit(&invitation, &snapshot, &add_hash, &creator_pk, now)
                 .unwrap();
-        let member = Group::joined(admitted, joiner_keys.keys).unwrap();
+        let member = Group::joined(admitted, &joiner_keys.seed).unwrap();
         (creator, member, add)
     }
 
@@ -444,14 +516,69 @@ mod tests {
 
         // A party of the same group id with another epoch secret reads
         // nothing, thus the epoch key and not the group id opens a record.
-        let mut other = Group::create(
-            *creator.group_id(),
-            MemberKeys::from_seed(&Secret::new([0x99; 32])),
-            now,
-            &mut rng,
-        )
-        .unwrap();
+        let mut other =
+            Group::create(*creator.group_id(), &Secret::new([0x99; 32]), now, &mut rng).unwrap();
         assert!(other.receive(&record, now).is_err());
+    }
+
+    #[test]
+    fn a_restored_group_keeps_its_place_in_the_group() {
+        let now = 1_700_000_000;
+        let (mut creator, mut member, _) = pair(now);
+        let mut rng = Rng(13);
+        let first = creator
+            .post(&text("before the restart"), now, &mut rng)
+            .unwrap();
+        assert!(matches!(
+            member.receive(&first, now).unwrap(),
+            Outcome::Content { .. }
+        ));
+
+        // The store seals these bytes; the seed sits in the identity table.
+        let creator_bytes = creator.export().unwrap();
+        let member_bytes = member.export().unwrap();
+        let mut creator = Group::restore(&creator_bytes, &Secret::new([0x21; 32])).unwrap();
+        let mut member = Group::restore(&member_bytes, &JOINER_SEED).unwrap();
+        assert_eq!(creator.own_index(), 0);
+        assert_eq!(member.own_index(), 1);
+        assert_eq!(member.roster().active_count(), 2);
+        assert_eq!(member.epoch(), creator.epoch());
+        assert_eq!(
+            creator.credentials().unwrap().write_public(),
+            member.credentials().unwrap().write_public()
+        );
+        // The owner credentials came back, and a member still holds none.
+        assert!(creator.owner(1).is_some());
+        assert!(member.owner(0).is_none());
+        // The replicas came back with their cursors.
+        assert_eq!(
+            creator.replicas().unwrap().reference(1).unwrap().relay_id,
+            [3; 32]
+        );
+
+        // GRP-259: the counter of each side survived, thus the record of
+        // before the restart is a duplicate and the next one is not.
+        assert_eq!(member.receive(&first, now).unwrap(), Outcome::Duplicate);
+        let second = creator
+            .post(&text("after the restart"), now, &mut rng)
+            .unwrap();
+        let Outcome::Content { counter, app, .. } = member.receive(&second, now).unwrap() else {
+            panic!("the restored member read nothing");
+        };
+        assert_eq!(counter, 2);
+        assert_eq!(
+            AppMessage::parse(&app, Channel::Group).unwrap().body,
+            b"after the restart"
+        );
+
+        // A stored object of another version is refused, and so is a
+        // trailing byte.
+        let mut wrong = creator_bytes.to_vec();
+        wrong[0] = 0x02;
+        assert!(Group::restore(&wrong, &Secret::new([0x21; 32])).is_err());
+        let mut long = creator_bytes.to_vec();
+        long.push(0);
+        assert!(Group::restore(&long, &Secret::new([0x21; 32])).is_err());
     }
 
     #[test]

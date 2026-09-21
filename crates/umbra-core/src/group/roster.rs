@@ -6,7 +6,11 @@
 
 use alloc::{collections::BTreeMap, vec::Vec};
 
-use umbra_crypto::{hash::sha3_256, sign::VerifyingKey};
+use umbra_crypto::{
+    hash::sha3_256,
+    sign::VerifyingKey,
+    stored::{Reader, Writer},
+};
 use umbra_wire::group::control::{
     ControlType, GrantingEpoch, GroupControl, GroupMemberEntry, ModAction, ModerationEpoch,
     PlainEpoch, PlainOp, RekeyRecord, Role, RosterSnapshot,
@@ -14,6 +18,15 @@ use umbra_wire::group::control::{
 
 use super::{GROUP_MAX, MOD_ACTION_MAX, OWNER_MIN, ROLE_HOLDER_MAX};
 use crate::Error;
+
+/// The version of each stored object of a group.
+pub(crate) const STORED_VERSION: u8 = 0x01;
+
+/// A count in a stored object, which a later read bounds by the rules of
+/// its own type.
+pub(crate) fn count(len: usize) -> Result<u32, Error> {
+    u32::try_from(len).map_err(|_| Error::Malformed)
+}
 
 /// One member of the roster.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -633,6 +646,112 @@ impl Roster {
                 key(a) < key(b)
             }
         }
+    }
+
+    /// Writes the roster to the stored form of Part 15 §15.6.4.
+    pub fn export(&self, w: &mut Writer) -> Result<(), Error> {
+        w.u8(STORED_VERSION);
+        w.bytes(&self.group_id);
+        w.u32(self.epoch_index);
+        w.bytes(&self.chain_hash);
+        w.u32(self.admission_epoch);
+        w.option(self.highest_index.as_ref(), |w, index| w.u16(*index));
+        w.u32(count(self.members.len())?);
+        for member in self.members.values() {
+            w.u16(member.index);
+            w.u8(member.role as u8);
+            w.bytes(&member.pair_pk);
+            w.bytes(&member.roster_pk_hash);
+            w.bytes(&member.kem_pk_hash);
+            w.flag(member.active);
+            w.option(member.kem_pk.as_ref(), |w, key| {
+                let _ = w.var(key);
+            });
+            w.option(member.roster_pk.as_ref(), |w, key| {
+                let _ = w.var(key);
+            });
+        }
+        w.u32(count(self.history.len())?);
+        for (roster_epoch, (active, at)) in &self.history {
+            w.u32(*roster_epoch);
+            w.u64(*at);
+            w.u32(count(active.len())?);
+            for index in active {
+                w.u16(*index);
+            }
+        }
+        w.u32(count(self.successors.len())?);
+        for ((predecessor, maker), hash) in &self.successors {
+            w.bytes(predecessor);
+            w.u16(*maker);
+            w.bytes(hash);
+        }
+        w.u32(count(self.forks.len())?);
+        for fork in &self.forks {
+            w.bytes(&fork.predecessor);
+            w.option(fork.named.as_ref(), |w, index| w.u16(*index));
+        }
+        Ok(())
+    }
+
+    /// Reads a roster that [`Roster::export`] wrote.
+    pub fn import(r: &mut Reader<'_>) -> Result<Self, Error> {
+        if r.u8()? != STORED_VERSION {
+            return Err(Error::Stale);
+        }
+        let group_id = r.array()?;
+        let epoch_index = r.u32()?;
+        let chain_hash = r.array()?;
+        let admission_epoch = r.u32()?;
+        let highest_index = r.option(Reader::u16)?;
+        let mut members = BTreeMap::new();
+        for _ in 0..r.u32()? {
+            let member = Member {
+                index: r.u16()?,
+                role: Role::from_byte(r.u8()?)?,
+                pair_pk: r.array()?,
+                roster_pk_hash: r.array()?,
+                kem_pk_hash: r.array()?,
+                active: r.flag()?,
+                kem_pk: r.option(|r| r.var().map(<[u8]>::to_vec))?,
+                roster_pk: r.option(|r| r.var().map(<[u8]>::to_vec))?,
+            };
+            members.insert(member.index, member);
+        }
+        let mut history = BTreeMap::new();
+        for _ in 0..r.u32()? {
+            let roster_epoch = r.u32()?;
+            let at = r.u64()?;
+            let mut active = Vec::new();
+            for _ in 0..r.u32()? {
+                active.push(r.u16()?);
+            }
+            history.insert(roster_epoch, (active, at));
+        }
+        let mut successors = BTreeMap::new();
+        for _ in 0..r.u32()? {
+            let predecessor: [u8; 32] = r.array()?;
+            let maker = r.u16()?;
+            successors.insert((predecessor, maker), r.array()?);
+        }
+        let mut forks = Vec::new();
+        for _ in 0..r.u32()? {
+            forks.push(Fork {
+                predecessor: r.array()?,
+                named: r.option(Reader::u16)?,
+            });
+        }
+        Ok(Roster {
+            group_id,
+            epoch_index,
+            chain_hash,
+            members,
+            highest_index,
+            history,
+            admission_epoch,
+            successors,
+            forks,
+        })
     }
 
     /// The entries of the roster at its current epoch, for a snapshot.

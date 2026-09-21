@@ -14,6 +14,7 @@ use umbra_crypto::{
     kem::PublicKey,
     rand_core::{CryptoRng, TryCryptoRng},
     secret::Secret,
+    stored::{Reader, Writer},
 };
 use umbra_wire::group::{
     control::Role,
@@ -21,7 +22,8 @@ use umbra_wire::group::{
 };
 
 use super::{
-    roster::Roster, slot_of, GROUP_EPOCH_GRACE, GROUP_EPOCH_MAX_AGE, GROUP_SLOT, GROUP_SLOT_SKEW,
+    roster::{Roster, STORED_VERSION},
+    slot_of, GROUP_EPOCH_GRACE, GROUP_EPOCH_MAX_AGE, GROUP_SLOT, GROUP_SLOT_SKEW,
     GROUP_SLOT_WINDOW, INLINE_SLOTS_MAX,
 };
 use crate::{attach::SEGMENT_SIZE, Error};
@@ -149,6 +151,48 @@ impl EpochState {
         Ok(self.chain.record_key(slot)?)
     }
 
+    /// Writes the epoch state to its stored form.
+    pub fn export(&self, w: &mut Writer) {
+        w.bytes(self.secret.expose().expose());
+        w.u32(self.epoch);
+        w.u32(self.start_slot);
+        w.u32(self.roster_epoch);
+        w.u16(self.rotator);
+        let slot = self.chain.slot();
+        w.u32(slot);
+        // The chain holds the key of that slot, thus this call clones it.
+        match self.chain.slot_key(slot) {
+            Ok(key) => w.bytes(key.expose()),
+            Err(_) => w.bytes(&[0; 32]),
+        }
+        w.bytes(self.credentials.read_secret().expose());
+        w.bytes(self.credentials.write_secret().expose());
+        w.u64(self.installed_at);
+    }
+
+    /// Reads an epoch state that [`EpochState::export`] wrote.
+    pub fn import(r: &mut Reader<'_>) -> Result<Self, Error> {
+        let secret = EpochSecret::from_secret(Secret::new(r.array()?));
+        let epoch = r.u32()?;
+        let start_slot = r.u32()?;
+        let roster_epoch = r.u32()?;
+        let rotator = r.u16()?;
+        let slot = r.u32()?;
+        let chain = ChainState::from_slot_key(epoch, slot, Secret::new(r.array()?));
+        let read = Secret::new(r.array()?);
+        let write = Secret::new(r.array()?);
+        Ok(EpochState {
+            secret,
+            epoch,
+            start_slot,
+            roster_epoch,
+            rotator,
+            chain,
+            credentials: Credentials::from_secrets(&read, &write),
+            installed_at: r.u64()?,
+        })
+    }
+
     /// Whether `GROUP_EPOCH_MAX_AGE` passed since `t_e` (`GRP-360`).
     pub fn aged(&self, now: u64) -> bool {
         now.saturating_sub(u64::from(self.start_slot).saturating_mul(GROUP_SLOT))
@@ -248,6 +292,36 @@ impl EpochStore {
             return Err(Error::Stale);
         }
         Ok(keys)
+    }
+
+    /// Writes the three epoch states to their stored form.
+    pub fn export(&self, w: &mut Writer) {
+        w.u8(STORED_VERSION);
+        for state in [&self.current, &self.previous, &self.alternate] {
+            w.flag(state.is_some());
+            if let Some(state) = state {
+                state.export(w);
+            }
+        }
+    }
+
+    /// Reads an epoch store that [`EpochStore::export`] wrote.
+    pub fn import(r: &mut Reader<'_>) -> Result<Self, Error> {
+        if r.u8()? != STORED_VERSION {
+            return Err(Error::Stale);
+        }
+        let mut states = [None, None, None];
+        for slot in &mut states {
+            if r.flag()? {
+                *slot = Some(EpochState::import(r)?);
+            }
+        }
+        let [current, previous, alternate] = states;
+        Ok(EpochStore {
+            current,
+            previous,
+            alternate,
+        })
     }
 
     /// The credentials of the current epoch, for the group-queue session.
