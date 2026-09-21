@@ -70,18 +70,18 @@ each column when a crate implements the requirement and a test covers it.
 | `NET` | 224 | 84 | 1 | 0 | 8 | **317** |
 | `IDN` | 120 | 43 | 1 | 0 | 5 | **169** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
-| `WIR` | 387 | 87 | 0 | 0 | 6 | **480** |
+| `WIR` | 389 | 87 | 0 | 0 | 6 | **482** |
 | `DEV` | 179 | 87 | 2 | 0 | 7 | **275** |
 | `NTF` | 67 | 30 | 0 | 0 | 2 | **99** |
 | `DIS` | 123 | 37 | 0 | 0 | 1 | **161** |
 | `REL` | 122 | 30 | 1 | 0 | 2 | **155** |
-| `GRP` | 204 | 56 | 0 | 0 | 5 | **265** |
+| `GRP` | 205 | 58 | 0 | 0 | 5 | **268** |
 | `COM` | 299 | 96 | 0 | 0 | 5 | **400** |
 | `ATT` | 139 | 46 | 1 | 0 | 2 | **188** |
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
 | `IMP` | 112 | 41 | 0 | 0 | 2 | **155** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2195 | 709 | 7 | 0 | 52 | **2963** |
+| **All** | 2198 | 711 | 7 | 0 | 52 | **2968** |
 
 ## SCP — Scope and Conventions
 
@@ -1273,6 +1273,8 @@ Source: `spec/06-wire-format.md`
 | `WIR-517` | §6.4.5 | MUST | A creator | A creator MUST key the authenticator of a `GNEW` with the `own_sk` whose public half sits in `own_pk` of that same payload. |  |  |
 | `WIR-518` | §6.4.5 | MUST NOT | (unstated) | A relay MUST verify a `GNEW` under the `own_pk` of its payload, and it MUST NOT accept a `GNEW` under `read_pk` or under `write_pk`. |  |  |
 | `WIR-519` | §6.4.5 | MUST NOT | (unstated) | A relay MUST emit a `GMSG` of an accepted `GPOST` to each session that subscribed, and the relay MUST NOT emit a second `GMSG` for a record whose bytes `WIR-385` matched. |  |  |
+| `WIR-520` | §6.6.3 | MUST | An admit | An admit MUST carry `read_sk_e` and `write_sk_e` of the epoch that it names. |  |  |
+| `WIR-521` | §6.6.3 | MUST | A parser | A parser MUST reject an admit whose `body_len` is not 249 plus `desc_len`. |  |  |
 
 ## DEV — Device Sets
 
@@ -2263,6 +2265,9 @@ Source: `spec/11-private-groups.md`
 | `GRP-381` | §11.9.2 | MUST | A verifier | A verifier MUST run every check of an epoch before it records that epoch as a successor of its predecessor, thus a rejected epoch never counts as one of the two successors of `GRP-070`. |  |  |
 | `GRP-382` | §11.9.2 | MUST | A plain epoch that adds or removes a member | A plain epoch that adds or removes a member MUST come from a member at `admin` or above, and a self-removal from the member that leaves; a verifier MUST discard each other plain epoch under `GRP-066`. |  |  |
 | `GRP-383` | §11.4.2 | MUST | The `slot` field of the epoch-key record header | The `slot` field of the epoch-key record header MUST carry `t_{e+1}`, and a member MUST take `t_e` of `GRP-224` from that field. |  |  |
+| `GRP-384` | §11.3.1 | MUST | An admit | An admit MUST carry `read_sk_e` and `write_sk_e`, and a joiner MUST take the two credentials from it. |  |  |
+| `GRP-385` | §11.3.1 | MUST NOT | A joiner | A joiner MUST NOT derive a queue credential, because it holds no `K_e`. |  |  |
+| `GRP-386` | §11.3.1 | MUST NOT | (unstated) | A member that takes `K_e` from an epoch-key record (§11.4.2) MUST derive the two credentials from it and MUST NOT keep the pair of an earlier epoch after `GROUP_EPOCH_GRACE`. |  |  |
 
 ## COM — Public Communities
 

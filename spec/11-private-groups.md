@@ -330,6 +330,24 @@ join (§11.4.1).
 from the epoch secret and not from a slot key, thus they do not advance by the
 hour. `own_sk` is never derived, and §11.2.1 makes the creator draw it.
 
+**A joiner derives no credential.** A joiner receives `K_{e,t_join}` and never
+`K_e`, because `K_e` gives every slot key of the epoch from `t_e` and would
+open the records before the join.
+
+- **[GRP-384]** An admit MUST carry `read_sk_e` and `write_sk_e`, and a joiner
+  MUST take the two credentials from it. **[GRP-385]** A joiner MUST NOT
+  derive a queue credential, because it holds no `K_e`. **[GRP-386]** A
+  member that takes `K_e` from an epoch-key record (§11.4.2) MUST derive the
+  two credentials from it and MUST NOT keep the pair of an earlier epoch
+  after `GROUP_EPOCH_GRACE`. Part 6 §6.6.3 gives the two fields of the admit.
+
+> *Cause.* The credentials are the reader set and the writer set of the group
+> queue, and that set is the membership. A joiner is a member from its add
+> record, thus the two values tell it nothing that the roster does not. The
+> admin that admits it holds them already. The alternative, a `K_e` to the
+> joiner, would give it each slot key from `t_e` and break §11.3.2 and the
+> history window of `GRP-233`.
+
 > *Cause.* Part 3 rules `NET-009` to `NET-014` make each queue key come from
 > the device CSPRNG and from no shared secret, so that a seized relay cannot
 > collect the queues of one user. The derivation of a group-queue credential
@@ -1075,7 +1093,8 @@ other member is needed or created. Part 6 §6.6.3 gives the layouts of
 4. **[GRP-312]** The admin MUST then send a `GroupInvitation` of stage `0x02`
    (an admit) on the pairwise channel. It carries `group_id`, the `index`, the
    epoch `e`, `t_join`, `K_{e,t_join}` (or the history-window key of §11.3.2),
-   the `roster_epoch` of the add, and for each replica the `relay_id`, the
+   `read_sk_e` and `write_sk_e` (`GRP-384`), the `roster_epoch` of the add,
+   and for each replica the `relay_id`, the
    `GroupQueueId`, and the `seq` of the add at that replica, and a
    `FileDescriptor` of a `RosterSnapshot` at that `roster_epoch` (§11.9.8).
 5. **[GRP-313]** The joiner MUST fetch the snapshot, verify it under §11.9.8,

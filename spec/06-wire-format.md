@@ -1687,11 +1687,13 @@ InvitationOffer {                 // 3 905 bytes and the name
     creator_roster_pk [1952]u8    // GroupRosterKey_g.pk of the creator
 }
 
-InvitationAdmit {                 // 185 bytes and the descriptor
+InvitationAdmit {                 // 249 bytes and the descriptor
     index             u16         // the member index that the admin gave the joiner
     epoch             u32         // the group epoch e at the admit
     t_join            u32         // the slot index at which the key of the joiner starts
     slot_key          [32]u8      // K_{e,t_join}, or the history-window key of Part 11 §11.3.1
+    read_sk           [32]u8      // read_sk_e of Part 11 §11.3.1
+    write_sk          [32]u8      // write_sk_e of Part 11 §11.3.1
     roster_epoch      u32         // the roster epoch of the snapshot
     replica_count     u8          // GROUP_REPLICAS
     replicas          [replica_count]ReplicaRef
@@ -1705,6 +1707,15 @@ ReplicaRef {                      // 68 bytes
     seq_of_add        u32         // the seq of the plain epoch that added the joiner, at that relay
 }
 ```
+
+- **[WIR-520]** An admit MUST carry `read_sk_e` and `write_sk_e` of the
+  epoch that it names. **[WIR-521]** A parser MUST reject an admit whose
+  `body_len` is not 249 plus `desc_len`. The two credentials come from `K_e`
+  under Part 11 §11.3.1, and the admit hands the joiner `K_{e,t_join}` and
+  never `K_e`, because `K_e` opens each slot of the epoch from its start. A
+  joiner therefore derives no credential, and without them it authorizes no
+  `GSUB` at either replica. Part 11 rule `GRP-384` states the same rule at
+  the member.
 
 **The roster objects.** Part 11 §11.9.2, §11.9.6, and §11.9.7 give the
 fields and the signature preimages of the plain epoch, the granting epoch, the
