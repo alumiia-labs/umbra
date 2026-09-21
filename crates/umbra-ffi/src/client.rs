@@ -520,7 +520,6 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // Each record that waited for the send path at the lock waits again.
         self.requeue_waiting()?;
         self.requeue_transfers()?;
-        self.requeue_group_creations()?;
         let seconds = self.auto_lock_seconds()?;
         self.apply_auto_lock(seconds);
         self.auto_lock.touch(now);
@@ -1895,12 +1894,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 continue;
             };
             let plain = Zeroizing::new(plain);
+            let conversation = conversation_of(&plain)?;
+            // A record of a group takes the run of the group queues.
+            if self.is_group(conversation)? {
+                continue;
+            }
             let info = info_of(&plain)?;
             waiting_records.push((
                 info.stored_at_ms,
                 Outgoing {
                     message: MsgRef(row),
-                    conversation: conversation_of(&plain)?,
+                    conversation,
                     app: plain
                         .get(MESSAGE_PREFIX..)
                         .ok_or(Error::Integrity)?
@@ -2006,6 +2010,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut app = Zeroizing::new(vec![0u8; message.len()]);
         message.encode(&mut app)?;
         drop(rich);
+
+        // A group record goes to the two replicas of its group queue and
+        // on no pairwise channel (Part 11 §11.2).
+        if self.is_group(conversation)? {
+            let message = self.post_to_group(conversation, msg_id, &app, now_ms, rng)?;
+            self.auto_lock.touch(now_ms / 1_000);
+            return Ok(message);
+        }
 
         let open = self.open_mut()?;
         // IMP-024, IMP-025: the store holds the keyed form of `msg_id`.

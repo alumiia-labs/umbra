@@ -12,7 +12,7 @@
 use std::collections::VecDeque;
 
 use umbra_core::{
-    group::{state::Group, GROUP_REPLICAS},
+    group::{join::Admitted, receive::Outcome, state::Group, GROUP_REPLICAS},
     store::{
         engine::Backend,
         record::{RowId, TableId},
@@ -23,8 +23,8 @@ use umbra_crypto::{rand_core::CryptoRng, secret::Secret};
 use umbra_wire::group::control::ReplicaRef;
 use zeroize::Zeroizing;
 
-use super::Client;
-use crate::{ConversationId, Error};
+use super::{stored_message, Client, MESSAGE_PREFIX, OUTBOX};
+use crate::{ConversationId, Delivery, Error, Event, MsgRef};
 
 /// The stored form of a group: its roster, its epochs, and its replicas.
 pub(super) const GROUP: TableId = TableId(0x12);
@@ -71,10 +71,35 @@ pub struct GroupQueueJob {
     pub own: Secret<32>,
 }
 
+/// One replica of a group queue, as a post names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GroupReplica {
+    /// The relay.
+    pub relay: [u8; 32],
+    /// The group queue at that relay.
+    pub group_queue_id: [u8; 32],
+}
+
+/// One record that waits for the run of the group queues. The same bytes
+/// go to each replica (`GRP-194`).
+pub struct GroupPost {
+    /// The message of this device that the record carries.
+    pub message: MsgRef,
+    /// The conversation.
+    pub conversation: ConversationId,
+    /// The two replicas.
+    pub replicas: [GroupReplica; GROUP_REPLICAS],
+    /// `write_sk` of the epoch.
+    pub write: Secret<32>,
+    /// The sealed `GroupQueueRecord`.
+    pub record: Vec<u8>,
+}
+
 /// The group work that waits for the run of the group queues.
 #[derive(Default)]
 pub(super) struct GroupQueues {
     pub creations: VecDeque<GroupQueueJob>,
+    pub posts: VecDeque<GroupPost>,
 }
 
 fn queue_row(group_id: &[u8; 32], replica: u8, relay: &[u8; 32]) -> Vec<u8> {
@@ -199,7 +224,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     }
 
     /// The group of a conversation, with the seed of its identity row.
-    pub(super) fn group_of(&self, conversation: ConversationId) -> Result<Group, Error> {
+    pub fn group_of(&self, conversation: ConversationId) -> Result<Group, Error> {
         let store = &self.open_ref()?.store;
         let row = Zeroizing::new(store.get(GROUP, &conversation.0)?.ok_or(Error::NotFound)?);
         let (group_id, stored) = row.split_at_checked(32).ok_or(Error::Integrity)?;
@@ -225,7 +250,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     }
 
     /// Writes a group back after a change of it.
-    pub(super) fn save_group<R: CryptoRng + ?Sized>(
+    pub fn save_group<R: CryptoRng + ?Sized>(
         &mut self,
         conversation: ConversationId,
         group: &Group,
@@ -331,7 +356,251 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             batch.delete(GROUP_QUEUE, row);
         }
         batch.commit()?;
+        // Each record that waited for the second queue goes now.
+        self.requeue_group_posts(rng)?;
         Ok(true)
+    }
+
+    /// Stores the group of an admit that a pairwise channel carried
+    /// (`GRP-313`). The joiner holds the two queues from the admit, thus
+    /// the group is ready at once.
+    pub fn adopt_group<R: CryptoRng + ?Sized>(
+        &mut self,
+        admitted: Admitted,
+        seed: &Secret<32>,
+        name: &str,
+        rng: &mut R,
+    ) -> Result<ConversationId, Error> {
+        let name = name.trim();
+        if name.len() > GROUP_NAME_MAX {
+            return Err(Error::TooLong);
+        }
+        let group = Group::joined(admitted, seed).map_err(|_| Error::Malformed)?;
+        let group_id = *group.group_id();
+        // GRP-153: a second admit to a group that this device holds is no
+        // group.
+        let conversation = self.conversation_of_group(&group_id)?;
+        if self.is_group(conversation)? {
+            return Err(Error::Malformed);
+        }
+        let row = Self::group_row(&group)?;
+        let open = self.open_mut()?;
+        let seed_row = open.store.row_id(TableId::LOCAL_IDENTITY, &group_id);
+        let mut batch = open.store.begin();
+        batch.put(GROUP, conversation.0, None, &row, rng)?;
+        batch.put(TableId::LOCAL_IDENTITY, seed_row, None, seed.expose(), rng)?;
+        batch.commit()?;
+        self.put_conversation_meta(conversation, 0, name, rng)?;
+        Ok(conversation)
+    }
+
+    /// Seals one `AppMessage` for a group and queues it for each replica.
+    /// A group whose two queues are not there yet stores the message and
+    /// posts nothing, and the next unlock or the second `GIDS` sends it.
+    pub(super) fn post_to_group<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        msg_id: [u8; 16],
+        app: &[u8],
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<MsgRef, Error> {
+        let open = self.open_mut()?;
+        let reference = super::msg_ref(&open.device_set_key, &msg_id);
+        let natural = [conversation.0.as_slice(), &reference].concat();
+        let row = open
+            .store
+            .row_id(umbra_core::store::record::TableId::MESSAGE, &natural);
+        let plain = stored_message(super::OUTGOING, Delivery::Queued, conversation, now_ms, app);
+        let mut batch = open.store.begin();
+        batch.put(
+            umbra_core::store::record::TableId::MESSAGE,
+            row,
+            Some(conversation.0),
+            &plain,
+            rng,
+        )?;
+        batch.put(OUTBOX, row, None, &super::outbox_row(), rng)?;
+        batch.commit()?;
+        let message = MsgRef(row);
+        self.queue_group_post(conversation, message, app, now_ms, rng)?;
+        Ok(message)
+    }
+
+    /// Builds the record of one stored message and queues it, when the
+    /// group holds both of its queues.
+    fn queue_group_post<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        message: MsgRef,
+        app: &[u8],
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let mut group = self.group_of(conversation)?;
+        let Some(replicas) = group.replicas() else {
+            return Ok(());
+        };
+        let replicas = [
+            GroupReplica {
+                relay: replicas.reference(0).ok_or(Error::Integrity)?.relay_id,
+                group_queue_id: replicas
+                    .reference(0)
+                    .ok_or(Error::Integrity)?
+                    .group_queue_id,
+            },
+            GroupReplica {
+                relay: replicas.reference(1).ok_or(Error::Integrity)?.relay_id,
+                group_queue_id: replicas
+                    .reference(1)
+                    .ok_or(Error::Integrity)?
+                    .group_queue_id,
+            },
+        ];
+        let write = group.credentials().ok_or(Error::Integrity)?.write_secret();
+        // GRP-246: the counter of this device moves with the record, thus
+        // the group goes back to the store before the record leaves.
+        let record = group
+            .post(app, now_ms / 1_000, rng)
+            .map_err(|_| Error::Malformed)?;
+        self.save_group(conversation, &group, rng)?;
+        self.groups.posts.push_back(GroupPost {
+            message,
+            conversation,
+            replicas,
+            write,
+            record,
+        });
+        Ok(())
+    }
+
+    /// The next record that waits for the run of the group queues.
+    pub fn take_group_post(&mut self) -> Option<GroupPost> {
+        self.groups.posts.pop_front()
+    }
+
+    /// One record that a `GMSG` carried. A record of this device, a
+    /// duplicate, and a record that waits for a roster give no message.
+    pub fn on_group_record<R: CryptoRng + ?Sized>(
+        &mut self,
+        group_queue_id: &[u8; 32],
+        record: &[u8],
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<Option<MsgRef>, Error> {
+        let Some(conversation) = self.conversation_of_queue(group_queue_id)? else {
+            return Ok(None);
+        };
+        let mut group = self.group_of(conversation)?;
+        let outcome = group.receive(record, now_ms / 1_000);
+        // The counters and the held records moved, whatever the outcome.
+        self.save_group(conversation, &group, rng)?;
+        let Ok(Outcome::Content { app, .. }) = outcome else {
+            return Ok(None);
+        };
+        let parsed = umbra_wire::app::AppMessage::parse(&app, umbra_wire::app::Channel::Group)?;
+        let open = self.open_mut()?;
+        let reference = super::msg_ref(&open.device_set_key, &parsed.msg_id);
+        let natural = [conversation.0.as_slice(), &reference].concat();
+        let row = open
+            .store
+            .row_id(umbra_core::store::record::TableId::MESSAGE, &natural);
+        // WIR-065: the second copy of one record drops at its `msg_id`.
+        if open
+            .store
+            .get(umbra_core::store::record::TableId::MESSAGE, &row)?
+            .is_some()
+        {
+            return Ok(None);
+        }
+        let plain = stored_message(
+            super::INCOMING,
+            Delivery::Delivered,
+            conversation,
+            now_ms,
+            &app,
+        );
+        let mut batch = open.store.begin();
+        batch.put(
+            umbra_core::store::record::TableId::MESSAGE,
+            row,
+            Some(conversation.0),
+            &plain,
+            rng,
+        )?;
+        batch.commit()?;
+        let message = MsgRef(row);
+        self.events.push_back(Event::Message {
+            conversation,
+            message,
+        });
+        Ok(Some(message))
+    }
+
+    /// The conversation of a group queue, or none when this device holds
+    /// no group with that queue.
+    fn conversation_of_queue(
+        &self,
+        group_queue_id: &[u8; 32],
+    ) -> Result<Option<ConversationId>, Error> {
+        for conversation in self.group_conversations()? {
+            let group = self.group_of(conversation)?;
+            let Some(replicas) = group.replicas() else {
+                continue;
+            };
+            let holds = (0..GROUP_REPLICAS).any(|index| {
+                replicas
+                    .reference(index)
+                    .is_some_and(|held| held.group_queue_id == *group_queue_id)
+            });
+            if holds {
+                return Ok(Some(conversation));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Puts each `GNEW` and each record that waits into the work list.
+    /// The run of the group queues calls it at its start, because a
+    /// record takes a fresh nonce and a counter of this device.
+    pub fn resume_group_work<R: CryptoRng + ?Sized>(&mut self, rng: &mut R) -> Result<(), Error> {
+        self.requeue_group_creations()?;
+        self.requeue_group_posts(rng)
+    }
+
+    /// Puts each record of a group that no replica accepted back into the
+    /// work list.
+    fn requeue_group_posts<R: CryptoRng + ?Sized>(&mut self, rng: &mut R) -> Result<(), Error> {
+        self.groups.posts.clear();
+        let store = &self.open_ref()?.store;
+        let mut waiting = Vec::new();
+        for (row, _) in store.list(OUTBOX, None)? {
+            let Some(plain) = store.get(umbra_core::store::record::TableId::MESSAGE, &row)? else {
+                continue;
+            };
+            let plain = Zeroizing::new(plain);
+            let conversation = super::conversation_of(&plain)?;
+            if store.get(GROUP, &conversation.0)?.is_none() {
+                continue;
+            }
+            let info = super::info_of(&plain)?;
+            waiting.push((
+                info.stored_at_ms,
+                conversation,
+                MsgRef(row),
+                Zeroizing::new(
+                    plain
+                        .get(MESSAGE_PREFIX..)
+                        .ok_or(Error::Integrity)?
+                        .to_vec(),
+                ),
+            ));
+        }
+        waiting.sort_by_key(|(stored_at, _, _, _)| *stored_at);
+        for (stored_at, conversation, message, app) in waiting {
+            self.queue_group_post(conversation, message, &app, stored_at, rng)?;
+        }
+        Ok(())
     }
 
     /// Puts each `GNEW` that no relay answered back into the work list, at

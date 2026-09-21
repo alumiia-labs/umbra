@@ -449,6 +449,9 @@ mod tests {
         client
             .unlock(&units("correct horse"), 1_700_000_100)
             .unwrap();
+        // The run of the group queues asks for the work at its start.
+        assert!(client.take_group_creation().is_none());
+        client.resume_group_work(&mut rng).unwrap();
         let first = client.take_group_creation().unwrap();
         let second = client.take_group_creation().unwrap();
         assert!(client.take_group_creation().is_none());
@@ -486,11 +489,137 @@ mod tests {
         client
             .unlock(&units("correct horse"), 1_700_000_200)
             .unwrap();
+        client.resume_group_work(&mut rng).unwrap();
         assert!(client.take_group_creation().is_none());
         let info = client.group_info(conversation).unwrap();
         assert!(info.is_ready);
         assert_eq!(info.epoch, 1);
         assert_eq!(name_of(&client).as_deref(), Some("Hiking"));
+    }
+
+    #[test]
+    fn a_group_message_waits_for_the_two_queues_and_a_record_becomes_a_message() {
+        let mut rng = Rng(31);
+        let mut client = new_client(&mut rng);
+        let relays = [[0xA1; 32], [0xB2; 32]];
+        let conversation = client
+            .create_group("Trail", relays, 1_700_000_000, &mut rng)
+            .unwrap();
+        let group_id = client.group_info(conversation).unwrap().group_id;
+
+        // A group with one queue sends nothing (`GRP-191`).
+        let mut draft = client.new_draft(conversation);
+        draft.set_text(&units("first light")).unwrap();
+        let sent = client
+            .send_draft(draft, 1_700_000_001_000, &mut rng)
+            .unwrap();
+        assert!(client.take_group_post().is_none());
+        // The record takes no pairwise channel.
+        assert!(client.take_outgoing().is_none());
+        client
+            .group_queue_made(&group_id, 0, relays[0], [0xC3; 32], &mut rng)
+            .unwrap();
+        assert!(client.take_group_post().is_none());
+
+        // The second queue makes the group ready, and the record that
+        // waited goes to each replica (`GRP-194`).
+        client
+            .group_queue_made(&group_id, 1, relays[1], [0xD4; 32], &mut rng)
+            .unwrap();
+        let post = client.take_group_post().unwrap();
+        assert!(client.take_group_post().is_none());
+        assert_eq!(post.message, sent);
+        assert_eq!(post.conversation, conversation);
+        assert_eq!(post.replicas[0].group_queue_id, [0xC3; 32]);
+        assert_eq!(post.replicas[1].group_queue_id, [0xD4; 32]);
+        assert_eq!(post.replicas[1].relay, relays[1]);
+
+        // A second member joins with the add and the admit of §11.9.1. It
+        // reads no record from before its admission (`GRP-252`), thus the
+        // first one gives it nothing.
+        let mut other = new_client(&mut rng);
+        let member = join_group(&mut client, &mut other, conversation, &mut rng);
+        assert!(other
+            .on_group_record(&[0xC3; 32], &post.record, 1_700_000_002_000, &mut rng)
+            .unwrap()
+            .is_none());
+
+        let mut draft = client.new_draft(conversation);
+        draft.set_text(&units("second light")).unwrap();
+        client
+            .send_draft(draft, 1_700_000_003_000, &mut rng)
+            .unwrap();
+        let post = client.take_group_post().unwrap();
+        let message = other
+            .on_group_record(&[0xC3; 32], &post.record, 1_700_000_003_000, &mut rng)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            other.next_event(),
+            Some(Event::Message {
+                conversation: member,
+                message
+            })
+        );
+        let mut view = View::default();
+        other.render(&message, &mut view).unwrap();
+        assert_eq!(String::from_utf16(&view.0).unwrap(), "second light");
+
+        // WIR-065: the copy from the other replica gives no second message.
+        assert!(other
+            .on_group_record(&[0xD4; 32], &post.record, 1_700_000_003_000, &mut rng)
+            .unwrap()
+            .is_none());
+        assert_eq!(other.next_event(), None);
+
+        // A record of a queue that this device does not hold is ignored.
+        assert!(other
+            .on_group_record(&[0xEE; 32], &post.record, 1_700_000_004_000, &mut rng)
+            .unwrap()
+            .is_none());
+    }
+
+    /// Puts `other` into the group of `client` with the add, the admit and
+    /// the snapshot of §11.9.1, and gives its conversation there.
+    fn join_group(
+        client: &mut Client<MemoryBackend, Element>,
+        other: &mut Client<MemoryBackend, Element>,
+        conversation: ConversationId,
+        rng: &mut Rng,
+    ) -> ConversationId {
+        use umbra_core::group::join::{accept_admit, JoinKeys};
+        use umbra_wire::group::control::{
+            GroupControl, GroupInvitation, JoinRecord, RosterSnapshot,
+        };
+        let now = 1_700_000_002;
+        let mut group = client.group_of(conversation).unwrap();
+        // The offer of stage 0x01 carries this key to the joiner.
+        let creator_pk = group
+            .roster()
+            .member(0)
+            .and_then(|creator| creator.roster_pk.clone())
+            .unwrap();
+        let joiner = JoinKeys::make(rng).unwrap();
+        let kem_pk = joiner.keys.kem().public().to_bytes();
+        let add = group
+            .add_object(&JoinRecord {
+                group_id: *group.group_id(),
+                keys: joiner.wire_keys(&kem_pk),
+            })
+            .unwrap();
+        let control = GroupControl::parse(&add).unwrap();
+        let add_hash = control.epoch_hash();
+        group.apply_control(&control, 0, now).unwrap();
+        let admit = group.admit_for(1, 0, b"", now).unwrap();
+        let admit_control = GroupControl::parse(&admit).unwrap();
+        let invitation = GroupInvitation::parse(admit_control.payload).unwrap();
+        let snapshot_bytes = group.snapshot(&[]).unwrap();
+        let snapshot = RosterSnapshot::parse(&snapshot_bytes).unwrap();
+        let admitted = accept_admit(&invitation, &snapshot, &add_hash, &creator_pk, now).unwrap();
+        client.save_group(conversation, &group, rng).unwrap();
+        other
+            .adopt_group(admitted, &joiner.seed, "Trail", rng)
+            .unwrap()
     }
 
     #[test]
