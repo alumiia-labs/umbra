@@ -10,9 +10,11 @@
 use std::collections::VecDeque;
 
 mod files;
+mod groups;
 
 pub use files::{DownloadJob, ErasureJob, FileInfo, FileState, UploadJob};
 use files::{FileQueues, CHUNK_CRED, FILE_DATA, FILE_STATE};
+pub use groups::{GroupInfo, GroupQueueJob, GROUP_NAME_MAX};
 use umbra_core::{
     directory::path::IngressPins,
     identity::address::safety_number,
@@ -204,6 +206,7 @@ pub struct Client<B: Backend, E: SecureElement> {
     events: VecDeque<Event>,
     outgoing: VecDeque<Outgoing>,
     files: FileQueues,
+    groups: groups::GroupQueues,
     auto_lock: AutoLock,
 }
 
@@ -452,6 +455,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             events: VecDeque::new(),
             outgoing: VecDeque::new(),
             files: FileQueues::default(),
+            groups: groups::GroupQueues::default(),
             auto_lock: AutoLock::new(now),
         })
     }
@@ -465,6 +469,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             events: VecDeque::new(),
             outgoing: VecDeque::new(),
             files: FileQueues::default(),
+            groups: groups::GroupQueues::default(),
             auto_lock: AutoLock::new(now),
         }
     }
@@ -515,6 +520,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // Each record that waited for the send path at the lock waits again.
         self.requeue_waiting()?;
         self.requeue_transfers()?;
+        self.requeue_group_creations()?;
         let seconds = self.auto_lock_seconds()?;
         self.apply_auto_lock(seconds);
         self.auto_lock.touch(now);
@@ -527,9 +533,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if let State::Unlocked(open) = core::mem::replace(&mut self.state, State::Closed) {
             self.state = State::Locked(open.store.lock());
             self.outgoing.clear();
-            // A file job holds the file in the clear, thus it leaves the
-            // memory with the key. The store brings it back at the unlock.
+            // A file job holds the file in the clear, and a group job an
+            // owner credential, thus both leave the memory with the key.
+            // The store brings them back at the unlock.
             self.files = FileQueues::default();
+            self.groups = groups::GroupQueues::default();
             self.events.push_back(Event::Locked);
         }
     }
@@ -982,18 +990,20 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         })
     }
 
-    /// The conversations of the device, one for each contact. The list
-    /// needs no network.
+    /// The conversations of the device: one for each contact, and one for
+    /// each group of Part 11. The list needs no network.
     pub fn conversations(&self) -> Result<Vec<ConversationId>, Error> {
         let store = &self.open_ref()?.store;
         let rows = store.list(TableId::CONTACT, None)?;
-        Ok(rows
+        let mut out: Vec<ConversationId> = rows
             .into_iter()
             .map(|(row, plain)| {
                 drop(Zeroizing::new(plain));
                 ConversationId(row)
             })
-            .collect())
+            .collect();
+        out.extend(self.group_conversations()?);
+        Ok(out)
     }
 
     /// The idle time of the auto-lock, in seconds. Zero means that the
@@ -1837,8 +1847,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(batch.commit()?)
     }
 
-    /// One summary for each contact, the newest conversation first. The
-    /// list needs no network.
+    /// One summary for each contact and for each group, the newest
+    /// conversation first. The list needs no network.
     pub fn summaries(&self) -> Result<Vec<ConversationSummary>, Error> {
         let store = &self.open_ref()?.store;
         let mut out = Vec::new();

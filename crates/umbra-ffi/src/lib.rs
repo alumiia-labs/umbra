@@ -401,6 +401,99 @@ mod tests {
     }
 
     #[test]
+    fn a_group_takes_its_two_queues_and_lives_through_a_lock() {
+        let mut rng = Rng(21);
+        let mut client = new_client(&mut rng);
+        let contacts = client.conversations().unwrap().len();
+        let relays = [[0xA1; 32], [0xB2; 32]];
+        let conversation = client
+            .create_group("Hiking", relays, 1_700_000_000, &mut rng)
+            .unwrap();
+        assert!(client.is_group(conversation).unwrap());
+        assert_eq!(client.conversations().unwrap().len(), contacts + 1);
+        let name_of = |client: &Client<MemoryBackend, Element>| {
+            client
+                .summaries()
+                .unwrap()
+                .into_iter()
+                .find(|summary| summary.conversation == conversation)
+                .map(|summary| summary.name)
+        };
+        assert_eq!(name_of(&client).as_deref(), Some("Hiking"));
+
+        // The creator is the owner at index 0, and the group is not ready
+        // before the two relays named their queues (`GRP-191`).
+        let info = client.group_info(conversation).unwrap();
+        assert_eq!((info.own_index, info.members, info.epoch), (0, 1, 1));
+        assert!(!info.is_ready);
+        assert_eq!(
+            client.conversation_of_group(&info.group_id).unwrap(),
+            conversation
+        );
+
+        // Two relays of one operator make no pair.
+        assert!(client
+            .create_group("Nope", [[0xA1; 32], [0xA1; 32]], 1_700_000_000, &mut rng)
+            .is_err());
+
+        // A lock drops the owner credentials from the memory, and the
+        // unlock brings each `GNEW` that waits back.
+        let mut jobs = Vec::new();
+        while let Some(job) = client.take_group_creation() {
+            jobs.push((job.replica, job.relay));
+        }
+        jobs.sort();
+        assert_eq!(jobs, vec![(0, relays[0]), (1, relays[1])]);
+        assert!(client.take_group_creation().is_none());
+        client.lock();
+        client
+            .unlock(&units("correct horse"), 1_700_000_100)
+            .unwrap();
+        let first = client.take_group_creation().unwrap();
+        let second = client.take_group_creation().unwrap();
+        assert!(client.take_group_creation().is_none());
+        assert_ne!(first.replica, second.replica);
+        assert_eq!(first.read_pk, second.read_pk);
+
+        // The first answer leaves the group unready, and the second one
+        // makes it ready.
+        let ready = client
+            .group_queue_made(
+                &info.group_id,
+                first.replica,
+                first.relay,
+                [0xC3; 32],
+                &mut rng,
+            )
+            .unwrap();
+        assert!(!ready);
+        assert!(!client.group_info(conversation).unwrap().is_ready);
+        let ready = client
+            .group_queue_made(
+                &info.group_id,
+                second.replica,
+                second.relay,
+                [0xD4; 32],
+                &mut rng,
+            )
+            .unwrap();
+        assert!(ready);
+        assert!(client.group_info(conversation).unwrap().is_ready);
+
+        // The group came back from the store with its replicas, and the
+        // work list is empty at the next unlock.
+        client.lock();
+        client
+            .unlock(&units("correct horse"), 1_700_000_200)
+            .unwrap();
+        assert!(client.take_group_creation().is_none());
+        let info = client.group_info(conversation).unwrap();
+        assert!(info.is_ready);
+        assert_eq!(info.epoch, 1);
+        assert_eq!(name_of(&client).as_deref(), Some("Hiking"));
+    }
+
+    #[test]
     fn a_draft_becomes_a_stored_message_and_renders_into_a_sink() {
         let mut rng = Rng(1);
         let mut client = new_client(&mut rng);
