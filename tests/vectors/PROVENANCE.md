@@ -83,5 +83,5 @@ the files, and run the script again.
 | `umbra/kem.json` | 7553 | `378f33f22f375a7f29580e6d56bb4b88a4255f7592539f4015974f77b21d143c` |
 | `umbra/onion.json` | 10288 | `e2b4ef4878ab263e83403bf98340e848127f12e264f9c6bf9fb783358ccf6691` |
 | `umbra/schedule.json` | 88172 | `a6d3b1b5c4f8093294a5895715e79dbb077b87ac476b2e9200d78caf089c2b36` |
-| `umbra/wire.json` | 83119 | `df19f155e0f28479a70ce7e1e61f69ab3f90bf1c2876f7069a33fb66be6e78fa` |
+| `umbra/wire.json` | 83247 | `5bcf005c72372b396872aa9d51aeb7cb28844871232c71bf038adcf31bff993d` |
 

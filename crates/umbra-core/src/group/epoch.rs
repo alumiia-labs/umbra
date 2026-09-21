@@ -35,6 +35,10 @@ pub struct EpochState {
     roster_epoch: u32,
     rotator: u16,
     chain: ChainState,
+    /// The queue credentials. The party that started the epoch derives
+    /// them from `K_e`, and a joiner takes them from its admit, because it
+    /// holds no `K_e` (`GRP-384`).
+    credentials: Credentials,
     installed_at: u64,
 }
 
@@ -50,6 +54,7 @@ impl EpochState {
         now: u64,
     ) -> Self {
         let chain = secret.start(group_id, epoch, start_slot);
+        let credentials = secret.credentials();
         EpochState {
             secret,
             epoch,
@@ -57,16 +62,20 @@ impl EpochState {
             roster_epoch,
             rotator,
             chain,
+            credentials,
             installed_at: now,
         }
     }
 
-    /// The state of a joiner from the chain of its admit (`GRP-313`).
+    /// The state of a joiner from the chain and the credentials of its
+    /// admit (`GRP-313`, `GRP-384`). It holds no `K_e`, thus it starts no
+    /// epoch and it signs no epoch-key record.
     pub fn from_chain(
         chain: ChainState,
         epoch: u32,
         start_slot: u32,
         roster_epoch: u32,
+        credentials: Credentials,
         now: u64,
     ) -> Self {
         EpochState {
@@ -76,6 +85,7 @@ impl EpochState {
             roster_epoch,
             rotator: 0,
             chain,
+            credentials,
             installed_at: now,
         }
     }
@@ -106,8 +116,8 @@ impl EpochState {
     }
 
     /// The queue credentials of the epoch.
-    pub fn credentials(&self) -> Credentials {
-        self.secret.credentials()
+    pub const fn credentials(&self) -> &Credentials {
+        &self.credentials
     }
 
     /// Moves the window: the oldest slot held is `t_now −
@@ -241,7 +251,7 @@ impl EpochStore {
     }
 
     /// The credentials of the current epoch, for the group-queue session.
-    pub fn credentials(&self) -> Option<Credentials> {
+    pub fn credentials(&self) -> Option<&Credentials> {
         self.current.as_ref().map(EpochState::credentials)
     }
 }

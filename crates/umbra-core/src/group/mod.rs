@@ -15,6 +15,7 @@ pub mod queue;
 pub mod receive;
 pub mod roster;
 pub mod send;
+pub mod state;
 
 /// `GROUP_MAX`.
 pub const GROUP_MAX: usize = 500;

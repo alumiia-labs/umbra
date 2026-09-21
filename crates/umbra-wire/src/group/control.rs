@@ -6,7 +6,7 @@
 //! Part 11, field for field, and the specification amendment that records
 //! them names this module.
 
-use alloc::vec::Vec;
+use alloc::{boxed::Box, vec::Vec};
 
 use umbra_crypto::{
     hash::sha3_256,
@@ -579,24 +579,37 @@ pub enum InvitationStage<'a> {
         /// `GroupRosterKey_g.pk` of the creator.
         creator_roster_pk: &'a [u8],
     },
-    /// Stage `0x02`.
-    Admit {
-        /// The member index the admin gave the joiner.
-        index: u16,
-        /// The group epoch at the admit.
-        epoch: u32,
-        /// The slot at which the key of the joiner starts.
-        t_join: u32,
-        /// `K_{e,t_join}`, or the history-window key.
-        slot_key: [u8; 32],
-        /// The roster epoch of the snapshot.
-        roster_epoch: u32,
-        /// The two replicas.
-        replicas: [ReplicaRef; REPLICAS],
-        /// A `FileDescriptor` that names a `RosterSnapshot`.
-        descriptor: &'a [u8],
-    },
+    /// Stage `0x02`. It is boxed, because the three keys make it far
+    /// larger than an offer.
+    Admit(Box<InvitationAdmit<'a>>),
 }
+
+/// The body of an admit, `InvitationAdmit` of §6.6.3.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvitationAdmit<'a> {
+    /// The member index the admin gave the joiner.
+    pub index: u16,
+    /// The group epoch at the admit.
+    pub epoch: u32,
+    /// The slot at which the key of the joiner starts.
+    pub t_join: u32,
+    /// `K_{e,t_join}`, or the history-window key.
+    pub slot_key: [u8; 32],
+    /// `read_sk_e`. A joiner holds no `K_e`, thus the admit hands it the
+    /// two queue credentials (`WIR-520`).
+    pub read_sk: [u8; 32],
+    /// `write_sk_e`.
+    pub write_sk: [u8; 32],
+    /// The roster epoch of the snapshot.
+    pub roster_epoch: u32,
+    /// The two replicas.
+    pub replicas: [ReplicaRef; REPLICAS],
+    /// A `FileDescriptor` that names a `RosterSnapshot`.
+    pub descriptor: &'a [u8],
+}
+
+/// The fixed part of an admit body, before the descriptor (`WIR-521`).
+pub const ADMIT_FIXED: usize = 249;
 
 /// A `GroupInvitation`, control type `0x07`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -632,21 +645,28 @@ impl<'a> GroupInvitation<'a> {
                 w.put(admin_roster_pk)?;
                 w.put(creator_roster_pk)?;
             }
-            InvitationStage::Admit {
-                index,
-                epoch,
-                t_join,
-                slot_key,
-                roster_epoch,
-                replicas,
-                descriptor,
-            } => {
+            InvitationStage::Admit(admit) => {
+                let InvitationAdmit {
+                    index,
+                    epoch,
+                    t_join,
+                    slot_key,
+                    read_sk,
+                    write_sk,
+                    roster_epoch,
+                    replicas,
+                    descriptor,
+                } = admit.as_ref();
                 w.u8(0x02)?;
-                w.u16(u16::try_from(185 + descriptor.len()).map_err(|_| Error::Malformed)?)?;
+                w.u16(
+                    u16::try_from(ADMIT_FIXED + descriptor.len()).map_err(|_| Error::Malformed)?,
+                )?;
                 w.u16(*index)?;
                 w.u32(*epoch)?;
                 w.u32(*t_join)?;
                 w.put(slot_key)?;
+                w.put(read_sk)?;
+                w.put(write_sk)?;
                 w.u32(*roster_epoch)?;
                 w.u8(REPLICAS as u8)?;
                 for rep in replicas {
@@ -691,6 +711,8 @@ impl<'a> GroupInvitation<'a> {
                 let epoch = b.u32()?;
                 let t_join = b.u32()?;
                 let slot_key = b.array()?;
+                let read_sk = b.array()?;
+                let write_sk = b.array()?;
                 let roster_epoch = b.u32()?;
                 if usize::from(b.u8()?) != REPLICAS {
                     return Err(Error::Malformed);
@@ -708,18 +730,20 @@ impl<'a> GroupInvitation<'a> {
                     };
                 }
                 let desc_len = usize::from(b.u16()?);
-                if body_len != 185 + desc_len {
+                if body_len != ADMIT_FIXED + desc_len {
                     return Err(Error::Malformed);
                 }
-                InvitationStage::Admit {
+                InvitationStage::Admit(Box::new(InvitationAdmit {
                     index,
                     epoch,
                     t_join,
                     slot_key,
+                    read_sk,
+                    write_sk,
                     roster_epoch,
                     replicas,
                     descriptor: b.take(desc_len)?,
-                }
+                }))
             }
             _ => return Err(Error::Malformed),
         };
@@ -1191,23 +1215,26 @@ mod tests {
         };
         let admit = GroupInvitation {
             group_id: [7; 32],
-            stage: InvitationStage::Admit {
+            stage: InvitationStage::Admit(Box::new(InvitationAdmit {
                 index: 4,
                 epoch: 2,
                 t_join: 497_000,
                 slot_key: [5; 32],
+                read_sk: [8; 32],
+                write_sk: [9; 32],
                 roster_epoch: 3,
                 replicas: [rep, rep],
                 descriptor: &[6; 257],
-            },
+            })),
         };
         let n = admit.encode(&mut out).unwrap();
-        assert_eq!(n, 36 + 185 + 257);
+        assert_eq!(n, 36 + ADMIT_FIXED + 257);
         assert_eq!(GroupInvitation::parse(&out[..n]).unwrap(), admit);
         out[33] = 0x03;
         assert!(GroupInvitation::parse(&out[..n]).is_err());
         out[33] = 0x02;
-        out[36 + 46] = 3;
+        // The replica count byte sits after the three keys.
+        out[36 + 110] = 3;
         assert!(GroupInvitation::parse(&out[..n]).is_err());
     }
 

@@ -4,14 +4,18 @@
 use alloc::vec::Vec;
 
 use umbra_crypto::{
-    group::{chain::ChainState, MemberKeys},
+    group::{
+        chain::{ChainState, Credentials},
+        MemberKeys,
+    },
     hash::sha3_256,
     rand_core::TryCryptoRng,
     secret::Secret,
 };
 use umbra_wire::group::control::{
-    Chain, ControlType, GroupControl, GroupInvitation, InvitationStage, JoinRecord,
-    MemberKeys as WireKeys, PlainEpoch, PlainOp, RekeyRecord, ReplicaRef, RosterSnapshot,
+    Chain, ControlType, GroupControl, GroupInvitation, InvitationAdmit, InvitationStage,
+    JoinRecord, MemberKeys as WireKeys, PlainEpoch, PlainOp, RekeyRecord, ReplicaRef,
+    RosterSnapshot, ADMIT_FIXED,
 };
 
 use super::{epoch::EpochState, roster::Roster, GROUP_SLOT, HISTORY_WINDOW_MAX, KEY_REQUEST_RATE};
@@ -122,6 +126,7 @@ pub fn admit(
     epoch: u32,
     slot: u32,
     chain: &ChainState,
+    credentials: &Credentials,
     roster_epoch: u32,
     replicas: [ReplicaRef; 2],
     descriptor: &[u8],
@@ -129,17 +134,22 @@ pub fn admit(
     let slot_key = chain.slot_key(slot)?;
     let invitation = GroupInvitation {
         group_id,
-        stage: InvitationStage::Admit {
+        stage: InvitationStage::Admit(alloc::boxed::Box::new(InvitationAdmit {
             index,
             epoch,
             t_join: slot,
             slot_key: *slot_key.expose(),
+            // GRP-384: the joiner holds no `K_e`, thus the admit hands it
+            // the two credentials of the group queue.
+            read_sk: *credentials.read_secret().expose(),
+            write_sk: *credentials.write_secret().expose(),
             roster_epoch,
             replicas,
             descriptor,
-        },
+        })),
     };
-    let mut payload = alloc::vec![0u8; descriptor.len().saturating_add(256)];
+    // 36 bytes of header, the fixed body, and the descriptor.
+    let mut payload = alloc::vec![0u8; descriptor.len().saturating_add(ADMIT_FIXED + 64)];
     let n = invitation.encode(&mut payload)?;
     wrap(
         ControlType::Invitation,
@@ -169,18 +179,20 @@ pub fn accept_admit(
     creator_roster_pk: &[u8],
     now: u64,
 ) -> Result<Admitted, Error> {
-    let InvitationStage::Admit {
+    let InvitationStage::Admit(admit) = &invitation.stage else {
+        return Err(Error::Malformed);
+    };
+    let InvitationAdmit {
         index,
         epoch,
         t_join,
         slot_key,
+        read_sk,
+        write_sk,
         roster_epoch,
         replicas,
         ..
-    } = &invitation.stage
-    else {
-        return Err(Error::Malformed);
-    };
+    } = admit.as_ref();
     if snapshot.group_id != invitation.group_id || snapshot.roster_epoch != *roster_epoch {
         return Err(Error::Unverified);
     }
@@ -189,7 +201,9 @@ pub fn accept_admit(
         return Err(Error::Unverified);
     }
     let chain = ChainState::from_slot_key(*epoch, *t_join, Secret::new(*slot_key));
-    let epoch_state = EpochState::from_chain(chain, *epoch, *t_join, *roster_epoch, now);
+    let credentials = Credentials::from_secrets(&Secret::new(*read_sk), &Secret::new(*write_sk));
+    let epoch_state =
+        EpochState::from_chain(chain, *epoch, *t_join, *roster_epoch, credentials, now);
     Ok(Admitted {
         roster,
         epoch: epoch_state,
@@ -313,6 +327,7 @@ mod tests {
             3,
             slot,
             &chain,
+            &secret.credentials(),
             roster.epoch_index(),
             replicas,
             b"descriptor",

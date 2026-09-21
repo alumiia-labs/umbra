@@ -99,6 +99,25 @@ impl EpochSecret {
 }
 
 impl Credentials {
+    /// The credentials that an admit handed a joiner. A joiner holds no
+    /// `K_e`, thus it cannot derive them (`GRP-384`).
+    pub fn from_secrets(read: &Secret<32>, write: &Secret<32>) -> Self {
+        Credentials {
+            read: StaticSecret::from(*read.expose()),
+            write: StaticSecret::from(*write.expose()),
+        }
+    }
+
+    /// The reader private key, as the admit carries it.
+    pub fn read_secret(&self) -> Secret<32> {
+        Secret::new(self.read.to_bytes())
+    }
+
+    /// The writer private key, as the admit carries it.
+    pub fn write_secret(&self) -> Secret<32> {
+        Secret::new(self.write.to_bytes())
+    }
+
     /// The reader private key.
     pub fn read(&self) -> &StaticSecret {
         &self.read

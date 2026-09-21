@@ -54,9 +54,9 @@ use umbra_wire::{
     descriptor::{ChunkRef, FileDescriptor, Level, CHUNK_SIZE},
     group::{
         control::{
-            Chain, ControlType, GrantingEpoch, GroupControl, GroupInvitation, InvitationStage,
-            JoinRecord, MemberKeys as JoinKeys, ModAction, ModerationEpoch, PlainEpoch, PlainOp,
-            RekeyRecord, ReplicaRef, Role, SnapshotNotice, PRESENCE,
+            Chain, ControlType, GrantingEpoch, GroupControl, GroupInvitation, InvitationAdmit,
+            InvitationStage, JoinRecord, MemberKeys as JoinKeys, ModAction, ModerationEpoch,
+            PlainEpoch, PlainOp, RekeyRecord, ReplicaRef, Role, SnapshotNotice, PRESENCE,
         },
         record::{
             seal_content, Carrier, ContentPlain, EpochKeyBody, GroupQueueRecord, KemSlot,
@@ -665,15 +665,17 @@ fn group_controls() -> Value {
     };
     let n = GroupInvitation {
         group_id: GROUP_ID,
-        stage: InvitationStage::Admit {
+        stage: InvitationStage::Admit(Box::new(InvitationAdmit {
             index: 4,
             epoch: 1,
             t_join: 497_000,
             slot_key: [0x89; 32],
+            read_sk: [0x8d; 32],
+            write_sk: [0x8e; 32],
             roster_epoch: 3,
             replicas: [rep, rep],
             descriptor: &[0x8a; 257],
-        },
+        })),
     }
     .encode(&mut buf)
     .unwrap();
