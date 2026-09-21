@@ -27,6 +27,10 @@ use umbra_core::{
         path::{Candidate, INGRESS_PINS},
         root::{ClockState, Consensus, DirectoryKeySet},
     },
+    group::{
+        queue::{select_pair, Candidate as GroupRelay},
+        GROUP_REPLICAS,
+    },
     identity::invitation::{Fragment, FRAGMENT_LEN},
     session::node::{ClientNode, ContactId, RelayInfo, StateChange},
     store::wrap::{Cost, SecureElement, WrapHeader, M_KIB_FLOOR, T_FLOOR},
@@ -39,6 +43,7 @@ use crate::{
     bridge::{Bridge, NetEvent},
     client::Client,
     draft::Draft,
+    groups::{run_groups, GroupCommand, GroupUpdate},
     runtime::{run_client, Ended, OsRng, Persist, Update},
     sqlite::SqliteBackend,
     transfers::{run_transfers, TransferCommand, TransferUpdate},
@@ -166,6 +171,20 @@ pub struct Config {
     /// this device. The first launch reads it, and a later launch ignores
     /// it.
     pub argon2_floor_ms: u64,
+}
+
+/// What a view shows of a group of Part 11.
+#[derive(uniffi::Record)]
+pub struct FfiGroupInfo {
+    /// The index of this device in the roster.
+    pub own_index: u16,
+    /// The active members.
+    pub members: u32,
+    /// The group epoch.
+    pub epoch: u32,
+    /// Whether both replicas hold a group queue. Until then no record
+    /// leaves this device (`GRP-191`).
+    pub is_ready: bool,
 }
 
 /// One relay of the set of the client, with the facts that the invariants
@@ -820,6 +839,26 @@ struct Inner {
     /// The message of each transfer that runs, and whether it is an upload.
     transfer_tags: BTreeMap<u64, (crate::MsgRef, bool)>,
     next_transfer_tag: u64,
+    /// The commands of the group task, or none before the first group
+    /// command of a run.
+    groups: Option<mpsc::UnboundedSender<GroupCommand>>,
+    /// What each group command that runs belongs to.
+    group_tags: BTreeMap<u64, GroupWork>,
+    next_group_tag: u64,
+}
+
+/// What one command of the group task belongs to.
+enum GroupWork {
+    /// A `GNEW` of one replica of a group.
+    Creation {
+        /// The group.
+        group_id: [u8; 32],
+        /// The replica, 0 or 1.
+        replica: u8,
+    },
+    /// A `GPOST` of one record at one replica. A record of the roster
+    /// carries no message.
+    Post(Option<crate::MsgRef>),
 }
 
 impl Inner {
@@ -854,6 +893,181 @@ impl Inner {
         }
         for command in commands {
             self.send_transfer(command);
+        }
+    }
+
+    /// Gives each group job of the store to the group task (Part 11
+    /// §11.2). With no run of the network the jobs wait in the store.
+    fn pump_groups(&mut self) {
+        if self.bridge.is_none() {
+            return;
+        }
+        let mut commands = Vec::new();
+        while let Some(job) = self.client.take_group_creation() {
+            let tag = self.next_group_tag(GroupWork::Creation {
+                group_id: job.group_id,
+                replica: job.replica,
+            });
+            commands.push(GroupCommand::Create {
+                tag,
+                relay: job.relay,
+                read_pk: job.read_pk,
+                write_pk: job.write_pk,
+                own: job.own,
+            });
+        }
+        while let Some(job) = self.client.take_group_post() {
+            // GRP-194: the same record goes to each replica, each under its
+            // own tag, and the first `GSEQ` accepts it (`GRP-195`).
+            for replica in job.replicas {
+                let tag = self.next_group_tag(GroupWork::Post(job.message));
+                commands.push(GroupCommand::Post {
+                    tag,
+                    relay: replica.relay,
+                    group_queue_id: replica.group_queue_id,
+                    write: umbra_crypto::secret::Secret::new(*job.write.expose()),
+                    record: job.record.clone(),
+                });
+            }
+        }
+        for command in commands {
+            self.send_group(command);
+        }
+    }
+
+    /// Two relays for the group queues of a new group: different
+    /// operators and different blocs, from the relays of the run
+    /// (`GRP-191`).
+    fn group_replicas(&self) -> Result<[[u8; 32]; GROUP_REPLICAS], FfiError> {
+        let mut candidates = Vec::new();
+        for endpoint in self.relays.iter().filter(|relay| relay.layer == 3) {
+            let info = relay_info(endpoint)?;
+            candidates.push(GroupRelay {
+                relay_id: info.candidate.relay_id,
+                operator_id: info.candidate.operator_id,
+                bloc: info.candidate.bloc,
+            });
+        }
+        Ok(select_pair(&candidates)
+            .map_err(|_| FfiError::Offline)?
+            .relays)
+    }
+
+    fn next_group_tag(&mut self, work: GroupWork) -> u64 {
+        self.next_group_tag = self.next_group_tag.wrapping_add(1);
+        self.group_tags.insert(self.next_group_tag, work);
+        self.next_group_tag
+    }
+
+    /// Sends one command to the group task, and starts the task when the
+    /// link of an earlier run ended.
+    fn send_group(&mut self, command: GroupCommand) {
+        let command = match &self.groups {
+            Some(sender) => match sender.send(command) {
+                Ok(()) => return,
+                Err(refused) => refused.0,
+            },
+            None => command,
+        };
+        self.groups = self.start_groups();
+        if let Some(sender) = &self.groups {
+            let _ = sender.send(command);
+        }
+        // With no task the work stays in the store, and the next run of
+        // `resume_group_work` brings it back.
+    }
+
+    fn start_groups(&mut self) -> Option<mpsc::UnboundedSender<GroupCommand>> {
+        let spawner = self.spawner.clone()?;
+        let guard_id = self.guard?;
+        let guard = self
+            .relays
+            .iter()
+            .find(|relay| relay.relay_id.as_slice() == guard_id.as_slice())?;
+        let dial = Dial {
+            host: guard.host.clone(),
+            addr_v4: Some(guard.ipv4.as_slice().try_into().ok()?),
+            addr_v6: None,
+            port: guard.port,
+        };
+        let ingress = relay_info(guard).ok()?;
+        let mut candidates = Vec::new();
+        for relay in self.relays.iter().filter(|relay| relay.layer != 1) {
+            candidates.push(relay_info(relay).ok()?);
+        }
+        let tls = match &self.root_ca_path {
+            Some(path) => native::tls_config_with_root_file(path),
+            None => native::tls_config(),
+        }
+        .ok()?;
+        let node = ClientNode::for_groups(ingress, candidates, self.client.root_identity().ok()?);
+        let (commands, task_commands) = mpsc::unbounded_channel();
+        let (task_updates, mut updates) = mpsc::unbounded_channel();
+        spawner.spawn(run_groups(node, dial, tls, task_commands, task_updates));
+        let me = self.me.clone();
+        spawner.spawn(async move {
+            while let Some(update) = updates.recv().await {
+                let Some(handle) = me.upgrade() else {
+                    break;
+                };
+                handle.on_group_update(update);
+            }
+        });
+        Some(commands)
+    }
+
+    /// Takes one answer of the group task into the store.
+    fn end_group(&mut self, update: GroupUpdate) {
+        match update {
+            GroupUpdate::Created {
+                tag,
+                relay,
+                group_queue_id,
+            } => {
+                let Some(GroupWork::Creation { group_id, replica }) = self.group_tags.remove(&tag)
+                else {
+                    return;
+                };
+                let _ = self.client.group_queue_made(
+                    &group_id,
+                    replica,
+                    relay,
+                    group_queue_id,
+                    &mut OsRng,
+                );
+                // The second queue makes the group ready, and each record
+                // that waited for it goes now.
+                self.pump_groups();
+            }
+            GroupUpdate::Posted { tag, .. } => {
+                // GRP-195: one replica accepted, thus the record is accepted.
+                if let Some(GroupWork::Post(Some(message))) = self.group_tags.remove(&tag) {
+                    let _ =
+                        self.client
+                            .set_delivery(&message, crate::Delivery::Accepted, &mut OsRng);
+                }
+            }
+            GroupUpdate::Record {
+                group_queue_id,
+                record,
+                ..
+            } => {
+                let _ = self.client.on_group_record(
+                    &group_queue_id,
+                    &record,
+                    crate::runtime::unix_now().saturating_mul(1_000),
+                    &mut OsRng,
+                );
+            }
+            // The store holds what a refused command carried, thus the
+            // next run asks for the work again.
+            GroupUpdate::Failed { tag, .. } => {
+                self.group_tags.remove(&tag);
+            }
+            GroupUpdate::Ended => {
+                self.groups = None;
+                self.group_tags.clear();
+            }
         }
     }
 
@@ -1168,6 +1382,9 @@ pub fn init(
             transfers: None,
             transfer_tags: BTreeMap::new(),
             next_transfer_tag: 0,
+            groups: None,
+            group_tags: BTreeMap::new(),
+            next_group_tag: 0,
         }),
         changed: Condvar::new(),
         runtime: Mutex::new(None),
@@ -1230,6 +1447,11 @@ impl Handle {
         self.changed.notify_all();
     }
 
+    fn on_group_update(&self, update: GroupUpdate) {
+        locked(&self.inner).end_group(update);
+        self.changed.notify_all();
+    }
+
     fn on_update(&self, update: Update) {
         let mut inner = locked(&self.inner);
         let Inner {
@@ -1280,12 +1502,15 @@ impl Handle {
         }
         if ended {
             *bridge = None;
-            // The transfer task has a link of its own. It ends with the run,
-            // and the store holds what it did not complete.
+            // The transfer task and the group task each have a link of
+            // their own. Both end with the run, and the store holds what
+            // they did not complete.
             inner.transfers = None;
+            inner.groups = None;
         }
         // A record with a descriptor asks for its file.
         inner.pump_transfers();
+        inner.pump_groups();
         drop(inner);
         self.changed.notify_all();
     }
@@ -1474,6 +1699,7 @@ impl Handle {
             inner.spawner = Some(runtime.handle().clone());
             inner.root_ca_path.clone_from(&network.root_ca_path);
             inner.transfers = None;
+            inner.groups = None;
             let Inner {
                 client,
                 bridge,
@@ -1503,6 +1729,9 @@ impl Handle {
             client.requeue_waiting()?;
             // Each transfer that an earlier run left open starts again.
             client.requeue_transfers()?;
+            // A group record takes a fresh nonce, thus the group work comes
+            // back at the start of a run and not at the unlock.
+            client.resume_group_work(&mut OsRng)?;
             running.flush(client, &mut OsRng)?;
             *bridge = Some(running);
             runtime.spawn(run_client(
@@ -1541,6 +1770,7 @@ impl Handle {
             let mut inner = locked(&self.inner);
             inner.bridge = None;
             inner.transfers = None;
+            inner.groups = None;
             inner.spawner = None;
         }
         if let Some(runtime) = locked(&self.runtime).take() {
@@ -1664,6 +1894,37 @@ impl Handle {
             .collect())
     }
 
+    /// Makes a private group of Part 11 with this device as its owner, and
+    /// asks two relays of different operators and blocs for a group queue.
+    /// The group sends nothing until both answered (`GRP-191`).
+    pub fn create_group(&self, name: String) -> Result<Vec<u8>, FfiError> {
+        let mut inner = locked(&self.inner);
+        let relays = inner.group_replicas()?;
+        let conversation = inner
+            .client
+            .create_group(&name, relays, unix_now(), &mut OsRng)?;
+        inner.pump_groups();
+        Ok(conversation.0.to_vec())
+    }
+
+    /// Whether a conversation names a group.
+    pub fn is_group(&self, conversation: Vec<u8>) -> Result<bool, FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        Ok(locked(&self.inner).client.is_group(conversation)?)
+    }
+
+    /// What a view shows of a group.
+    pub fn group_info(&self, conversation: Vec<u8>) -> Result<FfiGroupInfo, FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        let info = locked(&self.inner).client.group_info(conversation)?;
+        Ok(FfiGroupInfo {
+            own_index: info.own_index,
+            members: info.members,
+            epoch: info.epoch,
+            is_ready: info.is_ready,
+        })
+    }
+
     /// Gives a contact a name on this device. No peer and no relay learns
     /// it. An empty name takes the name away.
     pub fn set_contact_name(&self, conversation: Vec<u8>, name: String) -> Result<(), FfiError> {
@@ -1702,6 +1963,7 @@ impl Handle {
         }
         // A file goes to the relays first, and its record follows.
         inner.pump_transfers();
+        inner.pump_groups();
         drop(inner);
         self.changed.notify_all();
         Ok(Arc::new(MsgHandle(message)))
@@ -1788,6 +2050,7 @@ impl Handle {
         let mut inner = locked(&self.inner);
         inner.client.fetch_file(&message.0, &mut OsRng)?;
         inner.pump_transfers();
+        inner.pump_groups();
         Ok(())
     }
 
@@ -1841,6 +2104,7 @@ impl Handle {
         inner.client.delete_for_me(&message.0)?;
         // ATT-161: the chunks of a file that this device uploaded go too.
         inner.pump_transfers();
+        inner.pump_groups();
         Ok(())
     }
 
@@ -1857,6 +2121,7 @@ impl Handle {
             running.flush(client, &mut OsRng)?;
         }
         inner.pump_transfers();
+        inner.pump_groups();
         Ok(())
     }
 

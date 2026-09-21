@@ -9,6 +9,7 @@ use umbra_crypto::stored::{Reader, Writer};
 use umbra_wire::group::control::ReplicaRef;
 
 use super::{roster::STORED_VERSION, GROUP_REPLICAS};
+use crate::directory::bloc::BlocId;
 use crate::Error;
 
 /// A relay a creator may put a group queue on.
@@ -18,8 +19,8 @@ pub struct Candidate {
     pub relay_id: [u8; 32],
     /// The operator.
     pub operator_id: [u8; 32],
-    /// The jurisdiction bloc.
-    pub bloc: u8,
+    /// The jurisdiction bloc, as Part 10 §10.12 gives it.
+    pub bloc: BlocId,
 }
 
 /// The pair a creator selected, and whether the bloc invariant was relaxed
@@ -257,7 +258,7 @@ mod tests {
         let c = |r: u8, op: u8, bloc: u8| Candidate {
             relay_id: [r; 32],
             operator_id: [op; 32],
-            bloc,
+            bloc: BlocId::Own([bloc, 0]),
         };
         let pair = select_pair(&[c(1, 1, 1), c(2, 1, 2), c(3, 2, 1), c(4, 2, 2)]).unwrap();
         assert_eq!(pair.relays, [[1; 32], [4; 32]]);

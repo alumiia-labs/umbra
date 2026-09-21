@@ -1254,7 +1254,7 @@ fn two_members_talk_in_a_group_over_the_relays_of_a_signed_network() {
         .map(|relay| GroupRelay {
             relay_id: relay.candidate.relay_id,
             operator_id: relay.candidate.operator_id,
-            bloc: relay.jurisdiction[1],
+            bloc: BlocList::v1().bloc_of(&relay.jurisdiction),
         })
         .collect();
     let pair = select_pair(&candidates).unwrap();
