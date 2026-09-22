@@ -204,6 +204,8 @@ pub struct GroupSubscription {
     pub group_queue_id: [u8; 32],
     /// `read_sk` of the epoch.
     pub read: Secret<32>,
+    /// `read_sk` of the previous epoch inside its grace (`GRP-398`).
+    pub fallback: Option<Secret<32>>,
     /// The cursor of this device at that replica (`GRP-202`).
     pub from_seq: u32,
 }
@@ -242,6 +244,9 @@ pub struct GroupPost {
     pub replicas: [GroupReplica; GROUP_REPLICAS],
     /// `write_sk` of the epoch.
     pub write: Secret<32>,
+    /// `write_sk` of the previous epoch inside its grace. The relay takes
+    /// the pair of an epoch only at a `GKEY` (`GRP-398`).
+    pub fallback: Option<Secret<32>>,
     /// The sealed `GroupQueueRecord`.
     pub record: Vec<u8>,
     /// Whether the record starts an epoch. A `GKEY` follows it at the
@@ -1258,18 +1263,20 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     .group_queue_id,
             },
         ];
-        let write = group.credentials().ok_or(Error::Integrity)?.write_secret();
         // GRP-246: the counter of this device moves with the record, thus
         // the group goes back to the store before the record leaves.
         let record = group
             .post(app, now_ms / 1_000, rng)
             .map_err(|_| Error::Malformed)?;
+        let write = group.credentials().ok_or(Error::Integrity)?.write_secret();
+        let fallback = group.previous_credentials().map(|held| held.write_secret());
         self.save_group(conversation, &group, rng)?;
         self.groups.posts.push_back(GroupPost {
             message,
             conversation,
             replicas,
             write,
+            fallback,
             record,
             is_rotation: false,
         });
@@ -1367,6 +1374,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(replicas) = Self::group_replicas_of(&group)? else {
             return Ok(());
         };
+        // The relay may not hold the pair of the epoch that ends either,
+        // when no admin sent its `GKEY` yet.
+        let fallback = group.previous_credentials().map(|held| held.write_secret());
         let Ok(rotation) = group.rotate(now_ms / 1_000, rng) else {
             return Ok(());
         };
@@ -1376,6 +1386,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             conversation,
             replicas,
             write: rotation.write,
+            fallback,
             record: rotation.record,
             is_rotation: true,
         });
@@ -1537,6 +1548,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let Some(credentials) = group.credentials().map(|held| held.read_secret()) else {
                 continue;
             };
+            let fallback = group.previous_credentials().map(|held| held.read_secret());
             let Some(replicas) = group.replicas_mut() else {
                 continue;
             };
@@ -1549,6 +1561,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 relay: reference.relay_id,
                 group_queue_id: reference.group_queue_id,
                 read: credentials,
+                fallback,
                 from_seq: replicas.cursor(which),
             });
             self.save_group(conversation, &group, rng)?;
@@ -1811,16 +1824,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(replicas) = Self::group_replicas_of(&group)? else {
             return Ok(());
         };
-        let write = group.credentials().ok_or(Error::Integrity)?.write_secret();
         let record = group
             .presence(now_ms / 1_000, rng)
             .map_err(|_| Error::Malformed)?;
+        let write = group.credentials().ok_or(Error::Integrity)?.write_secret();
+        let fallback = group.previous_credentials().map(|held| held.write_secret());
         self.save_group(conversation, &group, rng)?;
         self.groups.posts.push_back(GroupPost {
             message: None,
             conversation,
             replicas,
             write,
+            fallback,
             record,
             is_rotation: false,
         });

@@ -254,6 +254,12 @@ impl Group {
         self.epochs.credentials()
     }
 
+    /// The reader and writer credentials of the previous epoch, while its
+    /// grace holds (`GRP-398`).
+    pub fn previous_credentials(&self) -> Option<&Credentials> {
+        self.epochs.previous_credentials()
+    }
+
     /// The owner credential of one replica, which an admin holds.
     pub fn owner(&self, replica: usize) -> Option<&Secret<32>> {
         self.owners.as_ref().and_then(|owners| owners.get(replica))
@@ -282,6 +288,8 @@ impl Group {
         now: u64,
         rng: &mut R,
     ) -> Result<Vec<u8>, Error> {
+        // GRP-231, GRP-386: the previous epoch ends with its grace.
+        self.epochs.expire(now);
         let members = self.roster.active_count();
         let bucket = bucket_for(members, app.len()).ok_or(Error::NoPath)?;
         let mut nonce = [0u8; 12];
@@ -334,6 +342,7 @@ impl Group {
     /// Reads one record that a `GMSG` carried. The bucket comes from the
     /// record length, which the relay does not change (`WIR-372`).
     pub fn receive(&mut self, record: &[u8], now: u64) -> Result<Outcome, Error> {
+        self.epochs.expire(now);
         let bucket = BUCKETS
             .into_iter()
             .find(|bucket| bucket.group_record() == record.len())

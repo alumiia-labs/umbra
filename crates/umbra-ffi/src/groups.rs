@@ -72,6 +72,9 @@ pub enum GroupCommand {
         group_queue_id: [u8; 32],
         /// `write_sk` of the epoch.
         write: Secret<32>,
+        /// `write_sk` of the previous epoch inside its grace. A refusal
+        /// under `write` sends the same bytes under it at once (`GRP-398`).
+        fallback: Option<Secret<32>>,
         /// One sealed `GroupQueueRecord`.
         record: Vec<u8>,
     },
@@ -83,6 +86,9 @@ pub enum GroupCommand {
         group_queue_id: [u8; 32],
         /// `read_sk` of the epoch.
         read: Secret<32>,
+        /// `read_sk` of the previous epoch inside its grace, as for a
+        /// `GPOST` (`GRP-398`).
+        fallback: Option<Secret<32>>,
         /// The cursor.
         from_seq: u32,
     },
@@ -140,23 +146,27 @@ impl GroupCommand {
                 relay,
                 group_queue_id,
                 write,
+                fallback,
                 record,
             } => GroupCommand::Post {
                 tag: *tag,
                 relay: *relay,
                 group_queue_id: *group_queue_id,
                 write: Secret::new(*write.expose()),
+                fallback: fallback.as_ref().map(|held| Secret::new(*held.expose())),
                 record: record.clone(),
             },
             GroupCommand::Subscribe {
                 relay,
                 group_queue_id,
                 read,
+                fallback,
                 from_seq,
             } => GroupCommand::Subscribe {
                 relay: *relay,
                 group_queue_id: *group_queue_id,
                 read: Secret::new(*read.expose()),
+                fallback: fallback.as_ref().map(|held| Secret::new(*held.expose())),
                 from_seq: *from_seq,
             },
             GroupCommand::Rotate {
@@ -181,6 +191,44 @@ impl GroupCommand {
                 group_queue_id: *group_queue_id,
                 own: Secret::new(*own.expose()),
             },
+        }
+    }
+}
+
+impl GroupCommand {
+    /// The same command under the credential of the previous epoch, when
+    /// it carries one (`GRP-398`).
+    fn under_fallback(&self) -> Option<GroupCommand> {
+        match self.copy() {
+            GroupCommand::Post {
+                tag,
+                relay,
+                group_queue_id,
+                fallback: Some(write),
+                record,
+                ..
+            } => Some(GroupCommand::Post {
+                tag,
+                relay,
+                group_queue_id,
+                write,
+                fallback: None,
+                record,
+            }),
+            GroupCommand::Subscribe {
+                relay,
+                group_queue_id,
+                fallback: Some(read),
+                from_seq,
+                ..
+            } => Some(GroupCommand::Subscribe {
+                relay,
+                group_queue_id,
+                read,
+                fallback: None,
+                from_seq,
+            }),
+            _ => None,
         }
     }
 }
@@ -346,6 +394,10 @@ async fn session(
     // The group queue of each `GSUB`, by the handle of the node.
     let mut subscribed: std::collections::BTreeMap<u64, [u8; 32]> =
         std::collections::BTreeMap::new();
+    // The second form of each command that carries a credential of the
+    // previous epoch, by the handle of its first form (`GRP-398`).
+    let mut second: std::collections::BTreeMap<u64, GroupCommand> =
+        std::collections::BTreeMap::new();
     let mut key = [0u8; 16];
     let mut mask = [0u8; 4];
     let _ = rng.try_fill_bytes(&mut key);
@@ -400,6 +452,17 @@ async fn session(
                 }
                 ClientEvent::CircuitLost => break 'run End::Lost,
                 ClientEvent::Group { handle, outcome } => {
+                    // GRP-398: the relay holds the credentials of a new
+                    // epoch only after a `GKEY`, thus a refusal under them
+                    // goes again under the previous pair, and the caller
+                    // hears only of the second answer.
+                    let retry = second.remove(&handle);
+                    if let (GroupOutcome::Refused(_), Some(retry)) = (&outcome, retry) {
+                        subscribed.remove(&handle);
+                        pending.remove(&handle);
+                        carried.early.insert(0, retry);
+                        continue;
+                    }
                     if let Some(group_queue_id) = subscribed.remove(&handle) {
                         let _ = updates.send(GroupUpdate::SubscriptionLost { group_queue_id });
                         continue;
@@ -471,6 +534,7 @@ async fn session(
                     group_queue_id,
                     write,
                     record,
+                    ..
                 } => (
                     Some(*tag),
                     *relay,
@@ -485,6 +549,7 @@ async fn session(
                     group_queue_id,
                     read,
                     from_seq,
+                    ..
                 } => (
                     None,
                     *relay,
@@ -530,6 +595,9 @@ async fn session(
                     }
                     if matches!(command, GroupCommand::Subscribe { .. }) {
                         subscribed.insert(handle, group_queue_id);
+                    }
+                    if let Some(retry) = command.under_fallback() {
+                        second.insert(handle, retry);
                     }
                     if matches!(
                         command,

@@ -675,6 +675,23 @@ sends `GKEY`, the excluded party keeps the relay credentials of the old epoch:
 it fetches ciphertext that it cannot open, and it posts records that every
 receiver rejects under §11.3.5. Part 16 §16.3 records that residual.
 
+- **[GRP-398]** A member whose `GPOST` or `GSUB` under the credentials of the
+  newest epoch it holds is refused MUST send the same command again at once
+  under the credentials of the epoch before it, while `GROUP_EPOCH_GRACE`
+  holds them, and it MUST count only a refusal of that second command under
+  `GRP-210`. The relay takes the credentials of an epoch at a `GKEY` alone,
+  and a rotator below `admin` sends none.
+
+> *Cause.* An earlier form named no credential for the time between an
+> installation and the `GKEY` of that epoch. A member that installed the new
+> epoch wrote under its pair, the relay refused it, and two refusals closed
+> the group under `GRP-210`. After a rotation by a plain member with no
+> admin online, each member that posted closed the group on its own device.
+> The second command costs one round trip at a switch of epoch. Two
+> rotations inside one `GROUP_EPOCH_GRACE` with no `GKEY` between them leave
+> a member with no pair that the relay holds, and Part 16 §16.3 records that
+> residual.
+
 **Two rotators at once.** Two members can post two epoch-key records for one
 epoch `e + 1` before either reads the other. **[GRP-273]** A member that
 verifies two epoch-key records for one epoch MUST install the secret of the

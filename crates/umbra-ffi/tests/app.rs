@@ -1513,6 +1513,7 @@ fn two_members_talk_in_a_group_over_the_relays_of_a_signed_network() {
                     relay: *relay,
                     group_queue_id: queue_ids[index],
                     write: Secret::new(*write_sk.expose()),
+                    fallback: None,
                     record: record.clone(),
                 })
                 .ok()
@@ -1537,6 +1538,7 @@ fn two_members_talk_in_a_group_over_the_relays_of_a_signed_network() {
             relay: replicas[0],
             group_queue_id: queue_ids[0],
             read: member.credentials().unwrap().read_secret(),
+            fallback: None,
             from_seq: 0,
         })
         .ok()
@@ -1580,6 +1582,7 @@ fn two_members_talk_in_a_group_over_the_relays_of_a_signed_network() {
             relay: replicas[0],
             group_queue_id: queue_ids[0],
             write: Secret::new([0x13; 32]),
+            fallback: None,
             record: second,
         })
         .ok()
@@ -1626,6 +1629,7 @@ fn two_members_talk_in_a_group_over_the_relays_of_a_signed_network() {
                 relay: *relay,
                 group_queue_id: queue_ids[index],
                 write: Secret::new(*write_sk.expose()),
+                fallback: None,
                 record: control_record.clone(),
             })
             .ok()
@@ -1665,6 +1669,7 @@ fn two_members_talk_in_a_group_over_the_relays_of_a_signed_network() {
                 relay: *relay,
                 group_queue_id: queue_ids[index],
                 write: Secret::new(*rotation.write.expose()),
+                fallback: None,
                 record: rotation.record.clone(),
             })
             .ok()
@@ -1710,12 +1715,29 @@ fn two_members_talk_in_a_group_over_the_relays_of_a_signed_network() {
             relay: replicas[0],
             group_queue_id: queue_ids[0],
             write: Secret::new(*new_write.expose()),
+            fallback: None,
             record: next.clone(),
         })
         .ok()
         .unwrap();
     let GroupUpdate::Failed { tag: 40, .. } = group_update(&mut creator_rx) else {
         panic!("the relay took a credential it does not hold");
+    };
+    // GRP-398: the same record under the new pair, with the pair of the
+    // epoch before it as the fallback, goes in before any `GKEY`.
+    creator_tx
+        .send(GroupCommand::Post {
+            tag: 42,
+            relay: replicas[1],
+            group_queue_id: queue_ids[1],
+            write: Secret::new(*new_write.expose()),
+            fallback: Some(Secret::new(*rotation.write.expose())),
+            record: next.clone(),
+        })
+        .ok()
+        .unwrap();
+    let GroupUpdate::Posted { tag: 42, .. } = group_update(&mut creator_rx) else {
+        panic!("the fallback did not take the record");
     };
     creator_tx
         .send(GroupCommand::Rotate {
@@ -1733,6 +1755,7 @@ fn two_members_talk_in_a_group_over_the_relays_of_a_signed_network() {
             relay: replicas[0],
             group_queue_id: queue_ids[0],
             write: Secret::new(*new_write.expose()),
+            fallback: None,
             record: next,
         })
         .ok()
@@ -1846,6 +1869,7 @@ fn the_group_run_outlives_its_relays_and_carries_its_commands_on() {
             relay: exit,
             group_queue_id,
             write: Secret::new([0x14; 32]),
+            fallback: None,
             record: vec![0; umbra_wire::bucket::Bucket::B0.group_record()],
         })
         .ok()

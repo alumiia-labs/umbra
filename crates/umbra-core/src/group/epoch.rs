@@ -328,6 +328,14 @@ impl EpochStore {
     pub fn credentials(&self) -> Option<&Credentials> {
         self.current.as_ref().map(EpochState::credentials)
     }
+
+    /// The credentials of the previous epoch inside its grace. The relay
+    /// takes the credentials of an epoch only at a `GKEY`, thus a command
+    /// that it refuses under the current pair goes again under this one
+    /// (`GRP-398`).
+    pub fn previous_credentials(&self) -> Option<&Credentials> {
+        self.previous.as_ref().map(EpochState::credentials)
+    }
 }
 
 /// One member the rotation includes.

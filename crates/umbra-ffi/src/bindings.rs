@@ -1044,6 +1044,7 @@ impl Inner {
                     relay: subscription.relay,
                     group_queue_id: subscription.group_queue_id,
                     read: subscription.read,
+                    fallback: subscription.fallback,
                     from_seq: subscription.from_seq,
                 });
             }
@@ -1101,6 +1102,10 @@ impl Inner {
                     relay: replica.relay,
                     group_queue_id: replica.group_queue_id,
                     write: umbra_crypto::secret::Secret::new(*job.write.expose()),
+                    fallback: job
+                        .fallback
+                        .as_ref()
+                        .map(|held| umbra_crypto::secret::Secret::new(*held.expose())),
                     record: job.record.clone(),
                 });
             }
