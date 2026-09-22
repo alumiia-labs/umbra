@@ -305,7 +305,9 @@ impl GroupService {
             GroupCmd::Gkey => {
                 session.accept(command, &served.queue.own_pk())?;
                 let keys = GkeyPayload::parse(command.payload).map_err(|_| Reject::Rejected)?;
-                served.queue.rotate(keys.read_pk, keys.write_pk, now);
+                served
+                    .queue
+                    .rotate(keys.read_pk, keys.write_pk, keys.own_pk, now);
                 self.head_changed(group_queue_id);
                 Ok((Vec::new(), Vec::new()))
             }
@@ -661,6 +663,37 @@ mod tests {
     }
 
     #[test]
+    fn a_new_owner_key_ends_the_old_one_at_once() {
+        let now = 1_000;
+        let (mut relay, id, read, write, own) = opened(now);
+        let next = StaticSecret::from([0x31u8; 32]);
+        let mut payload = [0u8; 96];
+        GkeyPayload {
+            read_pk: public(&read),
+            write_pk: public(&write),
+            own_pk: public(&next),
+        }
+        .encode(&mut payload)
+        .unwrap();
+        relay
+            .send(CIRCUIT, GroupCmd::Gkey, id, &payload, &own, now)
+            .unwrap();
+        // WIR-522: the owner key takes no grace, thus an admin that left
+        // its role and holds the old one deletes nothing.
+        assert_eq!(
+            relay.send(CIRCUIT, GroupCmd::Gdel, id, &[], &own, now + 1),
+            Err(Reject::Rejected)
+        );
+        assert_eq!(
+            relay.send(CIRCUIT, GroupCmd::Gkey, id, &payload, &own, now + 1),
+            Err(Reject::Rejected)
+        );
+        relay
+            .send(CIRCUIT, GroupCmd::Gdel, id, &[], &next, now + 2)
+            .unwrap();
+    }
+
+    #[test]
     fn a_rotation_holds_the_previous_key_and_a_deletion_leaves_nothing() {
         let now = 1_000;
         let (mut relay, id, read, write, own) = opened(now);
@@ -668,10 +701,11 @@ mod tests {
             StaticSecret::from([21u8; 32]),
             StaticSecret::from([22u8; 32]),
         );
-        let mut payload = [0u8; 64];
+        let mut payload = [0u8; 96];
         GkeyPayload {
             read_pk: public(&fresh_read),
             write_pk: public(&fresh_write),
+            own_pk: public(&own),
         }
         .encode(&mut payload)
         .unwrap();
@@ -726,16 +760,17 @@ mod tests {
     #[test]
     fn a_relay_that_restarts_serves_the_group_and_its_records() {
         let now = 1_000;
-        let (mut relay, id, read, write, _own) = opened(now);
+        let (mut relay, id, read, write, own) = opened(now);
         let first = record(1);
         relay
             .send(CIRCUIT, GroupCmd::Gpost, id, &first, &write, now)
             .unwrap();
         let fresh = StaticSecret::from([0x21u8; 32]);
-        let mut payload = [0u8; 64];
+        let mut payload = [0u8; 96];
         GkeyPayload {
             read_pk: public(&fresh),
             write_pk: public(&fresh),
+            own_pk: public(&own),
         }
         .encode(&mut payload)
         .unwrap();
@@ -774,7 +809,7 @@ mod tests {
         // A group queue that a `GDEL` took leaves the store, thus no later
         // run serves it (`NET-245`).
         second
-            .send(CIRCUIT, GroupCmd::Gdel, id, &[], &_own, now + 1)
+            .send(CIRCUIT, GroupCmd::Gdel, id, &[], &own, now + 1)
             .unwrap();
         for change in second.service.take_changes() {
             store.apply(&change);

@@ -271,8 +271,11 @@ pub struct GroupRekey {
     pub relay: [u8; 32],
     /// The group queue at that relay.
     pub group_queue_id: [u8; 32],
-    /// The owner credential of that replica.
+    /// The owner credential of that replica, which authorizes the `GKEY`.
     pub own: Secret<32>,
+    /// The owner credential after the `GKEY`, or none to keep `own`
+    /// (`WIR-522`).
+    pub next_own_pk: Option<[u8; 32]>,
     /// `read_pk` of the epoch.
     pub read_pk: [u8; 32],
     /// `write_pk` of the epoch.
@@ -1460,6 +1463,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             relay: *relay,
             group_queue_id: reference.group_queue_id,
             own: Secret::new(*own.expose()),
+            next_own_pk: None,
             read_pk: credentials.read_public(),
             write_pk: credentials.write_public(),
         }))
@@ -1971,6 +1975,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 relay: replica.relay,
                 group_queue_id: replica.group_queue_id,
                 own: Secret::new(*own.expose()),
+                next_own_pk: None,
                 read_pk: credentials.read_public(),
                 write_pk: credentials.write_public(),
             });

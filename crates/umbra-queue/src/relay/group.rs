@@ -156,10 +156,12 @@ impl GroupQueue {
         self.write.pair(now)
     }
 
-    /// Applies a `GKEY` (`NET-242`).
-    pub fn rotate(&mut self, read_pk: [u8; 32], write_pk: [u8; 32], now: u64) {
+    /// Applies a `GKEY` (`NET-242`). The owner credential takes no grace:
+    /// a new one ends the old one at once (`WIR-522`).
+    pub fn rotate(&mut self, read_pk: [u8; 32], write_pk: [u8; 32], own_pk: [u8; 32], now: u64) {
         self.read.rotate(read_pk, now);
         self.write.rotate(write_pk, now);
+        self.own_pk = own_pk;
     }
 
     /// The records held.
@@ -353,7 +355,7 @@ mod tests {
     #[test]
     fn the_graces_of_a_rotation_hold() {
         let mut q = queue();
-        q.rotate([5; 32], [6; 32], 2_000);
+        q.rotate([5; 32], [6; 32], [4; 32], 2_000);
         assert!(q.accepts_read(&[5; 32], 2_000));
         assert!(q.accepts_read(&[2; 32], 2_000 + GROUP_READ_GRACE - 1));
         assert!(!q.accepts_read(&[2; 32], 2_000 + GROUP_READ_GRACE));
@@ -363,7 +365,9 @@ mod tests {
         assert!(!q.accepts_write(&[3; 32], 2_000));
         assert!(q.accepts_read(&[2; 32], 2_000));
         // A second GKEY inside the grace replaces the previous key.
-        q.rotate([7; 32], [8; 32], 3_000);
+        // WIR-522: a new owner key ends the old one with no grace.
+        q.rotate([7; 32], [8; 32], [9; 32], 3_000);
+        assert_eq!(q.own_pk(), [9; 32]);
         assert!(q.accepts_read(&[5; 32], 3_000));
         assert!(!q.accepts_read(&[2; 32], 3_000));
         assert_eq!(q.read_pks(3_000), ([7; 32], Some([5; 32])));
@@ -375,7 +379,7 @@ mod tests {
         let mut q = queue();
         q.post(b"one", 1_000).unwrap();
         q.post(b"two", 1_001).unwrap();
-        q.rotate([5; 32], [6; 32], 2_000);
+        q.rotate([5; 32], [6; 32], [4; 32], 2_000);
         let records: Vec<Stored> = q.since(0).cloned().collect();
         let mut writer = Writer::new();
         q.export_head(&mut writer);

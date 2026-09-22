@@ -98,8 +98,11 @@ pub enum GroupCommand {
         relay: [u8; 32],
         /// The group queue at that relay.
         group_queue_id: [u8; 32],
-        /// The owner credential of this replica.
+        /// The owner credential of this replica, which authorizes it.
         own: Secret<32>,
+        /// The owner credential after the command, or none to keep `own`
+        /// (`WIR-522`).
+        next_own_pk: Option<[u8; 32]>,
         /// `read_pk` of the new epoch.
         read_pk: [u8; 32],
         /// `write_pk` of the new epoch.
@@ -173,12 +176,14 @@ impl GroupCommand {
                 relay,
                 group_queue_id,
                 own,
+                next_own_pk,
                 read_pk,
                 write_pk,
             } => GroupCommand::Rotate {
                 relay: *relay,
                 group_queue_id: *group_queue_id,
                 own: Secret::new(*own.expose()),
+                next_own_pk: *next_own_pk,
                 read_pk: *read_pk,
                 write_pk: *write_pk,
             },
@@ -563,6 +568,7 @@ async fn session(
                     relay,
                     group_queue_id,
                     own,
+                    next_own_pk,
                     read_pk,
                     write_pk,
                 } => (
@@ -571,6 +577,7 @@ async fn session(
                     *group_queue_id,
                     GroupJob::Rotate {
                         own: StaticSecret::from(*own.expose()),
+                        next_own_pk: *next_own_pk,
                         read_pk: *read_pk,
                         write_pk: *write_pk,
                     },

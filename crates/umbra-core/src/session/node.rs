@@ -269,8 +269,11 @@ pub enum GroupJob {
     },
     /// `GKEY`, which an admin sends at a rotation.
     Rotate {
-        /// `own_sk`.
+        /// `own_sk`, which authorizes the command.
         own: StaticSecret,
+        /// The owner credential after the command, or none to keep the
+        /// present one (`WIR-522`).
+        next_own_pk: Option<[u8; 32]>,
         /// The reader credential of the new epoch.
         read_pk: [u8; 32],
         /// The writer credential of the new epoch.
@@ -1594,11 +1597,19 @@ impl ClientNode {
             GroupJob::Unsubscribe { read } => (GroupCmd::Gunsub, read, Vec::new()),
             GroupJob::Rotate {
                 own,
+                next_own_pk,
                 read_pk,
                 write_pk,
             } => {
+                let own_pk =
+                    next_own_pk.unwrap_or(*umbra_crypto::x25519::PublicKey::from(&own).as_bytes());
                 let mut payload = alloc::vec![0u8; GKEY_LEN];
-                GkeyPayload { read_pk, write_pk }.encode(&mut payload)?;
+                GkeyPayload {
+                    read_pk,
+                    write_pk,
+                    own_pk,
+                }
+                .encode(&mut payload)?;
                 (GroupCmd::Gkey, own, payload)
             }
             GroupJob::Delete { own } => (GroupCmd::Gdel, own, Vec::new()),

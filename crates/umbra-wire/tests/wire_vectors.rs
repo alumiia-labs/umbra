@@ -531,8 +531,9 @@ fn group_records() -> Value {
     let gkey = GkeyPayload {
         read_pk: [0x7a; 32],
         write_pk: [0x7b; 32],
+        own_pk: [0x7d; 32],
     };
-    let mut gkey_bytes = [0u8; 64];
+    let mut gkey_bytes = [0u8; 96];
     gkey.encode(&mut gkey_bytes).unwrap();
     let gseq = GseqPayload {
         corr_id: [0x7c; 16],

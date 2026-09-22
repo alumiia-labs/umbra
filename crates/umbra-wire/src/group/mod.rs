@@ -83,7 +83,7 @@ pub const GNEW_NONE_LEN: usize = 99;
 /// The length of a `GSEQ` payload.
 pub const GSEQ_LEN: usize = 20;
 /// The length of a `GKEY` payload.
-pub const GKEY_LEN: usize = 64;
+pub const GKEY_LEN: usize = 96;
 /// The length of a `GNREG` or `GNUNREG` payload.
 pub const NOTIFY_REGISTRATION_LEN: usize = 1 + address::LEN;
 
@@ -208,6 +208,10 @@ pub struct GkeyPayload {
     pub read_pk: [u8; 32],
     /// The writer credential of the new epoch.
     pub write_pk: [u8; 32],
+    /// The owner credential after the command: the present one keeps the
+    /// owners, and a new one ends each `own_sk` that an admin who left the
+    /// role still holds (`WIR-522`).
+    pub own_pk: [u8; 32],
 }
 
 impl GkeyPayload {
@@ -216,6 +220,7 @@ impl GkeyPayload {
         let mut w = Writer::new(out);
         w.put(&self.read_pk)?;
         w.put(&self.write_pk)?;
+        w.put(&self.own_pk)?;
         Ok(w.position())
     }
 
@@ -225,6 +230,7 @@ impl GkeyPayload {
         let out = GkeyPayload {
             read_pk: r.array()?,
             write_pk: r.array()?,
+            own_pk: r.array()?,
         };
         r.finish()?;
         Ok(out)
@@ -297,9 +303,11 @@ mod tests {
         let gkey = GkeyPayload {
             read_pk: [5; 32],
             write_pk: [6; 32],
+            own_pk: [7; 32],
         };
         assert_eq!(gkey.encode(&mut out).unwrap(), GKEY_LEN);
-        assert_eq!(GkeyPayload::parse(&out[..64]).unwrap(), gkey);
+        assert_eq!(GkeyPayload::parse(&out[..96]).unwrap(), gkey);
+        assert!(GkeyPayload::parse(&out[..64]).is_err());
 
         let reg = GroupNotifyRegistration {
             queue: QueueAddress {

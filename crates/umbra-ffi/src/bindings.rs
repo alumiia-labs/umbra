@@ -1093,6 +1093,7 @@ impl Inner {
                 relay: job.relay,
                 group_queue_id: job.group_queue_id,
                 own: job.own,
+                next_own_pk: job.next_own_pk,
                 read_pk: job.read_pk,
                 write_pk: job.write_pk,
             });
@@ -1296,6 +1297,7 @@ impl Inner {
                             relay: job.relay,
                             group_queue_id: job.group_queue_id,
                             own: job.own,
+                            next_own_pk: job.next_own_pk,
                             read_pk: job.read_pk,
                             write_pk: job.write_pk,
                         });

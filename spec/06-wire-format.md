@@ -931,7 +931,7 @@ command carries a signature.
 | `0x94` | `GSUB` | Member | `read_sk` | `from_seq` `u32`, 4 bytes |
 | `0x95` | `GMSG` | Relay | — | `seq` `u32`, then one `GroupQueueRecord`; the L5 payload row of §6.9 |
 | `0x96` | `GUNSUB` | Member | `read_sk` | empty |
-| `0x97` | `GKEY` | Admin | `own_sk` | `GkeyPayload`, 64 bytes |
+| `0x97` | `GKEY` | Admin | `own_sk` | `GkeyPayload`, 96 bytes |
 | `0x98` | `GDEL` | Admin | `own_sk` | empty |
 | `0x99` | `GNREG` | Member | `read_sk` | `GroupNotifyRegistration`, 130 bytes |
 | `0x9A` | `GNUNREG` | Member | `read_sk` | `GroupNotifyRegistration`, 130 bytes |
@@ -953,9 +953,10 @@ GsubPayload {                     // the payload of GSUB, 4 bytes
     from_seq        u32           // the relay emits each retained record with a seq above this value
 }
 
-GkeyPayload {                     // the payload of GKEY, 64 bytes
+GkeyPayload {                     // the payload of GKEY, 96 bytes
     read_pk         [32]u8        // the reader credential of the new epoch
     write_pk        [32]u8        // the writer credential of the new epoch
+    own_pk          [32]u8        // the owner credential after the command (WIR-522)
 }
 
 GroupNotifyRegistration {         // the payload of GNREG and of GNUNREG, 130 bytes
@@ -1049,7 +1050,10 @@ manner of §6.4.3 rule 5.
 **The rotation of the credentials.**
 
 - **[WIR-390]** On a `GKEY`, a relay MUST replace `read_pk` and `write_pk`
-  with the two values of the payload. **[WIR-391]** A relay MUST keep the
+  with the two values of the payload. **[WIR-522]** It MUST replace
+  `own_pk` with the third value, and it MUST keep no previous `own_pk`: a
+  command under the owner key that the `GKEY` replaced is refused at once. A
+  `GKEY` that keeps the owners carries the present `own_pk`. **[WIR-391]** A relay MUST keep the
   previous `read_pk` for `GROUP_READ_GRACE` after the `GKEY`. **[WIR-392]** A
   relay MUST keep the previous `write_pk` for `GROUP_WRITE_GRACE` after the
   `GKEY`.

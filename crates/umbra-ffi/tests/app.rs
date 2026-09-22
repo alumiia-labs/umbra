@@ -1744,6 +1744,7 @@ fn two_members_talk_in_a_group_over_the_relays_of_a_signed_network() {
             relay: replicas[0],
             group_queue_id: queue_ids[0],
             own: Secret::new(*creator.owner(0).unwrap().expose()),
+            next_own_pk: None,
             read_pk: new_read,
             write_pk: new_write_pk,
         })
