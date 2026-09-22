@@ -75,13 +75,13 @@ each column when a crate implements the requirement and a test covers it.
 | `NTF` | 67 | 30 | 0 | 0 | 2 | **99** |
 | `DIS` | 123 | 37 | 0 | 0 | 1 | **161** |
 | `REL` | 124 | 32 | 1 | 0 | 2 | **159** |
-| `GRP` | 214 | 60 | 0 | 0 | 6 | **280** |
+| `GRP` | 215 | 60 | 0 | 0 | 6 | **281** |
 | `COM` | 299 | 96 | 0 | 0 | 5 | **400** |
 | `ATT` | 139 | 46 | 1 | 0 | 2 | **188** |
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
 | `IMP` | 112 | 41 | 0 | 0 | 2 | **155** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2210 | 715 | 7 | 0 | 53 | **2985** |
+| **All** | 2211 | 715 | 7 | 0 | 53 | **2986** |
 
 ## SCP — Scope and Conventions
 
@@ -2285,6 +2285,7 @@ Source: `spec/11-private-groups.md`
 | `GRP-396` | §11.9.7 | MUST | An admin | An admin MUST measure that silence over the time that it watched: for a member whose last record it did not see, the silence starts when this admin first holds that member and that role. |  |  |
 | `GRP-397` | §11.9.7 | MUST NOT | (unstated) | An admin MUST draw the backoff of `GRP-358` before the removal of `GRP-133`, and MUST NOT remove a member whose removal by another admin arrived during that backoff. |  |  |
 | `GRP-398` | §11.4.1 | MUST | (unstated) | A member whose `GPOST` or `GSUB` under the credentials of the newest epoch it holds is refused MUST send the same command again at once under the credentials of the epoch before it, while `GROUP_EPOCH_GRACE` holds them, and it MUST count only a refusal of that second command under `GRP-210`. |  |  |
+| `GRP-399` | §11.9.2 | MUST | A verifier of a snapshot | A verifier of a snapshot MUST reject it when a member at `moderator` or above is neither the creator nor the grantee of that role in the last granting epoch of the path that names it. |  |  |
 
 ## COM — Public Communities
 

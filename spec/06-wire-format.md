@@ -1748,7 +1748,7 @@ GrantingEpoch {                   // control type 0x04; GRP-060 signs it
     grantee_index     u16
     grantee_roster_pk_hash [32]u8
     role              u8          // the role after the epoch, in the set of GroupMemberEntry
-    grantee_roster_pk [1952]u8    // present when role is 0x03 or above (GRP-316), else absent
+    granter_roster_pk [1952]u8    // the key of the granter; its hash is in its entry (GRP-316)
     sig               [3309]u8    // ML-DSA-65 over the preimage of GRP-061
 }
 
@@ -1761,6 +1761,7 @@ ModerationEpoch {                 // control type 0x05; GRP-077 signs it
     actor_role        u8
     action_count      u8          // 1 to MOD_ACTION_MAX
     actions           [action_count]ModAction
+    actor_roster_pk   [1952]u8    // the key of the actor; its hash is in its entry (GRP-316)
     sig               [3309]u8    // ML-DSA-65 over the preimage of GRP-078
 }
 
@@ -1785,8 +1786,9 @@ each action after its label, and `author_hint` stays out of it.
 - **[WIR-489]** A parser MUST reject an `op` of a `PlainEpoch` that the
   layout above does not hold, and a `PlainEpoch` whose length does not equal
   the sum of the fields of its `op`. **[WIR-490]** A parser MUST reject a
-  `GrantingEpoch` that carries `grantee_roster_pk` at a `role` below `0x03`,
-  or that omits it at a `role` of `0x03` or above. **[WIR-491]** A parser
+  `GrantingEpoch` or a `ModerationEpoch` whose length does not hold the one
+  1 952-byte roster key of its signer and the 3 309-byte signature after
+  the fields before them. **[WIR-491]** A parser
   MUST reject an `action_count` of 0 or above `MOD_ACTION_MAX`, and an
   `action` that the layout above does not hold. **[WIR-492]** A parser MUST
   reject a `GroupPresence` whose length is not 1.

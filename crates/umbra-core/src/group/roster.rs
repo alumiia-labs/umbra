@@ -8,7 +8,6 @@ use alloc::{collections::BTreeMap, vec::Vec};
 
 use umbra_crypto::{
     hash::sha3_256,
-    sign::VerifyingKey,
     stored::{Reader, Writer},
 };
 use umbra_wire::group::control::{
@@ -43,8 +42,9 @@ pub struct Member {
     pub kem_pk_hash: [u8; 32],
     /// The full KEM key, once verified against its hash (`GRP-307`).
     pub kem_pk: Option<Vec<u8>>,
-    /// The full roster key, once verified against its hash. A member below
-    /// `moderator` never shows it.
+    /// The full roster key, where this device holds it: its own, and the
+    /// creator's from the offer. A signed roster object carries the key of
+    /// its signer, thus no check needs this field (`GRP-316`).
     pub roster_pk: Option<Vec<u8>>,
     /// Whether the member is in the active set.
     pub active: bool,
@@ -67,11 +67,6 @@ impl Member {
         }
         self.roster_pk = Some(roster_pk.to_vec());
         Ok(())
-    }
-
-    fn verifying_key(&self) -> Result<VerifyingKey, Error> {
-        let pk = self.roster_pk.as_deref().ok_or(Error::NoPath)?;
-        Ok(VerifyingKey::from_bytes(pk)?)
     }
 }
 
@@ -235,6 +230,7 @@ impl Roster {
         {
             creator.set_roster_pk(creator_roster_pk)?;
         }
+        let mut granted: BTreeMap<u16, Role> = BTreeMap::new();
         let mut rest = path;
         while !rest.is_empty() {
             let len = usize::from(u16::from_be_bytes([
@@ -249,13 +245,18 @@ impl Roster {
             }
             let epoch = GrantingEpoch::parse(control.payload)?;
             self.check_granting_signature(&epoch)?;
-            self.keep_grantee_key(&epoch)?;
+            self.check_grantee_key(&epoch)?;
+            granted.insert(epoch.grantee_index, epoch.role);
         }
-        if self
-            .members
-            .values()
-            .any(|m| m.role >= Role::Moderator && m.roster_pk.is_none())
-        {
+        // GRP-326: the path backs each role of the snapshot. The creator
+        // holds `owner` from the genesis, and each other role holder holds
+        // the role that its last granting epoch gave it.
+        let backed = |member: &Member| {
+            member.role < Role::Moderator
+                || member.roster_pk_hash == creator_hash
+                || granted.get(&member.index) == Some(&member.role)
+        };
+        if !self.members.values().all(backed) {
             return Err(Error::Unverified);
         }
         Ok(())
@@ -269,12 +270,14 @@ impl Roster {
         if granter.role < Role::Admin {
             return Err(Error::Unverified);
         }
-        epoch.verify(&granter.verifying_key()?)?;
+        // GRP-316: the epoch carries the key of its granter, and the roster
+        // entry binds it by its hash.
+        epoch.verify(&granter.roster_pk_hash)?;
         Ok(())
     }
 
-    /// The checks of `keep_grantee_key` without the store, before the
-    /// chain records the successor.
+    /// Whether the epoch names the grantee by the hash of its roster
+    /// entry.
     fn check_grantee_key(&self, epoch: &GrantingEpoch<'_>) -> Result<(), Error> {
         let grantee = self
             .members
@@ -282,27 +285,6 @@ impl Roster {
             .ok_or(Error::Unverified)?;
         if grantee.roster_pk_hash != epoch.grantee_roster_pk_hash {
             return Err(Error::Unverified);
-        }
-        if epoch.role >= Role::Moderator {
-            let pk = epoch.grantee_roster_pk.ok_or(Error::Malformed)?;
-            if sha3_256(&[pk]) != grantee.roster_pk_hash {
-                return Err(Error::Unverified);
-            }
-        }
-        Ok(())
-    }
-
-    fn keep_grantee_key(&mut self, epoch: &GrantingEpoch<'_>) -> Result<(), Error> {
-        let grantee = self
-            .members
-            .get_mut(&epoch.grantee_index)
-            .ok_or(Error::Unverified)?;
-        if grantee.roster_pk_hash != epoch.grantee_roster_pk_hash {
-            return Err(Error::Unverified);
-        }
-        if epoch.role >= Role::Moderator {
-            let pk = epoch.grantee_roster_pk.ok_or(Error::Malformed)?;
-            grantee.set_roster_pk(pk)?;
         }
         Ok(())
     }
@@ -585,7 +567,6 @@ impl Roster {
                 }
                 self.check_grantee_key(&epoch)?;
                 self.note_successor(epoch.chain.previous_epoch_hash, sender, hash, true)?;
-                self.keep_grantee_key(&epoch)?;
                 if let Some(m) = self.members.get_mut(&epoch.grantee_index) {
                     m.role = epoch.role;
                 }
@@ -612,7 +593,7 @@ impl Roster {
                 if actor.role < Role::Moderator || actor.role != epoch.actor_role {
                     return Err(Error::Unverified);
                 }
-                epoch.verify(&actor.verifying_key()?)?;
+                epoch.verify(&actor.roster_pk_hash)?;
                 self.note_successor(epoch.chain.previous_epoch_hash, sender, hash, true)?;
                 self.commit(hash, now);
                 Ok(Applied::Moderated(epoch.actions))
@@ -854,6 +835,7 @@ pub(crate) mod tests {
         role: Role,
     ) -> Vec<u8> {
         let grantee_pk = grantee.roster().verifying_key().to_bytes();
+        let granter_pk = granter.roster().verifying_key().to_bytes();
         let mut epoch = GrantingEpoch {
             chain: Chain {
                 group_id: *roster.group_id(),
@@ -864,7 +846,7 @@ pub(crate) mod tests {
             grantee_index,
             grantee_roster_pk_hash: sha3_256(&[&grantee_pk]),
             role,
-            grantee_roster_pk: (role >= Role::Moderator).then_some(&grantee_pk[..]),
+            granter_roster_pk: &granter_pk,
             sig: &[],
         };
         let preimage = epoch.preimage();
@@ -916,7 +898,8 @@ pub(crate) mod tests {
             .apply(&GroupControl::parse(&by_member).unwrap(), 0, 12)
             .unwrap();
 
-        // A grant to owner carries the roster key and needs an admin signer.
+        // A grant to owner needs an admin signer, and it carries the key of
+        // that signer alone (`GRP-316`).
         let grant = grant_control(&roster, &creator, 0, &bob, 1, Role::Owner);
         let applied = roster
             .apply(&GroupControl::parse(&grant).unwrap(), 0, 13)
@@ -928,7 +911,7 @@ pub(crate) mod tests {
                 role: Role::Owner
             }
         );
-        assert!(roster.member(1).unwrap().roster_pk.is_some());
+        assert!(roster.member(1).unwrap().roster_pk.is_none());
         assert_eq!(roster.owner_count(), 2);
         let demote = grant_control(&roster, &bob, 1, &creator, 0, Role::Member);
         assert_eq!(
@@ -939,6 +922,18 @@ pub(crate) mod tests {
         assert_eq!(
             roster.apply(&GroupControl::parse(&forged).unwrap(), 2, 14),
             Err(Error::Unverified)
+        );
+        // The new owner signs under a key that this roster never held, and
+        // its epoch verifies against the hash of its entry.
+        let by_bob = grant_control(&roster, &bob, 1, &carol, 2, Role::Observer);
+        assert_eq!(
+            roster
+                .apply(&GroupControl::parse(&by_bob).unwrap(), 1, 14)
+                .unwrap(),
+            Applied::Granted {
+                index: 2,
+                role: Role::Observer
+            }
         );
 
         // A removal is a trigger, and a self-removal too.

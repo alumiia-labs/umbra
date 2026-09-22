@@ -1130,9 +1130,10 @@ SHA3-256 of `GroupRosterKey_g.pk`), and `kem_pk_hash` (the SHA3-256 of
   is 1 216 bytes for each member and 608 KB at `GROUP_MAX`. **[GRP-308]** A
   member MUST verify a `kem_pk` and a `roster_pk` against the hash in the
   roster entry before it uses either one.
-- The full `roster_pk` of a member travels in the granting epoch that gives it
-  a role at `moderator` or above, and in the invitation for the creator and
-  the inviting admin. A member below `moderator` never shows its `roster_pk`.
+- The full `roster_pk` of a member travels in each signed roster object that
+  it makes, a granting epoch or a moderation epoch, and in the invitation for
+  the creator and the inviting admin. A member that signs nothing never shows
+  its `roster_pk`.
 
 **The join flow.** The flow below costs one user action at the joiner and one
 at the inviting admin. No other member acts, and no pairwise channel with any
@@ -1224,16 +1225,28 @@ a member, or it takes that role away.
   **[GRP-106]** A signer MUST put that label first in the preimage.
   **[GRP-107]** A verifier MUST reject a signature over a preimage that
   carries a different label.
-- **[GRP-062]** A verifier MUST check that signature against a roster key. An
-  earlier granting epoch or a join record binds that roster key to the
-  granter. The creator of the group is the first granter. A member receives
-  the roster key of the creator in the group invitation.
+- **[GRP-062]** A verifier MUST check that signature against the roster key
+  that the epoch carries, whose hash the roster entry of the granter binds
+  (`GRP-316`, `GRP-317`). The creator of the group is the first granter. A
+  member receives the roster key of the creator in the group invitation.
 - **[GRP-063]** A verifier MUST reject a granting epoch from a granter that
   holds a role below `admin`.
-- **[GRP-316]** A granting epoch that gives a role at `moderator` or above
-  MUST carry the full `roster_pk` of the grantee. **[GRP-317]** A verifier
-  MUST check that `roster_pk` against `grantee_roster_pk_hash` and against
-  the roster entry.
+- **[GRP-316]** A granting epoch and a moderation epoch MUST carry the full
+  `roster_pk` of the member that signs it. **[GRP-317]** A verifier MUST
+  check that `roster_pk` against the `roster_pk_hash` of the roster entry of
+  that member before it verifies the signature under it. **[GRP-399]** A
+  verifier of a snapshot MUST reject it when a member at `moderator` or
+  above is neither the creator nor the grantee of that role in the last
+  granting epoch of the path that names it.
+
+> *Cause of `GRP-316` in this form.* An earlier form made a grant at
+> `moderator` or above carry the key of the grantee. The roster holds only
+> the hash of the key of a member below `moderator`, thus no admin held the
+> key that such a grant needed, and a promotion could not be built. The key
+> of the signer is the one that a verifier needs, the signer always holds
+> it, and a grant stays the same size. A moderator that never grants shows
+> its key in its first moderation epoch, which is when a verifier first
+> needs it. `RekeyRecord` carried the key of its signer from the start.
 
 A **plain epoch** adds a member, removes a member that holds the `member` or
 the `observer` role, or records a self-removal.
@@ -1390,8 +1403,9 @@ gives a community.
    a signature over a preimage that carries a different label. The two group
    labels are different, thus a granting epoch and a moderation epoch cannot
    be confused.
-3. **[GRP-079]** A verifier MUST check that signature against a roster key. An
-   earlier granting epoch binds that roster key to the actor. **[GRP-080]** A
+3. **[GRP-079]** A verifier MUST check that signature against the roster key
+   that the epoch carries, whose hash the roster entry of the actor binds
+   (`GRP-316`, `GRP-317`). **[GRP-080]** A
    client MUST NOT apply an action before that check succeeds.
 4. **[GRP-081]** A verifier MUST reject a moderation epoch from a member that
    holds a role below `moderator`.

@@ -601,13 +601,14 @@ fn group_controls() -> Value {
     .unwrap();
     out.insert("plain_add".into(), json!(hex(&buf[..n])));
 
+    let granter_pk = granter.verifying_key().to_bytes();
     let mut grant = GrantingEpoch {
         chain,
         granter_index: 0,
         grantee_index: 4,
         grantee_roster_pk_hash: sha3_256(&[&grantee_pk]),
         role: Role::Admin,
-        grantee_roster_pk: Some(&grantee_pk),
+        granter_roster_pk: &granter_pk,
         sig: &[0; SIGNATURE_LEN],
     };
     let sig = granter
@@ -618,7 +619,7 @@ fn group_controls() -> Value {
     let n = grant.encode(&mut buf).unwrap();
     GrantingEpoch::parse(&buf[..n])
         .unwrap()
-        .verify(&granter.verifying_key())
+        .verify(&sha3_256(&[&granter_pk]))
         .unwrap();
     out.insert("granting".into(), json!(hex(&buf[..n])));
 
@@ -631,6 +632,7 @@ fn group_controls() -> Value {
             target: [0x86; 16],
             author_hint: 0xFFFF,
         }],
+        actor_roster_pk: &granter_pk,
         sig: &[0; SIGNATURE_LEN],
     };
     let sig = granter
@@ -641,7 +643,7 @@ fn group_controls() -> Value {
     let n = moderation.encode(&mut buf).unwrap();
     ModerationEpoch::parse(&buf[..n])
         .unwrap()
-        .verify(&granter.verifying_key())
+        .verify(&sha3_256(&[&granter_pk]))
         .unwrap();
     out.insert("moderation".into(), json!(hex(&buf[..n])));
 

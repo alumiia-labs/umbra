@@ -334,22 +334,17 @@ pub struct GrantingEpoch<'a> {
     pub grantee_roster_pk_hash: [u8; 32],
     /// The role after the epoch.
     pub role: Role,
-    /// The full roster key of the grantee, present at `moderator` or above
-    /// (`GRP-316`).
-    pub grantee_roster_pk: Option<&'a [u8]>,
+    /// The full roster key of the granter. The verifier checks it against
+    /// the roster entry of the granter, thus no member holds another
+    /// member's key before it (`GRP-316`).
+    pub granter_roster_pk: &'a [u8],
     /// The signature under the roster key of the granter.
     pub sig: &'a [u8],
 }
 
 impl<'a> GrantingEpoch<'a> {
     fn check(&self) -> Result<(), Error> {
-        let needs_key = self.role >= Role::Moderator;
-        match self.grantee_roster_pk {
-            Some(pk) if needs_key && pk.len() == VERIFYING_KEY_LEN => {}
-            None if !needs_key => {}
-            _ => return Err(Error::Malformed),
-        }
-        if self.sig.len() != SIGNATURE_LEN {
+        if self.granter_roster_pk.len() != VERIFYING_KEY_LEN || self.sig.len() != SIGNATURE_LEN {
             return Err(Error::Malformed);
         }
         Ok(())
@@ -367,17 +362,16 @@ impl<'a> GrantingEpoch<'a> {
         out
     }
 
-    /// Verifies `sig` under the roster key of the granter (`GRP-062`), and
-    /// the carried roster key against its hash (`GRP-317`).
-    pub fn verify(&self, granter_roster_pk: &VerifyingKey) -> Result<(), Error> {
-        if let Some(pk) = self.grantee_roster_pk {
-            if sha3_256(&[pk]) != self.grantee_roster_pk_hash {
-                return Err(Error::Malformed);
-            }
-        }
-        let sig = Signature::from_bytes(self.sig)?;
-        granter_roster_pk.verify(&self.preimage(), &sig)?;
-        Ok(())
+    /// Verifies the carried roster key against `granter_roster_pk_hash`
+    /// of the roster entry of the granter (`GRP-317`), and `sig` under it
+    /// (`GRP-062`).
+    pub fn verify(&self, granter_roster_pk_hash: &[u8; 32]) -> Result<(), Error> {
+        verify_signer(
+            self.granter_roster_pk,
+            granter_roster_pk_hash,
+            &self.preimage(),
+            self.sig,
+        )
     }
 
     /// Writes the epoch.
@@ -390,9 +384,7 @@ impl<'a> GrantingEpoch<'a> {
         w.u16(self.grantee_index)?;
         w.put(&self.grantee_roster_pk_hash)?;
         w.u8(self.role as u8)?;
-        if let Some(pk) = self.grantee_roster_pk {
-            w.put(pk)?;
-        }
+        w.put(self.granter_roster_pk)?;
         w.put(self.sig)?;
         Ok(w.position())
     }
@@ -408,11 +400,7 @@ impl<'a> GrantingEpoch<'a> {
         let grantee_index = r.u16()?;
         let grantee_roster_pk_hash = r.array()?;
         let role = Role::from_byte(r.u8()?)?;
-        let grantee_roster_pk = if role >= Role::Moderator {
-            Some(r.take(VERIFYING_KEY_LEN)?)
-        } else {
-            None
-        };
+        let granter_roster_pk = r.take(VERIFYING_KEY_LEN)?;
         let sig = r.take(SIGNATURE_LEN)?;
         r.finish()?;
         let out = GrantingEpoch {
@@ -421,12 +409,29 @@ impl<'a> GrantingEpoch<'a> {
             grantee_index,
             grantee_roster_pk_hash,
             role,
-            grantee_roster_pk,
+            granter_roster_pk,
             sig,
         };
         out.check()?;
         Ok(out)
     }
+}
+
+/// Verifies a signed roster object: the carried roster key against the
+/// hash of the roster entry of its signer, and the signature under it.
+fn verify_signer(
+    roster_pk: &[u8],
+    roster_pk_hash: &[u8; 32],
+    preimage: &[u8],
+    sig: &[u8],
+) -> Result<(), Error> {
+    if sha3_256(&[roster_pk]) != *roster_pk_hash {
+        return Err(Error::Malformed);
+    }
+    let key = VerifyingKey::from_bytes(roster_pk)?;
+    let sig = Signature::from_bytes(sig)?;
+    key.verify(preimage, &sig)?;
+    Ok(())
 }
 
 /// One moderator action.
@@ -452,6 +457,9 @@ pub struct ModerationEpoch<'a> {
     pub actor_role: Role,
     /// 1 to `MOD_ACTION_MAX` actions.
     pub actions: Vec<ModAction>,
+    /// The full roster key of the actor, which the verifier checks against
+    /// the roster entry of the actor (`GRP-316`).
+    pub actor_roster_pk: &'a [u8],
     /// The signature under the roster key of the actor.
     pub sig: &'a [u8],
 }
@@ -461,6 +469,7 @@ impl<'a> ModerationEpoch<'a> {
         if self.actions.is_empty()
             || self.actions.len() > MOD_ACTION_MAX
             || self.actions.iter().any(|a| !(1..=3).contains(&a.action))
+            || self.actor_roster_pk.len() != VERIFYING_KEY_LEN
             || self.sig.len() != SIGNATURE_LEN
         {
             return Err(Error::Malformed);
@@ -483,11 +492,15 @@ impl<'a> ModerationEpoch<'a> {
         out
     }
 
-    /// Verifies `sig` under the roster key of the actor (`GRP-079`).
-    pub fn verify(&self, actor_roster_pk: &VerifyingKey) -> Result<(), Error> {
-        let sig = Signature::from_bytes(self.sig)?;
-        actor_roster_pk.verify(&self.preimage(), &sig)?;
-        Ok(())
+    /// Verifies the carried roster key against `actor_roster_pk_hash` of
+    /// the roster entry of the actor, and `sig` under it (`GRP-079`).
+    pub fn verify(&self, actor_roster_pk_hash: &[u8; 32]) -> Result<(), Error> {
+        verify_signer(
+            self.actor_roster_pk,
+            actor_roster_pk_hash,
+            &self.preimage(),
+            self.sig,
+        )
     }
 
     /// Writes the epoch.
@@ -504,6 +517,7 @@ impl<'a> ModerationEpoch<'a> {
             w.put(&a.target)?;
             w.u16(a.author_hint)?;
         }
+        w.put(self.actor_roster_pk)?;
         w.put(self.sig)?;
         Ok(w.position())
     }
@@ -529,6 +543,7 @@ impl<'a> ModerationEpoch<'a> {
                 author_hint: r.u16()?,
             });
         }
+        let actor_roster_pk = r.take(VERIFYING_KEY_LEN)?;
         let sig = r.take(SIGNATURE_LEN)?;
         r.finish()?;
         let out = ModerationEpoch {
@@ -536,6 +551,7 @@ impl<'a> ModerationEpoch<'a> {
             actor_index,
             actor_role,
             actions,
+            actor_roster_pk,
             sig,
         };
         out.check()?;
@@ -1129,14 +1145,16 @@ mod tests {
     fn the_granting_and_moderation_epochs_verify_their_signatures() {
         let granter = SigningKey::from_seed(Secret::new([5; 32]));
         let grantee = SigningKey::from_seed(Secret::new([6; 32]));
+        let granter_pk = granter.verifying_key().to_bytes();
         let grantee_pk = grantee.verifying_key().to_bytes();
+        let granter_hash = sha3_256(&[&granter_pk]);
         let mut epoch = GrantingEpoch {
             chain: chain(),
             granter_index: 0,
             grantee_index: 4,
             grantee_roster_pk_hash: sha3_256(&[&grantee_pk]),
             role: Role::Moderator,
-            grantee_roster_pk: Some(&grantee_pk),
+            granter_roster_pk: &granter_pk,
             sig: &[0; SIGNATURE_LEN],
         };
         let sig = granter
@@ -1147,20 +1165,26 @@ mod tests {
         let mut out = vec![0u8; 6_000];
         let n = epoch.encode(&mut out).unwrap();
         let back = GrantingEpoch::parse(&out[..n]).unwrap();
-        back.verify(&granter.verifying_key()).unwrap();
-        assert!(back.verify(&grantee.verifying_key()).is_err());
+        // GRP-317: the carried key must match the hash of the entry.
+        back.verify(&granter_hash).unwrap();
+        assert!(back.verify(&sha3_256(&[&grantee_pk])).is_err());
+        // A key of another signer under the right hash fails the signature.
+        let swapped = GrantingEpoch {
+            granter_roster_pk: &grantee_pk,
+            ..back.clone()
+        };
+        assert!(swapped.verify(&sha3_256(&[&grantee_pk])).is_err());
+        // A demotion carries the key of the signer as each grant does.
         let demote = GrantingEpoch {
             role: Role::Member,
-            grantee_roster_pk: None,
             ..epoch.clone()
         };
-        let n2 = demote.encode(&mut out).unwrap();
-        assert_eq!(n - n2, VERIFYING_KEY_LEN);
-        let bad = GrantingEpoch {
-            grantee_roster_pk: None,
+        assert_eq!(demote.encode(&mut out).unwrap(), n);
+        let short = GrantingEpoch {
+            granter_roster_pk: &granter_pk[..100],
             ..epoch.clone()
         };
-        assert!(bad.encode(&mut out).is_err());
+        assert!(short.encode(&mut out).is_err());
 
         let mut moderation = ModerationEpoch {
             chain: chain(),
@@ -1171,6 +1195,7 @@ mod tests {
                 target: [9; 16],
                 author_hint: 0xFFFF,
             }],
+            actor_roster_pk: &granter_pk,
             sig: &[0; SIGNATURE_LEN],
         };
         let sig = granter
@@ -1180,11 +1205,11 @@ mod tests {
         moderation.sig = &sig;
         let n = moderation.encode(&mut out).unwrap();
         let back = ModerationEpoch::parse(&out[..n]).unwrap();
-        back.verify(&granter.verifying_key()).unwrap();
+        back.verify(&granter_hash).unwrap();
         // The hint is not in the preimage, thus a changed hint still verifies.
         let mut hinted = back.clone();
         hinted.actions[0].author_hint = 3;
-        hinted.verify(&granter.verifying_key()).unwrap();
+        hinted.verify(&granter_hash).unwrap();
         let too_many = ModerationEpoch {
             actions: vec![moderation.actions[0]; 21],
             ..moderation.clone()
