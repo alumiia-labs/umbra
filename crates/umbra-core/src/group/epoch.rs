@@ -359,7 +359,9 @@ pub struct RotationOutput {
 
 /// Builds the epoch-key record of epoch `epoch` (`GRP-276` to `GRP-282`).
 /// `own_sks` are the owner credentials of the two replicas, given to each
-/// member at `admin` or above.
+/// member at `admin` or above. A rotator below `admin` holds none and
+/// passes `None`, thus each slot carries no owner secret (`GRP-277`,
+/// `GRP-379`).
 #[allow(clippy::too_many_arguments)]
 pub fn rotate<R: CryptoRng + TryCryptoRng + ?Sized>(
     group_id: &[u8; 32],
@@ -367,7 +369,7 @@ pub fn rotate<R: CryptoRng + TryCryptoRng + ?Sized>(
     roster_epoch: u32,
     rotator: u16,
     included: &[Included<'_>],
-    own_sks: &[Secret<32>; REPLICAS as usize],
+    own_sks: Option<&[Secret<32>; REPLICAS as usize]>,
     now: u64,
     bucket: umbra_wire::bucket::Bucket,
     rng: &mut R,
@@ -388,15 +390,14 @@ pub fn rotate<R: CryptoRng + TryCryptoRng + ?Sized>(
             roster_epoch,
             epoch_secret: secret.expose(),
         });
-        let admin = member.role >= Role::Admin;
+        let admin = member.role >= Role::Admin && own_sks.is_some();
         let payload = SlotPayload {
             rotator,
             epoch_secret: Secret::new(*secret.expose().expose()),
             tag,
-            own_sks: if admin {
-                own_sks.iter().map(|s| Secret::new(*s.expose())).collect()
-            } else {
-                Vec::new()
+            own_sks: match own_sks.filter(|_| admin) {
+                Some(own) => own.iter().map(|s| Secret::new(*s.expose())).collect(),
+                None => Vec::new(),
             },
         };
         let mut plain = alloc::vec![0u8; payload.len()];
@@ -408,7 +409,10 @@ pub fn rotate<R: CryptoRng + TryCryptoRng + ?Sized>(
         out.truncate(n);
         sealed_slots.push((member.index, out));
     }
-    let admin_slots = included.iter().filter(|m| m.role >= Role::Admin).count();
+    let admin_slots = included
+        .iter()
+        .filter(|m| m.role >= Role::Admin && own_sks.is_some())
+        .count();
     let inline_max = if admin_slots > 9 {
         INLINE_SLOTS_MAX - 1
     } else {
@@ -693,7 +697,7 @@ mod tests {
             4,
             0,
             &included,
-            &own,
+            Some(&own),
             now,
             Bucket::B2,
             &mut Rng(5),

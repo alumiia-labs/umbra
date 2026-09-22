@@ -373,6 +373,31 @@ impl Roster {
         &self.forks
     }
 
+    /// The rotation triggers the roster chain holds after `roster_epoch`
+    /// (§11.4.1, `GRP-357`): each epoch whose active set lost an index. A
+    /// removal, a self-removal, an eviction, and a re-key each lose one,
+    /// and an add loses none. The kept history bounds the answer, thus an
+    /// epoch older than `GROUP_RETENTION` raises no trigger and the age
+    /// rule of `GRP-360` covers it.
+    pub fn triggers_since(&self, roster_epoch: u32) -> Vec<Trigger> {
+        let mut triggers = Vec::new();
+        let mut before: Option<&Vec<u16>> = None;
+        for (epoch, (active, _)) in &self.history {
+            if let Some(previous) = before {
+                if *epoch > roster_epoch {
+                    if let Some(gone) = previous.iter().find(|index| !active.contains(index)) {
+                        triggers.push(Trigger {
+                            excluded: Some(*gone),
+                            roster_epoch: *epoch,
+                        });
+                    }
+                }
+            }
+            before = Some(active);
+        }
+        triggers
+    }
+
     /// Drops the active sets older than `GROUP_RETENTION` (`GRP-263`),
     /// and never the current one.
     pub fn retain_history(&mut self, now: u64) {

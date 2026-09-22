@@ -62,7 +62,7 @@ impl JoinKeys {
     }
 }
 
-fn wrap(control_type: ControlType, payload: &[u8]) -> Result<Vec<u8>, Error> {
+pub(crate) fn wrap(control_type: ControlType, payload: &[u8]) -> Result<Vec<u8>, Error> {
     let control = GroupControl {
         control_type,
         payload,
