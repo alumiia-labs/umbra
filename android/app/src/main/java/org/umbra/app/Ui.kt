@@ -75,6 +75,12 @@ sealed interface Screen {
         val name: String,
     ) : Screen
     data class LeaveGroup(val conversation: Conversation) : Screen
+    data class MemberRole(
+        val conversation: Conversation,
+        val index: UShort,
+        val name: String,
+        val role: uniffi.umbra_ffi.FfiRole,
+    ) : Screen
 
     /** The conversation of a view of one contact. */
     val contact: Conversation?
@@ -93,6 +99,7 @@ sealed interface Screen {
             is GroupMembers -> conversation
             is RemoveMember -> conversation
             is LeaveGroup -> conversation
+            is MemberRole -> conversation
             else -> null
         }
 }
@@ -198,8 +205,13 @@ private fun ContactView(
         is Screen.GroupDetails -> GroupDetailsScreen(chat, pop, push)
         is Screen.InviteToGroup -> InviteToGroupScreen(chat, pop)
         is Screen.GroupMembers -> GroupMembersScreen(chat, pop, push)
-        is Screen.RemoveMember -> RemoveMemberScreen(chat, top.index, top.name, pop)
+        is Screen.RemoveMember -> RemoveMemberScreen(chat, top.index, top.name, pop) {
+            // The role view of a member that left shows nothing true.
+            val under = stack.dropLast(1).lastOrNull()
+            setStack(stack.dropLast(if (under is Screen.MemberRole) 2 else 1))
+        }
         is Screen.LeaveGroup -> LeaveGroupScreen(chat, pop) { setStack(listOf()) }
+        is Screen.MemberRole -> MemberRoleScreen(chat, top.index, top.name, top.role, pop, push)
         is Screen.ScanSafetyNumber -> ScanSafetyNumberScreen(chat, pop)
         else -> Unit
     }

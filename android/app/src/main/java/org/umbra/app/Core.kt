@@ -18,6 +18,7 @@ import uniffi.umbra_ffi.FfiEvent
 import uniffi.umbra_ffi.FfiException
 import uniffi.umbra_ffi.FfiGroupMember
 import uniffi.umbra_ffi.FfiGroupOffer
+import uniffi.umbra_ffi.FfiRole
 import uniffi.umbra_ffi.Handle
 import uniffi.umbra_ffi.MsgInfo
 import uniffi.umbra_ffi.Receipts
@@ -488,6 +489,14 @@ object Core {
         call { client ->
             val members = client.groupMembers(conversation.id)
             main.post { onLoaded(members) }
+        }
+
+    /** Gives a member the role `member` or `moderator`. */
+    fun setGroupRole(conversation: Conversation, index: UShort, role: FfiRole, then: () -> Unit) =
+        call { client ->
+            client.setGroupRole(conversation.id, index, role)
+            refreshChats()
+            main.post { then() }
         }
 
     /** Removes a member. The group starts a new epoch in the same action. */

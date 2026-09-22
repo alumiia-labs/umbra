@@ -1072,10 +1072,20 @@ impl Inner {
             }
         }
         if let Ok(silent) = self.client.members_to_evict(now_ms, &mut OsRng) {
-            for (conversation, index) in silent {
-                let _ = self
-                    .client
-                    .remove_from_group(conversation, index, now_ms, &mut OsRng);
+            for (conversation, index, action) in silent {
+                let _ = match action {
+                    crate::client::Silence::Remove => {
+                        self.client
+                            .remove_from_group(conversation, index, now_ms, &mut OsRng)
+                    }
+                    crate::client::Silence::Demote => self.client.set_group_role(
+                        conversation,
+                        index,
+                        umbra_wire::group::control::Role::Member,
+                        now_ms,
+                        &mut OsRng,
+                    ),
+                };
             }
         }
         while let Some(job) = self.client.take_group_rekey() {
@@ -2414,6 +2424,29 @@ impl Handle {
                 contact: member.contact.map(|held| held.0.to_vec()),
             })
             .collect())
+    }
+
+    /// Gives a member the role `member` or `moderator`, or takes it back.
+    pub fn set_group_role(
+        &self,
+        conversation: Vec<u8>,
+        index: u16,
+        role: FfiRole,
+    ) -> Result<(), FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        let role = match role {
+            FfiRole::Observer => umbra_wire::group::control::Role::Observer,
+            FfiRole::Member => umbra_wire::group::control::Role::Member,
+            FfiRole::Moderator => umbra_wire::group::control::Role::Moderator,
+            FfiRole::Admin => umbra_wire::group::control::Role::Admin,
+            FfiRole::Owner => umbra_wire::group::control::Role::Owner,
+        };
+        let mut inner = locked(&self.inner);
+        inner
+            .client
+            .set_group_role(conversation, index, role, unix_now_ms(), &mut OsRng)?;
+        inner.pump_groups();
+        Ok(())
     }
 
     /// Removes a member and rotates the epoch in the same action

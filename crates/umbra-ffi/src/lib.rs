@@ -353,7 +353,10 @@ mod tests {
         sha2::Sha256,
     };
 
-    use super::{client::Client, *};
+    use super::{
+        client::{Client, Silence},
+        *,
+    };
     use umbra_core::session::node::ContactId;
 
     struct Rng(u64);
@@ -701,21 +704,30 @@ mod tests {
             client
                 .members_to_evict(ms(quiet + 3_600), &mut rng)
                 .unwrap(),
-            vec![(conversation, 2)]
+            vec![(conversation, 2, Silence::Remove)]
         );
         let silent = week + 30 * DAY;
-        // The member of the presence record is not silent yet, and at the
-        // bound it draws its backoff.
-        for at in [silent - 1, silent] {
-            assert_eq!(
-                client.members_to_evict(ms(at), &mut rng).unwrap(),
-                vec![(conversation, 2)]
-            );
-        }
+        // The member of the presence record is not silent yet. Member 2
+        // comes back once its wait after the last answer ran out, and at
+        // the bound member 1 draws its backoff.
+        assert_eq!(
+            client.members_to_evict(ms(silent - 1), &mut rng).unwrap(),
+            vec![(conversation, 2, Silence::Remove)]
+        );
+        assert!(client
+            .members_to_evict(ms(silent), &mut rng)
+            .unwrap()
+            .is_empty());
         let due = client
             .members_to_evict(ms(silent + 3_600), &mut rng)
             .unwrap();
-        assert_eq!(due, vec![(conversation, 1), (conversation, 2)]);
+        assert_eq!(
+            due,
+            vec![
+                (conversation, 1, Silence::Remove),
+                (conversation, 2, Silence::Remove)
+            ]
+        );
 
         // GRP-133 and GRP-264: the removal rotates the epoch.
         client
@@ -728,6 +740,68 @@ mod tests {
             .members_to_evict(ms(silent + 7_200), &mut rng)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn an_admin_sets_a_role_and_a_silent_moderator_loses_it_before_it_goes() {
+        use umbra_wire::group::control::Role;
+        const DAY: u64 = 86_400;
+        let mut rng = Rng(71);
+        let mut client = new_client(&mut rng);
+        let mut other = new_client(&mut rng);
+        let (conversation, _) = ready_pair(&mut client, &mut other, &mut rng);
+        let mut third = new_client(&mut rng);
+        join_group(&mut client, &mut third, conversation, &mut rng);
+        let t0 = 1_700_000_010;
+        let ms = |seconds: u64| seconds * 1_000;
+
+        // The owner makes member 1 a moderator, and the grant goes out
+        // before it applies here (`GRP-389`).
+        client
+            .set_group_role(conversation, 1, Role::Moderator, ms(t0), &mut rng)
+            .unwrap();
+        let grant = client.take_group_post().unwrap();
+        assert!(grant.message.is_none());
+        let roles = |client: &Client<MemoryBackend, Element>| -> Vec<Role> {
+            client
+                .group_members(conversation)
+                .unwrap()
+                .iter()
+                .map(|member| member.role)
+                .collect()
+        };
+        assert_eq!(
+            roles(&client),
+            vec![Role::Owner, Role::Moderator, Role::Member]
+        );
+        // The roles that hold the owner credentials wait for their rotation.
+        assert!(client
+            .set_group_role(conversation, 2, Role::Admin, ms(t0), &mut rng)
+            .is_err());
+
+        // GRP-166: a silent moderator loses its role first, and the removal
+        // comes after the rate of one epoch (`GRP-076`).
+        assert!(client
+            .members_to_evict(ms(t0), &mut rng)
+            .unwrap()
+            .is_empty());
+        let silent = t0 + 30 * DAY;
+        client.members_to_evict(ms(silent), &mut rng).unwrap();
+        let first = client
+            .members_to_evict(ms(silent + 3_600), &mut rng)
+            .unwrap();
+        assert!(first.contains(&(conversation, 1, Silence::Demote)));
+        client
+            .set_group_role(conversation, 1, Role::Member, ms(silent + 3_600), &mut rng)
+            .unwrap();
+        let later = client
+            .members_to_evict(ms(silent + 3_630), &mut rng)
+            .unwrap();
+        assert!(!later.iter().any(|(_, index, _)| *index == 1));
+        let last = client
+            .members_to_evict(ms(silent + 7_200), &mut rng)
+            .unwrap();
+        assert!(last.contains(&(conversation, 1, Silence::Remove)));
     }
 
     #[test]

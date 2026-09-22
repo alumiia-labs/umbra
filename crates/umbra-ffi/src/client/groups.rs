@@ -18,7 +18,7 @@ use umbra_core::{
         receive::Outcome,
         roster::Applied,
         state::Group,
-        GROUP_REPLICAS, GROUP_SILENT_EVICT,
+        GROUP_REPLICAS, GROUP_SILENT_EVICT, ROSTER_RATE_LIMIT,
     },
     store::{
         engine::Backend,
@@ -221,6 +221,16 @@ pub struct GroupMember {
     pub is_self: bool,
     /// The contact behind the member, where this device knows it.
     pub contact: Option<ConversationId>,
+}
+
+/// What an admin does about a member that stayed silent (§11.9.7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Silence {
+    /// Remove the member with a plain epoch (`GRP-133`).
+    Remove,
+    /// Take the role of a moderator first (`GRP-166`). The removal follows
+    /// after `ROSTER_RATE_LIMIT`.
+    Demote,
 }
 
 /// One replica of a group queue, as a post names it.
@@ -1321,6 +1331,39 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         self.rotate_group(conversation, now_ms, rng)
     }
 
+    /// Gives a role below `admin` to a member below `admin` (§11.9.2). The
+    /// granting epoch goes out before it applies here (`GRP-389`). A role
+    /// at `admin` or above holds the owner credentials of the relay, whose
+    /// rotation is not here yet, thus this call refuses it.
+    pub fn set_group_role<R: CryptoRng + umbra_crypto::rand_core::TryCryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        index: u16,
+        role: Role,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let group = self.group_of(conversation)?;
+        let held = group
+            .roster()
+            .member(index)
+            .filter(|member| member.active)
+            .ok_or(Error::NotFound)?
+            .role;
+        if index == group.own_index() || held >= Role::Admin || role >= Role::Admin {
+            return Err(Error::Malformed);
+        }
+        if held == role {
+            return Ok(());
+        }
+        let object = group
+            .grant(index, role, rng)
+            .map_err(|_| Error::Malformed)?;
+        self.post_group_control(conversation, &object, now_ms, rng)?;
+        self.apply_own_roster_object(conversation, &object, now_ms, rng)?;
+        Ok(())
+    }
+
     /// Leaves a group (`GRP-067`). The member that leaves rotates nothing,
     /// because `GRP-356` bars the index each trigger excludes.
     pub fn leave_group<R: CryptoRng + ?Sized>(
@@ -1847,14 +1890,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// with no clock starts one here, thus a device that became an admin
     /// never removes a member on a silence it did not watch (`GRP-396`).
     ///
-    /// A silent member at `moderator` or above loses its role first, and a
-    /// removal that would leave one owner waits for a grant (`GRP-166`,
-    /// `GRP-168`). Neither is here: a granting epoch comes with the roles.
+    /// A silent moderator loses its role first (`GRP-166`). A silent
+    /// admin or owner waits: its role holds the owner credentials of the
+    /// relay, and their rotation is not here yet.
     pub fn members_to_evict<R: CryptoRng + ?Sized>(
         &mut self,
         now_ms: u64,
         rng: &mut R,
-    ) -> Result<Vec<(ConversationId, u16)>, Error> {
+    ) -> Result<Vec<(ConversationId, u16, Silence)>, Error> {
         let now = now_ms / 1_000;
         let mut due = Vec::new();
         for conversation in self.group_conversations()? {
@@ -1878,14 +1921,27 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     self.put_clock(conversation, key, now, rng)?;
                     continue;
                 };
-                if now.saturating_sub(seen) < GROUP_SILENT_EVICT
-                    || PresenceTracker::eviction(role, active, owners) != Eviction::Remove
-                {
+                let action = match PresenceTracker::eviction(role, active, owners) {
+                    Eviction::Remove => Some(Silence::Remove),
+                    Eviction::DemoteFirst if role == Role::Moderator => Some(Silence::Demote),
+                    _ => None,
+                };
+                let Some(action) =
+                    action.filter(|_| now.saturating_sub(seen) >= GROUP_SILENT_EVICT)
+                else {
                     self.groups.evictions.remove(&(conversation, index));
                     continue;
-                }
+                };
                 match self.groups.evictions.get(&(conversation, index)) {
-                    Some(at) if now >= *at => due.push((conversation, index)),
+                    Some(at) if now >= *at => {
+                        due.push((conversation, index, action));
+                        // GRP-076: the removal after a demotion waits for
+                        // the rate of one epoch of this admin.
+                        let next = now
+                            .saturating_add(ROSTER_RATE_LIMIT)
+                            .saturating_add(group.rotation_delay(rng));
+                        self.groups.evictions.insert((conversation, index), next);
+                    }
                     Some(_) => {}
                     None => {
                         let at = now.saturating_add(group.rotation_delay(rng));

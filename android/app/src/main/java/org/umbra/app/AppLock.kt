@@ -109,8 +109,9 @@ fun AutoLockScreen(onBack: () -> Unit) {
     }
 }
 
+/** The mark of one choice of a list, as the mockups draw it. */
 @Composable
-private fun RadioMark(isChosen: Boolean) {
+fun RadioMark(isChosen: Boolean) {
     Box(
         Modifier
             .size(20.dp)

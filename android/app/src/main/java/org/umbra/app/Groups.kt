@@ -1,6 +1,7 @@
 package org.umbra.app
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -14,6 +15,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -206,10 +208,18 @@ fun GroupMembersScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
         BackBar("Members · ${members.size}", onBack = onBack)
         LazyColumn {
             items(members, key = { it.index.toInt() }) { member ->
-                // GRP-382: a removal reaches a member below `moderator`.
-                val removable = mayRemove && !member.isSelf && member.role <= FfiRole.MEMBER
-                MemberRow(member, removable) {
-                    push(Screen.RemoveMember(chat.conversation, member.index, memberName(member)))
+                // The roles at `admin` and above hold the owner credentials
+                // of the relay, and this device changes none of them yet.
+                val editable = mayRemove && !member.isSelf && member.role < FfiRole.ADMIN
+                MemberRow(member, editable) {
+                    push(
+                        Screen.MemberRole(
+                            chat.conversation,
+                            member.index,
+                            memberName(member),
+                            member.role,
+                        ),
+                    )
                 }
             }
             if (chat.isMember) {
@@ -255,6 +265,77 @@ private fun MemberRow(member: FfiGroupMember, removable: Boolean, onRemove: () -
     }
 }
 
+/** The roles an admin gives here, with the words of mockup 054. */
+private val RoleChoices = listOf(
+    FfiRole.MEMBER to "Can send messages",
+    FfiRole.MODERATOR to "Can moderate content",
+)
+
+/**
+ * Mockup 054: the role of one member, and the way to its removal. A
+ * removal reaches a member below `moderator` (`GRP-382`).
+ */
+@Composable
+fun MemberRoleScreen(
+    chat: Chat,
+    index: UShort,
+    name: String,
+    role: FfiRole,
+    onBack: () -> Unit,
+    push: (Screen) -> Unit,
+) {
+    var chosen by remember { mutableStateOf(role) }
+    var isSaving by remember { mutableStateOf(false) }
+    Column(Modifier.fillMaxSize()) {
+        BackBar("Member role", onBack = onBack)
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
+            Spacer(Modifier.height(12.dp))
+            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                LetterAvatar(name, index.toInt(), size = 80)
+            }
+            Spacer(Modifier.height(16.dp))
+            Text(name, style = MaterialTheme.typography.headlineMedium)
+            Spacer(Modifier.height(8.dp))
+            for ((choice, detail) in RoleChoices) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .pressShadeInColumn()
+                        .press(role = androidx.compose.ui.semantics.Role.RadioButton) {
+                            chosen = choice
+                        }
+                        .padding(horizontal = PressInset, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    RadioMark(isChosen = chosen == choice)
+                    Spacer(Modifier.width(14.dp))
+                    Column {
+                        Text(roleLabel(choice))
+                        Text(
+                            detail,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Palette.TextSecondary,
+                            modifier = Modifier.subline(),
+                        )
+                    }
+                }
+                HorizontalDivider(color = Palette.Divider)
+            }
+            Spacer(Modifier.height(16.dp))
+            PrimaryButton("Save role", enabled = chosen != role && !isSaving) {
+                isSaving = true
+                Core.setGroupRole(chat.conversation, index, chosen) { onBack() }
+            }
+            if (role <= FfiRole.MEMBER) {
+                Spacer(Modifier.height(10.dp))
+                SecondaryButton("Remove from group") {
+                    push(Screen.RemoveMember(chat.conversation, index, name))
+                }
+            }
+        }
+    }
+}
+
 /**
  * Mockup 055: the removal of one member. The group starts a new epoch in
  * the same action, thus the member reads no later record (`GRP-264`).
@@ -265,6 +346,7 @@ fun RemoveMemberScreen(
     index: UShort,
     name: String,
     onBack: () -> Unit,
+    onDone: () -> Unit,
 ) {
     var isRemoving by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxSize()) {
@@ -278,7 +360,7 @@ fun RemoveMemberScreen(
             Spacer(Modifier.height(20.dp))
             DangerButton("Remove member", enabled = !isRemoving) {
                 isRemoving = true
-                Core.removeFromGroup(chat.conversation, index) { onBack() }
+                Core.removeFromGroup(chat.conversation, index) { onDone() }
             }
             QuietButton("Cancel", onBack)
         }

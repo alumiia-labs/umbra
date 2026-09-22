@@ -23,8 +23,8 @@ use umbra_wire::{
     bucket::Bucket,
     group::{
         control::{
-            Chain, ControlType, GroupControl, GroupMemberEntry, JoinRecord, MemberKemKey,
-            PlainEpoch, PlainOp, ReplicaRef, Role, RosterSnapshot,
+            Chain, ControlType, GrantingEpoch, GroupControl, GroupMemberEntry, JoinRecord,
+            MemberKemKey, PlainEpoch, PlainOp, ReplicaRef, Role, RosterSnapshot,
         },
         record::{
             slot_len, Carrier, EpochKeyBody, GroupQueueRecord, RecordKind, SlotPayload,
@@ -385,6 +385,49 @@ impl Group {
     /// it and rotates directly after it (`GRP-264`).
     pub fn remove_object(&self, index: u16) -> Result<Vec<u8>, Error> {
         self.plain_epoch(PlainOp::Remove { index })
+    }
+
+    /// The granting epoch that gives `role` to the member at `index`,
+    /// signed under the roster key of this member (`GRP-060`, `GRP-061`).
+    /// It carries that key, whose hash the roster entry of this member
+    /// binds (`GRP-316`). The roster checks the authority when it applies
+    /// the epoch; this call refuses a member below `admin` at once.
+    pub fn grant<R: TryCryptoRng + ?Sized>(
+        &self,
+        index: u16,
+        role: Role,
+        rng: &mut R,
+    ) -> Result<Vec<u8>, Error> {
+        if self.own_role().is_none_or(|own| own < Role::Admin) {
+            return Err(Error::Unverified);
+        }
+        let grantee = self
+            .roster
+            .member(index)
+            .filter(|member| member.active)
+            .ok_or(Error::NoPath)?;
+        let granter_pk = self.keys.roster().verifying_key().to_bytes();
+        let mut epoch = GrantingEpoch {
+            chain: Chain {
+                group_id: *self.roster.group_id(),
+                epoch_index: self.roster.epoch_index().saturating_add(1),
+                previous_epoch_hash: *self.roster.chain_hash(),
+            },
+            granter_index: self.own_index,
+            grantee_index: index,
+            grantee_roster_pk_hash: grantee.roster_pk_hash,
+            role,
+            granter_roster_pk: &granter_pk,
+            sig: &[],
+        };
+        let sig = self.keys.roster().sign(&epoch.preimage(), rng)?.to_bytes();
+        epoch.sig = &sig;
+        let mut payload = alloc::vec![0u8; 6_000];
+        let n = epoch.encode(&mut payload)?;
+        super::join::wrap(
+            ControlType::GrantingEpoch,
+            payload.get(..n).ok_or(Error::Malformed)?,
+        )
     }
 
     /// The plain epoch by which this member leaves (`GRP-067`).
@@ -1164,6 +1207,38 @@ mod tests {
         );
         assert_eq!(creator.own_role(), Some(Role::Owner));
         assert_eq!(third.own_role(), Some(Role::Member));
+    }
+
+    #[test]
+    fn an_admin_grants_a_role_that_every_member_verifies() {
+        let now = 1_700_000_000;
+        let (mut creator, mut member, mut third) = trio(now);
+        let mut rng = Rng(37);
+        // A member below `admin` grants nothing (`GRP-063`).
+        assert_eq!(
+            member.grant(2, Role::Moderator, &mut rng),
+            Err(Error::Unverified)
+        );
+        let grant = creator.grant(2, Role::Moderator, &mut rng).unwrap();
+        let control = GroupControl::parse(&grant).unwrap();
+        for group in [&mut creator, &mut member, &mut third] {
+            assert_eq!(
+                group.apply_control(&control, 0, now).unwrap(),
+                Applied::Granted {
+                    index: 2,
+                    role: Role::Moderator
+                }
+            );
+        }
+        assert_eq!(third.own_role(), Some(Role::Moderator));
+        // A demotion goes the same way, and each roster agrees.
+        let demote = creator.grant(2, Role::Member, &mut rng).unwrap();
+        let control = GroupControl::parse(&demote).unwrap();
+        for group in [&mut creator, &mut member, &mut third] {
+            group.apply_control(&control, 0, now).unwrap();
+        }
+        assert_eq!(member.roster().member(2).unwrap().role, Role::Member);
+        assert_eq!(creator.roster().chain_hash(), third.roster().chain_hash());
     }
 
     #[test]
