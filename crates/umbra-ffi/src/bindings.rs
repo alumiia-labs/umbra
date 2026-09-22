@@ -1330,7 +1330,8 @@ impl Inner {
                 else {
                     return;
                 };
-                // The next `GSUB` of the group takes the other replica.
+                // GRP-391: the next `GSUB` of the group takes the other
+                // replica, and a third waits for the next session.
                 self.group_reading.remove(&conversation);
                 if self.group_lost.insert(conversation) {
                     self.pump_groups();

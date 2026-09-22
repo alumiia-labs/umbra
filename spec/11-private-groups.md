@@ -197,6 +197,35 @@ replicas of one group give two unrelated sequences.
   record of the group (§11.4.2) on one replica before it sends a `GPOST`. Thus
   a device never posts under a stale epoch after a rotation that it could have
   read.
+
+**A replica that no circuit reaches.** Part 3 rule `NET-169` ends a build
+after `CIRCUIT_BUILD_TIMEOUT`. A relay that is down is the case that the second
+replica exists for, thus that end is not the end of the session.
+
+- **[GRP-390]** A client whose circuit to one replica ends under `NET-169`
+  MUST keep each other circuit of its group-queue session. It MUST fail each
+  command that waited for the circuit that ended, and `GRP-195` takes the
+  record at the other replica.
+- **[GRP-391]** A reader whose `GSUB` found no circuit under `NET-169` MUST
+  subscribe at the other replica in the same session. It MUST NOT try a third
+  time in that session. `GRP-204` gives the replica of its next session.
+- **[GRP-392]** A client whose group-queue session ends before an answer to a
+  `GPOST` MUST send the same bytes in its next session, under Part 3 rule
+  `NET-072`, and the relay answers with the `seq` that it holds (`NET-239`).
+  **[GRP-393]** A client that sends a `GNEW` again in the same way MAY leave
+  one empty group queue at a relay that answered the first one, and
+  `GROUP_RETENTION` ends it.
+- **[GRP-394]** A client whose group-queue link ends MUST wait
+  `GROUP_RELINK_FIRST` before a new link. It MUST double the wait after each
+  link that ended before a circuit was ready, up to `GROUP_RELINK_MAX`, and
+  MUST return to `GROUP_RELINK_FIRST` after a link on which a circuit was
+  ready.
+
+> *Cause.* An earlier implementation ended the whole session when one
+> circuit failed, and opened no new link on its own. A group then went silent
+> until a record of a contact woke the client, and one relay that was down
+> made the session of every group fail. The wait of `GRP-394` keeps a client
+> whose guard is down from a burst of links, which the guard would see.
 - A reader in Instant mode registers one notify queue for the group with
   `GNREG`, and Part 8 §8.5.2 gives that queue, its handle, and the digest that
   the relay writes into it.
@@ -1520,6 +1549,8 @@ made the joiner open 499 pairwise channels for the same admission.
 | `GROUP_EPOCH_GRACE` | 24 h from the installation of the next epoch, measured by the receiver (§11.3.2) |
 | `GROUP_ROSTER_WAIT` | 24 h from the arrival of the held record, measured by the receiver (§11.3.5) |
 | `GROUP_GAP_TIMEOUT` | 60 s from the first record above the gap, measured by the reader (§11.2.2) |
+| `GROUP_RELINK_FIRST` | 1 s from the end of a group-queue link, measured by the client (§11.2.2) |
+| `GROUP_RELINK_MAX` | 60 s (§11.2.2) |
 | `ROTATE_BACKOFF_ROLE` | exponential, mean 10 s, drawn by a member at `moderator` or above at a trigger it did not cause (§11.4.1) |
 | `ROTATE_BACKOFF_MEMBER` | exponential, mean 60 s, drawn by a member below `moderator` at a trigger (§11.4.1) |
 | `GROUP_TAG_LEN` | 12 bytes (§11.3.3) |

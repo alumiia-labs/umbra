@@ -44,7 +44,7 @@ use umbra_wire::{
     app::{AppKind, AppMessage, Channel},
     bucket::{Bucket, COMMAND_HEADER},
     capsule,
-    cell::{Cell, CellCommand},
+    cell::{pad_body, Cell, CellCommand},
     command::{iblob_parse, Cmd, Command, IdsPayload, LINK_ID_LEN},
     group::{
         encode_gsub, split_gmsg, GkeyPayload, GnewPayload, GroupCmd, GseqPayload, GKEY_LEN,
@@ -727,6 +727,17 @@ fn unreachable_ingress(root: RootIdentity) -> ClientNode {
     ClientNode::with_relays(nowhere, Vec::new(), root)
 }
 
+/// The `DESTROY` cell of a circuit under build, sealed for the hops that
+/// answered, thus the last of them ends its part (`NET-169`).
+fn destroy_cell(build: &mut CircuitBuild) -> Option<Vec<u8>> {
+    let mut body = alloc::vec![0u8; BUILD_BUCKET.body_len()];
+    // A build cell carries `EXTEND` or `EXTENDED` alone (`NET-157`), thus a
+    // `DESTROY` takes the plain body of its bucket.
+    pad_body(BUILD_BUCKET, CellCommand::Destroy, &[], &mut body).ok()?;
+    let tag = build.seal(&mut body).ok()?;
+    Some([build.circ_id().as_slice(), &tag, &body].concat())
+}
+
 fn copy_static(relay: &RelayStatic) -> RelayStatic {
     RelayStatic {
         s: relay.s,
@@ -956,19 +967,21 @@ impl ClientNode {
         self.pump()
     }
 
-    /// Ends each circuit whose build ran past `CIRCUIT_BUILD_TIMEOUT`
-    /// (Part 3 §3.4.3). The first tick that sees a build stamps it, thus
-    /// the end comes at most one tick late. A relay that drops an `EXTEND`
-    /// sends nothing back, and without this the build waits for ever.
+    /// Ends each circuit whose build ran past `CIRCUIT_BUILD_TIMEOUT` with
+    /// a `DESTROY` cell (`NET-169`). The first tick that sees a build
+    /// stamps it, thus the end comes at most one tick late. A relay that
+    /// drops an `EXTEND` sends nothing back, and without this the build
+    /// waits for ever.
     ///
     /// A group node fails the commands that waited for a circuit to one
     /// relay, and each other circuit runs on: a replica on a relay that is
-    /// down is the case that the second replica exists for (`GRP-195`).
+    /// down is the case that the second replica exists for (`GRP-390`).
     /// Each other circuit that ends gives `CircuitLost`, which the runtime
     /// reads as a build that failed.
     pub fn on_tick(&mut self, now: u64) -> Vec<ClientEvent> {
         let mut is_lost = false;
         let mut unreachable = Vec::new();
+        let mut destroys = Vec::new();
         let is_group = self.range == Range::Group;
         for slot in &mut self.slots {
             if !matches!(slot.circuit, Circuit::Building { .. }) {
@@ -979,12 +992,21 @@ impl ClientNode {
             if now.saturating_sub(since) < CIRCUIT_BUILD_TIMEOUT {
                 continue;
             }
-            slot.circuit = Circuit::None;
+            if let Circuit::Building { mut build, .. } =
+                core::mem::replace(&mut slot.circuit, Circuit::None)
+            {
+                destroys.extend(destroy_cell(&mut build));
+            }
             slot.building_since = None;
             match slot.exit.filter(|_| is_group) {
                 Some(relay) => unreachable.push(relay),
                 None => is_lost = true,
             }
+        }
+        for cell in destroys {
+            // A link that is gone carries no cell, and the relay ends the
+            // circuit with it.
+            let _ = self.send_cell(&cell);
         }
         let mut events = Vec::new();
         for relay in unreachable {
@@ -2748,6 +2770,8 @@ mod tests {
             node.on_tick(start + CIRCUIT_BUILD_TIMEOUT),
             alloc::vec![ClientEvent::CircuitLost]
         );
+        // NET-169: the circuit ends with a `DESTROY` cell.
+        assert_eq!(node.take_capsules().len(), 1);
         // The circuit is gone, thus a later tick ends nothing more.
         assert!(node.on_tick(start + 60).is_empty());
         assert!(!node.is_ready());

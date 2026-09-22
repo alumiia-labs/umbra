@@ -33,12 +33,13 @@ use crate::runtime::OsRng;
 /// The tick that keeps the run from a stall with no traffic.
 const TICK: Duration = Duration::from_secs(1);
 
-/// The first wait before a new link. Each session that ends before its
-/// circuit is ready doubles it, up to [`BACKOFF_MAX`].
-const BACKOFF_FIRST: Duration = Duration::from_secs(1);
+/// `GROUP_RELINK_FIRST`: the first wait before a new link. Each session
+/// that ends before its circuit is ready doubles it, up to
+/// [`GROUP_RELINK_MAX`] (`GRP-394`).
+const GROUP_RELINK_FIRST: Duration = Duration::from_secs(1);
 
-/// The longest wait before a new link.
-const BACKOFF_MAX: Duration = Duration::from_secs(60);
+/// `GROUP_RELINK_MAX`: the longest wait before a new link.
+const GROUP_RELINK_MAX: Duration = Duration::from_secs(60);
 
 /// How long a session must stay ready before a `GKEY` or a `GDEL` that it
 /// carried counts as delivered. Neither command has an answer.
@@ -224,13 +225,13 @@ pub enum GroupUpdate {
     },
     /// The session that carried the command ended before an answer. The
     /// caller sends the same bytes in a later session, and a relay that
-    /// holds them gives the answer it holds (`NET-239`, `NET-072`).
+    /// holds them gives the answer it holds (`GRP-392`, `NET-239`).
     Unsent {
         /// The tag of the command.
         tag: u64,
     },
     /// No circuit reached the relay of a `GSUB`. The caller subscribes at
-    /// the other replica (`GRP-204`).
+    /// the other replica (`GRP-391`).
     SubscriptionLost {
         /// The group queue of the `GSUB`.
         group_queue_id: [u8; 32],
@@ -277,7 +278,7 @@ pub async fn run_groups(
         early: Vec::new(),
         quiet: Vec::new(),
     };
-    let mut backoff = BACKOFF_FIRST;
+    let mut backoff = GROUP_RELINK_FIRST;
     loop {
         let (end, was_ready) = session(
             &mut node,
@@ -299,9 +300,9 @@ pub async fn run_groups(
             .retain(|command| !matches!(command, GroupCommand::Subscribe { .. }));
         let _ = updates.send(GroupUpdate::Reset);
         backoff = if was_ready {
-            BACKOFF_FIRST
+            GROUP_RELINK_FIRST
         } else {
-            backoff.saturating_mul(2).min(BACKOFF_MAX)
+            backoff.saturating_mul(2).min(GROUP_RELINK_MAX)
         };
         let wait = tokio::time::sleep(backoff);
         tokio::pin!(wait);
@@ -421,7 +422,7 @@ async fn session(
                             tag: held.tag,
                             reason: Some(reason),
                         },
-                        // GRP-195: the other replica takes the same record.
+                        // GRP-390: the other replica takes the same record.
                         GroupOutcome::Unreachable => GroupUpdate::Failed {
                             tag: held.tag,
                             reason: None,
