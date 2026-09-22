@@ -327,10 +327,17 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
             }
         }
         // GRP-210: a group whose two relays hold it no more takes no new
-        // message, and the composer would promise one.
-        if (chat.isClosed) {
+        // message, and the composer would promise one. A group that
+        // removed this device takes none either.
+        val stopped = when {
+            chat.isClosed -> "The relays of this group hold it no more. It takes no new message."
+            chat.isGroup && !chat.isMember ->
+                "You are no longer a member of this group. The messages here stay on this device."
+            else -> null
+        }
+        if (stopped != null) {
             Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
-                Note("The relays of this group hold it no more. It takes no new message.")
+                Note(stopped)
             }
             return@Column
         }

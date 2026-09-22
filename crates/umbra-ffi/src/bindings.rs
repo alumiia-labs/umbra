@@ -205,6 +205,8 @@ pub struct FfiGroupInfo {
     /// Whether each replica refused the group queue. The group is closed,
     /// and this device sends nothing more to it (`GRP-210`).
     pub is_closed: bool,
+    /// Whether the roster still holds this device.
+    pub is_member: bool,
 }
 
 /// The role of one member of a group (§11.9).
@@ -2296,6 +2298,7 @@ impl Handle {
             members: info.members,
             epoch: info.epoch,
             is_ready: info.is_ready,
+            is_member: info.is_member,
         })
     }
 

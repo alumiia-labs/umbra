@@ -167,6 +167,9 @@ pub struct GroupInfo {
     /// Whether each replica refused the group queue, thus the group is
     /// closed and this device sends nothing more (`GRP-210`).
     pub is_closed: bool,
+    /// Whether the roster still holds this device. A removal and a
+    /// self-removal both take it away (`GRP-067`, `GRP-382`).
+    pub is_member: bool,
 }
 
 /// One `GNEW` that waits for a circuit to its relay.
@@ -479,6 +482,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             epoch: group.epoch(),
             is_ready,
             is_closed: self.group_closed(conversation)?,
+            is_member: group
+                .roster()
+                .member(group.own_index())
+                .is_some_and(|member| member.active),
         })
     }
 

@@ -84,6 +84,8 @@ class Chat(
     val isReady: Boolean = true,
     /** Whether each relay of a group refused its queue (`GRP-210`). */
     val isClosed: Boolean = false,
+    /** Whether the roster of a group still holds this device. */
+    val isMember: Boolean = true,
 ) {
     /** What each list shows: the name of the user, or a stable short label. */
     val title: String
@@ -762,6 +764,7 @@ object Core {
             members = group?.members?.toInt() ?: 0,
             isReady = group?.isReady ?: true,
             isClosed = group?.isClosed ?: false,
+            isMember = group?.isMember ?: true,
         )
     }
 

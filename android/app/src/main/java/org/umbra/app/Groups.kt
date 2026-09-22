@@ -107,16 +107,18 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                     push(Screen.GroupMembers(chat.conversation))
                 },
             )
-            EntryRow(
-                RowEntry("user-plus", "Invite a contact") {
-                    push(Screen.InviteToGroup(chat.conversation))
-                },
-            )
-            EntryRow(
-                RowEntry("xmark", "Leave group") {
-                    push(Screen.LeaveGroup(chat.conversation))
-                },
-            )
+            if (chat.isMember) {
+                EntryRow(
+                    RowEntry("user-plus", "Invite a contact") {
+                        push(Screen.InviteToGroup(chat.conversation))
+                    },
+                )
+                EntryRow(
+                    RowEntry("xmark", "Leave group") {
+                        push(Screen.LeaveGroup(chat.conversation))
+                    },
+                )
+            }
             val waiting = Core.groupJoiners.filter { it.groupId.toList() == chat.groupId.toList() }
             for (joiner in waiting) {
                 JoinerRow(joiner)
@@ -124,6 +126,9 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
             if (chat.isClosed) {
                 Spacer(Modifier.height(12.dp))
                 Note("The relays of this group hold it no more. It takes no new message.")
+            } else if (!chat.isMember) {
+                Spacer(Modifier.height(12.dp))
+                Note("You are no longer a member of this group.")
             } else if (!chat.isReady) {
                 Spacer(Modifier.height(12.dp))
                 // A technical fact that the user cannot see anywhere else.
@@ -204,11 +209,13 @@ fun GroupMembersScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                     push(Screen.RemoveMember(chat.conversation, member.index, memberName(member)))
                 }
             }
-            item {
-                Spacer(Modifier.height(12.dp))
-                Column(Modifier.padding(horizontal = 20.dp)) {
-                    SecondaryButton("Add members") {
-                        push(Screen.InviteToGroup(chat.conversation))
+            if (chat.isMember) {
+                item {
+                    Spacer(Modifier.height(12.dp))
+                    Column(Modifier.padding(horizontal = 20.dp)) {
+                        SecondaryButton("Add members") {
+                            push(Screen.InviteToGroup(chat.conversation))
+                        }
                     }
                 }
             }
