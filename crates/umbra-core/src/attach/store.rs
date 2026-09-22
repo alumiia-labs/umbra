@@ -44,6 +44,24 @@ pub struct Registration {
     pub registered_at: u64,
 }
 
+/// A held chunk, as the durable store of a relay holds it. The fetch rate
+/// and the egress budget stay in RAM, and a restart starts them again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldChunk {
+    /// The class.
+    pub class: Class,
+    /// The credentials.
+    pub credentials: Credentials,
+    /// The bytes that the `CPUT` or the `CRPUT` gave.
+    pub bytes: Vec<u8>,
+    /// The registration time.
+    pub registered_at: u64,
+    /// The time of the bytes, and then of the last renewal.
+    pub renewed_at: u64,
+    /// The erase time.
+    pub erase_at: u64,
+}
+
 struct Held {
     class: Class,
     credentials: Credentials,
@@ -64,6 +82,7 @@ pub struct ChunkStore {
     quota: BTreeMap<[u8; 32], (u64, u64)>,
     egress_day: u64,
     egress_bytes: u64,
+    erased: Vec<[u8; 32]>,
 }
 
 const CHUNK_BYTES: u64 = CHUNK_SIZE as u64;
@@ -84,7 +103,44 @@ impl ChunkStore {
             quota: BTreeMap::new(),
             egress_day: 0,
             egress_bytes: 0,
+            erased: Vec::new(),
         }
+    }
+
+    /// A held chunk, for the durable store.
+    pub fn export(&self, chunk_id: &[u8; 32]) -> Option<HeldChunk> {
+        self.held.get(chunk_id).map(|held| HeldChunk {
+            class: held.class,
+            credentials: held.credentials,
+            bytes: held.bytes.clone(),
+            registered_at: held.registered_at,
+            renewed_at: held.renewed_at,
+            erase_at: held.erase_at,
+        })
+    }
+
+    /// Takes back a chunk of an earlier run. A pending registration is not
+    /// restored, and its upload fails and starts again.
+    pub fn restore(&mut self, chunk_id: [u8; 32], chunk: HeldChunk) {
+        self.held.insert(
+            chunk_id,
+            Held {
+                class: chunk.class,
+                credentials: chunk.credentials,
+                bytes: chunk.bytes,
+                registered_at: chunk.registered_at,
+                renewed_at: chunk.renewed_at,
+                erase_at: chunk.erase_at,
+                fetch_hour: 0,
+                fetches: 0,
+            },
+        );
+    }
+
+    /// The held chunks that left the store since the last call: a `CDEL`,
+    /// the erase time, or the trim.
+    pub fn take_erased(&mut self) -> Vec<[u8; 32]> {
+        core::mem::take(&mut self.erased)
     }
 
     /// The bytes held or reserved by a registration.
@@ -237,7 +293,10 @@ impl ChunkStore {
     /// Erases a chunk or a registration at a `CDEL` that the relay
     /// authenticated against `cred_pk` (`ATT-046`, `ATT-047`).
     pub fn delete(&mut self, chunk_id: &[u8; 32]) -> Result<(), Reject> {
-        if self.held.remove(chunk_id).is_some() || self.pending.remove(chunk_id).is_some() {
+        if self.held.remove(chunk_id).is_some() {
+            self.erased.push(*chunk_id);
+            Ok(())
+        } else if self.pending.remove(chunk_id).is_some() {
             Ok(())
         } else {
             Err(Reject::Rejected)
@@ -282,7 +341,14 @@ impl ChunkStore {
     /// (`ATT-046`, `ATT-094`). Returns the count erased.
     pub fn sweep(&mut self, now: u64) -> usize {
         let before = self.held.len().saturating_add(self.pending.len());
-        self.held.retain(|_, h| h.erase_at > now);
+        let erased = &mut self.erased;
+        self.held.retain(|id, h| {
+            let keep = h.erase_at > now;
+            if !keep {
+                erased.push(*id);
+            }
+            keep
+        });
         self.pending
             .retain(|_, r| now.saturating_sub(r.registered_at) < CHUNK_TTL);
         self.quota
@@ -304,6 +370,7 @@ impl ChunkStore {
             match oldest {
                 Some(id) => {
                     self.held.remove(&id);
+                    self.erased.push(id);
                     erased = erased.saturating_add(1);
                 }
                 None => break,

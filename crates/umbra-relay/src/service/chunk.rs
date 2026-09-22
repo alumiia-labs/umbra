@@ -4,8 +4,9 @@
 //! and of the egress budget. This service authorizes each command and gives
 //! the answer.
 //!
-//! The chunks sit in RAM, thus a restart of the relay ends them. A client
-//! reads a lost chunk from another replica (§13.4).
+//! Each held chunk goes to the durable store of the relay before the
+//! answer that names it (`ATT-191`). A registration that waits for its
+//! bytes stays in RAM, and a restart ends it.
 
 use umbra_core::{
     abuse::admission::{Accepts, RelayGate},
@@ -17,6 +18,8 @@ use umbra_core::{
         store::{ChunkStore, Class, Credentials},
     },
 };
+
+use crate::store::{Loaded, StoreChange};
 use umbra_crypto::rand_core::CryptoRng;
 use umbra_queue::{relay::session::Session, Reject};
 use umbra_wire::command::{Cmd, Command};
@@ -39,6 +42,7 @@ pub struct Push {
 pub struct ChunkService {
     store: ChunkStore,
     pushes: Vec<Push>,
+    changes: Vec<StoreChange>,
 }
 
 impl ChunkService {
@@ -47,6 +51,34 @@ impl ChunkService {
         ChunkService {
             store: ChunkStore::new(capacity),
             pushes: Vec::new(),
+            changes: Vec::new(),
+        }
+    }
+
+    /// A service that holds the chunks of an earlier run.
+    pub fn restore(capacity: u64, loaded: &Loaded) -> Self {
+        let mut service = ChunkService::new(capacity);
+        for (chunk_id, held) in &loaded.chunks {
+            service.store.restore(*chunk_id, held.clone());
+        }
+        service
+    }
+
+    /// The changes of the stored chunks since the last call.
+    pub fn take_changes(&mut self) -> Vec<StoreChange> {
+        for chunk_id in self.store.take_erased() {
+            self.changes.push(StoreChange::ChunkDeleted { chunk_id });
+        }
+        core::mem::take(&mut self.changes)
+    }
+
+    /// Records a chunk that took its bytes.
+    fn note_held(&mut self, chunk_id: [u8; 32]) {
+        if let Some(held) = self.store.export(&chunk_id) {
+            self.changes.push(StoreChange::Chunk {
+                chunk_id,
+                held: Box::new(held),
+            });
         }
     }
 
@@ -139,6 +171,7 @@ impl ChunkService {
                 session.accept_bound(command, &cred_pk, &token)?;
                 let chunk = chunk_payload(command.payload).map_err(|_| Reject::Rejected)?;
                 self.store.put(chunk_id, chunk, now)?;
+                self.note_held(chunk_id);
                 Ok(reply(ChunkCmd::Cprf, &self.held_proof(command)?))
             }
             ChunkCmd::Cget => {
@@ -152,7 +185,15 @@ impl ChunkService {
                 session.accept(command, &read_pk)?;
                 // ATT-126: a renewal has no answer, and a refused one has
                 // none too.
-                let _ = self.store.renew(&chunk_id, now);
+                if self.store.renew(&chunk_id, now).is_ok() {
+                    if let Some(erase_at) = self.store.erase_at(&chunk_id) {
+                        self.changes.push(StoreChange::ChunkRenewed {
+                            chunk_id,
+                            renewed_at: now,
+                            erase_at,
+                        });
+                    }
+                }
                 Ok(Vec::new())
             }
             ChunkCmd::Cvfy => {
@@ -215,7 +256,9 @@ impl ChunkService {
     ) -> Result<(), Reject> {
         let copy = CrputPayload::parse(payload).map_err(|_| Reject::Rejected)?;
         self.store
-            .replica_put(chunk_id, &copy.storage_token, copy.chunk, now)
+            .replica_put(chunk_id, &copy.storage_token, copy.chunk, now)?;
+        self.note_held(chunk_id);
+        Ok(())
     }
 
     fn credentials(&self, chunk_id: &[u8; 32]) -> Result<Credentials, Reject> {
@@ -340,6 +383,47 @@ mod tests {
         let used = payload.encode(&mut out).unwrap();
         out.truncate(used);
         out
+    }
+
+    #[test]
+    fn a_held_chunk_outlives_a_restart_and_an_erased_one_does_not() {
+        use crate::store::{MemoryStore, RelayStore};
+        let mut bench = Bench::new();
+        let mut disk = MemoryStore::default();
+        let cred = StaticSecret::from([3; 32]);
+        let read = StaticSecret::from([4; 32]);
+        let chunk = vec![0x5A; CHUNK_SIZE];
+        let register = register_payload(&cred, &read);
+        let (cid, _) = bench.send(ChunkCmd::Cnew, [0xC1; 32], &register, &cred, b"");
+        let token = payload_of(cid, ChunkCmd::Cid);
+        // A registration with no bytes stays in RAM.
+        assert!(bench.service.take_changes().is_empty());
+        let (put, _) = bench.send(ChunkCmd::Cput, [0xC1; 32], &chunk, &cred, &token);
+        payload_of(put, ChunkCmd::Cprf);
+        // ATT-191: the bytes go to the store with the answer.
+        let changes = bench.service.take_changes();
+        assert!(matches!(&changes[..], [StoreChange::Chunk { .. }]));
+        disk.commit(&changes).unwrap();
+        let (renewed, _) = bench.send(ChunkCmd::Crnw, [0xC1; 32], &[], &read, b"");
+        assert_eq!(renewed, Ok(Vec::new()));
+        disk.commit(&bench.service.take_changes()).unwrap();
+        let (cid, _) = bench.send(ChunkCmd::Cnew, [0xC2; 32], &register, &cred, b"");
+        payload_of(cid, ChunkCmd::Cid);
+
+        // The next run holds the chunk, and the registration is gone.
+        let loaded = disk.load().unwrap();
+        assert_eq!(loaded.chunks[&[0xC1; 32]].renewed_at, 1_000);
+        bench.service = ChunkService::restore(1 << 24, &loaded);
+        assert_eq!(bench.service.held_count(), 1);
+        let (got, _) = bench.send(ChunkCmd::Cget, [0xC1; 32], &[], &read, b"");
+        assert_eq!(payload_of(got, ChunkCmd::Cdat), chunk);
+        let (lost, _) = bench.send(ChunkCmd::Cput, [0xC2; 32], &chunk, &cred, &token);
+        assert_eq!(lost, Err(Reject::Rejected));
+
+        // ATT-046: the erase time ends the chunk in the store too.
+        bench.service.sweep(loaded.chunks[&[0xC1; 32]].erase_at);
+        disk.commit(&bench.service.take_changes()).unwrap();
+        assert!(disk.load().unwrap().chunks.is_empty());
     }
 
     #[test]

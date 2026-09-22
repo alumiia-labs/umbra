@@ -199,7 +199,9 @@ impl RelayNode {
     /// run. Each circuit, each session, and each subscription of that run
     /// is gone, and the clients build them again.
     pub fn restored(config: Config, loaded: Loaded) -> Self {
+        let chunks = ChunkService::restore(config.chunk_capacity, &loaded);
         let mut node = RelayNode::new(config);
+        node.chunks = chunks;
         node.groups = GroupService::restore(&loaded);
         node.queues = QueueService::restore(loaded);
         node
@@ -210,6 +212,7 @@ impl RelayNode {
     pub fn take_changes(&mut self) -> Vec<StoreChange> {
         let mut changes = self.queues.take_changes();
         changes.append(&mut self.groups.take_changes());
+        changes.append(&mut self.chunks.take_changes());
         changes
     }
 
@@ -641,6 +644,9 @@ impl RelayNode {
             }
         }
         self.queues.sweep(now);
+        // ATT-046, ATT-168: a chunk past its erase time leaves, and the
+        // store trims to its target.
+        self.chunks.sweep(now);
         let mut due = self.communities.sweep(now);
         due.extend(self.groups.sweep(now));
         due.into_iter().map(Output::Digest).collect()

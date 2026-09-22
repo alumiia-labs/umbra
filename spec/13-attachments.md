@@ -1125,6 +1125,22 @@ this section again.
 > and `ATT-094` gives the counter the same lifetime. Part 16 §16.1 holds the
 > attachment relay row without a change.
 
+**The store of an attachment relay.** A backup under `BNEW` lives for
+`BACKUP_TTL`, and Part 7 §7.6 restores a device from it. A relay that loses
+its chunks at a restart loses a replica of each file and each backup that it
+held, and a restart of many relays at one time loses whole files.
+
+- **[ATT-191]** An attachment relay MUST commit each chunk that a `CPUT` or a
+  `CRPUT` gave to durable storage before it sends the answer of that command,
+  under Part 3 rules `NET-298` and `NET-299`. It MUST commit the erase time
+  that a `CRNW` moves, and it MUST erase the chunk from that storage at a
+  `CDEL`, at its erase time, and at the trim of `ATT-168`. The store holds the
+  identifier, the class, the two credentials, the registration time, the time
+  of the last renewal, the erase time, and the bytes. It MUST NOT hold a
+  registration that waits for its bytes, a storage token, the fetch rate of
+  `ATT-171`, or the egress budget of §13.11. A restart ends each of those, and
+  an upload whose registration ended starts again.
+
 ## 13.11 The relay egress budget
 
 A store bounds what a relay holds, and this section bounds what it serves. A

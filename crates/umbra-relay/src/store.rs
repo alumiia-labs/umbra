@@ -1,6 +1,6 @@
 //! What a relay keeps between two runs: the pairwise queues with their
-//! records, the group queues of Part 11 with theirs, and the invitations
-//! that wait for their first fetch.
+//! records, the group queues of Part 11 with theirs, the invitations that
+//! wait for their first fetch, and the chunks of Part 13.
 //!
 //! A group lives at two relays for weeks. A relay that loses its group
 //! queues at a restart ends each group that it served, and no member
@@ -21,6 +21,7 @@
 
 use std::collections::BTreeMap;
 
+use umbra_core::attach::store::HeldChunk;
 use umbra_queue::relay::Stored;
 use umbra_wire::command::LINK_ID_LEN;
 
@@ -103,6 +104,28 @@ pub enum StoreChange {
         /// `GroupQueueId`.
         group_queue_id: [u8; 32],
     },
+    /// A `CPUT` or a `CRPUT` gave the bytes of a chunk (`ATT-191`).
+    Chunk {
+        /// The chunk identifier.
+        chunk_id: [u8; 32],
+        /// The chunk.
+        held: Box<HeldChunk>,
+    },
+    /// A `CRNW` moved the erase time of a chunk.
+    ChunkRenewed {
+        /// The chunk identifier.
+        chunk_id: [u8; 32],
+        /// The time of the renewal.
+        renewed_at: u64,
+        /// The new erase time.
+        erase_at: u64,
+    },
+    /// A `CDEL`, the erase time, or the trim ended a chunk. No byte of it
+    /// stays (`ATT-187`).
+    ChunkDeleted {
+        /// The chunk identifier.
+        chunk_id: [u8; 32],
+    },
 }
 
 /// One invitation of Part 4 §4.3.1, as the store holds it.
@@ -134,6 +157,8 @@ pub struct Loaded {
     pub invitations: BTreeMap<[u8; LINK_ID_LEN], StoredInvitation>,
     /// The group queues, by `GroupQueueId`.
     pub group_queues: BTreeMap<[u8; 32], StoredQueue>,
+    /// The chunks, by chunk identifier.
+    pub chunks: BTreeMap<[u8; 32], HeldChunk>,
 }
 
 impl Loaded {
@@ -195,6 +220,22 @@ impl Loaded {
             }
             StoreChange::GroupQueueDeleted { group_queue_id } => {
                 self.group_queues.remove(group_queue_id);
+            }
+            StoreChange::Chunk { chunk_id, held } => {
+                self.chunks.insert(*chunk_id, (**held).clone());
+            }
+            StoreChange::ChunkRenewed {
+                chunk_id,
+                renewed_at,
+                erase_at,
+            } => {
+                if let Some(held) = self.chunks.get_mut(chunk_id) {
+                    held.renewed_at = *renewed_at;
+                    held.erase_at = *erase_at;
+                }
+            }
+            StoreChange::ChunkDeleted { chunk_id } => {
+                self.chunks.remove(chunk_id);
             }
         }
     }

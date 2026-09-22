@@ -77,11 +77,11 @@ each column when a crate implements the requirement and a test covers it.
 | `REL` | 124 | 32 | 1 | 0 | 2 | **159** |
 | `GRP` | 220 | 62 | 0 | 0 | 6 | **288** |
 | `COM` | 299 | 96 | 0 | 0 | 5 | **400** |
-| `ATT` | 139 | 46 | 1 | 0 | 2 | **188** |
+| `ATT` | 140 | 46 | 1 | 0 | 2 | **189** |
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
 | `IMP` | 112 | 41 | 0 | 0 | 2 | **155** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2218 | 717 | 7 | 0 | 53 | **2995** |
+| **All** | 2219 | 717 | 7 | 0 | 53 | **2996** |
 
 ## SCP — Scope and Conventions
 
@@ -2897,6 +2897,7 @@ Source: `spec/13-attachments.md`
 | `ATT-188` | §13.3.3 | MUST | A client | A client MUST compare the `proof` of `ATT-186` against the value from its own copy, and it MUST take a difference as a failed `CPUT` under `ATT-118`. |  |  |
 | `ATT-189` | §13.4.1 | MUST | (unstated) | A registration, a `CPUT` or a `CREP` that a relay refuses, or that gets no answer, fails the chunk before its copies exist. |  |  |
 | `ATT-190` | §13.4.1 | MUST | (unstated) | A `CVFY` can arrive before the copy that it asks for, because the copy travels on a connection of its own. |  |  |
+| `ATT-191` | §13.10 | MUST | An attachment relay | An attachment relay MUST commit each chunk that a `CPUT` or a `CRPUT` gave to durable storage before it sends the answer of that command, under Part 3 rules `NET-298` and `NET-299`. |  |  |
 
 ## ABU — Anti-Abuse Without Identifiers
 

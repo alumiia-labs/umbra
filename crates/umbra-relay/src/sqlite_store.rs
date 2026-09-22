@@ -7,13 +7,14 @@
 //! that a `DEL` ended leave no bytes in the file (`WIR-039` to `WIR-042`).
 
 use rusqlite::{params, Connection, OptionalExtension};
+use umbra_core::attach::store::{Class, Credentials, HeldChunk};
 use umbra_queue::relay::Stored;
 
 use crate::store::{Loaded, RelayStore, StoreChange, StoreFault, StoredInvitation, StoredQueue};
 
 /// The schema version in `user_version`. Version 2 added the group
-/// queues of Part 11.
-const SCHEMA_VERSION: i64 = 2;
+/// queues of Part 11, and version 3 the chunks of Part 13.
+const SCHEMA_VERSION: i64 = 3;
 
 const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS queues (
@@ -45,7 +46,25 @@ const SCHEMA: &str = "
         bytes          BLOB NOT NULL,
         PRIMARY KEY (group_queue_id, seq)
     ) WITHOUT ROWID;
+    CREATE TABLE IF NOT EXISTS chunks (
+        chunk_id      BLOB PRIMARY KEY,
+        class         INTEGER NOT NULL,
+        cred_pk       BLOB NOT NULL,
+        read_pk       BLOB NOT NULL,
+        registered_at INTEGER NOT NULL,
+        renewed_at    INTEGER NOT NULL,
+        erase_at      INTEGER NOT NULL,
+        bytes         BLOB NOT NULL
+    );
 ";
+
+/// The class of a chunk in its column.
+const fn class_code(class: Class) -> i64 {
+    match class {
+        Class::Attachment => 1,
+        Class::Backup => 2,
+    }
+}
 
 /// The store of one relay in one SQLite file.
 pub struct SqliteStore {
@@ -88,10 +107,10 @@ impl SqliteStore {
                 .optional(),
         )?
         .is_none();
-        // Version 1 holds the pairwise queues alone. The schema below adds
-        // the two tables of the group queues and takes nothing away, thus
-        // that file opens here and keeps each queue it holds.
-        if !is_new && version != SCHEMA_VERSION && version != 1 {
+        // Version 1 holds the pairwise queues alone, and version 2 adds the
+        // group queues. The schema below adds tables and takes nothing
+        // away, thus those files open here and keep what they hold.
+        if !is_new && !(1..=SCHEMA_VERSION).contains(&version) {
             return Err(StoreFault);
         }
         fault(connection.execute_batch(SCHEMA))?;
@@ -209,6 +228,44 @@ impl RelayStore for SqliteStore {
             };
             loaded.invitations.insert(id(link_id)?, held);
         }
+
+        let mut chunks = fault(self.connection.prepare(
+            "SELECT chunk_id, class, cred_pk, read_pk, registered_at, renewed_at, erase_at, bytes
+             FROM chunks",
+        ))?;
+        let rows = fault(chunks.query_map([], |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+                row.get::<_, Vec<u8>>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, Vec<u8>>(7)?,
+            ))
+        }))?;
+        for row in rows {
+            let (chunk_id, class, cred_pk, read_pk, registered_at, renewed_at, erase_at, bytes) =
+                fault(row)?;
+            let class = match class {
+                1 => Class::Attachment,
+                2 => Class::Backup,
+                _ => return Err(StoreFault),
+            };
+            let held = HeldChunk {
+                class,
+                credentials: Credentials {
+                    cred_pk: id(cred_pk)?,
+                    read_pk: id(read_pk)?,
+                },
+                bytes,
+                registered_at: unsigned(registered_at)?,
+                renewed_at: unsigned(renewed_at)?,
+                erase_at: unsigned(erase_at)?,
+            };
+            loaded.chunks.insert(id(chunk_id)?, held);
+        }
         Ok(loaded)
     }
 
@@ -325,6 +382,40 @@ impl RelayStore for SqliteStore {
                         params![group_queue_id.as_slice()],
                     ))?
                 }
+                StoreChange::Chunk { chunk_id, held } => fault(transaction.execute(
+                    "INSERT OR REPLACE INTO chunks
+                     (chunk_id, class, cred_pk, read_pk, registered_at, renewed_at, erase_at, bytes)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    params![
+                        chunk_id.as_slice(),
+                        class_code(held.class),
+                        held.credentials.cred_pk.as_slice(),
+                        held.credentials.read_pk.as_slice(),
+                        signed(held.registered_at)?,
+                        signed(held.renewed_at)?,
+                        signed(held.erase_at)?,
+                        held.bytes
+                    ],
+                ))?,
+                StoreChange::ChunkRenewed {
+                    chunk_id,
+                    renewed_at,
+                    erase_at,
+                } => fault(transaction.execute(
+                    "UPDATE chunks SET renewed_at = ?2, erase_at = ?3 WHERE chunk_id = ?1",
+                    params![
+                        chunk_id.as_slice(),
+                        signed(*renewed_at)?,
+                        signed(*erase_at)?
+                    ],
+                ))?,
+                StoreChange::ChunkDeleted { chunk_id } => {
+                    deleted = true;
+                    fault(transaction.execute(
+                        "DELETE FROM chunks WHERE chunk_id = ?1",
+                        params![chunk_id.as_slice()],
+                    ))?
+                }
             };
         }
         fault(transaction.commit())?;
@@ -345,6 +436,20 @@ impl RelayStore for SqliteStore {
 mod tests {
     use super::*;
     use crate::store::MemoryStore;
+
+    fn chunk(class: Class, fill: u8) -> Box<HeldChunk> {
+        Box::new(HeldChunk {
+            class,
+            credentials: Credentials {
+                cred_pk: [fill; 32],
+                read_pk: [fill.wrapping_add(1); 32],
+            },
+            bytes: vec![fill; 4_096],
+            registered_at: 100,
+            renewed_at: 110,
+            erase_at: 900,
+        })
+    }
 
     fn changes() -> Vec<StoreChange> {
         let record = |seq: u32, at: u64| Stored {
@@ -446,6 +551,24 @@ mod tests {
             StoreChange::GroupQueueDeleted {
                 group_queue_id: [5; 32],
             },
+            StoreChange::Chunk {
+                chunk_id: [6; 32],
+                held: chunk(Class::Attachment, 6),
+            },
+            StoreChange::Chunk {
+                chunk_id: [7; 32],
+                held: chunk(Class::Backup, 7),
+            },
+            StoreChange::Chunk {
+                chunk_id: [8; 32],
+                held: chunk(Class::Attachment, 8),
+            },
+            StoreChange::ChunkRenewed {
+                chunk_id: [6; 32],
+                renewed_at: 500,
+                erase_at: 1_500,
+            },
+            StoreChange::ChunkDeleted { chunk_id: [8; 32] },
         ]
     }
 
@@ -485,6 +608,35 @@ mod tests {
         assert_eq!(loaded.group_queues[&[4; 32]].head, [4]);
         assert_eq!(loaded.group_queues[&[4; 32]].records.len(), 1);
         assert_eq!(loaded.group_queues[&[4; 32]].records[0].seq, 2);
+        // The chunks come back with their class and their renewal, and a
+        // `CDEL` leaves none (`ATT-191`).
+        assert_eq!(loaded.chunks.len(), 2);
+        assert_eq!(loaded.chunks[&[6; 32]].erase_at, 1_500);
+        assert_eq!(loaded.chunks[&[7; 32]].class, Class::Backup);
+    }
+
+    #[test]
+    fn a_deleted_chunk_leaves_no_bytes_in_the_file() {
+        let path = file("chunk-erase.db");
+        let mut store = SqliteStore::open(&path).unwrap();
+        let held = chunk(Class::Attachment, 0xC9);
+        let marker = held.bytes.clone();
+        store
+            .commit(&[StoreChange::Chunk {
+                chunk_id: [1; 32],
+                held,
+            }])
+            .unwrap();
+        let holds = |path: &str| {
+            let mut bytes = std::fs::read(path).unwrap();
+            bytes.extend(std::fs::read(format!("{path}-wal")).unwrap_or_default());
+            bytes.windows(64).any(|window| window == &marker[..64])
+        };
+        assert!(holds(&path));
+        store
+            .commit(&[StoreChange::ChunkDeleted { chunk_id: [1; 32] }])
+            .unwrap();
+        assert!(!holds(&path));
     }
 
     #[test]
