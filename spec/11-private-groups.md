@@ -702,10 +702,12 @@ member of role `admin` or above (`own_count` = `GROUP_REPLICAS`).
 
 - **[GRP-276]** A rotator MUST build one slot for each member the new roster
   holds, in index order, and no slot for a member it removes. **[GRP-277]** A
-  rotator MUST set `own_count` to `GROUP_REPLICAS` for a member of role
-  `admin` or above and to 0 for each other member. **[GRP-278]** A rotator
-  MUST put `own_sk` of replica 1 and then of replica 2 in `own_sks`, in the
-  replica order of the roster snapshot (§11.9.8).
+  rotator of role `admin` or above MUST set `own_count` to `GROUP_REPLICAS`
+  for a member of role `admin` or above and to 0 for each other member.
+  **[GRP-387]** A rotator below `admin` MUST set `own_count` to 0 in every
+  slot, because it holds no `own_sk`. **[GRP-278]** A rotator MUST put
+  `own_sk` of replica 1 and then of replica 2 in `own_sks`, in the replica
+  order of the roster snapshot (§11.9.8).
 - **[GRP-279]** A rotator MUST use a fresh `Encap` for each slot. The nonce is
   zero, because `K_slot` is fresh for each slot by construction.
 - **[GRP-280]** A rotator MUST carry the slots inline when the record fits the
@@ -725,6 +727,21 @@ member of role `admin` or above (`own_count` = `GROUP_REPLICAS`).
   members. **[GRP-285]** A member MUST NOT fetch another chunk of that object.
   Part 13 rule `ATT-142` applies to the descriptor. Each segment seals on its
   own under Part 13 §13.2.3, thus one chunk opens without the others.
+
+**[GRP-388]** A member MUST read the inline slots of an epoch-key record
+under the slot lengths that the roles of its own roster give, and, when that
+read fails or its own slot does not open under it, under the lengths of a
+record whose every `own_count` is 0. No field in the clear names the rotator,
+thus the reader cannot take the rotator's role from the record.
+
+> *Cause.* An earlier form of `GRP-277` made `own_count` follow the roles of
+> the roster alone, and the relay learns the slot lengths from the record.
+> `GRP-355` lets any active member rotate, and a member below `admin` holds
+> no `own_sk`, thus that form asked a plain rotator for a secret it does not
+> have. Naming the rotator in the clear would tell the relay which member
+> rotates, which §11.5 does not grant it, and a per-slot `own_count` byte in
+> the clear would name each admin. The two layouts differ in length alone,
+> thus the reader tries both and loses one parse.
 
 **Reading the record.** **[GRP-286]** A member that reads an epoch-key record
 MUST decapsulate its slot, verify `tag` under `K_{rotator,self}`, verify the

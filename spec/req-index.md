@@ -75,13 +75,13 @@ each column when a crate implements the requirement and a test covers it.
 | `NTF` | 67 | 30 | 0 | 0 | 2 | **99** |
 | `DIS` | 123 | 37 | 0 | 0 | 1 | **161** |
 | `REL` | 124 | 32 | 1 | 0 | 2 | **159** |
-| `GRP` | 205 | 58 | 0 | 0 | 5 | **268** |
+| `GRP` | 207 | 58 | 0 | 0 | 5 | **270** |
 | `COM` | 299 | 96 | 0 | 0 | 5 | **400** |
 | `ATT` | 139 | 46 | 1 | 0 | 2 | **188** |
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
 | `IMP` | 112 | 41 | 0 | 0 | 2 | **155** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2200 | 713 | 7 | 0 | 52 | **2972** |
+| **All** | 2202 | 713 | 7 | 0 | 52 | **2974** |
 
 ## SCP — Scope and Conventions
 
@@ -2272,6 +2272,8 @@ Source: `spec/11-private-groups.md`
 | `GRP-384` | §11.3.1 | MUST | An admit | An admit MUST carry `read_sk_e` and `write_sk_e`, and a joiner MUST take the two credentials from it. |  |  |
 | `GRP-385` | §11.3.1 | MUST NOT | A joiner | A joiner MUST NOT derive a queue credential, because it holds no `K_e`. |  |  |
 | `GRP-386` | §11.3.1 | MUST NOT | (unstated) | A member that takes `K_e` from an epoch-key record (§11.4.2) MUST derive the two credentials from it and MUST NOT keep the pair of an earlier epoch after `GROUP_EPOCH_GRACE`. |  |  |
+| `GRP-387` | §11.4.2 | MUST | A rotator below `admin` | A rotator below `admin` MUST set `own_count` to 0 in every slot, because it holds no `own_sk`. |  |  |
+| `GRP-388` | §11.4.2 | MUST | A member | A member MUST read the inline slots of an epoch-key record under the slot lengths that the roles of its own roster give, and, when that read fails or its own slot does not open under it, under the lengths of a record whose every `own_count` is 0. |  |  |
 
 ## COM — Public Communities
 

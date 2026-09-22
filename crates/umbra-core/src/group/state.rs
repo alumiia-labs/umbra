@@ -421,7 +421,7 @@ impl Group {
         if !self.roster.member(self.own_index).is_some_and(|m| m.active) {
             return Err(Error::Unverified);
         }
-        // GRP-379: only a rotator at `admin` or above holds the owner
+        // GRP-387: only a rotator at `admin` or above holds the owner
         // credentials, and a rotator below it fills no slot with them.
         let own_sks = self.owners.as_ref().filter(|_| {
             self.roster
@@ -545,7 +545,7 @@ impl Group {
     /// The rotator's role sets the length of an admin slot and no field in
     /// the clear names the rotator, thus the admin layout is read first
     /// and the layout of a rotator that holds no owner credential after it
-    /// (`GRP-387`).
+    /// (`GRP-388`).
     fn open_epoch_slot(
         &self,
         epoch: u32,
@@ -1036,7 +1036,7 @@ mod tests {
         assert!(member.owner(0).is_none());
         let rotation = member.rotate(now, &mut rng).unwrap();
         let record = parse_record(&rotation.record);
-        // GRP-387: the creator is an owner, thus the admin layout is the
+        // GRP-388: the creator is an owner, thus the admin layout is the
         // first one read, and the plain layout is the one that opens.
         creator
             .install_epoch_key(record.epoch, record.slot, record.body, now)
