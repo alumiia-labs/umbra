@@ -18,6 +18,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -26,7 +27,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
+import uniffi.umbra_ffi.FfiGroupMember
 import uniffi.umbra_ffi.FfiGroupOffer
+import uniffi.umbra_ffi.FfiRole
 
 /** The longest name of a group, as `GROUP_NAME_MAX` of the core gives it. */
 private const val GROUP_NAME_MAX = 64
@@ -98,10 +101,20 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
             FactRow("user-group", "Members", chat.members.toString())
             FactRow("file-lines", "Group identifier", chat.conversation.label)
             Spacer(Modifier.height(8.dp))
-            // Mockup 052: an admin brings a contact in.
+            // Mockup 052: the members, an invitation, and the way out.
+            EntryRow(
+                RowEntry("user-group", "Members and roles") {
+                    push(Screen.GroupMembers(chat.conversation))
+                },
+            )
             EntryRow(
                 RowEntry("user-plus", "Invite a contact") {
                     push(Screen.InviteToGroup(chat.conversation))
+                },
+            )
+            EntryRow(
+                RowEntry("xmark", "Leave group") {
+                    push(Screen.LeaveGroup(chat.conversation))
                 },
             )
             val waiting = Core.groupJoiners.filter { it.groupId.toList() == chat.groupId.toList() }
@@ -145,6 +158,156 @@ private fun JoinerRow(joiner: FfiGroupOffer) {
         if (!joiner.isAdded) {
             Spacer(Modifier.width(12.dp))
             InlineButton("Let in") { Core.admitJoiner(joiner) }
+        }
+    }
+}
+
+/** The label of a role, as mockup 053 writes it. */
+private fun roleLabel(role: FfiRole): String = when (role) {
+    FfiRole.OWNER -> "Owner"
+    FfiRole.ADMIN -> "Admin"
+    FfiRole.MODERATOR -> "Moderator"
+    FfiRole.MEMBER -> "Member"
+    FfiRole.OBSERVER -> "Observer"
+}
+
+/**
+ * The name of a member. The roster names no contact, thus a member that
+ * another admin brought in shows its index alone.
+ */
+private fun memberName(member: FfiGroupMember): String {
+    if (member.isSelf) return "You"
+    val contact = member.contact ?: return "Member ${member.index}"
+    return Core.chats.firstOrNull { it.conversation.id.contentEquals(contact) }?.title
+        ?: "Member ${member.index}"
+}
+
+/**
+ * Mockup 053: each member of the group with its role. An admin opens the
+ * removal of a member below it.
+ */
+@Composable
+fun GroupMembersScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
+    var members by remember { mutableStateOf(listOf<FfiGroupMember>()) }
+    LaunchedEffect(chat.conversation.label, chat.members) {
+        Core.groupMembers(chat.conversation) { members = it }
+    }
+    val own = members.firstOrNull { it.isSelf }
+    val mayRemove = own != null && own.role >= FfiRole.ADMIN && !chat.isClosed
+    Column(Modifier.fillMaxSize()) {
+        BackBar("Members · ${members.size}", onBack = onBack)
+        LazyColumn {
+            items(members, key = { it.index.toInt() }) { member ->
+                // GRP-382: a removal reaches a member below `moderator`.
+                val removable = mayRemove && !member.isSelf && member.role <= FfiRole.MEMBER
+                MemberRow(member, removable) {
+                    push(Screen.RemoveMember(chat.conversation, member.index, memberName(member)))
+                }
+            }
+            item {
+                Spacer(Modifier.height(12.dp))
+                Column(Modifier.padding(horizontal = 20.dp)) {
+                    SecondaryButton("Add members") {
+                        push(Screen.InviteToGroup(chat.conversation))
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MemberRow(member: FfiGroupMember, removable: Boolean, onRemove: () -> Unit) {
+    val row = Modifier.fillMaxWidth()
+    val pressable = if (removable) {
+        row.pressShadeInList().press(onClick = onRemove).padding(horizontal = PressInset)
+    } else {
+        row.padding(horizontal = 20.dp)
+    }
+    Row(
+        pressable.padding(vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        LetterAvatar(memberName(member), member.index.toInt(), size = 44)
+        Spacer(Modifier.width(14.dp))
+        Column(Modifier.weight(1f)) {
+            Text(memberName(member), style = MaterialTheme.typography.titleMedium)
+            Text(
+                roleLabel(member.role),
+                style = MaterialTheme.typography.bodyMedium,
+                color = Palette.TextSecondary,
+                modifier = Modifier.subline(),
+            )
+        }
+        if (removable) {
+            FaIcon("chevron-right", size = 14.dp, tint = Palette.TextSecondary)
+        }
+    }
+}
+
+/**
+ * Mockup 055: the removal of one member. The group starts a new epoch in
+ * the same action, thus the member reads no later record (`GRP-264`).
+ */
+@Composable
+fun RemoveMemberScreen(
+    chat: Chat,
+    index: UShort,
+    name: String,
+    onBack: () -> Unit,
+) {
+    var isRemoving by remember { mutableStateOf(false) }
+    Column(Modifier.fillMaxSize()) {
+        BackBar("Group membership", onBack = onBack)
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
+            Headline(
+                "Remove $name?",
+                "They read no message of this group after this. The messages " +
+                    "and the files they already hold stay with them.",
+            )
+            Spacer(Modifier.height(20.dp))
+            DangerButton("Remove member", enabled = !isRemoving) {
+                isRemoving = true
+                Core.removeFromGroup(chat.conversation, index) { onBack() }
+            }
+            QuietButton("Cancel", onBack)
+        }
+    }
+}
+
+/**
+ * Mockup 060: the way out of a group. An owner leaves only after it gave
+ * the role to another member (`GRP-051`).
+ */
+@Composable
+fun LeaveGroupScreen(chat: Chat, onBack: () -> Unit, onLeft: () -> Unit) {
+    var members by remember { mutableStateOf(listOf<FfiGroupMember>()) }
+    LaunchedEffect(chat.conversation.label) {
+        Core.groupMembers(chat.conversation) { members = it }
+    }
+    var isLeaving by remember { mutableStateOf(false) }
+    val own = members.firstOrNull { it.isSelf }
+    val owners = members.count { it.role == FfiRole.OWNER }
+    val lastOwner = own?.role == FfiRole.OWNER && owners <= 1
+    Column(Modifier.fillMaxSize()) {
+        BackBar("Leave group", onBack = onBack)
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
+            Headline(
+                "Leave ${chat.title}?",
+                "You read no new message of this group after this. The " +
+                    "members keep the messages you already sent.",
+            )
+            Spacer(Modifier.height(20.dp))
+            if (lastOwner) {
+                // GRP-051: a group keeps an owner, thus this one stays.
+                Note("This group has one owner. Give the role to another member first.")
+                Spacer(Modifier.height(16.dp))
+            }
+            DangerButton("Leave group", enabled = !isLeaving && !lastOwner) {
+                isLeaving = true
+                Core.leaveGroup(chat.conversation) { onLeft() }
+            }
+            QuietButton("Stay in group", onBack)
         }
     }
 }

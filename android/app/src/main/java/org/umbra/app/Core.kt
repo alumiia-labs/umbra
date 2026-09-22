@@ -16,6 +16,7 @@ import uniffi.umbra_ffi.Config
 import uniffi.umbra_ffi.Connection
 import uniffi.umbra_ffi.FfiEvent
 import uniffi.umbra_ffi.FfiException
+import uniffi.umbra_ffi.FfiGroupMember
 import uniffi.umbra_ffi.FfiGroupOffer
 import uniffi.umbra_ffi.Handle
 import uniffi.umbra_ffi.MsgInfo
@@ -478,6 +479,28 @@ object Core {
         client.admitJoiner(joiner.from, joiner.groupId)
         refreshJoinFlow()
         refreshChats()
+    }
+
+    /** The active members of a group, in index order. */
+    fun groupMembers(conversation: Conversation, onLoaded: (List<FfiGroupMember>) -> Unit) =
+        call { client ->
+            val members = client.groupMembers(conversation.id)
+            main.post { onLoaded(members) }
+        }
+
+    /** Removes a member. The group starts a new epoch in the same action. */
+    fun removeFromGroup(conversation: Conversation, index: UShort, then: () -> Unit) =
+        call { client ->
+            client.removeFromGroup(conversation.id, index)
+            refreshChats()
+            main.post { then() }
+        }
+
+    /** Leaves a group. The group keeps each message this device sent. */
+    fun leaveGroup(conversation: Conversation, then: () -> Unit) = call { client ->
+        client.leaveGroup(conversation.id)
+        refreshChats()
+        main.post { then() }
     }
 
     private fun refreshJoinFlow() = call { client ->

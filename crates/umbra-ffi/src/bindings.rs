@@ -207,6 +207,35 @@ pub struct FfiGroupInfo {
     pub is_closed: bool,
 }
 
+/// The role of one member of a group (§11.9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiRole {
+    /// Reads and posts nothing.
+    Observer,
+    /// Reads and posts.
+    Member,
+    /// Acts on a report of Part 12 §12.9.
+    Moderator,
+    /// Adds a member, removes one, and holds the owner credentials.
+    Admin,
+    /// An admin that also grants a role.
+    Owner,
+}
+
+/// One member of a group, as the member list shows it.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiGroupMember {
+    /// The member index, which the roster gives.
+    pub index: u16,
+    /// The role.
+    pub role: FfiRole,
+    /// Whether the index is this device.
+    pub is_self: bool,
+    /// The contact behind the member, where this device knows it. A
+    /// member that another admin brought in has none.
+    pub contact: Option<Vec<u8>>,
+}
+
 /// One relay of the set of the client, with the facts that the invariants
 /// of Part 3 §3.4.6 test.
 #[derive(Debug, Clone, uniffi::Record)]
@@ -2268,6 +2297,52 @@ impl Handle {
             epoch: info.epoch,
             is_ready: info.is_ready,
         })
+    }
+
+    /// The active members of a group in index order.
+    pub fn group_members(&self, conversation: Vec<u8>) -> Result<Vec<FfiGroupMember>, FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        Ok(locked(&self.inner)
+            .client
+            .group_members(conversation)?
+            .into_iter()
+            .map(|member| FfiGroupMember {
+                index: member.index,
+                role: match member.role {
+                    umbra_wire::group::control::Role::Observer => FfiRole::Observer,
+                    umbra_wire::group::control::Role::Member => FfiRole::Member,
+                    umbra_wire::group::control::Role::Moderator => FfiRole::Moderator,
+                    umbra_wire::group::control::Role::Admin => FfiRole::Admin,
+                    umbra_wire::group::control::Role::Owner => FfiRole::Owner,
+                },
+                is_self: member.is_self,
+                contact: member.contact.map(|held| held.0.to_vec()),
+            })
+            .collect())
+    }
+
+    /// Removes a member and rotates the epoch in the same action
+    /// (`GRP-264`), thus the member it removes reads no later record.
+    pub fn remove_from_group(&self, conversation: Vec<u8>, index: u16) -> Result<(), FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        let mut inner = locked(&self.inner);
+        inner
+            .client
+            .remove_from_group(conversation, index, unix_now_ms(), &mut OsRng)?;
+        inner.pump_groups();
+        Ok(())
+    }
+
+    /// Leaves a group (`GRP-067`). The group keeps each message this
+    /// device already sent.
+    pub fn leave_group(&self, conversation: Vec<u8>) -> Result<(), FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        let mut inner = locked(&self.inner);
+        inner
+            .client
+            .leave_group(conversation, unix_now_ms(), &mut OsRng)?;
+        inner.pump_groups();
+        Ok(())
     }
 
     /// Gives a contact a name on this device. No peer and no relay learns

@@ -136,6 +136,12 @@ pub(super) const GROUP_QUEUE: TableId = TableId(0x13);
 /// holds the `group_id` and then the `JoinRecord`, or nothing for an
 /// offer. The owner column names the pairwise conversation.
 pub(super) const GROUP_JOIN: TableId = TableId(0x14);
+/// The contact behind a member index, for each member that an admin of
+/// this device brought in. The roster names no contact, thus a member that
+/// another admin added has no row here and the view shows its index alone.
+/// A row holds the pairwise conversation, and its owner column names the
+/// group.
+pub(super) const GROUP_MEMBER: TableId = TableId(0x15);
 
 const QUEUE_ROW_LEN: usize = 32 + 1 + 32;
 
@@ -191,6 +197,19 @@ pub struct GroupSubscription {
     pub read: Secret<32>,
     /// The cursor of this device at that replica (`GRP-202`).
     pub from_seq: u32,
+}
+
+/// One member of a group, as the member list shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupMember {
+    /// The member index.
+    pub index: u16,
+    /// The role.
+    pub role: Role,
+    /// Whether the index is this device.
+    pub is_self: bool,
+    /// The contact behind the member, where this device knows it.
+    pub contact: Option<ConversationId>,
 }
 
 /// One replica of a group queue, as a post names it.
@@ -855,6 +874,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .group_of(conversation)?
             .snapshot(&[])
             .map_err(|_| Error::Malformed)?;
+        self.note_member_contact(conversation, index, joiner.from, rng)?;
         let mut entry = vec![ADDED];
         entry.extend_from_slice(&joiner.from.0);
         entry.extend_from_slice(&joiner.group_id);
@@ -1366,6 +1386,52 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             read_pk: credentials.read_public(),
             write_pk: credentials.write_public(),
         }))
+    }
+
+    /// The active members of a group in index order (§11.9).
+    pub fn group_members(&self, conversation: ConversationId) -> Result<Vec<GroupMember>, Error> {
+        let group = self.group_of(conversation)?;
+        let store = &self.open_ref()?.store;
+        let mut members = Vec::new();
+        for member in group.roster().active() {
+            let row = store.row_id(GROUP_MEMBER, &Self::member_key(conversation, member.index));
+            let contact = store
+                .get(GROUP_MEMBER, &row)?
+                .and_then(|bytes| <[u8; 16]>::try_from(bytes.as_slice()).ok())
+                .map(ConversationId);
+            members.push(GroupMember {
+                index: member.index,
+                role: member.role,
+                is_self: member.index == group.own_index(),
+                contact,
+            });
+        }
+        Ok(members)
+    }
+
+    fn member_key(conversation: ConversationId, index: u16) -> Vec<u8> {
+        let mut key = Vec::with_capacity(18);
+        key.extend_from_slice(&conversation.0);
+        key.extend_from_slice(&index.to_be_bytes());
+        key
+    }
+
+    /// Names the contact behind a member index that an admin of this
+    /// device added.
+    fn note_member_contact<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        index: u16,
+        contact: ConversationId,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let open = self.open_mut()?;
+        let row = open
+            .store
+            .row_id(GROUP_MEMBER, &Self::member_key(conversation, index));
+        let mut batch = open.store.begin();
+        batch.put(GROUP_MEMBER, row, Some(conversation.0), &contact.0, rng)?;
+        Ok(batch.commit()?)
     }
 
     /// The next `GKEY` that waits for the run of the group queues.

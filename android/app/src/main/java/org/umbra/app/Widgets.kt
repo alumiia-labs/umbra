@@ -31,6 +31,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -329,6 +330,27 @@ fun SecondaryButton(label: String, enabled: Boolean = true, onClick: () -> Unit)
     ) { Text(label, fontWeight = FontWeight.SemiBold) }
 }
 
+/** The filled button of an action that takes something away. */
+@Composable
+fun DangerButton(label: String, enabled: Boolean = true, onClick: () -> Unit) {
+    Button(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+        colors = ButtonDefaults.buttonColors(containerColor = Palette.Error),
+    ) { Text(label, fontWeight = FontWeight.SemiBold) }
+}
+
+/** The plain label under a button, for the way back out of a decision. */
+@Composable
+fun QuietButton(label: String, onClick: () -> Unit) {
+    TextButton(
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+        colors = ButtonDefaults.textButtonColors(contentColor = Palette.Action),
+    ) { Text(label, fontWeight = FontWeight.SemiBold) }
+}
+
 /** A secondary button that takes the width of its label, for a row. */
 @Composable
 fun InlineButton(label: String, enabled: Boolean = true, onClick: () -> Unit) {
@@ -372,15 +394,22 @@ fun HeroIcon(name: String) {
 /** A letter on a pastel ground. The ground comes from the conversation. */
 @Composable
 fun Avatar(chat: Chat, size: Int = 44) {
-    val ground = Palette.Avatars[(chat.conversation.hashCode() and 0x7FFFFFFF) % Palette.Avatars.size]
-    val letter = chat.name.firstOrNull()?.uppercase() ?: "?"
+    // A group with no name shows the icon of a group and no letter.
+    val icon = if (chat.isGroup && chat.name.isEmpty()) "user-group" else null
+    LetterAvatar(chat.name, chat.conversation.hashCode(), size, icon)
+}
+
+/** The same circle from a name that names no conversation of the store. */
+@Composable
+fun LetterAvatar(name: String, seed: Int, size: Int = 44, icon: String? = null) {
+    val ground = Palette.Avatars[(seed and 0x7FFFFFFF) % Palette.Avatars.size]
+    val letter = name.firstOrNull()?.uppercase() ?: "?"
     Box(
         Modifier.size(size.dp).clip(CircleShape).background(ground),
         contentAlignment = Alignment.Center,
     ) {
-        // A group with no name shows the icon of a group and no letter.
-        if (chat.isGroup && chat.name.isEmpty()) {
-            FaIcon("user-group", size = (size * 0.46f).dp, tint = Palette.Text)
+        if (icon != null) {
+            FaIcon(icon, size = (size * 0.46f).dp, tint = Palette.Text)
             return@Box
         }
         // The letter takes its size from the circle and not from the font

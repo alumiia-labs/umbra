@@ -68,6 +68,13 @@ sealed interface Screen {
     data class Photo(val conversation: Conversation, val line: Line) : Screen
     data class GroupDetails(val conversation: Conversation) : Screen
     data class InviteToGroup(val conversation: Conversation) : Screen
+    data class GroupMembers(val conversation: Conversation) : Screen
+    data class RemoveMember(
+        val conversation: Conversation,
+        val index: UShort,
+        val name: String,
+    ) : Screen
+    data class LeaveGroup(val conversation: Conversation) : Screen
 
     /** The conversation of a view of one contact. */
     val contact: Conversation?
@@ -83,6 +90,9 @@ sealed interface Screen {
             is Photo -> conversation
             is GroupDetails -> conversation
             is InviteToGroup -> conversation
+            is GroupMembers -> conversation
+            is RemoveMember -> conversation
+            is LeaveGroup -> conversation
             else -> null
         }
 }
@@ -187,6 +197,9 @@ private fun ContactView(
         is Screen.Photo -> PhotoScreen(top.line, chat, pop)
         is Screen.GroupDetails -> GroupDetailsScreen(chat, pop, push)
         is Screen.InviteToGroup -> InviteToGroupScreen(chat, pop)
+        is Screen.GroupMembers -> GroupMembersScreen(chat, pop, push)
+        is Screen.RemoveMember -> RemoveMemberScreen(chat, top.index, top.name, pop)
+        is Screen.LeaveGroup -> LeaveGroupScreen(chat, pop) { setStack(listOf()) }
         is Screen.ScanSafetyNumber -> ScanSafetyNumberScreen(chat, pop)
         else -> Unit
     }

@@ -1562,10 +1562,17 @@ fn two_members_talk_in_a_group_over_the_relays_of_a_signed_network() {
         })
         .ok()
         .unwrap();
-    loop {
+    // The refusal and the two answers of the record before it arrive in
+    // no fixed order, thus this loop waits for each of the three.
+    let mut refused = false;
+    let mut accepted = 0;
+    while !refused || accepted < 2 {
         match group_update(&mut creator_rx) {
-            GroupUpdate::Failed { tag: 12, .. } => break,
-            GroupUpdate::Posted { tag, .. } => assert!(tag == 20 || tag == 21),
+            GroupUpdate::Failed { tag: 12, .. } => refused = true,
+            GroupUpdate::Posted { tag, .. } => {
+                assert!(tag == 20 || tag == 21);
+                accepted += 1;
+            }
             other => panic!("{}", update_name(&other)),
         }
     }
