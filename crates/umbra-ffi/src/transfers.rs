@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 use umbra_core::{
     attach::{
         place::AttachmentRelay,
-        transfer::{Download, Progress, Shape, Upload, Uploaded},
+        transfer::{ChunkFetch, Download, Progress, Shape, Upload, Uploaded},
     },
     session::node::{ChunkJob, ClientEvent, ClientNode},
 };
@@ -62,6 +62,17 @@ pub enum TransferCommand {
         /// The descriptor of a received record.
         descriptor: Box<FileDescriptor>,
     },
+    /// Fetch one chunk of a file and open it alone: the slot of this member
+    /// in a chunked epoch-key record (Part 11 `GRP-284`). The update is
+    /// `Downloaded` with that one segment.
+    FetchChunk {
+        /// A value of the caller, which comes back in each update.
+        tag: u64,
+        /// The descriptor of the slot object.
+        descriptor: Box<FileDescriptor>,
+        /// The chunk.
+        index: u32,
+    },
 }
 
 /// What the task tells the caller.
@@ -97,6 +108,7 @@ pub enum TransferUpdate {
 }
 
 enum Active {
+    One(Box<ChunkFetch>),
     Up(Box<Upload>),
     Down(Box<Download>),
 }
@@ -121,8 +133,9 @@ pub async fn run_transfers(
         for command in early {
             // An erase that did not leave is lost with this run. The relays
             // erase the chunk at the end of its life (`ATT-046`).
-            if let TransferCommand::Upload { tag, .. } | TransferCommand::Download { tag, .. } =
-                command
+            if let TransferCommand::Upload { tag, .. }
+            | TransferCommand::Download { tag, .. }
+            | TransferCommand::FetchChunk { tag, .. } = command
             {
                 let _ = updates.send(TransferUpdate::Failed { tag: *tag });
             }
@@ -181,6 +194,7 @@ pub async fn run_transfers(
                 let mut failed = Vec::new();
                 for (tag, transfer) in &mut active {
                     let ticked = match transfer {
+                        Active::One(fetch) => fetch.tick(&mut node, &mut rng),
                         Active::Up(upload) => upload.tick(&mut node, &mut rng),
                         Active::Down(download) => download.tick(&mut node, &mut rng),
                     };
@@ -205,6 +219,7 @@ pub async fn run_transfers(
                 ClientEvent::Chunk { handle, outcome } => {
                     let owner = active.iter().find_map(|(tag, transfer)| {
                         let owns = match transfer {
+                            Active::One(fetch) => fetch.owns(handle),
                             Active::Up(upload) => upload.owns(handle),
                             Active::Down(download) => download.owns(handle),
                         };
@@ -215,6 +230,17 @@ pub async fn run_transfers(
                         continue;
                     };
                     let step = match transfer {
+                        Active::One(fetch) => fetch
+                            .on_outcome(&mut node, handle, outcome, &mut rng)
+                            .map(|progress| match progress {
+                                Progress::Running(done, total) => {
+                                    TransferUpdate::Progress { tag, done, total }
+                                }
+                                Progress::Done(plain) => TransferUpdate::Downloaded {
+                                    tag,
+                                    plain: Zeroizing::new(plain),
+                                },
+                            }),
                         Active::Up(upload) => upload
                             .on_outcome(&mut node, handle, outcome, &mut rng)
                             .map(|progress| match progress {
@@ -252,6 +278,26 @@ pub async fn run_transfers(
         }
         for command in early.drain(..) {
             match command {
+                TransferCommand::FetchChunk {
+                    tag,
+                    descriptor,
+                    index,
+                } => {
+                    let started = ChunkFetch::new(&descriptor, index, &relays, &mut rng).and_then(
+                        |mut fetch| {
+                            fetch.tick(&mut node, &mut rng)?;
+                            Ok(fetch)
+                        },
+                    );
+                    match started {
+                        Ok(fetch) => {
+                            active.insert(tag, Active::One(Box::new(fetch)));
+                        }
+                        Err(_) => {
+                            let _ = updates.send(TransferUpdate::Failed { tag });
+                        }
+                    }
+                }
                 TransferCommand::Upload { tag, plain, shape } => {
                     let started =
                         Upload::new(&plain, shape, &relays, &mut rng).and_then(|mut upload| {

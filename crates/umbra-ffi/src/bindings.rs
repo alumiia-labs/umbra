@@ -954,6 +954,17 @@ enum TransferWork {
         /// The group.
         group_id: [u8; 32],
     },
+    /// The slot object of a rotation above the inline carrier, whose
+    /// record follows the upload (`GRP-283`).
+    EpochSlots(Box<crate::client::EpochUpload>),
+    /// The one chunk of a slot object that holds the slot of this member
+    /// (`GRP-284`).
+    EpochChunk {
+        /// The group.
+        conversation: crate::ConversationId,
+        /// The chunk and the facts of its record.
+        wanted: Box<umbra_core::group::state::WantedChunk>,
+    },
 }
 
 /// What one command of the group task belongs to.
@@ -1128,6 +1139,7 @@ impl Inner {
                 .client
                 .answer_key_request(conversation, index, now_ms, &mut OsRng);
         }
+        self.pump_epoch_transfers();
         while let Some(job) = self.client.take_group_rekey() {
             commands.push(GroupCommand::Rotate {
                 relay: job.relay,
@@ -1166,6 +1178,37 @@ impl Inner {
                 self.group_sent.insert(tag, command.copy());
             }
             self.send_group(command);
+        }
+    }
+
+    /// Puts the slot object of each chunked rotation on the chunk path,
+    /// and fetches the chunk of each chunked record that arrived.
+    fn pump_epoch_transfers(&mut self) {
+        while let Some(upload) = self.client.take_epoch_upload() {
+            let plain = Zeroizing::new(upload.chunked.object.clone());
+            let tag = self.next_tag(TransferWork::EpochSlots(Box::new(upload)));
+            self.send_transfer(TransferCommand::Upload {
+                tag,
+                plain,
+                // A slot object is no media of the user (Part 13 §13.3).
+                shape: Shape::default(),
+            });
+        }
+        while let Some((conversation, wanted)) = self.client.take_epoch_chunk() {
+            let Ok(descriptor) = umbra_wire::descriptor::FileDescriptor::parse(&wanted.descriptor)
+            else {
+                continue;
+            };
+            let index = wanted.chunk;
+            let tag = self.next_tag(TransferWork::EpochChunk {
+                conversation,
+                wanted: Box::new(wanted),
+            });
+            self.send_transfer(TransferCommand::FetchChunk {
+                tag,
+                descriptor: Box::new(descriptor),
+                index,
+            });
         }
     }
 
@@ -1359,6 +1402,7 @@ impl Inner {
                     crate::runtime::unix_now().saturating_mul(1_000),
                     &mut OsRng,
                 );
+                self.pump_epoch_transfers();
             }
             GroupUpdate::Failed { tag, reason } => {
                 // WIR-317: a group queue that the relay does not hold and a
@@ -1450,8 +1494,11 @@ impl Inner {
             None => Some(command),
         };
         // No task runs: the transfer fails, and the user can ask again.
-        if let Some(TransferCommand::Upload { tag, .. } | TransferCommand::Download { tag, .. }) =
-            refused
+        if let Some(
+            TransferCommand::Upload { tag, .. }
+            | TransferCommand::Download { tag, .. }
+            | TransferCommand::FetchChunk { tag, .. },
+        ) = refused
         {
             self.end_transfer(TransferUpdate::Failed { tag });
         }
@@ -1516,6 +1563,7 @@ impl Inner {
     /// Takes the end of one transfer into the store. A message that a
     /// deletion took since has no row, and its result goes nowhere.
     fn end_transfer(&mut self, update: TransferUpdate) {
+        let mut moved = false;
         let Inner {
             client,
             bridge,
@@ -1559,6 +1607,14 @@ impl Inner {
                         }
                     }
                 }
+                Some(TransferWork::EpochSlots(upload)) => {
+                    let mut descriptor = vec![0u8; uploaded.descriptor.len()];
+                    if uploaded.descriptor.encode(&mut descriptor).is_ok() {
+                        moved = client
+                            .post_chunked_epoch(&upload, &descriptor, unix_now_ms(), &mut OsRng)
+                            .is_ok();
+                    }
+                }
                 _ => {}
             },
             TransferUpdate::Downloaded { tag, plain } => match transfer_tags.remove(&tag) {
@@ -1570,6 +1626,22 @@ impl Inner {
                     // the group from here.
                     let _ =
                         client.accept_group_admit(from, &group_id, &plain, unix_now(), &mut OsRng);
+                }
+                Some(TransferWork::EpochChunk {
+                    conversation,
+                    wanted,
+                }) => {
+                    // An epoch that installs moves the replicas, and a
+                    // record that waited for it may be a rotation too.
+                    moved = client
+                        .install_epoch_chunk(
+                            conversation,
+                            &wanted,
+                            &plain,
+                            unix_now_ms(),
+                            &mut OsRng,
+                        )
+                        .is_ok();
                 }
                 _ => {}
             },
@@ -1589,8 +1661,14 @@ impl Inner {
                 // A snapshot that did not move leaves the join where it
                 // was, and the view offers the press that sends it again.
                 Some(TransferWork::Snapshot { from, .. }) => client.snapshot_failed(from),
+                Some(TransferWork::EpochSlots(upload)) => client.epoch_upload_failed(*upload),
+                // A chunk that did not move leaves the epoch missing, and
+                // the member asks for it (§11.4.3).
                 _ => {}
             },
+        }
+        if moved {
+            self.pump_groups();
         }
     }
 

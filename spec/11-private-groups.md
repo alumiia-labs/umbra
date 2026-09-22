@@ -773,6 +773,10 @@ member of role `admin` or above (`own_count` = `GROUP_REPLICAS`).
   members. **[GRP-285]** A member MUST NOT fetch another chunk of that object.
   Part 13 rule `ATT-142` applies to the descriptor. Each segment seals on its
   own under Part 13 §13.2.3, thus one chunk opens without the others.
+- **[GRP-406]** A rotator MUST post the chunked epoch-key record only after
+  the object reached the chunk path, and MAY write the object again when that
+  failed. A rotator that gives up holds an epoch that no member holds; each
+  member that meets a record of it asks for it under §11.4.3.
 
 **[GRP-388]** A member MUST read the inline slots of an epoch-key record
 under the slot lengths that the roles of its own roster give, and, when that

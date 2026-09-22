@@ -67,10 +67,55 @@ fn bucket_for_slots(admin_slots: usize, plain_slots: usize) -> Option<Bucket> {
         .find(|bucket| need <= bucket.group_body())
 }
 
+/// Where the slots of a rotation go (§11.4.2).
+pub enum EpochCarrier {
+    /// The epoch-key record, one copy for each replica.
+    Inline(Vec<u8>),
+    /// The slot object for the chunk path, and the facts that its record
+    /// names after the upload (`GRP-281` to `GRP-283`).
+    Chunked(ChunkedEpoch),
+}
+
+/// The slots of a rotation above the inline carrier.
+pub struct ChunkedEpoch {
+    /// Whole blocks of `SEGMENT_SIZE` bytes, each holding `slots_per_chunk`
+    /// slots in index order and then zero bytes (`GRP-281`).
+    pub object: Vec<u8>,
+    /// The slots in each block (`GRP-282`).
+    pub slots_per_chunk: u16,
+    /// The count of slots.
+    pub slot_count: u16,
+    /// `t_e` of the new epoch.
+    pub start_slot: u32,
+    /// The roster epoch whose active members hold the slots.
+    pub roster_epoch: u32,
+}
+
+/// The one chunk of a chunked epoch-key record that holds the slot of
+/// this member (`GRP-284`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WantedChunk {
+    /// The `FileDescriptor` bytes of the slot object.
+    pub descriptor: Vec<u8>,
+    /// The chunk: the rank of this member among the included members,
+    /// over `slots_per_chunk`.
+    pub chunk: u32,
+    /// The epoch that the record starts.
+    pub epoch: u32,
+    /// `t_e`.
+    pub start_slot: u32,
+    /// The roster epoch of the slots.
+    pub roster_epoch: u32,
+    /// The count of slots.
+    pub slot_count: u16,
+    /// The slots in each block.
+    pub slots_per_chunk: u16,
+}
+
 /// What a rotation produced.
 pub struct Rotation {
-    /// The epoch-key record, one copy for each replica.
-    pub record: Vec<u8>,
+    /// The epoch-key record, or the slot object that its record follows.
+    pub carrier: EpochCarrier,
     /// The epoch it starts.
     pub epoch: u32,
     /// The write credential of the epoch before this one, under which the
@@ -533,10 +578,11 @@ impl Group {
             .iter()
             .filter(|member| member.role >= Role::Admin && own_sks.is_some())
             .count();
-        // GRP-281: a group above the inline carrier writes its slots on
-        // the chunk path, which this device does not do yet.
+        // GRP-280: the slots go inline when a bucket holds them, and on
+        // the chunk path otherwise.
         let bucket =
-            bucket_for_slots(admins, included.len().saturating_sub(admins)).ok_or(Error::NoPath)?;
+            bucket_for_slots(admins, included.len().saturating_sub(admins)).unwrap_or(Bucket::B3);
+        let slot_count = u16::try_from(included.len()).map_err(|_| Error::Malformed)?;
         let output = rotate(
             self.roster.group_id(),
             epoch,
@@ -548,18 +594,30 @@ impl Group {
             bucket,
             rng,
         )?;
-        let body = output.inline.ok_or(Error::NoPath)?;
-        // GRP-383: the header carries `t_{e+1}` in its slot field.
-        let record = GroupQueueRecord {
-            kind: RecordKind::EpochKey,
-            epoch,
-            slot: output.start_slot,
-            nonce: [0; 12],
-            body: &body,
+        let carrier = match (output.inline, output.chunks) {
+            (Some(body), _) => {
+                // GRP-383: the header carries `t_{e+1}` in its slot field.
+                let record = GroupQueueRecord {
+                    kind: RecordKind::EpochKey,
+                    epoch,
+                    slot: output.start_slot,
+                    nonce: [0; 12],
+                    body: &body,
+                };
+                let mut bytes = alloc::vec![0u8; bucket.group_record()];
+                let n = record.encode(bucket, &mut bytes)?;
+                bytes.truncate(n);
+                EpochCarrier::Inline(bytes)
+            }
+            (None, Some(chunks)) => EpochCarrier::Chunked(ChunkedEpoch {
+                object: chunks.concat(),
+                slots_per_chunk: output.slots_per_chunk,
+                slot_count,
+                start_slot: output.start_slot,
+                roster_epoch,
+            }),
+            (None, None) => return Err(Error::Malformed),
         };
-        let mut bytes = alloc::vec![0u8; bucket.group_record()];
-        let n = record.encode(bucket, &mut bytes)?;
-        bytes.truncate(n);
         self.epochs.install(EpochState::new(
             output.secret,
             self.roster.group_id(),
@@ -570,10 +628,163 @@ impl Group {
             now,
         ))?;
         Ok(Rotation {
-            record: bytes,
+            carrier,
             epoch,
             write,
         })
+    }
+
+    /// The epoch-key record of a chunked rotation, after the slot object
+    /// reached the chunk path under `descriptor` (`GRP-283`).
+    pub fn chunked_record(
+        &self,
+        epoch: u32,
+        chunked: &ChunkedEpoch,
+        descriptor: &[u8],
+    ) -> Result<Vec<u8>, Error> {
+        let body = EpochKeyBody {
+            roster_epoch: chunked.roster_epoch,
+            slot_count: chunked.slot_count,
+            carrier: Carrier::Chunked {
+                slots_per_chunk: chunked.slots_per_chunk,
+                descriptor,
+            },
+        };
+        let need = EPOCH_KEY_FIXED
+            .saturating_add(4)
+            .saturating_add(descriptor.len());
+        let bucket = BUCKETS
+            .into_iter()
+            .find(|bucket| need <= bucket.group_body())
+            .ok_or(Error::Malformed)?;
+        let mut body_bytes = alloc::vec![0u8; bucket.group_body()];
+        let n = body.encode(bucket, &mut body_bytes)?;
+        body_bytes.truncate(n);
+        let record = GroupQueueRecord {
+            kind: RecordKind::EpochKey,
+            epoch,
+            slot: chunked.start_slot,
+            nonce: [0; 12],
+            body: &body_bytes,
+        };
+        let mut bytes = alloc::vec![0u8; bucket.group_record()];
+        let n = record.encode(bucket, &mut bytes)?;
+        bytes.truncate(n);
+        Ok(bytes)
+    }
+
+    /// The chunk that holds the slot of this member, when an epoch-key
+    /// record carries its slots on the chunk path; none for an inline
+    /// record (`GRP-284`). This member fetches that chunk alone
+    /// (`GRP-285`).
+    pub fn wanted_chunk(
+        &self,
+        epoch: u32,
+        start_slot: u32,
+        body: &[u8],
+        now: u64,
+    ) -> Result<Option<WantedChunk>, Error> {
+        let parsed = EpochKeyBody::parse(body, |_| Some(0));
+        let Ok(EpochKeyBody {
+            roster_epoch,
+            slot_count,
+            carrier:
+                Carrier::Chunked {
+                    slots_per_chunk,
+                    descriptor,
+                },
+        }) = parsed
+        else {
+            return Ok(None);
+        };
+        self.check_epoch_key(epoch, now)?;
+        // The rotation served the active set of its roster epoch in index
+        // order, thus the rank of this member there names its block.
+        let rank = self
+            .roster
+            .rank_at(roster_epoch, self.own_index)
+            .ok_or(Error::NoPath)?;
+        let chunk = rank / usize::from(slots_per_chunk);
+        Ok(Some(WantedChunk {
+            descriptor: descriptor.to_vec(),
+            chunk: u32::try_from(chunk).map_err(|_| Error::Malformed)?,
+            epoch,
+            start_slot,
+            roster_epoch,
+            slot_count,
+            slots_per_chunk,
+        }))
+    }
+
+    /// Installs the epoch from the block of the chunk path that holds the
+    /// slot of this member (`GRP-284`, `GRP-286`).
+    pub fn install_chunk(
+        &mut self,
+        wanted: &WantedChunk,
+        block: &[u8],
+        now: u64,
+    ) -> Result<(), Error> {
+        self.check_epoch_key(wanted.epoch, now)?;
+        let first = usize::try_from(wanted.chunk)
+            .map_err(|_| Error::Malformed)?
+            .saturating_mul(usize::from(wanted.slots_per_chunk));
+        let count = usize::from(wanted.slots_per_chunk)
+            .min(usize::from(wanted.slot_count).saturating_sub(first));
+        let mut refused = Error::NoPath;
+        // GRP-388: the rotator's role sets the length of an admin slot.
+        for admin_layout in [true, false] {
+            let Some(slots) = self.block_slots(block, count, admin_layout) else {
+                continue;
+            };
+            match self.read_own_slot(wanted.roster_epoch, &slots, wanted.epoch, wanted.start_slot) {
+                Ok(payload) => {
+                    return self.finish_install(
+                        wanted.epoch,
+                        wanted.start_slot,
+                        wanted.roster_epoch,
+                        &payload,
+                        now,
+                    );
+                }
+                Err(error) => refused = error,
+            }
+        }
+        Err(refused)
+    }
+
+    /// The slots of one block of the chunk path under one layout, or none
+    /// when the block does not hold `count` of them.
+    fn block_slots<'a>(
+        &self,
+        block: &'a [u8],
+        count: usize,
+        admin_layout: bool,
+    ) -> Option<Vec<umbra_wire::group::record::KemSlot<'a>>> {
+        let mut slots = Vec::with_capacity(count);
+        let mut at = 0usize;
+        for _ in 0..count {
+            let head = block.get(at..at.checked_add(2)?)?;
+            let index = u16::from_be_bytes([*head.first()?, *head.get(1)?]);
+            let role = self.roster.member(index)?.role;
+            let own = if admin_layout && role >= Role::Admin {
+                REPLICAS
+            } else {
+                0
+            };
+            let start = at.checked_add(2)?;
+            let end = start.checked_add(slot_len(own).checked_sub(2)?)?;
+            slots.push(umbra_wire::group::record::KemSlot {
+                index,
+                sealed: block.get(start..end)?,
+            });
+            at = end;
+        }
+        // GRP-281: zero bytes fill the rest of the block.
+        block
+            .get(at..)?
+            .iter()
+            .all(|byte| *byte == 0)
+            .then_some(slots)
     }
 
     /// Installs the epoch that an epoch-key record starts (`GRP-286`,
@@ -586,8 +797,15 @@ impl Group {
         body: &[u8],
         now: u64,
     ) -> Result<(), Error> {
+        self.check_epoch_key(epoch, now)?;
+        let (payload, roster_epoch) = self.open_epoch_slot(epoch, start_slot, body)?;
+        self.finish_install(epoch, start_slot, roster_epoch, &payload, now)
+    }
+
+    /// Whether an epoch-key record of `epoch` may install at `now`
+    /// (`GRP-357`, `GRP-288`).
+    fn check_epoch_key(&self, epoch: u32, now: u64) -> Result<(), Error> {
         let current = self.epochs.current().ok_or(Error::NoPath)?;
-        let current_epoch = current.epoch();
         if epoch == current.epoch().saturating_add(1) {
             // GRP-357: a rotation that no trigger called for is refused.
             if self
@@ -604,14 +822,25 @@ impl Group {
             // `EpochStore::install` settles it by the rotator index.
             return Err(Error::Stale);
         }
-        let (payload, roster_epoch) = self.open_epoch_slot(epoch, start_slot, body)?;
+        Ok(())
+    }
+
+    /// Installs what an opened slot gives.
+    fn finish_install(
+        &mut self,
+        epoch: u32,
+        start_slot: u32,
+        roster_epoch: u32,
+        payload: &SlotPayload,
+        now: u64,
+    ) -> Result<(), Error> {
         // GRP-400: a slot with no epoch secret hands the owner credentials
         // and installs no epoch. Only a slot of the current epoch holds it.
         if payload.epoch_secret.expose() == &[0; 32] {
-            if epoch != current_epoch || payload.own_sks.len() != GROUP_REPLICAS {
+            if epoch != self.epochs.epoch() || payload.own_sks.len() != GROUP_REPLICAS {
                 return Err(Error::Unverified);
             }
-            self.take_owners(&payload);
+            self.take_owners(payload);
             return Ok(());
         }
         let secret = EpochSecret::from_secret(Secret::new(*payload.epoch_secret.expose()));
@@ -625,7 +854,7 @@ impl Group {
             payload.rotator,
             now,
         ))?;
-        self.take_owners(&payload);
+        self.take_owners(payload);
         Ok(())
     }
 
@@ -842,7 +1071,8 @@ impl Group {
                 continue;
             };
             let Carrier::Inline(slots) = &parsed.carrier else {
-                // GRP-283: a chunked record waits for the chunk path.
+                // GRP-284: the slot of a chunked record is on the chunk
+                // path, and `install_chunk` reads it.
                 return Err(Error::NoPath);
             };
             match self.read_own_slot(parsed.roster_epoch, slots, epoch, start_slot) {
@@ -1235,6 +1465,14 @@ mod tests {
         (creator, member, third)
     }
 
+    /// The inline epoch-key record of a rotation.
+    fn inline(rotation: &Rotation) -> &[u8] {
+        match &rotation.carrier {
+            EpochCarrier::Inline(record) => record,
+            EpochCarrier::Chunked(_) => panic!("the rotation went on the chunk path"),
+        }
+    }
+
     /// The record of a rotation, at the bucket its length names.
     fn parse_record(bytes: &[u8]) -> umbra_wire::group::record::GroupQueueRecord<'_> {
         let bucket = BUCKETS
@@ -1283,7 +1521,7 @@ mod tests {
         assert_eq!(creator.epoch(), first_epoch + 1);
         assert!(creator.owes_rotation(now).is_none());
 
-        let record = parse_record(&rotation.record);
+        let record = parse_record(inline(&rotation));
         assert_eq!(record.kind, RecordKind::EpochKey);
         assert_eq!(record.nonce, [0; 12]);
         third
@@ -1331,7 +1569,7 @@ mod tests {
 
         assert!(member.owner(0).is_none());
         let rotation = member.rotate(now, &mut rng).unwrap();
-        let record = parse_record(&rotation.record);
+        let record = parse_record(inline(&rotation));
         // GRP-388: the creator is an owner, thus the admin layout is the
         // first one read, and the plain layout is the one that opens.
         creator
@@ -1361,7 +1599,7 @@ mod tests {
         let mut rng = Rng(27);
         // GRP-357: no trigger stands, thus the record is refused.
         let rotation = creator.rotate(now, &mut rng).unwrap();
-        let record = parse_record(&rotation.record);
+        let record = parse_record(inline(&rotation));
         assert_eq!(
             member.install_epoch_key(record.epoch, record.slot, record.body, now),
             Err(Error::Unverified)
@@ -1624,6 +1862,106 @@ mod tests {
         assert!(!creator.may_supply(index, creator.epoch()));
         assert!(creator.key_supply(index, &mut rng).is_err());
         assert!(!creator.may_supply(1, creator.epoch() + 1));
+    }
+
+    #[test]
+    fn a_rotation_above_the_inline_carrier_goes_on_the_chunk_path() {
+        let now = 1_700_000_000;
+        let mut rng = Rng(53);
+        let mut creator =
+            Group::create([0x66; 32], &Secret::new([0x21; 32]), now, &mut rng).unwrap();
+        creator.set_replicas([
+            ReplicaRef {
+                relay_id: [1; 32],
+                group_queue_id: [2; 32],
+                seq_of_add: 0,
+            },
+            ReplicaRef {
+                relay_id: [3; 32],
+                group_queue_id: [4; 32],
+                seq_of_add: 0,
+            },
+        ]);
+        // 29 members join, thus the group holds 30, above the 27 slots of
+        // the inline carrier.
+        let mut last = None;
+        for seed in 1..=29u8 {
+            let join_seed = Secret::new([seed; 32]);
+            let keys = JoinKeys {
+                seed: Secret::new([seed; 32]),
+                keys: MemberKeys::from_seed(&join_seed),
+            };
+            let kem_pk = keys.keys.kem().public().to_bytes();
+            let add = creator
+                .add_object(&JoinRecord {
+                    group_id: *creator.group_id(),
+                    keys: keys.wire_keys(&kem_pk),
+                })
+                .unwrap();
+            let control = GroupControl::parse(&add).unwrap();
+            let add_hash = control.epoch_hash();
+            let Applied::Added(index) = creator.apply_control(&control, 0, now).unwrap() else {
+                panic!("the add added nobody");
+            };
+            last = Some((index, add_hash, keys));
+        }
+        let (index, add_hash, keys) = last.unwrap();
+        let admit = creator.admit_for(index, 0, b"", now).unwrap();
+        let invitation = umbra_wire::group::control::GroupInvitation::parse(
+            GroupControl::parse(&admit).unwrap().payload,
+        )
+        .unwrap();
+        let snapshot_bytes = creator.snapshot(&[]).unwrap();
+        let snapshot = RosterSnapshot::parse(&snapshot_bytes).unwrap();
+        let creator_pk = creator.keys.roster().verifying_key().to_bytes();
+        let admitted =
+            crate::group::join::accept_admit(&invitation, &snapshot, &add_hash, &creator_pk, now)
+                .unwrap();
+        let mut member = Group::joined(admitted, &keys.seed).unwrap();
+
+        // A removal leaves 29 members, and the rotation goes on the chunk
+        // path (`GRP-280`).
+        let removal = creator.remove_object(5).unwrap();
+        let control = GroupControl::parse(&removal).unwrap();
+        creator.apply_control(&control, 0, now).unwrap();
+        member.apply_control(&control, 0, now).unwrap();
+        let rotation = creator.rotate(now, &mut rng).unwrap();
+        let EpochCarrier::Chunked(chunked) = &rotation.carrier else {
+            panic!("29 slots went inline");
+        };
+        assert_eq!(chunked.slot_count, 29);
+        assert_eq!(chunked.slots_per_chunk, 27);
+        assert_eq!(chunked.object.len(), 2 * crate::attach::SEGMENT_SIZE);
+
+        // GRP-283: the record names the object by its descriptor, and the
+        // member finds the one chunk that holds its slot (`GRP-284`).
+        let bytes = creator
+            .chunked_record(rotation.epoch, chunked, b"a descriptor")
+            .unwrap();
+        let record = parse_record(&bytes);
+        let wanted = member
+            .wanted_chunk(record.epoch, record.slot, record.body, now)
+            .unwrap()
+            .unwrap();
+        assert_eq!(wanted.descriptor, b"a descriptor");
+        // The member holds the last index, rank 28, thus block 1.
+        assert_eq!(wanted.chunk, 1);
+        let segment = crate::attach::SEGMENT_SIZE;
+        // Block 0 holds the slots of rank 0 to 26 and none of this member.
+        assert!(member
+            .install_chunk(&wanted, &chunked.object[..segment], now)
+            .is_err());
+        assert_eq!(member.epoch(), 1);
+        let block = &chunked.object[segment..2 * segment];
+        member.install_chunk(&wanted, block, now).unwrap();
+        assert_eq!(member.epoch(), creator.epoch());
+        let next = creator
+            .post(&text("to twenty-nine"), now, &mut rng)
+            .unwrap();
+        assert!(matches!(
+            member.receive(&next, now).unwrap(),
+            Outcome::Content { .. }
+        ));
     }
 
     #[test]

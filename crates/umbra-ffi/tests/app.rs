@@ -33,7 +33,7 @@ use umbra_core::{
         queue::{select_pair, Candidate as GroupRelay},
         receive::Outcome,
         roster::Applied,
-        state::Group,
+        state::{EpochCarrier, Group},
     },
     session::node::{ClientNode, RelayInfo},
 };
@@ -1662,6 +1662,9 @@ fn two_members_talk_in_a_group_over_the_relays_of_a_signed_network() {
     // credential of the epoch before it (`GRP-362`).
     let rotation = creator.rotate(now, &mut rng).unwrap();
     assert_eq!(rotation.epoch, 2);
+    let EpochCarrier::Inline(record) = &rotation.carrier else {
+        panic!("a small group went on the chunk path");
+    };
     for (index, relay) in replicas.iter().enumerate() {
         creator_tx
             .send(GroupCommand::Post {
@@ -1670,7 +1673,7 @@ fn two_members_talk_in_a_group_over_the_relays_of_a_signed_network() {
                 group_queue_id: queue_ids[index],
                 write: Secret::new(*rotation.write.expose()),
                 fallback: None,
-                record: rotation.record.clone(),
+                record: record.clone(),
             })
             .ok()
             .unwrap();

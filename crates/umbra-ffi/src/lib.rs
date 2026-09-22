@@ -1021,7 +1021,7 @@ mod tests {
             .on_group_record(&[0xC3; 32], 10, &supply.record, at, &mut rng)
             .unwrap();
         assert!(reopened.is_some());
-        // GRP-407: the epoch it lacked came, thus the group is open again.
+        // GRP-405: the epoch it lacked came, thus the group is open again.
         let info = other.group_info(member).unwrap();
         assert!(!info.is_lapsed && !info.is_closed);
         assert_eq!(info.epoch, 3);
@@ -1065,6 +1065,108 @@ mod tests {
             })
         );
         assert_eq!(other.group_info(member).unwrap().epoch, 2);
+    }
+
+    #[test]
+    fn a_group_above_the_inline_carrier_rotates_on_the_chunk_path() {
+        use umbra_core::group::join::JoinKeys;
+        use umbra_wire::group::control::{GroupControl, JoinRecord};
+        const DAY: u64 = 86_400;
+        let mut rng = Rng(83);
+        let mut client = new_client(&mut rng);
+        let mut other = new_client(&mut rng);
+        let relays = [[0xA1; 32], [0xB2; 32]];
+        let conversation = client
+            .create_group("Trail", relays, 1_700_000_000, &mut rng)
+            .unwrap();
+        let group_id = client.group_info(conversation).unwrap().group_id;
+        client
+            .group_queue_made(&group_id, 0, relays[0], [0xC3; 32], &mut rng)
+            .unwrap();
+        client
+            .group_queue_made(&group_id, 1, relays[1], [0xD4; 32], &mut rng)
+            .unwrap();
+        // 28 members join before `other`, thus the group holds 30, above
+        // the 27 slots of the inline carrier.
+        let mut group = client.group_of(conversation).unwrap();
+        for _ in 0..28 {
+            let joiner = JoinKeys::make(&mut rng).unwrap();
+            let kem_pk = joiner.keys.kem().public().to_bytes();
+            let add = group
+                .add_object(&JoinRecord {
+                    group_id,
+                    keys: joiner.wire_keys(&kem_pk),
+                })
+                .unwrap();
+            group
+                .apply_control(&GroupControl::parse(&add).unwrap(), 0, 1_700_000_001)
+                .unwrap();
+        }
+        client.save_group(conversation, &group, &mut rng).unwrap();
+        let member = join_group(&mut client, &mut other, conversation, &mut rng);
+
+        // GRP-283: the slots go up first, and no record goes before them.
+        let later = 1_700_000_000 + 31 * DAY;
+        let ms = |seconds: u64| seconds * 1_000;
+        client
+            .rotate_group(conversation, ms(later), &mut rng)
+            .unwrap();
+        assert!(client.take_group_post().is_none());
+        let upload = client.take_epoch_upload().unwrap();
+        assert_eq!(upload.chunked.slot_count, 30);
+        // A failed upload goes again, up to its limit.
+        client.epoch_upload_failed(upload);
+        let upload = client.take_epoch_upload().unwrap();
+        assert_eq!(upload.tries, 1);
+        client
+            .post_chunked_epoch(&upload, b"a descriptor", ms(later), &mut rng)
+            .unwrap();
+        let key = client.take_group_post().unwrap();
+        assert!(key.is_rotation);
+        let mut draft = client.new_draft(conversation);
+        draft.set_text(&units("under the new key")).unwrap();
+        client.send_draft(draft, ms(later), &mut rng).unwrap();
+        let text = client.take_group_post().unwrap();
+
+        // GRP-284: the member fetches the one chunk that holds its slot,
+        // once for the two replicas.
+        assert!(other
+            .on_group_record(&[0xC3; 32], 2, &text.record, ms(later), &mut rng)
+            .unwrap()
+            .is_none());
+        for (queue, seq) in [([0xC3; 32], 3), ([0xD4; 32], 1)] {
+            assert!(other
+                .on_group_record(&queue, seq, &key.record, ms(later), &mut rng)
+                .unwrap()
+                .is_none());
+        }
+        let (at, wanted) = other.take_epoch_chunk().unwrap();
+        assert_eq!(at, member);
+        assert!(other.take_epoch_chunk().is_none());
+        assert_eq!(wanted.descriptor, b"a descriptor");
+        assert_eq!(wanted.chunk, 1);
+        let size = umbra_core::attach::SEGMENT_SIZE;
+        let block = &upload.chunked.object[size..2 * size];
+
+        // The epoch installs, and the record that waited becomes a message.
+        let message = other
+            .install_epoch_chunk(member, &wanted, block, ms(later), &mut rng)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            other.next_event(),
+            Some(Event::Message {
+                conversation: member,
+                message
+            })
+        );
+        assert_eq!(other.group_info(member).unwrap().epoch, 2);
+        // An upload past its limit is given up, and the members that lack
+        // the epoch ask for it.
+        let mut upload = upload;
+        upload.tries = 2;
+        client.epoch_upload_failed(upload);
+        assert!(client.take_epoch_upload().is_none());
     }
 
     /// Puts `other` into the group of `client` with the add, the admit and

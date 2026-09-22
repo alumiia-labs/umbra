@@ -17,7 +17,7 @@ use umbra_core::{
         presence::{presence_due, Eviction, PresenceTracker},
         receive::Outcome,
         roster::Applied,
-        state::Group,
+        state::{ChunkedEpoch, EpochCarrier, Group, WantedChunk},
         GROUP_REPLICAS, GROUP_SILENT_EVICT, ROSTER_RATE_LIMIT,
     },
     store::{
@@ -336,7 +336,49 @@ pub(super) struct GroupQueues {
     /// The requests of each group that this device took in, which drop
     /// above the rate (`GRP-378`).
     pub key_answers_rate: BTreeMap<ConversationId, KeyRequestRate>,
+    /// The slot objects of rotations that wait for the chunk path, whose
+    /// records follow the upload (`GRP-283`).
+    pub epoch_uploads: VecDeque<EpochUpload>,
+    /// The chunks of chunked epoch-key records that this device fetches
+    /// (`GRP-284`).
+    pub epoch_chunks: VecDeque<(ConversationId, WantedChunk)>,
 }
+
+/// The facts of a group before an arrival, which tell what it changed.
+struct Before {
+    epoch: u32,
+    owners: Option<[u8; 32]>,
+}
+
+impl Before {
+    fn of(group: &Group) -> Self {
+        Before {
+            epoch: group.epoch(),
+            owners: group.owner(0).map(|held| *held.expose()),
+        }
+    }
+}
+
+/// A rotation whose slots go on the chunk path, and whose record follows
+/// the upload (`GRP-281` to `GRP-283`).
+pub struct EpochUpload {
+    /// The group.
+    pub conversation: ConversationId,
+    /// The epoch that the rotation starts.
+    pub epoch: u32,
+    /// The slots and the facts of their record.
+    pub chunked: ChunkedEpoch,
+    /// `write_sk` of the epoch before, under which the record goes.
+    pub write: Secret<32>,
+    /// The pair before that, when no `GKEY` moved the relay yet.
+    pub fallback: Option<Secret<32>>,
+    /// The uploads that failed. Past `EPOCH_UPLOAD_TRIES` the members
+    /// that lack the epoch ask for it (`GRP-406`).
+    pub tries: u8,
+}
+
+/// The uploads of one slot object before the rotation gives it up.
+const EPOCH_UPLOAD_TRIES: u8 = 3;
 
 /// The key of the clock of the last record of this device in a group.
 fn sent_key(conversation: ConversationId) -> Vec<u8> {
@@ -1803,16 +1845,102 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             return Ok(());
         };
         self.save_group(conversation, &group, rng)?;
+        match rotation.carrier {
+            EpochCarrier::Inline(record) => self.groups.posts.push_back(GroupPost {
+                message: None,
+                conversation,
+                replicas,
+                write: rotation.write,
+                fallback,
+                record,
+                is_rotation: true,
+            }),
+            // GRP-283: the slots go on the chunk path, and the record that
+            // names them follows the upload.
+            EpochCarrier::Chunked(chunked) => self.groups.epoch_uploads.push_back(EpochUpload {
+                conversation,
+                epoch: rotation.epoch,
+                chunked,
+                write: rotation.write,
+                fallback,
+                tries: 0,
+            }),
+        }
+        self.put_clock(conversation, sent_key(conversation), now_ms / 1_000, rng)
+    }
+
+    /// The next slot object that waits for the chunk path.
+    pub fn take_epoch_upload(&mut self) -> Option<EpochUpload> {
+        self.groups.epoch_uploads.pop_front()
+    }
+
+    /// Posts the epoch-key record of a chunked rotation, after its slot
+    /// object reached the chunk path under `descriptor` (`GRP-283`). A
+    /// `GKEY` follows it, as after an inline record (`GRP-406`).
+    pub fn post_chunked_epoch<R: CryptoRng + ?Sized>(
+        &mut self,
+        upload: &EpochUpload,
+        descriptor: &[u8],
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let group = self.group_of(upload.conversation)?;
+        let Some(replicas) = Self::group_replicas_of(&group)? else {
+            return Ok(());
+        };
+        let record = group
+            .chunked_record(upload.epoch, &upload.chunked, descriptor)
+            .map_err(|_| Error::Malformed)?;
         self.groups.posts.push_back(GroupPost {
             message: None,
-            conversation,
+            conversation: upload.conversation,
             replicas,
-            write: rotation.write,
-            fallback,
-            record: rotation.record,
+            write: Secret::new(*upload.write.expose()),
+            fallback: upload
+                .fallback
+                .as_ref()
+                .map(|held| Secret::new(*held.expose())),
+            record,
             is_rotation: true,
         });
-        self.put_clock(conversation, sent_key(conversation), now_ms / 1_000, rng)
+        self.put_clock(
+            upload.conversation,
+            sent_key(upload.conversation),
+            now_ms / 1_000,
+            rng,
+        )
+    }
+
+    /// Takes back a slot object whose upload failed, below the limit.
+    pub fn epoch_upload_failed(&mut self, mut upload: EpochUpload) {
+        upload.tries = upload.tries.saturating_add(1);
+        if upload.tries < EPOCH_UPLOAD_TRIES {
+            self.groups.epoch_uploads.push_back(upload);
+        }
+    }
+
+    /// The next chunk of a chunked epoch-key record to fetch.
+    pub fn take_epoch_chunk(&mut self) -> Option<(ConversationId, WantedChunk)> {
+        self.groups.epoch_chunks.pop_front()
+    }
+
+    /// Installs an epoch from the one chunk that holds the slot of this
+    /// member (`GRP-284`), and takes each record that waited for it.
+    pub fn install_epoch_chunk<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        wanted: &WantedChunk,
+        block: &[u8],
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<Option<MsgRef>, Error> {
+        let mut group = self.group_of(conversation)?;
+        let before = Before::of(&group);
+        group
+            .install_chunk(wanted, block, now_ms / 1_000)
+            .map_err(|_| Error::Integrity)?;
+        let released: VecDeque<Outcome> = group.retry_held(now_ms / 1_000).into();
+        self.take_outcomes(conversation, group, released, before, true, now_ms, rng)
     }
 
     /// The `GKEY` that follows an accepted epoch-key record at one replica
@@ -2323,12 +2451,26 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let is_epoch_key = matches!(outcome, Ok(Outcome::EpochKey { .. }));
             replicas.arrived(which, seq, is_epoch_key);
         }
+        let before = Before::of(&group);
+        let outcomes: VecDeque<Outcome> = outcome.into_iter().collect();
+        self.take_outcomes(conversation, group, outcomes, before, false, now_ms, rng)
+    }
+
+    /// Takes the outcomes of one arrival in their order, with each record
+    /// that an epoch key or a roster object releases, and stores the group.
+    #[allow(clippy::too_many_arguments)]
+    fn take_outcomes<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        mut group: Group,
+        mut outcomes: VecDeque<Outcome>,
+        before: Before,
+        mut installed: bool,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<Option<MsgRef>, Error> {
         let now = now_ms / 1_000;
-        let mut outcomes: VecDeque<Outcome> = outcome.into_iter().collect();
         let mut first = None;
-        let mut installed = false;
-        let epoch_before = group.epoch();
-        let owners_before = group.owner(0).map(|held| *held.expose());
         while let Some(outcome) = outcomes.pop_front() {
             match outcome {
                 Outcome::EpochKey {
@@ -2342,6 +2484,19 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         for index in group.slot_indices(&body) {
                             self.groups.key_answers.remove(&(conversation, index));
                         }
+                    }
+                    // GRP-284: the slot of a chunked record waits on the
+                    // chunk path, and this device fetches its one chunk.
+                    if let Ok(Some(wanted)) = group.wanted_chunk(epoch, start_slot, &body, now) {
+                        // Each replica carries the record, and one fetch
+                        // serves both.
+                        let fetching = self.groups.epoch_chunks.iter().any(|(held, other)| {
+                            *held == conversation && other.epoch == wanted.epoch
+                        });
+                        if !fetching {
+                            self.groups.epoch_chunks.push_back((conversation, wanted));
+                        }
+                        continue;
                     }
                     if group
                         .install_epoch_key(epoch, start_slot, &body, now)
@@ -2394,7 +2549,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // GRP-363: an admin that installs an epoch it did not credential
         // moves each replica to it. A delivery of owner credentials alone
         // installs no epoch.
-        if installed && group.epoch() != epoch_before {
+        if installed && group.epoch() != before.epoch {
             self.queue_rekeys(&group)?;
             // GRP-405: the epoch that a lapsed member lacked arrived, and
             // the credentials of it take its records again.
@@ -2409,7 +2564,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
         // GRP-402: owner credentials from another admin answer the call for
         // them, thus this admin stands down.
-        if group.owner(0).map(|held| *held.expose()) != owners_before {
+        if group.owner(0).map(|held| *held.expose()) != before.owners {
             self.groups.owner_backoff.remove(&conversation);
             self.note_owners(conversation, &group, rng)?;
         }

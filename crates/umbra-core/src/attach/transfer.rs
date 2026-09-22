@@ -14,7 +14,7 @@ use umbra_wire::descriptor::{ChunkRef, FileDescriptor, Level};
 
 use super::{
     place::{fetch_order, resolve_hint, AttachmentRelay, HoldOffs},
-    seal::{read_secret, seal_file, Assembler, SealedFile},
+    seal::{open_chunk, read_secret, seal_file, Assembler, SealedFile},
     upload::{sample_positions, ChunkUpload},
     verify_sample, MAX_CONCURRENT_DOWN, MAX_CONCURRENT_UP, MAX_DESCRIPTOR_REFS, REPLICAS,
 };
@@ -766,5 +766,110 @@ impl Download {
         let is_complete = assembler.is_complete();
         self.tick(node, rng)?;
         Ok(is_complete)
+    }
+}
+
+/// The fetch of one chunk of a file, which opens alone under its index
+/// (Part 11 `GRP-284`, `GRP-285`): the slot of one member in a chunked
+/// epoch-key record. No other chunk of the file leaves the relays.
+pub struct ChunkFetch {
+    file_key: Secret<32>,
+    file_nonce: [u8; 24],
+    index: u32,
+    is_last: bool,
+    chunk_id: [u8; 32],
+    /// The replicas that this fetch did not ask yet, the next one last.
+    order: Vec<[u8; 32]>,
+    waiting: Option<u64>,
+}
+
+impl ChunkFetch {
+    /// The fetch of chunk `index` of `descriptor`, over each replica that
+    /// its reference names (`ATT-008`, `ATT-019`).
+    pub fn new<R: CryptoRng + ?Sized>(
+        descriptor: &FileDescriptor,
+        index: u32,
+        relays: &[AttachmentRelay],
+        rng: &mut R,
+    ) -> Result<Self, Error> {
+        if descriptor.level != Level::Data {
+            return Err(Error::Malformed);
+        }
+        let position = usize::try_from(index).map_err(|_| Error::Malformed)?;
+        let chunk_ref = descriptor.refs.get(position).ok_or(Error::Malformed)?;
+        let mut replicas = alloc::vec![chunk_ref.relay_id];
+        for hint in &chunk_ref.replicas {
+            let ids = relays.iter().map(|relay| relay.relay_id);
+            if let Ok(relay) = resolve_hint(hint, ids) {
+                replicas.push(relay);
+            }
+        }
+        let mut order = fetch_order(
+            &chunk_ref.chunk_id,
+            &replicas,
+            &HoldOffs::default(),
+            0,
+            &mut |bound| random_below(rng, bound),
+        );
+        order.reverse();
+        Ok(ChunkFetch {
+            file_key: Secret::new(*descriptor.file_key.expose()),
+            file_nonce: descriptor.file_nonce,
+            index,
+            is_last: position.saturating_add(1) == descriptor.refs.len(),
+            chunk_id: chunk_ref.chunk_id,
+            order,
+            waiting: None,
+        })
+    }
+
+    /// Whether the answer with this handle belongs to this fetch.
+    pub fn owns(&self, handle: u64) -> bool {
+        self.waiting == Some(handle)
+    }
+
+    /// Asks the next replica, when no question waits.
+    pub fn tick<R: CryptoRng + ?Sized>(
+        &mut self,
+        node: &mut ClientNode,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        if self.waiting.is_some() {
+            return Ok(());
+        }
+        // No replica is left: the chunk is out of reach.
+        let relay = self.order.pop().ok_or(Error::NoPath)?;
+        let read = read_secret(&self.file_key, self.index);
+        let handle = node.chunk(relay, self.chunk_id, ChunkJob::Fetch { read }, rng)?;
+        self.waiting = Some(handle);
+        Ok(())
+    }
+
+    /// Takes the answer to the `CGET`, and gives the opened segment.
+    pub fn on_outcome<R: CryptoRng + ?Sized>(
+        &mut self,
+        node: &mut ClientNode,
+        handle: u64,
+        outcome: ChunkOutcome,
+        rng: &mut R,
+    ) -> Result<Progress<Vec<u8>>, Error> {
+        if self.waiting != Some(handle) {
+            return Ok(Progress::Running(0, 1));
+        }
+        self.waiting = None;
+        if let ChunkOutcome::Fetched(bytes) = outcome {
+            if let Ok(plain) = open_chunk(
+                &self.file_key,
+                &self.file_nonce,
+                self.index,
+                self.is_last,
+                &bytes,
+            ) {
+                return Ok(Progress::Done(plain));
+            }
+        }
+        // ATT-019: the next replica.
+        self.tick(node, rng)?;
+        Ok(Progress::Running(0, 1))
     }
 }
