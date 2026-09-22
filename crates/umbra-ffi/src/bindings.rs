@@ -925,6 +925,9 @@ enum GroupWork {
         conversation: crate::ConversationId,
         /// The relay that takes this copy.
         relay: [u8; 32],
+        /// Whether the record starts an epoch, thus a `GKEY` follows it
+        /// at the replica that accepted it (`GRP-362`).
+        is_rotation: bool,
     },
 }
 
@@ -1002,6 +1005,29 @@ impl Inner {
                 });
             }
         }
+        // §11.4.1: a trigger that no record answered rotates the epoch
+        // after the backoff of this device.
+        if let Ok(due) = self
+            .client
+            .groups_to_rotate(crate::runtime::unix_now().saturating_mul(1_000), &mut OsRng)
+        {
+            for conversation in due {
+                let _ = self.client.rotate_group(
+                    conversation,
+                    crate::runtime::unix_now().saturating_mul(1_000),
+                    &mut OsRng,
+                );
+            }
+        }
+        while let Some(job) = self.client.take_group_rekey() {
+            commands.push(GroupCommand::Rotate {
+                relay: job.relay,
+                group_queue_id: job.group_queue_id,
+                own: job.own,
+                read_pk: job.read_pk,
+                write_pk: job.write_pk,
+            });
+        }
         while let Some(job) = self.client.take_group_post() {
             // GRP-194: the same record goes to each replica, each under its
             // own tag, and the first `GSEQ` accepts it (`GRP-195`).
@@ -1010,6 +1036,7 @@ impl Inner {
                     message: job.message,
                     conversation: job.conversation,
                     relay: replica.relay,
+                    is_rotation: job.is_rotation,
                 });
                 commands.push(GroupCommand::Post {
                     tag,
@@ -1161,19 +1188,32 @@ impl Inner {
             }
             GroupUpdate::Posted { tag, relay, .. } => {
                 // GRP-195: one replica accepted, thus the record is accepted.
-                if let Some(GroupWork::Post {
+                let Some(GroupWork::Post {
                     message,
                     conversation,
+                    is_rotation,
                     ..
                 }) = self.group_tags.remove(&tag)
-                {
-                    self.group_refusals.remove(&(conversation, relay));
-                    if let Some(message) = message {
-                        let _ = self.client.set_delivery(
-                            &message,
-                            crate::Delivery::Accepted,
-                            &mut OsRng,
-                        );
+                else {
+                    return;
+                };
+                self.group_refusals.remove(&(conversation, relay));
+                if let Some(message) = message {
+                    let _ =
+                        self.client
+                            .set_delivery(&message, crate::Delivery::Accepted, &mut OsRng);
+                }
+                // GRP-361: the `GKEY` waits for the replica that took the
+                // epoch-key record, and it goes to that replica alone.
+                if is_rotation {
+                    if let Ok(Some(job)) = self.client.group_rekey_for(conversation, &relay) {
+                        self.send_group(GroupCommand::Rotate {
+                            relay: job.relay,
+                            group_queue_id: job.group_queue_id,
+                            own: job.own,
+                            read_pk: job.read_pk,
+                            write_pk: job.write_pk,
+                        });
                     }
                 }
             }

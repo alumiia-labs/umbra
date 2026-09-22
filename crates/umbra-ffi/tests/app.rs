@@ -1569,6 +1569,148 @@ fn two_members_talk_in_a_group_over_the_relays_of_a_signed_network() {
             other => panic!("{}", update_name(&other)),
         }
     }
+
+    // §11.4: the creator removes the member and rotates in the same
+    // action. The roster object goes out under the epoch that stands.
+    let removal = creator.remove_object(1).unwrap();
+    let removal_control = umbra_wire::group::control::GroupControl::parse(&removal).unwrap();
+    let control_message = umbra_wire::app::AppMessage {
+        kind: umbra_wire::app::AppKind::GroupControl,
+        msg_id: [0x5B; 16],
+        sent_at: now * 1_000,
+        body: &removal,
+    };
+    let mut control_app = vec![0u8; control_message.len()];
+    let control_len = control_message.encode(&mut control_app).unwrap();
+    control_app.truncate(control_len);
+    // GRP-389: the record names the roster epoch that stands, thus the
+    // member it removes still reads the object that removes it.
+    let control_record = creator.post(&control_app, now, &mut rng).unwrap();
+    assert!(matches!(
+        creator.apply_control(&removal_control, 0, now).unwrap(),
+        Applied::Removed(_)
+    ));
+    for (index, relay) in replicas.iter().enumerate() {
+        creator_tx
+            .send(GroupCommand::Post {
+                tag: 30 + index as u64,
+                relay: *relay,
+                group_queue_id: queue_ids[index],
+                write: Secret::new(*write_sk.expose()),
+                record: control_record.clone(),
+            })
+            .ok()
+            .unwrap();
+    }
+    for _ in 0..2 {
+        let GroupUpdate::Posted { tag, .. } = group_update(&mut creator_rx) else {
+            panic!("a replica refused the roster object");
+        };
+        assert!(tag == 30 || tag == 31);
+    }
+    let GroupUpdate::Record {
+        record: carried, ..
+    } = group_update(&mut member_rx)
+    else {
+        panic!("the member got no roster object");
+    };
+    let Outcome::Content { app: read, .. } = member.receive(&carried, now).unwrap() else {
+        panic!("the roster object did not open");
+    };
+    let parsed =
+        umbra_wire::app::AppMessage::parse(&read, umbra_wire::app::Channel::Group).unwrap();
+    let control = umbra_wire::group::control::GroupControl::parse(parsed.body).unwrap();
+    assert!(matches!(
+        member.apply_control(&control, 0, now).unwrap(),
+        Applied::Removed(_)
+    ));
+
+    // The epoch-key record goes to each replica under the write
+    // credential of the epoch before it (`GRP-362`).
+    let rotation = creator.rotate(now, &mut rng).unwrap();
+    assert_eq!(rotation.epoch, 2);
+    for (index, relay) in replicas.iter().enumerate() {
+        creator_tx
+            .send(GroupCommand::Post {
+                tag: 32 + index as u64,
+                relay: *relay,
+                group_queue_id: queue_ids[index],
+                write: Secret::new(*rotation.write.expose()),
+                record: rotation.record.clone(),
+            })
+            .ok()
+            .unwrap();
+    }
+    for _ in 0..2 {
+        let GroupUpdate::Posted { tag, .. } = group_update(&mut creator_rx) else {
+            panic!("a replica refused the epoch-key record");
+        };
+        assert!(tag == 32 || tag == 33);
+    }
+
+    // The removed member still reads inside `GROUP_READ_GRACE`, and the
+    // record holds no slot for it (`GRP-276`).
+    let GroupUpdate::Record { record: key, .. } = group_update(&mut member_rx) else {
+        panic!("the member got no epoch-key record");
+    };
+    let Outcome::EpochKey {
+        epoch,
+        start_slot,
+        body,
+    } = member.receive(&key, now).unwrap()
+    else {
+        panic!("the record is no epoch-key record");
+    };
+    assert_eq!(epoch, 2);
+    assert!(member
+        .install_epoch_key(epoch, start_slot, &body, now)
+        .is_err());
+
+    // The relay holds the credentials of the old epoch until a `GKEY`,
+    // thus a record of the new epoch is refused before it and accepted
+    // after it (`GRP-361`).
+    let next = creator
+        .post(&text_of(b"after the rotation"), now, &mut rng)
+        .unwrap();
+    let new_write = creator.credentials().unwrap().write_secret();
+    let new_read = creator.credentials().unwrap().read_public();
+    let new_write_pk = creator.credentials().unwrap().write_public();
+    creator_tx
+        .send(GroupCommand::Post {
+            tag: 40,
+            relay: replicas[0],
+            group_queue_id: queue_ids[0],
+            write: Secret::new(*new_write.expose()),
+            record: next.clone(),
+        })
+        .ok()
+        .unwrap();
+    let GroupUpdate::Failed { tag: 40, .. } = group_update(&mut creator_rx) else {
+        panic!("the relay took a credential it does not hold");
+    };
+    creator_tx
+        .send(GroupCommand::Rotate {
+            relay: replicas[0],
+            group_queue_id: queue_ids[0],
+            own: Secret::new(*creator.owner(0).unwrap().expose()),
+            read_pk: new_read,
+            write_pk: new_write_pk,
+        })
+        .ok()
+        .unwrap();
+    creator_tx
+        .send(GroupCommand::Post {
+            tag: 41,
+            relay: replicas[0],
+            group_queue_id: queue_ids[0],
+            write: Secret::new(*new_write.expose()),
+            record: next,
+        })
+        .ok()
+        .unwrap();
+    let GroupUpdate::Posted { tag: 41, .. } = group_update(&mut creator_rx) else {
+        panic!("the replica refused the record after the `GKEY`");
+    };
 }
 
 /// The name of an update, for a test that met one it did not expect.

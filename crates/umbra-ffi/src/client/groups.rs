@@ -9,7 +9,7 @@
 //! `GRP-191` wait in a work list, and each answer of a relay fills one
 //! replica. The group is ready when both answered.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 use umbra_core::{
     group::{
@@ -216,6 +216,24 @@ pub struct GroupPost {
     pub write: Secret<32>,
     /// The sealed `GroupQueueRecord`.
     pub record: Vec<u8>,
+    /// Whether the record starts an epoch. A `GKEY` follows it at the
+    /// replica that accepted it, and never before (`GRP-362`).
+    pub is_rotation: bool,
+}
+
+/// One `GKEY` at one replica, which moves that replica to the credentials
+/// of the epoch this device holds (`GRP-361`, `GRP-363`).
+pub struct GroupRekey {
+    /// The relay.
+    pub relay: [u8; 32],
+    /// The group queue at that relay.
+    pub group_queue_id: [u8; 32],
+    /// The owner credential of that replica.
+    pub own: Secret<32>,
+    /// `read_pk` of the epoch.
+    pub read_pk: [u8; 32],
+    /// `write_pk` of the epoch.
+    pub write_pk: [u8; 32],
 }
 
 /// The group work that waits for the run of the group queues.
@@ -223,6 +241,11 @@ pub struct GroupPost {
 pub(super) struct GroupQueues {
     pub creations: VecDeque<GroupQueueJob>,
     pub posts: VecDeque<GroupPost>,
+    pub rekeys: VecDeque<GroupRekey>,
+    /// The instant at which each group may answer its trigger, with the
+    /// roster epoch of that trigger (§11.4.1). The backoff lives with the
+    /// run, thus a restart draws a new delay.
+    pub backoff: BTreeMap<ConversationId, (u32, u64)>,
 }
 
 fn queue_row(group_id: &[u8; 32], replica: u8, relay: &[u8; 32]) -> Vec<u8> {
@@ -801,7 +824,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     ) -> Result<GroupAdmission, Error> {
         let conversation = self.conversation_of_group(&joiner.group_id)?;
         let row = self.join_row(joiner.from, &joiner.group_id)?;
-        let mut group = self.group_of(conversation)?;
+        let group = self.group_of(conversation)?;
         let own = group
             .roster()
             .member(group.own_index())
@@ -821,16 +844,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         };
         let parsed = JoinRecord::parse(&record)?;
         let add = group.add_object(&parsed).map_err(|_| Error::Malformed)?;
-        let control = GroupControl::parse(&add)?;
-        let index = match group
-            .apply_control(&control, group.own_index(), now_ms / 1_000)
-            .map_err(|_| Error::Malformed)?
-        {
-            Applied::Added(index) => index,
-            _ => return Err(Error::Malformed),
+        // GRP-310, GRP-389: the add goes to each replica first, thus its
+        // record names the roster epoch that every member holds.
+        self.post_group_control(conversation, &add, now_ms, rng)?;
+        let index = self.apply_own_roster_object(conversation, &add, now_ms, rng)?;
+        let Applied::Added(index) = index else {
+            return Err(Error::Malformed);
         };
-        let snapshot = group.snapshot(&[]).map_err(|_| Error::Malformed)?;
-        self.save_group(conversation, &group, rng)?;
+        let snapshot = self
+            .group_of(conversation)?
+            .snapshot(&[])
+            .map_err(|_| Error::Malformed)?;
         let mut entry = vec![ADDED];
         entry.extend_from_slice(&joiner.from.0);
         entry.extend_from_slice(&joiner.group_id);
@@ -839,8 +863,6 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut batch = open.store.begin();
         batch.put(GROUP_JOIN, row, Some(joiner.from.0), &entry, rng)?;
         batch.commit()?;
-        // GRP-310: the add goes to each replica as a group record.
-        self.post_group_control(conversation, &add, now_ms, rng)?;
         Ok(GroupAdmission { snapshot, index })
     }
 
@@ -1207,8 +1229,182 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             replicas,
             write,
             record,
+            is_rotation: false,
         });
         Ok(())
+    }
+
+    /// The two replicas of a group, or none before both `GNEW` answers.
+    fn group_replicas_of(group: &Group) -> Result<Option<[GroupReplica; GROUP_REPLICAS]>, Error> {
+        let Some(replicas) = group.replicas() else {
+            return Ok(None);
+        };
+        let mut out = [GroupReplica {
+            relay: [0; 32],
+            group_queue_id: [0; 32],
+        }; GROUP_REPLICAS];
+        for (which, slot) in out.iter_mut().enumerate() {
+            let reference = replicas.reference(which).ok_or(Error::Integrity)?;
+            *slot = GroupReplica {
+                relay: reference.relay_id,
+                group_queue_id: reference.group_queue_id,
+            };
+        }
+        Ok(Some(out))
+    }
+
+    /// Removes a member and rotates in the same action (`GRP-264`). The
+    /// roster object goes out under the epoch that stands, and the
+    /// epoch-key record after it.
+    pub fn remove_from_group<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        index: u16,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let object = self
+            .group_of(conversation)?
+            .remove_object(index)
+            .map_err(|_| Error::Malformed)?;
+        self.post_group_control(conversation, &object, now_ms, rng)?;
+        self.apply_own_roster_object(conversation, &object, now_ms, rng)?;
+        self.rotate_group(conversation, now_ms, rng)
+    }
+
+    /// Leaves a group (`GRP-067`). The member that leaves rotates nothing,
+    /// because `GRP-356` bars the index each trigger excludes.
+    pub fn leave_group<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let object = self
+            .group_of(conversation)?
+            .leave_object()
+            .map_err(|_| Error::Malformed)?;
+        self.post_group_control(conversation, &object, now_ms, rng)?;
+        self.apply_own_roster_object(conversation, &object, now_ms, rng)?;
+        Ok(())
+    }
+
+    /// Applies a roster object that this device made, after the record
+    /// that carries it went to the work list (`GRP-389`).
+    fn apply_own_roster_object<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        object: &[u8],
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<Applied, Error> {
+        let mut group = self.group_of(conversation)?;
+        let control = GroupControl::parse(object)?;
+        let applied = group
+            .apply_control(&control, group.own_index(), now_ms / 1_000)
+            .map_err(|_| Error::Malformed)?;
+        self.save_group(conversation, &group, rng)?;
+        Ok(applied)
+    }
+
+    /// Starts the next epoch of a group and queues its epoch-key record
+    /// for each replica (§11.4.1). A group with no queue yet, a closed
+    /// group, and a group this device may no longer rotate give no record.
+    pub fn rotate_group<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        self.groups.backoff.remove(&conversation);
+        if self.group_closed(conversation)? {
+            return Ok(());
+        }
+        let mut group = self.group_of(conversation)?;
+        let Some(replicas) = Self::group_replicas_of(&group)? else {
+            return Ok(());
+        };
+        let Ok(rotation) = group.rotate(now_ms / 1_000, rng) else {
+            return Ok(());
+        };
+        self.save_group(conversation, &group, rng)?;
+        self.groups.posts.push_back(GroupPost {
+            message: None,
+            conversation,
+            replicas,
+            write: rotation.write,
+            record: rotation.record,
+            is_rotation: true,
+        });
+        Ok(())
+    }
+
+    /// The `GKEY` that follows an accepted epoch-key record at one replica
+    /// (`GRP-361`). A rotator that holds no owner credential sends none,
+    /// and an admin sends it under `GRP-363` instead.
+    pub fn group_rekey_for(
+        &self,
+        conversation: ConversationId,
+        relay: &[u8; 32],
+    ) -> Result<Option<GroupRekey>, Error> {
+        let group = self.group_of(conversation)?;
+        let Some(replicas) = Self::group_replicas_of(&group)? else {
+            return Ok(None);
+        };
+        let Some(which) = replicas.iter().position(|held| held.relay == *relay) else {
+            return Ok(None);
+        };
+        let (Some(own), Some(credentials), Some(reference)) =
+            (group.owner(which), group.credentials(), replicas.get(which))
+        else {
+            return Ok(None);
+        };
+        Ok(Some(GroupRekey {
+            relay: *relay,
+            group_queue_id: reference.group_queue_id,
+            own: Secret::new(*own.expose()),
+            read_pk: credentials.read_public(),
+            write_pk: credentials.write_public(),
+        }))
+    }
+
+    /// The next `GKEY` that waits for the run of the group queues.
+    pub fn take_group_rekey(&mut self) -> Option<GroupRekey> {
+        self.groups.rekeys.pop_front()
+    }
+
+    /// Each group whose backoff passed and whose trigger no record
+    /// answered (`GRP-358`, `GRP-359`). A group seen for the first time
+    /// draws its delay here and answers at a later call.
+    pub fn groups_to_rotate<R: CryptoRng + ?Sized>(
+        &mut self,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<Vec<ConversationId>, Error> {
+        let now = now_ms / 1_000;
+        let mut due = Vec::new();
+        for conversation in self.group_conversations()? {
+            let group = self.group_of(conversation)?;
+            let Some(trigger) = group.owes_rotation(now) else {
+                self.groups.backoff.remove(&conversation);
+                continue;
+            };
+            match self.groups.backoff.get(&conversation) {
+                Some((roster_epoch, at)) if *roster_epoch == trigger.roster_epoch => {
+                    if now >= *at {
+                        due.push(conversation);
+                    }
+                }
+                _ => {
+                    let delay = group.rotation_delay(rng);
+                    self.groups.backoff.insert(
+                        conversation,
+                        (trigger.roster_epoch, now.saturating_add(delay)),
+                    );
+                }
+            }
+        }
+        Ok(due)
     }
 
     /// Seals one roster object for a group and queues it for each replica.
@@ -1296,8 +1492,27 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let is_epoch_key = matches!(outcome, Ok(Outcome::EpochKey { .. }));
             replicas.arrived(which, seq, is_epoch_key);
         }
+        let mut installed = false;
+        if let Ok(Outcome::EpochKey {
+            epoch,
+            start_slot,
+            body,
+        }) = &outcome
+        {
+            installed = group
+                .install_epoch_key(*epoch, *start_slot, body, now_ms / 1_000)
+                .is_ok();
+            if installed {
+                // A record of the new epoch that arrived before its key
+                // waited; it opens now (`GRP-252`).
+                group.retry_held(now_ms / 1_000);
+            }
+        }
         // The counters and the held records moved, whatever the outcome.
         self.save_group(conversation, &group, rng)?;
+        if installed {
+            self.queue_rekeys(&group)?;
+        }
         let Ok(Outcome::Content { sender, app, .. }) = outcome else {
             return Ok(None);
         };
@@ -1351,6 +1566,31 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             message,
         });
         Ok(Some(message))
+    }
+
+    /// Moves each replica to the credentials of the epoch this device
+    /// installed, when this device holds the owner credentials and did
+    /// not make that epoch (`GRP-363`).
+    fn queue_rekeys(&mut self, group: &Group) -> Result<(), Error> {
+        let Some(replicas) = Self::group_replicas_of(group)? else {
+            return Ok(());
+        };
+        let Some(credentials) = group.credentials() else {
+            return Ok(());
+        };
+        for (which, replica) in replicas.iter().enumerate() {
+            let Some(own) = group.owner(which) else {
+                continue;
+            };
+            self.groups.rekeys.push_back(GroupRekey {
+                relay: replica.relay,
+                group_queue_id: replica.group_queue_id,
+                own: Secret::new(*own.expose()),
+                read_pk: credentials.read_public(),
+                write_pk: credentials.write_public(),
+            });
+        }
+        Ok(())
     }
 
     /// The conversation of a group queue, or none when this device holds

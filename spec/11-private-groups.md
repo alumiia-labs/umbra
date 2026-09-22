@@ -1144,6 +1144,19 @@ Every roster object is a `GroupControl` inside a content record of §11.3, and
 the tag vector of that record names its sender. The roster is a hash chain.
 Each epoch carries `epoch_index` and `previous_epoch_hash`.
 
+- **[GRP-389]** A member that posts a roster object MUST build the record that
+  carries it under the roster epoch that stands before that object, and MUST
+  apply the object to its own roster after it built that record.
+
+> *Cause.* The tag vector of a content record covers the active set of the
+> `roster_epoch` that the record names, and §11.3.5 gives each receiver its
+> tag by its rank in that set. A maker that applied the object first would
+> name the epoch the object creates: an add would name a set that no other
+> member holds yet, thus every member would hold the record under `GRP-252`
+> and nothing would ever resolve it, and a removal would name a set without
+> the member it removes, thus that member would never read why its records
+> stopped verifying.
+
 - **[GRP-314]** A member MUST compute the hash of a roster epoch as the
   SHA3-256 of the `GroupControl` payload bytes of that epoch. **[GRP-315]** A
   member MUST put that value in `previous_epoch_hash` of the successor.
