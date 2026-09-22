@@ -853,6 +853,16 @@ The same one-slot record delivers the owner credentials to a newly promoted
 admin. **[GRP-298]** An admin that promotes a member to `admin` or above MUST
 post a one-slot epoch-key record of the current epoch for that member with
 `own_count` = `GROUP_REPLICAS`, directly after the granting epoch.
+**[GRP-400]** That record MUST carry `k_e` of 32 zero bytes, and its `tag`
+MUST cover that value. A receiver MUST take `own_sks` from a slot whose
+`k_e` is zero and MUST install no epoch from it, and it MUST reject such a
+slot of an epoch other than its current one or with `own_count` 0.
+
+> *Cause of `GRP-400`.* A promotee may have joined inside the current epoch,
+> and `GRP-385` keeps `K_e` from a joiner, because `K_e` gives each slot key
+> from `t_e` and thus each record before the join. A one-slot record that
+> carried `K_e` gave it that history at a promotion. The owner credentials
+> are all that the record has to deliver.
 **[GRP-379]** A receiver MUST reject a slot whose `own_count` is above 0 when
 the rotator held a role below `admin` at the `roster_epoch` of the record,
 because only an admin holds `own_sk`.

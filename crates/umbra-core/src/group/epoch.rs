@@ -479,6 +479,57 @@ pub fn rotate<R: CryptoRng + TryCryptoRng + ?Sized>(
     })
 }
 
+/// The body of a one-slot record that hands the owner credentials of the
+/// replicas to one member at `admin` or above (`GRP-298`, `GRP-400`). The
+/// slot carries an epoch secret of 32 zero bytes: the member may have
+/// joined inside the epoch, and `K_e` would give it each slot key before
+/// its join (`GRP-385`).
+#[allow(clippy::too_many_arguments)]
+pub fn owner_delivery<R: CryptoRng + ?Sized>(
+    group_id: &[u8; 32],
+    epoch: u32,
+    start_slot: u32,
+    roster_epoch: u32,
+    rotator: u16,
+    member: &Included<'_>,
+    own_sks: &[Secret<32>; REPLICAS as usize],
+    bucket: umbra_wire::bucket::Bucket,
+    rng: &mut R,
+) -> Result<Vec<u8>, Error> {
+    let zero = [0u8; 32];
+    let tag = member.pair_key.epoch_tag(&EpochTag {
+        group_id,
+        epoch,
+        start_slot,
+        roster_epoch,
+        epoch_secret: &Secret::new(zero),
+    });
+    let payload = SlotPayload {
+        rotator,
+        epoch_secret: Secret::new(zero),
+        tag,
+        own_sks: own_sks.iter().map(|s| Secret::new(*s.expose())).collect(),
+    };
+    let mut plain = alloc::vec![0u8; payload.len()];
+    payload.encode(&mut plain)?;
+    let pk = PublicKey::from_bytes(member.kem_pk)?;
+    let mut sealed = alloc::vec![0u8; slot_len(REPLICAS).saturating_sub(2)];
+    let n = slot::seal(&pk, group_id, epoch, member.index, &plain, rng, &mut sealed)?;
+    sealed.truncate(n);
+    let body = EpochKeyBody {
+        roster_epoch,
+        slot_count: 1,
+        carrier: Carrier::Inline(alloc::vec![KemSlot {
+            index: member.index,
+            sealed: &sealed,
+        }]),
+    };
+    let mut out = alloc::vec![0u8; bucket.group_record()];
+    let n = body.encode(bucket, &mut out)?;
+    out.truncate(n);
+    Ok(out)
+}
+
 /// The chunk that holds the slot of rank `rank` (`GRP-284`).
 pub const fn chunk_of_rank(rank: usize, slots_per_chunk: u16) -> usize {
     if slots_per_chunk == 0 {

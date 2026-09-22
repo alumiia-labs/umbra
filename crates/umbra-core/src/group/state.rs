@@ -35,7 +35,7 @@ use umbra_wire::{
 
 use super::{
     backoff,
-    epoch::{rotate, EpochState, EpochStore, Included},
+    epoch::{owner_delivery, rotate, EpochState, EpochStore, Included},
     join::{admit, admit_slot, Admitted},
     queue::Replicas,
     receive::{Context, Outcome, Receiver},
@@ -587,6 +587,7 @@ impl Group {
         now: u64,
     ) -> Result<(), Error> {
         let current = self.epochs.current().ok_or(Error::NoPath)?;
+        let current_epoch = current.epoch();
         if epoch == current.epoch().saturating_add(1) {
             // GRP-357: a rotation that no trigger called for is refused.
             if self
@@ -604,6 +605,15 @@ impl Group {
             return Err(Error::Stale);
         }
         let (payload, roster_epoch) = self.open_epoch_slot(epoch, start_slot, body)?;
+        // GRP-400: a slot with no epoch secret hands the owner credentials
+        // and installs no epoch. Only a slot of the current epoch holds it.
+        if payload.epoch_secret.expose() == &[0; 32] {
+            if epoch != current_epoch || payload.own_sks.len() != GROUP_REPLICAS {
+                return Err(Error::Unverified);
+            }
+            self.take_owners(&payload);
+            return Ok(());
+        }
         let secret = EpochSecret::from_secret(Secret::new(*payload.epoch_secret.expose()));
         // GRP-386: the two queue credentials come from `K_e`.
         self.epochs.install(EpochState::new(
@@ -615,6 +625,12 @@ impl Group {
             payload.rotator,
             now,
         ))?;
+        self.take_owners(&payload);
+        Ok(())
+    }
+
+    /// Takes the owner credentials of a slot that carries them.
+    fn take_owners(&mut self, payload: &SlotPayload) {
         if payload.own_sks.len() == GROUP_REPLICAS {
             let mut owners = [Secret::<32>::zeroed(), Secret::<32>::zeroed()];
             for (held, given) in owners.iter_mut().zip(payload.own_sks.iter()) {
@@ -622,7 +638,75 @@ impl Group {
             }
             self.owners = Some(owners);
         }
-        Ok(())
+    }
+
+    /// Draws a new owner credential for each replica and holds it here,
+    /// and gives the ones it replaced, which authorize the `GKEY` that
+    /// moves each replica to the new ones (`WIR-522`, `GRP-401`).
+    pub fn replace_owners<R: CryptoRng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+    ) -> Result<[Secret<32>; GROUP_REPLICAS], Error> {
+        let old = self.owners.take().ok_or(Error::NoPath)?;
+        let mut owners = [Secret::<32>::zeroed(), Secret::<32>::zeroed()];
+        for owner in &mut owners {
+            rng.fill_bytes(owner.expose_mut());
+        }
+        self.owners = Some(owners);
+        Ok(old)
+    }
+
+    /// The one-slot record that hands the owner credentials that this
+    /// member holds to the member at `index`, which holds `admin` or above
+    /// (`GRP-298`, `GRP-400`).
+    pub fn owner_delivery<R: CryptoRng + ?Sized>(
+        &self,
+        index: u16,
+        rng: &mut R,
+    ) -> Result<Vec<u8>, Error> {
+        if self.own_role().is_none_or(|own| own < Role::Admin) {
+            return Err(Error::Unverified);
+        }
+        let owners = self.owners.as_ref().ok_or(Error::NoPath)?;
+        let current = self.epochs.current().ok_or(Error::NoPath)?;
+        let member = self
+            .roster
+            .member(index)
+            .filter(|member| member.active && member.role >= Role::Admin)
+            .ok_or(Error::NoPath)?;
+        let kem_pk = member.kem_pk.clone().ok_or(Error::NoPath)?;
+        let pair = self
+            .keys
+            .pair_key(&member.pair_pk, self.roster.group_id())?;
+        let included = Included {
+            index,
+            role: member.role,
+            kem_pk: &kem_pk,
+            pair_key: &pair,
+        };
+        let bucket = bucket_for_slots(1, 0).ok_or(Error::NoPath)?;
+        let body = owner_delivery(
+            self.roster.group_id(),
+            current.epoch(),
+            current.start_slot(),
+            self.roster.epoch_index(),
+            self.own_index,
+            &included,
+            owners,
+            bucket,
+            rng,
+        )?;
+        let record = GroupQueueRecord {
+            kind: RecordKind::EpochKey,
+            epoch: current.epoch(),
+            slot: current.start_slot(),
+            nonce: [0; 12],
+            body: &body,
+        };
+        let mut bytes = alloc::vec![0u8; bucket.group_record()];
+        let n = record.encode(bucket, &mut bytes)?;
+        bytes.truncate(n);
+        Ok(bytes)
     }
 
     /// Opens this member's slot in an epoch-key body and verifies its tag.
@@ -1239,6 +1323,55 @@ mod tests {
         }
         assert_eq!(member.roster().member(2).unwrap().role, Role::Member);
         assert_eq!(creator.roster().chain_hash(), third.roster().chain_hash());
+    }
+
+    #[test]
+    fn a_new_admin_takes_the_owner_credentials_and_no_epoch_secret() {
+        let now = 1_700_000_000;
+        let (mut creator, mut member, mut third) = trio(now);
+        let mut rng = Rng(41);
+        let grant = creator.grant(2, Role::Admin, &mut rng).unwrap();
+        let control = GroupControl::parse(&grant).unwrap();
+        for group in [&mut creator, &mut member, &mut third] {
+            group.apply_control(&control, 0, now).unwrap();
+        }
+        assert!(third.owner(0).is_none());
+        let before = third.credentials().unwrap().read_public();
+
+        // GRP-400: the slot carries no epoch secret, thus a member that
+        // joined inside the epoch learns nothing of the records before it.
+        let delivery = creator.owner_delivery(2, &mut rng).unwrap();
+        let record = parse_record(&delivery);
+        assert_eq!(record.epoch, creator.epoch());
+        third
+            .install_epoch_key(record.epoch, record.slot, record.body, now)
+            .unwrap();
+        assert_eq!(
+            third.owner(1).unwrap().expose(),
+            creator.owner(1).unwrap().expose()
+        );
+        assert_eq!(third.epoch(), creator.epoch());
+        assert_eq!(third.credentials().unwrap().read_public(), before);
+        // A member that the record does not serve finds no slot in it.
+        assert!(member
+            .install_epoch_key(record.epoch, record.slot, record.body, now)
+            .is_err());
+        // A member below `admin` hands out nothing.
+        assert!(member.owner_delivery(2, &mut rng).is_err());
+
+        // WIR-522: new owner credentials reach the admin the same way, and
+        // the replaced ones authorize the `GKEY` that moves the relay.
+        let old = creator.replace_owners(&mut rng).unwrap();
+        assert_ne!(old[0].expose(), creator.owner(0).unwrap().expose());
+        let again = creator.owner_delivery(2, &mut rng).unwrap();
+        let record = parse_record(&again);
+        third
+            .install_epoch_key(record.epoch, record.slot, record.body, now)
+            .unwrap();
+        assert_eq!(
+            third.owner(0).unwrap().expose(),
+            creator.owner(0).unwrap().expose()
+        );
     }
 
     #[test]
