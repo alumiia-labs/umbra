@@ -439,7 +439,18 @@ object Core {
     fun connect(context: Context) {
         val app = context.applicationContext
         call { client ->
-            BuildNetwork.network(app, client)?.let(client::connect)
+            val network = BuildNetwork.network(app, client)
+            if (network == null) {
+                // No manifest verified, fresh or kept, thus no run starts
+                // and no run ends to call for a retry. The backoff of a run
+                // that ended tries again.
+                main.post {
+                    degraded = "The relays do not answer. Messages wait."
+                    retryLater(app)
+                }
+                return@call
+            }
+            client.connect(network)
             // A run starts in the foreground tier, thus it takes the state
             // of this moment.
             client.setForeground(isVisible)
