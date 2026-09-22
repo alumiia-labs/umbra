@@ -1429,6 +1429,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             return Err(Error::Malformed);
         }
         let conversation = conversation_of(&plain)?;
+        // A group carries a reaction on its own queue, and Part 11 gives
+        // that path no rule yet. The view offers none, and this call
+        // refuses one.
+        if self.is_group(conversation)? {
+            return Err(Error::Malformed);
+        }
+        let open = self.open_mut()?;
+        let plain = Zeroizing::new(
+            open.store
+                .get(TableId::MESSAGE, &message.0)?
+                .ok_or(Error::NotFound)?,
+        );
         let app = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
         let target = AppMessage::parse(app, Channel::Pairwise)?.msg_id;
         let reference = msg_ref(&open.device_set_key, &target);
@@ -1546,6 +1558,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if draft.is_empty() || draft.conversation() != self.conversation_of_message(message)? {
             return Err(Error::Malformed);
         }
+        // An edit and a deletion of a group travel on its queue, and Part
+        // 11 gives that path no rule yet.
+        if self.is_group(draft.conversation())? {
+            return Err(Error::Malformed);
+        }
         let open = self.open_mut()?;
         let plain = Zeroizing::new(
             open.store
@@ -1650,6 +1667,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
+        if self.is_group(self.conversation_of_message(message)?)? {
+            return Err(Error::Malformed);
+        }
         let open = self.open_mut()?;
         let plain = Zeroizing::new(
             open.store

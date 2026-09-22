@@ -49,6 +49,7 @@ import androidx.compose.ui.unit.dp
 /** The views above the tabs. The list is a stack, and Back takes the top. */
 sealed interface Screen {
     data object AddContact : Screen
+    data object NewGroup : Screen
     data object YourInvitation : Screen
     data object UseInvitation : Screen
     data object ScanInvitation : Screen
@@ -65,6 +66,7 @@ sealed interface Screen {
     data class SafetyNumber(val conversation: Conversation) : Screen
     data class ScanSafetyNumber(val conversation: Conversation) : Screen
     data class Photo(val conversation: Conversation, val line: Line) : Screen
+    data class GroupDetails(val conversation: Conversation) : Screen
 
     /** The conversation of a view of one contact. */
     val contact: Conversation?
@@ -78,6 +80,7 @@ sealed interface Screen {
             is SafetyNumber -> conversation
             is ScanSafetyNumber -> conversation
             is Photo -> conversation
+            is GroupDetails -> conversation
             else -> null
         }
 }
@@ -132,6 +135,9 @@ private fun OpenApp() {
         when (top) {
             null -> TabsScreen(tab, onTab = { tab = it }, push)
             Screen.AddContact -> AddContactScreen(pop, push)
+            Screen.NewGroup -> NewGroupScreen(pop) { conversation ->
+                stack = listOf(Screen.Chat(conversation))
+            }
             Screen.YourInvitation -> YourInvitationScreen(pop)
             Screen.UseInvitation -> UseInvitationScreen(pop, push)
             Screen.ScanInvitation -> ScanInvitationScreen(pop)
@@ -177,6 +183,7 @@ private fun ContactView(
         is Screen.VerifyCode -> VerifyCodeScreen(chat, top.starts, pop)
         is Screen.SafetyNumber -> SafetyNumberScreen(chat, pop)
         is Screen.Photo -> PhotoScreen(top.line, chat, pop)
+        is Screen.GroupDetails -> GroupDetailsScreen(chat, pop)
         is Screen.ScanSafetyNumber -> ScanSafetyNumberScreen(chat, pop)
         else -> Unit
     }
@@ -334,7 +341,9 @@ private fun ChatsTab(push: (Screen) -> Unit) {
         // Mockup 153: a degraded state has its one line above the title.
         ConnectionNote()
         TabTitle("Chats")
-        val withMessages = Core.chats.filter { it.preview != null }
+        // A group with no message still shows: the user made it, and its
+        // creation is the act that put it here.
+        val withMessages = Core.chats.filter { it.preview != null || it.isGroup }
         if (withMessages.isEmpty()) {
             EmptyState("No conversations yet.")
             return

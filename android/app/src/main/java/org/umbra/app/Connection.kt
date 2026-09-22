@@ -151,7 +151,7 @@ fun ConnectionScreen(onBack: () -> Unit) {
 
 /** A row with a line icon, a title and a smaller line. It leads nowhere. */
 @Composable
-private fun FactRow(icon: String, title: String, detail: String) {
+fun FactRow(icon: String, title: String, detail: String) {
     Row(
         Modifier.fillMaxWidth().padding(horizontal = PressInset, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,

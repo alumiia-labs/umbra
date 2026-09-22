@@ -93,6 +93,19 @@ fun AddContactScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                 Spacer(Modifier.width(16.dp))
                 Text("Use an invitation instead")
             }
+            // Mockup 012: the group of Part 11 starts beside the contacts.
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .pressShadeInColumn()
+                    .press { push(Screen.NewGroup) }
+                    .padding(horizontal = PressInset, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                FaIcon("user-group", size = 20.dp, tint = Palette.Text)
+                Spacer(Modifier.width(16.dp))
+                Text("New private group")
+            }
         }
     }
 }

@@ -366,6 +366,11 @@ fun Avatar(chat: Chat, size: Int = 44) {
         Modifier.size(size.dp).clip(CircleShape).background(ground),
         contentAlignment = Alignment.Center,
     ) {
+        // A group with no name shows the icon of a group and no letter.
+        if (chat.isGroup && chat.name.isEmpty()) {
+            FaIcon("user-group", size = (size * 0.46f).dp, tint = Palette.Text)
+            return@Box
+        }
         // The letter takes its size from the circle and not from the font
         // scale of the system. Its line box is the glyph alone: the line
         // height of the theme is taller than a small circle, and the letter

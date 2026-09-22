@@ -72,10 +72,18 @@ class Chat(
     val lastAtMs: Long,
     val unread: Int,
     val isVerified: Boolean,
+    /** Whether the conversation is a private group of Part 11. */
+    val isGroup: Boolean = false,
+    /** The active members of a group. */
+    val members: Int = 0,
+    /** Whether the two relays of a group hold its queues (`GRP-191`). */
+    val isReady: Boolean = true,
 ) {
     /** What each list shows: the name of the user, or a stable short label. */
     val title: String
-        get() = name.ifEmpty { "Contact ${conversation.label}" }
+        get() = name.ifEmpty {
+            if (isGroup) "Group ${conversation.label}" else "Contact ${conversation.label}"
+        }
 }
 
 /**
@@ -421,6 +429,20 @@ object Core {
 
     fun invite() = call { it.invite() }
 
+    /**
+     * Makes a private group of Part 11. The two relays of its queues come
+     * from the relay set, and the group sends nothing until both answered.
+     */
+    fun createGroup(name: String, onMade: (Conversation) -> Unit) = call { client ->
+        val conversation = Conversation(client.createGroup(name))
+        val list = summaries(client)
+        main.post {
+            chats.clear()
+            chats.addAll(list)
+            onMade(conversation)
+        }
+    }
+
     /** Accepts the link of a contact. A link that does not parse is a fault. */
     fun accept(link: String) = call { it.accept(link) }
 
@@ -651,6 +673,11 @@ object Core {
                 sink.chars = CharArray(0)
             }
         }
+        val group = if (client.isGroup(summary.conversation)) {
+            client.groupInfo(summary.conversation)
+        } else {
+            null
+        }
         Chat(
             conversation = Conversation(summary.conversation),
             name = summary.name,
@@ -659,6 +686,9 @@ object Core {
             lastAtMs = summary.lastAtMs.toLong(),
             unread = summary.unread.toInt(),
             isVerified = summary.verified,
+            isGroup = group != null,
+            members = group?.members?.toInt() ?: 0,
+            isReady = group?.isReady ?: true,
         )
     }
 

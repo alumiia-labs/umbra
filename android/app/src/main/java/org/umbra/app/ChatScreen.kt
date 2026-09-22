@@ -249,9 +249,18 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
         // each action of a conversation. The bar needs no menu beside it.
         BackBar(
             chat.title,
+            subtitle = if (chat.isGroup) groupSubtitle(chat) else null,
             onBack = onBack,
             isVerified = chat.isVerified,
-            onTitle = { push(Screen.ContactDetails(chat.conversation)) },
+            onTitle = {
+                push(
+                    if (chat.isGroup) {
+                        Screen.GroupDetails(chat.conversation)
+                    } else {
+                        Screen.ContactDetails(chat.conversation)
+                    },
+                )
+            },
         )
         LazyColumn(
             state = listState,
