@@ -843,11 +843,21 @@ the epoch the member lacks, and `index` is 0.
   a `KeyRequest` of scope `0x02` on a pairwise channel MUST post it again as a
   group record, thus every member reads it and the backoff applies.
 - **[GRP-377]** A member MUST NOT answer a `KeyRequest` from an index that the
-  current roster does not hold. **[GRP-295]** A member MUST NOT send more than
+  current roster does not hold. **[GRP-404]** A member MUST NOT answer it for
+  an index that the active set at the `roster_epoch` of the current epoch
+  does not hold, and a member that holds no `K_e` of that epoch MUST NOT
+  answer it. **[GRP-295]** A member MUST NOT send more than
   `KEY_REQUEST_RATE` epoch requests for one group in each 24 h. **[GRP-378]**
   A member MUST discard an epoch request above that rate. §11.10 gives 8.
 - **[GRP-297]** If no path exists, the member MUST show the group as
   "membership lapsed", and it needs a new invitation.
+
+> *Cause of `GRP-404`.* An earlier form answered any index that the roster
+> holds. A member that joined inside the current epoch holds the chain from
+> its join slot, and it lacks nothing that it may hold; `K_e` would give it
+> each slot key from `t_e`, thus each record before its join, which
+> `GRP-385` forbids. The rotation of the epoch included each member that it
+> served, and the active set at its `roster_epoch` names them.
 
 The same one-slot record delivers the owner credentials to a newly promoted
 admin. **[GRP-298]** An admin that promotes a member to `admin` or above MUST

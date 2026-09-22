@@ -133,7 +133,10 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
             for (joiner in waiting) {
                 JoinerRow(joiner)
             }
-            if (chat.isClosed) {
+            if (chat.isLapsed) {
+                Spacer(Modifier.height(12.dp))
+                Note("Your membership lapsed while this device was away. Ask a member for a new invitation.")
+            } else if (chat.isClosed) {
                 Spacer(Modifier.height(12.dp))
                 Note("The relays of this group hold it no more. It takes no new message.")
             } else if (chat.ownerNeeded) {

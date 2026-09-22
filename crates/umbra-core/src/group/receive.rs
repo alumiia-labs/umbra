@@ -320,6 +320,16 @@ impl Receiver {
         self.held.len()
     }
 
+    /// The newest group epoch among the records held, which names an
+    /// epoch this member may lack (§11.4.3).
+    pub fn newest_held_epoch(&self) -> Option<u32> {
+        self.held
+            .iter()
+            .filter_map(|held| GroupQueueRecord::parse(&held.bytes, held.bucket).ok())
+            .map(|record| record.epoch)
+            .max()
+    }
+
     /// Tries each held record again, after a roster record or a clock
     /// check, and returns what resolved.
     pub fn retry_held(&mut self, ctx: &mut Context<'_>, now: u64) -> Vec<Outcome> {

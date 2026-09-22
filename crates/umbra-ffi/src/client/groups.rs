@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, VecDeque};
 
 use umbra_core::{
     group::{
-        join::{accept_admit, Admitted},
+        join::{accept_admit, Admitted, KeyRequestRate},
         presence::{presence_due, Eviction, PresenceTracker},
         receive::Outcome,
         roster::Applied,
@@ -28,7 +28,10 @@ use umbra_core::{
 };
 use umbra_crypto::{group::MemberKeys, hash::sha3_256, rand_core::CryptoRng, secret::Secret};
 use umbra_wire::{
-    app::{AppKind, AppMessage},
+    app::{
+        keys::{KeyRequest, KeyScope, KeySupply, SupplyStatus},
+        AppKind, AppMessage,
+    },
     group::control::{
         ControlType, GroupControl, GroupInvitation, InvitationStage, JoinRecord, ReplicaRef, Role,
     },
@@ -37,6 +40,14 @@ use zeroize::Zeroizing;
 
 use super::{stored_message, Client, MESSAGE_PREFIX, OUTBOX};
 use crate::{ConversationId, Delivery, Error, Event, MsgRef};
+
+/// The state byte of a group row: open.
+const OPEN: u8 = 0;
+/// The state byte of a group whose two replicas refused it (`GRP-210`).
+const CLOSED: u8 = 1;
+/// The state byte of a group that this device can no longer reach: it
+/// lacks the current epoch, and the relay refused its request (`GRP-297`).
+const LAPSED: u8 = 2;
 
 /// The byte of an offer that waits for the user.
 const OFFERED: u8 = 1;
@@ -187,6 +198,9 @@ pub struct GroupInfo {
     /// Whether each replica refused the group queue, thus the group is
     /// closed and this device sends nothing more (`GRP-210`).
     pub is_closed: bool,
+    /// Whether this device lacks the current epoch and the relay refused
+    /// its request, thus it needs a new invitation (`GRP-297`).
+    pub is_lapsed: bool,
     /// Whether the roster still holds this device. A removal and a
     /// self-removal both take it away (`GRP-067`, `GRP-382`).
     pub is_member: bool,
@@ -313,6 +327,15 @@ pub(super) struct GroupQueues {
     /// The instant at which this admin may draw new owner credentials for
     /// each group that owes them, after the backoff of `GRP-358`.
     pub owner_backoff: BTreeMap<ConversationId, u64>,
+    /// The epoch requests of this device for each group, and the time of
+    /// the last one (`GRP-295`).
+    pub key_requests: BTreeMap<ConversationId, (KeyRequestRate, Option<u64>)>,
+    /// The requests of other members that this device answers, with the
+    /// instant after the backoff (`GRP-375`).
+    pub key_answers: BTreeMap<(ConversationId, u16), u64>,
+    /// The requests of each group that this device took in, which drop
+    /// above the rate (`GRP-378`).
+    pub key_answers_rate: BTreeMap<ConversationId, KeyRequestRate>,
 }
 
 /// The key of the clock of the last record of this device in a group.
@@ -410,7 +433,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             });
         }
 
-        let stored = Self::group_row(&group, false)?;
+        let stored = Self::group_row(&group, OPEN)?;
         let open = self.open_mut()?;
         let conversation = ConversationId(open.store.row_id(GROUP, &group_id));
         let seed_row = open.store.row_id(TableId::LOCAL_IDENTITY, &group_id);
@@ -463,20 +486,31 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// The row of a group: its identifier, thus the row names the seed
     /// that opens it (`IMP-121`), a byte of the state that the group has
     /// at this device, and then its stored form.
-    fn group_row(group: &Group, is_closed: bool) -> Result<Zeroizing<Vec<u8>>, Error> {
+    fn group_row(group: &Group, state: u8) -> Result<Zeroizing<Vec<u8>>, Error> {
         let stored = group.export().map_err(|_| Error::Malformed)?;
         let mut row = Zeroizing::new(Vec::with_capacity(stored.len().saturating_add(33)));
         row.extend_from_slice(group.group_id());
-        row.push(u8::from(is_closed));
+        row.push(state);
         row.extend_from_slice(&stored);
         Ok(row)
     }
 
     /// Whether each replica of a group refused its queue (`GRP-210`).
+    /// A lapsed group sends nothing either.
     pub fn group_closed(&self, conversation: ConversationId) -> Result<bool, Error> {
+        Ok(self.group_state(conversation)? != OPEN)
+    }
+
+    /// Whether this device lacks the current epoch of a group and no
+    /// member can supply it, thus it needs a new invitation (`GRP-297`).
+    pub fn group_lapsed(&self, conversation: ConversationId) -> Result<bool, Error> {
+        Ok(self.group_state(conversation)? == LAPSED)
+    }
+
+    fn group_state(&self, conversation: ConversationId) -> Result<u8, Error> {
         let store = &self.open_ref()?.store;
         let row = Zeroizing::new(store.get(GROUP, &conversation.0)?.ok_or(Error::NotFound)?);
-        Ok(row.get(32) == Some(&1))
+        Ok(row.get(32).copied().unwrap_or(OPEN))
     }
 
     /// Marks a group closed. Each record of it stays in the store, and
@@ -490,7 +524,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             return Ok(());
         }
         let group = self.group_of(conversation)?;
-        let row = Self::group_row(&group, true)?;
+        // GRP-297: a member that lacks the epoch is refused as a queue
+        // that is gone is, and it is its membership that ended.
+        let state = if group.lacks_epoch().is_some() {
+            LAPSED
+        } else {
+            CLOSED
+        };
+        let row = Self::group_row(&group, state)?;
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         batch.put(GROUP, conversation.0, None, &row, rng)?;
@@ -511,8 +552,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         group: &Group,
         rng: &mut R,
     ) -> Result<(), Error> {
-        let is_closed = self.group_closed(conversation).unwrap_or(false);
-        let row = Self::group_row(group, is_closed)?;
+        let state = self.group_state(conversation).unwrap_or(OPEN);
+        let row = Self::group_row(group, state)?;
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         batch.put(GROUP, conversation.0, None, &row, rng)?;
@@ -532,6 +573,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             epoch: group.epoch(),
             is_ready,
             is_closed: self.group_closed(conversation)?,
+            is_lapsed: self.group_lapsed(conversation)?,
             is_member: group
                 .roster()
                 .member(group.own_index())
@@ -1242,7 +1284,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if self.is_group(conversation)? {
             return Err(Error::Malformed);
         }
-        let row = Self::group_row(&group, false)?;
+        let row = Self::group_row(&group, OPEN)?;
         let open = self.open_mut()?;
         let seed_row = open.store.row_id(TableId::LOCAL_IDENTITY, &group_id);
         let mut batch = open.store.begin();
@@ -1887,10 +1929,22 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
+        self.post_group_app(conversation, AppKind::GroupControl, body, now_ms, rng)
+    }
+
+    /// Seals one `AppMessage` of `kind` that no view shows, and queues it.
+    fn post_group_app<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        kind: AppKind,
+        body: &[u8],
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
         let mut msg_id = [0u8; 16];
         rng.fill_bytes(&mut msg_id);
         let record = AppMessage {
-            kind: AppKind::GroupControl,
+            kind,
             msg_id,
             sent_at: now_ms,
             body,
@@ -1898,6 +1952,148 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut app = Zeroizing::new(vec![0u8; record.len()]);
         record.encode(&mut app)?;
         self.queue_group_post(conversation, None, &app, now_ms, rng)
+    }
+
+    /// Each group that lacks its current epoch and may ask for it now: at
+    /// most once in each `GROUP_SLOT`, and inside `KEY_REQUEST_RATE`
+    /// (`GRP-289`, `GRP-295`).
+    pub fn groups_lacking_epoch(
+        &mut self,
+        now_ms: u64,
+    ) -> Result<Vec<(ConversationId, u32)>, Error> {
+        let now = now_ms / 1_000;
+        let mut due = Vec::new();
+        for conversation in self.group_conversations()? {
+            if self.group_closed(conversation)? {
+                continue;
+            }
+            let group = self.group_of(conversation)?;
+            let Some(epoch) = group.lacks_epoch() else {
+                continue;
+            };
+            if group.own_role().is_none() || group.replicas().is_none() {
+                continue;
+            }
+            let entry = self.groups.key_requests.entry(conversation).or_default();
+            if entry
+                .1
+                .is_some_and(|at| now.saturating_sub(at) < umbra_core::group::GROUP_SLOT)
+            {
+                continue;
+            }
+            if entry.0.allow(now) {
+                entry.1 = Some(now);
+                due.push((conversation, epoch));
+            }
+        }
+        Ok(due)
+    }
+
+    /// Posts a `KeyRequest` of scope `0x02` for `epoch` as a group record
+    /// under the epoch this device holds (`GRP-289`).
+    pub fn request_epoch<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        epoch: u32,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let group = self.group_of(conversation)?;
+        let request = KeyRequest {
+            scope: KeyScope::GroupEpoch,
+            id: *group.group_id(),
+            epoch,
+            index: 0,
+        };
+        let mut body = [0u8; 64];
+        let n = request.encode(&mut body)?;
+        let body = body.get(..n).ok_or(Error::Malformed)?;
+        self.post_group_app(conversation, AppKind::KeyRequest, body, now_ms, rng)
+    }
+
+    /// A `KeyRequest` that a group record carried from `sender`. A member
+    /// that may supply the epoch answers after its backoff, and a request
+    /// above the rate of the group drops (`GRP-375`, `GRP-378`).
+    fn on_key_request<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        group: &Group,
+        sender: u16,
+        body: &[u8],
+        now: u64,
+        rng: &mut R,
+    ) {
+        let Ok(request) = KeyRequest::parse(body) else {
+            return;
+        };
+        if request.scope != KeyScope::GroupEpoch
+            || request.id != *group.group_id()
+            || !group.may_supply(sender, request.epoch)
+        {
+            return;
+        }
+        let rate = self
+            .groups
+            .key_answers_rate
+            .entry(conversation)
+            .or_default();
+        if !rate.allow(now) {
+            return;
+        }
+        let at = now.saturating_add(group.rotation_delay(rng));
+        self.groups
+            .key_answers
+            .entry((conversation, sender))
+            .or_insert(at);
+    }
+
+    /// Each request whose backoff passed with no supply for its member
+    /// (`GRP-375`).
+    pub fn key_answers_due(&mut self, now_ms: u64) -> Vec<(ConversationId, u16)> {
+        let now = now_ms / 1_000;
+        let due: Vec<(ConversationId, u16)> = self
+            .groups
+            .key_answers
+            .iter()
+            .filter(|(_, at)| now >= **at)
+            .map(|(key, _)| *key)
+            .collect();
+        for key in &due {
+            self.groups.key_answers.remove(key);
+        }
+        due
+    }
+
+    /// Posts the one-slot record that supplies the current epoch to the
+    /// member at `index`, and then a `KeySupply` of status `0x01`
+    /// (`GRP-375`).
+    pub fn answer_key_request<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        index: u16,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let group = self.group_of(conversation)?;
+        let Ok(record) = group.key_supply(index, rng) else {
+            return Ok(());
+        };
+        let epoch = group.epoch();
+        self.queue_group_record(conversation, &group, record, now_ms, rng)?;
+        let supply = KeySupply {
+            request: KeyRequest {
+                scope: KeyScope::GroupEpoch,
+                id: *group.group_id(),
+                epoch,
+                index: 0,
+            },
+            status: SupplyStatus::Posted,
+            body: &[],
+        };
+        let mut body = [0u8; 64];
+        let n = supply.encode(&mut body)?;
+        let body = body.get(..n).ok_or(Error::Malformed)?;
+        self.post_group_app(conversation, AppKind::KeySupply, body, now_ms, rng)
     }
 
     /// One `GSUB` for each group that holds its queues. A reader takes
@@ -1978,6 +2174,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     start_slot,
                     body,
                 } => {
+                    // GRP-375: a supply for a member that this device
+                    // meant to answer came first, thus it stands down.
+                    if epoch == group.epoch() {
+                        for index in group.slot_indices(&body) {
+                            self.groups.key_answers.remove(&(conversation, index));
+                        }
+                    }
                     if group
                         .install_epoch_key(epoch, start_slot, &body, now)
                         .is_ok()
@@ -1995,6 +2198,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     self.note_seen(conversation, &group, sender, now, rng)?;
                     let parsed =
                         umbra_wire::app::AppMessage::parse(&app, umbra_wire::app::Channel::Group)?;
+                    // A request of a member that lacks the epoch, and the
+                    // notice that one was answered, are no messages.
+                    if parsed.kind == AppKind::KeyRequest {
+                        self.on_key_request(conversation, &group, sender, parsed.body, now, rng);
+                        continue;
+                    }
+                    if parsed.kind == AppKind::KeySupply {
+                        continue;
+                    }
                     // A roster object moves the roster and is no message
                     // (`GRP-318`), and a record that waited for it opens.
                     if parsed.kind == AppKind::GroupControl {

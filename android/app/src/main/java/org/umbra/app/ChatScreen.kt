@@ -330,6 +330,10 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
         // message, and the composer would promise one. A group that
         // removed this device takes none either.
         val stopped = when {
+            // GRP-297: the keys of the group moved on while this device was
+            // away, and no member could give them to it.
+            chat.isLapsed ->
+                "Your membership lapsed while this device was away. Ask a member for a new invitation."
             chat.isClosed -> "The relays of this group hold it no more. It takes no new message."
             chat.isGroup && !chat.isMember ->
                 "You are no longer a member of this group. The messages here stay on this device."

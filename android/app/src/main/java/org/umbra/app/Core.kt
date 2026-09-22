@@ -89,6 +89,8 @@ class Chat(
     val isMember: Boolean = true,
     /** Whether this owner must name a second owner first (`GRP-184`). */
     val ownerNeeded: Boolean = false,
+    /** Whether this device lost the keys of a group and needs a new invitation. */
+    val isLapsed: Boolean = false,
 ) {
     /** What each list shows: the name of the user, or a stable short label. */
     val title: String
@@ -788,6 +790,7 @@ object Core {
             isClosed = group?.isClosed ?: false,
             isMember = group?.isMember ?: true,
             ownerNeeded = group?.ownerNeeded ?: false,
+            isLapsed = group?.isLapsed ?: false,
         )
     }
 

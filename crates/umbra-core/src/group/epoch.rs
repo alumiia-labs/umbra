@@ -479,41 +479,43 @@ pub fn rotate<R: CryptoRng + TryCryptoRng + ?Sized>(
     })
 }
 
-/// The body of a one-slot record that hands the owner credentials of the
-/// replicas to one member at `admin` or above (`GRP-298`, `GRP-400`). The
-/// slot carries an epoch secret of 32 zero bytes: the member may have
-/// joined inside the epoch, and `K_e` would give it each slot key before
-/// its join (`GRP-385`).
+/// The body of a one-slot record of epoch `epoch` for one member
+/// (§11.4.3): `secret` is `K_e` for a key supply (`GRP-375`), or 32 zero
+/// bytes for a delivery of the owner credentials (`GRP-400`), and `own_sks`
+/// are those credentials or none.
 #[allow(clippy::too_many_arguments)]
-pub fn owner_delivery<R: CryptoRng + ?Sized>(
+pub fn one_slot<R: CryptoRng + ?Sized>(
     group_id: &[u8; 32],
     epoch: u32,
     start_slot: u32,
     roster_epoch: u32,
     rotator: u16,
     member: &Included<'_>,
-    own_sks: &[Secret<32>; REPLICAS as usize],
+    secret: &Secret<32>,
+    own_sks: Option<&[Secret<32>; REPLICAS as usize]>,
     bucket: umbra_wire::bucket::Bucket,
     rng: &mut R,
 ) -> Result<Vec<u8>, Error> {
-    let zero = [0u8; 32];
     let tag = member.pair_key.epoch_tag(&EpochTag {
         group_id,
         epoch,
         start_slot,
         roster_epoch,
-        epoch_secret: &Secret::new(zero),
+        epoch_secret: secret,
     });
+    let own_count = if own_sks.is_some() { REPLICAS } else { 0 };
     let payload = SlotPayload {
         rotator,
-        epoch_secret: Secret::new(zero),
+        epoch_secret: Secret::new(*secret.expose()),
         tag,
-        own_sks: own_sks.iter().map(|s| Secret::new(*s.expose())).collect(),
+        own_sks: own_sks
+            .map(|own| own.iter().map(|s| Secret::new(*s.expose())).collect())
+            .unwrap_or_default(),
     };
     let mut plain = alloc::vec![0u8; payload.len()];
     payload.encode(&mut plain)?;
     let pk = PublicKey::from_bytes(member.kem_pk)?;
-    let mut sealed = alloc::vec![0u8; slot_len(REPLICAS).saturating_sub(2)];
+    let mut sealed = alloc::vec![0u8; slot_len(own_count).saturating_sub(2)];
     let n = slot::seal(&pk, group_id, epoch, member.index, &plain, rng, &mut sealed)?;
     sealed.truncate(n);
     let body = EpochKeyBody {

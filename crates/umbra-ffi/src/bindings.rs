@@ -213,6 +213,9 @@ pub struct FfiGroupInfo {
     /// Whether this owner must name another owner before a silent owner
     /// can leave (`GRP-184`).
     pub owner_needed: bool,
+    /// Whether this device lacks the current epoch and the relay refused
+    /// its request, thus it needs a new invitation (`GRP-297`).
+    pub is_lapsed: bool,
 }
 
 /// The role of one member of a group (§11.9).
@@ -1097,6 +1100,20 @@ impl Inner {
             for conversation in due {
                 let _ = self.client.rotate_owners(conversation, now_ms, &mut OsRng);
             }
+        }
+        // §11.4.3: a group whose epoch this device lacks asks for it, and
+        // a request of another member is answered after the backoff.
+        if let Ok(lacking) = self.client.groups_lacking_epoch(now_ms) {
+            for (conversation, epoch) in lacking {
+                let _ = self
+                    .client
+                    .request_epoch(conversation, epoch, now_ms, &mut OsRng);
+            }
+        }
+        for (conversation, index) in self.client.key_answers_due(now_ms) {
+            let _ = self
+                .client
+                .answer_key_request(conversation, index, now_ms, &mut OsRng);
         }
         while let Some(job) = self.client.take_group_rekey() {
             commands.push(GroupCommand::Rotate {
@@ -2409,6 +2426,7 @@ impl Handle {
         let owner_needed = inner.client.owner_needed(conversation, unix_now_ms())?;
         Ok(FfiGroupInfo {
             owner_needed,
+            is_lapsed: info.is_lapsed,
             is_closed: info.is_closed,
             group_id: info.group_id.to_vec(),
             own_index: info.own_index,

@@ -35,7 +35,7 @@ use umbra_wire::{
 
 use super::{
     backoff,
-    epoch::{owner_delivery, rotate, EpochState, EpochStore, Included},
+    epoch::{one_slot, rotate, EpochState, EpochStore, Included},
     join::{admit, admit_slot, Admitted},
     queue::Replicas,
     receive::{Context, Outcome, Receiver},
@@ -668,7 +668,6 @@ impl Group {
             return Err(Error::Unverified);
         }
         let owners = self.owners.as_ref().ok_or(Error::NoPath)?;
-        let current = self.epochs.current().ok_or(Error::NoPath)?;
         let member = self
             .roster
             .member(index)
@@ -684,15 +683,39 @@ impl Group {
             kem_pk: &kem_pk,
             pair_key: &pair,
         };
-        let bucket = bucket_for_slots(1, 0).ok_or(Error::NoPath)?;
-        let body = owner_delivery(
+        // GRP-400: no epoch secret, thus a promotee that joined inside the
+        // epoch learns no record before its join.
+        let roster_epoch = self.roster.epoch_index();
+        self.one_slot_record(
+            &included,
+            roster_epoch,
+            &Secret::new([0; 32]),
+            Some(owners),
+            rng,
+        )
+    }
+
+    /// A one-slot epoch-key record of the current epoch for one member.
+    fn one_slot_record<R: CryptoRng + ?Sized>(
+        &self,
+        member: &Included<'_>,
+        roster_epoch: u32,
+        secret: &Secret<32>,
+        own_sks: Option<&[Secret<32>; GROUP_REPLICAS]>,
+        rng: &mut R,
+    ) -> Result<Vec<u8>, Error> {
+        let current = self.epochs.current().ok_or(Error::NoPath)?;
+        let admins = usize::from(own_sks.is_some());
+        let bucket = bucket_for_slots(admins, 1 - admins).ok_or(Error::NoPath)?;
+        let body = one_slot(
             self.roster.group_id(),
             current.epoch(),
             current.start_slot(),
-            self.roster.epoch_index(),
+            roster_epoch,
             self.own_index,
-            &included,
-            owners,
+            member,
+            secret,
+            own_sks,
             bucket,
             rng,
         )?;
@@ -707,6 +730,90 @@ impl Group {
         let n = record.encode(bucket, &mut bytes)?;
         bytes.truncate(n);
         Ok(bytes)
+    }
+
+    /// The epoch that this member lacks: a record of a later epoch waits,
+    /// and no epoch-key record of it opened here (§11.4.3, `GRP-289`).
+    pub fn lacks_epoch(&self) -> Option<u32> {
+        self.receiver
+            .newest_held_epoch()
+            .filter(|epoch| *epoch > self.epochs.epoch())
+    }
+
+    /// Whether this member may answer a `KeyRequest` of scope `0x02` from
+    /// `index` for `epoch` (`GRP-375`, `GRP-377`, `GRP-404`): the epoch is
+    /// the current one, this member holds its `K_e`, and the rotation of
+    /// that epoch included `index`. A member that joined inside the epoch
+    /// holds the chain from its join, and `K_e` would give it the records
+    /// before that join.
+    pub fn may_supply(&self, index: u16, epoch: u32) -> bool {
+        let Some(current) = self.epochs.current() else {
+            return false;
+        };
+        current.epoch() == epoch
+            && current.secret().expose().expose() != &[0; 32]
+            && index != self.own_index
+            && self
+                .roster
+                .member(index)
+                .is_some_and(|member| member.active)
+            && self
+                .roster
+                .active_at(current.roster_epoch())
+                .is_some_and(|set| set.contains(&index))
+    }
+
+    /// The one-slot record that gives `K_e` of the current epoch to the
+    /// member at `index`, with `own_count` 0 (`GRP-375`).
+    pub fn key_supply<R: CryptoRng + ?Sized>(
+        &self,
+        index: u16,
+        rng: &mut R,
+    ) -> Result<Vec<u8>, Error> {
+        let current = self.epochs.current().ok_or(Error::NoPath)?;
+        if !self.may_supply(index, current.epoch()) {
+            return Err(Error::Unverified);
+        }
+        let member = self.roster.member(index).ok_or(Error::NoPath)?;
+        let kem_pk = member.kem_pk.clone().ok_or(Error::NoPath)?;
+        let pair = self
+            .keys
+            .pair_key(&member.pair_pk, self.roster.group_id())?;
+        let included = Included {
+            index,
+            role: member.role,
+            kem_pk: &kem_pk,
+            pair_key: &pair,
+        };
+        // The roster epoch of the rotation, thus the requester counts the
+        // triggers after it as every other member does (`GRP-357`).
+        let secret = Secret::new(*current.secret().expose().expose());
+        self.one_slot_record(&included, current.roster_epoch(), &secret, None, rng)
+    }
+
+    /// The member indices that the slots of an epoch-key body serve, under
+    /// either layout of `GRP-388`. A member that waits to answer a request
+    /// stands down when a one-slot record for that index arrives first.
+    pub fn slot_indices(&self, body: &[u8]) -> Vec<u16> {
+        for admin_layout in [true, false] {
+            let parsed = EpochKeyBody::parse(body, |index| {
+                self.roster.member(index).map(|member| {
+                    if admin_layout && member.role >= Role::Admin {
+                        REPLICAS
+                    } else {
+                        0
+                    }
+                })
+            });
+            if let Ok(EpochKeyBody {
+                carrier: Carrier::Inline(slots),
+                ..
+            }) = parsed
+            {
+                return slots.iter().map(|slot| slot.index).collect();
+            }
+        }
+        Vec::new()
     }
 
     /// Opens this member's slot in an epoch-key body and verifies its tag.
@@ -1457,6 +1564,66 @@ mod tests {
             crate::group::join::accept_admit(&invitation, &bare, &add_hash, &creator_pk, now)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn a_member_that_missed_an_epoch_asks_and_one_that_joined_inside_it_gets_nothing() {
+        let now = 1_700_000_000;
+        let (mut creator, mut member, third) = trio(now);
+        let mut rng = Rng(47);
+        // The third member leaves, and the creator rotates. The member
+        // reads the removal, and the epoch-key record never reaches it.
+        let leave = third.leave_object().unwrap();
+        let control = GroupControl::parse(&leave).unwrap();
+        for group in [&mut creator, &mut member] {
+            group.apply_control(&control, 2, now).unwrap();
+        }
+        creator.rotate(now, &mut rng).unwrap();
+        let later = creator
+            .post(&text("under the epoch it lacks"), now, &mut rng)
+            .unwrap();
+        assert!(!matches!(
+            member.receive(&later, now).unwrap(),
+            Outcome::Content { .. }
+        ));
+        // GRP-289: the held record names the epoch it lacks.
+        assert_eq!(member.lacks_epoch(), Some(creator.epoch()));
+
+        // GRP-375: the creator holds `K_e` and supplies it, and the record
+        // that waited opens after the install.
+        assert!(creator.may_supply(1, creator.epoch()));
+        let supply = creator.key_supply(1, &mut rng).unwrap();
+        let record = parse_record(&supply);
+        assert_eq!(creator.slot_indices(record.body), alloc::vec![1]);
+        member
+            .install_epoch_key(record.epoch, record.slot, record.body, now)
+            .unwrap();
+        assert_eq!(member.epoch(), creator.epoch());
+        assert_eq!(member.lacks_epoch(), None);
+        let opened = member.retry_held(now);
+        assert!(matches!(opened.first(), Some(Outcome::Content { .. })));
+
+        // GRP-404: a member that joined inside the epoch holds no claim to
+        // `K_e`, and a member that holds none supplies nothing.
+        const FIFTH_SEED: Secret<32> = Secret::new([0x55; 32]);
+        let keys = JoinKeys {
+            seed: FIFTH_SEED,
+            keys: MemberKeys::from_seed(&FIFTH_SEED),
+        };
+        let kem_pk = keys.keys.kem().public().to_bytes();
+        let add = creator
+            .add_object(&JoinRecord {
+                group_id: *creator.group_id(),
+                keys: keys.wire_keys(&kem_pk),
+            })
+            .unwrap();
+        let control = GroupControl::parse(&add).unwrap();
+        let Applied::Added(index) = creator.apply_control(&control, 0, now).unwrap() else {
+            panic!("the add added nobody");
+        };
+        assert!(!creator.may_supply(index, creator.epoch()));
+        assert!(creator.key_supply(index, &mut rng).is_err());
+        assert!(!creator.may_supply(1, creator.epoch() + 1));
     }
 
     #[test]

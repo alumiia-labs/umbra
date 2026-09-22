@@ -886,6 +886,109 @@ mod tests {
     }
 
     #[test]
+    fn a_member_that_missed_an_epoch_key_asks_for_it_and_gets_it() {
+        const DAY: u64 = 86_400;
+        let mut rng = Rng(79);
+        let mut client = new_client(&mut rng);
+        let mut other = new_client(&mut rng);
+        let (conversation, member) = ready_pair(&mut client, &mut other, &mut rng);
+        let later = 1_700_000_000 + 31 * DAY;
+        let ms = |seconds: u64| seconds * 1_000;
+        // GRP-360: the owner rotates an aged epoch, and its epoch-key
+        // record never reaches the member.
+        client
+            .rotate_group(conversation, ms(later), &mut rng)
+            .unwrap();
+        let _lost = client.take_group_post().unwrap();
+        let mut draft = client.new_draft(conversation);
+        draft.set_text(&units("under the new key")).unwrap();
+        client.send_draft(draft, ms(later), &mut rng).unwrap();
+        let text = client.take_group_post().unwrap();
+        other
+            .on_group_record(&[0xC3; 32], 2, &text.record, ms(later), &mut rng)
+            .unwrap();
+        assert_eq!(other.next_event(), None);
+
+        // GRP-289: the member asks, once in the slot.
+        let lacking = other.groups_lacking_epoch(ms(later)).unwrap();
+        assert_eq!(lacking, vec![(member, 2)]);
+        assert!(other
+            .groups_lacking_epoch(ms(later + 60))
+            .unwrap()
+            .is_empty());
+        other.request_epoch(member, 2, ms(later), &mut rng).unwrap();
+        let request = other.take_group_post().unwrap();
+        client
+            .on_group_record(&[0xC3; 32], 3, &request.record, ms(later), &mut rng)
+            .unwrap();
+        assert_eq!(client.next_event(), None);
+
+        // GRP-375: after its backoff the owner posts the one-slot record
+        // and the notice of its supply.
+        assert!(client.key_answers_due(ms(later)).is_empty());
+        let due = client.key_answers_due(ms(later + 3_600));
+        assert_eq!(due, vec![(conversation, 1)]);
+        client
+            .answer_key_request(conversation, 1, ms(later + 3_600), &mut rng)
+            .unwrap();
+        let supply = client.take_group_post().unwrap();
+        let notice = client.take_group_post().unwrap();
+
+        // The epoch installs, and the record that waited becomes a message.
+        let message = other
+            .on_group_record(&[0xC3; 32], 4, &supply.record, ms(later + 3_600), &mut rng)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            other.next_event(),
+            Some(Event::Message {
+                conversation: member,
+                message
+            })
+        );
+        assert!(other
+            .on_group_record(&[0xC3; 32], 5, &notice.record, ms(later + 3_600), &mut rng)
+            .unwrap()
+            .is_none());
+        assert_eq!(other.group_info(member).unwrap().epoch, 2);
+        assert!(other
+            .groups_lacking_epoch(ms(later + 7_200))
+            .unwrap()
+            .is_empty());
+
+        // GRP-297: a group whose relays refuse a member that lacks its epoch
+        // lapsed; it is not gone.
+        let mut draft = client.new_draft(conversation);
+        draft.set_text(&units("one more")).unwrap();
+        client
+            .send_draft(draft, ms(later + 90 * DAY), &mut rng)
+            .unwrap();
+        client
+            .rotate_group(conversation, ms(later + 90 * DAY), &mut rng)
+            .unwrap();
+        while client.take_group_post().is_some() {}
+        let mut draft = client.new_draft(conversation);
+        draft.set_text(&units("in the third epoch")).unwrap();
+        client
+            .send_draft(draft, ms(later + 90 * DAY), &mut rng)
+            .unwrap();
+        let third = client.take_group_post().unwrap();
+        other
+            .on_group_record(
+                &[0xC3; 32],
+                9,
+                &third.record,
+                ms(later + 90 * DAY),
+                &mut rng,
+            )
+            .unwrap();
+        other.close_group(member, &mut rng).unwrap();
+        let info = other.group_info(member).unwrap();
+        assert!(info.is_lapsed && info.is_closed);
+        assert!(!client.group_info(conversation).unwrap().is_lapsed);
+    }
+
+    #[test]
     fn a_record_that_came_before_its_epoch_key_opens_when_the_key_does() {
         const DAY: u64 = 86_400;
         let mut rng = Rng(67);
