@@ -202,6 +202,9 @@ pub struct FfiGroupInfo {
     /// Whether both replicas hold a group queue. Until then no record
     /// leaves this device (`GRP-191`).
     pub is_ready: bool,
+    /// Whether each replica refused the group queue. The group is closed,
+    /// and this device sends nothing more to it (`GRP-210`).
+    pub is_closed: bool,
 }
 
 /// One relay of the set of the client, with the facts that the invariants
@@ -870,6 +873,9 @@ struct Inner {
     /// The groups that the run of the group queues reads. A subscription
     /// lives with its session, thus this set empties when the run ends.
     group_reading: BTreeSet<crate::ConversationId>,
+    /// The replicas that refused a record of a group. Two of them close
+    /// the group (`GRP-210`).
+    group_refusals: BTreeSet<(crate::ConversationId, [u8; 32])>,
 }
 
 /// What one command of the transfer task belongs to.
@@ -912,7 +918,14 @@ enum GroupWork {
     },
     /// A `GPOST` of one record at one replica. A record of the roster
     /// carries no message.
-    Post(Option<crate::MsgRef>),
+    Post {
+        /// The message of this device, or none for a roster object.
+        message: Option<crate::MsgRef>,
+        /// The group.
+        conversation: crate::ConversationId,
+        /// The relay that takes this copy.
+        relay: [u8; 32],
+    },
 }
 
 impl Inner {
@@ -993,7 +1006,11 @@ impl Inner {
             // GRP-194: the same record goes to each replica, each under its
             // own tag, and the first `GSEQ` accepts it (`GRP-195`).
             for replica in job.replicas {
-                let tag = self.next_group_tag(GroupWork::Post(job.message));
+                let tag = self.next_group_tag(GroupWork::Post {
+                    message: job.message,
+                    conversation: job.conversation,
+                    relay: replica.relay,
+                });
                 commands.push(GroupCommand::Post {
                     tag,
                     relay: replica.relay,
@@ -1142,12 +1159,22 @@ impl Inner {
                 // that waited for it goes now.
                 self.pump_groups();
             }
-            GroupUpdate::Posted { tag, .. } => {
+            GroupUpdate::Posted { tag, relay, .. } => {
                 // GRP-195: one replica accepted, thus the record is accepted.
-                if let Some(GroupWork::Post(Some(message))) = self.group_tags.remove(&tag) {
-                    let _ =
-                        self.client
-                            .set_delivery(&message, crate::Delivery::Accepted, &mut OsRng);
+                if let Some(GroupWork::Post {
+                    message,
+                    conversation,
+                    ..
+                }) = self.group_tags.remove(&tag)
+                {
+                    self.group_refusals.remove(&(conversation, relay));
+                    if let Some(message) = message {
+                        let _ = self.client.set_delivery(
+                            &message,
+                            crate::Delivery::Accepted,
+                            &mut OsRng,
+                        );
+                    }
                 }
             }
             GroupUpdate::Record {
@@ -1163,10 +1190,32 @@ impl Inner {
                     &mut OsRng,
                 );
             }
-            // The store holds what a refused command carried, thus the
-            // next run asks for the work again.
-            GroupUpdate::Failed { tag, .. } => {
-                self.group_tags.remove(&tag);
+            GroupUpdate::Failed { tag, reason } => {
+                // WIR-317: a group queue that the relay does not hold and a
+                // credential that it refuses give one reason. A record that
+                // each replica refuses names a group that is gone there,
+                // and `GRP-210` closes it. The store holds the record of
+                // any other reason, and the next run asks for it again.
+                let Some(GroupWork::Post {
+                    conversation,
+                    relay,
+                    ..
+                }) = self.group_tags.remove(&tag)
+                else {
+                    return;
+                };
+                if reason != Some(umbra_queue::Reject::Rejected) {
+                    return;
+                }
+                self.group_refusals.insert((conversation, relay));
+                let refused = self
+                    .group_refusals
+                    .iter()
+                    .filter(|(held, _)| *held == conversation)
+                    .count();
+                if refused >= GROUP_REPLICAS {
+                    let _ = self.client.close_group(conversation, &mut OsRng);
+                }
             }
             GroupUpdate::Ended => {
                 self.groups = None;
@@ -1532,6 +1581,7 @@ pub fn init(
             group_tags: BTreeMap::new(),
             next_group_tag: 0,
             group_reading: BTreeSet::new(),
+            group_refusals: BTreeSet::new(),
         }),
         changed: Condvar::new(),
         runtime: Mutex::new(None),
@@ -2171,6 +2221,7 @@ impl Handle {
         let conversation = conversation_of(&conversation)?;
         let info = locked(&self.inner).client.group_info(conversation)?;
         Ok(FfiGroupInfo {
+            is_closed: info.is_closed,
             group_id: info.group_id.to_vec(),
             own_index: info.own_index,
             members: info.members,

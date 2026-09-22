@@ -503,6 +503,25 @@ mod tests {
         assert!(ready);
         assert!(client.group_info(conversation).unwrap().is_ready);
 
+        // GRP-210: a group whose two replicas refused it takes no record,
+        // and its state lives through a lock.
+        assert!(!client.group_info(conversation).unwrap().is_closed);
+        client.close_group(conversation, &mut rng).unwrap();
+        assert!(client.group_info(conversation).unwrap().is_closed);
+        let mut draft = client.new_draft(conversation);
+        draft.set_text(&units("into a closed group")).unwrap();
+        client
+            .send_draft(draft, 1_700_000_150_000, &mut rng)
+            .unwrap();
+        assert!(client.take_group_post().is_none());
+        client.lock();
+        client
+            .unlock(&units("correct horse"), 1_700_000_160)
+            .unwrap();
+        client.resume_group_work(&mut rng).unwrap();
+        assert!(client.group_info(conversation).unwrap().is_closed);
+        assert!(client.take_group_post().is_none());
+
         // The group came back from the store with its replicas, and the
         // work list is empty at the next unlock.
         client.lock();

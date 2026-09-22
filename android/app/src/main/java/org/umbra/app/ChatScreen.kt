@@ -326,6 +326,14 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                 jumpsAtNextLoad = true
             }
         }
+        // GRP-210: a group whose two relays hold it no more takes no new
+        // message, and the composer would promise one.
+        if (chat.isClosed) {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
+                Note("The relays of this group hold it no more. It takes no new message.")
+            }
+            return@Column
+        }
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
             // The send button stays beside the line of the text.

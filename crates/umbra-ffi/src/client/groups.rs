@@ -158,6 +158,9 @@ pub struct GroupInfo {
     /// Whether both replicas hold a group queue. Until then no record goes
     /// out (`GRP-191`).
     pub is_ready: bool,
+    /// Whether each replica refused the group queue, thus the group is
+    /// closed and this device sends nothing more (`GRP-210`).
+    pub is_closed: bool,
 }
 
 /// One `GNEW` that waits for a circuit to its relay.
@@ -312,7 +315,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             });
         }
 
-        let stored = Self::group_row(&group)?;
+        let stored = Self::group_row(&group, false)?;
         let open = self.open_mut()?;
         let conversation = ConversationId(open.store.row_id(GROUP, &group_id));
         let seed_row = open.store.row_id(TableId::LOCAL_IDENTITY, &group_id);
@@ -347,8 +350,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     pub fn group_of(&self, conversation: ConversationId) -> Result<Group, Error> {
         let store = &self.open_ref()?.store;
         let row = Zeroizing::new(store.get(GROUP, &conversation.0)?.ok_or(Error::NotFound)?);
-        let (group_id, stored) = row.split_at_checked(32).ok_or(Error::Integrity)?;
-        let group_id: [u8; 32] = group_id.try_into().map_err(|_| Error::Integrity)?;
+        let (group_id, stored) = row.split_at_checked(33).ok_or(Error::Integrity)?;
+        let group_id: [u8; 32] = group_id
+            .get(..32)
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or(Error::Integrity)?;
         let seed_row = store.row_id(TableId::LOCAL_IDENTITY, &group_id);
         let seed = Zeroizing::new(
             store
@@ -360,13 +366,47 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     }
 
     /// The row of a group: its identifier, thus the row names the seed
-    /// that opens it (`IMP-121`), and then its stored form.
-    fn group_row(group: &Group) -> Result<Zeroizing<Vec<u8>>, Error> {
+    /// that opens it (`IMP-121`), a byte of the state that the group has
+    /// at this device, and then its stored form.
+    fn group_row(group: &Group, is_closed: bool) -> Result<Zeroizing<Vec<u8>>, Error> {
         let stored = group.export().map_err(|_| Error::Malformed)?;
-        let mut row = Zeroizing::new(Vec::with_capacity(stored.len().saturating_add(32)));
+        let mut row = Zeroizing::new(Vec::with_capacity(stored.len().saturating_add(33)));
         row.extend_from_slice(group.group_id());
+        row.push(u8::from(is_closed));
         row.extend_from_slice(&stored);
         Ok(row)
+    }
+
+    /// Whether each replica of a group refused its queue (`GRP-210`).
+    pub fn group_closed(&self, conversation: ConversationId) -> Result<bool, Error> {
+        let store = &self.open_ref()?.store;
+        let row = Zeroizing::new(store.get(GROUP, &conversation.0)?.ok_or(Error::NotFound)?);
+        Ok(row.get(32) == Some(&1))
+    }
+
+    /// Marks a group closed. Each record of it stays in the store, and
+    /// this device sends nothing more to its queues.
+    pub fn close_group<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        if self.group_closed(conversation)? {
+            return Ok(());
+        }
+        let group = self.group_of(conversation)?;
+        let row = Self::group_row(&group, true)?;
+        let open = self.open_mut()?;
+        let mut batch = open.store.begin();
+        batch.put(GROUP, conversation.0, None, &row, rng)?;
+        batch.commit()?;
+        // Each record that waited for a queue that is gone leaves the
+        // work list. The store keeps the message, and the user sees that
+        // it did not go.
+        self.groups
+            .posts
+            .retain(|post| post.conversation != conversation);
+        Ok(())
     }
 
     /// Writes a group back after a change of it.
@@ -376,7 +416,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         group: &Group,
         rng: &mut R,
     ) -> Result<(), Error> {
-        let row = Self::group_row(group)?;
+        let is_closed = self.group_closed(conversation).unwrap_or(false);
+        let row = Self::group_row(group, is_closed)?;
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         batch.put(GROUP, conversation.0, None, &row, rng)?;
@@ -395,6 +436,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             members: u32::try_from(group.roster().active_count()).unwrap_or(u32::MAX),
             epoch: group.epoch(),
             is_ready,
+            is_closed: self.group_closed(conversation)?,
         })
     }
 
@@ -1074,7 +1116,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if self.is_group(conversation)? {
             return Err(Error::Malformed);
         }
-        let row = Self::group_row(&group)?;
+        let row = Self::group_row(&group, false)?;
         let open = self.open_mut()?;
         let seed_row = open.store.row_id(TableId::LOCAL_IDENTITY, &group_id);
         let mut batch = open.store.begin();
@@ -1128,6 +1170,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
+        // GRP-210: a group whose two queues are gone takes no record.
+        if self.group_closed(conversation)? {
+            return Ok(());
+        }
         let mut group = self.group_of(conversation)?;
         let Some(replicas) = group.replicas() else {
             return Ok(());

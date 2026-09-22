@@ -108,7 +108,10 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
             for (joiner in waiting) {
                 JoinerRow(joiner)
             }
-            if (!chat.isReady) {
+            if (chat.isClosed) {
+                Spacer(Modifier.height(12.dp))
+                Note("The relays of this group hold it no more. It takes no new message.")
+            } else if (!chat.isReady) {
                 Spacer(Modifier.height(12.dp))
                 // A technical fact that the user cannot see anywhere else.
                 Note("One of the two relays of this group has not answered. Messages wait.")
