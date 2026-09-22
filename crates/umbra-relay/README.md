@@ -196,8 +196,9 @@ deployment the co-tenant site of the relay serves that path as a file.
 ## What the store file holds
 
 Queue identifiers, the public authorization keys, sequence numbers, the
-ciphertext of each record that no `ACK` covers, and each invitation blob. Each
-time is a multiple of one hour (`NET-301`). It holds no circuit, no session, no
+ciphertext of each record that no `ACK` covers, each invitation blob, and the
+group queues of Part 11 with their retained records. Each time is a multiple
+of one hour (`NET-301`). It holds no circuit, no session, no
 subscription, and no address of a client (`NET-300`). The file runs under
 `secure_delete`, and the relay truncates the write-ahead log after each commit
 that deletes, thus an acknowledged record leaves no bytes behind (`NET-302`).
@@ -205,6 +206,9 @@ that deletes, thus an acknowledged record leaves no bytes behind (`NET-302`).
 Do not copy the file of a live relay. Stop the relay, or use the backup
 command of SQLite.
 
-The chunks of Part 13 and the records of a group queue sit in memory alone.
-A restart drops them, and each client finds them gone. The store of the
-pairwise queues holds neither.
+The chunks of Part 13 sit in memory alone. A restart drops them, and each
+client fetches the file again from another replica or asks its sender.
+
+A file of an earlier version opens here. The schema takes nothing away, thus
+a relay of version 1 keeps each queue it holds and gains the two tables of
+the group queues.
