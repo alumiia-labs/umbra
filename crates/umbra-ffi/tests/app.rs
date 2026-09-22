@@ -647,6 +647,13 @@ struct SignedNetwork {
 }
 
 fn start_signed_network(relays: &tokio::runtime::Runtime) -> SignedNetwork {
+    start_signed_network_at(relays, None)
+}
+
+/// The same network on given ports, for a test that ends each relay
+/// process and starts it again. The keys come from fixed seeds, thus a
+/// client of the first network knows each relay of the second.
+fn start_signed_network_at(relays: &tokio::runtime::Runtime, at: Option<&[u16]>) -> SignedNetwork {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -661,8 +668,9 @@ fn start_signed_network(relays: &tokio::runtime::Runtime) -> SignedNetwork {
     for (index, seed) in IDENTITY_SEEDS.iter().enumerate() {
         let number = index as u8 + 1;
         let address = [127, number, 0, 1];
+        let port = at.and_then(|ports| ports.get(index).copied()).unwrap_or(0);
         let listener = relays
-            .block_on(TcpListener::bind((std::net::Ipv4Addr::from(address), 0)))
+            .block_on(TcpListener::bind((std::net::Ipv4Addr::from(address), port)))
             .unwrap();
         let (relay, static_secret) = relay_static(number);
         let mut host = [0u8; HOST_LEN];
@@ -1224,6 +1232,7 @@ fn one_app_offers_a_group_and_the_other_app_joins_it() {
     }
     let alice = launch(&directory, "alice.db", 1);
     let bob = launch(&directory, "bob.db", 2);
+    let mut networks = Vec::new();
     for handle in [&alice, &bob] {
         let verified = handle
             .network_of_manifest(
@@ -1234,6 +1243,7 @@ fn one_app_offers_a_group_and_the_other_app_joins_it() {
                 Some(CA.into()),
             )
             .unwrap();
+        networks.push(verified.network.clone());
         handle.clone().connect(verified.network).unwrap();
     }
     alice.invite().unwrap();
@@ -1316,6 +1326,18 @@ fn one_app_offers_a_group_and_the_other_app_joins_it() {
     let (conversation, message) = wait_for_message(&bob);
     assert_eq!(conversation, joined);
     assert_eq!(rendered(&bob, message), "we leave at six");
+
+    // The run of Alice ends and starts again, as at a change of the network
+    // of the device. The group comes back with it, and no record of a
+    // contact is needed to wake it.
+    alice.disconnect();
+    alice.clone().connect(networks[0].clone()).unwrap();
+    let draft = bob.new_draft(joined.clone()).unwrap();
+    draft.set_text(units("still in the group")).unwrap();
+    bob.send_draft(draft).unwrap();
+    let (conversation, message) = wait_for_message(&alice);
+    assert_eq!(conversation, group);
+    assert_eq!(rendered(&alice, message), "still in the group");
 
     alice.disconnect();
     bob.disconnect();
@@ -1727,6 +1749,139 @@ fn update_name(update: &GroupUpdate) -> &'static str {
         GroupUpdate::Posted { .. } => "posted",
         GroupUpdate::Record { .. } => "record",
         GroupUpdate::Failed { .. } => "failed",
+        GroupUpdate::Unsent { .. } => "unsent",
+        GroupUpdate::SubscriptionLost { .. } => "subscription lost",
+        GroupUpdate::Reset => "reset",
         GroupUpdate::Ended => "ended",
+    }
+}
+
+#[test]
+fn the_group_run_outlives_its_relays_and_carries_its_commands_on() {
+    let relays = tokio::runtime::Runtime::new().unwrap();
+    let network = start_signed_network(&relays);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let (keyset, _) = DirectoryKeySet::parse(&network.keyset).unwrap();
+    let mut consensus = Consensus::new(keyset, 0).unwrap();
+    let manifest = RelayManifest::parse(&network.manifest).unwrap();
+    let set = RelaySet::accept(&mut consensus, &manifest, &BlocList::v1(), now).unwrap();
+    let info_of = |relay: &ListedRelay| RelayInfo {
+        candidate: relay.candidate,
+        key: RelayStatic {
+            s: relay.ntor_pk,
+            relay_id: relay.candidate.relay_id,
+        },
+    };
+    let ingress = set
+        .relays
+        .iter()
+        .find(|relay| relay.candidate.ingress)
+        .unwrap();
+    let guard = Dial {
+        host: ingress.host.clone(),
+        addr_v4: Some(ingress.addr_v4),
+        addr_v6: None,
+        port: ingress.port,
+    };
+    let exit = set
+        .relays
+        .iter()
+        .find(|relay| relay.candidate.is_exit())
+        .unwrap()
+        .candidate
+        .relay_id;
+    let node = ClientNode::for_groups(
+        info_of(ingress),
+        set.relays
+            .iter()
+            .filter(|relay| !relay.candidate.ingress)
+            .map(info_of)
+            .collect(),
+        umbra_crypto::hierarchy::RootIdentity::new(Secret::new([0x93; 32])),
+    );
+    let clients = tokio::runtime::Runtime::new().unwrap();
+    let (commands, task_commands) = tokio::sync::mpsc::unbounded_channel();
+    let (task_updates, mut updates) = tokio::sync::mpsc::unbounded_channel();
+    clients.spawn(run_groups(
+        node,
+        guard,
+        native::tls_config_with_root_file(CA).unwrap(),
+        task_commands,
+        task_updates,
+    ));
+    let create = |tag: u64| GroupCommand::Create {
+        tag,
+        relay: exit,
+        read_pk: [0x11; 32],
+        write_pk: [0x12; 32],
+        own: Secret::new([0x13; 32]),
+    };
+    commands.send(create(1)).ok().unwrap();
+    let GroupUpdate::Created {
+        tag: 1,
+        group_queue_id,
+        ..
+    } = group_update(&mut updates)
+    else {
+        panic!("the relay made no group queue");
+    };
+
+    // Each relay process ends. The run does not end with its link: it
+    // tells the caller, and it opens a new link after a backoff.
+    drop(relays);
+    let update = group_update(&mut updates);
+    assert!(
+        matches!(update, GroupUpdate::Reset),
+        "{}",
+        update_name(&update)
+    );
+    // A record that the caller gives while no relay runs waits in the
+    // run, and it fails nowhere.
+    commands
+        .send(GroupCommand::Post {
+            tag: 2,
+            relay: exit,
+            group_queue_id,
+            write: Secret::new([0x14; 32]),
+            record: vec![0; umbra_wire::bucket::Bucket::B0.group_record()],
+        })
+        .ok()
+        .unwrap();
+
+    // The same relays come back on the same ports, with empty stores. The
+    // record goes in the new session, and the relay answers it: the queue
+    // it names is gone with the old process.
+    let relays = tokio::runtime::Runtime::new().unwrap();
+    let _again = start_signed_network_at(&relays, Some(&network.ports));
+    let mut answered = false;
+    let start = Instant::now();
+    while !answered && start.elapsed() < Duration::from_secs(90) {
+        match group_update(&mut updates) {
+            GroupUpdate::Failed {
+                tag: 2,
+                reason: Some(_),
+            } => answered = true,
+            GroupUpdate::Reset => {}
+            other => panic!("{}", update_name(&other)),
+        }
+    }
+    assert!(answered, "the record did not go in the new session");
+    // The new session takes a new command as the first one did.
+    commands.send(create(3)).ok().unwrap();
+    let GroupUpdate::Created { tag: 3, .. } = group_update(&mut updates) else {
+        panic!("the new session made no group queue");
+    };
+
+    // The run ends when the caller drops the commands, and not before.
+    drop(commands);
+    loop {
+        match group_update(&mut updates) {
+            GroupUpdate::Ended => break,
+            GroupUpdate::Reset => {}
+            other => panic!("{}", update_name(&other)),
+        }
     }
 }

@@ -34,7 +34,7 @@ use umbra_crypto::{
 use umbra_onion::{
     build::{build_cell_body, read_cell_body, Pending, BUILD_BUCKET, HELLO_LEN},
     circuit::CircuitBuild,
-    HOPS,
+    CIRCUIT_BUILD_TIMEOUT, HOPS,
 };
 use umbra_queue::{params::MAX_QUEUES_PER_SESSION, Reject};
 use umbra_transport::link::ClientLink;
@@ -305,6 +305,9 @@ pub enum GroupOutcome {
     /// The relay refused the command. `WIR-317` gives one reason for an
     /// unknown group queue and for a wrong credential.
     Refused(Reject),
+    /// No circuit reached the relay of the command within
+    /// `CIRCUIT_BUILD_TIMEOUT`. The command did not leave this device.
+    Unreachable,
 }
 
 /// What a relay did with a chunk command.
@@ -351,6 +354,8 @@ struct Slot {
     exit: Option<[u8; 32]>,
     /// The three relays of the chain, from the first build of this run.
     chain: Option<[[u8; 32]; HOPS]>,
+    /// The first tick that saw the build of this circuit run.
+    building_since: Option<u64>,
 }
 
 /// A relay that a client can put into a chain: the facts that the
@@ -374,6 +379,7 @@ impl Slot {
             reserved: 0,
             exit,
             chain: None,
+            building_since: None,
         }
     }
 
@@ -950,6 +956,66 @@ impl ClientNode {
         self.pump()
     }
 
+    /// Ends each circuit whose build ran past `CIRCUIT_BUILD_TIMEOUT`
+    /// (Part 3 §3.4.3). The first tick that sees a build stamps it, thus
+    /// the end comes at most one tick late. A relay that drops an `EXTEND`
+    /// sends nothing back, and without this the build waits for ever.
+    ///
+    /// A group node fails the commands that waited for a circuit to one
+    /// relay, and each other circuit runs on: a replica on a relay that is
+    /// down is the case that the second replica exists for (`GRP-195`).
+    /// Each other circuit that ends gives `CircuitLost`, which the runtime
+    /// reads as a build that failed.
+    pub fn on_tick(&mut self, now: u64) -> Vec<ClientEvent> {
+        let mut is_lost = false;
+        let mut unreachable = Vec::new();
+        let is_group = self.range == Range::Group;
+        for slot in &mut self.slots {
+            if !matches!(slot.circuit, Circuit::Building { .. }) {
+                slot.building_since = None;
+                continue;
+            }
+            let since = *slot.building_since.get_or_insert(now);
+            if now.saturating_sub(since) < CIRCUIT_BUILD_TIMEOUT {
+                continue;
+            }
+            slot.circuit = Circuit::None;
+            slot.building_since = None;
+            match slot.exit.filter(|_| is_group) {
+                Some(relay) => unreachable.push(relay),
+                None => is_lost = true,
+            }
+        }
+        let mut events = Vec::new();
+        for relay in unreachable {
+            events.extend(self.release_held_groups(&relay));
+        }
+        if is_lost {
+            events.push(ClientEvent::CircuitLost);
+        }
+        events
+    }
+
+    /// Fails each group command that waits for a circuit to `relay`, when
+    /// no circuit to it builds or runs any more.
+    fn release_held_groups(&mut self, relay: &[u8; 32]) -> Vec<ClientEvent> {
+        let is_live =
+            |slot: &Slot| slot.exit == Some(*relay) && !matches!(slot.circuit, Circuit::None);
+        if self.slots.iter().any(is_live) {
+            return Vec::new();
+        }
+        let (gone, kept): (Vec<HeldGroup>, Vec<HeldGroup>) = core::mem::take(&mut self.held_groups)
+            .into_iter()
+            .partition(|held| held.relay == *relay);
+        self.held_groups = kept;
+        gone.into_iter()
+            .map(|held| ClientEvent::Group {
+                handle: held.handle,
+                outcome: GroupOutcome::Unreachable,
+            })
+            .collect()
+    }
+
     /// The capsules to write to the link, in order.
     pub fn take_capsules(&mut self) -> Vec<Vec<u8>> {
         self.capsules.drain(..).collect()
@@ -1043,6 +1109,13 @@ impl ClientNode {
     ) -> Result<(), Error> {
         self.slots.push(Slot::empty(exit));
         self.current = self.slots.len().saturating_sub(1);
+        self.build_current(rng)
+    }
+
+    /// Chooses a chain for the current circuit and sends its first
+    /// `EXTEND`.
+    fn build_current<R: CryptoRng + ?Sized>(&mut self, rng: &mut R) -> Result<(), Error> {
+        self.slot_mut()?.chain = None;
         // With no conformant chain the circuit stays with no build, and
         // what waits for it waits (`NET-033`). The slot stays, thus a later
         // call for the same relay does not select again in this run.
@@ -1387,7 +1460,11 @@ impl ClientNode {
             self.start_group(held, rng)?;
         } else {
             self.held_groups.push(held);
-            self.circuit_for_group(relay, rng)?;
+            // A command that no circuit can reach does not wait for ever.
+            if let Err(error) = self.circuit_for_group(relay, rng) {
+                self.held_groups.retain(|held| held.handle != handle);
+                return Err(error);
+            }
         }
         Ok(handle)
     }
@@ -1415,15 +1492,32 @@ impl ClientNode {
                 Some(chain) => chain.last() == Some(&relay),
                 None => slot.exit == Some(relay),
             };
-            ends_there && slot.queues.is_empty() && slot.reserved == 0
+            let is_live = !matches!(slot.circuit, Circuit::None);
+            ends_there && is_live && slot.queues.is_empty() && slot.reserved == 0
         };
         if self.slots.iter().any(free_for_it) {
             return Ok(());
         }
         let current = self.current;
-        let started = self.add_circuit(Some(relay), rng);
+        // A circuit to this relay whose build ended builds again in its own
+        // slot, thus the dead slot does not hold its commands for ever.
+        let dead = |slot: &Slot| slot.exit == Some(relay) && matches!(slot.circuit, Circuit::None);
+        let started = match self.slots.iter().position(dead) {
+            Some(index) => {
+                self.current = index;
+                self.build_current(rng)
+            }
+            None => self.add_circuit(Some(relay), rng),
+        };
+        let is_building = !matches!(self.slot().map(|slot| &slot.circuit), Ok(Circuit::None));
         self.current = current;
-        started
+        started?;
+        // NET-033: no conformant chain reaches the relay in this run.
+        if is_building {
+            Ok(())
+        } else {
+            Err(Error::NoPath)
+        }
     }
 
     /// Signs a group-queue command for the session of its circuit, and
@@ -2625,5 +2719,110 @@ impl ClientNode {
     /// The relays of the circuit, for a runtime that dials the guard.
     pub fn guard(&self) -> RelayStatic {
         copy_static(&self.ingress.key)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+mod tests {
+    use super::*;
+    use crate::abuse::test_rng::Rng;
+
+    #[test]
+    fn a_build_that_no_relay_answers_ends_after_the_build_timeout() {
+        let relay = |number: u8| RelayStatic {
+            s: [number; 32],
+            relay_id: [number; 32],
+        };
+        let mut node = ClientNode::new(
+            [relay(1), relay(2), relay(3)],
+            RootIdentity::new(Secret::new([7; 32])),
+        );
+        node.connected(&mut Rng(3)).unwrap();
+        // The session opens, and the `EXTEND` of hop 1 leaves.
+        assert_eq!(node.take_capsules().len(), 2);
+        let start = 1_000;
+        assert!(node.on_tick(start).is_empty());
+        assert!(node.on_tick(start + CIRCUIT_BUILD_TIMEOUT - 1).is_empty());
+        assert_eq!(
+            node.on_tick(start + CIRCUIT_BUILD_TIMEOUT),
+            alloc::vec![ClientEvent::CircuitLost]
+        );
+        // The circuit is gone, thus a later tick ends nothing more.
+        assert!(node.on_tick(start + 60).is_empty());
+        assert!(!node.is_ready());
+    }
+
+    fn candidate(number: u8, layer: u8) -> RelayInfo {
+        RelayInfo {
+            candidate: Candidate {
+                relay_id: [number; 32],
+                operator_id: [number; 32],
+                family_id: [number; 32],
+                bloc: BlocId::Own([b'Z', number]),
+                asn: 64_500 + u32::from(number),
+                v4_prefix: Some([127, number]),
+                v6_prefix: None,
+                ingress: layer == 1,
+                chain: true,
+                queue: layer == 3,
+                layer,
+            },
+            key: RelayStatic {
+                s: [number; 32],
+                relay_id: [number; 32],
+            },
+        }
+    }
+
+    #[test]
+    fn a_replica_that_no_build_reaches_fails_its_commands_and_builds_again() {
+        let mut node = ClientNode::for_groups(
+            candidate(1, 1),
+            alloc::vec![candidate(2, 2), candidate(3, 3), candidate(4, 3)],
+            RootIdentity::new(Secret::new([7; 32])),
+        );
+        let mut rng = Rng(5);
+        node.connected(&mut rng).unwrap();
+        // The first circuit ends at one of the two exits, and the replica
+        // sits at the other one, thus it takes a circuit of its own.
+        let first_exit = node.slots[0].chain.unwrap()[2];
+        let replica = if first_exit == [3; 32] {
+            [4; 32]
+        } else {
+            [3; 32]
+        };
+        let subscribe = || GroupJob::Subscribe {
+            read: StaticSecret::from([4; 32]),
+            from_seq: 0,
+        };
+        let handle = node.group(replica, [9; 32], subscribe(), &mut rng).unwrap();
+        assert_eq!(node.slots.len(), 2);
+        let start = 1_000;
+        assert!(node.on_tick(start).is_empty());
+        // The circuit to the replica fails its command alone. The first
+        // circuit of the session carries no replica, and its end is the end
+        // of the session.
+        let events = node.on_tick(start + CIRCUIT_BUILD_TIMEOUT);
+        assert!(events.contains(&ClientEvent::Group {
+            handle,
+            outcome: GroupOutcome::Unreachable,
+        }));
+        assert!(events.contains(&ClientEvent::CircuitLost));
+        // The next command to that relay builds again in the same slot,
+        // and does not wait behind the dead one.
+        node.group(replica, [9; 32], subscribe(), &mut rng).unwrap();
+        assert_eq!(node.slots.len(), 2);
+        assert!(node
+            .slots
+            .iter()
+            .any(|slot| matches!(slot.circuit, Circuit::Building { .. })));
+        // A relay that no conformant chain reaches refuses the command at
+        // once, and holds nothing.
+        assert_eq!(
+            node.group([8; 32], [9; 32], subscribe(), &mut rng),
+            Err(Error::NoPath)
+        );
+        assert_eq!(node.held_groups.len(), 1);
     }
 }

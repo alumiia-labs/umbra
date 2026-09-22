@@ -900,10 +900,19 @@ struct Inner {
     groups: Option<mpsc::UnboundedSender<GroupCommand>>,
     /// What each group command that runs belongs to.
     group_tags: BTreeMap<u64, GroupWork>,
+    /// A copy of each `GNEW` and `GPOST` that the group task holds, by its
+    /// tag, until an answer. A session that ends before one gives the
+    /// same bytes to the next session (`NET-072`).
+    group_sent: BTreeMap<u64, GroupCommand>,
     next_group_tag: u64,
     /// The groups that the run of the group queues reads. A subscription
     /// lives with its session, thus this set empties when the run ends.
     group_reading: BTreeSet<crate::ConversationId>,
+    /// The groups whose `GSUB` found no circuit in this session. Each goes
+    /// to the other replica once at once, and after that at the next pump
+    /// that another cause brings, thus two replicas that are down give no
+    /// build at each timeout.
+    group_lost: BTreeSet<crate::ConversationId>,
     /// The replicas that refused a record of a group. Two of them close
     /// the group (`GRP-210`).
     group_refusals: BTreeSet<(crate::ConversationId, [u8; 32])>,
@@ -1079,6 +1088,9 @@ impl Inner {
             }
         }
         for command in commands {
+            if let Some(tag) = command.tag() {
+                self.group_sent.insert(tag, command.copy());
+            }
             self.send_group(command);
         }
     }
@@ -1196,6 +1208,15 @@ impl Inner {
 
     /// Takes one answer of the group task into the store.
     fn end_group(&mut self, update: GroupUpdate) {
+        let answered = match &update {
+            GroupUpdate::Created { tag, .. }
+            | GroupUpdate::Posted { tag, .. }
+            | GroupUpdate::Failed { tag, .. } => Some(*tag),
+            _ => None,
+        };
+        if let Some(tag) = answered {
+            self.group_sent.remove(&tag);
+        }
         match update {
             GroupUpdate::Created {
                 tag,
@@ -1253,6 +1274,9 @@ impl Inner {
                 seq,
                 record,
             } => {
+                if let Ok(Some(conversation)) = self.client.conversation_of_queue(&group_queue_id) {
+                    self.group_lost.remove(&conversation);
+                }
                 let _ = self.client.on_group_record(
                     &group_queue_id,
                     seq,
@@ -1288,9 +1312,41 @@ impl Inner {
                     let _ = self.client.close_group(conversation, &mut OsRng);
                 }
             }
+            GroupUpdate::Unsent { tag } => {
+                // A task that the run dropped starts no new session, and
+                // the store brings each message back at the next run.
+                let Some(command) = self.group_sent.remove(&tag) else {
+                    return;
+                };
+                if self.groups.is_none() {
+                    self.group_tags.remove(&tag);
+                    return;
+                }
+                self.group_sent.insert(tag, command.copy());
+                self.send_group(command);
+            }
+            GroupUpdate::SubscriptionLost { group_queue_id } => {
+                let Ok(Some(conversation)) = self.client.conversation_of_queue(&group_queue_id)
+                else {
+                    return;
+                };
+                // The next `GSUB` of the group takes the other replica.
+                self.group_reading.remove(&conversation);
+                if self.group_lost.insert(conversation) {
+                    self.pump_groups();
+                }
+            }
+            GroupUpdate::Reset => {
+                // Each subscription ended with the session, and each group
+                // takes one again in the next (`GRP-202`).
+                self.group_reading.clear();
+                self.group_lost.clear();
+                self.pump_groups();
+            }
             GroupUpdate::Ended => {
                 self.groups = None;
                 self.group_tags.clear();
+                self.group_sent.clear();
                 self.group_reading.clear();
             }
         }
@@ -1650,8 +1706,10 @@ pub fn init(
             next_transfer_tag: 0,
             groups: None,
             group_tags: BTreeMap::new(),
+            group_sent: BTreeMap::new(),
             next_group_tag: 0,
             group_reading: BTreeSet::new(),
+            group_lost: BTreeSet::new(),
             group_refusals: BTreeSet::new(),
         }),
         changed: Condvar::new(),

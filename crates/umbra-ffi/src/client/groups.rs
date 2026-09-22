@@ -1668,7 +1668,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
     /// The conversation of a group queue, or none when this device holds
     /// no group with that queue.
-    fn conversation_of_queue(
+    pub fn conversation_of_queue(
         &self,
         group_queue_id: &[u8; 32],
     ) -> Result<Option<ConversationId>, Error> {

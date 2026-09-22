@@ -10,6 +10,11 @@
 //! The task carries bytes. The state of a group, its epoch keys, and its
 //! roster sit at the store, which seals a record before it hands it over
 //! and opens one that arrives.
+//!
+//! A link or a circuit that ends does not end the task. The task opens a
+//! new link after a backoff and tells the caller with
+//! [`GroupUpdate::Reset`], because each subscription ended with the old
+//! session. The task ends when the caller drops the commands.
 
 use std::{sync::Arc, time::Duration};
 
@@ -27,6 +32,17 @@ use crate::runtime::OsRng;
 
 /// The tick that keeps the run from a stall with no traffic.
 const TICK: Duration = Duration::from_secs(1);
+
+/// The first wait before a new link. Each session that ends before its
+/// circuit is ready doubles it, up to [`BACKOFF_MAX`].
+const BACKOFF_FIRST: Duration = Duration::from_secs(1);
+
+/// The longest wait before a new link.
+const BACKOFF_MAX: Duration = Duration::from_secs(60);
+
+/// How long a session must stay ready before a `GKEY` or a `GDEL` that it
+/// carried counts as delivered. Neither command has an answer.
+const SETTLED: Duration = Duration::from_secs(30);
 
 /// What the caller asks of the task. Each command names one replica: the
 /// caller sends the same record to each of the two (`GRP-194`).
@@ -93,6 +109,81 @@ pub enum GroupCommand {
     },
 }
 
+impl GroupCommand {
+    /// The tag of a command that takes an answer.
+    pub fn tag(&self) -> Option<u64> {
+        match self {
+            GroupCommand::Create { tag, .. } | GroupCommand::Post { tag, .. } => Some(*tag),
+            _ => None,
+        }
+    }
+
+    /// The same command, for a later session.
+    pub fn copy(&self) -> GroupCommand {
+        match self {
+            GroupCommand::Create {
+                tag,
+                relay,
+                read_pk,
+                write_pk,
+                own,
+            } => GroupCommand::Create {
+                tag: *tag,
+                relay: *relay,
+                read_pk: *read_pk,
+                write_pk: *write_pk,
+                own: Secret::new(*own.expose()),
+            },
+            GroupCommand::Post {
+                tag,
+                relay,
+                group_queue_id,
+                write,
+                record,
+            } => GroupCommand::Post {
+                tag: *tag,
+                relay: *relay,
+                group_queue_id: *group_queue_id,
+                write: Secret::new(*write.expose()),
+                record: record.clone(),
+            },
+            GroupCommand::Subscribe {
+                relay,
+                group_queue_id,
+                read,
+                from_seq,
+            } => GroupCommand::Subscribe {
+                relay: *relay,
+                group_queue_id: *group_queue_id,
+                read: Secret::new(*read.expose()),
+                from_seq: *from_seq,
+            },
+            GroupCommand::Rotate {
+                relay,
+                group_queue_id,
+                own,
+                read_pk,
+                write_pk,
+            } => GroupCommand::Rotate {
+                relay: *relay,
+                group_queue_id: *group_queue_id,
+                own: Secret::new(*own.expose()),
+                read_pk: *read_pk,
+                write_pk: *write_pk,
+            },
+            GroupCommand::Delete {
+                relay,
+                group_queue_id,
+                own,
+            } => GroupCommand::Delete {
+                relay: *relay,
+                group_queue_id: *group_queue_id,
+                own: Secret::new(*own.expose()),
+            },
+        }
+    }
+}
+
 /// What the task tells the caller.
 pub enum GroupUpdate {
     /// The relay made the group queue.
@@ -124,15 +215,30 @@ pub enum GroupUpdate {
         /// The `GroupQueueRecord` bytes.
         record: Vec<u8>,
     },
-    /// The relay refused the command, or the run ended before it left.
+    /// The relay refused the command, or the node could not send it.
     Failed {
         /// The tag of the command.
         tag: u64,
         /// The reason, where the relay gave one.
         reason: Option<Reject>,
     },
-    /// The run ended. Each subscription ended with it, and the caller opens
-    /// a new run to continue.
+    /// The session that carried the command ended before an answer. The
+    /// caller sends the same bytes in a later session, and a relay that
+    /// holds them gives the answer it holds (`NET-239`, `NET-072`).
+    Unsent {
+        /// The tag of the command.
+        tag: u64,
+    },
+    /// No circuit reached the relay of a `GSUB`. The caller subscribes at
+    /// the other replica (`GRP-204`).
+    SubscriptionLost {
+        /// The group queue of the `GSUB`.
+        group_queue_id: [u8; 32],
+    },
+    /// The session ended, and a new one starts after a backoff. Each
+    /// subscription ended with the old session.
+    Reset,
+    /// The task ended, because the caller dropped the commands.
     Ended,
 }
 
@@ -142,8 +248,24 @@ struct Pending {
     relay: [u8; 32],
 }
 
-/// Runs the group queues until the link ends or the caller drops the
-/// commands. Each command that never left fails.
+/// Why a session ended.
+enum End {
+    /// The link or the circuit failed, and a new session starts.
+    Lost,
+    /// The caller dropped the commands.
+    Closed,
+}
+
+/// What one session leaves to the next.
+struct Carried {
+    /// The commands that did not leave yet.
+    early: Vec<GroupCommand>,
+    /// Each `GKEY` and `GDEL` of this session, until it settles.
+    quiet: Vec<GroupCommand>,
+}
+
+/// Runs the group queues until the caller drops the commands. A session
+/// that ends starts again after a backoff.
 pub async fn run_groups(
     mut node: ClientNode,
     guard: Dial,
@@ -151,57 +273,136 @@ pub async fn run_groups(
     mut commands: mpsc::UnboundedReceiver<GroupCommand>,
     updates: mpsc::UnboundedSender<GroupUpdate>,
 ) {
+    let mut carried = Carried {
+        early: Vec::new(),
+        quiet: Vec::new(),
+    };
+    let mut backoff = BACKOFF_FIRST;
+    loop {
+        let (end, was_ready) = session(
+            &mut node,
+            &guard,
+            tls.clone(),
+            &mut commands,
+            &updates,
+            &mut carried,
+        )
+        .await;
+        if matches!(end, End::Closed) {
+            break;
+        }
+        // A `GKEY` or a `GDEL` that may not have arrived goes in the next
+        // session. A `GSUB` of the caller comes again after `Reset`.
+        carried.early.append(&mut carried.quiet);
+        carried
+            .early
+            .retain(|command| !matches!(command, GroupCommand::Subscribe { .. }));
+        let _ = updates.send(GroupUpdate::Reset);
+        backoff = if was_ready {
+            BACKOFF_FIRST
+        } else {
+            backoff.saturating_mul(2).min(BACKOFF_MAX)
+        };
+        let wait = tokio::time::sleep(backoff);
+        tokio::pin!(wait);
+        let is_closed = loop {
+            tokio::select! {
+                () = &mut wait => break false,
+                command = commands.recv() => match command {
+                    Some(command) => carried.early.push(command),
+                    None => break true,
+                },
+            }
+        };
+        if is_closed {
+            break;
+        }
+    }
+    for command in carried.early.iter() {
+        if let GroupCommand::Create { tag, .. } | GroupCommand::Post { tag, .. } = command {
+            let _ = updates.send(GroupUpdate::Failed {
+                tag: *tag,
+                reason: None,
+            });
+        }
+    }
+    let _ = updates.send(GroupUpdate::Ended);
+}
+
+/// One session: one link, the circuits of the node on it, and the commands
+/// until the link, a circuit, or the caller ends it. It gives whether its
+/// circuit was ready, for the backoff.
+async fn session(
+    node: &mut ClientNode,
+    guard: &Dial,
+    tls: Arc<ClientConfig>,
+    commands: &mut mpsc::UnboundedReceiver<GroupCommand>,
+    updates: &mpsc::UnboundedSender<GroupUpdate>,
+    carried: &mut Carried,
+) -> (End, bool) {
     let mut rng = OsRng;
     let mut pending: std::collections::BTreeMap<u64, Pending> = std::collections::BTreeMap::new();
-    let mut early: Vec<GroupCommand> = Vec::new();
-
+    // The group queue of each `GSUB`, by the handle of the node.
+    let mut subscribed: std::collections::BTreeMap<u64, [u8; 32]> =
+        std::collections::BTreeMap::new();
     let mut key = [0u8; 16];
     let mut mask = [0u8; 4];
     let _ = rng.try_fill_bytes(&mut key);
     let _ = rng.try_fill_bytes(&mut mask);
     let plan = Plan::Only(Wire::Tcp);
-    let connected = native::connect(&guard, tls, plan, key, mask, Duration::from_secs(10)).await;
+    let connected = native::connect(guard, tls, plan, key, mask, Duration::from_secs(10)).await;
     let Ok(mut link) = connected else {
-        let _ = updates.send(GroupUpdate::Ended);
-        return;
+        return (End::Lost, false);
     };
+    // NET-024: the node builds each chain again on a new link.
     if node.connected(&mut rng).is_err() {
-        let _ = updates.send(GroupUpdate::Ended);
-        return;
+        return (End::Lost, false);
     }
 
-    let mut is_ready = false;
+    let mut ready_since: Option<tokio::time::Instant> = None;
     let mut tick = tokio::time::interval(TICK);
-    'run: loop {
+    let end = 'run: loop {
         for capsule in node.take_capsules() {
             if link.send(&capsule).await.is_err() {
-                break 'run;
+                break 'run End::Lost;
             }
         }
         let events = tokio::select! {
             received = link.recv() => match received {
                 Ok(bytes) => match node.on_capsule(&bytes, crate::runtime::unix_now(), &mut rng) {
                     Ok(events) => events,
-                    Err(_) => break 'run,
+                    Err(_) => break 'run End::Lost,
                 },
-                Err(_) => break 'run,
+                Err(_) => break 'run End::Lost,
             },
             command = commands.recv() => match command {
                 Some(command) => {
-                    early.push(command);
+                    carried.early.push(command);
                     Vec::new()
                 }
-                None => break 'run,
+                None => break 'run End::Closed,
             },
-            _ = tick.tick() => Vec::new(),
+            _ = tick.tick() => {
+                if ready_since.is_some_and(|since| since.elapsed() >= SETTLED) {
+                    carried.quiet.clear();
+                }
+                // CIRCUIT_BUILD_TIMEOUT: a build that no relay answers ends.
+                node.on_tick(crate::runtime::unix_now())
+            }
         };
         // A group node holds no contact, thus it commits nothing.
         let _ = node.take_changes();
         for event in events {
             match event {
-                ClientEvent::CircuitReady => is_ready = true,
-                ClientEvent::CircuitLost => break 'run,
+                ClientEvent::CircuitReady => {
+                    ready_since.get_or_insert_with(tokio::time::Instant::now);
+                }
+                ClientEvent::CircuitLost => break 'run End::Lost,
                 ClientEvent::Group { handle, outcome } => {
+                    if let Some(group_queue_id) = subscribed.remove(&handle) {
+                        let _ = updates.send(GroupUpdate::SubscriptionLost { group_queue_id });
+                        continue;
+                    }
                     let Some(held) = pending.remove(&handle) else {
                         continue;
                     };
@@ -220,6 +421,11 @@ pub async fn run_groups(
                             tag: held.tag,
                             reason: Some(reason),
                         },
+                        // GRP-195: the other replica takes the same record.
+                        GroupOutcome::Unreachable => GroupUpdate::Failed {
+                            tag: held.tag,
+                            reason: None,
+                        },
                     };
                     let _ = updates.send(update);
                 }
@@ -237,11 +443,11 @@ pub async fn run_groups(
                 _ => {}
             }
         }
-        if !is_ready {
+        if ready_since.is_none() {
             continue;
         }
-        for command in early.drain(..) {
-            let (tag, relay, group_queue_id, job) = match command {
+        for command in carried.early.drain(..) {
+            let (tag, relay, group_queue_id, job) = match &command {
                 GroupCommand::Create {
                     tag,
                     relay,
@@ -249,12 +455,12 @@ pub async fn run_groups(
                     write_pk,
                     own,
                 } => (
-                    Some(tag),
-                    relay,
+                    Some(*tag),
+                    *relay,
                     [0; 32],
                     GroupJob::Create {
-                        read_pk,
-                        write_pk,
+                        read_pk: *read_pk,
+                        write_pk: *write_pk,
                         own: StaticSecret::from(*own.expose()),
                     },
                 ),
@@ -265,12 +471,12 @@ pub async fn run_groups(
                     write,
                     record,
                 } => (
-                    Some(tag),
-                    relay,
-                    group_queue_id,
+                    Some(*tag),
+                    *relay,
+                    *group_queue_id,
                     GroupJob::Post {
                         write: StaticSecret::from(*write.expose()),
-                        record,
+                        record: record.clone(),
                     },
                 ),
                 GroupCommand::Subscribe {
@@ -280,11 +486,11 @@ pub async fn run_groups(
                     from_seq,
                 } => (
                     None,
-                    relay,
-                    group_queue_id,
+                    *relay,
+                    *group_queue_id,
                     GroupJob::Subscribe {
                         read: StaticSecret::from(*read.expose()),
-                        from_seq,
+                        from_seq: *from_seq,
                     },
                 ),
                 GroupCommand::Rotate {
@@ -295,12 +501,12 @@ pub async fn run_groups(
                     write_pk,
                 } => (
                     None,
-                    relay,
-                    group_queue_id,
+                    *relay,
+                    *group_queue_id,
                     GroupJob::Rotate {
                         own: StaticSecret::from(*own.expose()),
-                        read_pk,
-                        write_pk,
+                        read_pk: *read_pk,
+                        write_pk: *write_pk,
                     },
                 ),
                 GroupCommand::Delete {
@@ -309,8 +515,8 @@ pub async fn run_groups(
                     own,
                 } => (
                     None,
-                    relay,
-                    group_queue_id,
+                    *relay,
+                    *group_queue_id,
                     GroupJob::Delete {
                         own: StaticSecret::from(*own.expose()),
                     },
@@ -321,6 +527,15 @@ pub async fn run_groups(
                     if let Some(tag) = tag {
                         pending.insert(handle, Pending { tag, relay });
                     }
+                    if matches!(command, GroupCommand::Subscribe { .. }) {
+                        subscribed.insert(handle, group_queue_id);
+                    }
+                    if matches!(
+                        command,
+                        GroupCommand::Rotate { .. } | GroupCommand::Delete { .. }
+                    ) {
+                        carried.quiet.push(command);
+                    }
                 }
                 Err(_) => {
                     if let Some(tag) = tag {
@@ -329,21 +544,11 @@ pub async fn run_groups(
                 }
             }
         }
-    }
+    };
+    // Each command that left and took no answer goes again in a later
+    // session, under the tag the caller gave it.
     for held in pending.values() {
-        let _ = updates.send(GroupUpdate::Failed {
-            tag: held.tag,
-            reason: None,
-        });
+        let _ = updates.send(GroupUpdate::Unsent { tag: held.tag });
     }
-    for command in &early {
-        let tag = match command {
-            GroupCommand::Create { tag, .. } | GroupCommand::Post { tag, .. } => Some(*tag),
-            _ => None,
-        };
-        if let Some(tag) = tag {
-            let _ = updates.send(GroupUpdate::Failed { tag, reason: None });
-        }
-    }
-    let _ = updates.send(GroupUpdate::Ended);
+    (end, ready_since.is_some())
 }
