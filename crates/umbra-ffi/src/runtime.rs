@@ -266,6 +266,9 @@ pub async fn run_client(
     let mut tags: BTreeMap<u64, u64> = BTreeMap::new();
     let mut is_foreground = true;
     let mut next_slot = tokio::time::Instant::now() + cover_delay(&mut rng);
+    // The tick of `CIRCUIT_BUILD_TIMEOUT`. It sends nothing unless a build
+    // ran out, and the cover clock stays memoryless.
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
     let ended = 'run: loop {
         for capsule in node.take_capsules() {
             if link.send(&capsule).await.is_err() {
@@ -303,6 +306,9 @@ pub async fn run_client(
                 }
                 Vec::new()
             }
+            // NET-169: a build that no relay answers ends, and the run
+            // ends with its last circuit.
+            _ = tick.tick() => node.on_tick(unix_now()),
         };
         if let Err(ended) = settle(&mut node, persist.as_mut(), &events) {
             break 'run ended;

@@ -974,12 +974,13 @@ impl ClientNode {
     /// waits for ever.
     ///
     /// A group node fails the commands that waited for a circuit to one
-    /// relay, and each other circuit runs on: a replica on a relay that is
-    /// down is the case that the second replica exists for (`GRP-390`).
-    /// Each other circuit that ends gives `CircuitLost`, which the runtime
-    /// reads as a build that failed.
+    /// relay: a replica on a relay that is down is the case that the
+    /// second replica exists for (`GRP-390`). The session runs on while
+    /// another circuit builds or serves, thus one relay that is down stops
+    /// no other contact and no other group. With none left the node gives
+    /// `CircuitLost`, which the runtime reads as a build that failed.
     pub fn on_tick(&mut self, now: u64) -> Vec<ClientEvent> {
-        let mut is_lost = false;
+        let mut has_ended = false;
         let mut unreachable = Vec::new();
         let mut destroys = Vec::new();
         let is_group = self.range == Range::Group;
@@ -998,9 +999,11 @@ impl ClientNode {
                 destroys.extend(destroy_cell(&mut build));
             }
             slot.building_since = None;
-            match slot.exit.filter(|_| is_group) {
-                Some(relay) => unreachable.push(relay),
-                None => is_lost = true,
+            has_ended = true;
+            // A circuit of another range to one relay stays empty, and the
+            // next run builds it again (`NET-024`).
+            if let Some(relay) = slot.exit.filter(|_| is_group) {
+                unreachable.push(relay);
             }
         }
         for cell in destroys {
@@ -1012,7 +1015,11 @@ impl ClientNode {
         for relay in unreachable {
             events.extend(self.release_held_groups(&relay));
         }
-        if is_lost {
+        let is_left = self
+            .slots
+            .iter()
+            .any(|slot| !matches!(slot.circuit, Circuit::None));
+        if has_ended && !is_left {
             events.push(ClientEvent::CircuitLost);
         }
         events
