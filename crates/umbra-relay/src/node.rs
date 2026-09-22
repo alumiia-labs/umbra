@@ -179,6 +179,7 @@ impl RelayNode {
     /// is gone, and the clients build them again.
     pub fn restored(config: Config, loaded: Loaded) -> Self {
         let mut node = RelayNode::new(config);
+        node.groups = GroupService::restore(&loaded);
         node.queues = QueueService::restore(loaded);
         node
     }
@@ -186,7 +187,9 @@ impl RelayNode {
     /// The changes of the stored state since the last call. The process
     /// commits them before it sends an output of the same call (`NET-298`).
     pub fn take_changes(&mut self) -> Vec<StoreChange> {
-        self.queues.take_changes()
+        let mut changes = self.queues.take_changes();
+        changes.append(&mut self.groups.take_changes());
+        changes
     }
 
     /// The gate, for the effort that the runtime sets under load.

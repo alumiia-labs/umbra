@@ -4,10 +4,12 @@
 
 use alloc::{collections::VecDeque, vec::Vec};
 
+use umbra_crypto::stored::{Reader, Writer};
+
 use crate::{
     params::{
-        GROUP_IDLE_TTL, GROUP_POST_RATE, GROUP_POST_WINDOW, GROUP_QUEUE_QUOTA, GROUP_READ_GRACE,
-        GROUP_RETENTION, GROUP_WRITE_GRACE,
+        store_time, GROUP_IDLE_TTL, GROUP_POST_RATE, GROUP_POST_WINDOW, GROUP_QUEUE_QUOTA,
+        GROUP_READ_GRACE, GROUP_RETENTION, GROUP_WRITE_GRACE,
     },
     relay::Stored,
     Reject,
@@ -50,6 +52,22 @@ impl Credential {
         (self.current, previous)
     }
 
+    fn export(&self, writer: &mut Writer) {
+        writer.bytes(&self.current);
+        writer.option(self.previous.as_ref(), |w, (pk, at)| {
+            w.bytes(pk);
+            w.u64(store_time(*at));
+        });
+    }
+
+    fn import(reader: &mut Reader<'_>, grace: u64) -> Result<Self, umbra_crypto::Error> {
+        Ok(Credential {
+            current: reader.array()?,
+            previous: reader.option(|r| Ok((r.array()?, r.u64()?)))?,
+            grace,
+        })
+    }
+
     fn expire(&mut self, now: u64) {
         if let Some((_, at)) = self.previous {
             if now.saturating_sub(at) >= self.grace {
@@ -67,6 +85,8 @@ pub struct Posted {
     /// Whether the bytes are new here. A second send of one record is
     /// idempotent (`NET-239`), and it moves no reader.
     pub fresh: bool,
+    /// The quota took each record at or below this sequence (`NET-247`).
+    pub dropped_through: Option<u32>,
 }
 
 /// A group queue.
@@ -161,6 +181,7 @@ impl GroupQueue {
             return Ok(Posted {
                 seq: held.seq,
                 fresh: false,
+                dropped_through: None,
             });
         }
         while self
@@ -182,14 +203,64 @@ impl GroupQueue {
             bytes: record.to_vec(),
         });
         self.bytes = self.bytes.saturating_add(record.len());
+        let mut dropped_through = None;
         while self.bytes > GROUP_QUEUE_QUOTA {
             match self.records.pop_front() {
-                Some(old) => self.bytes = self.bytes.saturating_sub(old.bytes.len()),
+                Some(old) => {
+                    self.bytes = self.bytes.saturating_sub(old.bytes.len());
+                    dropped_through = Some(old.seq);
+                }
                 None => break,
             }
         }
         self.last_activity = now;
-        Ok(Posted { seq, fresh: true })
+        Ok(Posted {
+            seq,
+            fresh: true,
+            dropped_through,
+        })
+    }
+
+    /// Writes the head of the queue: its identifier, its three credentials
+    /// with the previous pair of a rotation, its sequence, and the time of
+    /// its last activity. The records travel beside it.
+    pub fn export_head(&self, writer: &mut Writer) {
+        writer.bytes(&self.id);
+        self.read.export(writer);
+        self.write.export(writer);
+        writer.bytes(&self.own_pk);
+        writer.u32(self.next_seq);
+        writer.u64(store_time(self.last_activity));
+    }
+
+    /// A group queue from the head that [`GroupQueue::export_head`] wrote
+    /// and from its stored records. A record at or above `next_seq` and a
+    /// set above the quota are faults of the store.
+    pub fn restore(reader: &mut Reader<'_>, mut records: Vec<Stored>) -> Result<Self, Reject> {
+        let mut head = || -> Result<GroupQueue, umbra_crypto::Error> {
+            Ok(GroupQueue {
+                id: reader.array()?,
+                read: Credential::import(reader, GROUP_READ_GRACE)?,
+                write: Credential::import(reader, GROUP_WRITE_GRACE)?,
+                own_pk: reader.array()?,
+                records: VecDeque::new(),
+                bytes: 0,
+                next_seq: reader.u32()?,
+                // The rate of a new run starts empty, and a restart is no
+                // way past `GROUP_POST_RATE`: it costs a run of the relay.
+                posts: VecDeque::new(),
+                last_activity: reader.u64()?,
+            })
+        };
+        let mut queue = head().map_err(|_| Reject::Rejected)?;
+        records.sort_by_key(|record| record.seq);
+        let bytes: usize = records.iter().map(|record| record.bytes.len()).sum();
+        if bytes > GROUP_QUEUE_QUOTA || records.iter().any(|record| record.seq >= queue.next_seq) {
+            return Err(Reject::Rejected);
+        }
+        queue.bytes = bytes;
+        queue.records = records.into();
+        Ok(queue)
     }
 
     /// The retained records above `from_seq`, in `seq` order, which a
@@ -204,8 +275,10 @@ impl GroupQueue {
     }
 
     /// Erases each record past `GROUP_RETENTION` (`NET-246`) and each
-    /// previous credential past its grace (`WIR-395`).
-    pub fn expire(&mut self, now: u64) {
+    /// previous credential past its grace (`WIR-395`). The result is the
+    /// highest sequence that left, for the store.
+    pub fn expire(&mut self, now: u64) -> Option<u32> {
+        let mut dropped_through = None;
         while self
             .records
             .front()
@@ -213,10 +286,12 @@ impl GroupQueue {
         {
             if let Some(old) = self.records.pop_front() {
                 self.bytes = self.bytes.saturating_sub(old.bytes.len());
+                dropped_through = Some(old.seq);
             }
         }
         self.read.expire(now);
         self.write.expire(now);
+        dropped_through
     }
 
     /// Whether the queue passed `GROUP_IDLE_TTL` with no activity
@@ -253,14 +328,16 @@ mod tests {
             q.post(b"a", 1_000).unwrap(),
             Posted {
                 seq: 1,
-                fresh: true
+                fresh: true,
+                dropped_through: None,
             }
         );
         assert_eq!(
             q.post(b"a", 1_001).unwrap(),
             Posted {
                 seq: 1,
-                fresh: false
+                fresh: false,
+                dropped_through: None,
             }
         );
         assert_eq!(q.post(b"b", 1_001).unwrap().seq, 2);
@@ -294,17 +371,53 @@ mod tests {
     }
 
     #[test]
+    fn a_stored_queue_comes_back_with_its_records_and_its_graces() {
+        let mut q = queue();
+        q.post(b"one", 1_000).unwrap();
+        q.post(b"two", 1_001).unwrap();
+        q.rotate([5; 32], [6; 32], 2_000);
+        let records: Vec<Stored> = q.since(0).cloned().collect();
+        let mut writer = Writer::new();
+        q.export_head(&mut writer);
+        let head = writer.finish();
+
+        let mut reader = Reader::new(&head);
+        let back = GroupQueue::restore(&mut reader, records).unwrap();
+        assert_eq!(back.id(), [1; 32]);
+        assert_eq!(back.own_pk(), [4; 32]);
+        assert_eq!(back.len(), 2);
+        // The sequence continues, thus no record takes the number of an
+        // earlier one (`NET-232`).
+        assert_eq!(back.since(0).map(|r| r.seq).collect::<Vec<_>>(), [1, 2]);
+        let mut back = back;
+        assert_eq!(back.post(b"three", 2_001).unwrap().seq, 3);
+        // The previous credentials of the rotation came back with it.
+        assert!(back.accepts_read(&[2; 32], 2_100));
+        assert!(back.accepts_write(&[3; 32], 2_100));
+        assert!(!back.accepts_write(&[3; 32], 2_000 + GROUP_WRITE_GRACE));
+
+        // A record at or above the next sequence is a fault of the store.
+        let mut reader = Reader::new(&head);
+        let ahead = alloc::vec![Stored {
+            seq: 9,
+            accepted_at: 1_000,
+            bytes: alloc::vec![0; 4],
+        }];
+        assert!(GroupQueue::restore(&mut reader, ahead).is_err());
+    }
+
+    #[test]
     fn the_retention_the_quota_and_the_idle_life_hold() {
         let mut q = queue();
         q.post(b"old", 1_000).unwrap();
         q.post(b"new", 1_000 + GROUP_RETENTION - 1).unwrap();
-        q.expire(1_000 + GROUP_RETENTION);
+        assert_eq!(q.expire(1_000 + GROUP_RETENTION), Some(1));
         assert_eq!(q.len(), 1);
         let big = vec![0u8; GROUP_QUEUE_QUOTA / 2 + 1];
         let mut other = big.clone();
         other[0] = 1;
         q.post(&big, 5_000).unwrap();
-        q.post(&other, 5_001).unwrap();
+        assert_eq!(q.post(&other, 5_001).unwrap().dropped_through, Some(3));
         assert_eq!(q.len(), 1);
         assert!(q.idle(5_001 + GROUP_IDLE_TTL));
         q.touch(9_000_000);

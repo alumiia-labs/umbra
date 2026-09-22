@@ -1,5 +1,11 @@
 //! What a relay keeps between two runs: the pairwise queues with their
-//! records, and the invitations that wait for their first fetch.
+//! records, the group queues of Part 11 with theirs, and the invitations
+//! that wait for their first fetch.
+//!
+//! A group lives at two relays for weeks. A relay that loses its group
+//! queues at a restart ends each group that it served, and no member
+//! action brings one back: the identifiers of the two queues sit inside
+//! the admit of every member.
 //!
 //! A client names a contact by the identifiers of two queues. A relay that
 //! loses its queues at a restart ends each contact that it served, and no
@@ -68,6 +74,35 @@ pub enum StoreChange {
         /// The link identifier.
         link_id: [u8; LINK_ID_LEN],
     },
+    /// A group queue is new, or its head moved: a credential, its
+    /// sequence, or the time of its last activity.
+    GroupQueue {
+        /// `GroupQueueId`.
+        group_queue_id: [u8; 32],
+        /// The head of `umbra_queue::relay::group::GroupQueue::export_head`.
+        head: Vec<u8>,
+    },
+    /// The relay accepted a `GPOST`.
+    GroupRecord {
+        /// `GroupQueueId`.
+        group_queue_id: [u8; 32],
+        /// The record.
+        record: Stored,
+    },
+    /// The retention or the quota took each record of the group queue at
+    /// or below this sequence (`NET-246`, `NET-247`).
+    GroupTrimmed {
+        /// `GroupQueueId`.
+        group_queue_id: [u8; 32],
+        /// The highest sequence that left.
+        through_seq: u32,
+    },
+    /// A `GDEL` or the idle lifetime ended the group queue. No identifier
+    /// of it stays (`NET-245`).
+    GroupQueueDeleted {
+        /// `GroupQueueId`.
+        group_queue_id: [u8; 32],
+    },
 }
 
 /// One invitation of Part 4 §4.3.1, as the store holds it.
@@ -97,6 +132,8 @@ pub struct Loaded {
     pub queues: BTreeMap<[u8; 32], StoredQueue>,
     /// The invitations, by link identifier.
     pub invitations: BTreeMap<[u8; LINK_ID_LEN], StoredInvitation>,
+    /// The group queues, by `GroupQueueId`.
+    pub group_queues: BTreeMap<[u8; 32], StoredQueue>,
 }
 
 impl Loaded {
@@ -134,6 +171,30 @@ impl Loaded {
             }
             StoreChange::InvitationDeleted { link_id } => {
                 self.invitations.remove(link_id);
+            }
+            StoreChange::GroupQueue {
+                group_queue_id,
+                head,
+            } => {
+                self.group_queues.entry(*group_queue_id).or_default().head = head.clone();
+            }
+            StoreChange::GroupRecord {
+                group_queue_id,
+                record,
+            } => {
+                let queue = self.group_queues.entry(*group_queue_id).or_default();
+                queue.records.push(record.clone());
+            }
+            StoreChange::GroupTrimmed {
+                group_queue_id,
+                through_seq,
+            } => {
+                if let Some(queue) = self.group_queues.get_mut(group_queue_id) {
+                    queue.records.retain(|record| record.seq > *through_seq);
+                }
+            }
+            StoreChange::GroupQueueDeleted { group_queue_id } => {
+                self.group_queues.remove(group_queue_id);
             }
         }
     }

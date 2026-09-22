@@ -11,8 +11,9 @@ use umbra_queue::relay::Stored;
 
 use crate::store::{Loaded, RelayStore, StoreChange, StoreFault, StoredInvitation, StoredQueue};
 
-/// The schema version in `user_version`.
-const SCHEMA_VERSION: i64 = 1;
+/// The schema version in `user_version`. Version 2 added the group
+/// queues of Part 11.
+const SCHEMA_VERSION: i64 = 2;
 
 const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS queues (
@@ -32,6 +33,17 @@ const SCHEMA: &str = "
         recipient_id BLOB NOT NULL,
         at           INTEGER NOT NULL,
         blob         BLOB
+    ) WITHOUT ROWID;
+    CREATE TABLE IF NOT EXISTS group_queues (
+        group_queue_id BLOB PRIMARY KEY,
+        head           BLOB NOT NULL
+    ) WITHOUT ROWID;
+    CREATE TABLE IF NOT EXISTS group_records (
+        group_queue_id BLOB NOT NULL,
+        seq            INTEGER NOT NULL,
+        accepted_at    INTEGER NOT NULL,
+        bytes          BLOB NOT NULL,
+        PRIMARY KEY (group_queue_id, seq)
     ) WITHOUT ROWID;
 ";
 
@@ -76,7 +88,10 @@ impl SqliteStore {
                 .optional(),
         )?
         .is_none();
-        if !is_new && version != SCHEMA_VERSION {
+        // Version 1 holds the pairwise queues alone. The schema below adds
+        // the two tables of the group queues and takes nothing away, thus
+        // that file opens here and keeps each queue it holds.
+        if !is_new && version != SCHEMA_VERSION && version != 1 {
             return Err(StoreFault);
         }
         fault(connection.execute_batch(SCHEMA))?;
@@ -122,6 +137,49 @@ impl RelayStore for SqliteStore {
             let queue = loaded
                 .queues
                 .get_mut(&id::<32>(recipient_id)?)
+                .ok_or(StoreFault)?;
+            queue.records.push(Stored {
+                seq: u32::try_from(seq).map_err(|_| StoreFault)?,
+                accepted_at: unsigned(accepted_at)?,
+                bytes,
+            });
+        }
+
+        let mut group_queues = fault(
+            self.connection
+                .prepare("SELECT group_queue_id, head FROM group_queues"),
+        )?;
+        let rows = fault(group_queues.query_map([], |row| {
+            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+        }))?;
+        for row in rows {
+            let (group_queue_id, head) = fault(row)?;
+            loaded.group_queues.insert(
+                id(group_queue_id)?,
+                StoredQueue {
+                    head,
+                    records: Vec::new(),
+                },
+            );
+        }
+
+        let mut group_records = fault(self.connection.prepare(
+            "SELECT group_queue_id, seq, accepted_at, bytes FROM group_records
+             ORDER BY group_queue_id, seq",
+        ))?;
+        let rows = fault(group_records.query_map([], |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Vec<u8>>(3)?,
+            ))
+        }))?;
+        for row in rows {
+            let (group_queue_id, seq, accepted_at, bytes) = fault(row)?;
+            let queue = loaded
+                .group_queues
+                .get_mut(&id::<32>(group_queue_id)?)
                 .ok_or(StoreFault)?;
             queue.records.push(Stored {
                 seq: u32::try_from(seq).map_err(|_| StoreFault)?,
@@ -225,6 +283,48 @@ impl RelayStore for SqliteStore {
                         params![link_id.as_slice()],
                     ))?
                 }
+                StoreChange::GroupQueue {
+                    group_queue_id,
+                    head,
+                } => fault(transaction.execute(
+                    "INSERT INTO group_queues (group_queue_id, head) VALUES (?1, ?2)
+                     ON CONFLICT (group_queue_id) DO UPDATE SET head = excluded.head",
+                    params![group_queue_id.as_slice(), head],
+                ))?,
+                StoreChange::GroupRecord {
+                    group_queue_id,
+                    record,
+                } => fault(transaction.execute(
+                    "INSERT INTO group_records (group_queue_id, seq, accepted_at, bytes)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        group_queue_id.as_slice(),
+                        i64::from(record.seq),
+                        signed(record.accepted_at)?,
+                        record.bytes
+                    ],
+                ))?,
+                StoreChange::GroupTrimmed {
+                    group_queue_id,
+                    through_seq,
+                } => {
+                    deleted = true;
+                    fault(transaction.execute(
+                        "DELETE FROM group_records WHERE group_queue_id = ?1 AND seq <= ?2",
+                        params![group_queue_id.as_slice(), i64::from(*through_seq)],
+                    ))?
+                }
+                StoreChange::GroupQueueDeleted { group_queue_id } => {
+                    deleted = true;
+                    fault(transaction.execute(
+                        "DELETE FROM group_records WHERE group_queue_id = ?1",
+                        params![group_queue_id.as_slice()],
+                    ))?;
+                    fault(transaction.execute(
+                        "DELETE FROM group_queues WHERE group_queue_id = ?1",
+                        params![group_queue_id.as_slice()],
+                    ))?
+                }
             };
         }
         fault(transaction.commit())?;
@@ -319,6 +419,33 @@ mod tests {
                 held: invitation(None),
             },
             StoreChange::InvitationDeleted { link_id: [8; 24] },
+            StoreChange::GroupQueue {
+                group_queue_id: [4; 32],
+                head: vec![4],
+            },
+            StoreChange::GroupQueue {
+                group_queue_id: [5; 32],
+                head: vec![5],
+            },
+            StoreChange::GroupRecord {
+                group_queue_id: [4; 32],
+                record: record(1, 10),
+            },
+            StoreChange::GroupRecord {
+                group_queue_id: [4; 32],
+                record: record(2, 20),
+            },
+            StoreChange::GroupRecord {
+                group_queue_id: [5; 32],
+                record: record(1, 10),
+            },
+            StoreChange::GroupTrimmed {
+                group_queue_id: [4; 32],
+                through_seq: 1,
+            },
+            StoreChange::GroupQueueDeleted {
+                group_queue_id: [5; 32],
+            },
         ]
     }
 
@@ -352,6 +479,63 @@ mod tests {
         assert_eq!(loaded.queues[&[1; 32]].records.len(), 1);
         assert_eq!(loaded.queues[&[2; 32]].records.len(), 1);
         assert_eq!(loaded.invitations.len(), 1);
+        // A group queue and its records come back, and a `GDEL` leaves
+        // neither (`NET-245`).
+        assert_eq!(loaded.group_queues.len(), 1);
+        assert_eq!(loaded.group_queues[&[4; 32]].head, [4]);
+        assert_eq!(loaded.group_queues[&[4; 32]].records.len(), 1);
+        assert_eq!(loaded.group_queues[&[4; 32]].records[0].seq, 2);
+    }
+
+    #[test]
+    fn a_file_of_the_earlier_schema_keeps_its_queues() {
+        let path = file("upgrade.db");
+        // A file of version 1: the three tables of the pairwise queues,
+        // and one queue in them.
+        {
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TABLE queues (recipient_id BLOB PRIMARY KEY, head BLOB NOT NULL);
+                     CREATE TABLE records (recipient_id BLOB NOT NULL, seq INTEGER NOT NULL,
+                        accepted_at INTEGER NOT NULL, bytes BLOB NOT NULL,
+                        PRIMARY KEY (recipient_id, seq));
+                     CREATE TABLE invitations (link_id BLOB PRIMARY KEY,
+                        recipient_id BLOB NOT NULL, at INTEGER NOT NULL, blob BLOB);
+                     PRAGMA user_version = 1;",
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO queues (recipient_id, head) VALUES (?1, ?2)",
+                    rusqlite::params![[1u8; 32].as_slice(), vec![1u8, 2]],
+                )
+                .unwrap();
+        }
+        let mut store = SqliteStore::open(&path).unwrap();
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.queues.len(), 1);
+        assert!(loaded.group_queues.is_empty());
+        // The file now takes a group queue.
+        store
+            .commit(&[StoreChange::GroupQueue {
+                group_queue_id: [4; 32],
+                head: vec![4],
+            }])
+            .unwrap();
+        assert_eq!(store.load().unwrap().group_queues.len(), 1);
+    }
+
+    #[test]
+    fn a_file_of_a_later_schema_does_not_open() {
+        let path = file("future.db");
+        {
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            connection
+                .execute_batch("CREATE TABLE queues (x INTEGER); PRAGMA user_version = 99;")
+                .unwrap();
+        }
+        assert!(SqliteStore::open(&path).is_err());
     }
 
     #[test]

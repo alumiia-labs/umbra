@@ -12,9 +12,13 @@ use umbra_core::{
     abuse::admission::{Accepts, RelayGate},
     notify::digest::{DigestGate, Policy},
 };
-use umbra_crypto::rand_core::CryptoRng;
+use umbra_crypto::{
+    rand_core::CryptoRng,
+    stored::{Reader, Writer},
+};
 use umbra_queue::{
-    relay::{group::GroupQueue, session::Session},
+    params::store_time,
+    relay::{group::GroupQueue, session::Session, Stored},
     Reject,
 };
 use umbra_wire::{
@@ -27,7 +31,10 @@ use umbra_wire::{
 };
 
 use super::{answer, DigestDue, Outbound, Reply, BUCKETS};
-use crate::circuits::CircuitKey;
+use crate::{
+    circuits::CircuitKey,
+    store::{Loaded, StoreChange},
+};
 
 /// One group queue with the state that the relay holds beside it.
 struct Served {
@@ -45,6 +52,8 @@ struct Served {
 #[derive(Default)]
 pub struct GroupService {
     served: BTreeMap<[u8; 32], Served>,
+    /// The changes since the last [`GroupService::take_changes`].
+    changes: Vec<StoreChange>,
 }
 
 /// The `GMSG` of one record, in the bucket that the record length gives.
@@ -99,6 +108,51 @@ fn sender_id_of(queue: &[u8; QUEUE_ADDRESS_LEN]) -> [u8; 32] {
 }
 
 impl GroupService {
+    /// The group queues of an earlier run. A queue whose stored form has
+    /// a fault is dropped, and the others stay. Each live session and
+    /// each subscription of that run is gone, and the members open them
+    /// again.
+    pub fn restore(loaded: &Loaded) -> Self {
+        let mut service = GroupService::default();
+        for (group_queue_id, stored) in &loaded.group_queues {
+            let mut reader = Reader::new(&stored.head);
+            let Ok(queue) = GroupQueue::restore(&mut reader, stored.records.clone()) else {
+                continue;
+            };
+            if queue.id() != *group_queue_id {
+                continue;
+            }
+            service.served.insert(
+                *group_queue_id,
+                Served {
+                    queue,
+                    digests: DigestGate::new(Policy::Group),
+                    notify: BTreeMap::new(),
+                    subscribers: Vec::new(),
+                },
+            );
+        }
+        service
+    }
+
+    /// The changes since the last call. The process commits them before it
+    /// sends an output of the same call (`NET-298`).
+    pub fn take_changes(&mut self) -> Vec<StoreChange> {
+        core::mem::take(&mut self.changes)
+    }
+
+    /// Records the head of a group queue after a change of it.
+    fn head_changed(&mut self, group_queue_id: [u8; 32]) {
+        if let Some(served) = self.served.get(&group_queue_id) {
+            let mut writer = Writer::new();
+            served.queue.export_head(&mut writer);
+            self.changes.push(StoreChange::GroupQueue {
+                group_queue_id,
+                head: writer.finish().to_vec(),
+            });
+        }
+    }
+
     /// The count of the group queues.
     pub fn len(&self) -> usize {
         self.served.len()
@@ -142,6 +196,27 @@ impl GroupService {
                 accept_either(session, command, served.queue.write_pks(now))?;
                 // WIR-374: a post carries no admission.
                 let posted = served.queue.post(command.payload, now)?;
+                if posted.fresh {
+                    self.changes.push(StoreChange::GroupRecord {
+                        group_queue_id,
+                        record: Stored {
+                            seq: posted.seq,
+                            accepted_at: store_time(now),
+                            bytes: command.payload.to_vec(),
+                        },
+                    });
+                    if let Some(through_seq) = posted.dropped_through {
+                        self.changes.push(StoreChange::GroupTrimmed {
+                            group_queue_id,
+                            through_seq,
+                        });
+                    }
+                    self.head_changed(group_queue_id);
+                }
+                let served = self
+                    .served
+                    .get_mut(&group_queue_id)
+                    .ok_or(Reject::Rejected)?;
                 let mut replies = vec![answer(
                     circuit,
                     command,
@@ -171,6 +246,18 @@ impl GroupService {
                 session.bind_queue(group_queue_id)?;
                 // NET-250: a `GSUB` is activity of the queue.
                 served.queue.touch(now);
+                self.changes.push(StoreChange::GroupQueue {
+                    group_queue_id,
+                    head: {
+                        let mut writer = Writer::new();
+                        served.queue.export_head(&mut writer);
+                        writer.finish().to_vec()
+                    },
+                });
+                let served = self
+                    .served
+                    .get_mut(&group_queue_id)
+                    .ok_or(Reject::Rejected)?;
                 if !served.subscribers.contains(&circuit) {
                     served.subscribers.push(circuit);
                 }
@@ -219,6 +306,7 @@ impl GroupService {
                 session.accept(command, &served.queue.own_pk())?;
                 let keys = GkeyPayload::parse(command.payload).map_err(|_| Reject::Rejected)?;
                 served.queue.rotate(keys.read_pk, keys.write_pk, now);
+                self.head_changed(group_queue_id);
                 Ok((Vec::new(), Vec::new()))
             }
             GroupCmd::Gdel => {
@@ -228,6 +316,8 @@ impl GroupService {
                 if let Some(served) = self.served.remove(&group_queue_id) {
                     drop(served.queue.delete());
                 }
+                self.changes
+                    .push(StoreChange::GroupQueueDeleted { group_queue_id });
                 Ok((Vec::new(), Vec::new()))
             }
             // A relay does not take the commands that it sends.
@@ -268,6 +358,7 @@ impl GroupService {
                 subscribers: Vec::new(),
             },
         );
+        self.head_changed(group_queue_id);
         Ok(answer(
             circuit,
             command,
@@ -312,8 +403,14 @@ impl GroupService {
     /// gap held back, and each queue past `GROUP_IDLE_TTL`.
     pub fn sweep(&mut self, now: u64) -> Vec<DigestDue> {
         let mut due = Vec::new();
+        let mut trimmed = Vec::new();
         for (group_queue_id, served) in &mut self.served {
-            served.queue.expire(now);
+            if let Some(through_seq) = served.queue.expire(now) {
+                trimmed.push(StoreChange::GroupTrimmed {
+                    group_queue_id: *group_queue_id,
+                    through_seq,
+                });
+            }
             due.extend(Self::digests_of(*group_queue_id, served, Tick::Clock(now)));
             let digests = &served.digests;
             // NTF-102: the address leaves with its registration.
@@ -321,8 +418,19 @@ impl GroupService {
                 .notify
                 .retain(|sender_id, _| digests.holds(sender_id));
         }
+        self.changes.append(&mut trimmed);
         // NET-249: a queue with no post and no subscription leaves.
-        self.served.retain(|_, served| !served.queue.idle(now));
+        let idle: Vec<[u8; 32]> = self
+            .served
+            .iter()
+            .filter(|(_, served)| served.queue.idle(now))
+            .map(|(group_queue_id, _)| *group_queue_id)
+            .collect();
+        for group_queue_id in idle {
+            self.served.remove(&group_queue_id);
+            self.changes
+                .push(StoreChange::GroupQueueDeleted { group_queue_id });
+        }
         due
     }
 }
@@ -613,6 +721,66 @@ mod tests {
             ),
             Err(Reject::Rejected)
         );
+    }
+
+    #[test]
+    fn a_relay_that_restarts_serves_the_group_and_its_records() {
+        let now = 1_000;
+        let (mut relay, id, read, write, _own) = opened(now);
+        let first = record(1);
+        relay
+            .send(CIRCUIT, GroupCmd::Gpost, id, &first, &write, now)
+            .unwrap();
+        let fresh = StaticSecret::from([0x21u8; 32]);
+        let mut payload = [0u8; 64];
+        GkeyPayload {
+            read_pk: public(&fresh),
+            write_pk: public(&fresh),
+        }
+        .encode(&mut payload)
+        .unwrap();
+
+        // The store holds what the run gave it.
+        let mut store = Loaded::default();
+        for change in relay.service.take_changes() {
+            store.apply(&change);
+        }
+        assert_eq!(store.group_queues.len(), 1);
+
+        // A second run of the relay reads it, and the reader of the epoch
+        // takes the record that waited.
+        let mut second = Relay::new();
+        second.service = GroupService::restore(&store);
+        assert_eq!(second.service.len(), 1);
+        let from_seq = [0u8; 4];
+        let (replies, _) = second
+            .send(OTHER, GroupCmd::Gsub, id, &from_seq, &read, now + 1)
+            .unwrap();
+        assert_eq!(replies.len(), 1);
+        let (gmsg, _) = Command::parse(&replies[0].outbound.encoded, Bucket::B0).unwrap();
+        assert_eq!(
+            split_gmsg(gmsg.payload, Bucket::B0).unwrap(),
+            (1, &first[..])
+        );
+
+        // NET-232: the sequence continues, thus a second record takes no
+        // number that a reader holds already.
+        let (replies, _) = second
+            .send(CIRCUIT, GroupCmd::Gpost, id, &record(2), &write, now + 1)
+            .unwrap();
+        let (gseq, _) = Command::parse(&replies[0].outbound.encoded, Bucket::B0).unwrap();
+        assert_eq!(GseqPayload::parse(gseq.payload).unwrap().seq, 2);
+
+        // A group queue that a `GDEL` took leaves the store, thus no later
+        // run serves it (`NET-245`).
+        second
+            .send(CIRCUIT, GroupCmd::Gdel, id, &[], &_own, now + 1)
+            .unwrap();
+        for change in second.service.take_changes() {
+            store.apply(&change);
+        }
+        assert!(store.group_queues.is_empty());
+        assert!(GroupService::restore(&store).is_empty());
     }
 
     #[test]
