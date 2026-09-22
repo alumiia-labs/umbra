@@ -185,6 +185,8 @@ impl Mesh {
                     relay_static(to).0.relay_id,
                     [from as u8 * 8 + to as u8; 8],
                     Secret::new([9; 32]),
+                    mesh.now,
+                    &mut mesh.rng,
                 );
                 mesh.route(from, outputs);
             }

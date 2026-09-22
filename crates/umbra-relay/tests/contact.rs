@@ -111,8 +111,14 @@ impl Network {
             self.peers[from].push((900, Peer::Relay(from + 1, 800)));
             self.peers[from + 1].push((800, Peer::Relay(from, 900)));
             let next_id = relay_static(from as u8 + 2).0.relay_id;
-            let outputs =
-                self.relays[from].dialed(900, next_id, [from as u8; 8], Secret::new([9; 32]));
+            let outputs = self.relays[from].dialed(
+                900,
+                next_id,
+                [from as u8; 8],
+                Secret::new([9; 32]),
+                self.now,
+                &mut self.rng,
+            );
             self.route(from, outputs);
         }
     }

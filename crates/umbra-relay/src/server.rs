@@ -157,7 +157,7 @@ pub async fn run_node(
                     let mut secret = [0u8; 32];
                     let _ = rng.try_fill_bytes(&mut session_id);
                     let _ = rng.try_fill_bytes(&mut secret);
-                    node.dialed(link, relay_id, session_id, Secret::new(secret))
+                    node.dialed(link, relay_id, session_id, Secret::new(secret), unix_now(), &mut rng)
                 }
                 Some(Input::Capsule { link, bytes }) => {
                     node.on_capsule(link, &bytes, unix_now(), &mut rng)

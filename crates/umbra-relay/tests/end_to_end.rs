@@ -91,6 +91,18 @@ struct Network {
 
 impl Network {
     fn new() -> Self {
+        let mut network = Network::unlinked();
+        // Relay 1 dials relay 2, and relay 2 dials relay 3.
+        for from in 0..2usize {
+            network.dial(from);
+        }
+        network
+    }
+
+    /// The three relays with no link between them. Each one dials the next
+    /// one at the first `EXTEND` that needs it, as a relay does after its
+    /// start.
+    fn unlinked() -> Self {
         let mut relays = Vec::new();
         let mut statics = Vec::new();
         for layer in 1..=3u8 {
@@ -109,31 +121,45 @@ impl Network {
                 chunk_capacity: 1 << 26,
             }));
         }
-        let mut network = Network {
+        Network {
             relays,
             statics,
             peers: vec![Vec::new(), Vec::new(), Vec::new()],
             inboxes: vec![VecDeque::new(), VecDeque::new()],
             rng: Rng(7),
-        };
-        // Relay 1 dials relay 2, and relay 2 dials relay 3.
-        for from in 0..2usize {
-            let link: LinkId = 900;
-            network.peers[from].push((link, Peer::Relay(from + 1, 800)));
-            network.peers[from + 1].push((800, Peer::Relay(from, link)));
-            let next_id = network.statics[from + 1].relay_id;
-            let outputs =
-                network.relays[from].dialed(link, next_id, [from as u8; 8], Secret::new([9; 32]));
-            network.route(from, outputs);
         }
-        network
+    }
+
+    /// Relay `from` dials the relay of the next layer.
+    fn dial(&mut self, from: usize) {
+        let link: LinkId = 900;
+        self.peers[from].push((link, Peer::Relay(from + 1, 800)));
+        self.peers[from + 1].push((800, Peer::Relay(from, link)));
+        let next_id = self.statics[from + 1].relay_id;
+        let outputs = self.relays[from].dialed(
+            link,
+            next_id,
+            [from as u8; 8],
+            Secret::new([9; 32]),
+            100,
+            &mut self.rng,
+        );
+        self.route(from, outputs);
     }
 
     fn route(&mut self, relay: usize, outputs: Vec<Output>) {
         let mut work: VecDeque<(usize, Output)> = outputs.into_iter().map(|o| (relay, o)).collect();
         while let Some((at, output)) = work.pop_front() {
-            let Output::Send { link, capsule } = output else {
-                panic!("an unexpected output");
+            let (link, capsule) = match output {
+                Output::Send { link, capsule } => (link, capsule),
+                // The dial ends after the relay took the cell that asked
+                // for it, as a socket does.
+                Output::Dial { relay_id } => {
+                    assert_eq!(relay_id, self.statics[at + 1].relay_id);
+                    self.dial(at);
+                    continue;
+                }
+                other => panic!("an unexpected output: {other:?}"),
             };
             let peer = self.peers[at].iter().find(|(l, _)| *l == link).unwrap().1;
             match peer {
@@ -481,4 +507,14 @@ fn a_record_travels_between_two_clients_over_three_relays() {
         ),
         "{events:?}"
     );
+}
+
+#[test]
+fn a_relay_holds_an_extend_while_it_dials_the_next_relay() {
+    // NET-319: before this rule the relay dropped the body, and the client
+    // waited for an `EXTENDED` that never came.
+    let mut network = Network::unlinked();
+    let mut client = Client::connect(&mut network, 0);
+    // The circuit holds three hops and carries a command.
+    let (_, _) = client.new_queue(&mut network, 0x40);
 }

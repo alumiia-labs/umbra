@@ -869,7 +869,11 @@ forward cell on that circuit. §3.4.4 rule `NET-114` gives it the check.
    send the body to the relay of `relay_id`. **[NET-163]** That relay MUST
    send the body on a new circuit of its link to that relay. **[NET-198]**
    Before it sends the body, that relay MUST bind the new circuit to the held
-   circuit as its next hop.
+   circuit as its next hop. **[NET-319]** A relay that holds no session to
+   the relay of `relay_id` MUST open one and hold the body until it opens,
+   and one dial MUST serve each body that waits for that relay. It MUST drop
+   a body that waited `CIRCUIT_BUILD_TIMEOUT`, because the client ended that
+   build under `NET-169`.
 7. **[NET-164]** A relay that receives an `EXTENDED` cell on a circuit of
    `NET-198` MUST send that body on the held circuit. **[NET-199]** That relay
    MUST send that body under its backward layer, with `X_L` of 16 zero bytes.
@@ -883,6 +887,13 @@ forward cell on that circuit. §3.4.4 rule `NET-114` gives it the check.
      the session of Part 6 §6.2.3. It MAY hold one session for each such
      relay and put each circuit on it. It holds no resend window there: a
      lost link ends its circuits, and each client builds again.
+
+> *Cause of `NET-319`.* An earlier implementation dialed the next relay and
+> dropped the body. A relay opens its links to the next layer at the first
+> need, thus after each start the first build over each pair of relays
+> waited for an `EXTENDED` that never came. A client showed "Connecting"
+> with no circuit, and a group went silent, until the user asked for a new
+> connection.
 8. **[NET-165]** A relay MUST drop an `EXTEND` cell at the endpoint of a
    circuit that holds a next hop already. **[NET-166]** A relay in layer 3 MUST
    drop an `EXTEND` cell at the endpoint of a circuit. **[NET-167]** A relay

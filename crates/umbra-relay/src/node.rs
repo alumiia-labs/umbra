@@ -17,6 +17,7 @@ use umbra_crypto::{
     handshake::nk::RelayStatic, rand_core::CryptoRng, rsabssa::PublicKey2048, secret::Secret,
     x25519::StaticSecret,
 };
+use umbra_onion::CIRCUIT_BUILD_TIMEOUT;
 use umbra_queue::{relay::session::Session, Reject};
 use umbra_transport::link::{ClientLink, RelayLink};
 use umbra_wire::{
@@ -56,7 +57,8 @@ pub enum Output {
         capsule: Vec<u8>,
     },
     /// The node holds no link to a relay of the next layer. The runtime
-    /// dials it, and the client builds its circuit again.
+    /// dials it, and each `EXTEND` that waits for it goes on the link that
+    /// opens (`NET-319`).
     Dial {
         /// The relay.
         relay_id: [u8; 32],
@@ -142,11 +144,29 @@ struct Endpoint {
     loops: u32,
 }
 
+/// One `EXTEND` body that waits for a link to its next relay.
+struct Waiting {
+    /// The held circuit that the body extends.
+    from: CircuitKey,
+    body: Vec<u8>,
+    arrived_at: u64,
+}
+
+impl Waiting {
+    /// Whether the client still waits, under `CIRCUIT_BUILD_TIMEOUT`.
+    fn is_live(&self, now: u64) -> bool {
+        now.saturating_sub(self.arrived_at) < CIRCUIT_BUILD_TIMEOUT
+    }
+}
+
 /// One relay.
 pub struct RelayNode {
     issuer_key: PublicKey2048,
     links: BTreeMap<LinkId, Framing>,
     next_hops: BTreeMap<[u8; 32], LinkId>,
+    /// The `EXTEND` bodies that wait for a link to their next relay
+    /// (`NET-319`).
+    extending: BTreeMap<[u8; 32], Vec<Waiting>>,
     circuits: CircuitTable,
     endpoints: BTreeMap<CircuitKey, Endpoint>,
     gate: RelayGate,
@@ -164,6 +184,7 @@ impl RelayNode {
             issuer_key: config.issuer_key,
             links: BTreeMap::new(),
             next_hops: BTreeMap::new(),
+            extending: BTreeMap::new(),
             circuits: CircuitTable::new(config.relay, config.static_secret, config.layer),
             endpoints: BTreeMap::new(),
             gate: RelayGate::new(relay_id),
@@ -204,13 +225,16 @@ impl RelayNode {
     }
 
     /// The runtime dialed a relay of the next layer on `link`. The result
-    /// is the capsule that opens the session (`WIR-229`).
-    pub fn dialed(
+    /// is the capsule that opens the session (`WIR-229`), and then each
+    /// `EXTEND` that waited for this link (`NET-319`).
+    pub fn dialed<R: CryptoRng + ?Sized>(
         &mut self,
         link: LinkId,
         relay_id: [u8; 32],
         session_id: [u8; 8],
         session_secret: Secret<32>,
+        now: u64,
+        rng: &mut R,
     ) -> Vec<Output> {
         let mut capsule = vec![0u8; 64];
         let Ok((client, used)) = ClientLink::open(session_id, session_secret, &mut capsule) else {
@@ -219,7 +243,39 @@ impl RelayNode {
         capsule.truncate(used);
         self.links.insert(link, Framing::Dialed(client));
         self.next_hops.insert(relay_id, link);
-        vec![Output::Send { link, capsule }]
+        let mut outputs = vec![Output::Send { link, capsule }];
+        let mut actions = Vec::new();
+        for waiting in self.extending.remove(&relay_id).unwrap_or_default() {
+            // The client ended a build older than its timeout.
+            if waiting.is_live(now) {
+                actions.extend(self.bind_extend(waiting.from, link, &waiting.body, rng));
+            }
+        }
+        outputs.extend(self.run(actions, now, rng));
+        outputs
+    }
+
+    /// Binds a held circuit to a new circuit on the link to its next
+    /// relay, and gives the build cell for it (`NET-163`, `NET-198`).
+    fn bind_extend<R: CryptoRng + ?Sized>(
+        &mut self,
+        from: CircuitKey,
+        next_link: LinkId,
+        body: &[u8],
+        rng: &mut R,
+    ) -> Vec<Action> {
+        let mut next = CircuitKey {
+            link: next_link,
+            circ_id: [0; 16],
+        };
+        // NET-154, NET-155.
+        loop {
+            rng.fill_bytes(&mut next.circ_id);
+            if self.circuits.is_free(&next) {
+                break;
+            }
+        }
+        self.circuits.bind_next(from, next, body)
     }
 
     /// Takes the bytes of one capsule from a link.
@@ -325,23 +381,23 @@ impl RelayNode {
                     from,
                     relay_id,
                     body,
-                } => match self.next_hops.get(&relay_id) {
-                    // NET-167: only a relay of the next layer holds a link here.
-                    None => outputs.push(Output::Dial { relay_id }),
-                    Some(next_link) => {
-                        let mut next = CircuitKey {
-                            link: *next_link,
-                            circ_id: [0; 16],
-                        };
-                        // NET-154, NET-155.
-                        loop {
-                            rng.fill_bytes(&mut next.circ_id);
-                            if self.circuits.is_free(&next) {
-                                break;
-                            }
+                } => match self.next_hops.get(&relay_id).copied() {
+                    // NET-167: only a relay of the next layer holds a link
+                    // here. NET-319: the body waits for the link, and one
+                    // dial serves each body that waits for that relay.
+                    None => {
+                        let waiting = self.extending.entry(relay_id).or_default();
+                        waiting.retain(|held| held.is_live(now));
+                        if waiting.is_empty() {
+                            outputs.push(Output::Dial { relay_id });
                         }
-                        work.extend(self.circuits.bind_next(from, next, &body));
+                        waiting.push(Waiting {
+                            from,
+                            body,
+                            arrived_at: now,
+                        });
                     }
+                    Some(next_link) => work.extend(self.bind_extend(from, next_link, &body, rng)),
                 },
                 Action::Serve {
                     circuit,
@@ -571,6 +627,12 @@ impl RelayNode {
     /// The periodic work: aged circuits, expired records, idle queues, the
     /// retention of each cache, and the digests that a budget held back.
     pub fn sweep(&mut self, now: u64) -> Vec<Output> {
+        // NET-319: a dial that never opened a link holds no body past the
+        // timeout of the client.
+        for waiting in self.extending.values_mut() {
+            waiting.retain(|held| held.is_live(now));
+        }
+        self.extending.retain(|_, waiting| !waiting.is_empty());
         for action in self.circuits.expire(now) {
             if let Action::Closed { circuit } = action {
                 self.endpoints.remove(&circuit);
