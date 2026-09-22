@@ -866,18 +866,21 @@ the relay and not of an epoch, thus a rotation of §11.4 leaves it where it was.
   `GKEY` that carries the new `own_pk` under the `own_sk` it replaces to
   each replica (`WIR-522`), and post a record of `GRP-400` with the new
   credentials to each other member at `admin` or above.
-- **[GRP-402]** A member at `admin` or above that holds the owner credentials
-  and reads a roster object by which a member that held them left the roles
-  at `admin` or above, or left the group, MUST do the same after the backoff
-  of `GRP-358`, and MUST NOT do it when a record of `GRP-400` reached it
-  during that backoff.
+- **[GRP-402]** When a member that held the owner credentials left the roles
+  at `admin` or above, or left the group, the active member at `admin` or
+  above with the lowest index MUST do the same after the backoff of
+  `GRP-358`, and no other admin MUST do it for that departure. After a
+  demotion, whose admin acts under `GRP-401`, it MUST first wait
+  `ROSTER_RATE_LIMIT`. It MUST NOT act when a record of `GRP-400` reached it
+  during that wait.
 
 > *Cause of `GRP-401` and `GRP-402`.* No earlier rule took `own_sk` back. An
 > admin that lost its role or left the group kept it, and `own_pk` never
 > changed at the relay. It could send a `GKEY` of keys that it alone knew and
-> lock every member out of the queue, or a `GDEL`. Two admins that act on one
-> departure at once leave the second one with credentials that the relay no
-> longer takes, and Part 16 §16.3 records that residual.
+> lock every member out of the queue, or a `GDEL`. Two admins that acted on
+> one departure would each draw a set, and one set would fail at the relay,
+> thus one admin acts for each departure. Two departures at once can still
+> give two sets, and Part 16 §16.3 records that residual.
 
 > *Cause of `GRP-400`.* A promotee may have joined inside the current epoch,
 > and `GRP-385` keeps `K_e` from a joiner, because `K_e` gives each slot key

@@ -1595,8 +1595,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     }
 
     /// Each group whose owner credentials a member holds that is no admin
-    /// now, after the backoff of this device (`GRP-401`, `GRP-402`). A
-    /// group seen for the first time records its admins and owes nothing.
+    /// now, when this device is the admin of the lowest index, after its
+    /// backoff (`GRP-402`). A group seen for the first time records its
+    /// admins and owes nothing.
     pub fn groups_owing_owners<R: CryptoRng + ?Sized>(
         &mut self,
         now_ms: u64,
@@ -1622,21 +1623,34 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 continue;
             };
             let admins = Self::admins_of(&group);
-            let has_left = held
+            let gone: Vec<u16> = held
                 .as_chunks::<2>()
                 .0
                 .iter()
                 .map(|pair| u16::from_be_bytes(*pair))
-                .any(|index| !admins.contains(&index));
-            if !has_left {
+                .filter(|index| !admins.contains(index))
+                .collect();
+            // GRP-402: one admin acts, the one of the lowest index, thus two
+            // admins draw no two sets for one departure.
+            if gone.is_empty() || admins.first() != Some(&group.own_index()) {
                 self.groups.owner_backoff.remove(&conversation);
                 continue;
             }
+            // A member that fell below `admin` has an admin that took the
+            // role and draws new credentials at once (`GRP-401`). This admin
+            // waits for its record, and acts only when none came.
+            let roster = group.roster();
+            let was_demoted = gone
+                .iter()
+                .all(|index| roster.member(*index).is_some_and(|member| member.active));
             match self.groups.owner_backoff.get(&conversation) {
                 Some(at) if now >= *at => due.push(conversation),
                 Some(_) => {}
                 None => {
-                    let at = now.saturating_add(group.rotation_delay(rng));
+                    let wait = if was_demoted { ROSTER_RATE_LIMIT } else { 0 };
+                    let at = now
+                        .saturating_add(wait)
+                        .saturating_add(group.rotation_delay(rng));
                     self.groups.owner_backoff.insert(conversation, at);
                 }
             }
