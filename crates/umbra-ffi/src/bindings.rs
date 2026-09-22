@@ -182,9 +182,12 @@ pub struct FfiGroupOffer {
     pub group_id: Vec<u8>,
     /// The name of the group, for an offer. A join request carries none.
     pub name: String,
-    /// For a join request: whether the admin let the contact in already
-    /// and the admit is on its way. The view offers no second press.
+    /// For a join request: whether the admin let the contact in already.
     pub is_added: bool,
+    /// For a join request that the admin let in: whether its snapshot is
+    /// on its way to the chunk path. A snapshot that did not arrive leaves
+    /// the join added, and a second press sends it again.
+    pub is_moving: bool,
 }
 
 /// What a view shows of a group of Part 11.
@@ -1512,7 +1515,8 @@ impl Inner {
                     let _ = client.download_failed(&message, &mut OsRng);
                 }
                 // A snapshot that did not move leaves the join where it
-                // was, and the user asks again.
+                // was, and the view offers the press that sends it again.
+                Some(TransferWork::Snapshot { from, .. }) => client.snapshot_failed(from),
                 _ => {}
             },
         }
@@ -2271,6 +2275,7 @@ impl Handle {
                 group_id: offer.group_id.to_vec(),
                 name: offer.name,
                 is_added: false,
+                is_moving: false,
             })
             .collect())
     }
@@ -2297,7 +2302,14 @@ impl Handle {
     /// The contacts that asked to come into a group of this device
     /// (`GRP-310`).
     pub fn group_joiners(&self) -> Result<Vec<FfiGroupOffer>, FfiError> {
-        Ok(locked(&self.inner)
+        let inner = locked(&self.inner);
+        let is_moving = |from: crate::ConversationId, group_id: [u8; 32]| {
+            inner.transfer_tags.values().any(|work| {
+                matches!(work, TransferWork::Snapshot { from: held, group_id: of, .. }
+                    if *held == from && *of == group_id)
+            })
+        };
+        Ok(inner
             .client
             .group_joiners()?
             .into_iter()
@@ -2306,6 +2318,7 @@ impl Handle {
                 group_id: joiner.group_id.to_vec(),
                 name: String::new(),
                 is_added: joiner.is_added,
+                is_moving: is_moving(joiner.from, joiner.group_id),
             })
             .collect())
     }

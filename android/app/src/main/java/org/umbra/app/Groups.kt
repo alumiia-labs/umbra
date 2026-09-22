@@ -147,22 +147,25 @@ private fun JoinerRow(joiner: FfiGroupOffer) {
         Modifier.fillMaxWidth().padding(vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        // A roster that did not reach the relays takes the same press
+        // again, and the group adds nobody a second time.
+        val isStuck = joiner.isAdded && !joiner.isMoving
         Column(Modifier.weight(1f)) {
             Text(if (joiner.isAdded) "$name comes in" else "$name asks to come in")
             Text(
-                if (joiner.isAdded) {
-                    "The roster goes to them through the relays."
-                } else {
-                    "The group gives them its roster and its keys."
+                when {
+                    isStuck -> "The roster did not reach the relays."
+                    joiner.isAdded -> "The roster goes to them through the relays."
+                    else -> "The group gives them its roster and its keys."
                 },
                 style = MaterialTheme.typography.labelMedium,
                 color = Palette.TextSecondary,
                 modifier = Modifier.subline(),
             )
         }
-        if (!joiner.isAdded) {
+        if (!joiner.isAdded || isStuck) {
             Spacer(Modifier.width(12.dp))
-            InlineButton("Let in") { Core.admitJoiner(joiner) }
+            InlineButton(if (isStuck) "Try again" else "Let in") { Core.admitJoiner(joiner) }
         }
     }
 }

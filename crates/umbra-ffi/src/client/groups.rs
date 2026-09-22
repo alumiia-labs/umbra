@@ -1395,6 +1395,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }))
     }
 
+    /// The upload of the snapshot of a join failed. The view reads the
+    /// joiner list again and offers the press that sends it again.
+    pub fn snapshot_failed(&mut self, from: ConversationId) {
+        self.events.push_back(Event::GroupJoiner { from });
+    }
+
     /// The active members of a group in index order (§11.9).
     pub fn group_members(&self, conversation: ConversationId) -> Result<Vec<GroupMember>, Error> {
         let group = self.group_of(conversation)?;
