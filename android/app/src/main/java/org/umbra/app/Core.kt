@@ -16,6 +16,7 @@ import uniffi.umbra_ffi.Config
 import uniffi.umbra_ffi.Connection
 import uniffi.umbra_ffi.FfiEvent
 import uniffi.umbra_ffi.FfiException
+import uniffi.umbra_ffi.FfiGroupOffer
 import uniffi.umbra_ffi.Handle
 import uniffi.umbra_ffi.MsgInfo
 import uniffi.umbra_ffi.Receipts
@@ -74,6 +75,8 @@ class Chat(
     val isVerified: Boolean,
     /** Whether the conversation is a private group of Part 11. */
     val isGroup: Boolean = false,
+    /** The identifier of a group, which the join flow names. */
+    val groupId: ByteArray = ByteArray(0),
     /** The active members of a group. */
     val members: Int = 0,
     /** Whether the two relays of a group hold its queues (`GRP-191`). */
@@ -196,6 +199,7 @@ object Core {
                     // The user opened the client, thus a view is on the
                     // screen, and the platform permits the start.
                     DeliveryService.start(app)
+                    refreshJoinFlow()
                 }
             } catch (wrong: FfiException.WrongPassphrase) {
                 fail("That passphrase does not open this device.")
@@ -298,6 +302,11 @@ object Core {
             }
             // The file of a message arrived, left, or failed.
             is FfiEvent.File -> revision++
+            // The join flow of a group moved.
+            is FfiEvent.GroupOffer, is FfiEvent.GroupJoiner -> {
+                refreshJoinFlow()
+                refreshChats()
+            }
             // A reaction, an edit, and a deletion are no arrival, thus they
             // raise no alert.
             is FfiEvent.Reacted -> revision++
@@ -310,6 +319,8 @@ object Core {
                 refreshChats()
             }
             is FfiEvent.Locked -> {
+                groupOffers.clear()
+                groupJoiners.clear()
                 images.clear()
                 decoding.clear()
                 online = false
@@ -440,6 +451,41 @@ object Core {
             chats.clear()
             chats.addAll(list)
             onMade(conversation)
+        }
+    }
+
+    /** The offers of a group that wait for this user (`GRP-170`). */
+    val groupOffers = mutableStateListOf<FfiGroupOffer>()
+
+    /** The contacts that asked to come into a group of this device. */
+    val groupJoiners = mutableStateListOf<FfiGroupOffer>()
+
+    /** Offers a group to a contact on their pairwise channel. */
+    fun offerGroup(group: Conversation, to: Conversation) = call { client ->
+        client.offerGroup(group.id, to.id)
+    }
+
+    /** Takes an offer: this device makes its group keys and asks to come in. */
+    fun acceptGroupOffer(offer: FfiGroupOffer) = call { client ->
+        client.acceptGroupOffer(offer.from, offer.groupId)
+        refreshJoinFlow()
+    }
+
+    /** Lets a contact into a group of this device (§11.9.1 steps 3 and 4). */
+    fun admitJoiner(joiner: FfiGroupOffer) = call { client ->
+        client.admitJoiner(joiner.from, joiner.groupId)
+        refreshJoinFlow()
+        refreshChats()
+    }
+
+    private fun refreshJoinFlow() = call { client ->
+        val offers = client.groupOffers()
+        val joiners = client.groupJoiners()
+        main.post {
+            groupOffers.clear()
+            groupOffers.addAll(offers)
+            groupJoiners.clear()
+            groupJoiners.addAll(joiners)
         }
     }
 
@@ -687,6 +733,7 @@ object Core {
             unread = summary.unread.toInt(),
             isVerified = summary.verified,
             isGroup = group != null,
+            groupId = group?.groupId ?: ByteArray(0),
             members = group?.members?.toInt() ?: 0,
             isReady = group?.isReady ?: true,
         )

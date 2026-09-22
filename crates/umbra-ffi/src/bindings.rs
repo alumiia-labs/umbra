@@ -13,7 +13,7 @@
 //! each update to the client under the lock of the handle.
 
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{Arc, Condvar, Mutex, MutexGuard, Weak},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -173,9 +173,23 @@ pub struct Config {
     pub argon2_floor_ms: u64,
 }
 
+/// One offer of a group, or one contact that asked to come into one.
+#[derive(uniffi::Record)]
+pub struct FfiGroupOffer {
+    /// The pairwise conversation that carried it.
+    pub from: Vec<u8>,
+    /// The group.
+    pub group_id: Vec<u8>,
+    /// The name of the group, for an offer. A join request carries none.
+    pub name: String,
+}
+
 /// What a view shows of a group of Part 11.
 #[derive(uniffi::Record)]
 pub struct FfiGroupInfo {
+    /// The group, which the join flow names. No relay reads it
+    /// (`GRP-151`).
+    pub group_id: Vec<u8>,
     /// The index of this device in the roster.
     pub own_index: u16,
     /// The active members.
@@ -641,6 +655,11 @@ pub enum FfiEvent {
     Online,
     /// The set of the circuits changed. [`Handle::connection`] gives it.
     Circuits,
+    /// A contact offered a group. [`Handle::group_offers`] gives it.
+    GroupOffer,
+    /// A contact asked to come into a group of this device.
+    /// [`Handle::group_joiners`] gives it.
+    GroupJoiner,
     /// The state of the file of a message changed. [`Handle::msg_info`]
     /// gives it.
     File {
@@ -836,8 +855,8 @@ struct Inner {
     /// The commands of the transfer task, or none before the first
     /// transfer of a run.
     transfers: Option<mpsc::UnboundedSender<TransferCommand>>,
-    /// The message of each transfer that runs, and whether it is an upload.
-    transfer_tags: BTreeMap<u64, (crate::MsgRef, bool)>,
+    /// What each transfer that runs belongs to.
+    transfer_tags: BTreeMap<u64, TransferWork>,
     next_transfer_tag: u64,
     /// The commands of the group task, or none before the first group
     /// command of a run.
@@ -845,6 +864,38 @@ struct Inner {
     /// What each group command that runs belongs to.
     group_tags: BTreeMap<u64, GroupWork>,
     next_group_tag: u64,
+    /// The groups that the run of the group queues reads. A subscription
+    /// lives with its session, thus this set empties when the run ends.
+    group_reading: BTreeSet<crate::ConversationId>,
+}
+
+/// What one command of the transfer task belongs to.
+enum TransferWork {
+    /// The file of a message, and whether it goes up.
+    File {
+        /// The message.
+        message: crate::MsgRef,
+        /// Whether the transfer is an upload.
+        is_upload: bool,
+    },
+    /// The roster snapshot of a join, which an admin puts on the chunk
+    /// path before it sends the admit (§11.9.1 step 3).
+    Snapshot {
+        /// The pairwise conversation of the joiner.
+        from: crate::ConversationId,
+        /// The group.
+        group_id: [u8; 32],
+        /// The member index that the admin gave the joiner.
+        index: u16,
+    },
+    /// The roster snapshot that an admit named, which the joiner fetches
+    /// before it holds the group (§11.9.1 step 5).
+    Admit {
+        /// The pairwise conversation that carried the admit.
+        from: crate::ConversationId,
+        /// The group.
+        group_id: [u8; 32],
+    },
 }
 
 /// What one command of the group task belongs to.
@@ -870,7 +921,10 @@ impl Inner {
         }
         let mut commands = Vec::new();
         while let Some(job) = self.client.take_upload() {
-            let tag = self.next_tag(job.message, true);
+            let tag = self.next_tag(TransferWork::File {
+                message: job.message,
+                is_upload: true,
+            });
             commands.push(TransferCommand::Upload {
                 tag,
                 plain: job.plain,
@@ -878,7 +932,10 @@ impl Inner {
             });
         }
         while let Some(job) = self.client.take_download() {
-            let tag = self.next_tag(job.message, false);
+            let tag = self.next_tag(TransferWork::File {
+                message: job.message,
+                is_upload: false,
+            });
             commands.push(TransferCommand::Download {
                 tag,
                 descriptor: job.descriptor,
@@ -915,6 +972,19 @@ impl Inner {
                 write_pk: job.write_pk,
                 own: job.own,
             });
+        }
+        if let Ok(subscriptions) = self.client.group_subscriptions(&mut OsRng) {
+            for subscription in subscriptions {
+                if !self.group_reading.insert(subscription.conversation) {
+                    continue;
+                }
+                commands.push(GroupCommand::Subscribe {
+                    relay: subscription.relay,
+                    group_queue_id: subscription.group_queue_id,
+                    read: subscription.read,
+                    from_seq: subscription.from_seq,
+                });
+            }
         }
         while let Some(job) = self.client.take_group_post() {
             // GRP-194: the same record goes to each replica, each under its
@@ -1016,6 +1086,36 @@ impl Inner {
         Some(commands)
     }
 
+    /// Gives each record of this device to the send path at once.
+    fn flush_outgoing(&mut self) {
+        let Inner { client, bridge, .. } = self;
+        if let Some(running) = bridge {
+            let _ = running.flush(client, &mut OsRng);
+        }
+    }
+
+    /// Asks the chunk path for the snapshot of each admit that waits
+    /// (`GRP-313`).
+    fn fetch_admitted_snapshots(&mut self) {
+        let Ok(waiting) = self.client.group_admits() else {
+            return;
+        };
+        for admit in waiting {
+            let Ok(descriptor) = umbra_wire::descriptor::FileDescriptor::parse(&admit.descriptor)
+            else {
+                continue;
+            };
+            let tag = self.next_tag(TransferWork::Admit {
+                from: admit.from,
+                group_id: admit.group_id,
+            });
+            self.send_transfer(TransferCommand::Download {
+                tag,
+                descriptor: Box::new(descriptor),
+            });
+        }
+    }
+
     /// Takes one answer of the group task into the store.
     fn end_group(&mut self, update: GroupUpdate) {
         match update {
@@ -1049,11 +1149,12 @@ impl Inner {
             }
             GroupUpdate::Record {
                 group_queue_id,
+                seq,
                 record,
-                ..
             } => {
                 let _ = self.client.on_group_record(
                     &group_queue_id,
+                    seq,
                     &record,
                     crate::runtime::unix_now().saturating_mul(1_000),
                     &mut OsRng,
@@ -1067,14 +1168,14 @@ impl Inner {
             GroupUpdate::Ended => {
                 self.groups = None;
                 self.group_tags.clear();
+                self.group_reading.clear();
             }
         }
     }
 
-    fn next_tag(&mut self, message: crate::MsgRef, is_upload: bool) -> u64 {
+    fn next_tag(&mut self, work: TransferWork) -> u64 {
         self.next_transfer_tag = self.next_transfer_tag.wrapping_add(1);
-        self.transfer_tags
-            .insert(self.next_transfer_tag, (message, is_upload));
+        self.transfer_tags.insert(self.next_transfer_tag, work);
         self.next_transfer_tag
     }
 
@@ -1168,8 +1269,8 @@ impl Inner {
         } = self;
         match update {
             TransferUpdate::Progress { .. } => {}
-            TransferUpdate::Uploaded { tag, uploaded } => {
-                if let Some((message, _)) = transfer_tags.remove(&tag) {
+            TransferUpdate::Uploaded { tag, uploaded } => match transfer_tags.remove(&tag) {
+                Some(TransferWork::File { message, .. }) => {
                     if client.upload_done(&message, &uploaded, &mut OsRng).is_ok() {
                         // The record with the descriptor goes to the send path.
                         if let Some(running) = bridge {
@@ -1177,20 +1278,58 @@ impl Inner {
                         }
                     }
                 }
-            }
-            TransferUpdate::Downloaded { tag, plain } => {
-                if let Some((message, _)) = transfer_tags.remove(&tag) {
+                Some(TransferWork::Snapshot {
+                    from,
+                    group_id,
+                    index,
+                }) => {
+                    // GRP-312: the admit names the snapshot that the chunk
+                    // path now holds.
+                    let mut descriptor = vec![0u8; uploaded.descriptor.len()];
+                    if uploaded.descriptor.encode(&mut descriptor).is_ok() {
+                        let joiner = crate::client::GroupJoiner { from, group_id };
+                        let _ = client.admit_joiner(
+                            &joiner,
+                            index,
+                            &descriptor,
+                            unix_now_ms(),
+                            &mut OsRng,
+                        );
+                        if let Some(running) = bridge {
+                            let _ = running.flush(client, &mut OsRng);
+                        }
+                    }
+                }
+                _ => {}
+            },
+            TransferUpdate::Downloaded { tag, plain } => match transfer_tags.remove(&tag) {
+                Some(TransferWork::File { message, .. }) => {
                     let _ = client.download_done(&message, &plain, &mut OsRng);
                 }
-            }
+                Some(TransferWork::Admit { from, group_id }) => {
+                    // GRP-326: the snapshot verifies, and the joiner holds
+                    // the group from here.
+                    let _ =
+                        client.accept_group_admit(from, &group_id, &plain, unix_now(), &mut OsRng);
+                }
+                _ => {}
+            },
             TransferUpdate::Failed { tag } => match transfer_tags.remove(&tag) {
-                Some((message, true)) => {
+                Some(TransferWork::File {
+                    message,
+                    is_upload: true,
+                }) => {
                     let _ = client.upload_failed(&message, &mut OsRng);
                 }
-                Some((message, false)) => {
+                Some(TransferWork::File {
+                    message,
+                    is_upload: false,
+                }) => {
                     let _ = client.download_failed(&message, &mut OsRng);
                 }
-                None => {}
+                // A snapshot that did not move leaves the join where it
+                // was, and the user asks again.
+                _ => {}
             },
         }
     }
@@ -1231,11 +1370,11 @@ impl Inner {
                         .map_or(Vec::new(), |conversation| conversation.0.to_vec()),
                     message: Arc::new(MsgHandle(message)),
                 },
-                // The join flow of Part 11 reaches no view of the app
-                // yet, thus these three change nothing on the screen.
-                Event::GroupOffer { .. } | Event::GroupJoiner { .. } | Event::GroupAdmit { .. } => {
-                    return self.next_event()
-                }
+                Event::GroupOffer { .. } => FfiEvent::GroupOffer,
+                Event::GroupJoiner { .. } => FfiEvent::GroupJoiner,
+                // The snapshot of an admit is already on its way: the
+                // commit of the record asked for it.
+                Event::GroupAdmit { .. } => return self.next_event(),
                 Event::Locked => FfiEvent::Locked,
                 Event::IntegrityFault => FfiEvent::IntegrityFault,
             });
@@ -1385,6 +1524,7 @@ pub fn init(
             groups: None,
             group_tags: BTreeMap::new(),
             next_group_tag: 0,
+            group_reading: BTreeSet::new(),
         }),
         changed: Condvar::new(),
         runtime: Mutex::new(None),
@@ -1416,6 +1556,11 @@ impl Persist for HandleStore {
             .client
             .commit_network(&changes, received, unix_now_ms(), &mut OsRng)
             .is_ok();
+        // The join flow of Part 11 moves with a record of a contact: an
+        // admit asks for its snapshot, and the work of a group goes out.
+        // Neither waits for a view to read an event.
+        inner.fetch_admitted_snapshots();
+        inner.pump_groups();
         drop(inner);
         handle.changed.notify_all();
         committed
@@ -1443,7 +1588,12 @@ impl Persist for HandleStore {
 impl Handle {
     /// A task of the runtime gives one update of the network to the client.
     fn on_transfer_update(&self, update: TransferUpdate) {
-        locked(&self.inner).end_transfer(update);
+        let mut inner = locked(&self.inner);
+        inner.end_transfer(update);
+        // A snapshot that arrived brought a group with it, and that group
+        // takes its subscription now.
+        inner.pump_groups();
+        drop(inner);
         self.changed.notify_all();
     }
 
@@ -1507,6 +1657,7 @@ impl Handle {
             // they did not complete.
             inner.transfers = None;
             inner.groups = None;
+            inner.group_reading.clear();
         }
         // A record with a descriptor asks for its file.
         inner.pump_transfers();
@@ -1700,6 +1851,7 @@ impl Handle {
             inner.root_ca_path.clone_from(&network.root_ca_path);
             inner.transfers = None;
             inner.groups = None;
+            inner.group_reading.clear();
             let Inner {
                 client,
                 bridge,
@@ -1771,6 +1923,7 @@ impl Handle {
             inner.bridge = None;
             inner.transfers = None;
             inner.groups = None;
+            inner.group_reading.clear();
             inner.spawner = None;
         }
         if let Some(runtime) = locked(&self.runtime).take() {
@@ -1907,6 +2060,93 @@ impl Handle {
         Ok(conversation.0.to_vec())
     }
 
+    /// Step 1 of §11.9.1: offers a group to a contact on their pairwise
+    /// channel. The invitee sees the offer and answers it.
+    pub fn offer_group(&self, group: Vec<u8>, to: Vec<u8>) -> Result<(), FfiError> {
+        let group = conversation_of(&group)?;
+        let to = conversation_of(&to)?;
+        let mut inner = locked(&self.inner);
+        inner
+            .client
+            .offer_group(group, to, unix_now_ms(), &mut OsRng)?;
+        inner.flush_outgoing();
+        Ok(())
+    }
+
+    /// The offers of a group that wait for the user (`GRP-170`).
+    pub fn group_offers(&self) -> Result<Vec<FfiGroupOffer>, FfiError> {
+        Ok(locked(&self.inner)
+            .client
+            .group_offers()?
+            .into_iter()
+            .map(|offer| FfiGroupOffer {
+                from: offer.from.0.to_vec(),
+                group_id: offer.group_id.to_vec(),
+                name: offer.name,
+            })
+            .collect())
+    }
+
+    /// Step 2 of §11.9.1: the user accepted an offer, thus this device
+    /// makes its group keys and asks to come in.
+    pub fn accept_group_offer(&self, from: Vec<u8>, group_id: Vec<u8>) -> Result<(), FfiError> {
+        let from = conversation_of(&from)?;
+        let group_id: [u8; 32] = group_id.try_into().map_err(|_| FfiError::Malformed)?;
+        let mut inner = locked(&self.inner);
+        let held = inner
+            .client
+            .group_offers()?
+            .into_iter()
+            .find(|offer| offer.from == from && offer.group_id == group_id)
+            .ok_or(FfiError::NotFound)?;
+        inner
+            .client
+            .accept_group_offer(&held, unix_now_ms(), &mut OsRng)?;
+        inner.flush_outgoing();
+        Ok(())
+    }
+
+    /// The contacts that asked to come into a group of this device
+    /// (`GRP-310`).
+    pub fn group_joiners(&self) -> Result<Vec<FfiGroupOffer>, FfiError> {
+        Ok(locked(&self.inner)
+            .client
+            .group_joiners()?
+            .into_iter()
+            .map(|joiner| FfiGroupOffer {
+                from: joiner.from.0.to_vec(),
+                group_id: joiner.group_id.to_vec(),
+                name: String::new(),
+            })
+            .collect())
+    }
+
+    /// Steps 3 and 4 of §11.9.1: the admin adds the joiner, posts the add
+    /// to each replica, and puts the roster snapshot on the chunk path.
+    /// The admit follows the upload of that snapshot.
+    pub fn admit_joiner(&self, from: Vec<u8>, group_id: Vec<u8>) -> Result<(), FfiError> {
+        let from = conversation_of(&from)?;
+        let group_id: [u8; 32] = group_id.try_into().map_err(|_| FfiError::Malformed)?;
+        let mut inner = locked(&self.inner);
+        let joiner = crate::client::GroupJoiner { from, group_id };
+        let admission = inner
+            .client
+            .add_joiner(&joiner, unix_now_ms(), &mut OsRng)?;
+        inner.pump_groups();
+        let tag = inner.next_tag(TransferWork::Snapshot {
+            from,
+            group_id,
+            index: admission.index,
+        });
+        inner.send_transfer(TransferCommand::Upload {
+            tag,
+            plain: Zeroizing::new(admission.snapshot),
+            // A snapshot is no media of the user (Part 13 §13.3).
+            shape: Shape::default(),
+        });
+        Ok(())
+    }
+
     /// Whether a conversation names a group.
     pub fn is_group(&self, conversation: Vec<u8>) -> Result<bool, FfiError> {
         let conversation = conversation_of(&conversation)?;
@@ -1918,6 +2158,7 @@ impl Handle {
         let conversation = conversation_of(&conversation)?;
         let info = locked(&self.inner).client.group_info(conversation)?;
         Ok(FfiGroupInfo {
+            group_id: info.group_id.to_vec(),
             own_index: info.own_index,
             members: info.members,
             epoch: info.epoch,

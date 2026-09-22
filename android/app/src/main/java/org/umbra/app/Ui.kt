@@ -67,6 +67,7 @@ sealed interface Screen {
     data class ScanSafetyNumber(val conversation: Conversation) : Screen
     data class Photo(val conversation: Conversation, val line: Line) : Screen
     data class GroupDetails(val conversation: Conversation) : Screen
+    data class InviteToGroup(val conversation: Conversation) : Screen
 
     /** The conversation of a view of one contact. */
     val contact: Conversation?
@@ -81,6 +82,7 @@ sealed interface Screen {
             is ScanSafetyNumber -> conversation
             is Photo -> conversation
             is GroupDetails -> conversation
+            is InviteToGroup -> conversation
             else -> null
         }
 }
@@ -183,7 +185,8 @@ private fun ContactView(
         is Screen.VerifyCode -> VerifyCodeScreen(chat, top.starts, pop)
         is Screen.SafetyNumber -> SafetyNumberScreen(chat, pop)
         is Screen.Photo -> PhotoScreen(top.line, chat, pop)
-        is Screen.GroupDetails -> GroupDetailsScreen(chat, pop)
+        is Screen.GroupDetails -> GroupDetailsScreen(chat, pop, push)
+        is Screen.InviteToGroup -> InviteToGroupScreen(chat, pop)
         is Screen.ScanSafetyNumber -> ScanSafetyNumberScreen(chat, pop)
         else -> Unit
     }
@@ -340,6 +343,7 @@ private fun ChatsTab(push: (Screen) -> Unit) {
     Column(Modifier.fillMaxSize()) {
         // Mockup 153: a degraded state has its one line above the title.
         ConnectionNote()
+        GroupOfferPrompt()
         TabTitle("Chats")
         // A group with no message still shows: the user made it, and its
         // creation is the act that put it here.
@@ -448,7 +452,7 @@ private fun ContactsTab(push: (Screen) -> Unit) {
 }
 
 @Composable
-private fun EmptyState(title: String) {
+fun EmptyState(title: String) {
     Text(
         title,
         style = MaterialTheme.typography.bodyLarge,

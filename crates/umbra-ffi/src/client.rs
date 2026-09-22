@@ -14,7 +14,10 @@ mod groups;
 
 pub use files::{DownloadJob, ErasureJob, FileInfo, FileState, UploadJob};
 use files::{FileQueues, CHUNK_CRED, FILE_DATA, FILE_STATE};
-pub use groups::{GroupInfo, GroupQueueJob, GROUP_NAME_MAX};
+pub use groups::{
+    GroupAdmitWaiting, GroupInfo, GroupJoiner, GroupOffer, GroupPost, GroupQueueJob,
+    GroupSubscription, GROUP_NAME_MAX,
+};
 use umbra_core::{
     directory::path::IngressPins,
     identity::address::safety_number,

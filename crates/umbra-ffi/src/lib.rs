@@ -560,7 +560,7 @@ mod tests {
         let mut other = new_client(&mut rng);
         let member = join_group(&mut client, &mut other, conversation, &mut rng);
         assert!(other
-            .on_group_record(&[0xC3; 32], &post.record, 1_700_000_002_000, &mut rng)
+            .on_group_record(&[0xC3; 32], 1, &post.record, 1_700_000_002_000, &mut rng)
             .unwrap()
             .is_none());
 
@@ -571,7 +571,7 @@ mod tests {
             .unwrap();
         let post = client.take_group_post().unwrap();
         let message = other
-            .on_group_record(&[0xC3; 32], &post.record, 1_700_000_003_000, &mut rng)
+            .on_group_record(&[0xC3; 32], 1, &post.record, 1_700_000_003_000, &mut rng)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -587,14 +587,14 @@ mod tests {
 
         // WIR-065: the copy from the other replica gives no second message.
         assert!(other
-            .on_group_record(&[0xD4; 32], &post.record, 1_700_000_003_000, &mut rng)
+            .on_group_record(&[0xD4; 32], 1, &post.record, 1_700_000_003_000, &mut rng)
             .unwrap()
             .is_none());
         assert_eq!(other.next_event(), None);
 
         // A record of a queue that this device does not hold is ignored.
         assert!(other
-            .on_group_record(&[0xEE; 32], &post.record, 1_700_000_004_000, &mut rng)
+            .on_group_record(&[0xEE; 32], 1, &post.record, 1_700_000_004_000, &mut rng)
             .unwrap()
             .is_none());
     }
@@ -771,7 +771,7 @@ mod tests {
             .unwrap();
         let post = admin.take_group_post().unwrap();
         let message = joiner
-            .on_group_record(&[0xC3; 32], &post.record, 1_700_000_006_500, &mut rng)
+            .on_group_record(&[0xC3; 32], 1, &post.record, 1_700_000_006_500, &mut rng)
             .unwrap()
             .unwrap();
         let mut view = View::default();

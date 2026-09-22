@@ -63,6 +63,7 @@ enum JoinEntry {
         name: String,
     },
     Admitted {
+        from: ConversationId,
         creator_roster_pk: Vec<u8>,
         admit: Vec<u8>,
         name: String,
@@ -92,6 +93,17 @@ pub struct GroupAdmission {
     pub snapshot: Vec<u8>,
     /// The member index that the admin gave the joiner.
     pub index: u16,
+}
+
+/// An admit that waits for the snapshot it names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupAdmitWaiting {
+    /// The pairwise conversation that carried it.
+    pub from: ConversationId,
+    /// The group.
+    pub group_id: [u8; 32],
+    /// The `FileDescriptor` of the `RosterSnapshot` (`GRP-323`).
+    pub descriptor: Vec<u8>,
 }
 
 /// A joiner that asked to come in, as the inviting admin holds it.
@@ -151,6 +163,20 @@ pub struct GroupQueueJob {
     pub write_pk: [u8; 32],
     /// The owner credential of this replica (`GRP-190`).
     pub own: Secret<32>,
+}
+
+/// One `GSUB` that a group needs, at one replica (`GRP-203`).
+pub struct GroupSubscription {
+    /// The conversation of the group.
+    pub conversation: ConversationId,
+    /// The relay.
+    pub relay: [u8; 32],
+    /// The group queue at that relay.
+    pub group_queue_id: [u8; 32],
+    /// `read_sk` of the epoch.
+    pub read: Secret<32>,
+    /// The cursor of this device at that replica (`GRP-202`).
+    pub from_seq: u32,
 }
 
 /// One replica of a group queue, as a post names it.
@@ -790,6 +816,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             creator_roster_pk,
             admit,
             name,
+            ..
         }) = self.join_entry(&row)?
         else {
             return Err(Error::NotFound);
@@ -869,6 +896,33 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(out)
     }
 
+    /// The admits that wait for the snapshot they name (`GRP-313`). The
+    /// caller fetches each descriptor on the chunk path and then calls
+    /// [`Client::accept_group_admit`].
+    pub fn group_admits(&self) -> Result<Vec<GroupAdmitWaiting>, Error> {
+        let mut out = Vec::new();
+        for row in self.join_rows()? {
+            let Some(JoinEntry::Admitted { from, admit, .. }) = self.join_entry(&row)? else {
+                continue;
+            };
+            let Ok(control) = GroupControl::parse(&admit) else {
+                continue;
+            };
+            let Ok(invitation) = GroupInvitation::parse(control.payload) else {
+                continue;
+            };
+            let InvitationStage::Admit(stage) = &invitation.stage else {
+                continue;
+            };
+            out.push(GroupAdmitWaiting {
+                from,
+                group_id: invitation.group_id,
+                descriptor: stage.descriptor.to_vec(),
+            });
+        }
+        Ok(out)
+    }
+
     fn join_row(&self, from: ConversationId, group_id: &[u8; 32]) -> Result<RowId, Error> {
         let store = &self.open_ref()?.store;
         Ok(store.row_id(GROUP_JOIN, &[from.0.as_slice(), group_id].concat()))
@@ -940,6 +994,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .map_err(|_| Error::Integrity)?;
                 let (admit, name) = rest.split_at_checked(len).ok_or(Error::Integrity)?;
                 JoinEntry::Admitted {
+                    from,
                     creator_roster_pk: key.to_vec(),
                     admit: admit.to_vec(),
                     name: core::str::from_utf8(name)
@@ -1091,6 +1146,38 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         self.queue_group_post(conversation, None, &app, now_ms, rng)
     }
 
+    /// One `GSUB` for each group that holds its queues. A reader takes
+    /// one replica in each session and alternates across sessions
+    /// (`GRP-203`, `GRP-204`).
+    pub fn group_subscriptions<R: CryptoRng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+    ) -> Result<Vec<GroupSubscription>, Error> {
+        let mut out = Vec::new();
+        for conversation in self.group_conversations()? {
+            let mut group = self.group_of(conversation)?;
+            let Some(credentials) = group.credentials().map(|held| held.read_secret()) else {
+                continue;
+            };
+            let Some(replicas) = group.replicas_mut() else {
+                continue;
+            };
+            let which = replicas.pick(rng.next_u32() & 1 == 1);
+            let Some(reference) = replicas.reference(which) else {
+                continue;
+            };
+            out.push(GroupSubscription {
+                conversation,
+                relay: reference.relay_id,
+                group_queue_id: reference.group_queue_id,
+                read: credentials,
+                from_seq: replicas.cursor(which),
+            });
+            self.save_group(conversation, &group, rng)?;
+        }
+        Ok(out)
+    }
+
     /// The next record that waits for the run of the group queues.
     pub fn take_group_post(&mut self) -> Option<GroupPost> {
         self.groups.posts.pop_front()
@@ -1101,6 +1188,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     pub fn on_group_record<R: CryptoRng + ?Sized>(
         &mut self,
         group_queue_id: &[u8; 32],
+        seq: u32,
         record: &[u8],
         now_ms: u64,
         rng: &mut R,
@@ -1110,12 +1198,36 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         };
         let mut group = self.group_of(conversation)?;
         let outcome = group.receive(record, now_ms / 1_000);
+        // GRP-202: the cursor of that replica moves to the record.
+        let which = (0..GROUP_REPLICAS).find(|index| {
+            group
+                .replicas()
+                .and_then(|held| held.reference(*index))
+                .is_some_and(|held| held.group_queue_id == *group_queue_id)
+        });
+        if let Some((which, replicas)) = which.zip(group.replicas_mut()) {
+            let is_epoch_key = matches!(outcome, Ok(Outcome::EpochKey { .. }));
+            replicas.arrived(which, seq, is_epoch_key);
+        }
         // The counters and the held records moved, whatever the outcome.
         self.save_group(conversation, &group, rng)?;
-        let Ok(Outcome::Content { app, .. }) = outcome else {
+        let Ok(Outcome::Content { sender, app, .. }) = outcome else {
             return Ok(None);
         };
         let parsed = umbra_wire::app::AppMessage::parse(&app, umbra_wire::app::Channel::Group)?;
+        // A roster object moves the roster and is no message (`GRP-318`).
+        if parsed.kind == AppKind::GroupControl {
+            let Ok(control) = GroupControl::parse(parsed.body) else {
+                return Ok(None);
+            };
+            if group
+                .apply_control(&control, sender, now_ms / 1_000)
+                .is_ok()
+            {
+                self.save_group(conversation, &group, rng)?;
+            }
+            return Ok(None);
+        }
         let open = self.open_mut()?;
         let reference = super::msg_ref(&open.device_set_key, &parsed.msg_id);
         let natural = [conversation.0.as_slice(), &reference].concat();

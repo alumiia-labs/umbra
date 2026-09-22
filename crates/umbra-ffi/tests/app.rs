@@ -1214,6 +1214,114 @@ fn group_update(updates: &mut tokio::sync::mpsc::UnboundedReceiver<GroupUpdate>)
 }
 
 #[test]
+fn one_app_offers_a_group_and_the_other_app_joins_it() {
+    let relays = tokio::runtime::Runtime::new().unwrap();
+    let network = start_signed_network(&relays);
+    let directory = std::env::temp_dir().join(format!("umbra-join-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    for name in ["alice.db", "bob.db"] {
+        let _ = std::fs::remove_file(directory.join(name));
+    }
+    let alice = launch(&directory, "alice.db", 1);
+    let bob = launch(&directory, "bob.db", 2);
+    for handle in [&alice, &bob] {
+        let verified = handle
+            .network_of_manifest(
+                network.manifest.clone(),
+                network.keyset.clone(),
+                0,
+                HOST.into(),
+                Some(CA.into()),
+            )
+            .unwrap();
+        handle.clone().connect(verified.network).unwrap();
+    }
+    alice.invite().unwrap();
+    let link = wait_for(&alice, |event| match event {
+        FfiEvent::Invitation { link } => Some(link),
+        _ => None,
+    });
+    bob.accept(link).unwrap();
+    let alice_conversation = wait_for_contact(&alice);
+    let bob_conversation = wait_for_contact(&bob);
+
+    // Alice makes the group, and its two queues answer.
+    let group = alice.create_group("Summit".into()).unwrap();
+    let start = Instant::now();
+    while start.elapsed() < STEP {
+        if alice.group_info(group.clone()).unwrap().is_ready {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let info = alice.group_info(group.clone()).unwrap();
+    assert!(info.is_ready, "the group took no queues");
+
+    // Step 1: the offer reaches Bob on the pairwise channel.
+    alice
+        .offer_group(group.clone(), alice_conversation.clone())
+        .unwrap();
+    wait_for(&bob, |event| match event {
+        FfiEvent::GroupOffer => Some(()),
+        _ => None,
+    });
+    let offers = bob.group_offers().unwrap();
+    assert_eq!(offers.len(), 1);
+    assert_eq!(offers[0].name, "Summit");
+    assert_eq!(offers[0].from, bob_conversation);
+
+    // Step 2: Bob asks to come in, and Alice sees the request.
+    bob.accept_group_offer(offers[0].from.clone(), offers[0].group_id.clone())
+        .unwrap();
+    wait_for(&alice, |event| match event {
+        FfiEvent::GroupJoiner => Some(()),
+        _ => None,
+    });
+    let joiners = alice.group_joiners().unwrap();
+    assert_eq!(joiners.len(), 1);
+    assert_eq!(joiners[0].group_id, info.group_id);
+
+    // Steps 3 to 5: the add, the snapshot on the chunk path, and the admit.
+    alice
+        .admit_joiner(joiners[0].from.clone(), joiners[0].group_id.clone())
+        .unwrap();
+    // The add applied at once, thus the roster of Alice holds two members.
+    assert_eq!(alice.group_info(group.clone()).unwrap().members, 2);
+    let start = Instant::now();
+    let mut joined = None;
+    while start.elapsed() < Duration::from_secs(60) {
+        if let Some(summary) = bob
+            .summaries()
+            .unwrap()
+            .into_iter()
+            .find(|summary| bob.is_group(summary.conversation.clone()).unwrap_or(false))
+        {
+            joined = Some(summary.conversation);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let joined = joined.expect("Bob did not come into the group");
+    let at_bob = bob.group_info(joined.clone()).unwrap();
+    assert_eq!(at_bob.group_id, info.group_id);
+    assert_eq!((at_bob.own_index, at_bob.members), (1, 2));
+    assert!(at_bob.is_ready);
+    assert_eq!(alice.group_info(group.clone()).unwrap().members, 2);
+    assert!(alice.group_joiners().unwrap().is_empty());
+
+    // A message of Alice reaches the member that came in.
+    let draft = alice.new_draft(group.clone()).unwrap();
+    draft.set_text(units("we leave at six")).unwrap();
+    alice.send_draft(draft).unwrap();
+    let (conversation, message) = wait_for_message(&bob);
+    assert_eq!(conversation, joined);
+    assert_eq!(rendered(&bob, message), "we leave at six");
+
+    alice.disconnect();
+    bob.disconnect();
+}
+
+#[test]
 fn two_members_talk_in_a_group_over_the_relays_of_a_signed_network() {
     let relays = tokio::runtime::Runtime::new().unwrap();
     let network = start_signed_network(&relays);
