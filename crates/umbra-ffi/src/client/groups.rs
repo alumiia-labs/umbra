@@ -673,13 +673,26 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
+        self.send_pairwise_app(conversation, AppKind::GroupControl, body, now_ms, rng)
+    }
+
+    /// Sends one `AppMessage` of `kind` that no view shows on a pairwise
+    /// channel.
+    fn send_pairwise_app<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        kind: AppKind,
+        body: &[u8],
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
         if self.is_group(conversation)? {
             return Err(Error::Malformed);
         }
         let mut msg_id = [0u8; 16];
         rng.fill_bytes(&mut msg_id);
         let record = AppMessage {
-            kind: AppKind::GroupControl,
+            kind,
             msg_id,
             sent_at: now_ms,
             body,
@@ -1068,6 +1081,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let admitted = accept_admit(&invitation, &snapshot, &add_hash, &creator_roster_pk, now)
             .map_err(|_| Error::Integrity)?;
         let conversation = self.adopt_group(admitted, &seed, &name, rng)?;
+        // GRP-290: the contact that brought this device in is a member it
+        // can ask on a pairwise channel when the group queue refuses it.
+        self.note_contact_in(conversation, b"via", from, rng)?;
         // GRP-068: this member may build a snapshot later, thus it keeps
         // the path that admitted it.
         for grant in umbra_core::group::roster::split_path(snapshot.path)? {
@@ -1863,6 +1879,39 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         key
     }
 
+    /// Keeps a contact that is a member of a group under a key of its own.
+    pub(crate) fn note_contact_in<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        tag: &[u8],
+        contact: ConversationId,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let key = [conversation.0.as_slice(), tag].concat();
+        let open = self.open_mut()?;
+        let row = open.store.row_id(GROUP_MEMBER, &key);
+        let mut batch = open.store.begin();
+        batch.put(GROUP_MEMBER, row, Some(conversation.0), &contact.0, rng)?;
+        Ok(batch.commit()?)
+    }
+
+    /// The contacts of this device that are members of a group, as far as
+    /// this device knows them: the one that brought it in, and the ones
+    /// that an admin of this device added.
+    fn contacts_in(&self, conversation: ConversationId) -> Result<Vec<ConversationId>, Error> {
+        let store = &self.open_ref()?.store;
+        let mut out = Vec::new();
+        for (_, value) in store.list(GROUP_MEMBER, Some(&conversation.0))? {
+            if let Ok(id) = <[u8; 16]>::try_from(value.as_slice()) {
+                let contact = ConversationId(id);
+                if !out.contains(&contact) {
+                    out.push(contact);
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Names the contact behind a member index that an admin of this
     /// device added.
     fn note_member_contact<R: CryptoRng + ?Sized>(
@@ -2026,9 +2075,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Ok(request) = KeyRequest::parse(body) else {
             return;
         };
+        // WIR-523: 0 names the sender, and any other value names the
+        // member that another member carries the request for.
+        let target = match request.index {
+            0 => Some(sender),
+            carried => u16::try_from(carried - 1).ok(),
+        };
+        let Some(target) = target else {
+            return;
+        };
         if request.scope != KeyScope::GroupEpoch
             || request.id != *group.group_id()
-            || !group.may_supply(sender, request.epoch)
+            || !group.may_supply(target, request.epoch)
         {
             return;
         }
@@ -2043,8 +2101,112 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let at = now.saturating_add(group.rotation_delay(rng));
         self.groups
             .key_answers
-            .entry((conversation, sender))
+            .entry((conversation, target))
             .or_insert(at);
+    }
+
+    /// Each lapsed group that lacks its epoch and may ask on a pairwise
+    /// channel now, inside the rate of `GRP-295` (`GRP-290`).
+    pub fn groups_to_ask_pairwise(
+        &mut self,
+        now_ms: u64,
+    ) -> Result<Vec<(ConversationId, u32)>, Error> {
+        let now = now_ms / 1_000;
+        let mut due = Vec::new();
+        for conversation in self.group_conversations()? {
+            if !self.group_lapsed(conversation)? {
+                continue;
+            }
+            let group = self.group_of(conversation)?;
+            let Some(epoch) = group.lacks_epoch() else {
+                continue;
+            };
+            let entry = self.groups.key_requests.entry(conversation).or_default();
+            if entry
+                .1
+                .is_some_and(|at| now.saturating_sub(at) < umbra_core::group::GROUP_SLOT)
+            {
+                continue;
+            }
+            if entry.0.allow(now) {
+                entry.1 = Some(now);
+                due.push((conversation, epoch));
+            }
+        }
+        Ok(due)
+    }
+
+    /// Asks each contact of this device in a group for `epoch` on the
+    /// pairwise channel, and names this member by `index` (`GRP-290`,
+    /// `WIR-523`).
+    pub fn request_epoch_pairwise<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        epoch: u32,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<usize, Error> {
+        let group = self.group_of(conversation)?;
+        let request = KeyRequest {
+            scope: KeyScope::GroupEpoch,
+            id: *group.group_id(),
+            epoch,
+            index: u32::from(group.own_index()) + 1,
+        };
+        let mut body = [0u8; 64];
+        let n = request.encode(&mut body)?;
+        let body = body.get(..n).ok_or(Error::Malformed)?.to_vec();
+        let contacts = self.contacts_in(conversation)?;
+        for contact in &contacts {
+            self.send_pairwise_app(*contact, AppKind::KeyRequest, &body, now_ms, rng)?;
+        }
+        Ok(contacts.len())
+    }
+
+    /// A `KeyRequest` of scope `0x02` that a pairwise channel carried. A
+    /// member that holds the epoch supplies it at once, because no other
+    /// member read the request; one that cannot posts it on the group queue
+    /// with the index of the member that lacks it, thus another member can
+    /// (`GRP-376`, `WIR-523`). The supply is sealed to the key of the member
+    /// that the index names, thus a false index gains nothing.
+    pub(super) fn on_pairwise_key_request<R: CryptoRng + ?Sized>(
+        &mut self,
+        body: &[u8],
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let Ok(request) = KeyRequest::parse(body) else {
+            return Ok(());
+        };
+        if request.scope != KeyScope::GroupEpoch || request.index == 0 {
+            return Ok(());
+        }
+        let conversation = self.conversation_of_group(&request.id)?;
+        if !self.is_group(conversation)? || self.group_closed(conversation)? {
+            return Ok(());
+        }
+        let Ok(target) = u16::try_from(request.index - 1) else {
+            return Ok(());
+        };
+        let rate = self
+            .groups
+            .key_answers_rate
+            .entry(conversation)
+            .or_default();
+        if !rate.allow(now_ms / 1_000) {
+            return Ok(());
+        }
+        let group = self.group_of(conversation)?;
+        if group.may_supply(target, request.epoch) {
+            return self.answer_key_request(conversation, target, now_ms, rng);
+        }
+        if group.own_role().is_some() {
+            let mut carried = [0u8; 64];
+            let n = request.encode(&mut carried)?;
+            let carried = carried.get(..n).ok_or(Error::Malformed)?.to_vec();
+            self.post_group_app(conversation, AppKind::KeyRequest, &carried, now_ms, rng)?;
+        }
+        Ok(())
     }
 
     /// Each request whose backoff passed with no supply for its member
@@ -2234,6 +2396,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // installs no epoch.
         if installed && group.epoch() != epoch_before {
             self.queue_rekeys(&group)?;
+            // GRP-405: the epoch that a lapsed member lacked arrived, and
+            // the credentials of it take its records again.
+            if self.group_lapsed(conversation)? {
+                let row = Self::group_row(&group, OPEN)?;
+                let open = self.open_mut()?;
+                let mut batch = open.store.begin();
+                batch.put(GROUP, conversation.0, None, &row, rng)?;
+                batch.commit()?;
+                self.groups.key_requests.remove(&conversation);
+            }
         }
         // GRP-402: owner credentials from another admin answer the call for
         // them, thus this admin stands down.

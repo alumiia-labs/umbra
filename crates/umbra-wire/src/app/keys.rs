@@ -70,13 +70,20 @@ pub struct KeyRequest {
     pub id: [u8; 32],
     /// The ratchet epoch, the group epoch lacked, or the roster epoch held.
     pub epoch: u32,
-    /// The `send_index` of the record, or 0.
+    /// The `send_index` of the record. For scope `0x02`: 0 for the member
+    /// that sent it, or 1 plus the member index of the member that lacks
+    /// the epoch, when another carries it (`WIR-523`). For scope `0x03`: 0.
     pub index: u32,
 }
 
 impl KeyRequest {
     fn check(&self) -> Result<(), Error> {
-        if self.scope != KeyScope::Session && self.index != 0 {
+        let bound = match self.scope {
+            KeyScope::Session => u32::MAX,
+            KeyScope::GroupEpoch => u32::from(u16::MAX) + 1,
+            KeyScope::RosterSnapshot => 0,
+        };
+        if self.index > bound {
             return Err(Error::Malformed);
         }
         Ok(())
@@ -295,11 +302,24 @@ mod tests {
                 assert_eq!(KeySupply::parse(&out[..45]).unwrap(), sup);
             }
         }
-        let bad = KeyRequest {
+        // WIR-523: scope 0x02 names a member as 1 plus its index, and no
+        // index above the member range; scope 0x03 names none.
+        let carried = KeyRequest {
             scope: KeyScope::GroupEpoch,
             id: [1; 32],
             epoch: 3,
             index: 1,
+        };
+        assert!(carried.encode(&mut out).is_ok());
+        let beyond = KeyRequest {
+            index: u32::from(u16::MAX) + 2,
+            ..carried
+        };
+        assert!(beyond.encode(&mut out).is_err());
+        let bad = KeyRequest {
+            scope: KeyScope::RosterSnapshot,
+            index: 1,
+            ..carried
         };
         assert!(bad.encode(&mut out).is_err());
         out[1] = 0x04;

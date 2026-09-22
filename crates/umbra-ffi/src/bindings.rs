@@ -1110,6 +1110,19 @@ impl Inner {
                     .request_epoch(conversation, epoch, now_ms, &mut OsRng);
             }
         }
+        // GRP-290: a lapsed member asks the members it knows as contacts.
+        let mut asked = false;
+        if let Ok(lapsed) = self.client.groups_to_ask_pairwise(now_ms) {
+            for (conversation, epoch) in lapsed {
+                asked |= self
+                    .client
+                    .request_epoch_pairwise(conversation, epoch, now_ms, &mut OsRng)
+                    .is_ok_and(|sent| sent > 0);
+            }
+        }
+        if asked {
+            self.flush_outgoing();
+        }
         for (conversation, index) in self.client.key_answers_due(now_ms) {
             let _ = self
                 .client

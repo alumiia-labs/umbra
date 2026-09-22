@@ -840,8 +840,11 @@ the epoch the member lacks, and `index` is 0.
   `KeySupply` of status `0x01` on the path that carried the request. For scope
   `0x02` the `body` of a `KeySupply` is empty, and status `0x01` means "a
   one-slot epoch-key record was posted". **[GRP-376]** A member that receives
-  a `KeyRequest` of scope `0x02` on a pairwise channel MUST post it again as a
-  group record, thus every member reads it and the backoff applies.
+  a `KeyRequest` of scope `0x02` on a pairwise channel MUST answer it at once
+  when `GRP-404` permits, because no other member read it, and MUST post it
+  otherwise as a group record that keeps the `index` of `WIR-523`, thus
+  another member answers under the backoff. The supply is sealed to the key
+  of the member that `index` names, thus a false `index` gains nothing.
 - **[GRP-377]** A member MUST NOT answer a `KeyRequest` from an index that the
   current roster does not hold. **[GRP-404]** A member MUST NOT answer it for
   an index that the active set at the `roster_epoch` of the current epoch
@@ -850,7 +853,9 @@ the epoch the member lacks, and `index` is 0.
   `KEY_REQUEST_RATE` epoch requests for one group in each 24 h. **[GRP-378]**
   A member MUST discard an epoch request above that rate. §11.10 gives 8.
 - **[GRP-297]** If no path exists, the member MUST show the group as
-  "membership lapsed", and it needs a new invitation.
+  "membership lapsed", and it needs a new invitation. **[GRP-405]** A member
+  that shows a group as lapsed and then installs the epoch it lacked MUST
+  show the group as open again.
 
 > *Cause of `GRP-404`.* An earlier form answered any index that the roster
 > holds. A member that joined inside the current epoch holds the chain from

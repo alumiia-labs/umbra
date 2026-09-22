@@ -601,6 +601,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut planned = Vec::new();
         let mut wanted: Vec<DownloadJob> = Vec::new();
         let mut control: Vec<(ConversationId, Vec<u8>)> = Vec::new();
+        // The requests of Part 11 §11.4.3 of a member that lacks an epoch.
+        let mut key_requests: Vec<(ConversationId, Vec<u8>)> = Vec::new();
         for change in changes {
             planned.push(match change {
                 StateChange::Contact { contact, state } => Planned::Put(
@@ -685,6 +687,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 // The join flow of Part 11 §11.9.1 runs after this loop,
                 // because it reads and writes groups of its own.
                 control.push((conversation, parsed.body.to_vec()));
+                continue;
+            }
+            if parsed.kind == AppKind::KeyRequest {
+                key_requests.push((conversation, parsed.body.to_vec()));
                 continue;
             }
             if parsed.kind == AppKind::Reaction {
@@ -976,6 +982,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         self.files.downloads.extend(wanted);
         for (conversation, body) in control {
             self.on_pairwise_control(conversation, &body, rng)?;
+        }
+        for (_, body) in key_requests {
+            self.on_pairwise_key_request(&body, now_ms, rng)?;
         }
         Ok(())
     }
@@ -2392,7 +2401,7 @@ fn is_request(plain: &[u8]) -> Result<bool, Error> {
     // is no message of that conversation (`GRP-309`, `GRP-312`).
     Ok(matches!(
         parsed.kind,
-        AppKind::Edit | AppKind::Reaction | AppKind::GroupControl
+        AppKind::Edit | AppKind::Reaction | AppKind::GroupControl | AppKind::KeyRequest
     ) || tombstone_of(&parsed)? == Some(Tombstone::Request))
 }
 

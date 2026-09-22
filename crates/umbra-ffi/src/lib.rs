@@ -986,6 +986,45 @@ mod tests {
         let info = other.group_info(member).unwrap();
         assert!(info.is_lapsed && info.is_closed);
         assert!(!client.group_info(conversation).unwrap().is_lapsed);
+
+        // GRP-290: the lapsed member asks a contact that is a member on
+        // their pairwise channel, and names itself by index (`WIR-523`).
+        let peer_at_client = ContactId([0x61; 32]);
+        let peer_at_other = ContactId([0x62; 32]);
+        let pair_at_client = client.conversation_for(&peer_at_client.0).unwrap();
+        let pair_at_other = other.conversation_for(&peer_at_other.0).unwrap();
+        other
+            .note_contact_in(member, b"via", pair_at_other, &mut rng)
+            .unwrap();
+        let at = ms(later + 91 * DAY);
+        assert_eq!(other.groups_to_ask_pairwise(at).unwrap(), vec![(member, 3)]);
+        assert_eq!(
+            other
+                .request_epoch_pairwise(member, 3, at, &mut rng)
+                .unwrap(),
+            1
+        );
+        let asked = other.take_outgoing().unwrap();
+        assert_eq!(asked.conversation, pair_at_other);
+        // GRP-376: the owner holds the epoch and supplies it at once, and
+        // the request is no message of the pairwise conversation.
+        deliver(&mut client, &peer_at_client, &asked.app, at, &mut rng);
+        assert!(client
+            .summaries()
+            .unwrap()
+            .iter()
+            .filter(|summary| summary.conversation == pair_at_client)
+            .all(|summary| summary.last.is_none()));
+        let supply = client.take_group_post().unwrap();
+        let _notice = client.take_group_post().unwrap();
+        let reopened = other
+            .on_group_record(&[0xC3; 32], 10, &supply.record, at, &mut rng)
+            .unwrap();
+        assert!(reopened.is_some());
+        // GRP-407: the epoch it lacked came, thus the group is open again.
+        let info = other.group_info(member).unwrap();
+        assert!(!info.is_lapsed && !info.is_closed);
+        assert_eq!(info.epoch, 3);
     }
 
     #[test]

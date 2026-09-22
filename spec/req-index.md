@@ -70,18 +70,18 @@ each column when a crate implements the requirement and a test covers it.
 | `NET` | 225 | 84 | 1 | 0 | 8 | **318** |
 | `IDN` | 120 | 43 | 1 | 0 | 5 | **169** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
-| `WIR` | 390 | 87 | 0 | 0 | 6 | **483** |
+| `WIR` | 391 | 87 | 0 | 0 | 6 | **484** |
 | `DEV` | 179 | 87 | 2 | 0 | 7 | **275** |
 | `NTF` | 67 | 30 | 0 | 0 | 2 | **99** |
 | `DIS` | 123 | 37 | 0 | 0 | 1 | **161** |
 | `REL` | 124 | 32 | 1 | 0 | 2 | **159** |
-| `GRP` | 218 | 62 | 0 | 0 | 6 | **286** |
+| `GRP` | 219 | 62 | 0 | 0 | 6 | **287** |
 | `COM` | 299 | 96 | 0 | 0 | 5 | **400** |
 | `ATT` | 139 | 46 | 1 | 0 | 2 | **188** |
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
 | `IMP` | 112 | 41 | 0 | 0 | 2 | **155** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2215 | 717 | 7 | 0 | 53 | **2992** |
+| **All** | 2217 | 717 | 7 | 0 | 53 | **2994** |
 
 ## SCP — Scope and Conventions
 
@@ -1277,6 +1277,7 @@ Source: `spec/06-wire-format.md`
 | `WIR-520` | §6.6.3 | MUST | An admit | An admit MUST carry `read_sk_e` and `write_sk_e` of the epoch that it names. |  |  |
 | `WIR-521` | §6.6.3 | MUST | A parser | A parser MUST reject an admit whose `body_len` is not 249 plus `desc_len`. |  |  |
 | `WIR-522` | §6.4.5 | MUST | It | It MUST replace `own_pk` with the third value, and it MUST keep no previous `own_pk`: a command under the owner key that the `GKEY` replaced is refused at once. |  |  |
+| `WIR-523` | §6.6.11 | MUST | A request of scope `0x02` on a pairwise channel | A request of scope `0x02` on a pairwise channel MUST carry 1 plus the member index of the requester in `index`, and one that another member posts on the group queue for it keeps that value; the tag of a group record names its poster and not the member that lacks the epoch. |  |  |
 
 ## DEV — Device Sets
 
@@ -2292,6 +2293,7 @@ Source: `spec/11-private-groups.md`
 | `GRP-402` | §11.4.3 | MUST NOT | (unstated) | A member at `admin` or above that holds the owner credentials and reads a roster object by which a member that held them left the roles at `admin` or above, or left the group, MUST do the same after the backoff of `GRP-358`, and MUST NOT do it when a record of `GRP-400` reached it during that backoff. |  |  |
 | `GRP-403` | §11.9.8 | MUST | A joiner | A joiner MUST verify the path in chain order from the creator as `owner`, MUST take the role of a granter from the path at that point, and MUST take the key hash of a granter from its entry or, for a granter that left the group, from the grant of the path that named it. |  |  |
 | `GRP-404` | §11.4.3 | MUST NOT | A member | A member MUST NOT answer it for an index that the active set at the `roster_epoch` of the current epoch does not hold, and a member that holds no `K_e` of that epoch MUST NOT answer it. |  |  |
+| `GRP-405` | §11.4.3 | MUST | (unstated) | A member that shows a group as lapsed and then installs the epoch it lacked MUST show the group as open again. |  |  |
 
 ## COM — Public Communities
 

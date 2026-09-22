@@ -2386,7 +2386,9 @@ KeyRequest {                      // kind 0x34
     epoch     u32       // scope 0x01: the ratchet epoch
                         // scope 0x02: the group epoch that the requester lacks
                         // scope 0x03: the roster epoch that the requester holds
-    index     u32       // the send_index of the record, or 0 for scope 0x02 and 0x03
+    index     u32       // scope 0x01: the send_index of the record
+                        // scope 0x02: 0 for the sender, or 1 + the member index of the member that lacks it (WIR-523)
+                        // scope 0x03: 0
 }
 
 KeySupply {                       // kind 0x35
@@ -2430,9 +2432,12 @@ record.
    `GROUP_WRITE_GRACE` and an epoch inside `GROUP_EPOCH_GRACE`. **[WIR-457]**
    Otherwise a client MUST send that request on a pairwise channel with a
    member of the group. **[WIR-458]** A client MUST NOT send a key request on
-   a community channel. A member below `admin` that receives a request of
-   scope `0x02` or `0x03` on a pairwise channel posts it again as a group
-   record, and Part 11 §11.4.3 gives that rule. A member that holds no path
+   a community channel. **[WIR-523]** A request of scope `0x02` on a pairwise
+   channel MUST carry 1 plus the member index of the requester in `index`,
+   and one that another member posts on the group queue for it keeps that
+   value; the tag of a group record names its poster and not the member that
+   lacks the epoch. A request of scope `0x02` that its requester posts MUST
+   carry 0. Part 11 §11.4.3 gives the answer. A member that holds no path
    shows the group as lapsed, under the same section.
 3. **[WIR-459]** A receiver MUST accept a key supply of scope `0x01` only on
    the channel on which it sent the request. **[WIR-347]** A receiver MUST
