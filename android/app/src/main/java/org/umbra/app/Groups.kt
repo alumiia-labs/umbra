@@ -82,6 +82,12 @@ fun NewGroupScreen(onBack: () -> Unit, onMade: (Conversation) -> Unit) {
  */
 @Composable
 fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
+    var members by remember { mutableStateOf(listOf<FfiGroupMember>()) }
+    LaunchedEffect(chat.conversation.label, chat.members) {
+        Core.groupMembers(chat.conversation) { members = it }
+    }
+    // GRP-310: an admin alone brings a contact in.
+    val isAdmin = members.any { it.isSelf && it.role >= FfiRole.ADMIN }
     Column(Modifier.fillMaxSize()) {
         BackBar("Group details", onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
@@ -110,11 +116,13 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                 },
             )
             if (chat.isMember) {
-                EntryRow(
-                    RowEntry("user-plus", "Invite a contact") {
-                        push(Screen.InviteToGroup(chat.conversation))
-                    },
-                )
+                if (isAdmin) {
+                    EntryRow(
+                        RowEntry("user-plus", "Invite a contact") {
+                            push(Screen.InviteToGroup(chat.conversation))
+                        },
+                    )
+                }
                 EntryRow(
                     RowEntry("xmark", "Leave group") {
                         push(Screen.LeaveGroup(chat.conversation))
@@ -222,7 +230,7 @@ fun GroupMembersScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                     )
                 }
             }
-            if (chat.isMember) {
+            if (chat.isMember && mayRemove) {
                 item {
                     Spacer(Modifier.height(12.dp))
                     Column(Modifier.padding(horizontal = 20.dp)) {
