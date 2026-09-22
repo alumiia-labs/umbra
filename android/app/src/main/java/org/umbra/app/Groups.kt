@@ -127,15 +127,22 @@ private fun JoinerRow(joiner: FfiGroupOffer) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(Modifier.weight(1f)) {
-            Text("$name asks to come in")
+            Text(if (joiner.isAdded) "$name comes in" else "$name asks to come in")
             Text(
-                "The group gives them its roster and its keys.",
+                if (joiner.isAdded) {
+                    "The roster goes to them through the relays."
+                } else {
+                    "The group gives them its roster and its keys."
+                },
                 style = MaterialTheme.typography.labelMedium,
                 color = Palette.TextSecondary,
                 modifier = Modifier.subline(),
             )
         }
-        SecondaryButton("Let in") { Core.admitJoiner(joiner) }
+        if (!joiner.isAdded) {
+            Spacer(Modifier.width(12.dp))
+            InlineButton("Let in") { Core.admitJoiner(joiner) }
+        }
     }
 }
 
@@ -205,9 +212,7 @@ fun GroupOfferPrompt() {
             modifier = Modifier.subline(),
         )
         Spacer(Modifier.height(8.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            SecondaryButton("Join") { Core.acceptGroupOffer(offer) }
-        }
+        InlineButton("Join") { Core.acceptGroupOffer(offer) }
     }
 }
 

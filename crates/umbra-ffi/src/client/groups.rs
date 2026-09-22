@@ -45,6 +45,10 @@ const WAITING: u8 = 2;
 const ASKED: u8 = 3;
 /// The byte of an admit that waits for the snapshot it names.
 const ADMITTED: u8 = 4;
+/// The byte of a joiner that an admin added and did not admit yet. The
+/// snapshot is on its way to the chunk path, and a second press adds no
+/// second member.
+const ADDED: u8 = 5;
 
 /// The length of `GroupRosterKey_g.pk`, an ML-DSA-65 verifying key.
 const ROSTER_PK_LEN: usize = 1_952;
@@ -72,6 +76,11 @@ enum JoinEntry {
         from: ConversationId,
         group_id: [u8; 32],
         record: Vec<u8>,
+    },
+    Added {
+        from: ConversationId,
+        group_id: [u8; 32],
+        index: u16,
     },
 }
 
@@ -113,6 +122,8 @@ pub struct GroupJoiner {
     pub from: ConversationId,
     /// The group.
     pub group_id: [u8; 32],
+    /// Whether the admin added it already and the admit is on its way.
+    pub is_added: bool,
 }
 
 /// The stored form of a group: its roster, its epochs, and its replicas.
@@ -748,9 +759,6 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     ) -> Result<GroupAdmission, Error> {
         let conversation = self.conversation_of_group(&joiner.group_id)?;
         let row = self.join_row(joiner.from, &joiner.group_id)?;
-        let Some(JoinEntry::Asked { record, .. }) = self.join_entry(&row)? else {
-            return Err(Error::NotFound);
-        };
         let mut group = self.group_of(conversation)?;
         let own = group
             .roster()
@@ -759,6 +767,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if own.role < Role::Admin {
             return Err(Error::Malformed);
         }
+        let record = match self.join_entry(&row)? {
+            Some(JoinEntry::Asked { record, .. }) => record,
+            // GRP-306: the roster holds the member once. A second call
+            // gives the snapshot again for a second try of the admit.
+            Some(JoinEntry::Added { index, .. }) => {
+                let snapshot = group.snapshot(&[]).map_err(|_| Error::Malformed)?;
+                return Ok(GroupAdmission { snapshot, index });
+            }
+            _ => return Err(Error::NotFound),
+        };
         let parsed = JoinRecord::parse(&record)?;
         let add = group.add_object(&parsed).map_err(|_| Error::Malformed)?;
         let control = GroupControl::parse(&add)?;
@@ -771,6 +789,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         };
         let snapshot = group.snapshot(&[]).map_err(|_| Error::Malformed)?;
         self.save_group(conversation, &group, rng)?;
+        let mut entry = vec![ADDED];
+        entry.extend_from_slice(&joiner.from.0);
+        entry.extend_from_slice(&joiner.group_id);
+        entry.extend_from_slice(&index.to_be_bytes());
+        let open = self.open_mut()?;
+        let mut batch = open.store.begin();
+        batch.put(GROUP_JOIN, row, Some(joiner.from.0), &entry, rng)?;
+        batch.commit()?;
         // GRP-310: the add goes to each replica as a group record.
         self.post_group_control(conversation, &add, now_ms, rng)?;
         Ok(GroupAdmission { snapshot, index })
@@ -889,8 +915,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     pub fn group_joiners(&self) -> Result<Vec<GroupJoiner>, Error> {
         let mut out = Vec::new();
         for row in self.join_rows()? {
-            if let Some(JoinEntry::Asked { from, group_id, .. }) = self.join_entry(&row)? {
-                out.push(GroupJoiner { from, group_id });
+            match self.join_entry(&row)? {
+                Some(JoinEntry::Asked { from, group_id, .. }) => out.push(GroupJoiner {
+                    from,
+                    group_id,
+                    is_added: false,
+                }),
+                Some(JoinEntry::Added { from, group_id, .. }) => out.push(GroupJoiner {
+                    from,
+                    group_id,
+                    is_added: true,
+                }),
+                _ => {}
             }
         }
         Ok(out)
@@ -1006,6 +1042,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 from,
                 group_id,
                 record: rest.to_vec(),
+            },
+            ADDED => JoinEntry::Added {
+                from,
+                group_id,
+                index: u16::from_be_bytes(rest.try_into().map_err(|_| Error::Integrity)?),
             },
             _ => return Err(Error::Integrity),
         }))

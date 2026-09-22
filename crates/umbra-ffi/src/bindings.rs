@@ -182,6 +182,9 @@ pub struct FfiGroupOffer {
     pub group_id: Vec<u8>,
     /// The name of the group, for an offer. A join request carries none.
     pub name: String,
+    /// For a join request: whether the admin let the contact in already
+    /// and the admit is on its way. The view offers no second press.
+    pub is_added: bool,
 }
 
 /// What a view shows of a group of Part 11.
@@ -1287,7 +1290,11 @@ impl Inner {
                     // path now holds.
                     let mut descriptor = vec![0u8; uploaded.descriptor.len()];
                     if uploaded.descriptor.encode(&mut descriptor).is_ok() {
-                        let joiner = crate::client::GroupJoiner { from, group_id };
+                        let joiner = crate::client::GroupJoiner {
+                            from,
+                            group_id,
+                            is_added: true,
+                        };
                         let _ = client.admit_joiner(
                             &joiner,
                             index,
@@ -2083,6 +2090,7 @@ impl Handle {
                 from: offer.from.0.to_vec(),
                 group_id: offer.group_id.to_vec(),
                 name: offer.name,
+                is_added: false,
             })
             .collect())
     }
@@ -2117,6 +2125,7 @@ impl Handle {
                 from: joiner.from.0.to_vec(),
                 group_id: joiner.group_id.to_vec(),
                 name: String::new(),
+                is_added: joiner.is_added,
             })
             .collect())
     }
@@ -2128,7 +2137,11 @@ impl Handle {
         let from = conversation_of(&from)?;
         let group_id: [u8; 32] = group_id.try_into().map_err(|_| FfiError::Malformed)?;
         let mut inner = locked(&self.inner);
-        let joiner = crate::client::GroupJoiner { from, group_id };
+        let joiner = crate::client::GroupJoiner {
+            from,
+            group_id,
+            is_added: false,
+        };
         let admission = inner
             .client
             .add_joiner(&joiner, unix_now_ms(), &mut OsRng)?;

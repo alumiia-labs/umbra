@@ -329,6 +329,18 @@ fun SecondaryButton(label: String, enabled: Boolean = true, onClick: () -> Unit)
     ) { Text(label, fontWeight = FontWeight.SemiBold) }
 }
 
+/** A secondary button that takes the width of its label, for a row. */
+@Composable
+fun InlineButton(label: String, enabled: Boolean = true, onClick: () -> Unit) {
+    OutlinedButton(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = Modifier.heightIn(min = 40.dp),
+        colors = ButtonDefaults.outlinedButtonColors(contentColor = Palette.Action),
+        border = BorderStroke(1.dp, Palette.Outline),
+    ) { Text(label, fontWeight = FontWeight.SemiBold) }
+}
+
 /** The sage note with an icon, for a fact that the user needs at this point. */
 @Composable
 fun Note(text: String, isError: Boolean = false) {
