@@ -858,6 +858,27 @@ MUST cover that value. A receiver MUST take `own_sks` from a slot whose
 `k_e` is zero and MUST install no epoch from it, and it MUST reject such a
 slot of an epoch other than its current one or with `own_count` 0.
 
+**The owner credentials after an admin leaves them.** `own_sk` is a secret of
+the relay and not of an epoch, thus a rotation of §11.4 leaves it where it was.
+
+- **[GRP-401]** An admin that takes the role `admin` or above from a member
+  MUST draw a new `own_sk` for each replica from the device CSPRNG, send a
+  `GKEY` that carries the new `own_pk` under the `own_sk` it replaces to
+  each replica (`WIR-522`), and post a record of `GRP-400` with the new
+  credentials to each other member at `admin` or above.
+- **[GRP-402]** A member at `admin` or above that holds the owner credentials
+  and reads a roster object by which a member that held them left the roles
+  at `admin` or above, or left the group, MUST do the same after the backoff
+  of `GRP-358`, and MUST NOT do it when a record of `GRP-400` reached it
+  during that backoff.
+
+> *Cause of `GRP-401` and `GRP-402`.* No earlier rule took `own_sk` back. An
+> admin that lost its role or left the group kept it, and `own_pk` never
+> changed at the relay. It could send a `GKEY` of keys that it alone knew and
+> lock every member out of the queue, or a `GDEL`. Two admins that act on one
+> departure at once leave the second one with credentials that the relay no
+> longer takes, and Part 16 §16.3 records that residual.
+
 > *Cause of `GRP-400`.* A promotee may have joined inside the current epoch,
 > and `GRP-385` keeps `K_e` from a joiner, because `K_e` gives each slot key
 > from `t_e` and thus each record before the join. A one-slot record that
@@ -1575,7 +1596,11 @@ in chain order.
 - **[GRP-326]** A joiner MUST verify `chain_hash` against the hash of the
   roster epoch that the add record names, verify each granting epoch of the
   path under §11.9.2, and verify each `kem_pk` against the `kem_pk_hash` of
-  its entry. **[GRP-327]** A joiner MUST reject a snapshot that fails one of
+  its entry. **[GRP-403]** A joiner MUST verify the path in chain order from
+  the creator as `owner`, MUST take the role of a granter from the path at
+  that point, and MUST take the key hash of a granter from its entry or,
+  for a granter that left the group, from the grant of the path that named
+  it. A grant stays valid after its granter lost its role. **[GRP-327]** A joiner MUST reject a snapshot that fails one of
   those checks. **[GRP-328]** A joiner MUST show a rejected snapshot as a
   failed admission.
 - **[GRP-329]** A member that restores from a backup and lacks a `kem_pk`

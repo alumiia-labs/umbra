@@ -75,13 +75,13 @@ each column when a crate implements the requirement and a test covers it.
 | `NTF` | 67 | 30 | 0 | 0 | 2 | **99** |
 | `DIS` | 123 | 37 | 0 | 0 | 1 | **161** |
 | `REL` | 124 | 32 | 1 | 0 | 2 | **159** |
-| `GRP` | 216 | 60 | 0 | 0 | 6 | **282** |
+| `GRP` | 218 | 61 | 0 | 0 | 6 | **285** |
 | `COM` | 299 | 96 | 0 | 0 | 5 | **400** |
 | `ATT` | 139 | 46 | 1 | 0 | 2 | **188** |
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
 | `IMP` | 112 | 41 | 0 | 0 | 2 | **155** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2213 | 715 | 7 | 0 | 53 | **2988** |
+| **All** | 2215 | 716 | 7 | 0 | 53 | **2991** |
 
 ## SCP — Scope and Conventions
 
@@ -2288,6 +2288,9 @@ Source: `spec/11-private-groups.md`
 | `GRP-398` | §11.4.1 | MUST | (unstated) | A member whose `GPOST` or `GSUB` under the credentials of the newest epoch it holds is refused MUST send the same command again at once under the credentials of the epoch before it, while `GROUP_EPOCH_GRACE` holds them, and it MUST count only a refusal of that second command under `GRP-210`. |  |  |
 | `GRP-399` | §11.9.2 | MUST | A verifier of a snapshot | A verifier of a snapshot MUST reject it when a member at `moderator` or above is neither the creator nor the grantee of that role in the last granting epoch of the path that names it. |  |  |
 | `GRP-400` | §11.4.3 | MUST | That record | That record MUST carry `k_e` of 32 zero bytes, and its `tag` MUST cover that value. |  |  |
+| `GRP-401` | §11.4.3 | MUST | An admin that takes the role `admin` or above from a member | An admin that takes the role `admin` or above from a member MUST draw a new `own_sk` for each replica from the device CSPRNG, send a `GKEY` that carries the new `own_pk` under the `own_sk` it replaces to each replica (`WIR-522`), and post a record of `GRP-400` with the new credentials to each other member at `admin` or above. |  |  |
+| `GRP-402` | §11.4.3 | MUST NOT | (unstated) | A member at `admin` or above that holds the owner credentials and reads a roster object by which a member that held them left the roles at `admin` or above, or left the group, MUST do the same after the backoff of `GRP-358`, and MUST NOT do it when a record of `GRP-400` reached it during that backoff. |  |  |
+| `GRP-403` | §11.9.8 | MUST | A joiner | A joiner MUST verify the path in chain order from the creator as `owner`, MUST take the role of a granter from the path at that point, and MUST take the key hash of a granter from its entry or, for a granter that left the group, from the grant of the path that named it. |  |  |
 
 ## COM — Public Communities
 

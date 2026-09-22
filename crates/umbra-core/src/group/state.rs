@@ -1375,6 +1375,70 @@ mod tests {
     }
 
     #[test]
+    fn a_joiner_verifies_a_role_whose_granter_lost_its_own() {
+        let now = 1_700_000_000;
+        let (mut creator, mut member, mut third) = trio(now);
+        let mut rng = Rng(43);
+        let apply = |bytes: &[u8], sender: u16, groups: [&mut Group; 3]| {
+            let control = GroupControl::parse(bytes).unwrap();
+            for group in groups {
+                group.apply_control(&control, sender, now).unwrap();
+            }
+        };
+        let to_admin = creator.grant(1, Role::Admin, &mut rng).unwrap();
+        apply(&to_admin, 0, [&mut creator, &mut member, &mut third]);
+        let to_moderator = member.grant(2, Role::Moderator, &mut rng).unwrap();
+        apply(&to_moderator, 1, [&mut creator, &mut member, &mut third]);
+        let demotion = creator.grant(1, Role::Member, &mut rng).unwrap();
+        apply(&demotion, 0, [&mut creator, &mut member, &mut third]);
+
+        // GRP-068, GRP-069: the path holds the grant of the moderator and
+        // the grant that made its granter an admin, and not the demotion.
+        let kept: Vec<&[u8]> = alloc::vec![&to_admin, &to_moderator, &demotion];
+        let (path, positions) = creator.roster().authority_path(&kept).unwrap();
+        assert_eq!(positions, alloc::vec![0, 1]);
+
+        // A fourth member joins with that path and verifies it in chain
+        // order, though its granter holds no role now.
+        const FOURTH_SEED: Secret<32> = Secret::new([0x44; 32]);
+        let keys = JoinKeys {
+            seed: FOURTH_SEED,
+            keys: MemberKeys::from_seed(&FOURTH_SEED),
+        };
+        let kem_pk = keys.keys.kem().public().to_bytes();
+        let add = creator
+            .add_object(&JoinRecord {
+                group_id: *creator.group_id(),
+                keys: keys.wire_keys(&kem_pk),
+            })
+            .unwrap();
+        let control = GroupControl::parse(&add).unwrap();
+        let add_hash = control.epoch_hash();
+        creator.apply_control(&control, 0, now).unwrap();
+        let admit = creator.admit_for(3, 0, b"", now).unwrap();
+        let invitation = umbra_wire::group::control::GroupInvitation::parse(
+            GroupControl::parse(&admit).unwrap().payload,
+        )
+        .unwrap();
+        let creator_pk = creator.keys.roster().verifying_key().to_bytes();
+        let snapshot_bytes = creator.snapshot(&path).unwrap();
+        let snapshot = RosterSnapshot::parse(&snapshot_bytes).unwrap();
+        let admitted =
+            crate::group::join::accept_admit(&invitation, &snapshot, &add_hash, &creator_pk, now)
+                .unwrap();
+        assert_eq!(admitted.roster.member(2).unwrap().role, Role::Moderator);
+
+        // GRP-399: with no path, the role of the moderator stands on
+        // nothing, and the snapshot fails.
+        let bare = creator.snapshot(&[]).unwrap();
+        let bare = RosterSnapshot::parse(&bare).unwrap();
+        assert!(
+            crate::group::join::accept_admit(&invitation, &bare, &add_hash, &creator_pk, now)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn the_bucket_grows_with_the_member_count() {
         // The dense vector costs 12 bytes for each member, and §11.2 states
         // that the modal 350-byte text stays in `B1` up to N = 124.

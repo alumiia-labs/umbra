@@ -136,6 +136,11 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
             if (chat.isClosed) {
                 Spacer(Modifier.height(12.dp))
                 Note("The relays of this group hold it no more. It takes no new message.")
+            } else if (chat.ownerNeeded) {
+                Spacer(Modifier.height(12.dp))
+                // GRP-184: the group keeps two owners, thus a silent owner
+                // leaves only after another member becomes one.
+                Note("An owner has been silent for 30 days. Make another member an owner.")
             } else if (!chat.isMember) {
                 Spacer(Modifier.height(12.dp))
                 Note("You are no longer a member of this group.")
@@ -216,9 +221,7 @@ fun GroupMembersScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
         BackBar("Members · ${members.size}", onBack = onBack)
         LazyColumn {
             items(members, key = { it.index.toInt() }) { member ->
-                // The roles at `admin` and above hold the owner credentials
-                // of the relay, and this device changes none of them yet.
-                val editable = mayRemove && !member.isSelf && member.role < FfiRole.ADMIN
+                val editable = mayRemove && !member.isSelf && member.role <= own!!.role
                 MemberRow(member, editable) {
                     push(
                         Screen.MemberRole(
@@ -226,6 +229,7 @@ fun GroupMembersScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                             member.index,
                             memberName(member),
                             member.role,
+                            own!!.role,
                         ),
                     )
                 }
@@ -273,11 +277,15 @@ private fun MemberRow(member: FfiGroupMember, removable: Boolean, onRemove: () -
     }
 }
 
-/** The roles an admin gives here, with the words of mockup 054. */
+/** The roles an admin gives, with the words of mockup 054. */
 private val RoleChoices = listOf(
     FfiRole.MEMBER to "Can send messages",
     FfiRole.MODERATOR to "Can moderate content",
+    FfiRole.ADMIN to "Can manage members and settings",
 )
+
+/** An owner also names owners, which the group keeps at two or more. */
+private val OwnerChoice = FfiRole.OWNER to "Can manage admins and owners"
 
 /**
  * Mockup 054: the role of one member, and the way to its removal. A
@@ -289,10 +297,12 @@ fun MemberRoleScreen(
     index: UShort,
     name: String,
     role: FfiRole,
+    ownRole: FfiRole,
     onBack: () -> Unit,
     push: (Screen) -> Unit,
 ) {
     var chosen by remember { mutableStateOf(role) }
+    val choices = if (ownRole == FfiRole.OWNER) RoleChoices + OwnerChoice else RoleChoices
     var isSaving by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxSize()) {
         BackBar("Member role", onBack = onBack)
@@ -304,7 +314,7 @@ fun MemberRoleScreen(
             Spacer(Modifier.height(16.dp))
             Text(name, style = MaterialTheme.typography.headlineMedium)
             Spacer(Modifier.height(8.dp))
-            for ((choice, detail) in RoleChoices) {
+            for ((choice, detail) in choices) {
                 Row(
                     Modifier
                         .fillMaxWidth()

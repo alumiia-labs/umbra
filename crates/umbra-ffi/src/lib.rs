@@ -774,10 +774,6 @@ mod tests {
             roles(&client),
             vec![Role::Owner, Role::Moderator, Role::Member]
         );
-        // The roles that hold the owner credentials wait for their rotation.
-        assert!(client
-            .set_group_role(conversation, 2, Role::Admin, ms(t0), &mut rng)
-            .is_err());
 
         // GRP-166: a silent moderator loses its role first, and the removal
         // comes after the rate of one epoch (`GRP-076`).
@@ -802,6 +798,91 @@ mod tests {
             .members_to_evict(ms(silent + 7_200), &mut rng)
             .unwrap();
         assert!(last.contains(&(conversation, 1, Silence::Remove)));
+    }
+
+    #[test]
+    fn owner_credentials_follow_the_admin_roles() {
+        use umbra_wire::group::control::Role;
+        let mut rng = Rng(73);
+        let mut client = new_client(&mut rng);
+        let mut other = new_client(&mut rng);
+        let (conversation, member) = ready_pair(&mut client, &mut other, &mut rng);
+        let now = 1_700_000_100_000;
+        let mut seq = 0;
+        let mut carry = |from: &mut Client<MemoryBackend, Element>,
+                         to: &mut Client<MemoryBackend, Element>,
+                         at: u64| {
+            while let Some(post) = from.take_group_post() {
+                seq += 1;
+                to.on_group_record(&[0xC3; 32], seq, &post.record, at, &mut Rng(u64::from(seq)))
+                    .unwrap();
+            }
+        };
+
+        // GRP-298, GRP-400: the grant, then the owner credentials.
+        client
+            .set_group_role(conversation, 1, Role::Admin, now, &mut rng)
+            .unwrap();
+        carry(&mut client, &mut other, now);
+        let owners_at = |client: &Client<MemoryBackend, Element>, conversation| {
+            client
+                .group_of(conversation)
+                .unwrap()
+                .owner(0)
+                .map(|held| *held.expose())
+        };
+        assert!(owners_at(&other, member).is_some());
+        assert_eq!(owners_at(&other, member), owners_at(&client, conversation));
+
+        // GRP-401: a demotion draws new owner credentials. Each replica
+        // moves to them under the ones they replace, and the admin that
+        // left holds the old ones alone.
+        let old = owners_at(&client, conversation);
+        client
+            .set_group_role(conversation, 1, Role::Member, now + 1_000, &mut rng)
+            .unwrap();
+        let mut rekeys = Vec::new();
+        while let Some(job) = client.take_group_rekey() {
+            rekeys.push(job);
+        }
+        assert_eq!(rekeys.len(), 2);
+        assert!(rekeys.iter().all(|job| job.next_own_pk.is_some()));
+        assert_eq!(Some(*rekeys[0].own.expose()), old);
+        assert_ne!(owners_at(&client, conversation), old);
+        carry(&mut client, &mut other, now + 1_000);
+        assert_eq!(owners_at(&other, member), old);
+
+        // GRP-402: an admin that leaves makes another admin draw new
+        // owner credentials after its backoff.
+        client
+            .set_group_role(conversation, 1, Role::Admin, now + 2_000, &mut rng)
+            .unwrap();
+        carry(&mut client, &mut other, now + 2_000);
+        assert_eq!(owners_at(&other, member), owners_at(&client, conversation));
+        other.leave_group(member, now + 3_000, &mut rng).unwrap();
+        let post = other.take_group_post().unwrap();
+        client
+            .on_group_record(&[0xC3; 32], 99, &post.record, now + 3_000, &mut rng)
+            .unwrap();
+        assert!(client
+            .groups_owing_owners(now + 3_000, &mut rng)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            client
+                .groups_owing_owners(now + 3_000_000, &mut rng)
+                .unwrap(),
+            vec![conversation]
+        );
+        let held = owners_at(&client, conversation);
+        client
+            .rotate_owners(conversation, now + 3_000_000, &mut rng)
+            .unwrap();
+        assert_ne!(owners_at(&client, conversation), held);
+        assert!(client
+            .groups_owing_owners(now + 3_100_000, &mut rng)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -882,7 +963,8 @@ mod tests {
         let admit = group.admit_for(index, 0, b"", now).unwrap();
         let admit_control = GroupControl::parse(&admit).unwrap();
         let invitation = GroupInvitation::parse(admit_control.payload).unwrap();
-        let snapshot_bytes = group.snapshot(&[]).unwrap();
+        let path = client.authority_path(conversation, &group).unwrap();
+        let snapshot_bytes = group.snapshot(&path).unwrap();
         let snapshot = RosterSnapshot::parse(&snapshot_bytes).unwrap();
         let admitted = accept_admit(&invitation, &snapshot, &add_hash, &creator_pk, now).unwrap();
         client.save_group(conversation, &group, rng).unwrap();

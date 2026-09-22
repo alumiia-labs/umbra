@@ -21,6 +21,21 @@ use crate::Error;
 /// The version of each stored object of a group.
 pub(crate) const STORED_VERSION: u8 = 0x01;
 
+/// The entries of an authority path: `BE16(len) || GroupControl` each.
+pub fn split_path(path: &[u8]) -> Result<Vec<&[u8]>, Error> {
+    let mut entries = Vec::new();
+    let mut rest = path;
+    while !rest.is_empty() {
+        let len = usize::from(u16::from_be_bytes([
+            *rest.first().ok_or(Error::Malformed)?,
+            *rest.get(1).ok_or(Error::Malformed)?,
+        ]));
+        entries.push(rest.get(2..2 + len).ok_or(Error::Malformed)?);
+        rest = rest.get(2 + len..).ok_or(Error::Malformed)?;
+    }
+    Ok(entries)
+}
+
 /// A count in a stored object, which a later read bounds by the rules of
 /// its own type.
 pub(crate) fn count(len: usize) -> Result<u32, Error> {
@@ -221,40 +236,75 @@ impl Roster {
     /// Verifies the authority path: each granting epoch in chain order,
     /// under a roster key the path or the creator gave (`GRP-062`,
     /// `GRP-326`). The grantee roster keys the path carries are kept.
+    /// Verifies the authority path of a snapshot in chain order
+    /// (`GRP-326`, `GRP-399`). The creator starts as `owner`. Each grant
+    /// needs a granter at `admin` or above at that point of the path, and
+    /// the key it carries must match the hash of the granter: from its
+    /// entry, or, for a granter that left since, from the grant that gave
+    /// it its role. Each role holder of the snapshot must hold the role
+    /// that the path gives it last.
     fn verify_path(&mut self, path: &[u8], creator_roster_pk: &[u8]) -> Result<(), Error> {
         let creator_hash = sha3_256(&[creator_roster_pk]);
-        if let Some(creator) = self
+        let mut creator = None;
+        if let Some(member) = self
             .members
             .values_mut()
             .find(|m| m.roster_pk_hash == creator_hash)
         {
-            creator.set_roster_pk(creator_roster_pk)?;
+            member.set_roster_pk(creator_roster_pk)?;
+            creator = Some(member.index);
         }
-        let mut granted: BTreeMap<u16, Role> = BTreeMap::new();
-        let mut rest = path;
-        while !rest.is_empty() {
-            let len = usize::from(u16::from_be_bytes([
-                *rest.first().ok_or(Error::Malformed)?,
-                *rest.get(1).ok_or(Error::Malformed)?,
-            ]));
-            let bytes = rest.get(2..2 + len).ok_or(Error::Malformed)?;
-            rest = rest.get(2 + len..).ok_or(Error::Malformed)?;
+        let mut grants = Vec::new();
+        for bytes in split_path(path)? {
             let control = GroupControl::parse(bytes)?;
             if control.control_type != ControlType::GrantingEpoch {
                 return Err(Error::Malformed);
             }
-            let epoch = GrantingEpoch::parse(control.payload)?;
-            self.check_granting_signature(&epoch)?;
-            self.check_grantee_key(&epoch)?;
-            granted.insert(epoch.grantee_index, epoch.role);
+            grants.push(GrantingEpoch::parse(control.payload)?);
         }
-        // GRP-326: the path backs each role of the snapshot. The creator
-        // holds `owner` from the genesis, and each other role holder holds
-        // the role that its last granting epoch gave it.
+        grants.sort_by_key(|grant| grant.chain.epoch_index);
+        if grants.windows(2).any(|pair| {
+            pair.first().map(|g| g.chain.epoch_index) == pair.get(1).map(|g| g.chain.epoch_index)
+        }) {
+            return Err(Error::Malformed);
+        }
+        // The role and the key hash of each index that the path names.
+        let mut state: BTreeMap<u16, (Role, [u8; 32])> = self
+            .members
+            .values()
+            .map(|member| (member.index, (Role::Member, member.roster_pk_hash)))
+            .collect();
+        let creator_index = creator.unwrap_or(0);
+        state.insert(creator_index, (Role::Owner, creator_hash));
+        for grant in &grants {
+            if grant.chain.group_id != self.group_id {
+                return Err(Error::Unverified);
+            }
+            let (granter_role, granter_hash) =
+                *state.get(&grant.granter_index).ok_or(Error::Unverified)?;
+            if granter_role < Role::Admin {
+                return Err(Error::Unverified);
+            }
+            grant.verify(&granter_hash)?;
+            match state.get_mut(&grant.grantee_index) {
+                Some((role, hash)) => {
+                    if *hash != grant.grantee_roster_pk_hash {
+                        return Err(Error::Unverified);
+                    }
+                    *role = grant.role;
+                }
+                None => {
+                    state.insert(
+                        grant.grantee_index,
+                        (grant.role, grant.grantee_roster_pk_hash),
+                    );
+                }
+            }
+        }
         let backed = |member: &Member| {
             member.role < Role::Moderator
-                || member.roster_pk_hash == creator_hash
-                || granted.get(&member.index) == Some(&member.role)
+                || member.index == creator_index && member.roster_pk_hash == creator_hash
+                || state.get(&member.index).map(|(role, _)| *role) == Some(member.role)
         };
         if !self.members.values().all(backed) {
             return Err(Error::Unverified);
@@ -758,6 +808,54 @@ impl Roster {
             successors,
             forks,
         })
+    }
+
+    /// The authority path of the current roles, from the granting epochs
+    /// that a member keeps (§11.9.3, §11.9.8): the last grant of each role
+    /// holder, and for each granter the last grant before that one that
+    /// named it, back to the creator at index 0. The result is the path in
+    /// chain order and the position of each grant it holds; each other
+    /// grant is on no path and may go (`GRP-068`, `GRP-069`).
+    pub fn authority_path(&self, grants: &[&[u8]]) -> Result<(Vec<u8>, Vec<usize>), Error> {
+        let mut parsed = Vec::with_capacity(grants.len());
+        for bytes in grants {
+            let control = GroupControl::parse(bytes)?;
+            let grant = GrantingEpoch::parse(control.payload)?;
+            parsed.push((
+                grant.chain.epoch_index,
+                grant.granter_index,
+                grant.grantee_index,
+            ));
+        }
+        let mut needed = alloc::collections::BTreeSet::new();
+        let mut work: Vec<(u16, u32)> = self
+            .active()
+            .filter(|member| member.role >= Role::Moderator && member.index != 0)
+            .map(|member| (member.index, u32::MAX))
+            .collect();
+        while let Some((holder, before)) = work.pop() {
+            let last = parsed
+                .iter()
+                .enumerate()
+                .filter(|(_, (epoch, _, grantee))| *grantee == holder && *epoch < before)
+                .max_by_key(|(_, (epoch, _, _))| *epoch);
+            let Some((position, (epoch, granter, _))) = last else {
+                continue;
+            };
+            if needed.insert(position) && *granter != 0 {
+                work.push((*granter, *epoch));
+            }
+        }
+        let mut kept: Vec<usize> = needed.into_iter().collect();
+        kept.sort_by_key(|position| parsed.get(*position).map(|(epoch, _, _)| *epoch));
+        let mut path = Vec::new();
+        for position in &kept {
+            let bytes = grants.get(*position).ok_or(Error::Malformed)?;
+            let len = u16::try_from(bytes.len()).map_err(|_| Error::Malformed)?;
+            path.extend_from_slice(&len.to_be_bytes());
+            path.extend_from_slice(bytes);
+        }
+        Ok((path, kept))
     }
 
     /// The entries of the roster at its current epoch, for a snapshot.

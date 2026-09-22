@@ -148,6 +148,17 @@ pub(super) const GROUP_MEMBER: TableId = TableId(0x15);
 /// each group, the time of the last record of this device. A row holds a
 /// `BE64` of seconds, and its owner column names the group.
 pub(super) const GROUP_PRESENCE: TableId = TableId(0x16);
+/// For each group, the member indices that held the owner credentials of
+/// this device when it last took or drew them (`GRP-401`). A member that
+/// leaves that set leaves with credentials that the relay still takes,
+/// thus its departure calls for new ones. The owner column names the
+/// group.
+pub(super) const GROUP_OWNERS: TableId = TableId(0x17);
+/// The granting epochs on the authority path to a current role
+/// (`GRP-068`). A row holds one `GroupControl`, under the group and the
+/// `epoch_index` of the grant, and its owner column names the group. A
+/// grant on no path leaves when the next snapshot is built (`GRP-069`).
+pub(super) const GROUP_GRANTS: TableId = TableId(0x18);
 
 const QUEUE_ROW_LEN: usize = 32 + 1 + 32;
 
@@ -296,6 +307,9 @@ pub(super) struct GroupQueues {
     /// admins that count one silence draw two delays, and the removal of
     /// the first reaches the second before its own (`GRP-133`).
     pub evictions: BTreeMap<(ConversationId, u16), u64>,
+    /// The instant at which this admin may draw new owner credentials for
+    /// each group that owes them, after the backoff of `GRP-358`.
+    pub owner_backoff: BTreeMap<ConversationId, u64>,
 }
 
 /// The key of the clock of the last record of this device in a group.
@@ -896,7 +910,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             // GRP-306: the roster holds the member once. A second call
             // gives the snapshot again for a second try of the admit.
             Some(JoinEntry::Added { index, .. }) => {
-                let snapshot = group.snapshot(&[]).map_err(|_| Error::Malformed)?;
+                let path = self.authority_path(conversation, &group)?;
+                let snapshot = group.snapshot(&path).map_err(|_| Error::Malformed)?;
                 return Ok(GroupAdmission { snapshot, index });
             }
             _ => return Err(Error::NotFound),
@@ -910,10 +925,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Applied::Added(index) = index else {
             return Err(Error::Malformed);
         };
-        let snapshot = self
-            .group_of(conversation)?
-            .snapshot(&[])
-            .map_err(|_| Error::Malformed)?;
+        // GRP-324: the snapshot carries the authority path of each role.
+        let group = self.group_of(conversation)?;
+        let path = self.authority_path(conversation, &group)?;
+        let snapshot = group.snapshot(&path).map_err(|_| Error::Malformed)?;
         self.note_member_contact(conversation, index, joiner.from, rng)?;
         let mut entry = vec![ADDED];
         entry.extend_from_slice(&joiner.from.0);
@@ -991,6 +1006,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let admitted = accept_admit(&invitation, &snapshot, &add_hash, &creator_roster_pk, now)
             .map_err(|_| Error::Integrity)?;
         let conversation = self.adopt_group(admitted, &seed, &name, rng)?;
+        // GRP-068: this member may build a snapshot later, thus it keeps
+        // the path that admitted it.
+        for grant in umbra_core::group::roster::split_path(snapshot.path)? {
+            self.note_grant(conversation, grant, rng)?;
+        }
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         batch.delete(GROUP_JOIN, row);
@@ -1334,10 +1354,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         self.rotate_group(conversation, now_ms, rng)
     }
 
-    /// Gives a role below `admin` to a member below `admin` (§11.9.2). The
-    /// granting epoch goes out before it applies here (`GRP-389`). A role
-    /// at `admin` or above holds the owner credentials of the relay, whose
-    /// rotation is not here yet, thus this call refuses it.
+    /// Gives a role to a member (§11.9.2). The granting epoch goes out
+    /// before it applies here (`GRP-389`). A member that rises to `admin`
+    /// takes the owner credentials in the record after it (`GRP-298`), and
+    /// a member that falls below `admin` leaves with credentials that the
+    /// relay still takes, thus this admin draws new ones (`GRP-401`).
     pub fn set_group_role<R: CryptoRng + umbra_crypto::rand_core::TryCryptoRng + ?Sized>(
         &mut self,
         conversation: ConversationId,
@@ -1353,18 +1374,274 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .filter(|member| member.active)
             .ok_or(Error::NotFound)?
             .role;
-        if index == group.own_index() || held >= Role::Admin || role >= Role::Admin {
+        if index == group.own_index() {
             return Err(Error::Malformed);
         }
         if held == role {
             return Ok(());
+        }
+        // The owner credentials travel with the admin roles, thus a device
+        // that holds none gives no such role.
+        if (held >= Role::Admin || role >= Role::Admin) && group.owner(0).is_none() {
+            return Err(Error::Malformed);
         }
         let object = group
             .grant(index, role, rng)
             .map_err(|_| Error::Malformed)?;
         self.post_group_control(conversation, &object, now_ms, rng)?;
         self.apply_own_roster_object(conversation, &object, now_ms, rng)?;
+        if held < Role::Admin && role >= Role::Admin {
+            let group = self.group_of(conversation)?;
+            let record = group
+                .owner_delivery(index, rng)
+                .map_err(|_| Error::Malformed)?;
+            self.queue_group_record(conversation, &group, record, now_ms, rng)?;
+            self.note_owners(conversation, &group, rng)?;
+        } else if held >= Role::Admin && role < Role::Admin {
+            self.rotate_owners(conversation, now_ms, rng)?;
+        }
         Ok(())
+    }
+
+    /// Queues one record that this group built for each replica.
+    fn queue_group_record<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        group: &Group,
+        record: Vec<u8>,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let Some(replicas) = Self::group_replicas_of(group)? else {
+            return Ok(());
+        };
+        let write = group.credentials().ok_or(Error::Integrity)?.write_secret();
+        let fallback = group.previous_credentials().map(|held| held.write_secret());
+        self.groups.posts.push_back(GroupPost {
+            message: None,
+            conversation,
+            replicas,
+            write,
+            fallback,
+            record,
+            is_rotation: false,
+        });
+        self.put_clock(conversation, sent_key(conversation), now_ms / 1_000, rng)
+    }
+
+    /// Draws new owner credentials, moves each replica to them with a
+    /// `GKEY` under the ones they replace, and hands them to each other
+    /// admin (`GRP-401`, `WIR-522`, `GRP-400`).
+    pub fn rotate_owners<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        self.groups.owner_backoff.remove(&conversation);
+        if self.group_closed(conversation)? {
+            return Ok(());
+        }
+        let mut group = self.group_of(conversation)?;
+        let Some(replicas) = Self::group_replicas_of(&group)? else {
+            return Ok(());
+        };
+        let old = group.replace_owners(rng).map_err(|_| Error::Malformed)?;
+        self.save_group(conversation, &group, rng)?;
+        let credentials = group.credentials().ok_or(Error::Integrity)?;
+        for (which, replica) in replicas.iter().enumerate() {
+            let (Some(own), Some(next)) = (old.get(which), group.owner(which)) else {
+                continue;
+            };
+            let next_own_pk = *umbra_crypto::x25519::PublicKey::from(
+                &umbra_crypto::x25519::StaticSecret::from(*next.expose()),
+            )
+            .as_bytes();
+            self.groups.rekeys.push_back(GroupRekey {
+                relay: replica.relay,
+                group_queue_id: replica.group_queue_id,
+                own: Secret::new(*own.expose()),
+                next_own_pk: Some(next_own_pk),
+                read_pk: credentials.read_public(),
+                write_pk: credentials.write_public(),
+            });
+        }
+        let admins: Vec<u16> = group
+            .roster()
+            .active()
+            .filter(|member| member.role >= Role::Admin && member.index != group.own_index())
+            .map(|member| member.index)
+            .collect();
+        for index in admins {
+            let record = group
+                .owner_delivery(index, rng)
+                .map_err(|_| Error::Malformed)?;
+            self.queue_group_record(conversation, &group, record, now_ms, rng)?;
+        }
+        self.note_owners(conversation, &group, rng)
+    }
+
+    /// Whether this device is an owner and an owner stayed silent for
+    /// `GROUP_SILENT_EVICT` while the group holds no more than `OWNER_MIN`
+    /// owners, thus the group needs another owner before that one can go
+    /// (`GRP-168`, `GRP-184`).
+    pub fn owner_needed(&self, conversation: ConversationId, now_ms: u64) -> Result<bool, Error> {
+        let group = self.group_of(conversation)?;
+        let now = now_ms / 1_000;
+        if group.own_role() != Some(Role::Owner) {
+            return Ok(false);
+        }
+        let roster = group.roster();
+        let owners = roster.owner_count();
+        for member in roster.active() {
+            if member.role != Role::Owner || member.index == group.own_index() {
+                continue;
+            }
+            let seen = self.clock(&Self::member_key(conversation, member.index))?;
+            let is_silent = seen.is_some_and(|at| now.saturating_sub(at) >= GROUP_SILENT_EVICT);
+            if is_silent
+                && PresenceTracker::eviction(member.role, roster.active_count(), owners)
+                    == Eviction::HoldForOwners
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Keeps one granting epoch of a group (`GRP-068`).
+    fn note_grant<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        control: &[u8],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let parsed = GroupControl::parse(control)?;
+        let grant = umbra_wire::group::control::GrantingEpoch::parse(parsed.payload)?;
+        let key = [
+            conversation.0.as_slice(),
+            &grant.chain.epoch_index.to_be_bytes(),
+        ]
+        .concat();
+        let open = self.open_mut()?;
+        let row = open.store.row_id(GROUP_GRANTS, &key);
+        let mut batch = open.store.begin();
+        batch.put(GROUP_GRANTS, row, Some(conversation.0), control, rng)?;
+        Ok(batch.commit()?)
+    }
+
+    /// The authority path of the current roles of a group, from the grants
+    /// that this device keeps. Each grant on no path leaves (`GRP-069`).
+    pub(crate) fn authority_path(
+        &mut self,
+        conversation: ConversationId,
+        group: &Group,
+    ) -> Result<Vec<u8>, Error> {
+        let store = &self.open_ref()?.store;
+        let mut rows = Vec::new();
+        for (row, _) in store.list(GROUP_GRANTS, Some(&conversation.0))? {
+            if let Some(bytes) = store.get(GROUP_GRANTS, &row)? {
+                rows.push((row, bytes));
+            }
+        }
+        let grants: Vec<&[u8]> = rows.iter().map(|(_, bytes)| bytes.as_slice()).collect();
+        let (path, kept) = group
+            .roster()
+            .authority_path(&grants)
+            .map_err(|_| Error::Integrity)?;
+        let gone: Vec<RowId> = rows
+            .iter()
+            .enumerate()
+            .filter(|(position, _)| !kept.contains(position))
+            .map(|(_, (row, _))| *row)
+            .collect();
+        if !gone.is_empty() {
+            let open = self.open_mut()?;
+            let mut batch = open.store.begin();
+            for row in gone {
+                batch.delete(GROUP_GRANTS, row);
+            }
+            batch.commit()?;
+        }
+        Ok(path)
+    }
+
+    /// The admins of a group now, which hold its owner credentials.
+    fn admins_of(group: &Group) -> Vec<u16> {
+        group
+            .roster()
+            .active()
+            .filter(|member| member.role >= Role::Admin)
+            .map(|member| member.index)
+            .collect()
+    }
+
+    /// Records the admins that hold the owner credentials of this device.
+    fn note_owners<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        group: &Group,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let set: Vec<u8> = Self::admins_of(group)
+            .iter()
+            .flat_map(|index| index.to_be_bytes())
+            .collect();
+        let open = self.open_mut()?;
+        let row = open.store.row_id(GROUP_OWNERS, &conversation.0);
+        let mut batch = open.store.begin();
+        batch.put(GROUP_OWNERS, row, Some(conversation.0), &set, rng)?;
+        Ok(batch.commit()?)
+    }
+
+    /// Each group whose owner credentials a member holds that is no admin
+    /// now, after the backoff of this device (`GRP-401`, `GRP-402`). A
+    /// group seen for the first time records its admins and owes nothing.
+    pub fn groups_owing_owners<R: CryptoRng + ?Sized>(
+        &mut self,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<Vec<ConversationId>, Error> {
+        let now = now_ms / 1_000;
+        let mut due = Vec::new();
+        for conversation in self.group_conversations()? {
+            if self.group_closed(conversation)? {
+                continue;
+            }
+            let group = self.group_of(conversation)?;
+            if group.owner(0).is_none() || group.own_role().is_none_or(|role| role < Role::Admin) {
+                continue;
+            }
+            let row = {
+                let store = &self.open_ref()?.store;
+                let key = store.row_id(GROUP_OWNERS, &conversation.0);
+                store.get(GROUP_OWNERS, &key)?
+            };
+            let Some(held) = row else {
+                self.note_owners(conversation, &group, rng)?;
+                continue;
+            };
+            let admins = Self::admins_of(&group);
+            let has_left = held
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| u16::from_be_bytes(*pair))
+                .any(|index| !admins.contains(&index));
+            if !has_left {
+                self.groups.owner_backoff.remove(&conversation);
+                continue;
+            }
+            match self.groups.owner_backoff.get(&conversation) {
+                Some(at) if now >= *at => due.push(conversation),
+                Some(_) => {}
+                None => {
+                    let at = now.saturating_add(group.rotation_delay(rng));
+                    self.groups.owner_backoff.insert(conversation, at);
+                }
+            }
+        }
+        Ok(due)
     }
 
     /// Leaves a group (`GRP-067`). The member that leaves rotates nothing,
@@ -1399,6 +1676,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .apply_control(&control, group.own_index(), now_ms / 1_000)
             .map_err(|_| Error::Malformed)?;
         self.save_group(conversation, &group, rng)?;
+        if matches!(applied, Applied::Granted { .. }) {
+            self.note_grant(conversation, object, rng)?;
+        }
         self.roster_moved(conversation, &applied, now_ms / 1_000, rng)?;
         Ok(applied)
     }
@@ -1651,6 +1931,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut outcomes: VecDeque<Outcome> = outcome.into_iter().collect();
         let mut first = None;
         let mut installed = false;
+        let epoch_before = group.epoch();
+        let owners_before = group.owner(0).map(|held| *held.expose());
         while let Some(outcome) = outcomes.pop_front() {
             match outcome {
                 Outcome::EpochKey {
@@ -1680,6 +1962,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     if parsed.kind == AppKind::GroupControl {
                         if let Ok(control) = GroupControl::parse(parsed.body) {
                             if let Ok(applied) = group.apply_control(&control, sender, now) {
+                                if matches!(applied, Applied::Granted { .. }) {
+                                    self.note_grant(conversation, parsed.body, rng)?;
+                                }
                                 self.roster_moved(conversation, &applied, now, rng)?;
                                 outcomes.extend(group.retry_held(now));
                             }
@@ -1694,8 +1979,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
         // The counters, the held records and the roster moved.
         self.save_group(conversation, &group, rng)?;
-        if installed {
+        // GRP-363: an admin that installs an epoch it did not credential
+        // moves each replica to it. A delivery of owner credentials alone
+        // installs no epoch.
+        if installed && group.epoch() != epoch_before {
             self.queue_rekeys(&group)?;
+        }
+        // GRP-402: owner credentials from another admin answer the call for
+        // them, thus this admin stands down.
+        if group.owner(0).map(|held| *held.expose()) != owners_before {
+            self.groups.owner_backoff.remove(&conversation);
+            self.note_owners(conversation, &group, rng)?;
         }
         Ok(first)
     }
@@ -1894,9 +2188,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// with no clock starts one here, thus a device that became an admin
     /// never removes a member on a silence it did not watch (`GRP-396`).
     ///
-    /// A silent moderator loses its role first (`GRP-166`). A silent
-    /// admin or owner waits: its role holds the owner credentials of the
-    /// relay, and their rotation is not here yet.
+    /// A silent moderator, admin, or owner loses its role first
+    /// (`GRP-166`), and the owner credentials rotate after it. A removal
+    /// that would leave fewer than two owners waits for a grant of `owner`
+    /// (`GRP-168`), and [`Client::owner_needed`] shows it.
     pub fn members_to_evict<R: CryptoRng + ?Sized>(
         &mut self,
         now_ms: u64,
@@ -1927,7 +2222,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 };
                 let action = match PresenceTracker::eviction(role, active, owners) {
                     Eviction::Remove => Some(Silence::Remove),
-                    Eviction::DemoteFirst if role == Role::Moderator => Some(Silence::Demote),
+                    Eviction::DemoteFirst => Some(Silence::Demote),
                     _ => None,
                 };
                 let Some(action) =

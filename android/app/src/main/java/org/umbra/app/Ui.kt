@@ -80,6 +80,7 @@ sealed interface Screen {
         val index: UShort,
         val name: String,
         val role: uniffi.umbra_ffi.FfiRole,
+        val ownRole: uniffi.umbra_ffi.FfiRole,
     ) : Screen
 
     /** The conversation of a view of one contact. */
@@ -211,7 +212,8 @@ private fun ContactView(
             setStack(stack.dropLast(if (under is Screen.MemberRole) 2 else 1))
         }
         is Screen.LeaveGroup -> LeaveGroupScreen(chat, pop) { setStack(listOf()) }
-        is Screen.MemberRole -> MemberRoleScreen(chat, top.index, top.name, top.role, pop, push)
+        is Screen.MemberRole ->
+            MemberRoleScreen(chat, top.index, top.name, top.role, top.ownRole, pop, push)
         is Screen.ScanSafetyNumber -> ScanSafetyNumberScreen(chat, pop)
         else -> Unit
     }

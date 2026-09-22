@@ -210,6 +210,9 @@ pub struct FfiGroupInfo {
     pub is_closed: bool,
     /// Whether the roster still holds this device.
     pub is_member: bool,
+    /// Whether this owner must name another owner before a silent owner
+    /// can leave (`GRP-184`).
+    pub owner_needed: bool,
 }
 
 /// The role of one member of a group (§11.9).
@@ -1086,6 +1089,13 @@ impl Inner {
                         &mut OsRng,
                     ),
                 };
+            }
+        }
+        // GRP-401, GRP-402: an admin that left its role or the group
+        // leaves with owner credentials that the relay still takes.
+        if let Ok(due) = self.client.groups_owing_owners(now_ms, &mut OsRng) {
+            for conversation in due {
+                let _ = self.client.rotate_owners(conversation, now_ms, &mut OsRng);
             }
         }
         while let Some(job) = self.client.take_group_rekey() {
@@ -2394,8 +2404,11 @@ impl Handle {
     /// What a view shows of a group.
     pub fn group_info(&self, conversation: Vec<u8>) -> Result<FfiGroupInfo, FfiError> {
         let conversation = conversation_of(&conversation)?;
-        let info = locked(&self.inner).client.group_info(conversation)?;
+        let inner = locked(&self.inner);
+        let info = inner.client.group_info(conversation)?;
+        let owner_needed = inner.client.owner_needed(conversation, unix_now_ms())?;
         Ok(FfiGroupInfo {
+            owner_needed,
             is_closed: info.is_closed,
             group_id: info.group_id.to_vec(),
             own_index: info.own_index,
@@ -2428,7 +2441,8 @@ impl Handle {
             .collect())
     }
 
-    /// Gives a member the role `member` or `moderator`, or takes it back.
+    /// Gives a member a role, or takes it back. A rise to `admin` hands
+    /// over the owner credentials, and a fall below it draws new ones.
     pub fn set_group_role(
         &self,
         conversation: Vec<u8>,

@@ -87,6 +87,8 @@ class Chat(
     val isClosed: Boolean = false,
     /** Whether the roster of a group still holds this device. */
     val isMember: Boolean = true,
+    /** Whether this owner must name a second owner first (`GRP-184`). */
+    val ownerNeeded: Boolean = false,
 ) {
     /** What each list shows: the name of the user, or a stable short label. */
     val title: String
@@ -491,7 +493,7 @@ object Core {
             main.post { onLoaded(members) }
         }
 
-    /** Gives a member the role `member` or `moderator`. */
+    /** Gives a member a role. The owner credentials follow the admin roles. */
     fun setGroupRole(conversation: Conversation, index: UShort, role: FfiRole, then: () -> Unit) =
         call { client ->
             client.setGroupRole(conversation.id, index, role)
@@ -774,6 +776,7 @@ object Core {
             isReady = group?.isReady ?: true,
             isClosed = group?.isClosed ?: false,
             isMember = group?.isMember ?: true,
+            ownerNeeded = group?.ownerNeeded ?: false,
         )
     }
 
