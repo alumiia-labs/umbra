@@ -816,10 +816,31 @@ impl Group {
     }
 
     /// The admit for the member at `index`, with the slot key of its join
-    /// and the two replicas (`GRP-312`, `GRP-233`).
+    /// and the two replicas (`GRP-312`, `GRP-233`), at the roster epoch
+    /// that stands.
     pub fn admit_for(
         &self,
         index: u16,
+        history_window_seconds: u64,
+        descriptor: &[u8],
+        now: u64,
+    ) -> Result<Vec<u8>, Error> {
+        self.admit_at(
+            index,
+            self.roster.epoch_index(),
+            history_window_seconds,
+            descriptor,
+            now,
+        )
+    }
+
+    /// The admit at `roster_epoch`, the roster epoch of the add and of its
+    /// snapshot (`GRP-323`). The roster can move between the add and the
+    /// admit, and the joiner checks the two against each other.
+    pub fn admit_at(
+        &self,
+        index: u16,
+        roster_epoch: u32,
         history_window_seconds: u64,
         descriptor: &[u8],
         now: u64,
@@ -843,7 +864,7 @@ impl Group {
             slot,
             &chain,
             current.credentials(),
-            self.roster.epoch_index(),
+            roster_epoch,
             refs,
             descriptor,
         )

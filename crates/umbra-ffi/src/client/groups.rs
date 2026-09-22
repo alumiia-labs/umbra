@@ -82,6 +82,9 @@ enum JoinEntry {
         from: ConversationId,
         group_id: [u8; 32],
         index: u16,
+        /// The snapshot at the roster epoch of the add (`GRP-323`). A row
+        /// of an earlier build holds none.
+        snapshot: Vec<u8>,
     },
 }
 
@@ -909,6 +912,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             Some(JoinEntry::Asked { record, .. }) => record,
             // GRP-306: the roster holds the member once. A second call
             // gives the snapshot again for a second try of the admit.
+            // GRP-323: the joiner verifies the snapshot against the add it
+            // read, thus a second try sends the snapshot of that add and not
+            // one of a roster that moved since.
+            Some(JoinEntry::Added {
+                index, snapshot, ..
+            }) if !snapshot.is_empty() => {
+                return Ok(GroupAdmission { snapshot, index });
+            }
             Some(JoinEntry::Added { index, .. }) => {
                 let path = self.authority_path(conversation, &group)?;
                 let snapshot = group.snapshot(&path).map_err(|_| Error::Malformed)?;
@@ -934,6 +945,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         entry.extend_from_slice(&joiner.from.0);
         entry.extend_from_slice(&joiner.group_id);
         entry.extend_from_slice(&index.to_be_bytes());
+        entry.extend_from_slice(&snapshot);
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         batch.put(GROUP_JOIN, row, Some(joiner.from.0), &entry, rng)?;
@@ -954,11 +966,19 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     ) -> Result<(), Error> {
         let conversation = self.conversation_of_group(&joiner.group_id)?;
         let group = self.group_of(conversation)?;
+        let row = self.join_row(joiner.from, &joiner.group_id)?;
+        // GRP-323: the admit names the roster epoch of the add, which the
+        // kept snapshot holds; the roster may have moved since.
+        let roster_epoch = match self.join_entry(&row)? {
+            Some(JoinEntry::Added { snapshot, .. }) if !snapshot.is_empty() => {
+                umbra_wire::group::control::RosterSnapshot::parse(&snapshot)?.roster_epoch
+            }
+            _ => group.roster().epoch_index(),
+        };
         let body = group
-            .admit_for(index, 0, descriptor, now_ms / 1_000)
+            .admit_at(index, roster_epoch, 0, descriptor, now_ms / 1_000)
             .map_err(|_| Error::Malformed)?;
         self.send_pairwise_control(joiner.from, &body, now_ms, rng)?;
-        let row = self.join_row(joiner.from, &joiner.group_id)?;
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         batch.delete(GROUP_JOIN, row);
@@ -1187,11 +1207,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 group_id,
                 record: rest.to_vec(),
             },
-            ADDED => JoinEntry::Added {
-                from,
-                group_id,
-                index: u16::from_be_bytes(rest.try_into().map_err(|_| Error::Integrity)?),
-            },
+            ADDED => {
+                let (index, snapshot) = rest.split_at_checked(2).ok_or(Error::Integrity)?;
+                JoinEntry::Added {
+                    from,
+                    group_id,
+                    index: u16::from_be_bytes(index.try_into().map_err(|_| Error::Integrity)?),
+                    snapshot: snapshot.to_vec(),
+                }
+            }
             _ => return Err(Error::Integrity),
         }))
     }

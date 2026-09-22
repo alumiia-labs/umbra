@@ -1053,6 +1053,41 @@ mod tests {
         assert_eq!(add.message, None);
         assert!(admin.take_group_post().is_none());
 
+        // GRP-323: the roster moves after the add, and a second press gives
+        // the snapshot of the add, which the joiner verifies against it.
+        admin
+            .set_group_role(
+                group,
+                1,
+                umbra_wire::group::control::Role::Moderator,
+                1_700_000_003_100,
+                &mut rng,
+            )
+            .unwrap();
+        // The joiner reads these from the queue after its add.
+        let mut moved = Vec::new();
+        while let Some(post) = admin.take_group_post() {
+            moved.push(post.record);
+        }
+        let again = admin
+            .add_joiner(&joiners[0], 1_700_000_003_200, &mut rng)
+            .unwrap();
+        assert_eq!(again.index, admission.index);
+        assert_eq!(again.snapshot, admission.snapshot);
+        assert_eq!(admin.group_info(group).unwrap().members, 2);
+        admin
+            .set_group_role(
+                group,
+                1,
+                umbra_wire::group::control::Role::Member,
+                1_700_000_003_300,
+                &mut rng,
+            )
+            .unwrap();
+        while let Some(post) = admin.take_group_post() {
+            moved.push(post.record);
+        }
+
         // Step 4: the admit names the snapshot that the chunk path holds.
         admin
             .admit_joiner(
@@ -1094,6 +1129,20 @@ mod tests {
         assert!(info.is_ready);
         assert_eq!(info.group_id, group_id);
 
+        // The two roster objects after the add reach the new member.
+        for (seq, record) in moved.iter().enumerate() {
+            joiner
+                .on_group_record(
+                    &[0xC3; 32],
+                    u32::try_from(seq).unwrap() + 1,
+                    record,
+                    1_700_000_005_500,
+                    &mut rng,
+                )
+                .unwrap();
+        }
+        assert_eq!(joiner.group_info(member).unwrap().members, 2);
+
         // A message of the admin reaches the new member.
         let mut draft = admin.new_draft(group);
         draft.set_text(&units("we leave at six")).unwrap();
@@ -1102,7 +1151,7 @@ mod tests {
             .unwrap();
         let post = admin.take_group_post().unwrap();
         let message = joiner
-            .on_group_record(&[0xC3; 32], 1, &post.record, 1_700_000_006_500, &mut rng)
+            .on_group_record(&[0xC3; 32], 9, &post.record, 1_700_000_006_500, &mut rng)
             .unwrap()
             .unwrap();
         let mut view = View::default();
