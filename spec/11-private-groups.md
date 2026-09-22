@@ -1458,8 +1458,20 @@ bytes, thus it fits bucket `B0`.
   roster gives the role `admin` or above, and for no other member.
   **[GRP-322]** A member below `admin` that reads a `GroupPresence` MUST
   discard it without a report.
+- **[GRP-395]** A `GroupPresence` MUST carry the `counter` of the last record
+  that its sender sent in that epoch, or 0 before the first, and it MUST NOT
+  advance that counter. A receiver MUST NOT apply `GRP-259` or the gap of
+  `GRP-205` to a `GroupPresence`. `GRP-246` gives the counter of each other
+  record.
 - **[GRP-132]** An admin MUST count a member as silent when it took no record
   and no presence record from that member for `GROUP_SILENT_EVICT`.
+  **[GRP-396]** An admin MUST measure that silence over the time that it
+  watched: for a member whose last record it did not see, the silence starts
+  when this admin first holds that member and that role. A member that
+  joins starts its silence at its add.
+  **[GRP-397]** An admin MUST draw the backoff of `GRP-358` before the
+  removal of `GRP-133`, and MUST NOT remove a member whose removal by another
+  admin arrived during that backoff.
   **[GRP-133]** An admin MUST then remove that member with a plain epoch of
   §11.9.2. **[GRP-134]** An admin MUST NOT remove a member that it counts as
   silent for a shorter period. §11.4.1 makes the admin rotate directly after
@@ -1492,6 +1504,17 @@ each week at `GROUP_MAX`.
 > record, thus a lurker stays in the group. A member whose device is gone
 > emits nothing, and RFC 9420 §16.6 gives the forward-secrecy cause that
 > §11.8 states.
+>
+> *Cause of `GRP-395` to `GRP-397`.* An earlier form let a presence record
+> take the next counter of its sender. A member below `admin` cannot verify
+> it, thus it saw a hole in that counter at each presence record, and
+> `GRP-205` sent it to the other replica for a record that no replica would
+> give it, until the quiet member posted again. A device that became an
+> admin, or that restored an old store, holds no history of the silence of
+> any member, and it would remove every member at once without `GRP-396`.
+> Two admins that count one silence would each post a removal on one
+> predecessor, and `GRP-070` would show a fork; the backoff of `GRP-397`
+> lets the first removal reach the second admin before its own.
 
 ### 11.9.8 The roster snapshot
 

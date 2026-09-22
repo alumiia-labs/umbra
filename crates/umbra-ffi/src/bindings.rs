@@ -1062,6 +1062,21 @@ impl Inner {
                 );
             }
         }
+        // §11.9.7: a quiet week gives one presence record, and an admin
+        // removes a member that stayed silent for `GROUP_SILENT_EVICT`.
+        let now_ms = crate::runtime::unix_now().saturating_mul(1_000);
+        if let Ok(due) = self.client.groups_owing_presence(now_ms, &mut OsRng) {
+            for conversation in due {
+                let _ = self.client.post_presence(conversation, now_ms, &mut OsRng);
+            }
+        }
+        if let Ok(silent) = self.client.members_to_evict(now_ms, &mut OsRng) {
+            for (conversation, index) in silent {
+                let _ = self
+                    .client
+                    .remove_from_group(conversation, index, now_ms, &mut OsRng);
+            }
+        }
         while let Some(job) = self.client.take_group_rekey() {
             commands.push(GroupCommand::Rotate {
                 relay: job.relay,

@@ -299,6 +299,38 @@ impl Group {
         )
     }
 
+    /// Builds one `GroupPresence` record (§11.9.7). The caller sends it in
+    /// each `PRESENCE_INTERVAL` in which it posted nothing else
+    /// (`GRP-128`).
+    pub fn presence<R: CryptoRng + ?Sized>(
+        &mut self,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<Vec<u8>, Error> {
+        let mut nonce = [0u8; 12];
+        rng.fill_bytes(&mut nonce);
+        let mut msg_id = [0u8; 16];
+        rng.fill_bytes(&mut msg_id);
+        self.sender.build_presence(
+            self.own_index,
+            &self.keys,
+            &self.roster,
+            &mut self.epochs,
+            &mut self.pairs,
+            nonce,
+            msg_id,
+            now,
+        )
+    }
+
+    /// The role of this member, or none after it left the roster.
+    pub fn own_role(&self) -> Option<Role> {
+        self.roster
+            .member(self.own_index)
+            .filter(|member| member.active)
+            .map(|member| member.role)
+    }
+
     /// Reads one record that a `GMSG` carried. The bucket comes from the
     /// record length, which the relay does not change (`WIR-372`).
     pub fn receive(&mut self, record: &[u8], now: u64) -> Result<Outcome, Error> {
@@ -1084,6 +1116,45 @@ mod tests {
         );
         // The backoff of a role holder is shorter than that of a member.
         assert!(creator.rotation_delay(&mut Rng(3)) <= member.rotation_delay(&mut Rng(3)));
+    }
+
+    #[test]
+    fn a_presence_record_reaches_the_admins_alone_and_leaves_no_gap() {
+        let now = 1_700_000_000;
+        let (mut creator, mut member, mut third) = trio(now);
+        let mut rng = Rng(31);
+        let presence = member.presence(now, &mut rng).unwrap();
+        // GRP-216: one sparse record in `B0`.
+        assert_eq!(presence.len(), Bucket::B0.group_record());
+        // GRP-217: the owner finds its tag and reads a presence signal.
+        assert_eq!(
+            creator.receive(&presence, now).unwrap(),
+            Outcome::Presence { sender: 1 }
+        );
+        // GRP-322: a plain member finds no entry and discards the record.
+        assert!(third.receive(&presence, now).is_err());
+
+        // GRP-395: the presence took no step of the counter, thus the next
+        // record of the member is its first, and no reader sees a gap.
+        let text_record = member
+            .post(&text("after a quiet week"), now, &mut rng)
+            .unwrap();
+        for reader in [&mut creator, &mut third] {
+            let Outcome::Content { counter, .. } = reader.receive(&text_record, now).unwrap()
+            else {
+                panic!("the record did not open");
+            };
+            assert_eq!(counter, 1);
+            assert!(!reader.needs_other_replica(now + crate::group::GROUP_GAP_TIMEOUT));
+        }
+        // A second presence at the same counter is no duplicate at the admin.
+        let again = member.presence(now, &mut rng).unwrap();
+        assert_eq!(
+            creator.receive(&again, now).unwrap(),
+            Outcome::Presence { sender: 1 }
+        );
+        assert_eq!(creator.own_role(), Some(Role::Owner));
+        assert_eq!(third.own_role(), Some(Role::Member));
     }
 
     #[test]

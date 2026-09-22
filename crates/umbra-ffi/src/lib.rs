@@ -618,6 +618,158 @@ mod tests {
             .is_none());
     }
 
+    /// A group of `client` with both queues, and `other` in it at index 1.
+    fn ready_pair(
+        client: &mut Client<MemoryBackend, Element>,
+        other: &mut Client<MemoryBackend, Element>,
+        rng: &mut Rng,
+    ) -> (ConversationId, ConversationId) {
+        let relays = [[0xA1; 32], [0xB2; 32]];
+        let conversation = client
+            .create_group("Trail", relays, 1_700_000_000, rng)
+            .unwrap();
+        let group_id = client.group_info(conversation).unwrap().group_id;
+        client
+            .group_queue_made(&group_id, 0, relays[0], [0xC3; 32], rng)
+            .unwrap();
+        client
+            .group_queue_made(&group_id, 1, relays[1], [0xD4; 32], rng)
+            .unwrap();
+        let member = join_group(client, other, conversation, rng);
+        (conversation, member)
+    }
+
+    #[test]
+    fn a_quiet_member_sends_presence_and_a_silent_one_is_removed() {
+        const DAY: u64 = 86_400;
+        let mut rng = Rng(61);
+        let mut client = new_client(&mut rng);
+        let mut other = new_client(&mut rng);
+        let (conversation, member) = ready_pair(&mut client, &mut other, &mut rng);
+        // GRP-169: a group of two evicts nobody, thus a third member joins.
+        let mut third = new_client(&mut rng);
+        join_group(&mut client, &mut third, conversation, &mut rng);
+        let t0 = 1_700_000_010;
+        let ms = |seconds: u64| seconds * 1_000;
+        // Each clock starts at its first look, and nothing is due then.
+        assert!(client
+            .members_to_evict(ms(t0), &mut rng)
+            .unwrap()
+            .is_empty());
+        assert!(other
+            .groups_owing_presence(ms(t0), &mut rng)
+            .unwrap()
+            .is_empty());
+        // A plain member watches no silence (`GRP-132`).
+        assert!(other
+            .members_to_evict(ms(t0 + 60 * DAY), &mut rng)
+            .unwrap()
+            .is_empty());
+
+        // GRP-128: a week with no record gives one presence record, and
+        // the owner reads it as a sign of life.
+        let week = t0 + 7 * DAY;
+        assert!(other
+            .groups_owing_presence(ms(week - 1), &mut rng)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            other.groups_owing_presence(ms(week), &mut rng).unwrap(),
+            vec![member]
+        );
+        other.post_presence(member, ms(week), &mut rng).unwrap();
+        let presence = other.take_group_post().unwrap();
+        assert!(presence.message.is_none());
+        assert!(client
+            .on_group_record(&[0xC3; 32], 1, &presence.record, ms(week), &mut rng)
+            .unwrap()
+            .is_none());
+        assert!(other
+            .groups_owing_presence(ms(week + DAY), &mut rng)
+            .unwrap()
+            .is_empty());
+
+        // GRP-134: silence shorter than `GROUP_SILENT_EVICT` removes
+        // nobody, and at the bound the owner draws its backoff first. The
+        // third member sent nothing at all, thus it is silent first.
+        let quiet = t0 + 30 * DAY;
+        assert!(client
+            .members_to_evict(ms(quiet), &mut rng)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            client
+                .members_to_evict(ms(quiet + 3_600), &mut rng)
+                .unwrap(),
+            vec![(conversation, 2)]
+        );
+        let silent = week + 30 * DAY;
+        // The member of the presence record is not silent yet, and at the
+        // bound it draws its backoff.
+        for at in [silent - 1, silent] {
+            assert_eq!(
+                client.members_to_evict(ms(at), &mut rng).unwrap(),
+                vec![(conversation, 2)]
+            );
+        }
+        let due = client
+            .members_to_evict(ms(silent + 3_600), &mut rng)
+            .unwrap();
+        assert_eq!(due, vec![(conversation, 1), (conversation, 2)]);
+
+        // GRP-133 and GRP-264: the removal rotates the epoch.
+        client
+            .remove_from_group(conversation, 2, ms(silent + 3_600), &mut rng)
+            .unwrap();
+        let info = client.group_info(conversation).unwrap();
+        assert_eq!((info.members, info.epoch), (2, 2));
+        // A group of two keeps its last member (`GRP-169`).
+        assert!(client
+            .members_to_evict(ms(silent + 7_200), &mut rng)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn a_record_that_came_before_its_epoch_key_opens_when_the_key_does() {
+        const DAY: u64 = 86_400;
+        let mut rng = Rng(67);
+        let mut client = new_client(&mut rng);
+        let mut other = new_client(&mut rng);
+        let (conversation, member) = ready_pair(&mut client, &mut other, &mut rng);
+        // GRP-360: the age of the epoch calls for a rotation.
+        let later = 1_700_000_000 + 31 * DAY;
+        let ms = |seconds: u64| seconds * 1_000;
+        client
+            .rotate_group(conversation, ms(later), &mut rng)
+            .unwrap();
+        let key = client.take_group_post().unwrap();
+        let mut draft = client.new_draft(conversation);
+        draft.set_text(&units("under the new key")).unwrap();
+        client.send_draft(draft, ms(later), &mut rng).unwrap();
+        let text = client.take_group_post().unwrap();
+
+        // The content arrives first, and it waits for the key.
+        assert!(other
+            .on_group_record(&[0xC3; 32], 2, &text.record, ms(later), &mut rng)
+            .unwrap()
+            .is_none());
+        assert_eq!(other.next_event(), None);
+        // The key installs, and the record that waited becomes a message.
+        let message = other
+            .on_group_record(&[0xD4; 32], 1, &key.record, ms(later), &mut rng)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            other.next_event(),
+            Some(Event::Message {
+                conversation: member,
+                message
+            })
+        );
+        assert_eq!(other.group_info(member).unwrap().epoch, 2);
+    }
+
     /// Puts `other` into the group of `client` with the add, the admit and
     /// the snapshot of §11.9.1, and gives its conversation there.
     fn join_group(
@@ -648,8 +800,12 @@ mod tests {
             .unwrap();
         let control = GroupControl::parse(&add).unwrap();
         let add_hash = control.epoch_hash();
-        group.apply_control(&control, 0, now).unwrap();
-        let admit = group.admit_for(1, 0, b"", now).unwrap();
+        let umbra_core::group::roster::Applied::Added(index) =
+            group.apply_control(&control, 0, now).unwrap()
+        else {
+            panic!("the add added nobody");
+        };
+        let admit = group.admit_for(index, 0, b"", now).unwrap();
         let admit_control = GroupControl::parse(&admit).unwrap();
         let invitation = GroupInvitation::parse(admit_control.payload).unwrap();
         let snapshot_bytes = group.snapshot(&[]).unwrap();

@@ -14,10 +14,11 @@ use std::collections::{BTreeMap, VecDeque};
 use umbra_core::{
     group::{
         join::{accept_admit, Admitted},
+        presence::{presence_due, Eviction, PresenceTracker},
         receive::Outcome,
         roster::Applied,
         state::Group,
-        GROUP_REPLICAS,
+        GROUP_REPLICAS, GROUP_SILENT_EVICT,
     },
     store::{
         engine::Backend,
@@ -142,6 +143,11 @@ pub(super) const GROUP_JOIN: TableId = TableId(0x14);
 /// A row holds the pairwise conversation, and its owner column names the
 /// group.
 pub(super) const GROUP_MEMBER: TableId = TableId(0x15);
+/// The activity clocks of §11.9.7: for each member that an admin of this
+/// device watches, the time of its last record or presence record, and for
+/// each group, the time of the last record of this device. A row holds a
+/// `BE64` of seconds, and its owner column names the group.
+pub(super) const GROUP_PRESENCE: TableId = TableId(0x16);
 
 const QUEUE_ROW_LEN: usize = 32 + 1 + 32;
 
@@ -268,6 +274,15 @@ pub(super) struct GroupQueues {
     /// roster epoch of that trigger (§11.4.1). The backoff lives with the
     /// run, thus a restart draws a new delay.
     pub backoff: BTreeMap<ConversationId, (u32, u64)>,
+    /// The instant at which this admin may remove each silent member. Two
+    /// admins that count one silence draw two delays, and the removal of
+    /// the first reaches the second before its own (`GRP-133`).
+    pub evictions: BTreeMap<(ConversationId, u16), u64>,
+}
+
+/// The key of the clock of the last record of this device in a group.
+fn sent_key(conversation: ConversationId) -> Vec<u8> {
+    [conversation.0.as_slice(), b"sent"].concat()
 }
 
 fn queue_row(group_id: &[u8; 32], replica: u8, relay: &[u8; 32]) -> Vec<u8> {
@@ -1258,7 +1273,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             record,
             is_rotation: false,
         });
-        Ok(())
+        self.put_clock(conversation, sent_key(conversation), now_ms / 1_000, rng)
     }
 
     /// The two replicas of a group, or none before both `GNEW` answers.
@@ -1331,6 +1346,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .apply_control(&control, group.own_index(), now_ms / 1_000)
             .map_err(|_| Error::Malformed)?;
         self.save_group(conversation, &group, rng)?;
+        self.roster_moved(conversation, &applied, now_ms / 1_000, rng)?;
         Ok(applied)
     }
 
@@ -1363,7 +1379,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             record: rotation.record,
             is_rotation: true,
         });
-        Ok(())
+        self.put_clock(conversation, sent_key(conversation), now_ms / 1_000, rng)
     }
 
     /// The `GKEY` that follows an accepted epoch-key record at one replica
@@ -1571,51 +1587,75 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let is_epoch_key = matches!(outcome, Ok(Outcome::EpochKey { .. }));
             replicas.arrived(which, seq, is_epoch_key);
         }
+        let now = now_ms / 1_000;
+        let mut outcomes: VecDeque<Outcome> = outcome.into_iter().collect();
+        let mut first = None;
         let mut installed = false;
-        if let Ok(Outcome::EpochKey {
-            epoch,
-            start_slot,
-            body,
-        }) = &outcome
-        {
-            installed = group
-                .install_epoch_key(*epoch, *start_slot, body, now_ms / 1_000)
-                .is_ok();
-            if installed {
-                // A record of the new epoch that arrived before its key
-                // waited; it opens now (`GRP-252`).
-                group.retry_held(now_ms / 1_000);
+        while let Some(outcome) = outcomes.pop_front() {
+            match outcome {
+                Outcome::EpochKey {
+                    epoch,
+                    start_slot,
+                    body,
+                } => {
+                    if group
+                        .install_epoch_key(epoch, start_slot, &body, now)
+                        .is_ok()
+                    {
+                        installed = true;
+                        // GRP-252: a record of the new epoch that arrived
+                        // before its key waited, and it opens now.
+                        outcomes.extend(group.retry_held(now));
+                    }
+                }
+                Outcome::Presence { sender } => {
+                    self.note_seen(conversation, &group, sender, now, rng)?;
+                }
+                Outcome::Content { sender, app, .. } => {
+                    self.note_seen(conversation, &group, sender, now, rng)?;
+                    let parsed =
+                        umbra_wire::app::AppMessage::parse(&app, umbra_wire::app::Channel::Group)?;
+                    // A roster object moves the roster and is no message
+                    // (`GRP-318`), and a record that waited for it opens.
+                    if parsed.kind == AppKind::GroupControl {
+                        if let Ok(control) = GroupControl::parse(parsed.body) {
+                            if let Ok(applied) = group.apply_control(&control, sender, now) {
+                                self.roster_moved(conversation, &applied, now, rng)?;
+                                outcomes.extend(group.retry_held(now));
+                            }
+                        }
+                        continue;
+                    }
+                    let stored = self.store_group_message(conversation, &app, now_ms, rng)?;
+                    first = first.or(stored);
+                }
+                Outcome::Held | Outcome::ClockSuspect | Outcome::Duplicate => {}
             }
         }
-        // The counters and the held records moved, whatever the outcome.
+        // The counters, the held records and the roster moved.
         self.save_group(conversation, &group, rng)?;
         if installed {
             self.queue_rekeys(&group)?;
         }
-        let Ok(Outcome::Content { sender, app, .. }) = outcome else {
-            return Ok(None);
-        };
-        let parsed = umbra_wire::app::AppMessage::parse(&app, umbra_wire::app::Channel::Group)?;
-        // A roster object moves the roster and is no message (`GRP-318`).
-        if parsed.kind == AppKind::GroupControl {
-            let Ok(control) = GroupControl::parse(parsed.body) else {
-                return Ok(None);
-            };
-            if group
-                .apply_control(&control, sender, now_ms / 1_000)
-                .is_ok()
-            {
-                self.save_group(conversation, &group, rng)?;
-            }
-            return Ok(None);
-        }
+        Ok(first)
+    }
+
+    /// Stores one message of a group that arrived, and raises its event.
+    /// The second copy of one record drops at its `msg_id` (`WIR-065`).
+    fn store_group_message<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        app: &[u8],
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<Option<MsgRef>, Error> {
+        let parsed = umbra_wire::app::AppMessage::parse(app, umbra_wire::app::Channel::Group)?;
         let open = self.open_mut()?;
         let reference = super::msg_ref(&open.device_set_key, &parsed.msg_id);
         let natural = [conversation.0.as_slice(), &reference].concat();
         let row = open
             .store
             .row_id(umbra_core::store::record::TableId::MESSAGE, &natural);
-        // WIR-065: the second copy of one record drops at its `msg_id`.
         if open
             .store
             .get(umbra_core::store::record::TableId::MESSAGE, &row)?
@@ -1628,7 +1668,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             Delivery::Delivered,
             conversation,
             now_ms,
-            &app,
+            app,
         );
         let mut batch = open.store.begin();
         batch.put(
@@ -1645,6 +1685,201 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             message,
         });
         Ok(Some(message))
+    }
+
+    /// Writes one activity clock of §11.9.7.
+    fn put_clock<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        key: Vec<u8>,
+        at: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let open = self.open_mut()?;
+        let row = open.store.row_id(GROUP_PRESENCE, &key);
+        let mut batch = open.store.begin();
+        batch.put(
+            GROUP_PRESENCE,
+            row,
+            Some(conversation.0),
+            &at.to_be_bytes(),
+            rng,
+        )?;
+        Ok(batch.commit()?)
+    }
+
+    /// Reads one activity clock of §11.9.7.
+    fn clock(&self, key: &[u8]) -> Result<Option<u64>, Error> {
+        let store = &self.open_ref()?.store;
+        let row = store.row_id(GROUP_PRESENCE, key);
+        Ok(store
+            .get(GROUP_PRESENCE, &row)?
+            .and_then(|bytes| <[u8; 8]>::try_from(bytes.as_slice()).ok())
+            .map(u64::from_be_bytes))
+    }
+
+    /// A record or a presence record of `sender` at `now` (`GRP-132`). An
+    /// admin alone counts silence, thus no other device writes the clock.
+    fn note_seen<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        group: &Group,
+        sender: u16,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        if group.own_role().is_none_or(|role| role < Role::Admin) {
+            return Ok(());
+        }
+        self.groups.evictions.remove(&(conversation, sender));
+        self.put_clock(
+            conversation,
+            Self::member_key(conversation, sender),
+            now,
+            rng,
+        )
+    }
+
+    /// A member that joined starts its silence at the join, and a member
+    /// that left takes its clock with it.
+    fn roster_moved<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        applied: &Applied,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        match applied {
+            Applied::Added(index) => self.put_clock(
+                conversation,
+                Self::member_key(conversation, *index),
+                now,
+                rng,
+            ),
+            Applied::Removed(trigger) => {
+                if let Some(index) = trigger.excluded {
+                    self.groups.evictions.remove(&(conversation, index));
+                    let open = self.open_mut()?;
+                    let row = open
+                        .store
+                        .row_id(GROUP_PRESENCE, &Self::member_key(conversation, index));
+                    let mut batch = open.store.begin();
+                    batch.delete(GROUP_PRESENCE, row);
+                    batch.commit()?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Each group that owes a `GroupPresence`: this device sent no record
+    /// to it in a `PRESENCE_INTERVAL` (`GRP-128`). A group seen for the
+    /// first time starts its clock here and owes nothing yet.
+    pub fn groups_owing_presence<R: CryptoRng + ?Sized>(
+        &mut self,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<Vec<ConversationId>, Error> {
+        let now = now_ms / 1_000;
+        let mut due = Vec::new();
+        for conversation in self.group_conversations()? {
+            if self.group_closed(conversation)? {
+                continue;
+            }
+            let group = self.group_of(conversation)?;
+            if group.own_role().is_none() || group.replicas().is_none() {
+                continue;
+            }
+            match self.clock(&sent_key(conversation))? {
+                None => self.put_clock(conversation, sent_key(conversation), now, rng)?,
+                Some(at) if presence_due(Some(at), now) => due.push(conversation),
+                Some(_) => {}
+            }
+        }
+        Ok(due)
+    }
+
+    /// Posts one `GroupPresence` to each replica of a group (§11.9.7).
+    pub fn post_presence<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let mut group = self.group_of(conversation)?;
+        let Some(replicas) = Self::group_replicas_of(&group)? else {
+            return Ok(());
+        };
+        let write = group.credentials().ok_or(Error::Integrity)?.write_secret();
+        let record = group
+            .presence(now_ms / 1_000, rng)
+            .map_err(|_| Error::Malformed)?;
+        self.save_group(conversation, &group, rng)?;
+        self.groups.posts.push_back(GroupPost {
+            message: None,
+            conversation,
+            replicas,
+            write,
+            record,
+            is_rotation: false,
+        });
+        self.put_clock(conversation, sent_key(conversation), now_ms / 1_000, rng)
+    }
+
+    /// Each member that this admin must remove for its silence, after the
+    /// backoff of this device (`GRP-132`, `GRP-133`, `GRP-397`). A member
+    /// with no clock starts one here, thus a device that became an admin
+    /// never removes a member on a silence it did not watch (`GRP-396`).
+    ///
+    /// A silent member at `moderator` or above loses its role first, and a
+    /// removal that would leave one owner waits for a grant (`GRP-166`,
+    /// `GRP-168`). Neither is here: a granting epoch comes with the roles.
+    pub fn members_to_evict<R: CryptoRng + ?Sized>(
+        &mut self,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<Vec<(ConversationId, u16)>, Error> {
+        let now = now_ms / 1_000;
+        let mut due = Vec::new();
+        for conversation in self.group_conversations()? {
+            if self.group_closed(conversation)? {
+                continue;
+            }
+            let group = self.group_of(conversation)?;
+            if group.own_role().is_none_or(|role| role < Role::Admin) {
+                continue;
+            }
+            let roster = group.roster();
+            let (active, owners) = (roster.active_count(), roster.owner_count());
+            let watched: Vec<(u16, Role)> = roster
+                .active()
+                .filter(|member| member.index != group.own_index())
+                .map(|member| (member.index, member.role))
+                .collect();
+            for (index, role) in watched {
+                let key = Self::member_key(conversation, index);
+                let Some(seen) = self.clock(&key)? else {
+                    self.put_clock(conversation, key, now, rng)?;
+                    continue;
+                };
+                if now.saturating_sub(seen) < GROUP_SILENT_EVICT
+                    || PresenceTracker::eviction(role, active, owners) != Eviction::Remove
+                {
+                    self.groups.evictions.remove(&(conversation, index));
+                    continue;
+                }
+                match self.groups.evictions.get(&(conversation, index)) {
+                    Some(at) if now >= *at => due.push((conversation, index)),
+                    Some(_) => {}
+                    None => {
+                        let at = now.saturating_add(group.rotation_delay(rng));
+                        self.groups.evictions.insert((conversation, index), at);
+                    }
+                }
+            }
+        }
+        Ok(due)
     }
 
     /// Moves each replica to the credentials of the epoch this device

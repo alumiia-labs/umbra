@@ -11,8 +11,12 @@ use umbra_crypto::group::{
     MemberKeys,
 };
 use umbra_wire::{
+    app::{AppKind, AppMessage, Channel},
     bucket::Bucket,
-    group::record::{open_content, ContentPlain, GroupQueueRecord, RecordKind},
+    group::{
+        control::{ControlType, GroupControl},
+        record::{open_content, ContentPlain, GroupQueueRecord, RecordKind, Tags},
+    },
 };
 
 use umbra_crypto::stored::{Reader, Writer};
@@ -75,6 +79,12 @@ pub enum Outcome {
         /// The `EpochKeyBody` bytes.
         body: Vec<u8>,
     },
+    /// A `GroupPresence` that verified at this admin (`GRP-217`). It is
+    /// a signal of activity alone, and it moves no counter (`GRP-395`).
+    Presence {
+        /// The member the tag names.
+        sender: u16,
+    },
     /// The record names a roster epoch ahead of the local roster, and it
     /// waits (`GRP-252`).
     Held,
@@ -89,6 +99,21 @@ struct HeldRecord {
     bytes: Vec<u8>,
     bucket: Bucket,
     arrived_at: u64,
+}
+
+/// Whether an `AppMessage` carries a `GroupPresence` of the one version
+/// (`WIR-492`).
+fn is_presence(app: &[u8]) -> bool {
+    let Ok(message) = AppMessage::parse(app, Channel::Group) else {
+        return false;
+    };
+    if message.kind != AppKind::GroupControl {
+        return false;
+    }
+    GroupControl::parse(message.body).is_ok_and(|control| {
+        control.control_type == ControlType::Presence
+            && control.payload == [crate::group::send::PRESENCE_VERSION]
+    })
 }
 
 /// The receiver state of one member in one group.
@@ -254,6 +279,14 @@ impl Receiver {
             },
             &tag,
         )?;
+        // GRP-217: a sparse record is a presence record or nothing, and
+        // GRP-395 keeps it out of the counter of its sender.
+        if matches!(plain.tags, Tags::Sparse(_)) {
+            if !is_presence(plain.app) {
+                return Err(Error::Unverified);
+            }
+            return Ok(Outcome::Presence { sender });
+        }
         let last = self.counters.entry((sender, record.epoch)).or_insert(0);
         if plain.counter <= *last {
             return Ok(Outcome::Duplicate);

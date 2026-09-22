@@ -9,12 +9,16 @@ use umbra_crypto::group::{
     MemberKeys, TAG_LEN,
 };
 use umbra_wire::{
+    app::{AppKind, AppMessage},
     bucket::Bucket,
     group::{
         control::{ControlType, GroupControl, Role},
         record::{seal_content, ContentPlain, Tags},
     },
 };
+
+/// The one version of a `GroupPresence` (Part 6 §6.6.3, `WIR-492`).
+pub const PRESENCE_VERSION: u8 = 0x01;
 
 use umbra_crypto::stored::{Reader, Writer};
 
@@ -172,7 +176,9 @@ impl Sender {
     }
 
     /// Builds and seals a `GroupPresence` record, tagged for each member
-    /// at `admin` or above and no other (`GRP-128`, `GRP-321`).
+    /// at `admin` or above and no other (`GRP-128`, `GRP-321`). It carries
+    /// the counter of the last record of this device in the epoch and takes
+    /// no step of it, because only an admin reads it (`GRP-395`).
     #[allow(clippy::too_many_arguments)]
     pub fn build_presence(
         &mut self,
@@ -182,6 +188,7 @@ impl Sender {
         epochs: &mut EpochStore,
         pairs: &mut PairCache,
         nonce: [u8; 12],
+        msg_id: [u8; 16],
         now: u64,
     ) -> Result<Vec<u8>, Error> {
         let epoch = epochs.epoch();
@@ -189,14 +196,24 @@ impl Sender {
         let keys = epochs.record_keys(epoch, slot, now)?;
         let (record_key, _) = keys.first().ok_or(Error::NoPath)?;
         let roster_epoch = roster.epoch_index();
-        let counter = self.next_counter(epoch)?;
+        let counter = self.counter(epoch);
+        let version = [PRESENCE_VERSION];
         let control = GroupControl {
             control_type: ControlType::Presence,
-            payload: &[],
+            payload: &version,
         };
-        let mut app = [0u8; 8];
-        let app_len = control.encode(&mut app)?;
-        let app = app.get(..app_len).ok_or(Error::Malformed)?;
+        let mut body = [0u8; 8];
+        let body_len = control.encode(&mut body)?;
+        let message = AppMessage {
+            kind: AppKind::GroupControl,
+            msg_id,
+            sent_at: now.saturating_mul(1_000),
+            body: body.get(..body_len).ok_or(Error::Malformed)?,
+        };
+        let mut app = alloc::vec![0u8; message.len()];
+        let app_len = message.encode(&mut app)?;
+        app.truncate(app_len);
+        let app = app.as_slice();
         let hash = app_hash(app);
         let targets: Vec<u16> = roster
             .active()

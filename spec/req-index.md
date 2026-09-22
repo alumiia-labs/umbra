@@ -75,13 +75,13 @@ each column when a crate implements the requirement and a test covers it.
 | `NTF` | 67 | 30 | 0 | 0 | 2 | **99** |
 | `DIS` | 123 | 37 | 0 | 0 | 1 | **161** |
 | `REL` | 124 | 32 | 1 | 0 | 2 | **159** |
-| `GRP` | 212 | 58 | 0 | 0 | 6 | **276** |
+| `GRP` | 213 | 60 | 0 | 0 | 6 | **279** |
 | `COM` | 299 | 96 | 0 | 0 | 5 | **400** |
 | `ATT` | 139 | 46 | 1 | 0 | 2 | **188** |
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
 | `IMP` | 112 | 41 | 0 | 0 | 2 | **155** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2208 | 713 | 7 | 0 | 53 | **2981** |
+| **All** | 2209 | 715 | 7 | 0 | 53 | **2984** |
 
 ## SCP — Scope and Conventions
 
@@ -2281,6 +2281,9 @@ Source: `spec/11-private-groups.md`
 | `GRP-392` | §11.2.2 | MUST | (unstated) | A client whose group-queue session ends before an answer to a `GPOST` MUST send the same bytes in its next session, under Part 3 rule `NET-072`, and the relay answers with the `seq` that it holds (`NET-239`). |  |  |
 | `GRP-393` | §11.2.2 | MAY | A client that sends a `GNEW` again in the same way | A client that sends a `GNEW` again in the same way MAY leave one empty group queue at a relay that answered the first one, and `GROUP_RETENTION` ends it. |  |  |
 | `GRP-394` | §11.2.2 | MUST | A client whose group-queue link ends | A client whose group-queue link ends MUST wait `GROUP_RELINK_FIRST` before a new link. |  |  |
+| `GRP-395` | §11.9.7 | MUST NOT | (unstated) | A `GroupPresence` MUST carry the `counter` of the last record that its sender sent in that epoch, or 0 before the first, and it MUST NOT advance that counter. |  |  |
+| `GRP-396` | §11.9.7 | MUST | An admin | An admin MUST measure that silence over the time that it watched: for a member whose last record it did not see, the silence starts when this admin first holds that member and that role. |  |  |
+| `GRP-397` | §11.9.7 | MUST NOT | (unstated) | An admin MUST draw the backoff of `GRP-358` before the removal of `GRP-133`, and MUST NOT remove a member whose removal by another admin arrived during that backoff. |  |  |
 
 ## COM — Public Communities
 
