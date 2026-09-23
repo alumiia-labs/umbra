@@ -16,6 +16,7 @@ extern crate alloc;
 
 pub mod aead;
 pub mod auth;
+pub mod dead;
 pub mod group;
 pub mod handshake;
 pub mod hash;

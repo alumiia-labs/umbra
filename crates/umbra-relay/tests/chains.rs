@@ -1358,3 +1358,142 @@ fn a_queue_rotates_to_another_operator_and_the_old_one_ends() {
         third_queue
     );
 }
+
+/// Runs one handle write of one client to its end.
+fn write_handle(
+    mesh: &mut Mesh,
+    client: usize,
+    mut write: umbra_core::attach::handle::HandleWrite,
+) -> Vec<[u8; 32]> {
+    let mut rng = Rng(61);
+    for _ in 0..400 {
+        write.tick(&mut mesh.clients[client], &mut rng).unwrap();
+        for (handle, outcome) in chunk_answers(mesh, client) {
+            let node = &mut mesh.clients[client];
+            if let Progress::Done(holders) =
+                write.on_outcome(node, handle, outcome, &mut rng).unwrap()
+            {
+                return holders;
+            }
+        }
+    }
+    panic!("the write did not end");
+}
+
+/// Runs one handle read of one client to its end.
+fn read_handle(
+    mesh: &mut Mesh,
+    client: usize,
+    mut read: umbra_core::attach::handle::HandleRead,
+) -> Option<Vec<u8>> {
+    let mut rng = Rng(62);
+    for _ in 0..400 {
+        if let Progress::Done(found) = read.tick(&mut mesh.clients[client], &mut rng).unwrap() {
+            return found;
+        }
+        for (handle, outcome) in chunk_answers(mesh, client) {
+            let node = &mut mesh.clients[client];
+            if let Progress::Done(found) = read.on_outcome(node, handle, outcome, &mut rng).unwrap()
+            {
+                return found;
+            }
+        }
+    }
+    panic!("the read did not end");
+}
+
+#[test]
+fn a_dead_channel_blob_goes_to_its_placement_and_the_peer_reads_it() {
+    use umbra_core::{
+        attach::{
+            handle::{HandleRead, HandleWrite},
+            place::placement_list,
+        },
+        session::dead::{open_blob, seal_blob},
+    };
+    use umbra_crypto::dead::DeadChannel;
+    use umbra_wire::address::{QueueAddress, LEN};
+    const WRITER: usize = 0;
+    const READER: usize = 1;
+    let mut mesh = Mesh::new(&[0x71, 0x72]);
+    use_transfer_node(&mut mesh, WRITER, 0x71);
+    use_transfer_node(&mut mesh, READER, 0x72);
+    mesh.settle();
+    let relays: Vec<AttachmentRelay> = (3..7).map(holder).collect();
+
+    // The two pairwise keys give one secret, and the writer names its own
+    // handle with its key (Part 3 §3.2.6).
+    let writer_key = RootIdentity::new(Secret::new([0x71; 32])).pairwise_identity(&[1; 16]);
+    let reader_key = RootIdentity::new(Secret::new([0x72; 32])).pairwise_identity(&[2; 16]);
+    let at_writer = DeadChannel::new(&writer_key, &reader_key.x25519_public()).unwrap();
+    let at_reader = DeadChannel::new(&reader_key, &writer_key.x25519_public()).unwrap();
+    let writer_pk = writer_key.x25519_public();
+    let week = 2_900;
+    let handle = at_writer.handle(&writer_pk, week);
+    let read_pk =
+        |read: &Secret<32>| *XPublic::from(&StaticSecret::from(*read.expose())).as_bytes();
+    let mut address = vec![0u8; LEN];
+    QueueAddress {
+        relay_id: [5; 32],
+        sender_id: [6; 32],
+        qs_auth_sk: Secret::new([7; 32]),
+        qe: Secret::new([8; 32]),
+    }
+    .encode(&mut address)
+    .unwrap();
+    let chunk = seal_blob(&at_writer.blob_key(&writer_pk, week), &address, [9; 24]).unwrap();
+
+    // ATT-133: the first two relays of the list hold it, and one of them
+    // made the copy (ATT-135).
+    let write = HandleWrite::new(
+        handle,
+        Secret::new([0x33; 32]),
+        read_pk(&at_writer.read_secret(&writer_pk, week)),
+        chunk,
+        false,
+        &relays,
+    )
+    .unwrap();
+    let holders = write_handle(&mut mesh, WRITER, write);
+    assert_eq!(holders, placement_list(&handle, &relays)[..2]);
+    assert_eq!(mesh.pushes, 1);
+
+    // NET-186, NET-190: the reader derives the handle and the keys of the
+    // writer, and it opens the address.
+    let read = HandleRead::new(
+        at_reader.handle(&writer_pk, week),
+        at_reader.read_secret(&writer_pk, week),
+        &relays,
+    );
+    let found = read_handle(&mut mesh, READER, read).expect("the blob");
+    let opened = open_blob(&at_reader.blob_key(&writer_pk, week), &found).unwrap();
+    assert_eq!(*opened, address);
+
+    // NET-192: the handle of the week before holds nothing.
+    let read = HandleRead::new(
+        at_reader.handle(&writer_pk, week - 1),
+        at_reader.read_secret(&writer_pk, week - 1),
+        &relays,
+    );
+    assert!(read_handle(&mut mesh, READER, read).is_none());
+
+    // ATT-138: a write under the same handle erases the first one, and the
+    // reader gets the new blob.
+    let chunk = seal_blob(&at_writer.blob_key(&writer_pk, week), &address, [10; 24]).unwrap();
+    let write = HandleWrite::new(
+        handle,
+        Secret::new([0x33; 32]),
+        read_pk(&at_writer.read_secret(&writer_pk, week)),
+        chunk.clone(),
+        true,
+        &relays,
+    )
+    .unwrap();
+    assert_eq!(write_handle(&mut mesh, WRITER, write), holders);
+    let read = HandleRead::new(
+        at_reader.handle(&writer_pk, week),
+        at_reader.read_secret(&writer_pk, week),
+        &relays,
+    );
+    assert_eq!(read_handle(&mut mesh, READER, read), Some(chunk));
+}

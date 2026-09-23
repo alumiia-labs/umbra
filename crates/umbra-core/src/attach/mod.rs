@@ -7,6 +7,7 @@
 //! takes the time and the random values it needs as arguments.
 
 pub mod command;
+pub mod handle;
 pub mod manifest;
 pub mod place;
 pub mod seal;
