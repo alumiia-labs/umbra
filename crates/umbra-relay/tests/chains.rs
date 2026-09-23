@@ -1787,3 +1787,68 @@ fn a_channel_restored_from_an_old_state_renews_and_talks_again() {
     }
     talk(&mut mesh, contacts, 25);
 }
+
+#[test]
+fn a_backup_object_takes_two_replicas_and_its_manifest_above_seven_chunks() {
+    use umbra_core::attach::transfer::Class;
+    use umbra_wire::descriptor::Level;
+    const WRITER: usize = 0;
+    const READER: usize = 1;
+    let mut mesh = Mesh::new(&[0xA1, 0xA2]);
+    use_transfer_node(&mut mesh, WRITER, 0xA1);
+    use_transfer_node(&mut mesh, READER, 0xA2);
+    mesh.settle();
+    let relays: Vec<AttachmentRelay> = (3..7).map(holder).collect();
+
+    // IDN-096: nine data chunks are above BACKUP_DESC_REFS.
+    let plain: Vec<u8> = (0..SEGMENT_SIZE * 8 + 5).map(|i| (i % 241) as u8).collect();
+    let mut rng = Rng(71);
+    let mut upload =
+        Upload::with_class(&plain, Shape::default(), &relays, Class::BACKUP, &mut rng).unwrap();
+    upload.tick(&mut mesh.clients[WRITER], &mut rng).unwrap();
+    let mut uploaded: Option<Uploaded> = None;
+    for _ in 0..600 {
+        for (handle, outcome) in chunk_answers(&mut mesh, WRITER) {
+            let node = &mut mesh.clients[WRITER];
+            if let Progress::Done(done) =
+                upload.on_outcome(node, handle, outcome, &mut rng).unwrap()
+            {
+                uploaded = Some(done);
+            }
+        }
+        if uploaded.is_some() {
+            break;
+        }
+    }
+    let uploaded = uploaded.expect("the upload ends");
+    assert_eq!(uploaded.descriptor.level, Level::Manifest);
+    // IDN-076: each chunk is at two relays.
+    assert!(uploaded
+        .credentials
+        .iter()
+        .all(|credential| credential.relays.len() == 2));
+
+    let mut encoded = vec![0u8; uploaded.descriptor.len()];
+    uploaded.descriptor.encode(&mut encoded).unwrap();
+    let received = umbra_wire::descriptor::FileDescriptor::parse(&encoded).unwrap();
+    // ATT-073 holds for an attachment, thus the attachment path refuses it.
+    assert!(Download::new(&received, &relays, &mut rng).is_err());
+    let mut download = Download::new_backup(&received, &relays, &mut rng).unwrap();
+    download.tick(&mut mesh.clients[READER], &mut rng).unwrap();
+    let mut fetched = None;
+    for _ in 0..600 {
+        for (handle, outcome) in chunk_answers(&mut mesh, READER) {
+            let node = &mut mesh.clients[READER];
+            if let Progress::Done(bytes) = download
+                .on_outcome(node, handle, outcome, &mut rng)
+                .unwrap()
+            {
+                fetched = Some(bytes);
+            }
+        }
+        if fetched.is_some() {
+            break;
+        }
+    }
+    assert_eq!(fetched.expect("the download ends"), plain);
+}

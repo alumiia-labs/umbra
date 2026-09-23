@@ -106,8 +106,39 @@ struct ChunkState {
     is_done: bool,
 }
 
+/// The class of an upload: an attachment of Part 13, or a backup object
+/// of Part 4 §4.7.2 in the backup class of §13.3.3 rule 10.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Class {
+    /// The relays of each chunk.
+    replicas: usize,
+    /// Whether the registration is a `BNEW`.
+    is_backup: bool,
+    /// The data chunk count above which the file takes the manifest level.
+    descriptor_refs: usize,
+}
+
+impl Class {
+    /// An attachment: `REPLICAS` relays, `CNEW`, and the manifest level
+    /// above `MAX_DESCRIPTOR_REFS` (`ATT-073`).
+    pub const ATTACHMENT: Class = Class {
+        replicas: REPLICAS,
+        is_backup: false,
+        descriptor_refs: MAX_DESCRIPTOR_REFS,
+    };
+    /// A backup object: `BACKUP_REPLICAS` relays (`IDN-076`), `BNEW`
+    /// (`IDN-117`), and the manifest level above `BACKUP_DESC_REFS`
+    /// (`IDN-096`).
+    pub const BACKUP: Class = Class {
+        replicas: super::BACKUP_REPLICAS,
+        is_backup: true,
+        descriptor_refs: crate::identity::BACKUP_DESC_REFS,
+    };
+}
+
 /// The upload of one file.
 pub struct Upload {
+    class: Class,
     sealed: SealedFile,
     file_key: Secret<32>,
     file_nonce: [u8; 24],
@@ -161,6 +192,17 @@ impl Upload {
         relays: &[AttachmentRelay],
         rng: &mut R,
     ) -> Result<Self, Error> {
+        Self::with_class(plain, shape, relays, Class::ATTACHMENT, rng)
+    }
+
+    /// The upload of `plain` in `class`.
+    pub fn with_class<R: CryptoRng + ?Sized>(
+        plain: &[u8],
+        shape: Shape,
+        relays: &[AttachmentRelay],
+        class: Class,
+        rng: &mut R,
+    ) -> Result<Self, Error> {
         let file_key = Secret::new(random_bytes(rng));
         let file_nonce = random_bytes(rng);
         let sealed = seal_file(&file_key, &file_nonce, plain)?;
@@ -170,9 +212,16 @@ impl Upload {
         }
         let mut chunks = Vec::with_capacity(sealed.chunks.len());
         for _ in &sealed.chunks {
-            chunks.push(ChunkState::draw(relays, Vec::new(), 0, rng)?);
+            chunks.push(ChunkState::draw(
+                relays,
+                Vec::new(),
+                0,
+                class.replicas,
+                rng,
+            )?);
         }
         Ok(Upload {
+            class,
             data_chunks: sealed.chunks.len(),
             sealed,
             chunk_key: Secret::new(*file_key.expose()),
@@ -211,7 +260,7 @@ impl Upload {
     /// The chunks placed, and the chunk count of both phases.
     fn progress(&self) -> (u32, u32) {
         let placed = self.chunks.iter().filter(|chunk| chunk.is_done).count();
-        let manifest = if self.data_chunks > MAX_DESCRIPTOR_REFS {
+        let manifest = if self.data_chunks > self.class.descriptor_refs {
             manifest::manifest_chunks(self.data_chunks)
         } else {
             0
@@ -252,7 +301,13 @@ impl Upload {
         let sealed = seal_file(&key, &self.file_nonce, &plain)?;
         let mut chunks = Vec::with_capacity(sealed.chunks.len());
         for _ in &sealed.chunks {
-            chunks.push(ChunkState::draw(&self.pool, Vec::new(), 0, rng)?);
+            chunks.push(ChunkState::draw(
+                &self.pool,
+                Vec::new(),
+                0,
+                self.class.replicas,
+                rng,
+            )?);
         }
         let data = core::mem::replace(&mut self.sealed, sealed);
         self.data = Some(DataPhase {
@@ -314,7 +369,7 @@ impl Upload {
                 let job = ChunkJob::Register {
                     cred,
                     read_pk: *umbra_crypto::x25519::PublicKey::from(&read).as_bytes(),
-                    is_backup: false,
+                    is_backup: self.class.is_backup,
                 };
                 (relay_at(at)?, job)
             }
@@ -417,7 +472,8 @@ impl Upload {
                 let repairs = chunk.repairs;
                 // The answers of the old start name no step of this upload.
                 self.waiting.retain(|_, (of, _, _)| *of != index);
-                let mut next = ChunkState::draw(&self.pool, failed, repairs, rng)?;
+                let mut next =
+                    ChunkState::draw(&self.pool, failed, repairs, self.class.replicas, rng)?;
                 next.is_started = true;
                 let replicas = next.relays.len();
                 *self.chunks.get_mut(index).ok_or(Error::Malformed)? = next;
@@ -580,7 +636,7 @@ impl Upload {
             _ => self.repair(node, index, step, rng)?,
         }
         if self.chunks.iter().all(|chunk| chunk.is_done) {
-            if self.data.is_some() || self.data_chunks <= MAX_DESCRIPTOR_REFS {
+            if self.data.is_some() || self.data_chunks <= self.class.descriptor_refs {
                 return self.finish().map(Progress::Done);
             }
             self.start_manifest(rng)?;
@@ -633,9 +689,10 @@ impl ChunkState {
         pool: &[AttachmentRelay],
         failed: Vec<[u8; 32]>,
         repairs: u8,
+        replicas: usize,
         rng: &mut R,
     ) -> Result<Self, Error> {
-        let picked = pick_relays(pool, &failed, rng)?;
+        let picked = pick_relays(pool, &failed, replicas, rng)?;
         let cred: [u8; 32] = random_bytes(rng);
         Ok(ChunkState {
             upload: ChunkUpload::new(random_bytes(rng), StaticSecret::from(cred)),
@@ -679,12 +736,13 @@ fn fresh_relay<R: CryptoRng + ?Sized>(
         .ok_or(Error::NoPath)
 }
 
-/// `REPLICAS` relays of different operators, in a random order. A relay set
-/// with fewer operators gives no upload, because the redundancy is
+/// `replicas` relays of different operators, in a random order. A relay
+/// set with fewer operators gives no upload, because the redundancy is
 /// mandatory (§13.4).
 fn pick_relays<R: CryptoRng + ?Sized>(
     relays: &[AttachmentRelay],
     failed: &[[u8; 32]],
+    replicas: usize,
     rng: &mut R,
 ) -> Result<Vec<[u8; 32]>, Error> {
     let mut pool: Vec<AttachmentRelay> = relays
@@ -692,8 +750,8 @@ fn pick_relays<R: CryptoRng + ?Sized>(
         .filter(|relay| !failed.contains(&relay.relay_id))
         .copied()
         .collect();
-    let mut picked: Vec<AttachmentRelay> = Vec::with_capacity(REPLICAS);
-    while picked.len() < REPLICAS && !pool.is_empty() {
+    let mut picked: Vec<AttachmentRelay> = Vec::with_capacity(replicas);
+    while picked.len() < replicas && !pool.is_empty() {
         let bound = u32::try_from(pool.len()).map_err(|_| Error::Malformed)?;
         let at = usize::try_from(random_below(rng, bound)).map_err(|_| Error::Malformed)?;
         let relay = pool.swap_remove(at.min(pool.len().saturating_sub(1)));
@@ -704,7 +762,7 @@ fn pick_relays<R: CryptoRng + ?Sized>(
             picked.push(relay);
         }
     }
-    if picked.len() < REPLICAS {
+    if picked.len() < replicas {
         return Err(Error::NoPath);
     }
     Ok(picked.into_iter().map(|relay| relay.relay_id).collect())
@@ -781,6 +839,25 @@ impl Download {
         relays: &[AttachmentRelay],
         rng: &mut R,
     ) -> Result<Self, Error> {
+        Self::with_class(descriptor, relays, Class::ATTACHMENT, rng)
+    }
+
+    /// The download of a backup object, which takes the manifest level
+    /// above `BACKUP_DESC_REFS` data chunks (`IDN-096`).
+    pub fn new_backup<R: CryptoRng + ?Sized>(
+        descriptor: &FileDescriptor,
+        relays: &[AttachmentRelay],
+        rng: &mut R,
+    ) -> Result<Self, Error> {
+        Self::with_class(descriptor, relays, Class::BACKUP, rng)
+    }
+
+    fn with_class<R: CryptoRng + ?Sized>(
+        descriptor: &FileDescriptor,
+        relays: &[AttachmentRelay],
+        class: Class,
+        rng: &mut R,
+    ) -> Result<Self, Error> {
         let data = Assembler::for_data(descriptor)?;
         let file_key = Secret::new(*descriptor.file_key.expose());
         let (assembler, chunk_key, expected, then) = match descriptor.level {
@@ -793,7 +870,7 @@ impl Download {
                     usize::try_from(assembler.chunk_count()).map_err(|_| Error::Malformed)?;
                 // ATT-073: a manifest names more data chunks than one
                 // descriptor holds.
-                if data_chunks <= MAX_DESCRIPTOR_REFS
+                if data_chunks <= class.descriptor_refs
                     || manifest_chunks != manifest::manifest_chunks(data_chunks)
                 {
                     return Err(Error::Malformed);
