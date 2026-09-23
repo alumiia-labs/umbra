@@ -24,11 +24,19 @@ pub enum CapsuleType {
     Session = 0x0B53,
     /// One `CRPUT` between two relays, outside each session (`WIR-211`).
     Replica = 0x0B54,
+    /// One `SEND` of a relay into a queue at another relay, outside each
+    /// session: the digest of a group or a community (`WIR-526`).
+    Deposit = 0x0B55,
 }
 
 /// The value of an `UMBRA_REPLICA` capsule: the command header, and the
 /// 32 682 bytes of a `CRPUT` payload (`WIR-213`).
 pub const REPLICA_LEN: usize = crate::bucket::COMMAND_HEADER + 32 + 32_650;
+
+/// The value of an `UMBRA_DEPOSIT` capsule: one `SEND` of bucket `B0`, with
+/// its header (`WIR-526`).
+pub const DEPOSIT_LEN: usize =
+    crate::bucket::COMMAND_HEADER + crate::bucket::Bucket::B0.l6_record();
 
 impl CapsuleType {
     const fn from_value(v: u64) -> Result<Self, Error> {
@@ -36,6 +44,7 @@ impl CapsuleType {
             0x0B52 => Ok(CapsuleType::Cell),
             0x0B53 => Ok(CapsuleType::Session),
             0x0B54 => Ok(CapsuleType::Replica),
+            0x0B55 => Ok(CapsuleType::Deposit),
             _ => Err(Error::Malformed),
         }
     }
@@ -94,6 +103,14 @@ fn check_value_len(kind: CapsuleType, len: usize) -> Result<(), Error> {
         // WIR-213: one length.
         CapsuleType::Replica => {
             if len == REPLICA_LEN {
+                Ok(())
+            } else {
+                Err(Error::Malformed)
+            }
+        }
+        // WIR-526: one length.
+        CapsuleType::Deposit => {
+            if len == DEPOSIT_LEN {
                 Ok(())
             } else {
                 Err(Error::Malformed)

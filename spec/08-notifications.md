@@ -742,6 +742,11 @@ gives the commands `GNREG` and `GNUNREG`, and Part 12 §12.6.4 gives the
   record, a member index, or a sequence number. The relay writes its
   `GroupQueueId` in the 32-byte identifier field of the digest, and it writes
   the count of records since the previous digest in `post_count`.
+  The digest travels to the queue relay of the notify queue as an
+  `UMBRA_DEPOSIT` of Part 6 rule `WIR-526`. That relay learns the address of
+  the group-queue relay that deposits into the queue, thus it learns that the
+  queue is a notify queue and which relay holds its group queue; it learns no
+  group and no member. Part 16 §16.3 holds that residual.
 - **[NTF-100]** A group-queue relay MUST hold a registration in memory only.
   **[NTF-101]** A group-queue relay MUST NOT hold more than
   `GROUP_NOTIFIER_MAX` registrations for one group queue. Part 3 §3.2.7 owns

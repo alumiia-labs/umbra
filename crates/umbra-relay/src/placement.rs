@@ -31,6 +31,9 @@ pub struct Placement {
     /// Where to dial each other relay with the attachment role, for the
     /// copy of a chunk (Part 13 §13.4.1).
     pub replicas: BTreeMap<[u8; 32], Dial>,
+    /// Where to dial each queue relay, with its static key, for the deposit
+    /// of a digest (Part 6 `WIR-526`).
+    pub queue_relays: BTreeMap<[u8; 32], (Dial, [u8; 32])>,
     /// Whether this relay has the attachment role.
     pub has_attachment_role: bool,
     /// The epoch of the root.
@@ -89,10 +92,17 @@ pub fn placement(
         .filter(|relay| relay.has_attachment_role && relay.candidate.relay_id != *relay_id)
         .map(|relay| (relay.candidate.relay_id, dial_of(relay)))
         .collect();
+    let queue_relays = set
+        .relays
+        .iter()
+        .filter(|relay| layer_of(relay) == 3 && relay.candidate.relay_id != *relay_id)
+        .map(|relay| (relay.candidate.relay_id, (dial_of(relay), relay.ntor_pk)))
+        .collect();
     Ok(Placement {
         layer,
         next,
         replicas,
+        queue_relays,
         has_attachment_role: own.has_attachment_role,
         epoch: set.epoch,
     })

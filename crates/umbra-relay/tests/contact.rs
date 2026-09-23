@@ -696,7 +696,7 @@ fn a_circuit_near_its_cells_ends_the_run_and_the_relay_ends_it_after() {
     }
     // The exit counts past the limit, and its sweep ends those circuits.
     let now = network.now;
-    network.relays[2].sweep(now);
+    network.relays[2].sweep(now, &mut Rng(3));
     assert!(network.relays[2].paced_circuits().count() < paced);
 }
 

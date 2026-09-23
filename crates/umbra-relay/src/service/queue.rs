@@ -2,7 +2,7 @@
 //! `SEND`, `SUB`, `UNSUB`, `ACK`, `NKEY`, and `DEL`, with the answer of
 //! each one and the push of a `MSG` to the circuit that subscribed.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use umbra_core::{
     abuse::admission::{Accepts, RelayGate},
@@ -14,10 +14,12 @@ use umbra_core::{
     },
 };
 use umbra_crypto::{
+    auth::CommandAuthKey,
     kem::KeyPair,
     rand_core::CryptoRng,
     secret::Secret,
     stored::{Reader, Writer},
+    x25519::StaticSecret,
 };
 use umbra_queue::{
     params::{store_time, INVITE_RESERVE_TTL, INVITE_TTL, MSG_TTL},
@@ -60,7 +62,13 @@ pub struct QueueService {
     changes: Vec<StoreChange>,
     /// The notification state of a queue relay (Part 8 §8.2.3).
     notify: Option<Notify>,
+    /// The `corr_id` of each recent deposit, which a second copy repeats
+    /// (`WIR-527`).
+    deposited: VecDeque<[u8; 16]>,
 }
+
+/// The deposits whose `corr_id` a queue relay holds (`WIR-527`).
+const DEPOSIT_SEEN: usize = 4_096;
 
 /// One `NPUSH` for the NDR, which the runtime sends over OHTTP.
 #[derive(Clone, PartialEq, Eq)]
@@ -254,6 +262,68 @@ impl QueueService {
         }
     }
 
+    /// Stores one record that a sender authorized, and gives the capacity
+    /// left and the `MSG` of a live subscription. A record that no live
+    /// subscription takes goes to the push scheduler (`NTF-128`).
+    fn store_record<R: CryptoRng + ?Sized>(
+        &mut self,
+        recipient_id: [u8; 32],
+        record: &[u8],
+        now: u64,
+        rng: &mut R,
+    ) -> Result<(u32, Option<Reply>), Reject> {
+        let queue = self.queues.get_mut(&recipient_id).ok_or(Reject::Rejected)?;
+        let seq = queue.send(record, now)?;
+        let remaining = u32::try_from(queue.remaining()).unwrap_or(u32::MAX);
+        self.changes.push(StoreChange::Record {
+            recipient_id,
+            record: Stored {
+                seq,
+                accepted_at: store_time(now),
+                bytes: record.to_vec(),
+            },
+        });
+        self.head_changed(recipient_id);
+        let live = self.subscribers.get(&recipient_id).and_then(|subscriber| {
+            msg_of(recipient_id, seq, record, rng).map(|outbound| Reply {
+                circuit: *subscriber,
+                outbound,
+            })
+        });
+        if live.is_none() {
+            self.on_arrival(recipient_id, now, rng);
+        }
+        Ok((remaining, live))
+    }
+
+    /// One `SEND` of another relay, from an `UMBRA_DEPOSIT` capsule: the
+    /// digest of a group or a community (`WIR-526`). Its auth derives from
+    /// the static key of this relay, a `corr_id` that came before drops,
+    /// and no answer goes back. The result is the `MSG` of a live
+    /// subscription.
+    pub fn deposit<R: CryptoRng + ?Sized>(
+        &mut self,
+        command: &Command<'_>,
+        relay_static: &StaticSecret,
+        now: u64,
+        rng: &mut R,
+    ) -> Option<Reply> {
+        if command.cmd != Cmd::Send || self.deposited.contains(&command.corr_id) {
+            return None;
+        }
+        let recipient_id = *self.by_sender.get(&command.queue_id)?;
+        let qs_auth_pk = self.queues.get(&recipient_id)?.keys().qs_auth_pk;
+        let key = CommandAuthKey::derive(relay_static, &qs_auth_pk).ok()?;
+        command.verify(&key, b"").ok()?;
+        if self.deposited.len() >= DEPOSIT_SEEN {
+            self.deposited.pop_front();
+        }
+        self.deposited.push_back(command.corr_id);
+        self.store_record(recipient_id, command.payload, now, rng)
+            .ok()
+            .and_then(|(_, live)| live)
+    }
+
     /// The queues and the invitations of an earlier run. A queue whose
     /// stored form has a fault is dropped, and the others stay.
     pub fn restore(loaded: Loaded) -> Self {
@@ -374,19 +444,10 @@ impl QueueService {
                     .by_sender
                     .get(&command.queue_id)
                     .ok_or(Reject::Rejected)?;
-                let queue = self.queues.get_mut(&recipient_id).ok_or(Reject::Rejected)?;
+                let queue = self.queues.get(&recipient_id).ok_or(Reject::Rejected)?;
                 session.accept(command, &queue.keys().qs_auth_pk)?;
-                let seq = queue.send(command.payload, now)?;
-                let remaining = u32::try_from(queue.remaining()).unwrap_or(u32::MAX);
-                self.changes.push(StoreChange::Record {
-                    recipient_id,
-                    record: Stored {
-                        seq,
-                        accepted_at: store_time(now),
-                        bytes: command.payload.to_vec(),
-                    },
-                });
-                self.head_changed(recipient_id);
+                let (remaining, live) =
+                    self.store_record(recipient_id, command.payload, now, rng)?;
                 // WIR-496: the QUOTA is the relay acknowledgment.
                 let mut replies = vec![answer(
                     circuit,
@@ -394,18 +455,7 @@ impl QueueService {
                     Cmd::Quota,
                     &remaining.to_be_bytes(),
                 )];
-                let live = self.subscribers.get(&recipient_id).and_then(|subscriber| {
-                    msg_of(recipient_id, seq, command.payload, rng).map(|outbound| Reply {
-                        circuit: *subscriber,
-                        outbound,
-                    })
-                });
-                match live {
-                    // NTF-128: a record that a live subscription took needs
-                    // no wake.
-                    Some(reply) => replies.push(reply),
-                    None => self.on_arrival(recipient_id, now, rng),
-                }
+                replies.extend(live);
                 Ok(replies)
             }
             Cmd::Iget => {

@@ -114,11 +114,12 @@ receiver the length of the frame that it carries.
 
 ```
 Capsule {
-    type      varint      // 0x0B52 UMBRA_CELL, 0x0B53 UMBRA_SESSION, or
-                          // 0x0B54 UMBRA_REPLICA
+    type      varint      // 0x0B52 UMBRA_CELL, 0x0B53 UMBRA_SESSION,
+                          // 0x0B54 UMBRA_REPLICA, or 0x0B55 UMBRA_DEPOSIT
     length    varint      // the byte count of value, in the 4-byte form
     value     [length]u8  // a SessionFrame (§6.2.2), a session control
-                          // record (§6.2.3), or one CRPUT command (§6.4)
+                          // record (§6.2.3), one CRPUT command (§6.4), or
+                          // one SEND command of a relay (WIR-526)
 }
 ```
 
@@ -127,7 +128,7 @@ sender MUST encode `type` in the 2-byte form. **[WIR-217]** A sender MUST encode
 `length` in the 4-byte form. Thus the capsule header is 6 bytes at each bucket.
 RFC 9000 §16 permits a longer form than the minimum, and §6.1.1 rule 4 permits
 one form only. **[WIR-218]** A receiver MUST reject a capsule whose `type` is
-not `0x0B52`, `0x0B53`, or `0x0B54`.
+not `0x0B52`, `0x0B53`, `0x0B54`, or `0x0B55`.
 
 **The cell length comes from the capsule.** **[WIR-219]** A receiver MUST take
 the cell length from `length`, and that length is `length` minus 12.
@@ -629,6 +630,29 @@ exactly as to a queue session.
   zero bytes, and the receiver MUST NOT read them. The `storage_token` of the
   payload is the one authority of a copy (Part 13 rules `ATT-107` and
   `ATT-108`).
+
+- **[WIR-526]** A relay that writes a digest of Part 8 §8.5 or Part 12
+  §12.6.4 into a queue at another relay MUST send it as the value of one
+  `UMBRA_DEPOSIT` capsule, on a connection of §6.2.1 that it opens for that
+  deposit. The value is one `SEND` of bucket `B0` with its header, and a
+  receiver MUST reject each other length and each other command. The sender
+  MUST derive the key of `auth` under Part 3 §3.2.3 with the static key of
+  the receiving relay, which the relay manifest gives, in the place of
+  `RelaySession_pk`. The capsule is outside the session of §6.2.3, and it
+  gets no answer. A relay that writes a digest into a queue of its own
+  stores it with no capsule.
+- **[WIR-527]** A relay MUST hold the `corr_id` of each of the last 4 096
+  deposits that it took, and it MUST drop a deposit that repeats one. A
+  deposit whose `auth` does not verify drops, and its `corr_id` is not held.
+
+> *Cause of the deposit.* Part 8 rule `NTF-096` and Part 12 rule `COM-371`
+> had a relay write a digest "as a `SEND`", and no section gave the path. A
+> `SEND` travels at the end of a circuit under the key of its session, and a
+> relay holds no circuit to another relay of layer 3. The static key of the
+> receiving relay takes the place of the session key, and the held `corr_id`
+> values take the place of the session that rejects a repeat. A repeat older
+> than the window stores one more digest, which costs one more wake and no
+> more.
 
 > *Cause of the capsule.* An earlier draft put the `CRPUT` on "a direct
 > transport session" and gave it no frame. A `SessionFrame` holds a cell of

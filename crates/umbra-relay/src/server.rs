@@ -33,7 +33,7 @@ use umbra_wire::ndr::NdrResponse;
 use crate::{
     circuits::{CircuitKey, LinkId},
     node::{Output, RelayNode},
-    service::{queue::NdrPush, DigestDue},
+    service::queue::NdrPush,
     store::RelayStore,
 };
 
@@ -116,9 +116,7 @@ pub enum Input {
 pub enum Request {
     /// Dial a relay of the next layer.
     Dial([u8; 32]),
-    /// Write a digest into a notify queue, as a sender.
-    Digest(DigestDue),
-    /// Send one copy of a chunk to a replica relay.
+    /// Send one capsule to another relay: a chunk copy or a deposit.
     Push {
         /// The relay that takes the copy.
         relay_id: [u8; 32],
@@ -207,7 +205,7 @@ pub async fn run_node(
                 }
                 if now.saturating_sub(last_sweep) >= SWEEP_PERIOD {
                     last_sweep = now;
-                    outputs.extend(node.sweep(now));
+                    outputs.extend(node.sweep(now, &mut rng));
                 }
                 outputs
             }
@@ -228,9 +226,6 @@ pub async fn run_node(
                 }
                 Output::Dial { relay_id } => {
                     let _ = requests.send(Request::Dial(relay_id));
-                }
-                Output::Digest(digest) => {
-                    let _ = requests.send(Request::Digest(digest));
                 }
                 Output::Push { relay_id, capsule } => {
                     let _ = requests.send(Request::Push { relay_id, capsule });
@@ -576,14 +571,12 @@ pub async fn run_relay(
                 }
                 // ATT-105: a relay that the set does not name gets no copy.
                 Request::Push { relay_id, capsule } => {
+                    // A chunk copy goes to a relay with the attachment role,
+                    // and a deposit to a queue relay (`WIR-526`).
                     if let Some(target) = replicas.get(&relay_id) {
                         tokio::spawn(push_copy(target.clone(), client_tls.clone(), capsule));
                     }
                 }
-                // The write of a digest needs a circuit of this relay to the
-                // queue relay of the subscriber. That sender is not built
-                // yet, thus the digest stops here.
-                Request::Digest(_) => {}
                 Request::NdrPush(push) => {
                     let Some((route, tls)) = carried_ndr.clone() else {
                         continue;

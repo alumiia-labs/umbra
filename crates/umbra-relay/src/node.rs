@@ -11,7 +11,11 @@ use std::collections::{BTreeMap, VecDeque};
 use umbra_core::{
     abuse::admission::{Accepts, RelayGate},
     attach::command::{CrputPayload, CRPUT_LEN},
-    session::batch::{unpack, Range},
+    notify::digest::NotifyDigest,
+    session::{
+        batch::{unpack, Range},
+        channel::Outbound as ChannelOutbound,
+    },
 };
 use umbra_crypto::{
     handshake::nk::RelayStatic, rand_core::CryptoRng, rsabssa::PublicKey2048, secret::Secret,
@@ -21,11 +25,13 @@ use umbra_onion::CIRCUIT_BUILD_TIMEOUT;
 use umbra_queue::{relay::session::Session, Reject};
 use umbra_transport::link::{ClientLink, RelayLink};
 use umbra_wire::{
+    address::QueueAddress,
     bucket::Bucket,
     capsule::{self, CapsuleType},
     cell::CellCommand,
     command::{Cmd, Command},
     group::GroupCmd,
+    queue::L6Kind,
     session::SessionControl,
 };
 
@@ -71,13 +77,12 @@ pub enum Output {
         /// The relay.
         relay_id: [u8; 32],
     },
-    /// Write a digest into a notify queue, as a sender.
-    Digest(DigestDue),
     /// Send one `NPUSH` to the NDR over OHTTP (Part 8 §8.2.7). The runtime
     /// gives an answer `gone` back through [`RelayNode::ndr_gone`].
     NdrPush(NdrPush),
-    /// Send one copy of a chunk to a replica relay, on a connection of its
-    /// own (`WIR-211`). The runtime keeps nothing of it after the send.
+    /// Send one capsule to another relay, on a connection of its own: the
+    /// copy of a chunk (`WIR-211`) or the deposit of a digest (`WIR-526`).
+    /// The runtime keeps nothing of it after the send.
     Push {
         /// The relay that takes the copy.
         relay_id: [u8; 32],
@@ -198,12 +203,24 @@ pub struct RelayNode {
     communities: CommunityService,
     groups: GroupService,
     chunks: ChunkService,
+    /// The identifier and the static key of this relay, for a deposit that
+    /// a relay writes into one of its own queues and for the auth of each
+    /// deposit it takes (`WIR-526`).
+    relay: RelayStatic,
+    static_secret: StaticSecret,
+    /// The static key of each queue relay of the relay set, for a deposit.
+    queue_relays: BTreeMap<[u8; 32], [u8; 32]>,
 }
 
 impl RelayNode {
     /// A relay with no link and no circuit.
     pub fn new(config: Config) -> Self {
         let relay_id = config.relay.relay_id;
+        let relay = RelayStatic {
+            s: config.relay.s,
+            relay_id,
+        };
+        let static_secret = config.static_secret.clone();
         let mut queues = QueueService::default();
         if let Some(pair) = notify_pair(&config) {
             queues.set_notify_key(pair);
@@ -220,7 +237,98 @@ impl RelayNode {
             communities: CommunityService::new(config.community_capacity),
             groups: GroupService::default(),
             chunks: ChunkService::new(config.chunk_capacity),
+            relay,
+            static_secret,
+            queue_relays: BTreeMap::new(),
         }
+    }
+
+    /// The static key of each queue relay of the relay set, which the
+    /// manifest gives, for the deposit of a digest (`WIR-526`).
+    pub fn set_queue_relays(&mut self, relays: BTreeMap<[u8; 32], [u8; 32]>) {
+        self.queue_relays = relays;
+    }
+
+    /// Hands each digest to its notify queue (Part 8 `NTF-096`, Part 12
+    /// `COM-371`): into a queue of this relay at once, and to another queue
+    /// relay as an `UMBRA_DEPOSIT` capsule on a connection of its own.
+    fn deliver_digests<R: CryptoRng + ?Sized>(
+        &mut self,
+        digests: Vec<DigestDue>,
+        now: u64,
+        rng: &mut R,
+    ) -> Vec<Output> {
+        let mut outputs = Vec::new();
+        for due in digests {
+            let Ok(address) = QueueAddress::parse(&due.queue) else {
+                continue;
+            };
+            let mut inner = [0u8; 34];
+            let digest = NotifyDigest {
+                id: due.id,
+                post_count: due.post_count,
+            };
+            let Ok(used) = digest.encode(&mut inner) else {
+                continue;
+            };
+            let mut nonce = [0u8; 12];
+            rng.fill_bytes(&mut nonce);
+            let Ok(sealed) = ChannelOutbound::new(&address).seal_record(
+                L6Kind::NotifyDigest,
+                inner.get(..used).unwrap_or_default(),
+                nonce,
+            ) else {
+                continue;
+            };
+            let mut corr_id = [0u8; 16];
+            rng.fill_bytes(&mut corr_id);
+            if address.relay_id == self.relay.relay_id {
+                let Ok(encoded) = sealed.sign(&self.relay.s, corr_id) else {
+                    continue;
+                };
+                outputs.extend(self.take_deposit(&encoded, now, rng));
+                continue;
+            }
+            let Some(static_key) = self.queue_relays.get(&address.relay_id) else {
+                continue;
+            };
+            let Ok(encoded) = sealed.sign(static_key, corr_id) else {
+                continue;
+            };
+            let mut capsule = vec![0u8; capsule::HEADER_LEN + encoded.len()];
+            if let Ok(used) = capsule::encode(CapsuleType::Deposit, &encoded, &mut capsule) {
+                capsule.truncate(used);
+                outputs.push(Output::Push {
+                    relay_id: address.relay_id,
+                    capsule,
+                });
+            }
+        }
+        outputs
+    }
+
+    /// Takes one deposit into a queue of this relay (`WIR-526`): the `MSG`
+    /// of a live subscription goes to its circuit, and a push follows an
+    /// arrival that no subscription took.
+    fn take_deposit<R: CryptoRng + ?Sized>(
+        &mut self,
+        encoded: &[u8],
+        now: u64,
+        rng: &mut R,
+    ) -> Vec<Output> {
+        let Ok((command, _)) = Command::parse(encoded, Bucket::B0) else {
+            return Vec::new();
+        };
+        if let Some(reply) = self.queues.deposit(&command, &self.static_secret, now, rng) {
+            if let Some(endpoint) = self.endpoints.get_mut(&reply.circuit) {
+                endpoint.outbox.push_back(reply.outbound);
+            }
+        }
+        self.queues
+            .take_ndr_pushes()
+            .into_iter()
+            .map(Output::NdrPush)
+            .collect()
     }
 
     /// A node that continues the queues and the invitations of an earlier
@@ -354,6 +462,9 @@ impl RelayNode {
                 }
                 Vec::new()
             }
+            // WIR-526: the digest of another relay, on a connection that
+            // holds no session.
+            CapsuleType::Deposit => self.take_deposit(value, now, rng),
             CapsuleType::Cell => {
                 let cell = match self.links.get_mut(&link) {
                     Some(Framing::Accepted(framing)) => framing.receive(value),
@@ -461,7 +572,7 @@ impl RelayNode {
                     content,
                 } => {
                     let (paced, unpaced, digests) = self.serve(circuit, bucket, &content, now, rng);
-                    outputs.extend(digests.into_iter().map(Output::Digest));
+                    outputs.extend(self.deliver_digests(digests, now, rng));
                     // ATT-102: one copy for each target of a `CREP`.
                     outputs.extend(self.chunks.take_pushes().iter().filter_map(push_output));
                     outputs.extend(
@@ -704,7 +815,7 @@ impl RelayNode {
 
     /// The periodic work: aged circuits, expired records, idle queues, the
     /// retention of each cache, and the digests that a budget held back.
-    pub fn sweep(&mut self, now: u64) -> Vec<Output> {
+    pub fn sweep<R: CryptoRng + ?Sized>(&mut self, now: u64, rng: &mut R) -> Vec<Output> {
         // NET-319: a dial that never opened a link holds no body past the
         // timeout of the client.
         for waiting in self.extending.values_mut() {
@@ -719,7 +830,7 @@ impl RelayNode {
         self.chunks.sweep(now);
         let mut due = self.communities.sweep(now);
         due.extend(self.groups.sweep(now));
-        ended.extend(due.into_iter().map(Output::Digest));
+        ended.extend(self.deliver_digests(due, now, rng));
         ended
     }
 }
@@ -796,5 +907,129 @@ mod tests {
         // link ends.
         let outputs = node.on_capsule(2, &capsule[..capsule.len() - 1], 1_000, &mut Rng);
         assert!(matches!(outputs[..], [Output::Close { link: 2 }]));
+    }
+
+    fn relay_config(seed: u8) -> Config {
+        let static_secret = StaticSecret::from([seed; 32]);
+        Config {
+            relay: RelayStatic {
+                s: *XPublic::from(&static_secret).as_bytes(),
+                relay_id: [seed; 32],
+            },
+            static_secret,
+            layer: 3,
+            issuer_key: PublicKey2048::from_modulus(&[0xFF; 256]).unwrap(),
+            community_capacity: 1 << 20,
+            chunk_capacity: 0,
+        }
+    }
+
+    #[test]
+    fn a_digest_goes_to_the_queue_relay_of_its_notify_queue_as_one_deposit() {
+        use umbra_crypto::{queue::QueueKey, stored::Writer};
+        use umbra_queue::relay::queue::{Queue, QueueKeys};
+        use umbra_wire::queue::open;
+        let now = 1_800_000_000;
+        // Relay B holds the notify queue of a reader.
+        let qs = StaticSecret::from([0x51; 32]);
+        let keys = QueueKeys {
+            recipient_id: [0x52; 32],
+            sender_id: [0x53; 32],
+            qr_auth_pk: [0x54; 32],
+            qs_auth_pk: *XPublic::from(&qs).as_bytes(),
+        };
+        let mut head = Writer::new();
+        Queue::new(keys, now).export_head(&mut head);
+        let mut loaded = Loaded::default();
+        loaded.queues.insert(
+            [0x52; 32],
+            crate::store::StoredQueue {
+                head: head.finish().to_vec(),
+                records: Vec::new(),
+            },
+        );
+        let b = relay_config(0xB5);
+        let b_id = b.relay.relay_id;
+        let b_key = b.relay.s;
+        let mut relay_b = RelayNode::restored(b, loaded);
+
+        // Relay A holds the group queue and the registration of that queue.
+        let mut relay_a = RelayNode::new(relay_config(0xA5));
+        relay_a.set_queue_relays(BTreeMap::from([(b_id, b_key)]));
+        let address = QueueAddress {
+            relay_id: b_id,
+            sender_id: [0x53; 32],
+            qs_auth_sk: Secret::new([0x51; 32]),
+            qe: Secret::new([0x55; 32]),
+        };
+        let mut queue = [0u8; umbra_wire::address::LEN];
+        address.encode(&mut queue).unwrap();
+        let due = DigestDue {
+            id: [0x56; 32],
+            queue,
+            post_count: 3,
+        };
+        let outputs = relay_a.deliver_digests(vec![due], now, &mut Rng);
+        let [Output::Push { relay_id, capsule }] = &outputs[..] else {
+            panic!("no deposit");
+        };
+        assert_eq!(*relay_id, b_id);
+        let (kind, value, _) = capsule::parse(capsule).unwrap();
+        assert_eq!(kind, CapsuleType::Deposit);
+        assert_eq!(value.len(), capsule::DEPOSIT_LEN);
+
+        // A deposit signed for another relay does not verify at B. It comes
+        // first, thus no `corr_id` of B holds it back.
+        let mut other = relay_config(0xC5);
+        other.relay.relay_id = [0xC5; 32];
+        let mut relay_c = RelayNode::new(other);
+        relay_c.set_queue_relays(BTreeMap::from([(b_id, [0x77; 32])]));
+        let mut queue = [0u8; umbra_wire::address::LEN];
+        address.encode(&mut queue).unwrap();
+        let forged = relay_c.deliver_digests(
+            vec![DigestDue {
+                id: [0x56; 32],
+                queue,
+                post_count: 1,
+            }],
+            now,
+            &mut Rng,
+        );
+        let [Output::Push {
+            capsule: forged, ..
+        }] = &forged[..]
+        else {
+            panic!("no deposit");
+        };
+        relay_b.on_capsule(4, forged, now, &mut Rng);
+        assert!(!relay_b
+            .take_changes()
+            .iter()
+            .any(|change| matches!(change, StoreChange::Record { .. })));
+
+        // WIR-526: relay B takes it with no session and gives no answer, and
+        // the reader opens a digest that names the group queue.
+        assert!(relay_b.on_capsule(4, capsule, now, &mut Rng).is_empty());
+        let changes = relay_b.take_changes();
+        let record = changes
+            .iter()
+            .find_map(|change| match change {
+                StoreChange::Record { record, .. } => Some(record.bytes.clone()),
+                _ => None,
+            })
+            .expect("a stored record");
+        let key = QueueKey::derive(&Secret::new([0x55; 32]), &[0x53; 32]);
+        let mut inner = vec![0u8; Bucket::B0.l6_record()];
+        let (kind, used) = open(&key, &[0x53; 32], &record, Bucket::B0, &mut inner).unwrap();
+        assert_eq!(kind, L6Kind::NotifyDigest);
+        let digest = NotifyDigest::parse(&inner[..used]).unwrap();
+        assert_eq!((digest.id, digest.post_count), ([0x56; 32], 3));
+
+        // WIR-527: the same capsule again is a repeat, and it stores nothing.
+        relay_b.on_capsule(4, capsule, now, &mut Rng);
+        assert!(!relay_b
+            .take_changes()
+            .iter()
+            .any(|change| matches!(change, StoreChange::Record { .. })));
     }
 }

@@ -121,6 +121,8 @@ struct Settings {
     next: BTreeMap<[u8; 32], Dial>,
     /// Each other relay with the attachment role, from the manifest.
     replicas: BTreeMap<[u8; 32], Dial>,
+    /// The static key of each queue relay, for the deposit of a digest.
+    queue_keys: BTreeMap<[u8; 32], [u8; 32]>,
     /// The key that signs the descriptor of this relay.
     identity: Option<SigningKey>,
     /// The manifest that gave this relay its place. The relay serves it to
@@ -218,10 +220,18 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
             .ok()
             .filter(|l| (1..=3).contains(l))?,
     };
-    let (next, replicas) = match placed {
-        Some(placed) => (placed.next, placed.replicas),
-        None => (next, BTreeMap::new()),
+    let (next, mut replicas, queue_relays) = match placed {
+        Some(placed) => (placed.next, placed.replicas, placed.queue_relays),
+        None => (next, BTreeMap::new(), BTreeMap::new()),
     };
+    // WIR-526: a deposit goes on the same one-shot connection as a copy.
+    for (relay_id, (dial, _)) in &queue_relays {
+        replicas.entry(*relay_id).or_insert_with(|| dial.clone());
+    }
+    let queue_keys = queue_relays
+        .into_iter()
+        .map(|(relay_id, (_, key))| (relay_id, key))
+        .collect();
     Some(Settings {
         listen: (*values.get("listen")?).to_owned(),
         cert: (*values.get("cert")?).to_owned(),
@@ -243,6 +253,7 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
         },
         next,
         replicas,
+        queue_keys,
         identity,
         manifest,
         ohttp_gateway: match values.get("ohttp_gateway") {
@@ -487,7 +498,11 @@ async fn run() -> ExitCode {
         loaded.invitations.len()
     );
     run_relay(
-        RelayNode::restored(settings.config, loaded),
+        {
+            let mut node = RelayNode::restored(settings.config, loaded);
+            node.set_queue_relays(settings.queue_keys);
+            node
+        },
         listener,
         tls,
         settings.next,
