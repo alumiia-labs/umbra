@@ -1733,6 +1733,142 @@ mod tests {
     }
 
     #[test]
+    fn a_new_store_under_the_restored_seed_holds_each_row_of_the_backup() {
+        use crate::client::{BackupUpload, RestoredBackup};
+        use umbra_core::{
+            attach::{
+                transfer::{ChunkCredential, Uploaded},
+                CHUNK_SIZE,
+            },
+            session::node::{ContactId, StateChange},
+        };
+        use umbra_crypto::{secret::Secret, zeroize::Zeroizing};
+        use umbra_wire::descriptor::{ChunkRef, FileDescriptor, Level};
+
+        let uploaded = || Uploaded {
+            descriptor: FileDescriptor {
+                level: Level::Data,
+                file_key: Secret::new([1; 32]),
+                file_nonce: [2; 24],
+                commit: [3; 32],
+                digest: [4; 32],
+                media_seconds: 0,
+                padded_size: CHUNK_SIZE as u32,
+                mime_class: 0,
+                pixel_w: 0,
+                pixel_h: 0,
+                refs: vec![ChunkRef {
+                    relay_id: [5; 32],
+                    chunk_id: [6; 32],
+                    cred_pk: [7; 32],
+                    replicas: [[0; 12]; 2],
+                }],
+            },
+            credentials: vec![ChunkCredential {
+                chunk_id: [6; 32],
+                cred: Secret::new([8; 32]),
+                relays: vec![[5; 32], [9; 32]],
+            }],
+        };
+        let messages_of = |client: &Client<MemoryBackend, Element>, conversation| {
+            client
+                .messages(conversation)
+                .unwrap()
+                .iter()
+                .map(|message| {
+                    let mut view = View::default();
+                    client.render(message, &mut view).unwrap();
+                    String::from_utf16(&view.0).unwrap()
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let mut rng = Rng(161);
+        let mut alice = new_client(&mut rng);
+        let contact = ContactId([9; 32]);
+        let change = StateChange::Contact {
+            contact,
+            state: zeroize::Zeroizing::new(vec![0x04, 2, 3]),
+        };
+        let now = 1_800_000_000;
+        alice
+            .commit_network(&[change], &[], now * 1_000, &mut rng)
+            .unwrap();
+        let conversation = alice.conversation_for(&contact.0).unwrap();
+        let send =
+            |client: &mut Client<MemoryBackend, Element>, words: &str, at: u64, rng: &mut Rng| {
+                let mut draft = client.new_draft(conversation);
+                draft.set_text(&units(words)).unwrap();
+                client.send_draft(draft, at * 1_000, rng).unwrap();
+                while client.take_outgoing().is_some() {}
+            };
+        send(&mut alice, "before the full object", now, &mut rng);
+        let BackupUpload {
+            plain: full,
+            pending,
+        } = alice.backup_due(now + 10, true).unwrap().unwrap();
+        alice
+            .backup_uploaded(pending, &uploaded(), 168 * 3_000, &mut rng)
+            .unwrap();
+        send(&mut alice, "in the delta", now + 100, &mut rng);
+        let BackupUpload {
+            plain: delta,
+            pending,
+        } = alice.backup_due(now + 2 * 86_400, true).unwrap().unwrap();
+        assert!(!pending.is_full());
+
+        // IDN-102: a delta alone is no backup.
+        assert!(RestoredBackup::assemble(std::slice::from_ref(&delta)).is_err());
+        let restored = RestoredBackup::assemble(&[full, delta]).unwrap();
+        assert_eq!(restored.contact_count(), 1);
+
+        // The store of the new device comes from the restored seed.
+        let mut bob = Client::create_with_seed(
+            MemoryBackend::default(),
+            Element([2; 32]),
+            &units("a new phrase"),
+            CHEAP,
+            now + 3 * 86_400,
+            restored.seed(),
+            &mut Rng(162),
+        )
+        .unwrap();
+        bob.apply_restore(&restored, &mut rng).unwrap();
+        assert_eq!(bob.conversation_for(&contact.0).unwrap(), conversation);
+        assert_eq!(
+            messages_of(&bob, conversation),
+            messages_of(&alice, conversation)
+        );
+        assert_eq!(
+            messages_of(&bob, conversation),
+            ["before the full object", "in the delta"]
+        );
+        let (mut code_a, mut code_b) = (View::default(), View::default());
+        alice.render_recovery_code(&mut code_a, &mut rng).unwrap();
+        bob.render_recovery_code(&mut code_b, &mut rng).unwrap();
+        assert_eq!(code_a.0, code_b.0);
+
+        // IDN-183: the contact waits for its renewal, across each run.
+        assert_eq!(bob.restored_stale().unwrap(), [contact.0]);
+        bob.restored_renewed(&contact.0, &mut rng).unwrap();
+        assert!(bob.restored_stale().unwrap().is_empty());
+
+        // IDN-155: a backup with no root seed recovered no identity.
+        let empty = umbra_core::identity::backup::BackupObject {
+            kind: umbra_core::identity::backup::KIND_FULL,
+            written_at: now,
+            base_at: 0,
+            rows: Vec::new(),
+        }
+        .encode()
+        .unwrap();
+        assert!(matches!(
+            RestoredBackup::assemble(&[Zeroizing::new(empty.to_vec())]),
+            Err(Error::NotFound)
+        ));
+    }
+
+    #[test]
     fn a_handle_group_rotates_after_seven_days_and_its_old_handle_leaves() {
         use umbra_core::notify::{ndr::Ndr, ROTATE_INTERVAL};
         use umbra_crypto::secret::Secret;

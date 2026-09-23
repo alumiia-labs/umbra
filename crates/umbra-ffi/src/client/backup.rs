@@ -23,12 +23,13 @@ use umbra_core::{
     session::dead::week_of,
     store::{
         engine::Backend,
-        record::{RowId, TableId},
+        record::{RowId, RowKey, TableId},
         wrap::SecureElement,
     },
 };
 use umbra_crypto::{
     hash::sha3_256,
+    hierarchy::RootIdentity,
     rand_core::CryptoRng,
     secret::Secret,
     stored::{Reader, Writer},
@@ -522,4 +523,152 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
 fn alloc_vec(len: usize) -> Vec<u8> {
     vec![0u8; len]
+}
+
+/// The setting that lists each contact of a restore whose channel waits
+/// for its renewal. Each run marks them stale again, until the renewal of
+/// each one ends (`IDN-183`).
+const RESTORE_STALE_SETTING: &[u8] = b"restore-stale";
+
+/// The rows of a restore: the full object and each delta after it, in the
+/// order of the root (`IDN-182`), with the root seed that they hold.
+pub struct RestoredBackup {
+    seed: Secret<32>,
+    rows: Vec<BackupRow>,
+    contacts: Vec<[u8; 32]>,
+}
+
+impl RestoredBackup {
+    /// Applies `objects` in order, and finds the root seed among the rows
+    /// of the local identity table: the one row whose seed names that row
+    /// under its own `K_store`. A backup with no such row recovered no
+    /// identity (`IDN-155`), and the result is `NotFound`.
+    pub fn assemble(objects: &[Zeroizing<Vec<u8>>]) -> Result<Self, Error> {
+        let mut rows: BTreeMap<(u8, RowId), BackupRow> = BTreeMap::new();
+        for (at, bytes) in objects.iter().enumerate() {
+            let object = BackupObject::parse(bytes)?;
+            // IDN-102: the full object first, and then each delta.
+            if (at == 0) != (object.kind == KIND_FULL) {
+                return Err(Error::Malformed);
+            }
+            for row in object.rows {
+                match row {
+                    BackupRow::Put { table, row: id, .. } => {
+                        let key = (table.0, id);
+                        rows.insert(key, row);
+                    }
+                    BackupRow::Delete { table, row: id } => {
+                        rows.remove(&(table.0, id));
+                    }
+                }
+            }
+        }
+        let names_root = |seed: [u8; 32], row: &RowId| {
+            let store_key = RootIdentity::new(Secret::new(seed)).storage_key();
+            RowKey::derive(&store_key).row_id(TableId::LOCAL_IDENTITY, super::ROOT_KEY) == *row
+        };
+        let seed = rows
+            .values()
+            .find_map(|row| match row {
+                BackupRow::Put {
+                    table, row, plain, ..
+                } if *table == TableId::LOCAL_IDENTITY => {
+                    let seed: [u8; 32] = plain.as_slice().try_into().ok()?;
+                    names_root(seed, row).then_some(seed)
+                }
+                _ => None,
+            })
+            .ok_or(Error::NotFound)?;
+        let contacts = rows
+            .values()
+            .filter_map(|row| match row {
+                BackupRow::Put { table, plain, .. } if *table == TableId::CONTACT => {
+                    plain.get(..32).and_then(|id| id.try_into().ok())
+                }
+                _ => None,
+            })
+            .collect();
+        Ok(RestoredBackup {
+            seed: Secret::new(seed),
+            rows: rows.into_values().collect(),
+            contacts,
+        })
+    }
+
+    /// The root seed, for the store of the restored device.
+    pub fn seed(&self) -> Secret<32> {
+        Secret::new(*self.seed.expose())
+    }
+
+    /// The count of the contacts that the backup holds.
+    pub fn contact_count(&self) -> usize {
+        self.contacts.len()
+    }
+}
+
+impl<B: Backend, E: SecureElement> Client<B, E> {
+    /// Writes each row of a restore into the store that
+    /// [`Client::create_with_seed`] made under its seed, and lists each
+    /// contact for the stale mark of its next run (`IDN-183`).
+    pub fn apply_restore<R: CryptoRng + ?Sized>(
+        &mut self,
+        restored: &RestoredBackup,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let open = self.open_mut()?;
+        let listed = open.store.row_id(super::SETTINGS, RESTORE_STALE_SETTING);
+        let mut batch = open.store.begin();
+        for row in &restored.rows {
+            if let BackupRow::Put {
+                table,
+                row,
+                owner,
+                plain,
+            } = row
+            {
+                batch.put(*table, *row, *owner, plain, rng)?;
+            }
+        }
+        batch.put(
+            super::SETTINGS,
+            listed,
+            None,
+            &restored.contacts.concat(),
+            rng,
+        )?;
+        Ok(batch.commit()?)
+    }
+
+    /// Each contact of a restore whose renewal did not end yet.
+    pub fn restored_stale(&self) -> Result<Vec<[u8; 32]>, Error> {
+        let store = &self.open_ref()?.store;
+        let row = store.row_id(super::SETTINGS, RESTORE_STALE_SETTING);
+        let Some(bytes) = store.get(super::SETTINGS, &row)? else {
+            return Ok(Vec::new());
+        };
+        Ok(bytes.as_chunks::<32>().0.to_vec())
+    }
+
+    /// The renewal of a contact of a restore ended: its run marks it stale
+    /// no more.
+    pub fn restored_renewed<R: CryptoRng + ?Sized>(
+        &mut self,
+        contact: &[u8; 32],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let mut listed = self.restored_stale()?;
+        if !listed.contains(contact) {
+            return Ok(());
+        }
+        listed.retain(|held| held != contact);
+        let open = self.open_mut()?;
+        let row = open.store.row_id(super::SETTINGS, RESTORE_STALE_SETTING);
+        let mut batch = open.store.begin();
+        if listed.is_empty() {
+            batch.delete(super::SETTINGS, row);
+        } else {
+            batch.put(super::SETTINGS, row, None, &listed.concat(), rng)?;
+        }
+        Ok(batch.commit()?)
+    }
 }

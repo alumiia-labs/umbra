@@ -15,7 +15,7 @@ mod files;
 mod groups;
 mod notify;
 
-pub use backup::{BackupUpload, PendingBackup, RootWrite};
+pub use backup::{BackupUpload, PendingBackup, RestoredBackup, RootWrite};
 pub use dead::DeadWork;
 pub use files::{DownloadJob, ErasureJob, FileInfo, FileState, UploadJob};
 use files::{FileQueues, CHUNK_CRED, FILE_DATA, FILE_STATE};
@@ -439,6 +439,21 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     ) -> Result<Self, Error> {
         let mut seed = Secret::<32>::zeroed();
         rng.fill_bytes(seed.expose_mut());
+        Self::create_with_seed(backend, element, passphrase, cost, now, seed, rng)
+    }
+
+    /// Makes the store of a device under a root seed that a restore of
+    /// Part 4 §4.7.2 gave: `K_store` comes from it, thus each row of the
+    /// backup takes its place again.
+    pub fn create_with_seed<R: CryptoRng + ?Sized>(
+        backend: B,
+        element: E,
+        passphrase: &[u16],
+        cost: Cost,
+        now: u64,
+        seed: Secret<32>,
+        rng: &mut R,
+    ) -> Result<Self, Error> {
         let mut salt = [0u8; 16];
         rng.fill_bytes(&mut salt);
         let mut nonce = [0u8; 24];

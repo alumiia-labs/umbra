@@ -963,10 +963,89 @@ struct Inner {
     /// Whether a view of the app is on the screen. A backup is written in
     /// the foreground only (`IDN-080`).
     is_foreground: bool,
+    /// The restore that runs, from its first root to its rows.
+    restore: Option<RestoreJob>,
+}
+
+/// A restore of Part 4 §4.7.2 while it runs: the root key of the entered
+/// code, the week whose root it reads, and the objects that it holds.
+struct RestoreJob {
+    key: umbra_core::identity::recovery::BackupRootKey,
+    first_week: u32,
+    week: u32,
+    objects: Vec<Option<Zeroizing<Vec<u8>>>>,
+    status: RestoreStatus,
+    restored: Option<crate::client::RestoredBackup>,
+}
+
+/// Where a restore stands (Part 4 §4.7.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum RestoreStatus {
+    /// No restore runs.
+    Idle,
+    /// The root of a week is asked, `weeks_back` weeks before the current
+    /// one.
+    Searching {
+        /// The weeks before the current one.
+        weeks_back: u32,
+    },
+    /// The objects of the root come down.
+    Fetching {
+        /// The objects here.
+        done: u32,
+        /// The objects of the root.
+        total: u32,
+    },
+    /// The rows are here, and `take_restored` gives them.
+    Ready {
+        /// The contacts that the backup holds.
+        contacts: u32,
+    },
+    /// No root opens in `BACKUP_LOOKBACK` weeks (`IDN-116`).
+    NotFound,
+    /// The backup holds no identity (`IDN-155`).
+    NoIdentity,
+    /// A transfer failed. The user can start again.
+    Failed,
+}
+
+/// The rows of a restore, which [`init_restored`] writes into a new store.
+/// The platform holds this object and never reads it.
+#[derive(uniffi::Object)]
+pub struct Restored(Mutex<Option<crate::client::RestoredBackup>>);
+
+#[uniffi::export]
+impl Restored {
+    /// The count of the contacts that the backup holds.
+    pub fn contact_count(&self) -> u32 {
+        locked(&self.0).as_ref().map_or(0, |restored| {
+            u32::try_from(restored.contact_count()).unwrap_or(u32::MAX)
+        })
+    }
+}
+
+/// One step of a restore that a transfer gave.
+enum RestoreStep {
+    Root {
+        week: u32,
+        chunk: Option<Vec<u8>>,
+    },
+    Object {
+        index: usize,
+        plain: Zeroizing<Vec<u8>>,
+    },
+    Failed,
 }
 
 /// What one command of the transfer task belongs to.
 enum TransferWork {
+    /// The backup root of one week, which a restore reads (`IDN-101`).
+    RestoreRoot {
+        /// The week.
+        week: u32,
+    },
+    /// One object that a restored root names, by its entry.
+    RestoreObject(usize),
     /// A backup object of Part 4 §4.7.2, and what its upload commits.
     Backup(Box<crate::client::PendingBackup>),
     /// The backup root of the week, and the chunks that go after it
@@ -1829,6 +1908,7 @@ impl Inner {
             ..
         } = self;
         let mut dead_work = Vec::new();
+        let mut restore_step = None;
         let mut backup_root = None;
         let mut backup_erase = Vec::new();
         match update {
@@ -1852,10 +1932,17 @@ impl Inner {
             // NET-190: a blob that opens gives the address of the peer. A
             // blob that does not open is an empty handle (`NET-192`).
             TransferUpdate::HandleRead { tag, chunk } => {
+                let work = transfer_tags.remove(&tag);
+                if let Some(TransferWork::RestoreRoot { week }) = &work {
+                    restore_step = Some(RestoreStep::Root {
+                        week: *week,
+                        chunk: chunk.clone(),
+                    });
+                }
                 if let Some(TransferWork::DeadRead {
                     conversation,
                     blob_key,
-                }) = transfer_tags.remove(&tag)
+                }) = work
                 {
                     let address = chunk.and_then(|chunk| {
                         umbra_core::session::dead::open_blob(&blob_key, &chunk).ok()
@@ -1933,6 +2020,9 @@ impl Inner {
                 _ => {}
             },
             TransferUpdate::Downloaded { tag, plain } => match transfer_tags.remove(&tag) {
+                Some(TransferWork::RestoreObject(index)) => {
+                    restore_step = Some(RestoreStep::Object { index, plain });
+                }
                 Some(TransferWork::File { message, .. }) => {
                     let _ = client.download_done(&message, &plain, &mut OsRng);
                 }
@@ -1961,6 +2051,9 @@ impl Inner {
                 _ => {}
             },
             TransferUpdate::Failed { tag } => match transfer_tags.remove(&tag) {
+                Some(TransferWork::RestoreRoot { .. } | TransferWork::RestoreObject(_)) => {
+                    restore_step = Some(RestoreStep::Failed);
+                }
                 Some(TransferWork::File {
                     message,
                     is_upload: true,
@@ -2006,6 +2099,108 @@ impl Inner {
                 cred: credential.cred,
                 relays: credential.relays,
             });
+        }
+        if let Some(step) = restore_step {
+            self.restore_step(step);
+        }
+    }
+
+    /// Asks for the backup root of `week` (`IDN-101`).
+    fn ask_restore_root(&mut self, week: u32) {
+        let Some(job) = self.restore.as_ref() else {
+            return;
+        };
+        let credentials = job.key.epoch(week);
+        let tag = self.next_tag(TransferWork::RestoreRoot { week });
+        self.send_transfer(TransferCommand::ReadHandle {
+            tag,
+            handle: credentials.handle,
+            read: credentials.read,
+        });
+    }
+
+    /// One step of a restore: a root, or one object that it names.
+    fn restore_step(&mut self, step: RestoreStep) {
+        use umbra_core::{
+            attach::segment::unpad_handle_object,
+            identity::{recovery::BackupRoot, BACKUP_LOOKBACK},
+        };
+        let Some(job) = self.restore.as_mut() else {
+            return;
+        };
+        match step {
+            RestoreStep::Failed => job.status = RestoreStatus::Failed,
+            RestoreStep::Root { week, chunk } => {
+                // IDN-103, IDN-116: a root that does not open is an empty
+                // epoch, and the search goes back until one opens.
+                let credentials = job.key.epoch(week);
+                let mut buf = Vec::new();
+                let descriptors: Option<Vec<Vec<u8>>> = chunk.as_deref().and_then(|chunk| {
+                    let sealed = unpad_handle_object(chunk).ok()?;
+                    let root = BackupRoot::open(&credentials, sealed, &mut buf).ok()?;
+                    Some(
+                        root.entries
+                            .iter()
+                            .map(|entry| entry.descriptor.to_vec())
+                            .collect(),
+                    )
+                });
+                let Some(descriptors) = descriptors else {
+                    let back = job.first_week.saturating_sub(week).saturating_add(1);
+                    if back >= BACKUP_LOOKBACK || week == 0 {
+                        job.status = RestoreStatus::NotFound;
+                        return;
+                    }
+                    job.week = week.saturating_sub(1);
+                    job.status = RestoreStatus::Searching { weeks_back: back };
+                    let next = job.week;
+                    self.ask_restore_root(next);
+                    return;
+                };
+                let total = u32::try_from(descriptors.len()).unwrap_or(u32::MAX);
+                job.objects = descriptors.iter().map(|_| None).collect();
+                job.status = RestoreStatus::Fetching { done: 0, total };
+                for (index, bytes) in descriptors.iter().enumerate() {
+                    let Ok(descriptor) = umbra_wire::descriptor::FileDescriptor::parse(bytes)
+                    else {
+                        if let Some(job) = self.restore.as_mut() {
+                            job.status = RestoreStatus::Failed;
+                        }
+                        return;
+                    };
+                    let tag = self.next_tag(TransferWork::RestoreObject(index));
+                    self.send_transfer(TransferCommand::DownloadBackup {
+                        tag,
+                        descriptor: Box::new(descriptor),
+                    });
+                }
+            }
+            RestoreStep::Object { index, plain } => {
+                if let Some(slot) = job.objects.get_mut(index) {
+                    *slot = Some(plain);
+                }
+                let total = u32::try_from(job.objects.len()).unwrap_or(u32::MAX);
+                let done = job.objects.iter().filter(|object| object.is_some()).count();
+                job.status = RestoreStatus::Fetching {
+                    done: u32::try_from(done).unwrap_or(u32::MAX),
+                    total,
+                };
+                if done < job.objects.len() {
+                    return;
+                }
+                let objects: Vec<Zeroizing<Vec<u8>>> =
+                    job.objects.iter_mut().filter_map(Option::take).collect();
+                match crate::client::RestoredBackup::assemble(&objects) {
+                    Ok(restored) => {
+                        job.status = RestoreStatus::Ready {
+                            contacts: u32::try_from(restored.contact_count()).unwrap_or(u32::MAX),
+                        };
+                        job.restored = Some(restored);
+                    }
+                    Err(Error::NotFound) => job.status = RestoreStatus::NoIdentity,
+                    Err(_) => job.status = RestoreStatus::Failed,
+                }
+            }
         }
     }
 
@@ -2178,8 +2373,71 @@ pub fn init(
             client
         }
     };
-    Ok(Arc::new(Handle {
-        database_path: config.database_path,
+    Ok(handle_of(config.database_path, client))
+}
+
+/// Makes the store of a restored device (Part 4 §4.7.2): the files of the
+/// database go, a new store comes from the root seed of the backup under
+/// `passphrase`, and it takes each row of the backup. The platform drops
+/// the handle of the restore before this call, thus no connection holds
+/// the file. Each contact is stale until its renewal (`IDN-183`).
+#[uniffi::export]
+pub fn init_restored(
+    config: Config,
+    element: Arc<dyn SecureElementCallback>,
+    passphrase: Vec<u16>,
+    restored: Arc<Restored>,
+) -> Result<Arc<Handle>, FfiError> {
+    let passphrase = Zeroizing::new(passphrase);
+    let restored = locked(&restored.0).take().ok_or(FfiError::NotFound)?;
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let path = format!("{}{suffix}", config.database_path);
+        if std::path::Path::new(&path).exists() {
+            std::fs::remove_file(&path).map_err(|_| FfiError::Storage)?;
+        }
+    }
+    let backend = SqliteBackend::open(&config.database_path).map_err(|_| FfiError::Storage)?;
+    let headers = SqliteBackend::open(&config.database_path).map_err(|_| FfiError::Storage)?;
+    let cost = Cost::calibrate(config.argon2_floor_ms);
+    let mut client = Client::create_with_seed(
+        backend,
+        ForeignElement(element),
+        &passphrase,
+        cost,
+        unix_now(),
+        restored.seed(),
+        &mut OsRng,
+    )?;
+    headers
+        .set_header(client.header())
+        .map_err(|_| FfiError::Storage)?;
+    client.apply_restore(&restored, &mut OsRng)?;
+    Ok(handle_of(config.database_path, client))
+}
+
+/// The type of entered recovery digits (Part 4 §4.7.7): 1 for the
+/// recovery code, 2 for the user half, 3 for a share of the social half,
+/// and 0 for digits whose check fails (`IDN-151`). A screen names the type
+/// that the user entered and the one that it asks for (`IDN-153`).
+#[uniffi::export]
+pub fn recovery_digits_kind(digits: Vec<u16>) -> u8 {
+    use umbra_core::identity::recovery::{from_digits, DigitsType};
+    let text = Zeroizing::new(String::from_utf16_lossy(&Zeroizing::new(digits)));
+    let kinds = [
+        (DigitsType::Code, 1),
+        (DigitsType::User, 2),
+        (DigitsType::Share, 3),
+    ];
+    kinds
+        .into_iter()
+        .find(|(kind, _)| from_digits(&text, *kind).is_ok())
+        .map_or(0, |(_, number)| number)
+}
+
+/// The handle of an open client.
+fn handle_of(database_path: String, client: Client<SqliteBackend, ForeignElement>) -> Arc<Handle> {
+    Arc::new(Handle {
+        database_path,
         inner: Mutex::new(Inner {
             invitation_host: String::new(),
             client,
@@ -2212,10 +2470,11 @@ pub fn init(
             next_silence_check: 0,
             dead_work: Vec::new(),
             is_foreground: false,
+            restore: None,
         }),
         changed: Condvar::new(),
         runtime: Mutex::new(None),
-    }))
+    })
 }
 
 fn conversation_of(bytes: &[u8]) -> Result<ConversationId, FfiError> {
@@ -2349,6 +2608,9 @@ impl Handle {
             // channel (NET-329). The channel lives, and each record with no
             // delivery receipt goes again.
             Update::PeerMoved(contact) | Update::ChannelRenewed(contact) => {
+                if matches!(update, Update::ChannelRenewed(_)) {
+                    let _ = client.restored_renewed(&contact.0, &mut OsRng);
+                }
                 if let Ok(conversation) = client.conversation_for(&contact.0) {
                     if let Ok(Some(erase)) = client.dead_channel_ended(conversation, &mut OsRng) {
                         dead_work.push(erase);
@@ -2721,6 +2983,11 @@ impl Handle {
                     .restore_contact(state)
                     .map_err(|_| FfiError::Integrity)?;
                 contacts.insert(*conversation, contact);
+            }
+            // IDN-183: each contact of a restore is stale until its renewal
+            // ends, in each run.
+            for id in client.restored_stale()? {
+                let _ = node.mark_stale(&umbra_core::session::node::ContactId(id));
             }
             for state in &stored.invitations {
                 let bundle = node
@@ -3196,6 +3463,61 @@ impl Handle {
     /// (Part 4 §4.7.2).
     pub fn last_backup_at(&self) -> Option<u64> {
         locked(&self.inner).client.last_backup_at().ok().flatten()
+    }
+
+    /// Starts a restore of Part 4 §4.7.2 from the recovery code in
+    /// `digits`, over the network of this handle: the root of the current
+    /// week and then of each earlier week until one opens (`IDN-101`,
+    /// `IDN-116`), and each object that it names. `restore_status` shows
+    /// the progress. The KDF of the code runs in this call.
+    pub fn restore_backup(&self, digits: Vec<u16>) -> Result<(), FfiError> {
+        use umbra_core::{
+            identity::recovery::{from_digits, DigitsType, RecoveryCode},
+            session::dead::week_of,
+        };
+        let text = Zeroizing::new(String::from_utf16_lossy(&Zeroizing::new(digits)));
+        // IDN-151, IDN-154: the check and the type come before the KDF.
+        let code = from_digits(&text, DigitsType::Code).map_err(|_| FfiError::Malformed)?;
+        let key = RecoveryCode::from_bytes(&code)
+            .and_then(|code| code.backup_root_key())
+            .map_err(|error| FfiError::from(Error::from(error)))?;
+        let mut inner = locked(&self.inner);
+        let epoch = inner.client.directory_epoch()?;
+        if inner.bridge.is_none() || epoch == 0 {
+            return Err(FfiError::Offline);
+        }
+        let week = week_of(epoch);
+        inner.restore = Some(RestoreJob {
+            key,
+            first_week: week,
+            week,
+            objects: Vec::new(),
+            status: RestoreStatus::Searching { weeks_back: 0 },
+            restored: None,
+        });
+        inner.ask_restore_root(week);
+        Ok(())
+    }
+
+    /// Where the restore stands.
+    pub fn restore_status(&self) -> RestoreStatus {
+        locked(&self.inner)
+            .restore
+            .as_ref()
+            .map_or(RestoreStatus::Idle, |job| job.status)
+    }
+
+    /// The rows of a restore that is ready, for [`init_restored`]. The
+    /// restore of this handle ends.
+    pub fn take_restored(&self) -> Result<Arc<Restored>, FfiError> {
+        let mut inner = locked(&self.inner);
+        let restored = inner
+            .restore
+            .as_mut()
+            .and_then(|job| job.restored.take())
+            .ok_or(FfiError::NotFound)?;
+        inner.restore = None;
+        Ok(Arc::new(Restored(Mutex::new(Some(restored)))))
     }
 
     /// Renders the recovery code into a sink of the platform, as the 87

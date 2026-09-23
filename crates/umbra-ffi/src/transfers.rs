@@ -74,6 +74,14 @@ pub enum TransferCommand {
         /// The chunk.
         index: u32,
     },
+    /// Fetch one backup object of Part 4 §4.7.2, whose descriptor a backup
+    /// root named. A `Downloaded` or a `Failed` follows.
+    DownloadBackup {
+        /// A value of the caller, which comes back in each update.
+        tag: u64,
+        /// The descriptor.
+        descriptor: Box<FileDescriptor>,
+    },
     /// Upload one backup object of Part 4 §4.7.2 in the backup class. An
     /// `Uploaded` or a `Failed` follows.
     UploadBackup {
@@ -188,7 +196,8 @@ pub async fn run_transfers(
             | TransferCommand::FetchChunk { tag, .. }
             | TransferCommand::WriteHandle { tag, .. }
             | TransferCommand::ReadHandle { tag, .. }
-            | TransferCommand::UploadBackup { tag, .. } = command
+            | TransferCommand::UploadBackup { tag, .. }
+            | TransferCommand::DownloadBackup { tag, .. } = command
             {
                 let _ = updates.send(TransferUpdate::Failed { tag: *tag });
             }
@@ -417,6 +426,22 @@ pub async fn run_transfers(
                         let _ = node.chunk(relay, chunk_id, job, &mut rng);
                     }
                     idle_since = tokio::time::Instant::now();
+                }
+                TransferCommand::DownloadBackup { tag, descriptor } => {
+                    let started = Download::new_backup(&descriptor, &relays, &mut rng).and_then(
+                        |mut download| {
+                            download.tick(&mut node, &mut rng)?;
+                            Ok(download)
+                        },
+                    );
+                    match started {
+                        Ok(download) => {
+                            active.insert(tag, Active::Down(Box::new(download)));
+                        }
+                        Err(_) => {
+                            let _ = updates.send(TransferUpdate::Failed { tag });
+                        }
+                    }
                 }
                 TransferCommand::UploadBackup { tag, plain } => {
                     let started = Upload::with_class(

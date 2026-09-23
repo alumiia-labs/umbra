@@ -47,8 +47,9 @@ use umbra_crypto::{
     x25519::{PublicKey as XPublic, StaticSecret},
 };
 use umbra_ffi::bindings::{
-    fetch_manifest, init, parse_network, Config, FfiError, FfiEvent, Handle, MsgHandle, Network,
-    RelayEndpoint, SecureElementCallback, TextSink,
+    fetch_manifest, init, init_restored, parse_network, recovery_digits_kind, Config, FfiError,
+    FfiEvent, Handle, MsgHandle, Network, RelayEndpoint, RestoreStatus, SecureElementCallback,
+    TextSink,
 };
 use umbra_ffi::groups::{run_groups, GroupCommand, GroupUpdate};
 use umbra_ffi::transfers::{run_transfers, TransferCommand, TransferUpdate};
@@ -2301,4 +2302,115 @@ fn an_app_in_the_foreground_writes_its_backup_to_the_relays() {
         std::thread::sleep(Duration::from_millis(250));
     }
     alice.disconnect();
+}
+
+#[test]
+fn a_lost_phone_comes_back_from_its_backup_and_its_contact_talks_again() {
+    let relays = tokio::runtime::Runtime::new().unwrap();
+    let network = start_signed_network(&relays);
+    let directory = std::env::temp_dir().join(format!("umbra-restore-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let network_for = |handle: &Handle| {
+        handle
+            .network_of_manifest(
+                network.manifest.clone(),
+                network.keyset.clone(),
+                0,
+                HOST.into(),
+                Some(CA.into()),
+            )
+            .unwrap()
+            .network
+    };
+    let alice = launch(&directory, "alice.db", 1);
+    let bob = launch(&directory, "bob.db", 2);
+    for handle in [&alice, &bob] {
+        handle.clone().connect(network_for(handle)).unwrap();
+    }
+    alice.invite().unwrap();
+    let link = wait_for(&alice, |event| match event {
+        FfiEvent::Invitation { link } => Some(link),
+        _ => None,
+    });
+    bob.accept(link).unwrap();
+    let alice_conversation = wait_for_contact(&alice);
+    let bob_conversation = wait_for_contact(&bob);
+    let draft = bob.new_draft(bob_conversation.clone()).unwrap();
+    draft.set_text(units("see you soon")).unwrap();
+    bob.send_draft(draft).unwrap();
+    let (_, message) = wait_for_message(&alice);
+    assert_eq!(rendered(&alice, message), "see you soon");
+
+    // The backup of Alice goes up, and she writes her recovery code down.
+    alice.set_foreground(true);
+    let start = Instant::now();
+    while alice.last_backup_at().is_none() {
+        assert!(start.elapsed() < Duration::from_secs(150), "no backup");
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    // The root follows the object.
+    std::thread::sleep(Duration::from_secs(5));
+    let code = Arc::new(View::default());
+    alice.recovery_code(code.clone()).unwrap();
+    let digits = code.0.lock().unwrap().clone();
+    assert_eq!(recovery_digits_kind(digits.clone()), 1);
+    assert_eq!(recovery_digits_kind(units("12345")), 0);
+
+    // The phone is lost.
+    alice.disconnect();
+    drop(alice);
+
+    // A new phone: a first launch, the network, and the restore.
+    let fresh = launch(&directory, "new.db", 3);
+    fresh.clone().connect(network_for(&fresh)).unwrap();
+    wait_for(&fresh, |event| match event {
+        FfiEvent::Online => Some(()),
+        _ => None,
+    });
+    fresh.restore_backup(digits).unwrap();
+    let start = Instant::now();
+    loop {
+        match fresh.restore_status() {
+            RestoreStatus::Ready { contacts } => {
+                assert_eq!(contacts, 1);
+                break;
+            }
+            RestoreStatus::Searching { .. } | RestoreStatus::Fetching { .. } => {}
+            other => panic!("{other:?}"),
+        }
+        assert!(start.elapsed() < Duration::from_secs(60), "no restore");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let restored = fresh.take_restored().unwrap();
+    fresh.disconnect();
+    drop(fresh);
+    let config = Config {
+        database_path: directory.join("new.db").to_str().unwrap().to_owned(),
+        argon2_floor_ms: 60_000,
+    };
+    let keystore = Arc::new(Keystore([3; 32])) as Arc<dyn SecureElementCallback>;
+    let back = init_restored(config, keystore, units("a new phrase"), restored).unwrap();
+
+    // The conversation and its history are here, under the new passphrase.
+    assert!(back
+        .summaries()
+        .unwrap()
+        .iter()
+        .any(|summary| summary.conversation == alice_conversation));
+    back.clone().connect(network_for(&back)).unwrap();
+
+    // NET-325 to NET-329: the stale channel renews, and the two talk again.
+    let draft = back.new_draft(alice_conversation.clone()).unwrap();
+    draft.set_text(units("I am back")).unwrap();
+    back.send_draft(draft).unwrap();
+    let (_, message) = wait_for_message(&bob);
+    assert_eq!(rendered(&bob, message), "I am back");
+    let draft = bob.new_draft(bob_conversation).unwrap();
+    draft.set_text(units("welcome back")).unwrap();
+    bob.send_draft(draft).unwrap();
+    let (_, message) = wait_for_message(&back);
+    assert_eq!(rendered(&back, message), "welcome back");
+    back.disconnect();
+    bob.disconnect();
 }
