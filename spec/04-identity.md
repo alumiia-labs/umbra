@@ -1028,7 +1028,9 @@ that table.
   values, a full object with a delete or a `base_at` other than 0, or bytes
   after the last row. **[IDN-182]** A restore MUST apply the full object
   and then each delta in the order of the root, each row in object order: a
-  put replaces the row, and a delete removes it.
+  put replaces the row, and a delete removes it. **[IDN-183]** A restore
+  MUST mark the channel of each restored contact stale under Part 3 rule
+  `NET-325`, and the renewal of Part 3 §3.2.6 gives each one a new session.
 - **[IDN-073]** A relay MUST hold a backup object for `BACKUP_TTL`. §4.8 sets
   that value to 180 days. **[IDN-074]** A revision MUST hold `BACKUP_LOOKBACK`
   weeks at or above `BACKUP_TTL`.

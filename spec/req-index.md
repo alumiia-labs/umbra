@@ -67,10 +67,10 @@ each column when a crate implements the requirement and a test covers it.
 | --- | --- | --- | --- | --- | --- | --- |
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
-| `NET` | 230 | 84 | 1 | 0 | 8 | **323** |
-| `IDN` | 125 | 44 | 1 | 0 | 5 | **175** |
+| `NET` | 236 | 84 | 1 | 0 | 8 | **329** |
+| `IDN` | 126 | 44 | 1 | 0 | 5 | **176** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
-| `WIR` | 395 | 87 | 0 | 0 | 6 | **488** |
+| `WIR` | 396 | 87 | 0 | 0 | 6 | **489** |
 | `DEV` | 179 | 87 | 2 | 0 | 7 | **275** |
 | `NTF` | 77 | 31 | 0 | 0 | 3 | **111** |
 | `DIS` | 123 | 37 | 0 | 0 | 1 | **161** |
@@ -81,7 +81,7 @@ each column when a crate implements the requirement and a test covers it.
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
 | `IMP` | 112 | 41 | 0 | 0 | 2 | **155** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2243 | 719 | 7 | 0 | 54 | **3023** |
+| **All** | 2251 | 719 | 7 | 0 | 54 | **3031** |
 
 ## SCP — Scope and Conventions
 
@@ -462,6 +462,12 @@ Source: `spec/03-network-architecture.md`
 | `NET-322` | §3.4.3 | MUST | A relay that ends a circuit | A relay that ends a circuit MUST tell each neighbor of it with the `CircuitDestroy` of Part 6 §6.2.3, on each link of the circuit but the one that ended it: a closed link, a `CircuitDestroy`, or a `DESTROY` cell of the client. |  |  |
 | `NET-323` | §3.2.4 | MUST | A client | A client MUST draw the jitter of a queue from a value that no relay holds. |  |  |
 | `NET-324` | §3.2.6 | MUST | (unstated) | A client whose `SUB` of the current inbound queue of a contact gets a `NACK` with reason `REJECTED` MUST make a new queue for that contact, as at a rotation. |  |  |
+| `NET-325` | §3.2.6 | MUST | A client | A client MUST mark the channel of each contact of a restore stale. |  |  |
+| `NET-326` | §3.2.6 | MUST | A client with a stale channel | A client with a stale channel MUST make a new queue and a bundle of Part 5 §5.4.1 as the responder, under the pairwise identity of that contact, with a fresh one-time prekey. |  |  |
+| `NET-327` | §3.2.6 | MUST | A client that gets such a record | A client that gets such a record MUST drop it unless `responder_static_x25519` equals the pairwise key of the peer that the contact holds. |  |  |
+| `NET-328` | §3.2.6 | MUST | (unstated) | If the channels of both parties are stale, the party whose pairwise X25519 key is the lower as a big-endian integer MUST answer the bundle of the other, and the other MUST drop the bundle that it gets. |  |  |
+| `NET-329` | §3.2.6 | MUST | A handshake of a renewal | A handshake of a renewal MUST replace the channel of the contact only if the static key of the peer in it equals the pairwise key of the peer that the contact holds. |  |  |
+| `NET-330` | §3.2.6 | MUST | (unstated) | A client with a stale channel that takes a new address of the peer under rule 9 MUST send its bundle again to that address. |  |  |
 
 ## IDN — Identity
 
@@ -644,6 +650,7 @@ Source: `spec/04-identity.md`
 | `IDN-180` | §4.7.2 | MUST NOT | A client | A client MUST NOT put in a backup object a row that holds a state of this device alone: a push registration of Part 8, a push token, the ingress pin of Part 10, the dead-channel state of Part 3 §3.2.6, or the wrap of the store. |  |  |
 | `IDN-181` | §4.7.2 | MUST | A reader | A reader MUST reject an object with a `version` other than `0x01`, a `kind` other than the two values, a full object with a delete or a `base_at` other than 0, or bytes after the last row. |  |  |
 | `IDN-182` | §4.7.2 | MUST | A restore | A restore MUST apply the full object and then each delta in the order of the root, each row in object order: a put replaces the row, and a delete removes it. |  |  |
+| `IDN-183` | §4.7.2 | MUST | A restore | A restore MUST mark the channel of each restored contact stale under Part 3 rule `NET-325`, and the renewal of Part 3 §3.2.6 gives each one a new session. |  |  |
 
 ## CRY — Cryptographic Core
 
@@ -1293,6 +1300,7 @@ Source: `spec/06-wire-format.md`
 | `WIR-525` | §6.2.2 | MUST | A sender | A sender MUST keep the last `RESEND_WINDOW` frames of a session for a resume, 1 000 frames, and MUST drop the oldest one when a new frame comes to a full window. |  |  |
 | `WIR-526` | §6.4 | MUST | (unstated) | A relay that writes a digest of Part 8 §8.5 or Part 12 §12.6.4 into a queue at another relay MUST send it as the value of one `UMBRA_DEPOSIT` capsule, on a connection of §6.2.1 that it opens for that deposit. |  |  |
 | `WIR-527` | §6.4 | MUST | A relay | A relay MUST hold the `corr_id` of each of the last 4 096 deposits that it took, and it MUST drop a deposit that repeats one. |  |  |
+| `WIR-528` | §6.4.2 | MUST | A receiver | A receiver MUST take the content of a renewal record as a bundle in the layout of Part 5 §5.4.1, and it MUST read it on the queue of a contact whose handshake is complete. |  |  |
 
 ## DEV — Device Sets
 

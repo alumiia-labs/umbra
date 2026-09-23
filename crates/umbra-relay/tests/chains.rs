@@ -1660,3 +1660,130 @@ fn two_contacts_whose_queues_lapsed_meet_again_through_their_blobs() {
     assert_eq!(texts_of(mesh.take_events(BOB)), [b"found you"]);
     assert_eq!(texts_of(mesh.take_events(ALICE)), [b"and you"]);
 }
+
+/// Each client writes one text to the other, and each gets it.
+fn talk(mesh: &mut Mesh, contacts: [ContactId; 2], tag: u8) {
+    for (from, to) in [(0usize, 1usize), (1, 0)] {
+        let now = mesh.now;
+        let words = format!("round {tag} from {from}");
+        mesh.clients[from]
+            .send(
+                &contacts[from],
+                &text(tag, &words),
+                now,
+                &mut Rng(u64::from(tag)),
+            )
+            .unwrap();
+        mesh.settle();
+        assert_eq!(texts_of(mesh.take_events(to)), [words.as_bytes()]);
+        mesh.take_events(from);
+    }
+}
+
+fn renewed(events: &[ClientEvent], contact: ContactId) -> bool {
+    events.contains(&ClientEvent::ChannelRenewed { contact })
+}
+
+#[test]
+fn a_channel_restored_from_an_old_state_renews_and_talks_again() {
+    const ALICE: usize = 0;
+    const BOB: usize = 1;
+    let mut mesh = Mesh::new(&[0x91, 0x92]);
+    mesh.settle();
+    mesh.take_events(ALICE);
+    mesh.take_events(BOB);
+    mesh.clients[ALICE].invite(&mut Rng(1)).unwrap();
+    mesh.settle();
+    let events = mesh.take_events(ALICE);
+    let [ClientEvent::Invitation { bundle, .. }] = &events[..] else {
+        panic!("{events:?}");
+    };
+    mesh.clients[BOB]
+        .accept(bundle.clone(), &mut Rng(2))
+        .unwrap();
+    mesh.settle();
+    mesh.settle();
+    let contacts = [
+        contact_of(&mesh.take_events(ALICE)),
+        contact_of(&mesh.take_events(BOB)),
+    ];
+    talk(&mut mesh, contacts, 10);
+
+    // The backup of Alice holds this state. The two talk on, and each DH
+    // step moves the ratchet past it.
+    let backup = mesh.stored[ALICE].clone();
+    for round in 11..14 {
+        talk(&mut mesh, contacts, round);
+    }
+
+    // NET-325: Alice comes back from the backup, and her channel is stale.
+    // Her record waits, and no ratchet record leaves.
+    mesh.stored[ALICE] = backup;
+    let seed = mesh_seed_of(&mesh, ALICE);
+    mesh.restart(ALICE, seed);
+    mesh.settle();
+    mesh.take_events(ALICE);
+    mesh.clients[ALICE].mark_stale(&contacts[ALICE]).unwrap();
+    assert!(mesh.clients[ALICE].is_stale(&contacts[ALICE]));
+    let now = mesh.now;
+    mesh.clients[ALICE]
+        .send(
+            &contacts[ALICE],
+            &text(20, "back from a backup"),
+            now,
+            &mut Rng(20),
+        )
+        .unwrap();
+
+    // NET-326 to NET-329: the bundle reaches Bob, his static check holds,
+    // the handshake runs, and each side takes the new channel. The record
+    // that waited goes on it.
+    mesh.settle();
+    mesh.settle();
+    mesh.settle();
+    let alice = mesh.take_events(ALICE);
+    let bob = mesh.take_events(BOB);
+    assert!(renewed(&alice, contacts[ALICE]), "{alice:?}");
+    assert!(renewed(&bob, contacts[BOB]), "{bob:?}");
+    assert_eq!(texts_of(bob), [b"back from a backup"]);
+    assert!(!mesh.clients[ALICE].is_stale(&contacts[ALICE]));
+    talk(&mut mesh, contacts, 21);
+
+    // The new state lives through a restart.
+    let seed = mesh_seed_of(&mesh, ALICE);
+    mesh.restart(ALICE, seed);
+    mesh.settle();
+    mesh.take_events(ALICE);
+    talk(&mut mesh, contacts, 22);
+
+    // NET-328: both come back from old states at once. Each offers a
+    // bundle, the party with the lower static key answers, and the two
+    // meet on one channel.
+    let backups = [mesh.stored[ALICE].clone(), mesh.stored[BOB].clone()];
+    talk(&mut mesh, contacts, 23);
+    talk(&mut mesh, contacts, 24);
+    for client in [ALICE, BOB] {
+        mesh.stored[client] = backups[client].clone();
+        let seed = mesh_seed_of(&mesh, client);
+        mesh.restart(client, seed);
+    }
+    mesh.settle();
+    for client in [ALICE, BOB] {
+        mesh.take_events(client);
+        mesh.clients[client].mark_stale(&contacts[client]).unwrap();
+        let now = mesh.now;
+        let events = mesh.clients[client]
+            .rotate_due(now, &mut Rng(30 + client as u64))
+            .unwrap();
+        mesh.events[client].extend(events);
+    }
+    for _ in 0..4 {
+        mesh.settle();
+    }
+    for client in [ALICE, BOB] {
+        let events = mesh.take_events(client);
+        assert!(renewed(&events, contacts[client]), "{client}: {events:?}");
+        assert!(!mesh.clients[client].is_stale(&contacts[client]));
+    }
+    talk(&mut mesh, contacts, 25);
+}

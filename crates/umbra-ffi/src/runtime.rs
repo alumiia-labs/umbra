@@ -173,6 +173,8 @@ pub enum Update {
     },
     /// The peer gave a new address on the channel.
     PeerMoved(ContactId),
+    /// A renewal replaced the channel of a contact (Part 3 §3.2.6).
+    ChannelRenewed(ContactId),
     /// A minute of a ready run passed. The work of weeks and hours, as the
     /// dead-channel blob of Part 3 §3.2.6, runs at it.
     Tick,
@@ -457,6 +459,7 @@ pub async fn run_client(
                     address: Zeroizing::new(address),
                 },
                 ClientEvent::PeerMoved { contact } => Update::PeerMoved(contact),
+                ClientEvent::ChannelRenewed { contact } => Update::ChannelRenewed(contact),
                 ClientEvent::CircuitLost => break 'run Ended::CircuitLost,
                 ClientEvent::CircuitAged => break 'run Ended::Aged,
             };

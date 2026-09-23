@@ -719,8 +719,12 @@ QueueE2E {
    sender-key record in an earlier draft, and it is retired. The value `0x03`
    names a report record (Part 12 §12.5.3). The value `0x04` names a `NotifyDigest` (Part 12 §12.6.4).
    The value `0x05` names a handshake record, which the text after rule 6
-   gives.
-   **[WIR-023]** A receiver MUST reject an unknown kind.
+   gives. The value `0x06` names a renewal record: a bundle of Part 5
+   §5.4.1 of a party whose ratchet is stale (Part 3 §3.2.6, `NET-326`).
+   **[WIR-023]** A receiver MUST reject an unknown kind. **[WIR-528]** A
+   receiver MUST take the content of a renewal record as a bundle in the
+   layout of Part 5 §5.4.1, and it MUST read it on the queue of a contact
+   whose handshake is complete. No ratchet covers the record.
 6. **[WIR-024]** **A sender MUST fill the L6 record to a fixed length for the bucket.** That
    length is the "L6 record on a `MSG`" row of §6.9. That row gives 390 bytes at
    bucket `B0`. **[WIR-025]** Thus the `payload_len` of a `SEND` MUST equal that row.

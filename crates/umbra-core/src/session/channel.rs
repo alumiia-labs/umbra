@@ -495,6 +495,14 @@ pub enum Received {
         /// The `AppMessage` bytes.
         bytes: Vec<u8>,
     },
+    /// The bundle of a channel renewal (Part 3 §3.2.6). No ratchet covers
+    /// it: the queue end-to-end layer alone does, as for a flight.
+    Renewal {
+        /// The sequence number of the `MSG`.
+        seq: u32,
+        /// The bundle, in the layout of Part 5 §5.4.1.
+        bundle: Vec<u8>,
+    },
     /// A record that the queue already delivered.
     Duplicate,
     /// A record that does not open, or a record of another kind than a
@@ -598,6 +606,12 @@ impl PairwiseChannel {
     /// (`NET-177`, `NET-178`).
     pub fn end_previous(&mut self) -> Option<Inbound> {
         self.previous.take()
+    }
+
+    /// The inbound queues of a channel that a renewal replaced: the
+    /// current one, and the one that a rotation replaced.
+    pub fn into_inbounds(self) -> (Inbound, Option<Inbound>) {
+        (self.inbound, self.previous)
     }
 
     /// Whether `queue` is an inbound queue of this channel.
@@ -706,6 +720,11 @@ impl PairwiseChannel {
                 kind: L6Kind::Ratchet,
                 inner,
             } => (seq, inner),
+            Opened::Record {
+                seq,
+                kind: L6Kind::Renewal,
+                inner,
+            } => return Ok(Received::Renewal { seq, bundle: inner }),
             Opened::Record { seq, .. } => return Ok(Received::Undecryptable { seq }),
         };
         let mut app = alloc::vec![0u8; bucket.l7_record()];

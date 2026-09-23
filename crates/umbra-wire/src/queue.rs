@@ -30,6 +30,9 @@ pub enum L6Kind {
     /// One flight of the pairwise handshake of Part 5 §5.4: the flight
     /// number from 1 to 3, and then the flight.
     Handshake = 0x05,
+    /// The bundle of a channel renewal of Part 3 §3.2.6: a party whose
+    /// ratchet is stale offers a new handshake to its contact.
+    Renewal = 0x06,
 }
 
 impl L6Kind {
@@ -39,6 +42,7 @@ impl L6Kind {
             0x03 => Ok(L6Kind::Report),
             0x04 => Ok(L6Kind::NotifyDigest),
             0x05 => Ok(L6Kind::Handshake),
+            0x06 => Ok(L6Kind::Renewal),
             _ => Err(Error::Malformed),
         }
     }

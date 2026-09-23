@@ -533,6 +533,61 @@ the derivation.
 >
 > A fetch of a missing chunk costs one `B0` command and one `B0` `NACK`. Thus
 > the weekly fetch of `NET-187` costs about 1.1 KB for each silent contact.
+
+**A channel renewal.** A restore of Part 4 §4.7.2 gives back the ratchet of a
+contact as the backup held it, and the two parties moved on after that. The
+restored sending chain would seal a new record under a message key that it
+used before, and the peer drops a record at a chain position that it read
+already. The peer also wrote under DH steps whose private halves the restored
+device never held. Thus a restored ratchet is **stale**, and the two parties
+make a new session over the pairwise identities, which a restore keeps.
+
+- **[NET-325]** A client MUST mark the channel of each contact of a restore
+  stale. A client MUST NOT seal a record on a stale ratchet: it holds each
+  record of the user until the renewal ends, and it makes no rotation of the
+  channel. A client MAY open records on a stale ratchet.
+- **[NET-326]** A client with a stale channel MUST make a new queue and a
+  bundle of Part 5 §5.4.1 as the responder, under the pairwise identity of
+  that contact, with a fresh one-time prekey. It MUST send the bundle to the
+  newest queue of the peer as an L6 record of kind `0x06` of Part 6 §6.4.2.
+  It MUST keep the bundle and its prekey until the handshake ends, across a
+  restart, as it keeps an invitation.
+- **[NET-327]** A client that gets such a record MUST drop it unless
+  `responder_static_x25519` equals the pairwise key of the peer that the
+  contact holds. Otherwise it MUST run the handshake of Part 5 §5.4 as the
+  initiator under its own pairwise identity of that contact, from a new
+  queue. It MUST NOT run a second one for the same contact while one runs.
+- **[NET-328]** If the channels of both parties are stale, the party whose
+  pairwise X25519 key is the lower as a big-endian integer MUST answer the
+  bundle of the other, and the other MUST drop the bundle that it gets.
+  Thus the two parties end on one session.
+- **[NET-329]** A handshake of a renewal MUST replace the channel of the
+  contact only if the static key of the peer in it equals the pairwise key
+  of the peer that the contact holds. The client then MUST take the new
+  session and queues as the channel, MUST send the `DEL` of `NET-020` for
+  each queue of the old channel, MUST end each other renewal of that
+  contact, and MUST send again each record with no delivery receipt under
+  `NET-193`. The contact keeps its conversation, its verification state,
+  and its identifier in the store.
+
+> *Cause of `NET-325` to `NET-329`.* An earlier draft put "the pairwise queue
+> state" in the backup and said nothing of the ratchet. A restore then either
+> reused message keys, which breaks the confidentiality of the two records
+> that share a key, or broke each conversation for good. The pairwise
+> identities outlive the ratchet, and the handshake of Part 5 §5.4 already
+> authenticates them, thus a renewal reuses that handshake with no new
+> cryptography. The bundle travels under the queue end-to-end layer of the
+> peer, whose key only the contact holds, and the static check of `NET-327`
+> refuses a bundle of any other party.
+
+- **[NET-330]** A client with a stale channel that takes a new address of
+  the peer under rule 9 MUST send its bundle again to that address.
+
+> *Residual.* A stale party whose peer lost its queue sends its bundle into
+> a queue that no relay holds. The two meet again when the peer takes a new
+> queue under `NET-324` and its blob of rule 7 reaches the stale party. A
+> blob that carries a bundle would close that wait, and this revision does
+> not define one.
 > Rule `NET-189` keeps the fetch off a live contact, thus a relay sees a
 > dead-channel handle only when a pair has lost its channel.
 

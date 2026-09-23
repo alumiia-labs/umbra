@@ -196,6 +196,7 @@ impl Bridge {
             | Update::ChannelDead(_)
             | Update::QueueRotated { .. }
             | Update::PeerMoved(_)
+            | Update::ChannelRenewed(_)
             | Update::Tick
             | Update::NotifyKey { .. }
             | Update::NotifyQueue { .. }

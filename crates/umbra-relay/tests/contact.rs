@@ -1310,7 +1310,9 @@ fn a_ceremony_gives_one_code_and_only_the_user_verifies() {
 
 #[test]
 fn a_stored_contact_of_the_first_version_continues() {
-    const TAIL: usize = 32 + 8 + 32 + 8 + 1 + 129;
+    // The tail of version 0x04: the contact, the time of the queue, the
+    // state of a rotation, the own address, and the stale flag.
+    const TAIL: usize = 32 + 8 + 32 + 8 + 1 + 129 + 1;
     const ALICE: usize = 0;
     const BOB: usize = 1;
     let mut network = Network::new();
@@ -1330,8 +1332,8 @@ fn a_stored_contact_of_the_first_version_continues() {
     // queue, the state of a rotation, and the address of the own queue,
     // which the bundle of the inviter gave.
     for state in network.stored[ALICE].contacts.values_mut() {
-        assert_eq!(state[0], 0x03);
-        assert_eq!(state[state.len() - 130], 1);
+        assert_eq!(state[0], 0x04);
+        assert_eq!(state[state.len() - 131], 1);
         state[0] = 0x01;
         state.truncate(state.len() - TAIL);
         state.drain(1 + 16 + 32..1 + 16 + 32 + 32);
@@ -1349,13 +1351,13 @@ fn a_stored_contact_of_the_first_version_continues() {
     assert!(network.stored[ALICE]
         .contacts
         .values()
-        .all(|state| state[0] == 0x03 && state[49..81] == queue_relay));
+        .all(|state| state[0] == 0x04 && state[49..81] == queue_relay));
 
     // Version 0x02 named the relay and held no tail. A contact of the first
     // version holds no address of its own queue, thus its tail ends with
-    // the flag of none.
+    // the flag of none and the stale flag.
     for state in network.stored[ALICE].contacts.values_mut() {
-        assert_eq!(state.last(), Some(&0));
+        assert_eq!(state[state.len() - 2..], [0, 0]);
         state[0] = 0x02;
         state.truncate(state.len() - (TAIL - 129));
     }

@@ -2282,9 +2282,10 @@ impl Handle {
                     let _ = client.dead_queue_rotated(conversation, address, &mut OsRng);
                 }
             }
-            // NET-190, NET-193: the peer moved. The channel lives, and each
-            // record with no delivery receipt goes again.
-            Update::PeerMoved(contact) => {
+            // NET-190, NET-193: the peer moved, or a renewal replaced the
+            // channel (NET-329). The channel lives, and each record with no
+            // delivery receipt goes again.
+            Update::PeerMoved(contact) | Update::ChannelRenewed(contact) => {
                 if let Ok(conversation) = client.conversation_for(&contact.0) {
                     if let Ok(Some(erase)) = client.dead_channel_ended(conversation, &mut OsRng) {
                         dead_work.push(erase);
@@ -2661,7 +2662,10 @@ impl Handle {
                 let bundle = node
                     .restore_invitation(state)
                     .map_err(|_| FfiError::Integrity)?;
-                net_events.push_back(NetEvent::Invitation(bundle));
+                // A renewal of Part 3 §3.2.6 is no invitation of the user.
+                if !bundle.is_empty() {
+                    net_events.push_back(NetEvent::Invitation(bundle));
+                }
             }
             // Each notify queue of a group takes its digests again, and one
             // that no group names ends (`NTF-133`).
