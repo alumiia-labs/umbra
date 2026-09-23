@@ -22,7 +22,7 @@ use umbra_crypto::{
     secret::Secret,
 };
 use umbra_transport::{
-    native,
+    https, native,
     race::{Plan, Wire},
     Dial,
 };
@@ -238,30 +238,95 @@ async fn push_copy(target: Dial, tls: Arc<rustls::ClientConfig>, capsule: Vec<u8
     }
 }
 
+/// The path of the OHTTP relay of Part 8 §8.2 (`NTF-127`).
+pub const OHTTP_PATH: &str = "/ohttp";
+/// The longest encapsulated request: the header, the encapsulation, one
+/// NDR request, and the tag.
+const OHTTP_REQUEST_MAX: usize = 4_096;
+/// The longest encapsulated response.
+const OHTTP_RESPONSE_MAX: usize = 256;
+/// The wait for the gateway, which waits for the provider in turn.
+const OHTTP_WAIT: Duration = Duration::from_secs(15);
+
+/// The gateway that the OHTTP relay role posts to.
+pub struct OhttpForward {
+    /// The URL of the gateway of the NDR.
+    pub gateway: https::Url,
+    /// The configuration that this relay trusts the gateway under.
+    pub tls: Arc<rustls::ClientConfig>,
+}
+
+/// What a relay carries over HTTPS beside the upgrade: the manifest of
+/// Part 3 §3.10, and the OHTTP relay role of Part 8 §8.2.
+#[derive(Default)]
+pub struct Carried {
+    /// The manifest, for a client that asks for it.
+    pub manifest: Option<Vec<u8>>,
+    /// The gateway, for a relay with the OHTTP relay role.
+    pub ohttp: Option<OhttpForward>,
+}
+
+/// Forwards one encapsulated request to the gateway and gives its answer
+/// back (`NTF-127`). The relay reads no byte of either, it keeps neither,
+/// and the gateway sees this relay alone.
+async fn relay_ohttp<S>(stream: &mut S, inbound: &mut Vec<u8>, forward: Option<&OhttpForward>)
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let answer = match (
+        forward,
+        https::read_request(stream, inbound, OHTTP_REQUEST_MAX).await,
+    ) {
+        (Some(forward), Ok(request)) if request.method == "POST" => https::post(
+            &forward.gateway,
+            "message/ohttp-req",
+            &[],
+            &request.body,
+            forward.tls.clone(),
+            OHTTP_RESPONSE_MAX,
+            OHTTP_WAIT,
+        )
+        .await
+        .ok()
+        .filter(|(status, _)| *status == 200)
+        .map(|(_, body)| body),
+        _ => None,
+    };
+    let _ = match answer {
+        Some(body) => https::respond(stream, 200, "message/ohttp-res", &body).await,
+        None => https::respond(stream, 502, "text/plain", &[]).await,
+    };
+}
+
 /// Serves one accepted connection: the HTTP upgrade of Part 6 §6.2.1, and
 /// then one capsule in each WebSocket frame, in both directions. The
 /// function returns when either side closes.
 ///
-/// A request for the relay manifest gets `manifest` and the end of the
+/// A request for the relay manifest gets the manifest and the end of the
 /// connection (Part 3 §3.10). In a deployment the co-tenant site of Part 3
-/// §3.8 serves that path, and the relay sees no such request.
+/// §3.8 serves that path, and the relay sees no such request. A `POST` to
+/// `OHTTP_PATH` goes to the gateway of the NDR.
 pub async fn serve_connection<S>(
     mut stream: S,
     link: LinkId,
     node: mpsc::Sender<Input>,
-    manifest: Option<Arc<Vec<u8>>>,
+    carried: Arc<Carried>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let mut inbound: Vec<u8> = Vec::with_capacity(4_096);
     let mut chunk = vec![0u8; 16_384];
     let request = loop {
+        if inbound.starts_with(format!("POST {OHTTP_PATH} ").as_bytes()) {
+            relay_ohttp(&mut stream, &mut inbound, carried.ohttp.as_ref()).await;
+            return;
+        }
         if native::asks_manifest(&inbound) && inbound.windows(4).any(|w| w == b"\r\n\r\n") {
-            let _ = match manifest {
+            let _ = match &carried.manifest {
                 Some(bytes) => {
                     let head = native::manifest_response_head(bytes.len());
                     let _ = stream.write_all(head.as_bytes()).await;
-                    stream.write_all(&bytes).await
+                    stream.write_all(bytes).await
                 }
                 None => {
                     stream
@@ -356,7 +421,7 @@ pub async fn accept_loop(
     listener: TcpListener,
     tls: TlsAcceptor,
     node: mpsc::Sender<Input>,
-    manifest: Option<Arc<Vec<u8>>>,
+    carried: Arc<Carried>,
 ) {
     let mut link: LinkId = 2;
     loop {
@@ -366,12 +431,12 @@ pub async fn accept_loop(
         let _ = tcp.set_nodelay(true);
         let tls = tls.clone();
         let node = node.clone();
-        let manifest = manifest.clone();
+        let carried = carried.clone();
         let this_link = link;
         link = link.saturating_add(2);
         tokio::spawn(async move {
             if let Ok(stream) = tls.accept(tcp).await {
-                serve_connection(stream, this_link, node, manifest).await;
+                serve_connection(stream, this_link, node, carried).await;
             }
         });
     }
@@ -429,9 +494,9 @@ pub async fn dial_next(
 /// accept loop. `next_hops` names each relay of the next layer, and
 /// `client_tls` is the configuration that the dialer trusts them under. A
 /// deployment passes [`PACING_MEAN_MS`] (`NET-077`), and a test passes less.
-/// With a `manifest` the relay is an HTTPS carrier of it. `replicas` names
-/// each other relay with the attachment role, for the copies of Part 13
-/// §13.4.1.
+/// `carried` gives what the relay serves over HTTPS beside the upgrade.
+/// `replicas` names each other relay with the attachment role, for the
+/// copies of Part 13 §13.4.1.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_relay(
     node: RelayNode,
@@ -442,9 +507,9 @@ pub async fn run_relay(
     client_tls: Arc<rustls::ClientConfig>,
     pacing_mean_ms: u64,
     store: Box<dyn RelayStore>,
-    manifest: Option<Vec<u8>>,
+    carried: Carried,
 ) {
-    let manifest = manifest.map(Arc::new);
+    let carried = Arc::new(carried);
     let (inputs, node_inputs) = mpsc::channel::<Input>(1_024);
     let (requests, mut node_requests) = mpsc::unbounded_channel::<Request>();
     let node_task = tokio::spawn(run_node(node, node_inputs, requests, pacing_mean_ms, store));
@@ -495,7 +560,7 @@ pub async fn run_relay(
     });
     // The node task ends when the store fails, and the relay ends with it.
     tokio::select! {
-        () = accept_loop(listener, tls, inputs, manifest) => {}
+        () = accept_loop(listener, tls, inputs, carried) => {}
         _ = node_task => {}
     }
 }

@@ -29,7 +29,7 @@ use umbra_crypto::{
 use umbra_ffi::runtime::{run_client, Command, NoStore, Update};
 use umbra_relay::{
     node::{Config, RelayNode},
-    server::{run_relay, tls_acceptor},
+    server::{run_relay, tls_acceptor, Carried},
     store::MemoryStore,
 };
 use umbra_transport::{native, Dial};
@@ -161,7 +161,7 @@ async fn two_clients_meet_and_talk_over_real_sockets() {
             client_tls.clone(),
             PACING_MEAN_MS,
             Box::new(MemoryStore::default()),
-            None,
+            Carried::default(),
         ));
     }
 

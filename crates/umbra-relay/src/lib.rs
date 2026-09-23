@@ -13,6 +13,8 @@
 #![forbid(unsafe_code)]
 
 pub mod circuits;
+#[cfg(feature = "native")]
+pub mod ndr_server;
 pub mod node;
 pub mod placement;
 #[cfg(feature = "native")]

@@ -80,7 +80,7 @@ async fn a_client_upgrades_opens_a_session_and_builds_one_hop() {
     let store = Box::new(MemoryStore::default());
     tokio::spawn(run_node(node, node_inputs, requests, 1_000, store));
     let (mut client, server) = tokio::io::duplex(1 << 16);
-    tokio::spawn(serve_connection(server, 2, inputs, None));
+    tokio::spawn(serve_connection(server, 2, inputs, Default::default()));
 
     // The upgrade of Part 6 §6.2.1.
     let key = [5u8; 16];

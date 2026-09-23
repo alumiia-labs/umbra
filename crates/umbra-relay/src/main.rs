@@ -52,6 +52,10 @@
 //! such line keeps its queues in RAM, and a restart of it ends each contact
 //! that it served. It says so at its start.
 //!
+//! An `ohttp_gateway=https://ndr.example/gateway` line gives the relay the
+//! OHTTP relay role of Part 8 §8.2: it forwards each `POST /ohttp` to that
+//! gateway of the Notification Delivery Relay.
+//!
 //! The `next` line repeats, one for each relay of the next layer. The
 //! `trust` line is for a test network: the dialer then trusts that one
 //! authority and not the web roots. A deployment leaves it out.
@@ -76,11 +80,11 @@ use umbra_crypto::{
 use umbra_relay::{
     node::{Config, RelayNode},
     placement::placement,
-    server::{run_relay, tls_acceptor, OsRng, PACING_MEAN_MS},
+    server::{run_relay, tls_acceptor, Carried, OhttpForward, OsRng, PACING_MEAN_MS},
     sqlite_store::SqliteStore,
     store::{MemoryStore, RelayStore},
 };
-use umbra_transport::{native, Dial};
+use umbra_transport::{https, native, Dial};
 
 fn hex(text: &str) -> Option<Vec<u8>> {
     if !text.len().is_multiple_of(2) {
@@ -116,6 +120,8 @@ struct Settings {
     /// The manifest that gave this relay its place. The relay serves it to
     /// a client that asks over HTTPS (Part 3 §3.10).
     manifest: Option<Vec<u8>>,
+    /// The gateway of the NDR, for a relay with the OHTTP relay role.
+    ohttp_gateway: Option<https::Url>,
     /// What this relay declares of itself for a network descriptor: the
     /// operator, the country, the autonomous system, and the IPv4 /16.
     facts: BTreeMap<String, String>,
@@ -231,6 +237,10 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
         replicas,
         identity,
         manifest,
+        ohttp_gateway: match values.get("ohttp_gateway") {
+            Some(url) => Some(https::Url::parse(url)?),
+            None => None,
+        },
         facts: [
             "operator", "country", "asn", "prefix", "family", "class", "roles",
         ]
@@ -462,10 +472,17 @@ async fn run() -> ExitCode {
         tls,
         settings.next,
         settings.replicas,
-        client_tls,
+        client_tls.clone(),
         PACING_MEAN_MS,
         store,
-        settings.manifest,
+        Carried {
+            manifest: settings.manifest,
+            // NTF-127: the OHTTP relay role posts to the gateway of the NDR.
+            ohttp: settings.ohttp_gateway.map(|gateway| OhttpForward {
+                gateway,
+                tls: client_tls.clone(),
+            }),
+        },
     )
     .await;
     ExitCode::SUCCESS

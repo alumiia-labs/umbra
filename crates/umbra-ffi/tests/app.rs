@@ -55,7 +55,7 @@ use umbra_ffi::transfers::{run_transfers, TransferCommand, TransferUpdate};
 use umbra_relay::{
     node::{Config as RelayConfig, RelayNode},
     placement::placement,
-    server::{run_relay, tls_acceptor, OsRng},
+    server::{run_relay, tls_acceptor, Carried, OsRng},
     sqlite_store::SqliteStore,
     store::{MemoryStore, RelayStore},
 };
@@ -228,7 +228,7 @@ fn start_relays(
             client_tls.clone(),
             PACING_MEAN_MS,
             store,
-            None,
+            Carried::default(),
         ));
     }
     (relays, ports)
@@ -766,7 +766,10 @@ fn start_signed_network_at(relays: &tokio::runtime::Runtime, at: Option<&[u16]>)
             PACING_MEAN_MS,
             store,
             // The ingress relay is the carrier of the manifest.
-            (placed.layer == 1).then(|| manifest.clone()),
+            Carried {
+                manifest: (placed.layer == 1).then(|| manifest.clone()),
+                ohttp: None,
+            },
         ));
     }
     assert_eq!(layers, SIGNED_LAYERS);

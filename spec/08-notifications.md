@@ -73,6 +73,15 @@ threat model and its own trust boundary.
   `message/bhttp` labels of RFC 9458 §4.3 and §4.4, as RFC 9458 §4.6 permits
   for another media type. The key configuration of the gateway MUST list one
   suite, the UMBRA suite.
+  **[NTF-127]** A client build and the settings of a queue relay MUST pin
+  the route to the NDR: the URL of the OHTTP relay, the key id, and the key
+  configuration of the gateway. A party MUST NOT take that key from a fetch
+  that no signature covers, because an OHTTP relay that handed its own key
+  would read each request. A relay with the OHTTP relay role MUST forward
+  each request to the gateway without a change, MUST keep no request and no
+  response, and MUST write no log line that names a sender. The reference
+  relay serves the role at `POST /ohttp` beside its WebSocket upgrade, and
+  the reference NDR serves the gateway at `POST /gateway`.
 
 ### 8.2.1 Token blinding
 

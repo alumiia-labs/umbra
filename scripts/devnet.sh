@@ -11,6 +11,9 @@
 # manifest of the seven (Part 10 §10.5.5). A relay reads its layer from that
 # manifest. The seeds of the relays and of the authorities are in the
 # repository, thus this network protects nothing.
+#
+# The Notification Delivery Relay of Part 8 §8.2 listens on port 7450, and
+# the two ingress relays carry its OHTTP requests (`POST /ohttp`).
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -36,6 +39,8 @@ pids=()
 trap 'kill "${pids[@]}" 2>/dev/null || true' EXIT INT TERM
 # The queue relays start first, thus each dial of a lower layer finds a port
 # that accepts.
+target/debug/umbra-ndr tests/fixtures/devnet/ndr.conf &
+pids+=($!)
 for relay in 3 5 7 2 4 1 6; do
     target/debug/umbra-relay "tests/fixtures/devnet/relay$relay.conf" &
     pids+=($!)
