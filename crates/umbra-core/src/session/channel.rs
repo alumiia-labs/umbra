@@ -405,6 +405,43 @@ impl Inbound {
         )
     }
 
+    /// The `NKEY` of the queue: a notifier key of its own, which the relay
+    /// answers with its notification key and a `notifier_id` (Part 8
+    /// §8.2.3, §8.2.4).
+    pub fn notifier_key(
+        &self,
+        relay_session_pk: &[u8; 32],
+        corr_id: [u8; 16],
+        notifier_pk: &[u8; 32],
+    ) -> Result<Vec<u8>, Error> {
+        signed(
+            Cmd::Nkey,
+            self.recipient_id,
+            corr_id,
+            notifier_pk,
+            &self.auth_secret,
+            relay_session_pk,
+        )
+    }
+
+    /// The `NBIND` of the queue: the binding sealed to the notification
+    /// key of the relay (`NTF-113`).
+    pub fn bind(
+        &self,
+        relay_session_pk: &[u8; 32],
+        corr_id: [u8; 16],
+        sealed: &[u8],
+    ) -> Result<Vec<u8>, Error> {
+        signed(
+            Cmd::Nbind,
+            self.recipient_id,
+            corr_id,
+            sealed,
+            &self.auth_secret,
+            relay_session_pk,
+        )
+    }
+
     /// The `ACK` that the cursor offers at `now`, with its point. The
     /// point never sits above a hole before `ACK_HOLE_TIMEOUT` (`WIR-112`,
     /// `WIR-113`). The caller gives the point back to

@@ -25,6 +25,7 @@ use umbra_queue::params::RECEIPT_MIN_DELAY;
 use umbra_relay::{
     circuits::LinkId,
     node::{Config, Output, RelayNode},
+    service::queue::NdrPush,
     store::{MemoryStore, RelayStore},
 };
 use umbra_wire::app::{AppKind, AppMessage, Channel};
@@ -78,6 +79,8 @@ struct Network {
     stored: Vec<Stored>,
     inboxes: Vec<VecDeque<Vec<u8>>>,
     events: Vec<Vec<ClientEvent>>,
+    /// The pushes that the queue relays handed to their runtime.
+    pushes: Vec<NdrPush>,
     rng: Rng,
     now: u64,
 }
@@ -166,6 +169,7 @@ impl Network {
             stored: vec![Stored::default(), Stored::default()],
             inboxes: vec![VecDeque::new(), VecDeque::new()],
             events: vec![Vec::new(), Vec::new()],
+            pushes: Vec::new(),
             rng: Rng(7),
             now: 1_000,
         };
@@ -186,6 +190,10 @@ impl Network {
                 Output::Send { link, capsule } => (link, capsule),
                 // The link of a client that stopped.
                 Output::Close { .. } => continue,
+                Output::NdrPush(push) => {
+                    self.pushes.push(push);
+                    continue;
+                }
                 other => panic!("an unexpected output: {other:?}"),
             };
             let Some(peer) = self.peers[at].iter().find(|(l, _)| *l == link) else {
@@ -690,6 +698,81 @@ fn a_circuit_near_its_cells_ends_the_run_and_the_relay_ends_it_after() {
     let now = network.now;
     network.relays[2].sweep(now);
     assert!(network.relays[2].paced_circuits().count() < paced);
+}
+
+/// Two clients that became contacts, with their two conversations.
+fn contacts(network: &mut Network) -> (ContactId, ContactId) {
+    network.settle();
+    network.take_events(0);
+    network.take_events(1);
+    network.clients[0].invite(&mut Rng(1)).unwrap();
+    network.settle();
+    let events = network.take_events(0);
+    let Some(ClientEvent::Invitation { bundle, .. }) = events.last() else {
+        panic!("{events:?}");
+    };
+    network.clients[1]
+        .accept(bundle.clone(), &mut Rng(2))
+        .unwrap();
+    network.settle();
+    let (alice, _) = contact_of(&network.take_events(0));
+    let (bob, _) = contact_of(&network.take_events(1));
+    (alice, bob)
+}
+
+#[test]
+fn a_queue_takes_its_binding_and_a_live_arrival_wakes_nobody() {
+    use umbra_core::notify::binding::Binding;
+    use umbra_crypto::kem::PublicKey;
+    let mut network = Network::new();
+    let (_, bob_contact) = contacts(&mut network);
+
+    // NTF-112: the relay of each inbound queue of Alice answers her `NKEY`
+    // with its notification key.
+    let queues = network.clients[0].inbound_queues();
+    assert_eq!(queues.len(), 1);
+    let (queue, relay) = queues[0];
+    assert_eq!(relay, relay_static(3).0.relay_id);
+    network.clients[0]
+        .notify_queue(&queue, &mut Rng(5))
+        .unwrap();
+    network.settle();
+    let events = network.take_events(0);
+    let [ClientEvent::NotifyKey {
+        recipient_id,
+        relay_ntf_pk,
+    }] = &events[..]
+    else {
+        panic!("{events:?}");
+    };
+    assert_eq!(*recipient_id, queue);
+    let relay_ntf = PublicKey::from_bytes(relay_ntf_pk).unwrap();
+
+    // NTF-113: she seals her binding to it.
+    let binding = Binding {
+        root: Secret::new([0x31; 32]),
+        handle: [0x32; 16],
+        k_tok: Secret::new([0x33; 32]),
+        queue_alias: [0x34; 16],
+        relay_idx: 0,
+    };
+    let sealed = binding.seal(&relay_ntf, &queue, &mut Rng(6)).unwrap();
+    network.clients[0]
+        .bind_queue(&queue, &sealed, &mut Rng(7))
+        .unwrap();
+    network.settle();
+
+    // NTF-128: her subscription takes the record, and no push follows.
+    let now = network.now;
+    network.clients[1]
+        .send(&bob_contact, &text(1, "while she reads"), now, &mut Rng(8))
+        .unwrap();
+    network.settle();
+    assert!(network
+        .take_events(0)
+        .iter()
+        .any(|event| matches!(event, ClientEvent::Message { .. })));
+    assert!(network.pushes.is_empty());
 }
 
 fn invitations_of(events: Vec<ClientEvent>) -> Vec<Vec<u8>> {

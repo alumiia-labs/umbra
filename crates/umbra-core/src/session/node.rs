@@ -179,6 +179,15 @@ pub enum ClientEvent {
     /// The circuit failed its check or its build, and the runtime builds a
     /// new one.
     CircuitLost,
+    /// The relay of an inbound queue answered its `NKEY` with its
+    /// notification key (`NTF-112`). The caller seals the binding of the
+    /// queue to it and sends it with [`ClientNode::bind_queue`].
+    NotifyKey {
+        /// The queue.
+        recipient_id: [u8; 32],
+        /// The `UMBRA-KEM` public key of the relay.
+        relay_ntf_pk: Vec<u8>,
+    },
     /// A circuit came near `CIRCUIT_MAX_AGE` or `CIRCUIT_MAX_CELLS`, at
     /// which each relay of it ends it with no cell (`NET-320`, `NET-321`).
     /// The runtime ends the run and starts a new one at once, and nothing
@@ -559,6 +568,8 @@ enum Waiting {
     Group(Box<GroupWait>),
     Queue(Box<QueueKeys>),
     UserSend(u64),
+    /// The `NKEY` of this inbound queue.
+    Notify([u8; 32]),
     /// An `IRES` or an `IPUT` of the invitation on this queue.
     Link([u8; 32]),
     Blob(Box<BlobWait>),
@@ -1414,6 +1425,69 @@ impl ClientNode {
         self.queue_command(encoded, Waiting::Queue(Box::new(keys)))?;
         let slot = self.slot_mut()?;
         slot.reserved = slot.reserved.saturating_add(1);
+        self.pump()
+    }
+
+    /// Each inbound queue that a ready circuit serves, with the relay that
+    /// holds it: the queues that a push can wake (Part 8 §8.2.1).
+    pub fn inbound_queues(&self) -> Vec<([u8; 32], [u8; 32])> {
+        self.slots
+            .iter()
+            .filter(|slot| slot.is_ready())
+            .filter_map(|slot| {
+                let relay = slot.chain?.last().copied()?;
+                Some(slot.queues.iter().map(move |queue| (*queue, relay)))
+            })
+            .flatten()
+            .collect()
+    }
+
+    /// The inbound end of a stored queue: of a contact, or of a
+    /// handshake that runs.
+    fn inbound_of(&self, recipient_id: &[u8; 32]) -> Option<&Inbound> {
+        self.contacts
+            .values()
+            .map(|contact| contact.channel.inbound())
+            .chain(self.halves.values().map(|half| &half.inbound))
+            .find(|inbound| inbound.recipient_id() == recipient_id)
+    }
+
+    /// Sends the `NKEY` of an inbound queue on the circuit that serves it
+    /// (`NTF-112`). A [`ClientEvent::NotifyKey`] carries the answer.
+    pub fn notify_queue<R: CryptoRng + ?Sized>(
+        &mut self,
+        recipient_id: &[u8; 32],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        self.current = self.slot_of(recipient_id).ok_or(Error::NoPath)?;
+        let session_pk = self.session_pk()?;
+        // The notifier key of §8.2.4 serves no party of this revision: the
+        // relay pushes, and no NDR subscribes. A fresh value names nothing.
+        let notifier_pk: [u8; 32] = random(rng);
+        let command = self
+            .inbound_of(recipient_id)
+            .ok_or(Error::NoPath)?
+            .notifier_key(&session_pk, random(rng), &notifier_pk)?;
+        self.queue_command(command, Waiting::Notify(*recipient_id))?;
+        self.pump()
+    }
+
+    /// Sends the `NBIND` of an inbound queue: the binding sealed to the
+    /// notification key of its relay (`NTF-113`).
+    pub fn bind_queue<R: CryptoRng + ?Sized>(
+        &mut self,
+        recipient_id: &[u8; 32],
+        sealed: &[u8],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        self.current = self.slot_of(recipient_id).ok_or(Error::NoPath)?;
+        let session_pk = self.session_pk()?;
+        let command = self.inbound_of(recipient_id).ok_or(Error::NoPath)?.bind(
+            &session_pk,
+            random(rng),
+            sealed,
+        )?;
+        self.queue_command(command, Waiting::Other)?;
         self.pump()
     }
 
@@ -2417,6 +2491,14 @@ impl ClientNode {
                     // WIR-496: the QUOTA is the relay acknowledgment.
                     (Some(Waiting::UserSend(user)), Cmd::Quota) => {
                         out.push(ClientEvent::Accepted { handle: user });
+                    }
+                    // NTF-112: the `NPK` comes first. The `NID` after it
+                    // names no command that waits, and it drops.
+                    (Some(Waiting::Notify(recipient_id)), Cmd::Npk) => {
+                        out.push(ClientEvent::NotifyKey {
+                            recipient_id,
+                            relay_ntf_pk: payload,
+                        });
                     }
                     (Some(Waiting::Link(queue)), Cmd::Ilink) => {
                         out.extend(self.on_link(queue, &payload, rng)?);

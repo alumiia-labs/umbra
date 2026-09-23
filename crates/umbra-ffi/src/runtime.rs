@@ -79,6 +79,16 @@ pub enum Command {
     /// follows, or an [`Update::VerificationRefused`] with no complete
     /// ceremony.
     ConfirmVerified(ContactId),
+    /// Send the `NKEY` of an inbound queue. An [`Update::NotifyKey`]
+    /// follows with the notification key of its relay (Part 8 §8.2.3).
+    NotifyQueue([u8; 32]),
+    /// Send the `NBIND` of an inbound queue: its binding, sealed.
+    BindQueue {
+        /// The queue.
+        recipient_id: [u8; 32],
+        /// The sealed binding of 1 234 bytes.
+        sealed: Vec<u8>,
+    },
 }
 
 /// The store of the client, as the runtime sees it.
@@ -118,6 +128,16 @@ pub enum Update {
     /// The circuits that hold their three hops, each as its three relays.
     /// It comes at each change of that set.
     Circuits(Vec<[[u8; 32]; 3]>),
+    /// Each inbound queue that a ready circuit serves, with its relay. It
+    /// comes at each change of that set, for the bindings of Part 8.
+    Queues(Vec<([u8; 32], [u8; 32])>),
+    /// The relay of an inbound queue answered its `NKEY`.
+    NotifyKey {
+        /// The queue.
+        recipient_id: [u8; 32],
+        /// The notification key of the relay.
+        relay_ntf_pk: Vec<u8>,
+    },
     /// The fragment of an invitation link, which the user gives out of
     /// band.
     Invitation(Vec<u8>),
@@ -266,6 +286,7 @@ pub async fn run_client(
 
     let mut early: VecDeque<Command> = VecDeque::new();
     let mut shown_chains: Vec<[[u8; 32]; 3]> = Vec::new();
+    let mut shown_queues: Vec<([u8; 32], [u8; 32])> = Vec::new();
     let mut tags: BTreeMap<u64, u64> = BTreeMap::new();
     let mut is_foreground = true;
     let mut next_slot = tokio::time::Instant::now() + cover_delay(&mut rng);
@@ -349,6 +370,13 @@ pub async fn run_client(
                 ClientEvent::Chunk { .. }
                 | ClientEvent::Group { .. }
                 | ClientEvent::GroupRecord { .. } => continue,
+                ClientEvent::NotifyKey {
+                    recipient_id,
+                    relay_ntf_pk,
+                } => Update::NotifyKey {
+                    recipient_id,
+                    relay_ntf_pk,
+                },
                 ClientEvent::CircuitLost => break 'run Ended::CircuitLost,
                 ClientEvent::CircuitAged => break 'run Ended::Aged,
             };
@@ -358,6 +386,11 @@ pub async fn run_client(
         if chains != shown_chains {
             shown_chains.clone_from(&chains);
             let _ = updates.send(Update::Circuits(chains));
+        }
+        let queues = node.inbound_queues();
+        if queues != shown_queues {
+            shown_queues.clone_from(&queues);
+            let _ = updates.send(Update::Queues(queues));
         }
         while node.is_ready() {
             let Some(command) = early.pop_front() else {
@@ -408,6 +441,17 @@ pub async fn run_client(
                             let _ = updates.send(Update::Failed(tag));
                         }
                     }
+                }
+                // A queue that no circuit serves any more takes its binding
+                // in a later run, thus a failure here ends nothing.
+                Command::NotifyQueue(recipient_id) => {
+                    let _ = node.notify_queue(&recipient_id, &mut rng);
+                }
+                Command::BindQueue {
+                    recipient_id,
+                    sealed,
+                } => {
+                    let _ = node.bind_queue(&recipient_id, &sealed, &mut rng);
                 }
             }
             if let Err(ended) = settle(&mut node, persist.as_mut(), &[]) {

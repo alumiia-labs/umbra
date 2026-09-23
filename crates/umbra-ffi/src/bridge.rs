@@ -155,7 +155,8 @@ impl Bridge {
     ) -> Result<Option<NetEvent>, Error> {
         Ok(match update {
             // The handle keeps the circuits, and the bridge has no part in it.
-            Update::Circuits(_) => None,
+            // The bindings of Part 8 take these before the bridge.
+            Update::Circuits(_) | Update::Queues(_) | Update::NotifyKey { .. } => None,
             Update::Online => Some(NetEvent::Online),
             Update::Offline(ended) => Some(NetEvent::Offline(ended)),
             Update::Invitation(bundle) => Some(NetEvent::Invitation(bundle)),
