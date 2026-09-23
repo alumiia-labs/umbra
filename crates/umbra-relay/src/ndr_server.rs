@@ -20,7 +20,7 @@ use umbra_crypto::{kem::KeyPair, ohttp};
 use umbra_transport::https::{self, Url};
 use umbra_wire::ndr::{NdrResponse, TokenCarrier, HANDLE_LEN};
 
-use crate::{server::OsRng, store::StoreFault};
+use crate::{fcm::Fcm, server::OsRng, store::StoreFault};
 
 /// The path of the gateway.
 pub const GATEWAY_PATH: &str = "/gateway";
@@ -174,12 +174,18 @@ impl State {
     }
 }
 
-/// Posts the blob to the provider. A UnifiedPush endpoint takes the 69
-/// bytes as the body, with the expiry in the `TTL` header (`NTF-065`).
-/// No FCM sender is built, thus an FCM token gives no post.
-async fn deliver(delivery: &Delivery, tls: Arc<rustls::ClientConfig>) -> Option<u16> {
-    if delivery.carrier != TokenCarrier::UnifiedPush {
-        return None;
+/// Posts the blob to the provider. FCM takes a data message of high
+/// priority, and a UnifiedPush endpoint takes the 69 bytes as the body; each
+/// carries the expiry (`NTF-065`). An NDR with no FCM account posts nothing
+/// for an FCM token.
+async fn deliver(
+    delivery: &Delivery,
+    tls: Arc<rustls::ClientConfig>,
+    fcm: Option<&Fcm>,
+) -> Option<u16> {
+    if delivery.carrier == TokenCarrier::Fcm {
+        let token = core::str::from_utf8(&delivery.target).ok()?;
+        return fcm?.send(token, &delivery.blob, delivery.ttl).await;
     }
     let url = Url::parse(core::str::from_utf8(&delivery.target).ok()?)?;
     let ttl = delivery.ttl.to_string();
@@ -202,6 +208,7 @@ async fn serve(
     gateway: Arc<Gateway>,
     state: Arc<Mutex<State>>,
     provider_tls: Arc<rustls::ClientConfig>,
+    fcm: Option<Arc<Fcm>>,
 ) {
     let mut inbound = Vec::new();
     let Ok(request) = https::read_request(&mut stream, &mut inbound, REQUEST_MAX).await else {
@@ -225,7 +232,7 @@ async fn serve(
         return;
     };
     if let Some(delivery) = delivery {
-        match deliver(&delivery, provider_tls).await {
+        match deliver(&delivery, provider_tls, fcm.as_deref()).await {
             // NTF-125: the provider named the target gone.
             Some(404 | 410) => {
                 if let Ok(mut state) = state.lock() {
@@ -244,14 +251,17 @@ async fn serve(
 }
 
 /// Runs the NDR until the listener fails. `provider_tls` is the
-/// configuration that the posts to the providers trust.
+/// configuration that the posts to the providers trust, and `fcm` the
+/// sender of the FCM account of the deployment, if it has one.
 pub async fn run_ndr(
     listener: TcpListener,
     tls: TlsAcceptor,
     gateway: Gateway,
     mut store: Box<dyn NdrStore>,
     provider_tls: Arc<rustls::ClientConfig>,
+    fcm: Option<Fcm>,
 ) -> Result<(), StoreFault> {
+    let fcm = fcm.map(Arc::new);
     let held = store.load()?;
     let state = Arc::new(Mutex::new(State {
         ndr: Ndr::restore(held),
@@ -266,9 +276,10 @@ pub async fn run_ndr(
         let gateway = gateway.clone();
         let state = state.clone();
         let provider_tls = provider_tls.clone();
+        let fcm = fcm.clone();
         tokio::spawn(async move {
             if let Ok(stream) = tls.accept(tcp).await {
-                serve(stream, gateway, state, provider_tls).await;
+                serve(stream, gateway, state, provider_tls, fcm).await;
             }
         });
     }

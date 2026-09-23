@@ -668,6 +668,7 @@ fn a_message_to_an_app_that_went_away_reaches_its_push_endpoint() {
         Gateway { key_id: 1, pair },
         Box::new(MemoryNdrStore::default()),
         native::tls_config_with_root_file(CA).unwrap(),
+        None,
     ));
     let (_relays, ports) = start_relays_with(None, None, Some(&ndr));
     let mut network = network_of(&ports);

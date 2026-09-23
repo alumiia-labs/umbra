@@ -361,6 +361,15 @@ PushToken   { carrier u8, target }         // the plaintext of ct_token, at most
   when the provider names the target gone. A queue relay MUST stop pushing
   to a handle that got the answer `gone`.
 
+- **[NTF-130]** The NDR MUST send an FCM push through the HTTP v1 API of
+  FCM as a data message with no `notification` field: the one data field
+  `b` holds the blob in base64url with no padding, `android.priority` is
+  `HIGH`, and `android.ttl` is the expiry of the push in seconds. The NDR
+  MUST take a status 404 from FCM as the answer that the token is gone. The
+  NDR MUST sign the assertion of its access token with the key of the service
+  account of the deployment, and it MUST NOT give that account or its token
+  to any other party.
+
 > *Cause of `NTF-124`.* A queue relay knows each handle of its queues. A
 > removal or a replacement that needed the handle alone would let that relay
 > end the pushes of a device, or point them at a token of its own. The hash
