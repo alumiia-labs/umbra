@@ -854,6 +854,16 @@ CSPRNG outputs. **[IDN-071]** A client MUST derive `BackupRootKey` from the two
 halves together. **[IDN-072]** A party MUST NOT derive `BackupRootKey` from one
 half.
 
+**[IDN-177]** A client MUST derive `BackupRootKey` with `salt` of the 20
+bytes `"umbra/v1/backup-salt"`, with `m` of exactly 64 MiB, with `t` of
+exactly 3, and with a parallelism of 1. Part 5 §5.11 holds the label.
+
+> *Cause of `IDN-177`.* An earlier draft named a salt and floors for `m` and
+> `t`, and it gave no value for any of them. A restore holds the code and
+> nothing else, thus each input of the KDF must be a constant. A fixed salt
+> gives an attacker no table across users, because the code carries 256
+> random bits and no dictionary covers it.
+
 Recovery is a rare operation, and it can accept 365 ms or more. Thus the KDF is
 deliberately expensive.
 
@@ -978,6 +988,47 @@ that table.
   > which is about 62 MB. That figure is the ceiling of one backup object, and
   > it bounds the opt-in media. Part 13 §13.3.2 gives the null reference that
   > the second `RelayRef` of a backup ref holds.
+- **The backup object.** A backup object carries rows of the local store of
+  Part 15 §15.6.4, each under its surrogate identifier and in its
+  plaintext. `K_store` derives from the root seed (Part 5 §5.2), and the
+  surrogate identifiers derive from `K_store`, thus a restore under the same
+  seed puts each row at its place again.
+
+  ```
+  BackupObject {                        // the plaintext of the file, before §13.3
+      version      u8                   // 0x01
+      kind         u8                   // 0x01 a full object, 0x02 a delta object
+      written_at   u64                  // Unix seconds of the writer
+      base_at      u64                  // a delta: written_at of the object before it; a full object: 0
+      count        u32
+      rows         [count]BackupRow
+  }
+
+  BackupRow {
+      op           u8                   // 0x01 put, 0x02 delete
+      table        u8                   // the table of the store
+      row_id       [16]u8               // the surrogate identifier
+      // op 0x01 only:
+      owner_flag   u8                   // 0x00 no owner, 0x01 an owner follows
+      owner        [16]u8               // the owner column, when owner_flag is 0x01
+      len          u32
+      plain        [len]u8              // the plaintext of the row
+  }
+  ```
+
+  **[IDN-178]** A client MUST write each backup object in the layout above.
+  **[IDN-179]** A full object MUST hold each row that the restore needs and
+  no delete. A delta MUST hold each such row that changed and each such row
+  that left since the object before it. **[IDN-180]** A client MUST NOT put
+  in a backup object a row that holds a state of this device alone: a push
+  registration of Part 8, a push token, the ingress pin of Part 10, the
+  dead-channel state of Part 3 §3.2.6, or the wrap of the store. A restored
+  device makes each of them again. **[IDN-181]** A reader MUST reject an
+  object with a `version` other than `0x01`, a `kind` other than the two
+  values, a full object with a delete or a `base_at` other than 0, or bytes
+  after the last row. **[IDN-182]** A restore MUST apply the full object
+  and then each delta in the order of the root, each row in object order: a
+  put replaces the row, and a delete removes it.
 - **[IDN-073]** A relay MUST hold a backup object for `BACKUP_TTL`. §4.8 sets
   that value to 180 days. **[IDN-074]** A revision MUST hold `BACKUP_LOOKBACK`
   weeks at or above `BACKUP_TTL`.

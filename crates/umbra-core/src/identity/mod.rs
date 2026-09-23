@@ -4,6 +4,7 @@
 //! and handle keys themselves live in the crypto crate's hierarchy.
 
 pub mod address;
+pub mod backup;
 pub mod invitation;
 pub mod keychange;
 pub mod recovery;

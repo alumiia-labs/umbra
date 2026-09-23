@@ -9,6 +9,7 @@
 
 use std::collections::VecDeque;
 
+mod backup;
 mod dead;
 mod files;
 mod groups;
@@ -457,7 +458,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut batch = store.begin();
         batch.put(TableId::LOCAL_IDENTITY, row, None, seed.expose(), rng)?;
         batch.commit()?;
-        Ok(Client {
+        let mut client = Client {
             element,
             header,
             state: State::Unlocked(Box::new(Open {
@@ -469,7 +470,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             files: FileQueues::default(),
             groups: groups::GroupQueues::default(),
             auto_lock: AutoLock::new(now),
-        })
+        };
+        // IDN-070: the recovery code comes at the first launch.
+        client.recovery_code(rng)?;
+        Ok(client)
     }
 
     /// Opens the store of a device that exists, in the locked state.

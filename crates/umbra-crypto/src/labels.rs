@@ -107,6 +107,7 @@ labels! {
     ISSUER_KEY = "umbra/v1/issuer-key";
     ROW_ID = "umbra/v1/row-id";
     ROTATE_JITTER = "umbra/v1/rotate-jitter";
+    BACKUP_SALT = "umbra/v1/backup-salt";
 }
 
 /// `umbra/v1/handle-key`

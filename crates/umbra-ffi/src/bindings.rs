@@ -3122,6 +3122,16 @@ impl Handle {
         inner.next_event()
     }
 
+    /// Renders the recovery code into a sink of the platform, as the 87
+    /// digits of Part 4 §4.7.7 in groups of five (`IDN-149`). The platform
+    /// overwrites its buffer when the view ends (`IMP-037`).
+    pub fn recovery_code(&self, sink: Arc<dyn TextSink>) -> Result<(), FfiError> {
+        let mut sink = ForeignSink(sink);
+        Ok(locked(&self.inner)
+            .client
+            .render_recovery_code(&mut sink, &mut OsRng)?)
+    }
+
     /// Renders the text of a message into a sink of the platform.
     pub fn msg_render(
         &self,

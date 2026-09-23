@@ -11,6 +11,7 @@ use umbra_crypto::{
     kdf, labels,
     secret::Secret,
     sha3::Sha3_256,
+    zeroize::Zeroizing,
 };
 use umbra_wire::codec::{Reader, Writer};
 
@@ -52,6 +53,26 @@ impl RecoveryCode {
     /// The social half.
     pub fn social(&self) -> &Secret<16> {
         &self.social
+    }
+
+    /// The code from its 32 bytes, user half first: the payload of the
+    /// digits of type `0x0001`.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
+        let user: [u8; 16] = bytes
+            .get(..16)
+            .and_then(|half| half.try_into().ok())
+            .ok_or(Error::Malformed)?;
+        let social: [u8; 16] = bytes
+            .get(16..)
+            .and_then(|half| half.try_into().ok())
+            .ok_or(Error::Malformed)?;
+        Ok(RecoveryCode::new(Secret::new(user), Secret::new(social)))
+    }
+
+    /// `BackupRootKey` under the fixed salt and cost of `IDN-157`, which a
+    /// device that holds the code alone derives again.
+    pub fn backup_root_key(&self) -> Result<BackupRootKey, Error> {
+        self.root_key(labels::BACKUP_SALT, kdf::RECOVERY_M_KIB, kdf::RECOVERY_T)
     }
 
     /// The 32 bytes of the code, user half first.
@@ -268,16 +289,16 @@ fn check_of(kind: DigitsType, payload: &[u8]) -> [u8; 2] {
 }
 
 /// Encodes a secret as `RecoveryDigits`, in groups of five (`IDN-149`).
-pub fn to_digits(kind: DigitsType, payload: &[u8]) -> Result<String, Error> {
+pub fn to_digits(kind: DigitsType, payload: &[u8]) -> Result<Zeroizing<String>, Error> {
     if payload.len() != kind.payload_len() {
         return Err(Error::Malformed);
     }
-    let mut bytes = Vec::with_capacity(4 + payload.len());
+    let mut bytes = Zeroizing::new(Vec::with_capacity(4 + payload.len()));
     bytes.extend_from_slice(&(kind as u16).to_be_bytes());
     bytes.extend_from_slice(payload);
     bytes.extend_from_slice(&check_of(kind, payload));
-    let digits = decimal(&bytes, kind.width());
-    let mut out = String::with_capacity(kind.width() + kind.width() / 5);
+    let digits = Zeroizing::new(decimal(&bytes, kind.width()));
+    let mut out = Zeroizing::new(String::with_capacity(kind.width() + kind.width() / 5));
     for (i, group) in digits.as_bytes().chunks(5).enumerate() {
         if i > 0 {
             out.push(' ');
@@ -290,8 +311,9 @@ pub fn to_digits(kind: DigitsType, payload: &[u8]) -> Result<String, Error> {
 /// Decodes entered digits, verifies the checksum before any KDF runs
 /// (`IDN-151`), and refuses a type other than `expected` (`IDN-154`).
 /// The error carries nothing; the caller names the types to the user.
-pub fn from_digits(text: &str, expected: DigitsType) -> Result<Vec<u8>, Error> {
-    let digits: Vec<u8> = text.bytes().filter(|b| b.is_ascii_digit()).collect();
+pub fn from_digits(text: &str, expected: DigitsType) -> Result<Zeroizing<Vec<u8>>, Error> {
+    let digits: Zeroizing<Vec<u8>> =
+        Zeroizing::new(text.bytes().filter(|b| b.is_ascii_digit()).collect());
     // The digit count names the type the user entered (IDN-153).
     let entered = match digits.len() {
         87 => DigitsType::Code,
@@ -301,8 +323,8 @@ pub fn from_digits(text: &str, expected: DigitsType) -> Result<Vec<u8>, Error> {
     };
     let total_len = 4 + entered.payload_len();
     // Decimal to big-endian bytes by repeated multiply-add.
-    let mut bytes = alloc::vec![0u8; total_len];
-    for d in &digits {
+    let mut bytes = Zeroizing::new(alloc::vec![0u8; total_len]);
+    for d in digits.iter() {
         let mut carry = u32::from(d - b'0');
         for b in bytes.iter_mut().rev() {
             let cur = u32::from(*b) * 10 + carry;
@@ -318,7 +340,7 @@ pub fn from_digits(text: &str, expected: DigitsType) -> Result<Vec<u8>, Error> {
     if kind != entered {
         return Err(Error::Malformed);
     }
-    let payload = r.take(kind.payload_len())?.to_vec();
+    let payload = Zeroizing::new(r.take(kind.payload_len())?.to_vec());
     let check: [u8; 2] = r.array()?;
     if check != check_of(kind, &payload) {
         return Err(Error::Malformed);
@@ -442,7 +464,7 @@ mod tests {
         let code = [7u8; 32];
         let text = to_digits(DigitsType::Code, &code).unwrap();
         assert_eq!(text.bytes().filter(|b| b.is_ascii_digit()).count(), 87);
-        assert_eq!(from_digits(&text, DigitsType::Code).unwrap(), code);
+        assert_eq!(*from_digits(&text, DigitsType::Code).unwrap(), code);
         assert_eq!(from_digits(&text, DigitsType::User), Err(Error::Unverified));
         let mut wrong = text.clone();
         let last = wrong.pop().unwrap();

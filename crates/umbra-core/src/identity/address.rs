@@ -173,6 +173,8 @@ pub fn decimal(bytes: &[u8], width: usize) -> String {
     }
     digits.truncate(width);
     digits.reverse();
+    // The value can be a secret of Part 4 §4.7.7, thus the work copy goes.
+    umbra_crypto::zeroize::Zeroize::zeroize(&mut number);
     String::from_utf8(digits).unwrap_or_default()
 }
 

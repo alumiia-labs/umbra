@@ -68,7 +68,7 @@ each column when a crate implements the requirement and a test covers it.
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
 | `NET` | 230 | 84 | 1 | 0 | 8 | **323** |
-| `IDN` | 120 | 43 | 1 | 0 | 5 | **169** |
+| `IDN` | 125 | 44 | 1 | 0 | 5 | **175** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
 | `WIR` | 395 | 87 | 0 | 0 | 6 | **488** |
 | `DEV` | 179 | 87 | 2 | 0 | 7 | **275** |
@@ -81,7 +81,7 @@ each column when a crate implements the requirement and a test covers it.
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
 | `IMP` | 112 | 41 | 0 | 0 | 2 | **155** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2238 | 718 | 7 | 0 | 54 | **3017** |
+| **All** | 2243 | 719 | 7 | 0 | 54 | **3023** |
 
 ## SCP — Scope and Conventions
 
@@ -638,6 +638,12 @@ Source: `spec/04-identity.md`
 | `IDN-174` | §4.5.2 | MUST NOT | A ceremony | A ceremony MUST NOT continue after the run of the client that holds it. |  |  |
 | `IDN-175` | §4.5 | MUST | A client | A client MUST keep the verification state as the pairwise identity public key of the contact that the user verified. |  |  |
 | `IDN-176` | §4.5 | MUST | (unstated) | A scan or an entry of a safety number that is equal to the number of the device, by its digits alone, MUST set the same state as a confirmed short code. |  |  |
+| `IDN-177` | §4.7.1 | MUST | A client | A client MUST derive `BackupRootKey` with `salt` of the 20 bytes `"umbra/v1/backup-salt"`, with `m` of exactly 64 MiB, with `t` of exactly 3, and with a parallelism of 1. |  |  |
+| `IDN-178` | §4.7.2 | MUST | A client | A client MUST write each backup object in the layout above. |  |  |
+| `IDN-179` | §4.7.2 | MUST | A full object | A full object MUST hold each row that the restore needs and no delete. |  |  |
+| `IDN-180` | §4.7.2 | MUST NOT | A client | A client MUST NOT put in a backup object a row that holds a state of this device alone: a push registration of Part 8, a push token, the ingress pin of Part 10, the dead-channel state of Part 3 §3.2.6, or the wrap of the store. |  |  |
+| `IDN-181` | §4.7.2 | MUST | A reader | A reader MUST reject an object with a `version` other than `0x01`, a `kind` other than the two values, a full object with a delete or a `base_at` other than 0, or bytes after the last row. |  |  |
+| `IDN-182` | §4.7.2 | MUST | A restore | A restore MUST apply the full object and then each delta in the order of the root, each row in object order: a put replaces the row, and a delete removes it. |  |  |
 
 ## CRY — Cryptographic Core
 

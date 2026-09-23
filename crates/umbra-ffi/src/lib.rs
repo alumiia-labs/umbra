@@ -924,10 +924,14 @@ mod tests {
         assert_eq!(client.next_event(), None);
 
         // GRP-375: after its backoff the owner posts the one-slot record
-        // and the notice of its supply.
-        assert!(client.key_answers_due(ms(later)).is_empty());
-        let due = client.key_answers_due(ms(later + 3_600));
+        // and the notice of its supply. The backoff is an exponential draw,
+        // which can end inside the first second.
+        let mut due = client.key_answers_due(ms(later));
+        if due.is_empty() {
+            due = client.key_answers_due(ms(later + 3_600));
+        }
         assert_eq!(due, vec![(conversation, 1)]);
+        assert!(client.key_answers_due(ms(later + 3_600)).is_empty());
         client
             .answer_key_request(conversation, 1, ms(later + 3_600), &mut rng)
             .unwrap();
@@ -1541,6 +1545,36 @@ mod tests {
         let again = client.take_outgoing().unwrap();
         assert_eq!(again.message, message);
         assert!(client.take_outgoing().is_none());
+    }
+
+    #[test]
+    fn a_new_store_holds_a_recovery_code_that_leaves_as_digits_alone() {
+        use umbra_core::identity::recovery::{from_digits, DigitsType};
+        let mut rng = Rng(141);
+        let mut client = new_client(&mut rng);
+        let mut view = View::default();
+        client.render_recovery_code(&mut view, &mut rng).unwrap();
+        let text = String::from_utf16(&view.0).unwrap();
+        // IDN-149: 87 digits in groups of five, and no hexadecimal form.
+        assert_eq!(text.chars().filter(char::is_ascii_digit).count(), 87);
+        assert_eq!(text.split(' ').count(), 18);
+        let code = from_digits(&text, DigitsType::Code).unwrap();
+        // The code lives through a lock, and it is the same code.
+        client.lock();
+        client.unlock(&units("correct horse"), 1_100).unwrap();
+        let mut again = View::default();
+        client.render_recovery_code(&mut again, &mut rng).unwrap();
+        assert_eq!(again.0, view.0);
+        assert_eq!(
+            *client.recovery_code(&mut rng).unwrap().bytes().expose(),
+            code.as_slice()
+        );
+        // A second store draws a code of its own.
+        let mut other = View::default();
+        new_client(&mut Rng(142))
+            .render_recovery_code(&mut other, &mut rng)
+            .unwrap();
+        assert_ne!(other.0, view.0);
     }
 
     #[test]
