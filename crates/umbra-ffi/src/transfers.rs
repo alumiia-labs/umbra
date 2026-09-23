@@ -14,7 +14,7 @@ use umbra_core::{
     attach::{
         handle::{HandleRead, HandleWrite},
         place::AttachmentRelay,
-        transfer::{ChunkFetch, Download, Progress, Shape, Upload, Uploaded},
+        transfer::{ChunkFetch, Class, Download, Progress, Shape, Upload, Uploaded},
     },
     session::node::{ChunkJob, ClientEvent, ClientNode},
 };
@@ -73,6 +73,14 @@ pub enum TransferCommand {
         descriptor: Box<FileDescriptor>,
         /// The chunk.
         index: u32,
+    },
+    /// Upload one backup object of Part 4 §4.7.2 in the backup class. An
+    /// `Uploaded` or a `Failed` follows.
+    UploadBackup {
+        /// A value of the caller, which comes back in each update.
+        tag: u64,
+        /// The encoded object.
+        plain: Zeroizing<Vec<u8>>,
     },
     /// Write one handle-addressed chunk (Part 13 §13.4.2). A
     /// `HandleWritten` or a `Failed` follows.
@@ -179,7 +187,8 @@ pub async fn run_transfers(
             | TransferCommand::Download { tag, .. }
             | TransferCommand::FetchChunk { tag, .. }
             | TransferCommand::WriteHandle { tag, .. }
-            | TransferCommand::ReadHandle { tag, .. } = command
+            | TransferCommand::ReadHandle { tag, .. }
+            | TransferCommand::UploadBackup { tag, .. } = command
             {
                 let _ = updates.send(TransferUpdate::Failed { tag: *tag });
             }
@@ -408,6 +417,27 @@ pub async fn run_transfers(
                         let _ = node.chunk(relay, chunk_id, job, &mut rng);
                     }
                     idle_since = tokio::time::Instant::now();
+                }
+                TransferCommand::UploadBackup { tag, plain } => {
+                    let started = Upload::with_class(
+                        &plain,
+                        Shape::default(),
+                        &relays,
+                        Class::BACKUP,
+                        &mut rng,
+                    )
+                    .and_then(|mut upload| {
+                        upload.tick(&mut node, &mut rng)?;
+                        Ok(upload)
+                    });
+                    match started {
+                        Ok(upload) => {
+                            active.insert(tag, Active::Up(Box::new(upload)));
+                        }
+                        Err(_) => {
+                            let _ = updates.send(TransferUpdate::Failed { tag });
+                        }
+                    }
                 }
                 TransferCommand::WriteHandle {
                     tag,

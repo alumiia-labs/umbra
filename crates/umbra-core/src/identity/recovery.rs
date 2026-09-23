@@ -101,6 +101,12 @@ impl BackupRootKey {
         BackupRootKey(key)
     }
 
+    /// The key, for the local store of the device that derived it, thus
+    /// the KDF runs once.
+    pub fn expose_for_store(&self) -> &Secret<32> {
+        &self.0
+    }
+
     fn prf(&self, label: &[u8], epoch: u32) -> Secret<32> {
         let mut mac = Hmac::<Sha3_256>::new_from_slice(self.0.expose())
             .unwrap_or_else(|_| Hmac::<Sha3_256>::new(&Default::default()));

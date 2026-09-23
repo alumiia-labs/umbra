@@ -15,6 +15,7 @@ mod files;
 mod groups;
 mod notify;
 
+pub use backup::{BackupUpload, PendingBackup, RootWrite};
 pub use dead::DeadWork;
 pub use files::{DownloadJob, ErasureJob, FileInfo, FileState, UploadJob};
 use files::{FileQueues, CHUNK_CRED, FILE_DATA, FILE_STATE};

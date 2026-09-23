@@ -68,7 +68,7 @@ each column when a crate implements the requirement and a test covers it.
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
 | `NET` | 236 | 84 | 1 | 0 | 8 | **329** |
-| `IDN` | 126 | 44 | 1 | 0 | 5 | **176** |
+| `IDN` | 127 | 44 | 1 | 0 | 5 | **177** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
 | `WIR` | 396 | 87 | 0 | 0 | 6 | **489** |
 | `DEV` | 179 | 87 | 2 | 0 | 7 | **275** |
@@ -81,7 +81,7 @@ each column when a crate implements the requirement and a test covers it.
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
 | `IMP` | 112 | 41 | 0 | 0 | 2 | **155** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2251 | 719 | 7 | 0 | 54 | **3031** |
+| **All** | 2252 | 719 | 7 | 0 | 54 | **3032** |
 
 ## SCP — Scope and Conventions
 
@@ -651,6 +651,7 @@ Source: `spec/04-identity.md`
 | `IDN-181` | §4.7.2 | MUST | A reader | A reader MUST reject an object with a `version` other than `0x01`, a `kind` other than the two values, a full object with a delete or a `base_at` other than 0, or bytes after the last row. |  |  |
 | `IDN-182` | §4.7.2 | MUST | A restore | A restore MUST apply the full object and then each delta in the order of the root, each row in object order: a put replaces the row, and a delete removes it. |  |  |
 | `IDN-183` | §4.7.2 | MUST | A restore | A restore MUST mark the channel of each restored contact stale under Part 3 rule `NET-325`, and the renewal of Part 3 §3.2.6 gives each one a new session. |  |  |
+| `IDN-184` | §4.7.2 | MUST | A client | A client MUST write a delta object at its time when no row changed since the object before it. |  |  |
 
 ## CRY — Cryptographic Core
 

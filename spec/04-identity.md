@@ -1065,6 +1065,9 @@ that table.
   the activity of the user. Part 7 §7.1 makes this same objection against the
   ratchet-state-on-relay proposal of SimpleX, and the objection applies here
   also.
+- **[IDN-184]** A client MUST write a delta object at its time when no row
+  changed since the object before it. A delta that a change alone starts
+  shows the relay the time of that change.
 - **[IDN-080]** A client MUST write a backup in the foreground only.
   **[IDN-081]** A client MUST draw an independent delay for each backup write,
   from a uniform distribution over the write interval. Thus U4 does not measure

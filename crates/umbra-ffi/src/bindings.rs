@@ -960,10 +960,18 @@ struct Inner {
     next_silence_check: u64,
     /// The dead-channel work that an update of the node gave.
     dead_work: Vec<crate::client::DeadWork>,
+    /// Whether a view of the app is on the screen. A backup is written in
+    /// the foreground only (`IDN-080`).
+    is_foreground: bool,
 }
 
 /// What one command of the transfer task belongs to.
 enum TransferWork {
+    /// A backup object of Part 4 §4.7.2, and what its upload commits.
+    Backup(Box<crate::client::PendingBackup>),
+    /// The backup root of the week, and the chunks that go after it
+    /// (`IDN-099`).
+    BackupRoot(Vec<umbra_core::attach::transfer::ChunkCredential>),
     /// The dead-channel blob of this device for one week (`NET-183`).
     DeadWrite {
         /// The conversation.
@@ -1635,6 +1643,29 @@ impl Inner {
         }
     }
 
+    /// The backup object that is due goes up (Part 4 §4.7.2). One write
+    /// runs at a time: the object, then its root.
+    fn pump_backup(&mut self) {
+        if self.bridge.is_none() {
+            return;
+        }
+        let is_running = self
+            .transfer_tags
+            .values()
+            .any(|work| matches!(work, TransferWork::Backup(_) | TransferWork::BackupRoot(_)));
+        if is_running || self.client.directory_epoch().unwrap_or(0) == 0 {
+            return;
+        }
+        let Ok(Some(due)) = self.client.backup_due(unix_now(), self.is_foreground) else {
+            return;
+        };
+        let tag = self.next_tag(TransferWork::Backup(Box::new(due.pending)));
+        self.send_transfer(TransferCommand::UploadBackup {
+            tag,
+            plain: due.plain,
+        });
+    }
+
     fn send_dead_work(&mut self, step: crate::client::DeadWork) {
         use crate::client::DeadWork;
         use umbra_crypto::secret::Secret;
@@ -1798,22 +1829,26 @@ impl Inner {
             ..
         } = self;
         let mut dead_work = Vec::new();
+        let mut backup_root = None;
+        let mut backup_erase = Vec::new();
         match update {
             TransferUpdate::Progress { .. } => {}
-            TransferUpdate::HandleWritten { tag, relays } => {
-                if let Some(TransferWork::DeadWrite {
+            TransferUpdate::HandleWritten { tag, relays } => match transfer_tags.remove(&tag) {
+                // IDN-099: the new root is there, and the old objects go.
+                Some(TransferWork::BackupRoot(erase)) => backup_erase = erase,
+                Some(TransferWork::DeadWrite {
                     conversation,
                     week,
                     cred,
-                }) = transfer_tags.remove(&tag)
-                {
+                }) => {
                     if let Ok(Some(erase)) =
                         client.dead_blob_written(conversation, week, cred, relays, &mut OsRng)
                     {
                         dead_work.push(erase);
                     }
                 }
-            }
+                _ => {}
+            },
             // NET-190: a blob that opens gives the address of the peer. A
             // blob that does not open is an empty handle (`NET-192`).
             TransferUpdate::HandleRead { tag, chunk } => {
@@ -1845,6 +1880,14 @@ impl Inner {
                 }
             }
             TransferUpdate::Uploaded { tag, uploaded } => match transfer_tags.remove(&tag) {
+                // IDN-098: the root of the week names the object.
+                Some(TransferWork::Backup(pending)) => {
+                    let epoch = client.directory_epoch().unwrap_or(0);
+                    if let Ok(root) = client.backup_uploaded(*pending, &uploaded, epoch, &mut OsRng)
+                    {
+                        backup_root = Some(root);
+                    }
+                }
                 Some(TransferWork::File { message, .. }) => {
                     if client.upload_done(&message, &uploaded, &mut OsRng).is_ok() {
                         // The record with the descriptor goes to the send path.
@@ -1944,6 +1987,25 @@ impl Inner {
         }
         for step in dead_work {
             self.send_dead_work(step);
+        }
+        if let Some(root) = backup_root {
+            let tag = self.next_tag(TransferWork::BackupRoot(root.erase));
+            // ATT-138: the root of the week replaces the one before it.
+            self.send_transfer(TransferCommand::WriteHandle {
+                tag,
+                handle: root.handle,
+                cred: root.cred,
+                read_pk: root.read_pk,
+                chunk: root.chunk,
+                replaces: true,
+            });
+        }
+        for credential in backup_erase {
+            self.send_transfer(TransferCommand::Erase {
+                chunk_id: credential.chunk_id,
+                cred: credential.cred,
+                relays: credential.relays,
+            });
         }
     }
 
@@ -2149,6 +2211,7 @@ pub fn init(
             silent: Vec::new(),
             next_silence_check: 0,
             dead_work: Vec::new(),
+            is_foreground: false,
         }),
         changed: Condvar::new(),
         runtime: Mutex::new(None),
@@ -2382,6 +2445,7 @@ impl Handle {
         inner.pump_ndr();
         if is_tick {
             inner.pump_dead_channels();
+            inner.pump_backup();
         }
         let work = core::mem::take(&mut inner.dead_work);
         for step in work {
@@ -2795,7 +2859,9 @@ impl Handle {
     /// client in the background makes no cover cell (Part 3 §3.6.2). With
     /// no network the call does nothing.
     pub fn set_foreground(&self, is_foreground: bool) {
-        if let Some(bridge) = locked(&self.inner).bridge.as_ref() {
+        let mut inner = locked(&self.inner);
+        inner.is_foreground = is_foreground;
+        if let Some(bridge) = inner.bridge.as_ref() {
             let _ = bridge.set_foreground(is_foreground);
         }
     }
@@ -3124,6 +3190,12 @@ impl Handle {
             .wait_timeout_while(locked(&self.inner), timeout, |inner| !inner.has_event())
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         inner.next_event()
+    }
+
+    /// The time of the last backup of this device, in Unix seconds, or none
+    /// (Part 4 §4.7.2).
+    pub fn last_backup_at(&self) -> Option<u64> {
+        locked(&self.inner).client.last_backup_at().ok().flatten()
     }
 
     /// Renders the recovery code into a sink of the platform, as the 87

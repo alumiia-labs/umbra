@@ -2263,3 +2263,42 @@ fn the_group_run_outlives_its_relays_and_carries_its_commands_on() {
         }
     }
 }
+
+#[test]
+fn an_app_in_the_foreground_writes_its_backup_to_the_relays() {
+    let relays = tokio::runtime::Runtime::new().unwrap();
+    let network = start_signed_network(&relays);
+    let directory = std::env::temp_dir().join(format!("umbra-backup-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let alice = launch(&directory, "alice.db", 1);
+    let verified = alice
+        .network_of_manifest(
+            network.manifest.clone(),
+            network.keyset.clone(),
+            0,
+            HOST.into(),
+            Some(CA.into()),
+        )
+        .unwrap()
+        .network;
+    assert_eq!(alice.last_backup_at(), None);
+    // IDN-080: a device in the background writes none.
+    alice.clone().connect(verified).unwrap();
+    wait_for(&alice, |event| match event {
+        FfiEvent::Online => Some(()),
+        _ => None,
+    });
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(alice.last_backup_at(), None);
+
+    // In the foreground the first full object goes up at the next check,
+    // which runs each minute of a ready run.
+    alice.set_foreground(true);
+    let start = Instant::now();
+    while alice.last_backup_at().is_none() {
+        assert!(start.elapsed() < Duration::from_secs(150), "no backup");
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    alice.disconnect();
+}

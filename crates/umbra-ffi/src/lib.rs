@@ -318,6 +318,14 @@ impl From<umbra_wire::Error> for Error {
     }
 }
 
+/// A stored form of this crate that its reader does not take is a fault
+/// of the store.
+impl From<umbra_crypto::Error> for Error {
+    fn from(_: umbra_crypto::Error) -> Self {
+        Error::Integrity
+    }
+}
+
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(match self {
@@ -1575,6 +1583,153 @@ mod tests {
             .render_recovery_code(&mut other, &mut rng)
             .unwrap();
         assert_ne!(other.0, view.0);
+    }
+
+    #[test]
+    fn a_backup_writes_a_full_object_and_then_deltas_of_what_changed() {
+        use crate::client::BackupUpload;
+        use umbra_core::{
+            attach::{
+                segment::unpad_handle_object,
+                transfer::{ChunkCredential, Uploaded},
+                CHUNK_SIZE,
+            },
+            identity::{
+                backup::{BackupObject, BackupRow},
+                recovery::BackupRoot,
+            },
+            session::node::{ContactId, StateChange},
+            store::record::TableId,
+        };
+        use umbra_crypto::secret::Secret;
+        use umbra_wire::{
+            descriptor::{ChunkRef, FileDescriptor, Level},
+            ndr::TokenCarrier,
+        };
+
+        let uploaded = |tag: u8| Uploaded {
+            descriptor: FileDescriptor {
+                level: Level::Data,
+                file_key: Secret::new([tag; 32]),
+                file_nonce: [2; 24],
+                commit: [3; 32],
+                digest: [4; 32],
+                media_seconds: 0,
+                padded_size: CHUNK_SIZE as u32,
+                mime_class: 0,
+                pixel_w: 0,
+                pixel_h: 0,
+                refs: vec![ChunkRef {
+                    relay_id: [5; 32],
+                    chunk_id: [tag; 32],
+                    cred_pk: [7; 32],
+                    replicas: [[0; 12]; 2],
+                }],
+            },
+            credentials: vec![ChunkCredential {
+                chunk_id: [tag; 32],
+                cred: Secret::new([8; 32]),
+                relays: vec![[5; 32], [9; 32]],
+            }],
+        };
+        let tables = |object: &BackupObject, table: TableId| {
+            object
+                .rows
+                .iter()
+                .filter(|row| {
+                    matches!(row, BackupRow::Put { table: held, .. } | BackupRow::Delete { table: held, .. } if *held == table)
+                })
+                .count()
+        };
+
+        let mut rng = Rng(151);
+        let mut client = new_client(&mut rng);
+        client
+            .set_push_token(Some((TokenCarrier::Fcm, "a-token")), &mut rng)
+            .unwrap();
+        let now = 1_800_000_000;
+        let epoch = 168 * 3_000;
+
+        // IDN-080: a write runs in the foreground only.
+        assert!(client.backup_due(now, false).unwrap().is_none());
+        let BackupUpload { plain, pending } = client.backup_due(now, true).unwrap().unwrap();
+        assert!(pending.is_full());
+        let full = BackupObject::parse(&plain).unwrap();
+        // The root seed and the recovery code go, and the push token of this
+        // device stays (IDN-180).
+        assert_eq!(tables(&full, TableId::LOCAL_IDENTITY), 2);
+        assert_eq!(tables(&full, TableId(0x0A)), 0);
+        let root = client
+            .backup_uploaded(pending, &uploaded(1), epoch, &mut rng)
+            .unwrap();
+        assert!(root.erase.is_empty());
+
+        // IDN-093, IDN-094: the root is the chunk of the week, and it opens
+        // under the key of that week alone.
+        let credentials = client.backup_credentials(3_000, &mut rng).unwrap();
+        assert_eq!(root.handle, credentials.handle);
+        let mut buf = Vec::new();
+        let sealed = unpad_handle_object(&root.chunk).unwrap();
+        let opened = BackupRoot::open(&credentials, sealed, &mut buf).unwrap();
+        assert_eq!(opened.entries.len(), 1);
+        assert_eq!(opened.entries[0].kind, 0x01);
+        let other = client.backup_credentials(3_001, &mut rng).unwrap();
+        assert_ne!(other.handle, credentials.handle);
+        assert!(BackupRoot::open(&other, sealed, &mut Vec::new()).is_err());
+
+        // IDN-081: no write is due right after one.
+        assert!(client.backup_due(now + 60, true).unwrap().is_none());
+
+        // A new contact and a message: the delta holds them and nothing
+        // that did not change (IDN-179).
+        let contact = ContactId([9; 32]);
+        let change = StateChange::Contact {
+            contact,
+            state: zeroize::Zeroizing::new(vec![1, 2, 3]),
+        };
+        client
+            .commit_network(&[change], &[], (now + 100) * 1_000, &mut rng)
+            .unwrap();
+        let later = now + 2 * 86_400;
+        let BackupUpload { plain, pending } = client.backup_due(later, true).unwrap().unwrap();
+        assert!(!pending.is_full());
+        let delta = BackupObject::parse(&plain).unwrap();
+        assert_eq!(delta.base_at, now);
+        assert_eq!(tables(&delta, TableId::CONTACT), 1);
+        assert_eq!(tables(&delta, TableId::LOCAL_IDENTITY), 0);
+        let root = client
+            .backup_uploaded(pending, &uploaded(2), epoch, &mut rng)
+            .unwrap();
+        let sealed = unpad_handle_object(&root.chunk).unwrap();
+        let opened = BackupRoot::open(&credentials, sealed, &mut buf).unwrap();
+        assert_eq!(
+            opened
+                .entries
+                .iter()
+                .map(|entry| entry.kind)
+                .collect::<Vec<_>>(),
+            [0x01, 0x02]
+        );
+
+        // IDN-078, IDN-099: after BACKUP_FULL_INTERVAL a full object replaces
+        // each entry, and the chunks of the two old objects go after the
+        // new root.
+        let month = now + 46 * 86_400;
+        let BackupUpload { pending, .. } = client.backup_due(month, true).unwrap().unwrap();
+        assert!(pending.is_full());
+        let root = client
+            .backup_uploaded(pending, &uploaded(3), epoch + 168 * 7, &mut rng)
+            .unwrap();
+        let erased: Vec<[u8; 32]> = root
+            .erase
+            .iter()
+            .map(|credential| credential.chunk_id)
+            .collect();
+        assert_eq!(erased, [[1; 32], [2; 32]]);
+        assert_eq!(
+            root.handle,
+            client.backup_credentials(3_007, &mut rng).unwrap().handle
+        );
     }
 
     #[test]

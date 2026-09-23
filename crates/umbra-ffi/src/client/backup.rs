@@ -5,11 +5,36 @@
 //! §4.7.7, through a sink of the platform (`IMP-037`), and never as hex
 //! (`IDN-041`).
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use umbra_core::{
-    identity::recovery::{to_digits, DigitsType, RecoveryCode},
-    store::{engine::Backend, record::TableId, wrap::SecureElement},
+    attach::{
+        segment::pad_handle_object,
+        transfer::{ChunkCredential, Uploaded},
+    },
+    identity::{
+        backup::{BackupObject, BackupRow, KIND_DELTA, KIND_FULL},
+        recovery::{
+            to_digits, BackupEntry, BackupRoot, BackupRootKey, DigitsType, EpochCredentials,
+            RecoveryCode,
+        },
+        BACKUP_FULL_INTERVAL, BACKUP_HISTORY_DAYS, BACKUP_INTERVAL, BACKUP_ROOT_ENTRIES,
+    },
+    session::dead::week_of,
+    store::{
+        engine::Backend,
+        record::{RowId, TableId},
+        wrap::SecureElement,
+    },
 };
-use umbra_crypto::{rand_core::CryptoRng, secret::Secret, zeroize::Zeroizing};
+use umbra_crypto::{
+    hash::sha3_256,
+    rand_core::CryptoRng,
+    secret::Secret,
+    stored::{Reader, Writer},
+    x25519::{PublicKey as XPublic, StaticSecret},
+    zeroize::Zeroizing,
+};
 
 use super::Client;
 use crate::{Error, Sink};
@@ -63,4 +88,438 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         sink.put(&units);
         Ok(())
     }
+}
+
+/// The hash of each row that the last backup object carried, by the table
+/// and the surrogate identifier of the row: a delta holds the rows whose
+/// hash moved and the rows that left (`IDN-179`).
+const BACKUP_INDEX: TableId = TableId(0x1F);
+/// The state of the backup of this device: the schedule and the entries of
+/// the root with the credentials of their chunks. A backup carries neither.
+const BACKUP_STATE: TableId = TableId(0x20);
+const STATE_KEY: &[u8] = b"backup-state";
+/// `BackupRootKey`, which the KDF of `IDN-177` gives once for the device.
+const ROOT_KEY_KEY: &[u8] = b"backup-root-key";
+const INDEX_VALUE_LEN: usize = 1 + 16 + 32;
+
+/// The tables that a backup carries (`IDN-179`). Invitations, push
+/// registrations, the dead-channel state, the files, and the state of the
+/// backup itself stay on the device (`IDN-180`).
+const BACKED_UP: [TableId; 20] = [
+    TableId::MESSAGE,
+    TableId::TOMBSTONE,
+    TableId::CONTACT,
+    TableId::QUEUE,
+    TableId::VERIFICATION,
+    TableId::LOCAL_IDENTITY,
+    super::OUTBOX,
+    super::CONVERSATION,
+    super::SETTINGS,
+    super::RECEIPT,
+    super::PENDING,
+    super::REVISION,
+    super::REACTION,
+    super::groups::GROUP,
+    super::groups::GROUP_QUEUE,
+    super::groups::GROUP_JOIN,
+    super::groups::GROUP_MEMBER,
+    super::groups::GROUP_PRESENCE,
+    super::groups::GROUP_OWNERS,
+    super::groups::GROUP_GRANTS,
+];
+
+/// A backup object that is due: its bytes, which go up as a file of the
+/// backup class, and what its upload commits.
+pub struct BackupUpload {
+    /// The encoded `BackupObject`.
+    pub plain: Zeroizing<Vec<u8>>,
+    /// What the upload commits.
+    pub pending: PendingBackup,
+}
+
+/// A backup object that goes up, with the index that its upload commits.
+pub struct PendingBackup {
+    kind: u8,
+    written_at: u64,
+    index: Vec<(RowId, Option<Vec<u8>>)>,
+}
+
+impl PendingBackup {
+    /// Whether the object is a full one.
+    pub fn is_full(&self) -> bool {
+        self.kind == KIND_FULL
+    }
+}
+
+/// The write of the backup root of the week (`IDN-093`, `IDN-098`), and
+/// the chunks that go after it (`IDN-099`).
+pub struct RootWrite {
+    /// `backup_handle_epoch`, the `chunk_id` of the root.
+    pub handle: [u8; 32],
+    /// `backup_write_cred`.
+    pub cred: Secret<32>,
+    /// The public half of `backup_read_cred`.
+    pub read_pk: [u8; 32],
+    /// The sealed and padded root.
+    pub chunk: Vec<u8>,
+    /// The chunks of each object that the new root names no more. They go
+    /// after the root is written.
+    pub erase: Vec<ChunkCredential>,
+}
+
+struct StoredEntry {
+    kind: u8,
+    descriptor: Vec<u8>,
+    credentials: Vec<ChunkCredential>,
+}
+
+#[derive(Default)]
+struct BackupState {
+    next_full_at: u64,
+    next_delta_at: u64,
+    last_written_at: u64,
+    entries: Vec<StoredEntry>,
+}
+
+impl BackupState {
+    fn encode(&self) -> Result<Zeroizing<Vec<u8>>, Error> {
+        let mut writer = Writer::new();
+        writer.u64(self.next_full_at);
+        writer.u64(self.next_delta_at);
+        writer.u64(self.last_written_at);
+        writer.u8(u8::try_from(self.entries.len()).map_err(|_| Error::Integrity)?);
+        for entry in &self.entries {
+            writer.u8(entry.kind);
+            writer.var(&entry.descriptor)?;
+            writer.u32(u32::try_from(entry.credentials.len()).map_err(|_| Error::Integrity)?);
+            for credential in &entry.credentials {
+                writer.bytes(&credential.chunk_id);
+                writer.bytes(credential.cred.expose());
+                writer.u8(u8::try_from(credential.relays.len()).map_err(|_| Error::Integrity)?);
+                for relay in &credential.relays {
+                    writer.bytes(relay);
+                }
+            }
+        }
+        Ok(writer.finish())
+    }
+
+    fn parse(bytes: &[u8]) -> Result<Self, Error> {
+        let mut reader = Reader::new(bytes);
+        let next_full_at = reader.u64()?;
+        let next_delta_at = reader.u64()?;
+        let last_written_at = reader.u64()?;
+        let count = reader.u8()?;
+        let mut entries = Vec::new();
+        for _ in 0..count {
+            let kind = reader.u8()?;
+            let descriptor = reader.var()?.to_vec();
+            let mut credentials = Vec::new();
+            for _ in 0..reader.u32()? {
+                let chunk_id = reader.array()?;
+                let cred = Secret::new(reader.array()?);
+                let mut relays = Vec::new();
+                for _ in 0..reader.u8()? {
+                    relays.push(reader.array()?);
+                }
+                credentials.push(ChunkCredential {
+                    chunk_id,
+                    cred,
+                    relays,
+                });
+            }
+            entries.push(StoredEntry {
+                kind,
+                descriptor,
+                credentials,
+            });
+        }
+        reader.end()?;
+        Ok(BackupState {
+            next_full_at,
+            next_delta_at,
+            last_written_at,
+            entries,
+        })
+    }
+}
+
+/// The time of the next write of an interval: a uniform draw over one
+/// interval, centered on it, thus the time follows no act of the user
+/// (`IDN-048`, `IDN-081`).
+fn next_write<R: CryptoRng + ?Sized>(now: u64, interval: u64, rng: &mut R) -> u64 {
+    let mut draw = [0u8; 8];
+    rng.fill_bytes(&mut draw);
+    now.saturating_add(interval / 2)
+        .saturating_add(u64::from_be_bytes(draw) % interval.max(1))
+}
+
+fn index_key(table: TableId, row: &RowId) -> Vec<u8> {
+    [&[table.0][..], row].concat()
+}
+
+fn row_hash(table: TableId, row: &RowId, owner: Option<&RowId>, plain: &[u8]) -> [u8; 32] {
+    let owner_part: &[u8] = owner.map_or(&[0u8][..], |owner| owner.as_slice());
+    let flag = [u8::from(owner.is_some())];
+    sha3_256(&[
+        b"umbra/backup-index",
+        &[table.0],
+        row,
+        &flag,
+        owner_part,
+        plain,
+    ])
+}
+
+impl<B: Backend, E: SecureElement> Client<B, E> {
+    fn backup_state(&self) -> Result<Option<BackupState>, Error> {
+        let store = &self.open_ref()?.store;
+        let row = store.row_id(BACKUP_STATE, STATE_KEY);
+        match store.get(BACKUP_STATE, &row)? {
+            Some(bytes) => Ok(Some(BackupState::parse(&Zeroizing::new(bytes))?)),
+            None => Ok(None),
+        }
+    }
+
+    /// The time of the last backup object that went up, or none.
+    pub fn last_backup_at(&self) -> Result<Option<u64>, Error> {
+        Ok(self
+            .backup_state()?
+            .map(|state| state.last_written_at)
+            .filter(|at| *at != 0))
+    }
+
+    /// The four values of the weekly epoch `week` (§4.7.2). The KDF of
+    /// `IDN-177` runs once, and the state of the backup keeps its result.
+    pub fn backup_credentials<R: CryptoRng + ?Sized>(
+        &mut self,
+        week: u32,
+        rng: &mut R,
+    ) -> Result<EpochCredentials, Error> {
+        let store = &self.open_ref()?.store;
+        let row = store.row_id(BACKUP_STATE, ROOT_KEY_KEY);
+        if let Some(bytes) = store.get(BACKUP_STATE, &row)? {
+            let bytes = Zeroizing::new(bytes);
+            let key: [u8; 32] = bytes.as_slice().try_into().map_err(|_| Error::Integrity)?;
+            return Ok(BackupRootKey::from_secret(Secret::new(key)).epoch(week));
+        }
+        let key = self.recovery_code(rng)?.backup_root_key()?;
+        let open = self.open_mut()?;
+        let mut batch = open.store.begin();
+        batch.put(
+            BACKUP_STATE,
+            row,
+            None,
+            key.expose_for_store().expose(),
+            rng,
+        )?;
+        batch.commit()?;
+        Ok(key.epoch(week))
+    }
+
+    /// Whether a row of a carried table stays on the device: a setting of
+    /// this device alone (`IDN-180`), or a message older than
+    /// `BACKUP_HISTORY_DAYS` (`IDN-082`).
+    fn stays(&self, table: TableId, row: &RowId, plain: &[u8], now: u64) -> Result<bool, Error> {
+        let store = &self.open_ref()?.store;
+        if table == super::SETTINGS {
+            let local = [
+                super::notify::PUSH_TOKEN_SETTING,
+                super::notify::CONTACT_SET_SETTING,
+                super::INGRESS_PINS_SETTING,
+            ];
+            return Ok(local
+                .iter()
+                .any(|key| store.row_id(super::SETTINGS, key) == *row));
+        }
+        if table == TableId::MESSAGE {
+            if let Ok(info) = super::info_of(plain) {
+                let age_ms = now.saturating_mul(1_000).saturating_sub(info.stored_at_ms);
+                return Ok(age_ms > BACKUP_HISTORY_DAYS * 86_400 * 1_000);
+            }
+        }
+        Ok(false)
+    }
+
+    /// The backup object that is due at `now`, in the foreground only
+    /// (`IDN-080`): a full object at `BACKUP_FULL_INTERVAL`, and a delta at
+    /// `BACKUP_INTERVAL` between two full ones (`IDN-078`, `IDN-079`). A
+    /// delta with no row goes too, thus the cadence shows no activity.
+    pub fn backup_due(
+        &mut self,
+        now: u64,
+        is_foreground: bool,
+    ) -> Result<Option<BackupUpload>, Error> {
+        if !is_foreground {
+            return Ok(None);
+        }
+        let state = self.backup_state()?;
+        let kind = match &state {
+            None => KIND_FULL,
+            Some(state) if now >= state.next_full_at => KIND_FULL,
+            Some(state) if state.entries.len() >= BACKUP_ROOT_ENTRIES => KIND_FULL,
+            Some(state) if now >= state.next_delta_at && !state.entries.is_empty() => KIND_DELTA,
+            Some(_) => return Ok(None),
+        };
+        let mut current: Vec<BackupRow> = Vec::new();
+        for table in BACKED_UP {
+            let rows = self.open_ref()?.store.list_owned(table)?;
+            for (row, owner, plain) in rows {
+                let plain = Zeroizing::new(plain);
+                if !self.stays(table, &row, &plain, now)? {
+                    current.push(BackupRow::Put {
+                        table,
+                        row,
+                        owner,
+                        plain,
+                    });
+                }
+            }
+        }
+        let store = &self.open_ref()?.store;
+        let mut indexed: BTreeMap<RowId, Vec<u8>> = BTreeMap::new();
+        for (key, value) in store.list(BACKUP_INDEX, None)? {
+            indexed.insert(key, value);
+        }
+        let mut rows = Vec::new();
+        let mut index = Vec::new();
+        let mut kept: BTreeSet<RowId> = BTreeSet::new();
+        for put in current {
+            let BackupRow::Put {
+                table,
+                row,
+                owner,
+                plain,
+            } = &put
+            else {
+                continue;
+            };
+            let (table, row) = (*table, *row);
+            let hash = row_hash(table, &row, owner.as_ref(), plain);
+            let key = store.row_id(BACKUP_INDEX, &index_key(table, &row));
+            kept.insert(key);
+            let value = [&[table.0][..], &row, &hash].concat();
+            let is_same = indexed.get(&key).is_some_and(|held| *held == value);
+            if kind == KIND_DELTA && is_same {
+                continue;
+            }
+            if !is_same {
+                index.push((key, Some(value)));
+            }
+            rows.push(put);
+        }
+        for (key, value) in &indexed {
+            if kept.contains(key) {
+                continue;
+            }
+            index.push((*key, None));
+            if kind == KIND_DELTA && value.len() == INDEX_VALUE_LEN {
+                let table = TableId(value.first().copied().ok_or(Error::Integrity)?);
+                let row: RowId = value
+                    .get(1..17)
+                    .and_then(|bytes| bytes.try_into().ok())
+                    .ok_or(Error::Integrity)?;
+                rows.push(BackupRow::Delete { table, row });
+            }
+        }
+        let base_at = match (&state, kind) {
+            (Some(state), KIND_DELTA) => state.last_written_at,
+            _ => 0,
+        };
+        let object = BackupObject {
+            kind,
+            written_at: now,
+            base_at,
+            rows,
+        };
+        Ok(Some(BackupUpload {
+            plain: object.encode()?,
+            pending: PendingBackup {
+                kind,
+                written_at: now,
+                index,
+            },
+        }))
+    }
+
+    /// The object of `pending` is at the relays: its index commits, the
+    /// schedule moves, and the root of the week names it with the objects
+    /// before it. A full object replaces each entry, and their chunks go
+    /// after the new root (`IDN-097` to `IDN-099`).
+    pub fn backup_uploaded<R: CryptoRng + ?Sized>(
+        &mut self,
+        pending: PendingBackup,
+        uploaded: &Uploaded,
+        consensus_epoch: u64,
+        rng: &mut R,
+    ) -> Result<RootWrite, Error> {
+        let mut state = self.backup_state()?.unwrap_or_default();
+        let mut descriptor = alloc_vec(uploaded.descriptor.len());
+        uploaded.descriptor.encode(&mut descriptor)?;
+        let entry = StoredEntry {
+            kind: pending.kind,
+            descriptor,
+            credentials: uploaded
+                .credentials
+                .iter()
+                .map(|credential| ChunkCredential {
+                    chunk_id: credential.chunk_id,
+                    cred: Secret::new(*credential.cred.expose()),
+                    relays: credential.relays.clone(),
+                })
+                .collect(),
+        };
+        let mut erase = Vec::new();
+        let now = pending.written_at;
+        if pending.kind == KIND_FULL {
+            for old in core::mem::take(&mut state.entries) {
+                erase.extend(old.credentials);
+            }
+            state.next_full_at = next_write(now, BACKUP_FULL_INTERVAL, rng);
+        }
+        state.entries.push(entry);
+        state.next_delta_at = next_write(now, BACKUP_INTERVAL, rng);
+        state.last_written_at = now;
+
+        let credentials = self.backup_credentials(week_of(consensus_epoch), rng)?;
+        let root = BackupRoot {
+            entries: state
+                .entries
+                .iter()
+                .map(|entry| BackupEntry {
+                    kind: entry.kind,
+                    descriptor: &entry.descriptor,
+                })
+                .collect(),
+        };
+        let mut nonce = [0u8; 24];
+        rng.fill_bytes(&mut nonce);
+        let sealed = root.seal(&credentials, nonce)?;
+        let chunk = pad_handle_object(&sealed)?;
+        let read_pk = *XPublic::from(&StaticSecret::from(*credentials.read.expose())).as_bytes();
+
+        let encoded = state.encode()?;
+        let open = self.open_mut()?;
+        let state_row = open.store.row_id(BACKUP_STATE, STATE_KEY);
+        let mut batch = open.store.begin();
+        batch.put(BACKUP_STATE, state_row, None, &encoded, rng)?;
+        for (key, value) in pending.index {
+            match value {
+                Some(value) => batch.put(BACKUP_INDEX, key, None, &value, rng)?,
+                None => batch.delete(BACKUP_INDEX, key),
+            }
+        }
+        batch.commit()?;
+        Ok(RootWrite {
+            handle: credentials.handle,
+            cred: Secret::new(*credentials.write.expose()),
+            read_pk,
+            chunk,
+            erase,
+        })
+    }
+}
+
+fn alloc_vec(len: usize) -> Vec<u8> {
+    vec![0u8; len]
 }

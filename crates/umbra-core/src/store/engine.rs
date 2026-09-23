@@ -30,6 +30,10 @@ pub struct StoredRow {
     pub sealed: Vec<u8>,
 }
 
+/// One opened row with its owner column: the surrogate identifier, the
+/// owner, and the plaintext.
+pub type OwnedRow = (RowId, Option<RowId>, Vec<u8>);
+
 /// The MAC state of one table as a backend holds it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StoredTable {
@@ -143,6 +147,25 @@ impl<B: Backend> Store<B> {
             }
             out.push((
                 row.row_id,
+                sealed.open(&self.store_key, table, &row.row_id)?,
+            ));
+        }
+        Ok(out)
+    }
+
+    /// Reads and opens each row of the table with its owner column, as a
+    /// backup of Part 4 §4.7.2 carries it. A row with a discarded key is
+    /// left out.
+    pub fn list_owned(&self, table: TableId) -> Result<Vec<OwnedRow>, Error> {
+        let mut out = Vec::new();
+        for row in self.backend.rows(table, None)? {
+            let sealed = SealedRecord::from_bytes(row.sealed)?;
+            if sealed.is_discarded() {
+                continue;
+            }
+            out.push((
+                row.row_id,
+                row.owner,
                 sealed.open(&self.store_key, table, &row.row_id)?,
             ));
         }

@@ -29,9 +29,9 @@ const NOTIFY_GROUP: TableId = TableId(0x1A);
 const NOTIFY_QUEUE: TableId = TableId(0x1B);
 /// The push token of the platform as the NDR takes it: the carrier byte
 /// and its target (`NTF-123`).
-const PUSH_TOKEN_SETTING: &[u8] = b"push-token";
+pub(super) const PUSH_TOKEN_SETTING: &[u8] = b"push-token";
 /// The hash of the contact set at the last check of `NTF-008`.
-const CONTACT_SET_SETTING: &[u8] = b"push-contact-set";
+pub(super) const CONTACT_SET_SETTING: &[u8] = b"push-contact-set";
 
 const RELAY_LEN: usize = 32 + 32 + 2;
 /// A group row of the first form, before the root and the rotation time.
