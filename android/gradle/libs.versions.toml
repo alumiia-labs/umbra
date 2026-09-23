@@ -8,6 +8,7 @@ jna = "5.19.1"
 zxing = "3.5.4"
 firebaseBom = "33.7.0"
 googleServices = "4.4.2"
+work = "2.10.0"
 
 [libraries]
 androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
@@ -21,6 +22,7 @@ jna = { group = "net.java.dev.jna", name = "jna", version.ref = "jna" }
 zxing-core = { group = "com.google.zxing", name = "core", version.ref = "zxing" }
 firebase-bom = { group = "com.google.firebase", name = "firebase-bom", version.ref = "firebaseBom" }
 firebase-messaging = { group = "com.google.firebase", name = "firebase-messaging" }
+androidx-work = { group = "androidx.work", name = "work-runtime-ktx", version.ref = "work" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

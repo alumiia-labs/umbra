@@ -505,6 +505,12 @@ carrier of a build that holds no other one.
   client holds no key that reads a queue (Part 15 rule `IMP-127`). A client
   that locks with no view on the screen MUST tell the user one time, with no
   sound, that no message arrives until the unlock.
+- **[NTF-131]** A client that holds no push carrier MAY poll: a periodic
+  job of the platform, no more often than its least period, starts a run of
+  an open client that has none, and that run drains each queue under
+  Part 3 §3.7 item 4. A locked client holds no key of a queue, thus a poll
+  of a locked client MUST do nothing. The reference Android build holds FCM
+  and this poll beside the persistent socket, and it holds no UnifiedPush.
 - **[NTF-121]** A record that arrives MUST NOT start the idle time of the
   auto-lock again. An action of the user alone does that. Thus a peer that
   writes each 10 minutes does not keep `K_store` in RAM.

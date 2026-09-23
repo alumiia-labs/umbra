@@ -105,6 +105,8 @@ dependencies {
     // The FCM carrier of Part 8 §8.4.1.
     implementation(platform(libs.firebase.bom))
     implementation(libs.firebase.messaging)
+    // The poll of a build with no Firebase app.
+    implementation(libs.androidx.work)
     implementation(libs.androidx.camera.camera2)
     implementation(libs.androidx.camera.lifecycle)
     implementation(libs.androidx.camera.view)

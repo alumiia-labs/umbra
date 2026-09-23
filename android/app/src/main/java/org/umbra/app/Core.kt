@@ -212,6 +212,7 @@ object Core {
                     DeliveryService.start(app)
                     refreshJoinFlow()
                     Push.opened(app)
+                    Poll.schedule(app)
                 }
             } catch (wrong: FfiException.WrongPassphrase) {
                 fail("That passphrase does not open this device.")
