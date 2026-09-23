@@ -11,7 +11,12 @@ comment `# R1`, `# R2`, or `# build` on each entry. A crate outside the lists
 charges R3. The linked graph is `cargo tree -e normal,no-proc-macro`; a
 proc-macro, a build script, and a crate that only those reach form the build
 register, which no binary links and which carries no cap (Part 15 §15.2.3).
-No R3 cap exists in v1 either, thus R3 and build report a count only.
+The default graph holds no platform crate, thus R3 there is empty.
+
+The platform builds turn the features on: the Android library and the relay
+server. Their R3 crates charge to the subsystem of Part 15 §15.2.3 whose
+root reaches them. A crate that several roots reach charges to the one it is
+the root of, or else to the first subsystem in `SUBSYSTEMS`.
 
 Usage: python scripts/deps.py [--check]
   --check   exit 1 when the generated text differs from the committed file.
@@ -31,7 +36,21 @@ TARGETS = [
     "wasm32-unknown-unknown",
 ]
 CAPS = {"R1": 40, "R2": 30}
-WORKSPACE = {"umbra-crypto", "umbra-wire", "umbra-onion", "umbra-queue", "umbra-transport", "umbra-core"}
+WORKSPACE = {"umbra-crypto", "umbra-wire", "umbra-onion", "umbra-queue", "umbra-transport",
+             "umbra-core", "umbra-ffi", "umbra-relay"}
+# Each platform build: package, features, target, and the R3 cap that
+# IMP-009 set at the first measurement.
+PLATFORM = [
+    ("umbra-ffi", "bindings", "aarch64-linux-android", 50),
+    ("umbra-relay", "native", "x86_64-unknown-linux-gnu", 35),
+]
+# Subsystem, its root crates, and its cap (IMP-007).
+SUBSYSTEMS = [
+    ("Async runtime", {"tokio"}, 20),
+    ("Transport", {"rustls", "tokio-rustls", "quinn", "webpki-roots"}, 40),
+    ("Storage", {"rusqlite"}, 25),
+    ("UniFFI surface", {"uniffi"}, 15),
+]
 
 
 def run(*args: str) -> str:
@@ -61,6 +80,33 @@ def graph(target: str, edges: str) -> dict[str, str]:
             continue
         crates[m.group(1)] = m.group(2)
     return crates
+
+
+def platform(reg: dict[str, str], package: str, features: str, target: str) -> dict[str, list]:
+    """subsystem -> R3 crates of one platform build."""
+    out = run("cargo", "tree", "-p", package, "--features", features, "--target", target,
+              "-e", "normal,no-proc-macro", "--no-dedupe", "--prefix", "depth", "--format", "{p}")
+    stack: list[tuple[int, str]] = []
+    reached: dict[str, tuple[str, set[str]]] = {}
+    root_of = {root: name for name, roots, _ in SUBSYSTEMS for root in roots}
+    for line in out.splitlines():
+        m = re.match(r"^(\d+)(\S+) v(\S+)", line.strip())
+        if not m:
+            continue
+        depth, name, ver = int(m.group(1)), m.group(2), m.group(3)
+        while stack and stack[-1][0] >= depth:
+            stack.pop()
+        stack.append((depth, name))
+        if name in WORKSPACE or reg.get(name) in ("R1", "R2"):
+            continue
+        subs = {root_of[n] for _, n in stack if n in root_of}
+        reached.setdefault(name, (ver, set()))[1].update(subs)
+    order = [name for name, _, _ in SUBSYSTEMS] + ["Other"]
+    by_sub: dict[str, list] = {name: [] for name in order}
+    for name, (ver, subs) in sorted(reached.items()):
+        sub = root_of.get(name) or next((o for o in order if o in subs), "Other")
+        by_sub[sub].append((name, ver))
+    return by_sub
 
 
 def render() -> str:
@@ -107,6 +153,27 @@ def render() -> str:
             lines.append("")
             lines += [f"- `{name}` {ver}" for name, ver in by_reg[r]]
             lines.append("")
+    caps = {name: cap for name, _, cap in SUBSYSTEMS}
+    for package, features, target, r3_cap in PLATFORM:
+        by_sub = platform(reg, package, features, target)
+        total = sum(len(v) for v in by_sub.values())
+        lines += [f"## Platform build: `{package}` with `{features}`, `{target}`", ""]
+        lines += ["| Subsystem | Count | Cap | Result |", "| --- | --- | --- | --- |"]
+        result = "PASS" if total <= r3_cap else "FAIL"
+        lines.append(f"| R3 total | {total} | {r3_cap} | {result} |")
+        for sub, crates in by_sub.items():
+            cap = caps.get(sub)
+            if cap is None and not crates:
+                continue
+            res = "n/a" if cap is None else ("PASS" if len(crates) <= cap else "FAIL")
+            lines.append(f"| {sub} | {len(crates)} | {cap if cap is not None else 'none'} | {res} |")
+        lines.append("")
+        for sub, crates in by_sub.items():
+            if not crates:
+                continue
+            lines += [f"### {sub}", ""]
+            lines += [f"- `{name}` {ver}" for name, ver in crates]
+            lines.append("")
     return "\n".join(lines) + "\n"
 
 
@@ -119,6 +186,10 @@ def main(argv: list[str]) -> int:
         strip = lambda s: re.sub(r"^- (Date|Commit): .*$", "", s, flags=re.M)
         if strip(current) != strip(text):
             print("DEPENDENCIES.md is stale; run scripts/deps.py")
+            return 1
+        # IMP-005, IMP-009: a register or a subsystem over its cap fails.
+        if "| FAIL |" in text:
+            print("a register or a subsystem is over its cap")
             return 1
         print("DEPENDENCIES.md is current")
         return 0

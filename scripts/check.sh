@@ -53,6 +53,9 @@ cargo build --workspace --target aarch64-linux-android
 
 step "dependency policy"
 cargo deny check bans licenses sources
+# The platform graph of register R3: its licences, under the exceptions of
+# deny.toml. Its crates stay off the bans allow list (Part 15 §15.2.3).
+cargo deny --features umbra-ffi/bindings,umbra-relay/native check licenses
 
 step "generated files are current"
 python scripts/deps.py --check

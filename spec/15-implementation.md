@@ -124,35 +124,48 @@ this section with a written cause. §15.2.5 gives the removal candidates.
 ### 15.2.3 Register R3: the platform subsystems
 
 R3 holds the transport stack, the storage stack, the async runtime, the UniFFI
-surface, and the build tooling. §15.2.8 names the transport stack. No party has
-measured R3, and this section gives it no number. A cap on an unmeasured graph
-is a guess. A guess in this position is the error that §15.2.4 corrects, thus
-this section does not write one.
+surface, and the build tooling. §15.2.8 names the transport stack. Each of
+them sits behind a feature that is off by default, thus the default graph
+holds no R3 crate, and `DEPENDENCIES.md` measures R3 on the two platform
+builds: the Android library with `bindings`, and the relay server with
+`native`.
 
-One rule applies until the first measurement. **[IMP-007]** **One subsystem in
-R3 MUST NOT add more transitive crates than its row in the table below.** No
-single platform part costs more than the whole message core. Part 3 §3.8
-rejects a WebRTC stack under this rule. Each cap is an estimate until §15.2.4
-measures the subsystem, and `IMP-009` sets the measured cap.
+**[IMP-007]** **One subsystem in R3 MUST NOT add more transitive crates than
+its row in the table below.** No single platform part costs more than the
+whole message core. Part 3 §3.8 rejects a WebRTC stack under this rule. A crate
+that two subsystems reach charges to one of them, in the order of the table.
 
-| Subsystem | Cap (estimate) |
-| --- | --- |
-| Transport, §15.2.8 | 40 |
-| Storage, §15.6.4 | 25 |
-| Async runtime | 20 |
-| UniFFI surface, §15.6.1 | 15 |
-| Web surface, §15.7 | 15 |
-| Build tooling | No cap, because a build tool is not linked |
+| Subsystem | Cap | Measured, Android library | Measured, relay server |
+| --- | --- | --- | --- |
+| Async runtime | 20 | 5 | 5 |
+| Transport, §15.2.8 | 40 | 20 | 20 |
+| Storage, §15.6.4 | 25 | 6 | 6 |
+| UniFFI surface, §15.6.1 | 15 | 14 | 0 |
+| Web surface, §15.7 | 15 | not built | not built |
+| Build tooling | No cap, because a build tool is not linked | | |
+
+**The first measurement (2026-09-22).** The Android library links 45 R3
+crates, and the relay server links 31. The R3 cap is **50** for the Android
+library and **35** for the relay server. The UniFFI surface sits one crate
+below its cap: a UniFFI upgrade that adds two crates fails the build, and the
+maintainers then remove a crate or revise this section with a written cause,
+as `IMP-006` asks of R2.
+
+> *The licences of R3.* The platform graph adds three licences to the allow
+> list of the core: MPL-2.0 for the six `uniffi` crates, ISC for the rustls
+> verifier and `aws-lc`, and CDLA-Permissive-2.0 for the root data of
+> `webpki-roots`. MPL-2.0 is file-level copyleft, UMBRA changes no file of
+> it, and MPL-2.0 §3.3 permits the combination with AGPL-3.0. `deny.toml`
+> allows each of them for the named crates alone.
 
 **[IMP-008]** At the first measurement, the maintainers MUST publish the R3 count. **[IMP-009]** Those
 maintainers MUST set the R3 cap in the same change.
 
 ### 15.2.4 Measurement: the party, the trigger, and the artifact
 
-**This section publishes no measured count of this repository.** This repository
-holds no `Cargo.toml` file and no `crates/` directory, thus no party measures a
-transitive crate count today. Each figure outside the R1 table is an estimate,
-and this section marks each one as an estimate.
+`DEPENDENCIES.md` at the root of the repository holds the measured counts.
+The figures of §15.2.2 and §15.2.5 are estimates of changes that the
+repository has not made, and those sections mark each one as an estimate.
 
 **The maintainers of the reference implementation measure the three counts.**
 The trigger is the first commit that adds the workspace `Cargo.toml` file. **[IMP-010]** That

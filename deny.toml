@@ -21,6 +21,26 @@ version = 2
 # LGPL-3.0-only covers equix and hashx alone, which Part 14 §14.8 names; the
 # LGPL combines into the AGPL-3.0-only workspace under GPLv3 §13.
 allow = ["MIT", "Apache-2.0", "BSD-3-Clause", "Unicode-3.0", "AGPL-3.0-only", "LGPL-3.0-only"]
+# The platform graph of register R3 (Part 15 §15.2.3) adds three licences,
+# each for the named crates alone. MPL-2.0 is file-level copyleft: UMBRA
+# changes no uniffi file, and MPL-2.0 §3.3 lets it combine into the AGPL.
+# ISC and CDLA-Permissive-2.0 are permissive. `check.sh` checks the
+# licences of that graph, and the default graph never reaches these crates.
+unused-license-exception = "allow"
+exceptions = [
+    { allow = ["MPL-2.0"], crate = "uniffi" },
+    { allow = ["MPL-2.0"], crate = "uniffi_core" },
+    { allow = ["MPL-2.0"], crate = "uniffi_internal_macros" },
+    { allow = ["MPL-2.0"], crate = "uniffi_macros" },
+    { allow = ["MPL-2.0"], crate = "uniffi_meta" },
+    { allow = ["MPL-2.0"], crate = "uniffi_pipeline" },
+    { allow = ["ISC"], crate = "rustls-webpki" },
+    { allow = ["ISC"], crate = "untrusted" },
+    { allow = ["ISC"], crate = "aws-lc-rs" },
+    { allow = ["ISC", "MIT-0"], crate = "aws-lc-sys" },
+    { allow = ["ISC"], crate = "ring" },
+    { allow = ["CDLA-Permissive-2.0"], crate = "webpki-roots" },
+]
 
 [bans]
 multiple-versions = "warn"
