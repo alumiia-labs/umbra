@@ -1370,6 +1370,180 @@ mod tests {
     }
 
     #[test]
+    fn a_dead_channel_writes_its_blob_each_week_and_fetches_the_one_of_the_peer() {
+        use crate::client::DeadWork;
+        use umbra_core::session::node::{ContactId, StateChange};
+        use umbra_crypto::{dead::DeadChannel, kem::KeyPair, secret::Secret};
+
+        let mut rng = Rng(131);
+        let mut client = new_client(&mut rng);
+        // A stored contact: the version, the pairwise salt, and the key of
+        // the peer lead its form.
+        let salt = [5u8; 16];
+        let peer = KeyPair::from_seeds(Secret::new([6; 32]), Secret::new([6; 64]));
+        let state = [&[0x02u8][..], &salt, &peer.x25519_public(), &[0; 8]].concat();
+        let contact = ContactId([9; 32]);
+        let change = StateChange::Contact {
+            contact,
+            state: zeroize::Zeroizing::new(state),
+        };
+        client
+            .commit_network(&[change], &[], 1_000_000, &mut rng)
+            .unwrap();
+        let conversation = client.conversation_for(&contact.0).unwrap();
+        assert_eq!(client.contact_id_of(conversation).unwrap(), contact.0);
+        let own = client.root_identity().unwrap().pairwise_identity(&salt);
+        let secret = DeadChannel::new(&own, &peer.x25519_public()).unwrap();
+        let (own_pk, peer_pk) = (own.x25519_public(), peer.x25519_public());
+        let epoch = 168 * 3_000;
+        let now = 1_800_000_000;
+
+        // NET-203: no root gives no week, and a live channel gives no work.
+        assert!(client
+            .dead_channel_work(now, 0, &[], &mut rng)
+            .unwrap()
+            .is_empty());
+        assert!(client
+            .dead_channel_work(now, epoch, &[], &mut rng)
+            .unwrap()
+            .is_empty());
+
+        // NET-182: a dead channel with no new queue asks for one, and its
+        // fetch takes a time in the next 24 hours.
+        client.channel_dead(conversation, now, &mut rng).unwrap();
+        let work = client.dead_channel_work(now, epoch, &[], &mut rng).unwrap();
+        assert!(matches!(work[..], [DeadWork::Rotate { contact: id }] if id == contact.0));
+
+        // NET-183: the new queue goes into the blob of the week.
+        let mut real = vec![0u8; umbra_wire::address::LEN];
+        umbra_wire::address::QueueAddress {
+            relay_id: [1; 32],
+            sender_id: [2; 32],
+            qs_auth_sk: Secret::new([3; 32]),
+            qe: Secret::new([4; 32]),
+        }
+        .encode(&mut real)
+        .unwrap();
+        client
+            .dead_queue_rotated(conversation, &real, &mut rng)
+            .unwrap();
+        let work = client.dead_channel_work(now, epoch, &[], &mut rng).unwrap();
+        let [DeadWork::Write {
+            week,
+            handle,
+            chunk,
+            ..
+        }] = &work[..]
+        else {
+            panic!("one write");
+        };
+        assert_eq!((*week, *handle), (3_000, secret.handle(&own_pk, 3_000)));
+        let opened =
+            umbra_core::session::dead::open_blob(&secret.blob_key(&own_pk, 3_000), chunk).unwrap();
+        assert_eq!(*opened, real);
+
+        // NET-187, NET-188: a day later the fetch of the two weeks is due,
+        // once in the week.
+        let work = client
+            .dead_channel_work(now + 86_400, epoch, &[], &mut rng)
+            .unwrap();
+        let reads: Vec<[u8; 32]> = work
+            .iter()
+            .filter_map(|step| match step {
+                DeadWork::Read { handle, .. } => Some(*handle),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            reads,
+            [
+                secret.handle(&peer_pk, 3_000),
+                secret.handle(&peer_pk, 2_999)
+            ]
+        );
+        let again = client
+            .dead_channel_work(now + 2 * 86_400, epoch, &[], &mut rng)
+            .unwrap();
+        assert!(!again
+            .iter()
+            .any(|step| matches!(step, DeadWork::Read { .. })));
+
+        // NET-184, NET-185: the blob of the week is there, the next week
+        // writes a new one, and the one before it goes.
+        let erase = client
+            .dead_blob_written(
+                conversation,
+                3_000,
+                Secret::new([8; 32]),
+                vec![[1; 32], [2; 32]],
+                &mut rng,
+            )
+            .unwrap();
+        assert!(erase.is_none());
+        let work = client
+            .dead_channel_work(now + 3 * 86_400, epoch, &[], &mut rng)
+            .unwrap();
+        assert!(!work
+            .iter()
+            .any(|step| matches!(step, DeadWork::Write { .. })));
+        let work = client
+            .dead_channel_work(now + 7 * 86_400, epoch + 168, &[], &mut rng)
+            .unwrap();
+        assert!(work
+            .iter()
+            .any(|step| matches!(step, DeadWork::Write { week: 3_001, .. })));
+        let erase = client
+            .dead_blob_written(
+                conversation,
+                3_001,
+                Secret::new([9; 32]),
+                vec![[3; 32], [4; 32]],
+                &mut rng,
+            )
+            .unwrap();
+        assert!(matches!(
+            erase,
+            Some(DeadWork::Erase { handle, ref relays, .. })
+                if handle == secret.handle(&own_pk, 3_000) && *relays == [[1; 32], [2; 32]]
+        ));
+
+        // NET-190: the peer moved, the channel lives, and the last blob goes.
+        let erase = client.dead_channel_ended(conversation, &mut rng).unwrap();
+        assert!(
+            matches!(erase, Some(DeadWork::Erase { handle, .. }) if handle == secret.handle(&own_pk, 3_001))
+        );
+        assert!(client
+            .dead_channel_work(now + 8 * 86_400, epoch + 168, &[], &mut rng)
+            .unwrap()
+            .is_empty());
+
+        // NET-186, NET-193: a record with no receipt for seven days makes the
+        // channel silent, and it goes to the send path again.
+        let mut draft = client.new_draft(conversation);
+        draft.set_text(&units("are you there")).unwrap();
+        let message = client
+            .send_draft(draft, (now + 8 * 86_400) * 1_000, &mut rng)
+            .unwrap();
+        while client.take_outgoing().is_some() {}
+        client
+            .set_delivery(&message, Delivery::Accepted, &mut rng)
+            .unwrap();
+        let later_ms = (now + 16 * 86_400) * 1_000;
+        assert!(client
+            .silent_conversations(later_ms - 2 * 86_400 * 1_000)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            client.silent_conversations(later_ms).unwrap(),
+            [conversation]
+        );
+        client.resend_unreceipted(conversation).unwrap();
+        let again = client.take_outgoing().unwrap();
+        assert_eq!(again.message, message);
+        assert!(client.take_outgoing().is_none());
+    }
+
+    #[test]
     fn a_handle_group_rotates_after_seven_days_and_its_old_handle_leaves() {
         use umbra_core::notify::{ndr::Ndr, ROTATE_INTERVAL};
         use umbra_crypto::secret::Secret;

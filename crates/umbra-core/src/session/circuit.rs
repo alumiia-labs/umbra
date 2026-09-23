@@ -7,7 +7,10 @@
 //! cells through the link of the transport crate, and it takes a cover
 //! cell from here when the cover clock ticks with nothing ready.
 
-use alloc::{collections::BTreeMap, vec::Vec};
+use alloc::{
+    collections::{BTreeMap, VecDeque},
+    vec::Vec,
+};
 
 use umbra_onion::circuit::Circuit;
 use umbra_queue::Reject;
@@ -80,7 +83,13 @@ pub struct CircuitSession {
     batcher: Batcher,
     /// The handle of each command that holds no answer yet, by `corr_id`.
     pending: BTreeMap<[u8; 16], u64>,
+    /// The last `SUB` commands, whose only answer is a `NACK`: a queue
+    /// that the relay does not hold (Part 3 `NET-324`).
+    watched: VecDeque<([u8; 16], u64)>,
 }
+
+/// How many `SUB` commands a session watches for a `NACK`.
+const WATCHED_SUBS: usize = 256;
 
 impl CircuitSession {
     /// A session over a built circuit. `relay_session_pk` is the `er` of
@@ -92,6 +101,7 @@ impl CircuitSession {
             relay_session_pk,
             batcher: Batcher::new(range),
             pending: BTreeMap::new(),
+            watched: VecDeque::new(),
         }
     }
 
@@ -141,7 +151,8 @@ impl CircuitSession {
         self.batcher.push(cmd, encoded)?;
         // A relay gives these no answer but a `NACK`, thus nothing waits
         // for one. A `NACK` of one of them names no command here, and
-        // `WIR-323` drops it: the records of a lost `ACK` come again.
+        // `WIR-323` drops it: the records of a lost `ACK` come again. A
+        // `SUB` is the one that the session watches below.
         // A `CRNW` of Part 13 has no answer at all (`ATT-126`), and neither
         // has an `NBIND` (`NTF-129`). Of the group range only a `GNEW` and
         // a `GPOST` are answered (§6.4.5).
@@ -165,6 +176,14 @@ impl CircuitSession {
         );
         if awaits {
             self.pending.insert(corr_id, handle);
+        }
+        // A `SUB` has no answer, and a `NACK` of it names its queue as gone.
+        if cmd == Cmd::Sub {
+            self.watched.push_back((corr_id, handle));
+            if self.watched.len() > WATCHED_SUBS {
+                self.watched.pop_front();
+            }
+            return Ok(true);
         }
         Ok(awaits)
     }
@@ -254,8 +273,15 @@ impl CircuitSession {
             Cmd::Nack => {
                 let nack = NackPayload::parse(command.payload)?;
                 // WIR-323: a NACK that names no command of this session.
+                let watched = self
+                    .watched
+                    .iter()
+                    .position(|(corr_id, _)| *corr_id == nack.corr_id)
+                    .and_then(|at| self.watched.remove(at))
+                    .map(|(_, handle)| handle);
                 self.pending
                     .remove(&nack.corr_id)
+                    .or(watched)
                     .map(|handle| Event::Rejected {
                         handle,
                         reason: reject_of(nack.reason),

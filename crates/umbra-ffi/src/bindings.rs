@@ -954,10 +954,32 @@ struct Inner {
     next_notify_tag: u64,
     /// Whether a handle group rotated in this run (`NTF-081`).
     rotated_in_run: bool,
+    /// The silent channels of the last check, and the time of the next
+    /// one (`NET-186`).
+    silent: Vec<crate::ConversationId>,
+    next_silence_check: u64,
+    /// The dead-channel work that an update of the node gave.
+    dead_work: Vec<crate::client::DeadWork>,
 }
 
 /// What one command of the transfer task belongs to.
 enum TransferWork {
+    /// The dead-channel blob of this device for one week (`NET-183`).
+    DeadWrite {
+        /// The conversation.
+        conversation: crate::ConversationId,
+        /// The week.
+        week: u32,
+        /// `cred_sk` of the blob, for its later `CDEL`.
+        cred: umbra_crypto::secret::Secret<32>,
+    },
+    /// The dead-channel blob of the peer for one week (`NET-186`).
+    DeadRead {
+        /// The conversation.
+        conversation: crate::ConversationId,
+        /// The key that opens it.
+        blob_key: umbra_crypto::secret::Secret<32>,
+    },
     /// The file of a message, and whether it goes up.
     File {
         /// The message.
@@ -1586,6 +1608,95 @@ impl Inner {
         }
     }
 
+    /// The dead-channel work of Part 3 §3.2.6 that is due: the silent
+    /// channels once each hour, and the blobs of this device and of each
+    /// peer.
+    fn pump_dead_channels(&mut self) {
+        if self.bridge.is_none() {
+            return;
+        }
+        let now = unix_now();
+        if now >= self.next_silence_check {
+            self.next_silence_check = now.saturating_add(3_600);
+            if let Ok(silent) = self.client.silent_conversations(unix_now_ms()) {
+                self.silent = silent;
+            }
+        }
+        let epoch = self.client.directory_epoch().unwrap_or(0);
+        let silent = self.silent.clone();
+        let Ok(work) = self
+            .client
+            .dead_channel_work(now, epoch, &silent, &mut OsRng)
+        else {
+            return;
+        };
+        for step in work {
+            self.send_dead_work(step);
+        }
+    }
+
+    fn send_dead_work(&mut self, step: crate::client::DeadWork) {
+        use crate::client::DeadWork;
+        use umbra_crypto::secret::Secret;
+        match step {
+            DeadWork::Rotate { contact } => {
+                if let Some(running) = &self.bridge {
+                    let _ = running.rotate_now(umbra_core::session::node::ContactId(contact));
+                }
+            }
+            DeadWork::Write {
+                conversation,
+                week,
+                handle,
+                cred,
+                read_pk,
+                chunk,
+            } => {
+                // One write of a blob runs at a time for a conversation.
+                let is_running = self.transfer_tags.values().any(|work| {
+                    matches!(work, TransferWork::DeadWrite { conversation: held, .. } if *held == conversation)
+                });
+                if is_running {
+                    return;
+                }
+                let tag = self.next_tag(TransferWork::DeadWrite {
+                    conversation,
+                    week,
+                    cred: Secret::new(*cred.expose()),
+                });
+                self.send_transfer(TransferCommand::WriteHandle {
+                    tag,
+                    handle,
+                    cred,
+                    read_pk,
+                    chunk,
+                    replaces: false,
+                });
+            }
+            DeadWork::Read {
+                conversation,
+                handle,
+                read,
+                blob_key,
+            } => {
+                let tag = self.next_tag(TransferWork::DeadRead {
+                    conversation,
+                    blob_key,
+                });
+                self.send_transfer(TransferCommand::ReadHandle { tag, handle, read });
+            }
+            DeadWork::Erase {
+                handle,
+                cred,
+                relays,
+            } => self.send_transfer(TransferCommand::Erase {
+                chunk_id: handle,
+                cred,
+                relays,
+            }),
+        }
+    }
+
     fn next_tag(&mut self, work: TransferWork) -> u64 {
         self.next_transfer_tag = self.next_transfer_tag.wrapping_add(1);
         self.transfer_tags.insert(self.next_transfer_tag, work);
@@ -1611,7 +1722,9 @@ impl Inner {
         if let Some(
             TransferCommand::Upload { tag, .. }
             | TransferCommand::Download { tag, .. }
-            | TransferCommand::FetchChunk { tag, .. },
+            | TransferCommand::FetchChunk { tag, .. }
+            | TransferCommand::WriteHandle { tag, .. }
+            | TransferCommand::ReadHandle { tag, .. },
         ) = refused
         {
             self.end_transfer(TransferUpdate::Failed { tag });
@@ -1684,8 +1797,53 @@ impl Inner {
             transfer_tags,
             ..
         } = self;
+        let mut dead_work = Vec::new();
         match update {
             TransferUpdate::Progress { .. } => {}
+            TransferUpdate::HandleWritten { tag, relays } => {
+                if let Some(TransferWork::DeadWrite {
+                    conversation,
+                    week,
+                    cred,
+                }) = transfer_tags.remove(&tag)
+                {
+                    if let Ok(Some(erase)) =
+                        client.dead_blob_written(conversation, week, cred, relays, &mut OsRng)
+                    {
+                        dead_work.push(erase);
+                    }
+                }
+            }
+            // NET-190: a blob that opens gives the address of the peer. A
+            // blob that does not open is an empty handle (`NET-192`).
+            TransferUpdate::HandleRead { tag, chunk } => {
+                if let Some(TransferWork::DeadRead {
+                    conversation,
+                    blob_key,
+                }) = transfer_tags.remove(&tag)
+                {
+                    let address = chunk.and_then(|chunk| {
+                        umbra_core::session::dead::open_blob(&blob_key, &chunk).ok()
+                    });
+                    let contact = client.contact_id_of(conversation);
+                    if let (Some(address), Ok(contact), Some(running)) =
+                        (address, contact, bridge.as_mut())
+                    {
+                        let contact = umbra_core::session::node::ContactId(contact);
+                        if running.peer_moved(contact, address).is_ok() {
+                            if let Ok(Some(erase)) =
+                                client.dead_channel_ended(conversation, &mut OsRng)
+                            {
+                                dead_work.push(erase);
+                            }
+                            // NET-193: each record with no receipt goes again.
+                            if client.resend_unreceipted(conversation).is_ok() {
+                                let _ = running.flush(client, &mut OsRng);
+                            }
+                        }
+                    }
+                }
+            }
             TransferUpdate::Uploaded { tag, uploaded } => match transfer_tags.remove(&tag) {
                 Some(TransferWork::File { message, .. }) => {
                     if client.upload_done(&message, &uploaded, &mut OsRng).is_ok() {
@@ -1783,6 +1941,9 @@ impl Inner {
         }
         if moved {
             self.pump_groups();
+        }
+        for step in dead_work {
+            self.send_dead_work(step);
         }
     }
 
@@ -1985,6 +2146,9 @@ pub fn init(
             notify_pending: BTreeMap::new(),
             next_notify_tag: 0,
             rotated_in_run: false,
+            silent: Vec::new(),
+            next_silence_check: 0,
+            dead_work: Vec::new(),
         }),
         changed: Condvar::new(),
         runtime: Mutex::new(None),
@@ -2074,9 +2238,12 @@ impl Handle {
             circuits_changed,
             notify_pending,
             rotated_in_run,
+            silent,
+            dead_work,
             ..
         } = &mut *inner;
         let ended = matches!(update, Update::Offline(_));
+        let is_tick = matches!(update, Update::Tick);
         match &update {
             Update::Circuits(chains) => {
                 circuits.clone_from(chains);
@@ -2097,6 +2264,36 @@ impl Handle {
                 ) {
                     for recipient_id in unbound {
                         let _ = running.notify_queue(recipient_id);
+                    }
+                }
+            }
+            // NET-182: a dead channel takes a new queue, and its blob names
+            // it.
+            Update::ChannelDead(contact) => {
+                if let Ok(conversation) = client.conversation_for(&contact.0) {
+                    let _ = client.channel_dead(conversation, unix_now(), &mut OsRng);
+                }
+                if let Some(running) = bridge.as_ref() {
+                    let _ = running.rotate_now(*contact);
+                }
+            }
+            Update::QueueRotated { contact, address } => {
+                if let Ok(conversation) = client.conversation_for(&contact.0) {
+                    let _ = client.dead_queue_rotated(conversation, address, &mut OsRng);
+                }
+            }
+            // NET-190, NET-193: the peer moved. The channel lives, and each
+            // record with no delivery receipt goes again.
+            Update::PeerMoved(contact) => {
+                if let Ok(conversation) = client.conversation_for(&contact.0) {
+                    if let Ok(Some(erase)) = client.dead_channel_ended(conversation, &mut OsRng) {
+                        dead_work.push(erase);
+                    }
+                    silent.retain(|held| *held != conversation);
+                    if client.resend_unreceipted(conversation).is_ok() {
+                        if let Some(running) = bridge.as_mut() {
+                            let _ = running.flush(client, &mut OsRng);
+                        }
                     }
                 }
             }
@@ -2182,6 +2379,13 @@ impl Handle {
         inner.pump_transfers();
         inner.pump_groups();
         inner.pump_ndr();
+        if is_tick {
+            inner.pump_dead_channels();
+        }
+        let work = core::mem::take(&mut inner.dead_work);
+        for step in work {
+            inner.send_dead_work(step);
+        }
         drop(inner);
         self.changed.notify_all();
     }

@@ -20,6 +20,7 @@ use umbra_transport::{
     race::{Plan, Wire},
     Dial,
 };
+use zeroize::Zeroizing;
 
 /// The entropy of the operating system. A client that cannot draw a random
 /// value stops, because each key and each identifier needs one.
@@ -82,8 +83,17 @@ pub enum Command {
     /// Make a notify queue of Part 8 §8.5.2. An [`Update::NotifyQueue`]
     /// with the same tag follows.
     MakeNotifyQueue(u64),
-    /// End a notify queue with a `DEL` (`NTF-103`, `NTF-105`).
+    /// End a notify queue with a `DEL` (`NTF-133`).
     EndNotifyQueue([u8; 32]),
+    /// Make a new queue for a dead channel (`NET-182`).
+    RotateNow(ContactId),
+    /// The dead-channel blob of the peer gave its address (`NET-190`).
+    PeerMoved {
+        /// The contact.
+        contact: ContactId,
+        /// The encoded `QueueAddress`.
+        address: Zeroizing<Vec<u8>>,
+    },
     /// Send the `NKEY` of an inbound queue. An [`Update::NotifyKey`]
     /// follows with the notification key of its relay (Part 8 §8.2.3).
     NotifyQueue([u8; 32]),
@@ -152,6 +162,20 @@ pub enum Update {
     },
     /// An inbound queue of a contact ended at the end of its rotation.
     QueueEnded([u8; 32]),
+    /// A relay refused a record to a contact with `REJECTED` (`NET-182`).
+    ChannelDead(ContactId),
+    /// A contact reads a new queue, at this address.
+    QueueRotated {
+        /// The contact.
+        contact: ContactId,
+        /// The encoded `QueueAddress`.
+        address: Zeroizing<Vec<u8>>,
+    },
+    /// The peer gave a new address on the channel.
+    PeerMoved(ContactId),
+    /// A minute of a ready run passed. The work of weeks and hours, as the
+    /// dead-channel blob of Part 3 §3.2.6, runs at it.
+    Tick,
     /// The relay of an inbound queue answered its `NKEY`.
     NotifyKey {
         /// The queue.
@@ -365,6 +389,7 @@ pub async fn run_client(
                 if node.is_ready() && now >= next_rotation_check {
                     next_rotation_check = now.saturating_add(60);
                     events.extend(node.rotate_due(now, &mut rng).unwrap_or_default());
+                    let _ = updates.send(Update::Tick);
                 }
                 events
             }
@@ -426,6 +451,12 @@ pub async fn run_client(
                     relay_ntf_pk,
                 },
                 ClientEvent::QueueEnded { queue } => Update::QueueEnded(queue),
+                ClientEvent::ChannelDead { contact } => Update::ChannelDead(contact),
+                ClientEvent::QueueRotated { contact, address } => Update::QueueRotated {
+                    contact,
+                    address: Zeroizing::new(address),
+                },
+                ClientEvent::PeerMoved { contact } => Update::PeerMoved(contact),
                 ClientEvent::CircuitLost => break 'run Ended::CircuitLost,
                 ClientEvent::CircuitAged => break 'run Ended::Aged,
             };
@@ -500,6 +531,12 @@ pub async fn run_client(
                 }
                 Command::EndNotifyQueue(recipient_id) => {
                     let _ = node.end_notify_queue(&recipient_id, &mut rng);
+                }
+                Command::RotateNow(contact) => {
+                    let _ = node.rotate_now(&contact);
+                }
+                Command::PeerMoved { contact, address } => {
+                    let _ = node.peer_moved(&contact, &address, now, &mut rng);
                 }
                 Command::NotifyQueue(recipient_id) => {
                     let _ = node.notify_queue(&recipient_id, &mut rng);

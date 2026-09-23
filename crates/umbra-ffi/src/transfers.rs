@@ -12,6 +12,7 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use tokio::sync::mpsc;
 use umbra_core::{
     attach::{
+        handle::{HandleRead, HandleWrite},
         place::AttachmentRelay,
         transfer::{ChunkFetch, Download, Progress, Shape, Upload, Uploaded},
     },
@@ -73,6 +74,31 @@ pub enum TransferCommand {
         /// The chunk.
         index: u32,
     },
+    /// Write one handle-addressed chunk (Part 13 §13.4.2). A
+    /// `HandleWritten` or a `Failed` follows.
+    WriteHandle {
+        /// A value of the caller, which comes back in the update.
+        tag: u64,
+        /// The `chunk_id`.
+        handle: [u8; 32],
+        /// `cred_sk` of the chunk.
+        cred: umbra_crypto::secret::Secret<32>,
+        /// The public half of `read_sk`.
+        read_pk: [u8; 32],
+        /// The padded chunk.
+        chunk: Vec<u8>,
+        /// Whether a chunk under this handle goes first (`ATT-138`).
+        replaces: bool,
+    },
+    /// Read one handle-addressed chunk. A `HandleRead` follows.
+    ReadHandle {
+        /// A value of the caller, which comes back in the update.
+        tag: u64,
+        /// The `chunk_id`.
+        handle: [u8; 32],
+        /// `read_sk` of the chunk.
+        read: umbra_crypto::secret::Secret<32>,
+    },
 }
 
 /// What the task tells the caller.
@@ -100,6 +126,20 @@ pub enum TransferUpdate {
         /// The plaintext.
         plain: Zeroizing<Vec<u8>>,
     },
+    /// The relays that hold a handle-addressed chunk.
+    HandleWritten {
+        /// The tag of the command.
+        tag: u64,
+        /// The relays.
+        relays: Vec<[u8; 32]>,
+    },
+    /// The chunk under a handle, or `None` when no relay holds one.
+    HandleRead {
+        /// The tag of the command.
+        tag: u64,
+        /// The chunk.
+        chunk: Option<Vec<u8>>,
+    },
     /// The transfer ended with no result. The caller can ask again.
     Failed {
         /// The tag of the command.
@@ -111,6 +151,8 @@ enum Active {
     One(Box<ChunkFetch>),
     Up(Box<Upload>),
     Down(Box<Download>),
+    Write(Box<HandleWrite>),
+    Read(Box<HandleRead>),
 }
 
 /// Runs the transfers until the link ends, or until no transfer is left for
@@ -135,7 +177,9 @@ pub async fn run_transfers(
             // erase the chunk at the end of its life (`ATT-046`).
             if let TransferCommand::Upload { tag, .. }
             | TransferCommand::Download { tag, .. }
-            | TransferCommand::FetchChunk { tag, .. } = command
+            | TransferCommand::FetchChunk { tag, .. }
+            | TransferCommand::WriteHandle { tag, .. }
+            | TransferCommand::ReadHandle { tag, .. } = command
             {
                 let _ = updates.send(TransferUpdate::Failed { tag: *tag });
             }
@@ -192,11 +236,22 @@ pub async fn run_transfers(
                     idle_since = tokio::time::Instant::now();
                 }
                 let mut failed = Vec::new();
+                let mut read = Vec::new();
                 for (tag, transfer) in &mut active {
                     let ticked = match transfer {
                         Active::One(fetch) => fetch.tick(&mut node, &mut rng),
                         Active::Up(upload) => upload.tick(&mut node, &mut rng),
                         Active::Down(download) => download.tick(&mut node, &mut rng),
+                        Active::Write(write) => write.tick(&mut node, &mut rng),
+                        // A read that no relay answered ends at a tick.
+                        Active::Read(reading) => match reading.tick(&mut node, &mut rng) {
+                            Ok(Progress::Done(chunk)) => {
+                                read.push((*tag, chunk));
+                                Ok(())
+                            }
+                            Ok(Progress::Running(..)) => Ok(()),
+                            Err(error) => Err(error),
+                        },
                     };
                     if ticked.is_err() {
                         failed.push(*tag);
@@ -205,6 +260,10 @@ pub async fn run_transfers(
                 for tag in failed {
                     active.remove(&tag);
                     let _ = updates.send(TransferUpdate::Failed { tag });
+                }
+                for (tag, chunk) in read {
+                    active.remove(&tag);
+                    let _ = updates.send(TransferUpdate::HandleRead { tag, chunk });
                 }
                 // CIRCUIT_BUILD_TIMEOUT: a build that no relay answers ends,
                 // and a run with no circuit left ends with it.
@@ -224,6 +283,8 @@ pub async fn run_transfers(
                             Active::One(fetch) => fetch.owns(handle),
                             Active::Up(upload) => upload.owns(handle),
                             Active::Down(download) => download.owns(handle),
+                            Active::Write(write) => write.owns(handle),
+                            Active::Read(read) => read.owns(handle),
                         };
                         owns.then_some(*tag)
                     });
@@ -264,6 +325,24 @@ pub async fn run_transfers(
                                     tag,
                                     plain: Zeroizing::new(plain),
                                 },
+                            }),
+                        Active::Write(write) => write
+                            .on_outcome(&mut node, handle, outcome, &mut rng)
+                            .map(|progress| match progress {
+                                Progress::Running(done, total) => {
+                                    TransferUpdate::Progress { tag, done, total }
+                                }
+                                Progress::Done(relays) => {
+                                    TransferUpdate::HandleWritten { tag, relays }
+                                }
+                            }),
+                        Active::Read(read) => read
+                            .on_outcome(&mut node, handle, outcome, &mut rng)
+                            .map(|progress| match progress {
+                                Progress::Running(done, total) => {
+                                    TransferUpdate::Progress { tag, done, total }
+                                }
+                                Progress::Done(chunk) => TransferUpdate::HandleRead { tag, chunk },
                             }),
                     };
                     let update = step.unwrap_or(TransferUpdate::Failed { tag });
@@ -329,6 +408,42 @@ pub async fn run_transfers(
                         let _ = node.chunk(relay, chunk_id, job, &mut rng);
                     }
                     idle_since = tokio::time::Instant::now();
+                }
+                TransferCommand::WriteHandle {
+                    tag,
+                    handle,
+                    cred,
+                    read_pk,
+                    chunk,
+                    replaces,
+                } => {
+                    let started = HandleWrite::new(handle, cred, read_pk, chunk, replaces, &relays)
+                        .and_then(|mut write| {
+                            write.tick(&mut node, &mut rng)?;
+                            Ok(write)
+                        });
+                    match started {
+                        Ok(write) => {
+                            active.insert(tag, Active::Write(Box::new(write)));
+                        }
+                        Err(_) => {
+                            let _ = updates.send(TransferUpdate::Failed { tag });
+                        }
+                    }
+                }
+                TransferCommand::ReadHandle { tag, handle, read } => {
+                    let mut reading = HandleRead::new(handle, read, &relays);
+                    match reading.tick(&mut node, &mut rng) {
+                        Ok(Progress::Running(..)) => {
+                            active.insert(tag, Active::Read(Box::new(reading)));
+                        }
+                        Ok(Progress::Done(chunk)) => {
+                            let _ = updates.send(TransferUpdate::HandleRead { tag, chunk });
+                        }
+                        Err(_) => {
+                            let _ = updates.send(TransferUpdate::Failed { tag });
+                        }
+                    }
                 }
                 TransferCommand::Download { tag, descriptor } => {
                     let started =

@@ -1310,6 +1310,7 @@ fn a_ceremony_gives_one_code_and_only_the_user_verifies() {
 
 #[test]
 fn a_stored_contact_of_the_first_version_continues() {
+    const TAIL: usize = 32 + 8 + 32 + 8 + 1 + 129;
     const ALICE: usize = 0;
     const BOB: usize = 1;
     let mut network = Network::new();
@@ -1326,11 +1327,13 @@ fn a_stored_contact_of_the_first_version_continues() {
     // the salt, the key of the peer, and then the channel. The two queues
     // of such a contact live at one relay, and the channel names it. Nor
     // did it hold the tail of version 0x03: the contact, the time of the
-    // queue, and the state of a rotation.
+    // queue, the state of a rotation, and the address of the own queue,
+    // which the bundle of the inviter gave.
     for state in network.stored[ALICE].contacts.values_mut() {
         assert_eq!(state[0], 0x03);
+        assert_eq!(state[state.len() - 130], 1);
         state[0] = 0x01;
-        state.truncate(state.len() - (32 + 8 + 32 + 8));
+        state.truncate(state.len() - TAIL);
         state.drain(1 + 16 + 32..1 + 16 + 32 + 32);
     }
     network.restart(ALICE, 0x41);
@@ -1348,10 +1351,13 @@ fn a_stored_contact_of_the_first_version_continues() {
         .values()
         .all(|state| state[0] == 0x03 && state[49..81] == queue_relay));
 
-    // Version 0x02 named the relay and held no tail.
+    // Version 0x02 named the relay and held no tail. A contact of the first
+    // version holds no address of its own queue, thus its tail ends with
+    // the flag of none.
     for state in network.stored[ALICE].contacts.values_mut() {
+        assert_eq!(state.last(), Some(&0));
         state[0] = 0x02;
-        state.truncate(state.len() - (32 + 8 + 32 + 8));
+        state.truncate(state.len() - (TAIL - 129));
     }
     network.restart(ALICE, 0x41);
     let now = network.now;

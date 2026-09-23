@@ -13,6 +13,7 @@ use umbra_core::{
     store::{engine::Backend, wrap::SecureElement},
 };
 use umbra_crypto::rand_core::CryptoRng;
+use zeroize::Zeroizing;
 
 use crate::{
     client::Client,
@@ -77,6 +78,16 @@ impl Bridge {
     /// Makes a notify queue of Part 8 §8.5.2 under a tag of the caller.
     pub fn make_notify_queue(&self, tag: u64) -> Result<(), Error> {
         self.command(Command::MakeNotifyQueue(tag))
+    }
+
+    /// Makes a new queue for a dead channel (`NET-182`).
+    pub fn rotate_now(&self, contact: ContactId) -> Result<(), Error> {
+        self.command(Command::RotateNow(contact))
+    }
+
+    /// The peer moved to `address` (`NET-190`).
+    pub fn peer_moved(&self, contact: ContactId, address: Zeroizing<Vec<u8>>) -> Result<(), Error> {
+        self.command(Command::PeerMoved { contact, address })
     }
 
     /// Ends a notify queue with a `DEL`.
@@ -182,6 +193,10 @@ impl Bridge {
             Update::Circuits(_)
             | Update::Queues(_)
             | Update::QueueEnded(_)
+            | Update::ChannelDead(_)
+            | Update::QueueRotated { .. }
+            | Update::PeerMoved(_)
+            | Update::Tick
             | Update::NotifyKey { .. }
             | Update::NotifyQueue { .. }
             | Update::Digest { .. } => None,

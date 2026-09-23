@@ -1497,3 +1497,166 @@ fn a_dead_channel_blob_goes_to_its_placement_and_the_peer_reads_it() {
     );
     assert_eq!(read_handle(&mut mesh, READER, read), Some(chunk));
 }
+
+/// Connects one more node for transfers to the ingress, and returns its
+/// index.
+fn add_transfer_node(mesh: &mut Mesh, seed: u8) -> usize {
+    let index = mesh.clients.len();
+    let link = 50_000 + index as LinkId;
+    mesh.clients.push(client(seed));
+    mesh.links.push(link);
+    mesh.stored.push(BTreeMap::new());
+    mesh.inboxes.push(VecDeque::new());
+    mesh.events.push(Vec::new());
+    mesh.seeds.push(seed);
+    mesh.peers[0].push((link, Peer::Client(index)));
+    use_transfer_node(mesh, index, seed);
+    mesh.settle();
+    mesh.take_events(index);
+    index
+}
+
+#[test]
+fn two_contacts_whose_queues_lapsed_meet_again_through_their_blobs() {
+    use umbra_core::{
+        attach::handle::{HandleRead, HandleWrite},
+        session::{
+            dead::{open_blob, seal_blob},
+            node::stored_dead_channel,
+        },
+    };
+    use umbra_queue::params::QUEUE_IDLE_TTL;
+    const ALICE: usize = 0;
+    const BOB: usize = 1;
+    let mut mesh = Mesh::new(&[0x81, 0x82]);
+    mesh.settle();
+    mesh.take_events(ALICE);
+    mesh.take_events(BOB);
+    mesh.clients[ALICE].invite(&mut Rng(1)).unwrap();
+    mesh.settle();
+    let events = mesh.take_events(ALICE);
+    let [ClientEvent::Invitation { bundle, .. }] = &events[..] else {
+        panic!("{events:?}");
+    };
+    mesh.clients[BOB]
+        .accept(bundle.clone(), &mut Rng(2))
+        .unwrap();
+    mesh.settle();
+    mesh.settle();
+    let contacts = [
+        contact_of(&mesh.take_events(ALICE)),
+        contact_of(&mesh.take_events(BOB)),
+    ];
+    let now = mesh.now;
+    mesh.clients[BOB]
+        .send(&contacts[BOB], &text(1, "first"), now, &mut Rng(3))
+        .unwrap();
+    mesh.settle();
+    assert_eq!(texts_of(mesh.take_events(ALICE)), [b"first"]);
+
+    // Both parties stay away past QUEUE_IDLE_TTL, and the relays drop the
+    // two queues.
+    mesh.now += QUEUE_IDLE_TTL + 3_600;
+    for relay in 0..LAYERS.len() {
+        let now = mesh.now;
+        let outputs = mesh.relays[relay].sweep(now, &mut Rng(4));
+        mesh.route(relay, outputs);
+    }
+    for client in [ALICE, BOB] {
+        let seed = mesh_seed_of(&mesh, client);
+        mesh.restart(client, seed);
+    }
+    mesh.settle();
+
+    // NET-324: the SUB of each finds no queue, and each takes a new one.
+    // Its address goes to the queue of the peer, which is gone too, thus
+    // each channel is dead (NET-182).
+    let mut addresses = Vec::new();
+    for client in [ALICE, BOB] {
+        rotate(&mut mesh, client, &contacts[client]);
+        mesh.settle();
+        let events = mesh.take_events(client);
+        let address = events
+            .iter()
+            .find_map(|event| match event {
+                ClientEvent::QueueRotated { address, .. } => Some(address.clone()),
+                _ => None,
+            })
+            .expect("the address of the new queue");
+        addresses.push(address);
+        assert!(
+            events.contains(&ClientEvent::ChannelDead {
+                contact: contacts[client]
+            }),
+            "{events:?}"
+        );
+    }
+
+    // NET-183: each writes its blob for the week, and NET-186 each reads
+    // the one of the peer.
+    let relays: Vec<AttachmentRelay> = (3..7).map(holder).collect();
+    let week = 3_000;
+    let secrets: Vec<_> = [ALICE, BOB]
+        .into_iter()
+        .map(|client| {
+            let root = RootIdentity::new(Secret::new([mesh_seed_of(&mesh, client); 32]));
+            stored_dead_channel(&mesh.stored[client][&contacts[client]], &root).unwrap()
+        })
+        .collect();
+    let movers = [
+        add_transfer_node(&mut mesh, 0x81),
+        add_transfer_node(&mut mesh, 0x82),
+    ];
+    for client in [ALICE, BOB] {
+        let (secret, own_pk, _) = &secrets[client];
+        let read = secret.read_secret(own_pk, week);
+        let read_pk = *XPublic::from(&StaticSecret::from(*read.expose())).as_bytes();
+        let chunk = seal_blob(&secret.blob_key(own_pk, week), &addresses[client], [7; 24]).unwrap();
+        let write = HandleWrite::new(
+            secret.handle(own_pk, week),
+            Secret::new([0x40 + client as u8; 32]),
+            read_pk,
+            chunk,
+            false,
+            &relays,
+        )
+        .unwrap();
+        write_handle(&mut mesh, movers[client], write);
+    }
+    for client in [ALICE, BOB] {
+        let (secret, _, peer_pk) = &secrets[client];
+        let read = HandleRead::new(
+            secret.handle(peer_pk, week),
+            secret.read_secret(peer_pk, week),
+            &relays,
+        );
+        let chunk = read_handle(&mut mesh, movers[client], read).expect("the blob of the peer");
+        let address = open_blob(&secret.blob_key(peer_pk, week), &chunk).unwrap();
+        assert_eq!(*address, addresses[1 - client]);
+        // NET-190, NET-191: the peer moved, and the own address goes to it.
+        let now = mesh.now;
+        mesh.clients[client]
+            .peer_moved(&contacts[client], &address, now, &mut Rng(5))
+            .unwrap();
+    }
+    mesh.settle();
+    mesh.settle();
+    for client in [ALICE, BOB] {
+        assert!(mesh.take_events(client).contains(&ClientEvent::PeerMoved {
+            contact: contacts[client]
+        }));
+    }
+
+    // The two talk again.
+    let now = mesh.now;
+    mesh.clients[ALICE]
+        .send(&contacts[ALICE], &text(6, "found you"), now, &mut Rng(6))
+        .unwrap();
+    mesh.clients[BOB]
+        .send(&contacts[BOB], &text(7, "and you"), now, &mut Rng(7))
+        .unwrap();
+    mesh.settle();
+    mesh.settle();
+    assert_eq!(texts_of(mesh.take_events(BOB)), [b"found you"]);
+    assert_eq!(texts_of(mesh.take_events(ALICE)), [b"and you"]);
+}

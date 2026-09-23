@@ -446,6 +446,20 @@ delivery receipt `DEAD_CHANNEL_SILENCE` after the send. Part 3 §3.5.4 rule
 `NET-041` makes a delivery receipt mandatory. Thus a silent channel shows a
 peer that is offline, or a peer that cannot read the queue.
 
+**[NET-324]** A client whose `SUB` of the current inbound queue of a contact
+gets a `NACK` with reason `REJECTED` MUST make a new queue for that contact,
+as at a rotation. The relay holds no such queue, thus no record of the peer
+reaches the client there. The address of the new queue goes to the peer in
+a record of kind `0x33`, and the blob of rule 7 carries it when that record
+does not arrive.
+
+> *Cause of `NET-324`.* Two contacts that lapse past `QUEUE_IDLE_TTL` lose
+> both queues. Each finds its channel dead at its next `SEND`, and each
+> reads the blob of the other. Rule 9 then has each send "its own current
+> `QueueAddress`", and that address named the queue that the relay dropped.
+> The two channels stayed dead. A `SUB` is the first command that shows the
+> loss, thus it starts the new queue.
+
 The two parties hold the pairwise identities of Part 4 §4.2.2, and a restore
 keeps them. Each party derives one secret from the two X25519 keys. From that
 secret, it derives the handle, the read key, and the content key of a

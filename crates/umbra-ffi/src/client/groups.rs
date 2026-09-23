@@ -2547,7 +2547,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
     /// Each notify queue that ends: each one of a group that this device
     /// no longer serves, and each one that a new queue replaced once both replicas took the new
-    /// `GNREG` (`NTF-103`, `NTF-105`).
+    /// `GNREG` (`NTF-105`, `NTF-132`).
     pub fn notify_endings_due(&self) -> Result<Vec<NotifyEnding>, Error> {
         let mut out = Vec::new();
         for conversation in self.group_conversations()? {

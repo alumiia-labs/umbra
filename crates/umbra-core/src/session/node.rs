@@ -21,6 +21,7 @@ use alloc::{
 
 use umbra_crypto::{
     auth::CommandAuthKey,
+    dead::DeadChannel,
     handshake::{nk::RelayStatic, xk::SessionKeys},
     hierarchy::RootIdentity,
     kem::KeyPair,
@@ -214,6 +215,26 @@ pub enum ClientEvent {
     /// The runtime ends the run and starts a new one at once, and nothing
     /// failed.
     CircuitAged,
+    /// The peer gave a new address in a record of kind `0x33`, thus a
+    /// dead channel lives again (`NET-176`, `NET-191`).
+    PeerMoved {
+        /// The contact.
+        contact: ContactId,
+    },
+    /// A relay refused a `SEND` to a contact with `REJECTED`: the queue of
+    /// the peer is gone, and the channel is dead (Part 3 §3.2.6).
+    ChannelDead {
+        /// The contact.
+        contact: ContactId,
+    },
+    /// A contact reads a new inbound queue, and its address went to the
+    /// peer. The dead-channel blob of `NET-183` names it.
+    QueueRotated {
+        /// The contact.
+        contact: ContactId,
+        /// The encoded `QueueAddress` of the new queue.
+        address: Vec<u8>,
+    },
     /// An inbound queue of a contact ended at the end of its rotation
     /// (`NET-178`). Its push binding goes with it.
     QueueEnded {
@@ -611,8 +632,16 @@ enum Waiting {
     Group(Box<GroupWait>),
     Queue(Box<QueueKeys>),
     UserSend(u64),
+    /// A `SEND` to a contact, with the handle of the user when a user
+    /// record rides in it.
+    Contact {
+        contact: [u8; 32],
+        user: Option<u64>,
+    },
     /// The `NKEY` of this inbound queue.
     Notify([u8; 32]),
+    /// The `SUB` of this inbound queue.
+    Subscribe([u8; 32]),
     /// An `IRES` or an `IPUT` of the invitation on this queue.
     Link([u8; 32]),
     Blob(Box<BlobWait>),
@@ -665,6 +694,10 @@ struct Contact {
     previous_relay: [u8; 32],
     /// The time of the rotation that runs, which starts `ROTATE_GRACE`.
     rotated_at: u64,
+    /// The encoded `QueueAddress` of the inbound queue, which goes to the
+    /// peer again after a dead channel (`NET-191`). A store of an earlier
+    /// form holds none, and a rotation gives one.
+    own_address: Option<Zeroizing<Vec<u8>>>,
 }
 
 /// The two pairwise identity keys of a stored contact: the key of this
@@ -689,6 +722,23 @@ fn stored_version(reader: &mut Reader<'_>) -> Result<bool, Error> {
         0x01 => Ok(false),
         _ => Err(Error::Malformed),
     }
+}
+
+/// The dead-channel secret of a stored contact (Part 3 §3.2.6), with the
+/// pairwise key of this device and the one of the peer. The first names
+/// the handle of this device as a writer, and the second the one of the
+/// peer.
+pub fn stored_dead_channel(
+    state: &[u8],
+    root: &RootIdentity,
+) -> Result<(DeadChannel, [u8; 32], [u8; 32]), Error> {
+    let mut reader = Reader::new(state);
+    contact_version(&mut reader)?;
+    let salt: [u8; 16] = reader.array()?;
+    let peer_static: [u8; 32] = reader.array()?;
+    let own = root.pairwise_identity(&salt);
+    let secret = DeadChannel::new(&own, &peer_static)?;
+    Ok((secret, own.x25519_public(), peer_static))
 }
 
 /// Reads the version byte of a stored contact: `0x01`, `0x02`, or
@@ -837,6 +887,10 @@ pub struct ClientNode {
     notify: BTreeMap<[u8; 32], NotifyQueue>,
     /// The contacts whose new queue the relay makes now.
     rotating: BTreeSet<[u8; 32]>,
+    /// The contacts that take a new queue at the next check, whatever the
+    /// age of their queue: a dead channel (`NET-182`), or a peer that moved
+    /// while this device holds no address of its own queue (`NET-191`).
+    forced: BTreeSet<[u8; 32]>,
     /// The contacts whose channel moved since the last
     /// [`ClientNode::take_changes`].
     moved: BTreeSet<[u8; 32]>,
@@ -946,6 +1000,7 @@ impl ClientNode {
             halves: BTreeMap::new(),
             contacts: BTreeMap::new(),
             rotating: BTreeSet::new(),
+            forced: BTreeSet::new(),
             notify: BTreeMap::new(),
             moved: BTreeSet::new(),
             changes: Vec::new(),
@@ -976,6 +1031,13 @@ impl ClientNode {
             writer.u64(contact.since);
             writer.bytes(&contact.previous_relay);
             writer.u64(contact.rotated_at);
+            match &contact.own_address {
+                Some(address) => {
+                    writer.u8(1);
+                    writer.bytes(address);
+                }
+                None => writer.u8(0),
+            }
             changes.push(StateChange::Contact {
                 contact: ContactId(id),
                 state: writer.finish(),
@@ -1009,6 +1071,11 @@ impl ClientNode {
         } else {
             (*channel.inbound().recipient_id(), 0, ANY_RELAY, 0)
         };
+        let own_address = if version == CONTACT_STORED_VERSION && reader.u8()? == 1 {
+            Some(Zeroizing::new(reader.take(QUEUE_ADDRESS_LEN)?.to_vec()))
+        } else {
+            None
+        };
         reader.end()?;
         // A store of version 0x01 came from a network with one queue relay,
         // thus the two queues of its contact live at one relay, and the
@@ -1034,6 +1101,7 @@ impl ClientNode {
                 since,
                 previous_relay,
                 rotated_at,
+                own_address,
             },
         );
         Ok(ContactId(id))
@@ -1055,7 +1123,7 @@ impl ClientNode {
         Ok(id)
     }
 
-    /// Ends a notify queue (`NTF-103`, `NTF-105`): a `DEL` goes to its relay
+    /// Ends a notify queue (`NTF-133`): a `DEL` goes to its relay
     /// when a circuit serves it, and the node holds it no more. A relay that
     /// gets no `DEL` ends the queue at its idle lifetime.
     pub fn end_notify_queue<R: CryptoRng + ?Sized>(
@@ -1154,7 +1222,7 @@ impl ClientNode {
             // The address travels on the ratchet, thus a contact with no
             // sending chain waits.
             if due.is_none()
-                && (is_old || is_full)
+                && (is_old || is_full || self.forced.contains(id))
                 && held.channel.can_send()
                 && !self.rotating.contains(id)
             {
@@ -1169,6 +1237,40 @@ impl ClientNode {
             self.start_rotation(contact, now, rng)?;
         }
         Ok(out)
+    }
+
+    /// Makes a new queue for a contact at the next rotation check, whatever
+    /// the age of the current one (`NET-182`). A [`ClientEvent::QueueRotated`]
+    /// gives its address. A rotation that runs serves already.
+    pub fn rotate_now(&mut self, contact: &ContactId) -> Result<(), Error> {
+        let held = self.contacts.get(&contact.0).ok_or(Error::NoPath)?;
+        if held.channel.previous().is_none() && !self.rotating.contains(&contact.0) {
+            self.forced.insert(contact.0);
+        }
+        Ok(())
+    }
+
+    /// The peer moved to `address`, which its dead-channel blob gave
+    /// (`NET-190`): later records go there, and the address of the inbound
+    /// queue of this device goes to the peer on the ratchet (`NET-191`).
+    /// With no address of its own this device makes a new queue, whose
+    /// address goes the same way.
+    pub fn peer_moved<R: CryptoRng + ?Sized>(
+        &mut self,
+        contact: &ContactId,
+        address: &[u8],
+        now: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let parsed = QueueAddress::parse(address)?;
+        let held = self.contacts.get_mut(&contact.0).ok_or(Error::NoPath)?;
+        held.channel.accept_address(&parsed);
+        let own = held.own_address.clone();
+        self.moved.insert(contact.0);
+        match own {
+            Some(own) => self.send_control(contact.0, AppKind::QueueAddress, &own, now, rng),
+            None => self.rotate_now(contact),
+        }
     }
 
     /// Makes the new queue of a contact at a relay of another operator
@@ -1249,9 +1351,14 @@ impl ClientNode {
         held.previous_relay = core::mem::replace(&mut held.inbound_relay, relay);
         held.since = now;
         held.rotated_at = now;
+        held.own_address = Some(Zeroizing::new(address.to_vec()));
+        self.forced.remove(&contact);
         self.moved.insert(contact);
         self.send_control(contact, AppKind::QueueAddress, address, now, rng)?;
-        Ok(Vec::new())
+        Ok(alloc::vec![ClientEvent::QueueRotated {
+            contact: ContactId(contact),
+            address: address.to_vec(),
+        }])
     }
 
     /// Ends the rotation of a contact: the replaced queue takes a `DEL`
@@ -1392,11 +1499,17 @@ impl ClientNode {
             .chain(self.halves.values().map(|half| &half.inbound))
             .chain(self.notify.values().map(|held| &held.inbound));
         for inbound in stored.filter(|inbound| queues.contains(inbound.recipient_id())) {
-            commands.push(inbound.subscribe(&session_pk, random(rng))?);
-            commands.extend(inbound.acknowledge_again(&session_pk, random(rng))?);
+            let queue = *inbound.recipient_id();
+            commands.push((
+                inbound.subscribe(&session_pk, random(rng))?,
+                Waiting::Subscribe(queue),
+            ));
+            if let Some(command) = inbound.acknowledge_again(&session_pk, random(rng))? {
+                commands.push((command, Waiting::Other));
+            }
         }
-        for command in commands {
-            self.queue_command(command, Waiting::Other)?;
+        for (command, waiting) in commands {
+            self.queue_command(command, waiting)?;
         }
         self.pump()
     }
@@ -2603,7 +2716,11 @@ impl ClientNode {
             held.channel
                 .send(app, &session_pk, random(rng), random(rng), now, rng)?;
         self.moved.insert(contact);
-        self.queue_command(encoded, waiting)?;
+        let user = match waiting {
+            Waiting::UserSend(handle) => Some(handle),
+            _ => None,
+        };
+        self.queue_command(encoded, Waiting::Contact { contact, user })?;
         self.pump()
     }
 
@@ -2966,7 +3083,13 @@ impl ClientNode {
                         out.extend(self.on_ids(*keys, &payload, rng)?);
                     }
                     // WIR-496: the QUOTA is the relay acknowledgment.
-                    (Some(Waiting::UserSend(user)), Cmd::Quota) => {
+                    (Some(Waiting::UserSend(user)), Cmd::Quota)
+                    | (
+                        Some(Waiting::Contact {
+                            user: Some(user), ..
+                        }),
+                        Cmd::Quota,
+                    ) => {
                         out.push(ClientEvent::Accepted { handle: user });
                     }
                     // NTF-112: the `NPK` comes first. The `NID` after it
@@ -3009,6 +3132,37 @@ impl ClientNode {
                             keys.handle
                         }
                         Some(Waiting::UserSend(user)) => user,
+                        // A `SUB` of the current queue of a contact that the
+                        // relay does not hold: the queue is gone, thus the
+                        // peer cannot write to it, and the contact takes a
+                        // new one (Part 3 §3.2.6, `NET-324`).
+                        Some(Waiting::Subscribe(queue)) => {
+                            if reason == Reject::Rejected {
+                                if let Some(contact) = self.contact_of(&queue) {
+                                    let is_current =
+                                        self.contacts.get(&contact).is_some_and(|held| {
+                                            held.channel.inbound().recipient_id() == &queue
+                                        });
+                                    if is_current {
+                                        self.forced.insert(contact);
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                        // NET-182: a `REJECTED` for a `SEND` under the
+                        // newest address of a contact makes the channel dead.
+                        Some(Waiting::Contact { contact, user }) => {
+                            if reason == Reject::Rejected {
+                                out.push(ClientEvent::ChannelDead {
+                                    contact: ContactId(contact),
+                                });
+                            }
+                            match user {
+                                Some(user) => user,
+                                None => continue,
+                            }
+                        }
                         Some(Waiting::Link(queue)) => {
                             let setup = self.halves.get(&queue).and_then(|half| half.link.as_ref());
                             setup.map_or(handle, |link| link.handle)
@@ -3265,6 +3419,9 @@ impl ClientNode {
                             parsed.and_then(|parsed| QueueAddress::parse(parsed.body).ok());
                         if let Some(address) = address {
                             held.channel.accept_address(&address);
+                            out.push(ClientEvent::PeerMoved {
+                                contact: ContactId(contact),
+                            });
                         }
                     }
                     // The records of a ceremony are for the node, and the
@@ -3377,6 +3534,16 @@ impl ClientNode {
             }
         };
         let (keys, peer_static, outbound, role): (SessionKeys, [u8; 32], Outbound, Role) = finished;
+        // The address of the first queue of this device: the invitee gave it
+        // in flight 1, and the bundle of the inviter holds it.
+        let own_address = if half.opening.is_empty() {
+            Bundle::parse(&half.bundle).ok().and_then(|bundle| {
+                let mut out = Zeroizing::new(alloc::vec![0u8; QUEUE_ADDRESS_LEN]);
+                bundle.queue_address.encode(&mut out).ok().map(|_| out)
+            })
+        } else {
+            Some(Zeroizing::new(half.opening.clone()))
+        };
         let ratchet = Ratchet::new(keys, role, Width::W64, now, rng)?;
         self.contacts.insert(
             queue_id,
@@ -3390,6 +3557,7 @@ impl ClientNode {
                 since: now,
                 previous_relay: ANY_RELAY,
                 rotated_at: 0,
+                own_address,
             },
         );
         self.moved.insert(queue_id);
