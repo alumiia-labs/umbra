@@ -78,16 +78,20 @@ impl ClientLink {
 
     /// Frames `cell` into a cell capsule (`WIR-138`), keeps a copy in the
     /// resend window, and returns the capsule length. Fails when `seq`
-    /// would wrap (`WIR-139`) or the window is full.
+    /// would wrap (`WIR-139`). A full window drops its oldest frame
+    /// (`WIR-525`).
     pub fn send(&mut self, cell: &[u8], out: &mut [u8]) -> Result<usize, Error> {
         if !self.connected {
             return Err(Error::State);
         }
-        if self.next_seq >= SEQ_MAX || self.window.len() >= RESEND_WINDOW {
+        if self.next_seq >= SEQ_MAX {
             return Err(Error::State);
         }
         let seq = self.next_seq;
         let used = self.frame(seq, false, cell, out)?;
+        if self.window.len() >= RESEND_WINDOW {
+            self.window.pop_front();
+        }
         self.window.push_back((seq, cell.to_vec()));
         self.next_seq = self.next_seq.saturating_add(1);
         Ok(used)
@@ -323,6 +327,19 @@ impl RelayLink {
 mod tests {
     use super::*;
     use alloc::vec;
+
+    #[test]
+    fn a_full_window_drops_its_oldest_frame_and_refuses_no_send() {
+        let mut buf = vec![0u8; 40_000];
+        let (mut client, _) = ClientLink::open([1; 8], Secret::new([2; 32]), &mut buf).unwrap();
+        let cell = vec![7u8; 512];
+        // WIR-525: a long upload sends past the window.
+        for _ in 0..RESEND_WINDOW + 200 {
+            client.send(&cell, &mut buf).unwrap();
+        }
+        assert_eq!(client.window.len(), RESEND_WINDOW);
+        assert_eq!(client.window.front().map(|(seq, _)| *seq), Some(200));
+    }
 
     #[test]
     fn a_session_survives_a_connection_and_drops_a_duplicate() {

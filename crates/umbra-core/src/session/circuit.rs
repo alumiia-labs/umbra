@@ -142,8 +142,9 @@ impl CircuitSession {
         // A relay gives these no answer but a `NACK`, thus nothing waits
         // for one. A `NACK` of one of them names no command here, and
         // `WIR-323` drops it: the records of a lost `ACK` come again.
-        // A `CRNW` of Part 13 has no answer at all (`ATT-126`). Of the
-        // group range only a `GNEW` and a `GPOST` are answered (§6.4.5).
+        // A `CRNW` of Part 13 has no answer at all (`ATT-126`), and neither
+        // has an `NBIND` (`NTF-129`). Of the group range only a `GNEW` and
+        // a `GPOST` are answered (§6.4.5).
         const CRNW: u8 = 0x7A;
         let awaits = !matches!(
             cmd,
@@ -151,6 +152,7 @@ impl CircuitSession {
                 | Cmd::Sub
                 | Cmd::Unsub
                 | Cmd::Del
+                | Cmd::Nbind
                 | Cmd::Attachment(CRNW)
                 | Cmd::Group(
                     GroupCmd::Gsub

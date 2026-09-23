@@ -70,7 +70,7 @@ each column when a crate implements the requirement and a test covers it.
 | `NET` | 228 | 84 | 1 | 0 | 8 | **321** |
 | `IDN` | 120 | 43 | 1 | 0 | 5 | **169** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
-| `WIR` | 392 | 87 | 0 | 0 | 6 | **485** |
+| `WIR` | 393 | 87 | 0 | 0 | 6 | **486** |
 | `DEV` | 179 | 87 | 2 | 0 | 7 | **275** |
 | `NTF` | 74 | 31 | 0 | 0 | 2 | **107** |
 | `DIS` | 123 | 37 | 0 | 0 | 1 | **161** |
@@ -81,7 +81,7 @@ each column when a crate implements the requirement and a test covers it.
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
 | `IMP` | 112 | 41 | 0 | 0 | 2 | **155** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2230 | 718 | 7 | 0 | 53 | **3008** |
+| **All** | 2231 | 718 | 7 | 0 | 53 | **3009** |
 
 ## SCP — Scope and Conventions
 
@@ -1282,6 +1282,7 @@ Source: `spec/06-wire-format.md`
 | `WIR-522` | §6.4.5 | MUST | It | It MUST replace `own_pk` with the third value, and it MUST keep no previous `own_pk`: a command under the owner key that the `GKEY` replaced is refused at once. |  |  |
 | `WIR-523` | §6.6.11 | MUST | A request of scope `0x02` on a pairwise channel | A request of scope `0x02` on a pairwise channel MUST carry 1 plus the member index of the requester in `index`, and one that another member posts on the group queue for it keeps that value; the tag of a group record names its poster and not the member that lacks the epoch. |  |  |
 | `WIR-524` | §6.2.3 | MUST | A relay | A relay MUST send a `CircuitDestroy` under `NET-322` on the link of each neighbor of a circuit that it ends, with the `circ_id` that the circuit carries on that link. |  |  |
+| `WIR-525` | §6.2.2 | MUST | A sender | A sender MUST keep the last `RESEND_WINDOW` frames of a session for a resume, 1 000 frames, and MUST drop the oldest one when a new frame comes to a full window. |  |  |
 
 ## DEV — Device Sets
 

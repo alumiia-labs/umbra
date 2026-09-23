@@ -211,6 +211,16 @@ across two sessions to one relay.
 frames each cell that it sends with its own `seq`, and a client applies
 `WIR-141` to it.
 
+**[WIR-525]** A sender MUST keep the last `RESEND_WINDOW` frames of a session
+for a resume, 1 000 frames, and MUST drop the oldest one when a new frame
+comes to a full window. It MUST NOT refuse a frame for a full window. A frame
+that left the window is older than each frame in flight, and the end-to-end
+ARQ of Part 3 §3.7 covers its record.
+
+> *Cause of `WIR-525`.* The reference client refused each frame after its
+> first 1 000 on one session, because no signal released the window. An upload
+> of 270 chunks crossed that bound and failed with no relay at fault.
+
 **[WIR-138]** A sender MUST increase `seq` by one for each frame, and it MUST
 start at zero. **[WIR-139]** A sender MUST close the session before `seq` wraps.
 A `u24` gives 16 777 216 frames, and `CIRCUIT_MAX_CELLS` of Part 3 §3.4.3 is
