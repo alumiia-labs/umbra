@@ -66,6 +66,13 @@ threat model and its own trust boundary.
   MUST use the HPKE of AUX-6, and its key configuration and its request header
   MUST carry the suite identifiers of Part 5 §5.4 in place of the registry
   values of RFC 9180.
+  **[NTF-126]** The inner message of that OHTTP MUST be one `NdrRequest` of
+  §8.2.7 and its response one `NdrResponse`, with no Binary HTTP around
+  them. The request label MUST be `"message/umbra-ndr request"` and the
+  response label `"message/umbra-ndr response"` in place of the
+  `message/bhttp` labels of RFC 9458 §4.3 and §4.4, as RFC 9458 §4.6 permits
+  for another media type. The key configuration of the gateway MUST list one
+  suite, the UMBRA suite.
 
 ### 8.2.1 Token blinding
 

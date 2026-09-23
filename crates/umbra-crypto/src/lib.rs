@@ -24,6 +24,7 @@ pub mod hpke;
 pub mod kdf;
 pub mod kem;
 pub mod labels;
+pub mod ohttp;
 #[cfg(feature = "pow")]
 pub mod pow;
 pub mod queue;
