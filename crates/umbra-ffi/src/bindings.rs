@@ -952,6 +952,8 @@ struct Inner {
     /// The group of each notify queue that the run makes, by tag.
     notify_pending: BTreeMap<u64, crate::ConversationId>,
     next_notify_tag: u64,
+    /// Whether a handle group rotated in this run (`NTF-081`).
+    rotated_in_run: bool,
 }
 
 /// What one command of the transfer task belongs to.
@@ -1958,6 +1960,7 @@ pub fn init(
             ndr_in_flight: BTreeSet::new(),
             notify_pending: BTreeMap::new(),
             next_notify_tag: 0,
+            rotated_in_run: false,
         }),
         changed: Condvar::new(),
         runtime: Mutex::new(None),
@@ -2046,6 +2049,7 @@ impl Handle {
             circuits,
             circuits_changed,
             notify_pending,
+            rotated_in_run,
             ..
         } = &mut *inner;
         let ended = matches!(update, Update::Offline(_));
@@ -2055,11 +2059,18 @@ impl Handle {
                 *circuits_changed = true;
             }
             // NTF-112: each queue with no binding asks its relay for the
-            // notification key.
+            // notification key. NTF-007, NTF-081: one handle group that is
+            // due rotates in a run, and its queues bind again.
             Update::Queues(queues) => {
-                if let (Ok(unbound), Some(running)) =
-                    (client.queues_to_bind(queues, &mut OsRng), bridge.as_ref())
-                {
+                if !*rotated_in_run {
+                    *rotated_in_run = client
+                        .rotate_one_group(unix_now(), &mut OsRng)
+                        .unwrap_or(false);
+                }
+                if let (Ok(unbound), Some(running)) = (
+                    client.queues_to_bind(queues, unix_now(), &mut OsRng),
+                    bridge.as_ref(),
+                ) {
                     for recipient_id in unbound {
                         let _ = running.notify_queue(recipient_id);
                     }
@@ -2098,6 +2109,7 @@ impl Handle {
                 circuits.clear();
                 *circuits_changed = true;
                 notify_pending.clear();
+                *rotated_in_run = false;
             }
             _ => {}
         }

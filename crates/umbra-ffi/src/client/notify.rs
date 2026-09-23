@@ -5,10 +5,12 @@
 //!
 //! The store keeps what a registration needs across runs: a queue binds
 //! once, a group registers once, and a new endpoint registers each group
-//! again under its removal secret (`NTF-124`).
+//! again under its removal secret (`NTF-124`). A group rotates each 7 days
+//! and at each change of the contact set, one group in one run
+//! (`NTF-007`, `NTF-008`, `NTF-080`, `NTF-081`).
 
 use umbra_core::{
-    notify::{binding::Binding, MAX_QUEUES_PER_HANDLE},
+    notify::{binding::Binding, MAX_QUEUES_PER_HANDLE, ROTATE_INTERVAL},
     store::{engine::Backend, record::TableId, wrap::SecureElement},
 };
 use umbra_crypto::{aead, hash::sha3_256, rand_core::CryptoRng, secret::Secret};
@@ -28,9 +30,13 @@ const NOTIFY_QUEUE: TableId = TableId(0x1B);
 /// The push token of the platform as the NDR takes it: the carrier byte
 /// and its target (`NTF-123`).
 const PUSH_TOKEN_SETTING: &[u8] = b"push-token";
+/// The hash of the contact set at the last check of `NTF-008`.
+const CONTACT_SET_SETTING: &[u8] = b"push-contact-set";
 
 const RELAY_LEN: usize = 32 + 32 + 2;
-const GROUP_LEN: usize = 16 + 32 + 32 + 32 + 1 + 1 + 1;
+/// A group row of the first form, before the root and the rotation time.
+const GROUP_LEN_V1: usize = 16 + 32 + 32 + 32 + 1 + 1 + 1;
+const GROUP_LEN: usize = GROUP_LEN_V1 + 32 + 8;
 /// A group of pairwise queues.
 const PAIRWISE: u8 = 0;
 /// A group of notify queues, which holds no pairwise queue (`NTF-091`).
@@ -43,6 +49,8 @@ const UNREGISTERED: u8 = 0;
 const REGISTERED: u8 = 1;
 /// The NDR holds the group under an earlier endpoint.
 const STALE: u8 = 2;
+/// A rotation replaced the group, and its `NUNREG` waits (`NTF-007`).
+const RETIRED: u8 = 3;
 
 struct Relay {
     relay_id: [u8; 32],
@@ -58,6 +66,11 @@ struct Group {
     state: u8,
     count: u8,
     class: u8,
+    /// `k_ntf_root` of the group, which rotates with the triple
+    /// (`NTF-007`). A row of the first form takes the root of its relay.
+    root: Option<Secret<32>>,
+    /// The time of the last rotation, or 0.
+    rotated_at: u64,
 }
 
 struct Queue {
@@ -102,18 +115,21 @@ impl Relay {
 
 impl Group {
     fn encode(&self) -> Vec<u8> {
+        let root = self.root.as_ref().map_or([0u8; 32], |held| *held.expose());
         [
             self.handle.as_slice(),
             &self.relay_id,
             self.k_tok.expose(),
             self.removal.expose(),
             &[self.state, self.count, self.class],
+            &root,
+            &self.rotated_at.to_be_bytes(),
         ]
         .concat()
     }
 
     fn parse(bytes: &[u8]) -> Result<Self, Error> {
-        if bytes.len() != GROUP_LEN {
+        if bytes.len() != GROUP_LEN && bytes.len() != GROUP_LEN_V1 {
             return Err(Error::Malformed);
         }
         let mut at = 0;
@@ -122,6 +138,14 @@ impl Group {
         let k_tok = Secret::new(take(bytes, &mut at)?);
         let removal = Secret::new(take(bytes, &mut at)?);
         let [state, count, class] = take(bytes, &mut at)?;
+        let (root, rotated_at) = if bytes.len() == GROUP_LEN {
+            (
+                Some(Secret::new(take(bytes, &mut at)?)),
+                u64::from_be_bytes(take(bytes, &mut at)?),
+            )
+        } else {
+            (None, 0)
+        };
         Ok(Group {
             handle,
             relay_id,
@@ -130,6 +154,8 @@ impl Group {
             state,
             count,
             class,
+            root,
+            rotated_at,
         })
     }
 }
@@ -230,17 +256,139 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         rows: &[(TableId, Vec<u8>, Vec<u8>)],
         rng: &mut R,
     ) -> Result<(), Error> {
+        self.write_rows(rows, &[], rng)
+    }
+
+    /// Writes rows and deletes rows under their natural keys in one batch.
+    fn write_rows<R: CryptoRng + ?Sized>(
+        &mut self,
+        rows: &[(TableId, Vec<u8>, Vec<u8>)],
+        deleted: &[(TableId, Vec<u8>)],
+        rng: &mut R,
+    ) -> Result<(), Error> {
         let open = self.open_mut()?;
         let keyed: Vec<_> = rows
             .iter()
             .map(|(table, natural, value)| (*table, open.store.row_id(*table, natural), value))
             .collect();
+        let gone: Vec<_> = deleted
+            .iter()
+            .map(|(table, natural)| (*table, open.store.row_id(*table, natural)))
+            .collect();
         let mut batch = open.store.begin();
         for (table, row, value) in keyed {
             batch.put(table, row, None, value, rng)?;
         }
+        for (table, row) in gone {
+            batch.delete(table, row);
+        }
         batch.commit()?;
         Ok(())
+    }
+
+    /// The hash of the contact set, for `NTF-008`.
+    fn contact_set(&self) -> Result<[u8; 32], Error> {
+        let store = &self.open_ref()?.store;
+        let mut rows: Vec<_> = store
+            .list(TableId::CONTACT, None)?
+            .into_iter()
+            .map(|(row, _)| row)
+            .collect();
+        rows.sort_unstable();
+        let parts: Vec<&[u8]> = rows.iter().map(|row| row.as_slice()).collect();
+        Ok(sha3_256(&parts))
+    }
+
+    /// Rotates one handle group that is due: 7 days after its last
+    /// rotation, or at a change of the contact set (`NTF-007`, `NTF-008`).
+    /// The group takes a fresh handle, `k_tok`, removal secret, and
+    /// `k_ntf_root`, and each of its queues binds again under a new
+    /// `NKEY`, which draws a new `notifier_id`. The old handle waits for its
+    /// `NUNREG`. The caller rotates one group in one run (`NTF-080`,
+    /// `NTF-081`). The result says whether a group rotated.
+    pub fn rotate_one_group<R: CryptoRng + ?Sized>(
+        &mut self,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<bool, Error> {
+        if self.push_token()?.is_none() {
+            return Ok(false);
+        }
+        let mut groups = self.notify_groups()?;
+        let mut rows = Vec::new();
+        let set = self.contact_set()?;
+        let known = {
+            let store = &self.open_ref()?.store;
+            let row = store.row_id(SETTINGS, CONTACT_SET_SETTING);
+            store.get(SETTINGS, &row)?
+        };
+        // The first check records the set, and each later change of it
+        // makes each group due.
+        if known.as_deref() != Some(set.as_slice()) {
+            if known.is_some() {
+                for group in &mut groups {
+                    group.rotated_at = 0;
+                }
+            }
+            rows.push((SETTINGS, CONTACT_SET_SETTING.to_vec(), set.to_vec()));
+        }
+        let due = groups.iter().position(|group| {
+            group.state != RETIRED && now.saturating_sub(group.rotated_at) >= ROTATE_INTERVAL
+        });
+        let Some(at) = due else {
+            rows.extend(
+                groups
+                    .iter()
+                    .map(|group| (NOTIFY_GROUP, group.handle.to_vec(), group.encode())),
+            );
+            return self.put_rows(&rows, rng).map(|()| false);
+        };
+        let old = groups.swap_remove(at);
+        let old_handle = old.handle;
+        let mut fresh = Group {
+            handle: random(rng),
+            relay_id: old.relay_id,
+            k_tok: Secret::new(random(rng)),
+            removal: Secret::new(random(rng)),
+            state: UNREGISTERED,
+            count: 0,
+            class: old.class,
+            root: Some(Secret::new(random(rng))),
+            rotated_at: now,
+        };
+        let mut deleted = Vec::new();
+        // A handle that the NDR never held needs no NUNREG.
+        if old.state == UNREGISTERED {
+            deleted.push((NOTIFY_GROUP, old.handle.to_vec()));
+        } else {
+            let retired = Group {
+                state: RETIRED,
+                count: 0,
+                ..old
+            };
+            rows.push((NOTIFY_GROUP, retired.handle.to_vec(), retired.encode()));
+        }
+        let queues = self.open_ref()?.store.list(NOTIFY_QUEUE, None)?;
+        for (_, bytes) in queues {
+            let Ok(mut queue) = Queue::parse(&bytes) else {
+                continue;
+            };
+            // NTF-034: the group takes again the queues that it holds now.
+            if queue.handle == old_handle {
+                fresh.count = fresh.count.saturating_add(1);
+                queue.handle = fresh.handle;
+                queue.bound = false;
+                rows.push((NOTIFY_QUEUE, queue.recipient_id.to_vec(), queue.encode()));
+            }
+        }
+        rows.push((NOTIFY_GROUP, fresh.handle.to_vec(), fresh.encode()));
+        rows.extend(
+            groups
+                .iter()
+                .map(|group| (NOTIFY_GROUP, group.handle.to_vec(), group.encode())),
+        );
+        self.write_rows(&rows, &deleted, rng)?;
+        Ok(true)
     }
 
     /// Whether a queue is a notify queue of Part 8 §8.5.2.
@@ -251,12 +399,24 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     }
 
     fn notify_groups(&self) -> Result<Vec<Group>, Error> {
-        self.open_ref()?
+        let relays = self.notify_relays()?;
+        let mut groups: Vec<Group> = self
+            .open_ref()?
             .store
             .list(NOTIFY_GROUP, None)?
             .iter()
             .map(|(_, bytes)| Group::parse(bytes))
-            .collect()
+            .collect::<Result<_, _>>()?;
+        // A row of the first form holds the root of its relay.
+        for group in &mut groups {
+            if group.root.is_none() {
+                group.root = relays
+                    .iter()
+                    .find(|relay| relay.relay_id == group.relay_id)
+                    .map(|relay| Secret::new(*relay.root.expose()));
+            }
+        }
+        Ok(groups)
     }
 
     fn notify_relays(&self) -> Result<Vec<Relay>, Error> {
@@ -283,6 +443,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     pub fn queues_to_bind<R: CryptoRng + ?Sized>(
         &mut self,
         queues: &[([u8; 32], [u8; 32])],
+        now: u64,
         rng: &mut R,
     ) -> Result<Vec<[u8; 32]>, Error> {
         if self.push_token()?.is_none() {
@@ -320,6 +481,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let room = groups.iter().position(|group| {
                 group.relay_id == *relay_id
                     && group.class == class
+                    && group.state != RETIRED
                     && usize::from(group.count) < MAX_QUEUES_PER_HANDLE
             });
             let at = match room {
@@ -333,6 +495,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         state: UNREGISTERED,
                         count: 0,
                         class,
+                        root: Some(Secret::new(random(rng))),
+                        rotated_at: now,
                     });
                     groups.len().saturating_sub(1)
                 }
@@ -407,8 +571,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         else {
             return Ok(None);
         };
+        let Some(root) = group.root else {
+            return Ok(None);
+        };
         Ok(Some(Binding {
-            root: relay.root,
+            root,
             handle: group.handle,
             k_tok: group.k_tok,
             queue_alias: queue.alias,
@@ -441,6 +608,21 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut calls = Vec::new();
         for group in self.notify_groups()? {
             let request = match (&token, group.state) {
+                // NTF-007: the handle that a rotation replaced leaves.
+                (_, RETIRED) => {
+                    let mut out = Box::new([0u8; NDR_REQUEST_LEN]);
+                    NdrRequest::Unregister {
+                        handle: group.handle,
+                        removal: Secret::new(*group.removal.expose()),
+                    }
+                    .encode(&mut out)
+                    .map_err(|_| Error::Malformed)?;
+                    NdrCall {
+                        handle: group.handle,
+                        is_removal: true,
+                        request: out,
+                    }
+                }
                 (Some(_), REGISTERED) | (None, UNREGISTERED) => continue,
                 (Some(plain), state) => {
                     let nonce: [u8; 24] = random(rng);
@@ -507,6 +689,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         else {
             return Ok(());
         };
+        if group.state == RETIRED {
+            return self.write_rows(&[], &[(NOTIFY_GROUP, group.handle.to_vec())], rng);
+        }
         group.state = if call.is_removal {
             UNREGISTERED
         } else {

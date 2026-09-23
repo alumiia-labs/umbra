@@ -1181,7 +1181,10 @@ mod tests {
             .chain([([0x50; 32], [0xB2; 32])])
             .collect();
         // No endpoint, no binding.
-        assert!(client.queues_to_bind(&queues, &mut rng).unwrap().is_empty());
+        assert!(client
+            .queues_to_bind(&queues, 0, &mut rng)
+            .unwrap()
+            .is_empty());
         let up = TokenCarrier::UnifiedPush;
         assert!(client
             .set_push_token(Some((up, "http://plain.example/up")), &mut rng)
@@ -1194,7 +1197,7 @@ mod tests {
         );
 
         // NTF-031: eight queues of one relay share a handle at most.
-        let unbound = client.queues_to_bind(&queues, &mut rng).unwrap();
+        let unbound = client.queues_to_bind(&queues, 0, &mut rng).unwrap();
         assert_eq!(unbound.len(), 11);
         let a = client.binding_of(&[0; 32]).unwrap().unwrap();
         let b = client.binding_of(&[7; 32]).unwrap().unwrap();
@@ -1202,11 +1205,13 @@ mod tests {
         let d = client.binding_of(&[0x50; 32]).unwrap().unwrap();
         assert_eq!(a.handle, b.handle);
         assert_ne!(a.handle, c.handle);
-        assert_eq!(a.root.expose(), c.root.expose());
+        // NTF-007: each group holds a root of its own, which rotates with it.
+        assert_eq!(a.root.expose(), b.root.expose());
+        assert_ne!(a.root.expose(), c.root.expose());
         assert_ne!(a.queue_alias, b.queue_alias);
         assert_ne!(a.relay_idx, d.relay_idx);
         client.queue_bound(&[0; 32], &mut rng).unwrap();
-        let again = client.queues_to_bind(&queues, &mut rng).unwrap();
+        let again = client.queues_to_bind(&queues, 0, &mut rng).unwrap();
         assert_eq!(again.len(), 10);
         assert!(!again.contains(&[0; 32]));
 
@@ -1254,6 +1259,73 @@ mod tests {
         }
         assert!(ndr.is_empty());
         assert!(client.ndr_calls_due(&mut rng).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_handle_group_rotates_after_seven_days_and_its_old_handle_leaves() {
+        use umbra_core::notify::{ndr::Ndr, ROTATE_INTERVAL};
+        use umbra_crypto::secret::Secret;
+        use umbra_wire::ndr::{NdrRequest, NdrResponse, TokenCarrier, BLOB_LEN, NDR_REQUEST_LEN};
+        let mut rng = Rng(93);
+        let mut client = new_client(&mut rng);
+        let queues: Vec<([u8; 32], [u8; 32])> = (0..3u8).map(|i| ([i; 32], [0xA1; 32])).collect();
+        client
+            .set_push_token(Some((TokenCarrier::Fcm, "fcm-token")), &mut rng)
+            .unwrap();
+        let t0 = 1_800_000_000;
+        client.queues_to_bind(&queues, t0, &mut rng).unwrap();
+        for queue in &queues {
+            client.queue_bound(&queue.0, &mut rng).unwrap();
+        }
+        let mut ndr = Ndr::default();
+        for call in client.ndr_calls_due(&mut rng).unwrap() {
+            assert_eq!(ndr.handle(&call.request[..]).0, NdrResponse::Taken);
+            client.ndr_call_taken(&call, &mut rng).unwrap();
+        }
+        let before = client.binding_of(&[0; 32]).unwrap().unwrap();
+
+        // NTF-007: nothing is due inside 7 days.
+        assert!(!client.rotate_one_group(t0 + 60, &mut rng).unwrap());
+        assert!(!client
+            .rotate_one_group(t0 + ROTATE_INTERVAL - 1, &mut rng)
+            .unwrap());
+        assert!(client
+            .rotate_one_group(t0 + ROTATE_INTERVAL, &mut rng)
+            .unwrap());
+        // The queues bind again under the new triple and root.
+        let unbound = client
+            .queues_to_bind(&queues, t0 + ROTATE_INTERVAL, &mut rng)
+            .unwrap();
+        assert_eq!(unbound.len(), 3);
+        let after = client.binding_of(&[0; 32]).unwrap().unwrap();
+        assert_ne!(after.handle, before.handle);
+        assert_ne!(after.k_tok.expose(), before.k_tok.expose());
+        assert_ne!(after.root.expose(), before.root.expose());
+        assert_eq!(after.queue_alias, before.queue_alias);
+
+        // The new handle registers and the old one leaves the NDR.
+        let calls = client.ndr_calls_due(&mut rng).unwrap();
+        assert_eq!(calls.len(), 2);
+        for call in &calls {
+            assert_eq!(ndr.handle(&call.request[..]).0, NdrResponse::Taken);
+            client.ndr_call_taken(call, &mut rng).unwrap();
+        }
+        assert!(client.ndr_calls_due(&mut rng).unwrap().is_empty());
+        let push = |binding: &umbra_core::notify::binding::Binding| {
+            let mut out = [0u8; NDR_REQUEST_LEN];
+            NdrRequest::Push {
+                handle: binding.handle,
+                k_tok: Secret::new(*binding.k_tok.expose()),
+                ttl: 60,
+                blob: [0; BLOB_LEN],
+            }
+            .encode(&mut out)
+            .unwrap();
+            out
+        };
+        assert_eq!(ndr.handle(&push(&before)).0, NdrResponse::Refused);
+        assert_eq!(ndr.handle(&push(&after)).0, NdrResponse::Taken);
+        assert_eq!(ndr.len(), 1);
     }
 
     /// Puts `other` into the group of `client` with the add, the admit and
