@@ -22,8 +22,11 @@ import uniffi.umbra_ffi.FfiRole
 import uniffi.umbra_ffi.Handle
 import uniffi.umbra_ffi.MsgInfo
 import uniffi.umbra_ffi.Receipts
+import uniffi.umbra_ffi.RestoreStatus
 import uniffi.umbra_ffi.TextSink
 import uniffi.umbra_ffi.init
+import uniffi.umbra_ffi.initRestored
+import uniffi.umbra_ffi.recoveryDigitsKind
 import uniffi.umbra_ffi.measureArgon2FloorMs
 import uniffi.umbra_ffi.MsgHandle
 import uniffi.umbra_ffi.MsgReaction
@@ -196,24 +199,7 @@ object Core {
             try {
                 val opened = handle ?: launch(app, units)
                 opened.unlock(units)
-                handle = opened
-                // The store holds each contact, thus the list needs no network.
-                val stored = summaries(opened)
-                val idleSeconds = opened.autoLockSeconds().toLong()
-                BuildNetwork.network(app, opened)?.let(opened::connect)
-                drain(opened, app)
-                main.post {
-                    chats.clear()
-                    chats.addAll(stored)
-                    autoLockSeconds = idleSeconds
-                    phase = Phase.Open
-                    // The user opened the client, thus a view is on the
-                    // screen, and the platform permits the start.
-                    DeliveryService.start(app)
-                    refreshJoinFlow()
-                    Push.opened(app)
-                    Poll.schedule(app)
-                }
+                begin(app, opened)
             } catch (wrong: FfiException.WrongPassphrase) {
                 fail("That passphrase does not open this device.")
             } catch (other: FfiException) {
@@ -221,6 +207,151 @@ object Core {
             }
         }
     }
+
+    /** Takes an open client: its list, its network, and its events. */
+    private fun begin(app: Context, opened: Handle) {
+        handle = opened
+        // The store holds each contact, thus the list needs no network.
+        val stored = summaries(opened)
+        val idleSeconds = opened.autoLockSeconds().toLong()
+        val backupAt = opened.lastBackupAt()?.toLong()
+        BuildNetwork.network(app, opened)?.let(opened::connect)
+        drain(opened, app)
+        main.post {
+            chats.clear()
+            chats.addAll(stored)
+            autoLockSeconds = idleSeconds
+            lastBackupAt = backupAt
+            restoreNote = null
+            phase = Phase.Open
+            // The user opened the client, thus a view is on the
+            // screen, and the platform permits the start.
+            DeliveryService.start(app)
+            refreshJoinFlow()
+            Push.opened(app)
+            Poll.schedule(app)
+        }
+    }
+
+    /** What the restore of a first launch shows while it runs, or null. */
+    var restoreNote by mutableStateOf<String?>(null)
+        private set
+
+    /** The time of the last backup, in Unix seconds, or null. */
+    var lastBackupAt by mutableStateOf<Long?>(null)
+        private set
+
+    fun readBackup() = call { client ->
+        val at = client.lastBackupAt()?.toLong()
+        main.post { lastBackupAt = at }
+    }
+
+    /** The recovery code as digits, in an array that the caller wipes. */
+    fun recoveryCode(onLoaded: (CharArray) -> Unit) = call { client ->
+        val sink = CharSink()
+        client.recoveryCode(sink)
+        main.post { onLoaded(sink.chars) }
+    }
+
+    /**
+     * Restores a device from its recovery code (Part 4 §4.7.2): a first
+     * store under the new passphrase with the network, the backup of the
+     * code, and then the store of the restored seed in its place. This
+     * call overwrites both arrays.
+     */
+    fun restore(context: Context, passphrase: CharArray, digits: CharArray) {
+        val app = context.applicationContext
+        fault = null
+        restoreNote = "Looking for the backup…"
+        worker.execute {
+            val units = passphrase.map { it.code.toUShort() }
+            passphrase.fill('\u0000')
+            val code = digits.map { it.code.toUShort() }
+            digits.fill('\u0000')
+            // IDN-151 to IDN-154: the check and the type come first, and a
+            // wrong type names both types.
+            val kind = recoveryDigitsKind(code).toInt()
+            if (kind != 1) {
+                restoreFailed(
+                    when (kind) {
+                        2 -> "These are the digits of the user half. The restore takes the recovery code."
+                        3 -> "These are the digits of a share. The restore takes the recovery code."
+                        else -> "These digits do not check."
+                    },
+                )
+                return@execute
+            }
+            var opened: Handle? = null
+            try {
+                val first = launch(app, units)
+                opened = first
+                first.unlock(units)
+                val network = BuildNetwork.network(app, first)
+                if (network == null) {
+                    dropStore(app, first)
+                    restoreFailed("No network.")
+                    return@execute
+                }
+                first.connect(network)
+                first.restoreBackup(code)
+                val deadline = System.currentTimeMillis() + RESTORE_WAIT_MS
+                var failure: String? = null
+                var isReady = false
+                while (!isReady && failure == null) {
+                    when (val status = first.restoreStatus()) {
+                        is RestoreStatus.Ready -> isReady = true
+                        is RestoreStatus.NotFound -> failure = "No backup opens under this code."
+                        // IDN-155: an empty identity is no account.
+                        is RestoreStatus.NoIdentity -> failure = "The backup holds no identity."
+                        is RestoreStatus.Failed -> failure = "The backup did not come down."
+                        is RestoreStatus.Fetching ->
+                            main.post { restoreNote = "Restoring ${status.done} of ${status.total}…" }
+                        else -> Unit
+                    }
+                    if (!isReady && failure == null) {
+                        if (System.currentTimeMillis() > deadline) failure = "The backup did not come down."
+                        Thread.sleep(250)
+                    }
+                }
+                if (failure != null) {
+                    dropStore(app, first)
+                    restoreFailed(failure)
+                    return@execute
+                }
+                val restored = first.takeRestored()
+                first.disconnect()
+                first.close()
+                opened = null
+                val database = File(app.filesDir, "umbra.db")
+                val back = initRestored(
+                    Config(database.absolutePath, measureArgon2FloorMs()),
+                    KeystoreElement(app),
+                    units,
+                    restored,
+                )
+                begin(app, back)
+            } catch (other: FfiException) {
+                opened?.let { dropStore(app, it) }
+                restoreFailed("The restore failed: ${other.javaClass.simpleName}.")
+            }
+        }
+    }
+
+    /** Ends the store of a restore that did not complete: a first launch comes again. */
+    private fun dropStore(app: Context, opened: Handle) {
+        opened.disconnect()
+        opened.close()
+        for (suffix in listOf("", "-wal", "-shm", "-journal")) {
+            File(app.filesDir, "umbra.db$suffix").delete()
+        }
+    }
+
+    private fun restoreFailed(message: String) = main.post {
+        restoreNote = null
+        fault = message
+    }
+
+    private const val RESTORE_WAIT_MS = 10 * 60_000L
 
     /** Whether this device holds a store, thus the unlock view says so. */
     fun hasStore(context: Context) = File(context.filesDir, "umbra.db").exists()
@@ -818,6 +949,8 @@ object Core {
         worker.execute {
             try {
                 action(client)
+            } catch (locked: FfiException.Locked) {
+                // A read that the lock overtook is no fault of the user.
             } catch (failure: FfiException) {
                 main.post { fault = "That did not work: ${failure.javaClass.simpleName}." }
             }

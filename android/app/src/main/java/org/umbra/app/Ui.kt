@@ -57,6 +57,7 @@ sealed interface Screen {
     data object Connection : Screen
     data object AutoLock : Screen
     data object ChangePassphrase : Screen
+    data object RecoveryCode : Screen
     data class Chat(val conversation: Conversation) : Screen
     data class ContactDetails(val conversation: Conversation) : Screen
     data class EditName(val conversation: Conversation) : Screen
@@ -152,6 +153,7 @@ private fun OpenApp() {
     val top = stack.lastOrNull()
     Column(Modifier.fillMaxSize()) {
         if (top !is Screen.VerifyCode) VerifyPrompt(push)
+        if (top == null) RecoveryPromptLine(push)
         when (top) {
             null -> TabsScreen(tab, onTab = { tab = it }, push)
             Screen.AddContact -> AddContactScreen(pop, push)
@@ -165,6 +167,7 @@ private fun OpenApp() {
             Screen.Connection -> ConnectionScreen(pop)
             Screen.AutoLock -> AutoLockScreen(pop)
             Screen.ChangePassphrase -> ChangePassphraseScreen(pop)
+            Screen.RecoveryCode -> RecoveryCodeScreen(pop)
             else -> {
                 val chat = Core.chats.firstOrNull { it.conversation == top.contact }
                 // The list loads again after a lock or a new run.
@@ -234,6 +237,7 @@ private fun UnlockScreen() {
     val context = LocalContext.current
     val field = rememberPlatformField()
     val isFirst = remember { !Core.hasStore(context) }
+    var isRestoring by remember { mutableStateOf(false) }
     val isOpening = Core.phase == Core.Phase.Opening
     // The field is gone while the store opens, and its keyboard goes too.
     HideKeyboardOn(isOpening)
@@ -245,12 +249,15 @@ private fun UnlockScreen() {
         Spacer(Modifier.height(28.dp))
         when {
             isOpening -> Headline("Opening UMBRA")
+            isFirst && isRestoring -> Headline("Restore")
             // The one fact that a user cannot know: no party resets it.
             isFirst -> Headline("Choose a passphrase.", "Nobody can reset it for you.")
             else -> Headline("Welcome back.")
         }
         Spacer(Modifier.height(20.dp))
-        if (isOpening) {
+        if (isFirst && isRestoring && !isOpening) {
+            RestoreForm(onCancel = { isRestoring = false })
+        } else if (isOpening) {
             Text(
                 if (isFirst) "Protecting this device…" else "Unlocking this device…",
                 style = MaterialTheme.typography.bodySmall,
@@ -269,6 +276,10 @@ private fun UnlockScreen() {
             Spacer(Modifier.height(14.dp))
             PrimaryButton(if (isFirst) "Create and open" else "Unlock") {
                 field.take()?.let { Core.open(context, it) }
+            }
+            if (isFirst) {
+                Spacer(Modifier.height(8.dp))
+                SecondaryButton("Restore from a recovery code") { isRestoring = true }
             }
         }
         Core.fault?.let {
@@ -495,6 +506,11 @@ private fun SettingsTab(push: (Screen) -> Unit) {
         // Mockup 105: this row leads to the settings of the lock. The lock
         // itself is the icon of the bar.
         SettingRow("lock", "App lock", "Passphrase and auto-lock") { push(Screen.AppLock) }
+        val context = LocalContext.current
+        LaunchedEffect(Unit) { Core.readBackup() }
+        val backupAt = Core.lastBackupAt
+        val backup = if (backupAt == null) "No backup yet" else "Last backup ${timeLabel(context, backupAt * 1_000)}"
+        SettingRow("key", "Recovery code", backup) { push(Screen.RecoveryCode) }
     }
 }
 
