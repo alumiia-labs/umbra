@@ -289,6 +289,22 @@ mod tests {
             panic!("{events:?}");
         };
         assert_eq!(queue_id, bob.inbound().recipient_id());
+        // A channel of the first stored form holds no flag of a previous
+        // queue before its ratchet, and it restores to the same channel.
+        let exported = bob.export().unwrap();
+        let flag = (1..exported.len() - 5)
+            .rev()
+            .find(|&at| {
+                let len = u32::from_be_bytes(exported[at + 1..at + 5].try_into().unwrap());
+                exported[at] == 0 && len as usize == exported.len() - at - 5
+            })
+            .unwrap();
+        let mut first_form = exported.to_vec();
+        first_form.remove(flag);
+        first_form[0] = 0x01;
+        let restored = PairwiseChannel::restore(&first_form).unwrap();
+        assert!(restored.previous().is_none());
+        assert_eq!(*restored.export().unwrap(), *exported);
         let received = bob.receive(payload, *bucket, 20, &mut rng).unwrap();
         assert_eq!(
             received,

@@ -301,7 +301,9 @@ impl Mesh {
         }
         node.connected(&mut Rng(300 + u64::from(seed))).unwrap();
         self.clients[client] = node;
-        self.links[client] = old_link + 100;
+        // The links of a relay to the next layer take 800 and 900 and
+        // above, thus a new run of a client takes a link far from them.
+        self.links[client] = old_link + 10_000;
         self.peers[0].push((self.links[client], Peer::Client(client)));
     }
 
@@ -1188,4 +1190,171 @@ fn a_group_queue_takes_a_record_at_one_client_and_gives_it_at_another() {
     };
     assert_ne!(second, group_queue_id);
     assert!(mesh.clients[CREATOR].chains().len() > before);
+}
+
+/// Each client starts a new run, and the two contacts write once each way,
+/// thus no queue passes `QUEUE_IDLE_TTL` while the clock moves by days.
+fn a_month_passes(mesh: &mut Mesh, contacts: (ContactId, ContactId), tag: u8) {
+    mesh.now += 30 * 86_400;
+    for client in 0..2 {
+        let seed = mesh_seed_of(mesh, client);
+        mesh.restart(client, seed);
+    }
+    mesh.settle();
+    let now = mesh.now;
+    mesh.clients[1]
+        .send(
+            &contacts.1,
+            &text(tag, "a month on"),
+            now,
+            &mut Rng(u64::from(tag)),
+        )
+        .unwrap();
+    mesh.clients[0]
+        .send(
+            &contacts.0,
+            &text(tag + 1, "and back"),
+            now,
+            &mut Rng(u64::from(tag) + 1),
+        )
+        .unwrap();
+    mesh.settle();
+    assert_eq!(texts_of(mesh.take_events(0)), [b"a month on"]);
+    assert_eq!(texts_of(mesh.take_events(1)), [b"and back"]);
+}
+
+/// Calls the rotation check of a client until its inbound queue for the
+/// contact moves: the first check can need a circuit to a relay of another
+/// operator, and a later one makes the queue there.
+fn rotate(mesh: &mut Mesh, client: usize, contact: &ContactId) {
+    let before = mesh.clients[client].inbound_queue(contact).unwrap();
+    for turn in 0..8 {
+        let now = mesh.now;
+        let events = mesh.clients[client]
+            .rotate_due(now, &mut Rng(700 + turn))
+            .unwrap();
+        mesh.events[client].extend(events);
+        mesh.settle();
+        if mesh.clients[client].inbound_queue(contact).unwrap().0 != before.0 {
+            return;
+        }
+    }
+    panic!("the queue did not rotate");
+}
+
+fn ended_queues(events: &[ClientEvent]) -> Vec<[u8; 32]> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            ClientEvent::QueueEnded { queue } => Some(*queue),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_queue_rotates_to_another_operator_and_the_old_one_ends() {
+    const ALICE: usize = 0;
+    const BOB: usize = 1;
+    let mut mesh = Mesh::new(&[0x41, 0x61]);
+    mesh.settle();
+    mesh.take_events(ALICE);
+    mesh.take_events(BOB);
+    mesh.clients[ALICE].invite(&mut Rng(1)).unwrap();
+    mesh.settle();
+    let events = mesh.take_events(ALICE);
+    let [ClientEvent::Invitation { bundle, .. }] = &events[..] else {
+        panic!("{events:?}");
+    };
+    mesh.clients[BOB]
+        .accept(bundle.clone(), &mut Rng(2))
+        .unwrap();
+    mesh.settle();
+    mesh.settle();
+    let contacts = (
+        contact_of(&mesh.take_events(ALICE)),
+        contact_of(&mesh.take_events(BOB)),
+    );
+    let alice_contact = contacts.0;
+    let (first_queue, first_relay, _) = mesh.clients[ALICE].inbound_queue(&alice_contact).unwrap();
+
+    // NET-018: the queue is young, thus no check rotates it.
+    let now = mesh.now;
+    assert!(mesh.clients[ALICE]
+        .rotate_due(now, &mut Rng(3))
+        .unwrap()
+        .is_empty());
+    mesh.settle();
+    assert_eq!(
+        mesh.clients[ALICE].inbound_queue(&alice_contact).unwrap().0,
+        first_queue
+    );
+
+    // Four months pass. ROTATE_AFTER with its jitter is at most 108 days.
+    for month in 0..4u8 {
+        a_month_passes(&mut mesh, contacts, 10 + 2 * month);
+    }
+    rotate(&mut mesh, ALICE, &alice_contact);
+    let (second_queue, second_relay, reads_both) =
+        mesh.clients[ALICE].inbound_queue(&alice_contact).unwrap();
+    // Part 3 §3.2.4: the new queue is at a relay of another operator, and
+    // the old one stays readable until the peer takes the new address.
+    assert_ne!(second_relay, first_relay);
+    assert!(reads_both);
+    assert!(texts_of(mesh.take_events(BOB)).is_empty(), "NET-294");
+    // The store keeps the contact under its first identifier.
+    assert_eq!(
+        mesh.stored[ALICE].keys().copied().collect::<Vec<_>>(),
+        [alice_contact]
+    );
+
+    // A new run of Alice holds the rotation from her store.
+    let seed = mesh_seed_of(&mesh, ALICE);
+    mesh.restart(ALICE, seed);
+    mesh.settle();
+    assert_eq!(
+        mesh.clients[ALICE].inbound_queue(&alice_contact).unwrap(),
+        (second_queue, second_relay, true)
+    );
+
+    // NET-177: a record of Bob on the new queue ends the old one.
+    let now = mesh.now;
+    mesh.clients[BOB]
+        .send(&contacts.1, &text(40, "to the new queue"), now, &mut Rng(4))
+        .unwrap();
+    mesh.settle();
+    let events = mesh.take_events(ALICE);
+    assert_eq!(ended_queues(&events), [first_queue]);
+    assert_eq!(texts_of(events), [b"to the new queue"]);
+    assert_eq!(
+        mesh.clients[ALICE].inbound_queue(&alice_contact).unwrap(),
+        (second_queue, second_relay, false)
+    );
+    let now = mesh.now;
+    mesh.clients[ALICE]
+        .send(&alice_contact, &text(41, "still here"), now, &mut Rng(5))
+        .unwrap();
+    mesh.settle();
+    assert_eq!(texts_of(mesh.take_events(BOB)), [b"still here"]);
+
+    // A second rotation, and no record of Bob comes: the old queue ends at
+    // ROTATE_GRACE.
+    for month in 0..4u8 {
+        a_month_passes(&mut mesh, contacts, 50 + 2 * month);
+    }
+    rotate(&mut mesh, ALICE, &alice_contact);
+    let (third_queue, _, reads_both) = mesh.clients[ALICE].inbound_queue(&alice_contact).unwrap();
+    assert!(reads_both);
+    mesh.now += 7 * 86_400 - 120;
+    let now = mesh.now;
+    let events = mesh.clients[ALICE].rotate_due(now, &mut Rng(6)).unwrap();
+    assert!(ended_queues(&events).is_empty());
+    mesh.now += 120;
+    let now = mesh.now;
+    let events = mesh.clients[ALICE].rotate_due(now, &mut Rng(7)).unwrap();
+    assert_eq!(ended_queues(&events), [second_queue]);
+    assert_eq!(
+        mesh.clients[ALICE].inbound_queue(&alice_contact).unwrap().0,
+        third_queue
+    );
 }

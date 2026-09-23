@@ -1324,10 +1324,13 @@ fn a_stored_contact_of_the_first_version_continues() {
 
     // Version 0x01 named no relay of the inbound queue: the version byte,
     // the salt, the key of the peer, and then the channel. The two queues
-    // of such a contact live at one relay, and the channel names it.
+    // of such a contact live at one relay, and the channel names it. Nor
+    // did it hold the tail of version 0x03: the contact, the time of the
+    // queue, and the state of a rotation.
     for state in network.stored[ALICE].contacts.values_mut() {
-        assert_eq!(state[0], 0x02);
+        assert_eq!(state[0], 0x03);
         state[0] = 0x01;
+        state.truncate(state.len() - (32 + 8 + 32 + 8));
         state.drain(1 + 16 + 32..1 + 16 + 32 + 32);
     }
     network.restart(ALICE, 0x41);
@@ -1343,5 +1346,19 @@ fn a_stored_contact_of_the_first_version_continues() {
     assert!(network.stored[ALICE]
         .contacts
         .values()
-        .all(|state| state[0] == 0x02 && state[49..81] == queue_relay));
+        .all(|state| state[0] == 0x03 && state[49..81] == queue_relay));
+
+    // Version 0x02 named the relay and held no tail.
+    for state in network.stored[ALICE].contacts.values_mut() {
+        state[0] = 0x02;
+        state.truncate(state.len() - (32 + 8 + 32 + 8));
+    }
+    network.restart(ALICE, 0x41);
+    let now = network.now;
+    network.clients[BOB]
+        .send(&bob_contact, &text(2, "and still"), now, &mut Rng(4))
+        .unwrap();
+    network.settle();
+    assert_eq!(messages_of(network.take_events(ALICE)), [b"and still"]);
+    assert!(network.clients[ALICE].contacts().count() == 1);
 }

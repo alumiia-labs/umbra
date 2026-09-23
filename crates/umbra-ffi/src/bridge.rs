@@ -181,6 +181,7 @@ impl Bridge {
             // The bindings of Part 8 take these before the bridge.
             Update::Circuits(_)
             | Update::Queues(_)
+            | Update::QueueEnded(_)
             | Update::NotifyKey { .. }
             | Update::NotifyQueue { .. }
             | Update::Digest { .. } => None,

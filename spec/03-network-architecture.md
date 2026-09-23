@@ -209,7 +209,18 @@ operations (Part 12).
 Queue rotation makes a fresh queue on the relay of a **different operator** and
 moves the channel. **[NET-019]** A client MUST use independent jitter for each queue rotation.
 A client that rotates all its queues at the same time gives the relay a signal
-for collection.
+for collection. **[NET-323]** A client MUST draw the jitter of a queue from a
+value that no relay holds. The reference draw is the first two bytes of
+`SHA3-256("umbra/v1/rotate-jitter" || pairwise_salt || RecipientId)` as a
+`BE16`, modulo 401, as a count of parts of a thousand from −200 to +200 of
+`ROTATE_AFTER`. `pairwise_salt` is the salt of the contact under Part 4 §4.2.2.
+Part 5 §5.11 holds the label.
+
+> *Cause of `NET-323`.* A draw from the `RecipientId` alone is independent
+> for each queue, and the relay of the queue holds that identifier and the
+> time of its `NEW`. That relay then knows the time of the rotation, and a
+> `NEW` at another relay at that time links the old queue to the new one for
+> two relays that collude. The salt never leaves the device.
 
 **[NET-020]** At the end of a rotation, a client MUST send `DEL` to the old relay. Part 6
 §6.4.3 gives the teardown rules and the delay rules for that command. **[NET-021]** A client

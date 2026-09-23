@@ -2132,6 +2132,10 @@ impl Handle {
                     }
                 }
             }
+            // NET-178: the push binding of a queue that ended goes with it.
+            Update::QueueEnded(queue) => {
+                let _ = client.unbind_queue(queue, &mut OsRng);
+            }
             // A run that ended holds no circuit, and a notify queue that it
             // did not make goes to the next run.
             Update::Offline(_) => {

@@ -1535,6 +1535,7 @@ names the object type and its lifetime:
 "umbra/v1/log-commit"
 "umbra/v1/issuer-key"
 "umbra/v1/row-id"
+"umbra/v1/rotate-jitter"
 ```
 
 **The list above is closed.** **[CRY-028]** An implementation MUST NOT use a label that this

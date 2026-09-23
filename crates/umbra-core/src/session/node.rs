@@ -214,6 +214,12 @@ pub enum ClientEvent {
     /// The runtime ends the run and starts a new one at once, and nothing
     /// failed.
     CircuitAged,
+    /// An inbound queue of a contact ended at the end of its rotation
+    /// (`NET-178`). Its push binding goes with it.
+    QueueEnded {
+        /// The `RecipientId` of the queue.
+        queue: [u8; 32],
+    },
 }
 
 /// One chunk command of Part 13 §13.3.3 for one relay.
@@ -521,6 +527,13 @@ enum Purpose {
     },
     /// The notify queue of a group (Part 8 §8.5.2).
     Notify,
+    /// The new inbound queue of a contact (Part 3 §3.2.6, `NET-176`).
+    Rotate {
+        /// The contact.
+        contact: [u8; 32],
+        /// The time of the call, which starts the grace of `NET-177`.
+        now: u64,
+    },
 }
 
 /// A notify queue of Part 8 §8.5.2: a queue of this device that no contact
@@ -645,6 +658,13 @@ struct Contact {
     /// The verification ceremony of this run. A ceremony has no stored
     /// form, because its nonce serves one comparison (`IDN-145`).
     ceremony: Option<Ceremony>,
+    /// The time the inbound queue was made, or 0 when a store of an
+    /// earlier version gave none; the next check starts it then.
+    since: u64,
+    /// The relay of the inbound queue that a rotation replaced.
+    previous_relay: [u8; 32],
+    /// The time of the rotation that runs, which starts `ROTATE_GRACE`.
+    rotated_at: u64,
 }
 
 /// The two pairwise identity keys of a stored contact: the key of this
@@ -655,7 +675,7 @@ pub fn stored_contact_keys(
     root: &RootIdentity,
 ) -> Result<([u8; 32], [u8; 32]), Error> {
     let mut reader = Reader::new(state);
-    stored_version(&mut reader)?;
+    contact_version(&mut reader)?;
     let salt: [u8; 16] = reader.array()?;
     let peer_static: [u8; 32] = reader.array()?;
     Ok((root.pairwise_identity(&salt).x25519_public(), peer_static))
@@ -667,6 +687,15 @@ fn stored_version(reader: &mut Reader<'_>) -> Result<bool, Error> {
     match reader.u8()? {
         STORED_VERSION => Ok(true),
         0x01 => Ok(false),
+        _ => Err(Error::Malformed),
+    }
+}
+
+/// Reads the version byte of a stored contact: `0x01`, `0x02`, or
+/// [`CONTACT_STORED_VERSION`].
+fn contact_version(reader: &mut Reader<'_>) -> Result<u8, Error> {
+    match reader.u8()? {
+        version @ (0x01 | STORED_VERSION | CONTACT_STORED_VERSION) => Ok(version),
         _ => Err(Error::Malformed),
     }
 }
@@ -729,8 +758,36 @@ pub enum CoverSlot {
 /// is about 20 % of the cells (`NET-063`).
 const LOOP_SHARE: u8 = 51;
 
-/// The version byte of a stored contact and of a stored invitation.
+/// The version byte of a stored invitation, and of a stored contact of
+/// an earlier form.
 const STORED_VERSION: u8 = 0x02;
+
+/// The version byte of a stored contact. It adds the contact identifier,
+/// the time of the inbound queue, and the state of a rotation to version
+/// `0x02`.
+const CONTACT_STORED_VERSION: u8 = 0x03;
+
+/// `ROTATE_AFTER` of Part 3 §3.2.4: the age of a queue, in seconds.
+pub const ROTATE_AFTER: u64 = 90 * 86_400;
+/// `ROTATE_AFTER` of Part 3 §3.2.4: the count of records of a queue.
+pub const ROTATE_AFTER_RECORDS: u32 = 10_000;
+/// `ROTATE_GRACE` of Part 3 §3.2.4: how long an owner reads the replaced
+/// queue, in seconds.
+pub const ROTATE_GRACE: u64 = 7 * 86_400;
+/// `ROTATE_JITTER` of Part 3 §3.2.4, in parts of a thousand.
+const ROTATE_JITTER_PERMILLE: u64 = 200;
+
+/// The age at which the queue `queue` rotates: `ROTATE_AFTER` moved by a
+/// jitter of ±20 %. The draw comes from the pairwise salt of the contact
+/// and the queue identifier, thus each queue takes its own value, no two
+/// queues rotate together (`NET-018`, `NET-019`), and no relay can
+/// predict the time (`NET-323`).
+fn rotate_age(salt: &[u8; 16], queue: &[u8; 32]) -> u64 {
+    let hash = umbra_crypto::hash::sha3_256(&[umbra_crypto::labels::ROTATE_JITTER, salt, queue]);
+    let draw = u64::from(u16::from_be_bytes([hash[0], hash[1]]));
+    let permille = 1_000 - ROTATE_JITTER_PERMILLE + draw % (2 * ROTATE_JITTER_PERMILLE + 1);
+    ROTATE_AFTER / 1_000 * permille
+}
 
 /// The version of the stored form of a notify queue: the version, the relay,
 /// and the queue end.
@@ -778,6 +835,8 @@ pub struct ClientNode {
     contacts: BTreeMap<[u8; 32], Contact>,
     /// The notify queues of Part 8 §8.5.2, by `RecipientId`.
     notify: BTreeMap<[u8; 32], NotifyQueue>,
+    /// The contacts whose new queue the relay makes now.
+    rotating: BTreeSet<[u8; 32]>,
     /// The contacts whose channel moved since the last
     /// [`ClientNode::take_changes`].
     moved: BTreeSet<[u8; 32]>,
@@ -886,6 +945,7 @@ impl ClientNode {
             waiting: BTreeMap::new(),
             halves: BTreeMap::new(),
             contacts: BTreeMap::new(),
+            rotating: BTreeSet::new(),
             notify: BTreeMap::new(),
             moved: BTreeSet::new(),
             changes: Vec::new(),
@@ -907,11 +967,15 @@ impl ClientNode {
                 continue;
             };
             let mut writer = Writer::new();
-            writer.u8(STORED_VERSION);
+            writer.u8(CONTACT_STORED_VERSION);
             writer.bytes(&contact.salt);
             writer.bytes(&contact.peer_static);
             writer.bytes(&contact.inbound_relay);
             writer.var(&contact.channel.export()?)?;
+            writer.bytes(&id);
+            writer.u64(contact.since);
+            writer.bytes(&contact.previous_relay);
+            writer.u64(contact.rotated_at);
             changes.push(StateChange::Contact {
                 contact: ContactId(id),
                 state: writer.finish(),
@@ -924,26 +988,40 @@ impl ClientNode {
     /// subscribes to its queue when the circuit is ready.
     pub fn restore_contact(&mut self, state: &[u8]) -> Result<ContactId, Error> {
         let mut reader = Reader::new(state);
-        let names_relay = stored_version(&mut reader)?;
+        let version = contact_version(&mut reader)?;
         let salt = reader.array()?;
         let peer_static = reader.array()?;
-        let inbound_relay = if names_relay {
-            reader.array()?
-        } else {
+        let inbound_relay = if version == 0x01 {
             ANY_RELAY
+        } else {
+            reader.array()?
         };
         let channel = PairwiseChannel::restore(reader.var()?)?;
+        // A form of version 0x03 names the contact, which stays the first
+        // queue after a rotation, and the state of the rotation.
+        let (id, since, previous_relay, rotated_at) = if version == CONTACT_STORED_VERSION {
+            (
+                reader.array()?,
+                reader.u64()?,
+                reader.array()?,
+                reader.u64()?,
+            )
+        } else {
+            (*channel.inbound().recipient_id(), 0, ANY_RELAY, 0)
+        };
         reader.end()?;
         // A store of version 0x01 came from a network with one queue relay,
         // thus the two queues of its contact live at one relay, and the
         // channel names the relay of the outbound one.
-        let inbound_relay = if names_relay {
-            inbound_relay
-        } else {
+        let inbound_relay = if version == 0x01 {
             *channel.outbound().relay_id()
+        } else {
+            inbound_relay
         };
-        let id = *channel.inbound().recipient_id();
-        self.assign(id, inbound_relay);
+        self.assign(*channel.inbound().recipient_id(), inbound_relay);
+        if let Some(previous) = channel.previous() {
+            self.assign(*previous.recipient_id(), previous_relay);
+        }
         self.contacts.insert(
             id,
             Contact {
@@ -953,6 +1031,9 @@ impl ClientNode {
                 salt,
                 waiting_sends: VecDeque::new(),
                 ceremony: None,
+                since,
+                previous_relay,
+                rotated_at,
             },
         );
         Ok(ContactId(id))
@@ -1001,6 +1082,211 @@ impl ClientNode {
             }
         }
         Ok(())
+    }
+
+    /// The contact that reads `queue`. Its first queue names it, and a
+    /// rotation gives it a second one (Part 3 §3.2.6).
+    fn contact_of(&self, queue: &[u8; 32]) -> Option<[u8; 32]> {
+        if self
+            .contacts
+            .get(queue)
+            .is_some_and(|held| held.channel.reads(queue))
+        {
+            return Some(*queue);
+        }
+        self.contacts
+            .iter()
+            .find(|(_, held)| held.channel.reads(queue))
+            .map(|(id, _)| *id)
+    }
+
+    /// Each inbound queue of a contact: the current one, and the one that a
+    /// rotation replaced.
+    fn queues_of(&self, contact: &[u8; 32]) -> Vec<[u8; 32]> {
+        self.contacts
+            .get(contact)
+            .map(|held| {
+                core::iter::once(held.channel.inbound())
+                    .chain(held.channel.previous())
+                    .map(|inbound| *inbound.recipient_id())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The operator of a relay of the set.
+    fn operator_of(&self, relay_id: &[u8; 32]) -> Option<[u8; 32]> {
+        core::iter::once(&self.ingress)
+            .chain(&self.relays)
+            .find(|relay| relay.candidate.relay_id == *relay_id)
+            .map(|relay| relay.candidate.operator_id)
+    }
+
+    /// Starts and ends the queue rotations that are due at `now` (Part 3
+    /// §3.2.6). A rotation ends at `ROTATE_GRACE` when no record arrived
+    /// on the new queue before (`NET-177`). A queue rotates at its age of
+    /// `ROTATE_AFTER` with its own jitter, or at `ROTATE_AFTER_RECORDS`
+    /// records (§3.2.4). One call starts one rotation at most, thus the
+    /// rotations of a store that comes back after a long pause spread over
+    /// the checks.
+    pub fn rotate_due<R: CryptoRng + ?Sized>(
+        &mut self,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<Vec<ClientEvent>, Error> {
+        let mut ended = Vec::new();
+        let mut due = None;
+        for (id, held) in &mut self.contacts {
+            if held.since == 0 {
+                held.since = now;
+                self.moved.insert(*id);
+            }
+            if held.channel.previous().is_some() {
+                if now.saturating_sub(held.rotated_at) >= ROTATE_GRACE {
+                    ended.push(*id);
+                }
+                continue;
+            }
+            let inbound = held.channel.inbound();
+            let is_old =
+                now.saturating_sub(held.since) >= rotate_age(&held.salt, inbound.recipient_id());
+            let is_full = inbound.cursor().acked() >= ROTATE_AFTER_RECORDS;
+            // The address travels on the ratchet, thus a contact with no
+            // sending chain waits.
+            if due.is_none()
+                && (is_old || is_full)
+                && held.channel.can_send()
+                && !self.rotating.contains(id)
+            {
+                due = Some(*id);
+            }
+        }
+        let mut out = Vec::new();
+        for contact in ended {
+            out.extend(self.end_rotation(contact, rng)?);
+        }
+        if let Some(contact) = due {
+            self.start_rotation(contact, now, rng)?;
+        }
+        Ok(out)
+    }
+
+    /// Makes the new queue of a contact at a relay of another operator
+    /// than the relay of its inbound queue (Part 3 §3.2.4). With no ready
+    /// circuit to such a relay a circuit starts, and a later check makes
+    /// the queue. A set with no other operator gives no rotation.
+    fn start_rotation<R: CryptoRng + ?Sized>(
+        &mut self,
+        contact: [u8; 32],
+        now: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let old_relay = self
+            .contacts
+            .get(&contact)
+            .ok_or(Error::NoPath)?
+            .inbound_relay;
+        let old_operator = self.operator_of(&old_relay);
+        let is_other = |relay: &[u8; 32], operator: Option<[u8; 32]>| {
+            *relay != old_relay && (old_operator.is_none() || operator != old_operator)
+        };
+        let ready = self.slots.iter().position(|slot| {
+            let exit = slot.chain.and_then(|chain| chain.last().copied());
+            slot.is_ready()
+                && slot.has_room()
+                && exit.is_some_and(|exit| is_other(&exit, self.operator_of(&exit)))
+        });
+        if let Some(slot) = ready {
+            self.rotating.insert(contact);
+            self.current = slot;
+            let handle = self.handle();
+            return self.make_queue_here(Purpose::Rotate { contact, now }, handle, rng);
+        }
+        let targets: Vec<[u8; 32]> = self
+            .relays
+            .iter()
+            .filter(|relay| relay.candidate.queue)
+            .filter(|relay| is_other(&relay.candidate.relay_id, Some(relay.candidate.operator_id)))
+            .map(|relay| relay.candidate.relay_id)
+            .collect();
+        if targets.is_empty() {
+            return Ok(());
+        }
+        let draw = usize::from(u16::from_be_bytes(random(rng)));
+        match targets.get(draw % targets.len()) {
+            Some(target) => self.circuit_to(*target, rng),
+            None => Ok(()),
+        }
+    }
+
+    /// The relay made the new queue of a contact: the channel reads it,
+    /// and its address goes to the peer on the ratchet as a record of kind
+    /// `0x33` (`NET-176`). A contact that is gone, or that rotates
+    /// already, takes no second queue, and the new one ends.
+    fn on_rotated<R: CryptoRng + ?Sized>(
+        &mut self,
+        contact: [u8; 32],
+        inbound: Inbound,
+        relay: [u8; 32],
+        address: &[u8],
+        now: u64,
+        rng: &mut R,
+    ) -> Result<Vec<ClientEvent>, Error> {
+        let Some(held) = self
+            .contacts
+            .get_mut(&contact)
+            .filter(|held| held.channel.previous().is_none())
+        else {
+            let queue = *inbound.recipient_id();
+            let command = inbound.delete(&self.session_pk()?, random(rng))?;
+            for slot in &mut self.slots {
+                slot.queues.remove(&queue);
+            }
+            self.queue_command(command, Waiting::Other)?;
+            return Ok(Vec::new());
+        };
+        held.channel.rotate(inbound)?;
+        held.previous_relay = core::mem::replace(&mut held.inbound_relay, relay);
+        held.since = now;
+        held.rotated_at = now;
+        self.moved.insert(contact);
+        self.send_control(contact, AppKind::QueueAddress, address, now, rng)?;
+        Ok(Vec::new())
+    }
+
+    /// Ends the rotation of a contact: the replaced queue takes a `DEL`
+    /// when a circuit serves it (`NET-177`, `NET-178`), and the channel
+    /// reads it no more. A relay that gets no `DEL` ends the queue at
+    /// `QUEUE_IDLE_TTL`.
+    fn end_rotation<R: CryptoRng + ?Sized>(
+        &mut self,
+        contact: [u8; 32],
+        rng: &mut R,
+    ) -> Result<Vec<ClientEvent>, Error> {
+        let Some(held) = self.contacts.get_mut(&contact) else {
+            return Ok(Vec::new());
+        };
+        let Some(previous) = held.channel.end_previous() else {
+            return Ok(Vec::new());
+        };
+        held.rotated_at = 0;
+        held.previous_relay = ANY_RELAY;
+        self.moved.insert(contact);
+        let queue = *previous.recipient_id();
+        if let Some(slot) = self.slot_of(&queue) {
+            let current = self.current;
+            self.current = slot;
+            if let Ok(session_pk) = self.session_pk() {
+                let command = previous.delete(&session_pk, random(rng))?;
+                self.queue_command(command, Waiting::Other)?;
+                self.pump()?;
+            }
+            self.current = current;
+            if let Some(slot) = self.slots.get_mut(slot) {
+                slot.queues.remove(&queue);
+            }
+        }
+        Ok(alloc::vec![ClientEvent::QueueEnded { queue }])
     }
 
     /// Makes a notify queue of Part 8 §8.5.2 (`NTF-090`). A
@@ -1099,10 +1385,9 @@ impl ClientNode {
         let session_pk = self.session_pk()?;
         let queues = &self.slot()?.queues;
         let mut commands = Vec::new();
-        let contacts = self
-            .contacts
-            .values()
-            .map(|contact| contact.channel.inbound());
+        let contacts = self.contacts.values().flat_map(|contact| {
+            core::iter::once(contact.channel.inbound()).chain(contact.channel.previous())
+        });
         let stored = contacts
             .chain(self.halves.values().map(|half| &half.inbound))
             .chain(self.notify.values().map(|held| &held.inbound));
@@ -1234,6 +1519,18 @@ impl ClientNode {
     /// The contacts whose handshake finished.
     pub fn contacts(&self) -> impl Iterator<Item = ContactId> + '_ {
         self.contacts.keys().map(|id| ContactId(*id))
+    }
+
+    /// The inbound queue of a contact, the relay that holds it, and
+    /// whether the channel still reads the queue that a rotation replaced.
+    pub fn inbound_queue(&self, contact: &ContactId) -> Option<([u8; 32], [u8; 32], bool)> {
+        self.contacts.get(&contact.0).map(|held| {
+            (
+                *held.channel.inbound().recipient_id(),
+                held.inbound_relay,
+                held.channel.previous().is_some(),
+            )
+        })
     }
 
     fn handle(&mut self) -> u64 {
@@ -1563,7 +1860,9 @@ impl ClientNode {
     fn inbound_of(&self, recipient_id: &[u8; 32]) -> Option<&Inbound> {
         self.contacts
             .values()
-            .map(|contact| contact.channel.inbound())
+            .flat_map(|contact| {
+                core::iter::once(contact.channel.inbound()).chain(contact.channel.previous())
+            })
             .chain(self.halves.values().map(|half| &half.inbound))
             .chain(self.notify.values().map(|held| &held.inbound))
             .find(|inbound| inbound.recipient_id() == recipient_id)
@@ -2282,14 +2581,10 @@ impl ClientNode {
         // A `SEND` binds no queue to a session. It goes on a circuit to the
         // relay of the queue, and on one that does not serve the inbound
         // queue of the contact when one is ready.
-        let relay = *self
-            .contacts
-            .get(&contact)
-            .ok_or(Error::NoPath)?
-            .channel
-            .outbound()
-            .relay_id();
-        let Some(slot) = self.ready_slot_to(&relay, self.slot_of(&contact)) else {
+        let channel = &self.contacts.get(&contact).ok_or(Error::NoPath)?.channel;
+        let relay = *channel.outbound().relay_id();
+        let inbound_slot = self.slot_of(channel.inbound().recipient_id());
+        let Some(slot) = self.ready_slot_to(&relay, inbound_slot) else {
             // No circuit ends at the relay of the queue. The record waits
             // for one, in its order, and the call is no fault: a record
             // that arrives must never end a run for the lack of a circuit.
@@ -2328,9 +2623,11 @@ impl ClientNode {
     ) -> Result<CoverSlot, Error> {
         let contacts: Vec<[u8; 32]> = self.contacts.keys().copied().collect();
         for contact in contacts {
-            if self.slot_of(&contact).is_some()
-                && self.acknowledge(&ContactId(contact), now, rng)?
-            {
+            let is_served = self
+                .queues_of(&contact)
+                .iter()
+                .any(|queue| self.slot_of(queue).is_some());
+            if is_served && self.acknowledge(&ContactId(contact), now, rng)? {
                 return Ok(CoverSlot::Acknowledgment);
             }
         }
@@ -2382,19 +2679,35 @@ impl ClientNode {
         now: u64,
         rng: &mut R,
     ) -> Result<bool, Error> {
-        // The `ACK` goes to the session that serves the queue.
-        self.current = self.slot_of(&contact.0).ok_or(Error::NoPath)?;
-        let session_pk = self.session_pk()?;
-        let held = self.contacts.get_mut(&contact.0).ok_or(Error::NoPath)?;
-        let channel = &mut held.channel;
-        let Some((point, encoded)) = channel.acknowledge(&session_pk, random(rng), now)? else {
-            return Ok(false);
-        };
-        channel.acknowledged(point);
-        self.moved.insert(contact.0);
-        self.queue_command(encoded, Waiting::Other)?;
-        self.pump()?;
-        Ok(true)
+        // The `ACK` goes to the session that serves the queue. During a
+        // rotation the contact has two queues, and each one takes its own.
+        let queues = self.queues_of(&contact.0);
+        let mut served = false;
+        for queue in queues {
+            let Some(slot) = self.slot_of(&queue) else {
+                continue;
+            };
+            served = true;
+            self.current = slot;
+            let session_pk = self.session_pk()?;
+            let held = self.contacts.get_mut(&contact.0).ok_or(Error::NoPath)?;
+            let channel = &mut held.channel;
+            let Some((point, encoded)) =
+                channel.acknowledge_on(&queue, &session_pk, random(rng), now)?
+            else {
+                continue;
+            };
+            channel.acknowledged_on(&queue, point);
+            self.moved.insert(contact.0);
+            self.queue_command(encoded, Waiting::Other)?;
+            self.pump()?;
+            return Ok(true);
+        }
+        if served {
+            Ok(false)
+        } else {
+            Err(Error::NoPath)
+        }
     }
 
     /// Acknowledges the digests of a notify queue under the floor of
@@ -2687,6 +3000,12 @@ impl ClientNode {
                             if let Some(slot) = self.slots.get_mut(keys.slot) {
                                 slot.reserved = slot.reserved.saturating_sub(1);
                             }
+                            // A rotation that the relay refused runs again
+                            // at a later check.
+                            if let Purpose::Rotate { contact, .. } = keys.purpose {
+                                self.rotating.remove(&contact);
+                                continue;
+                            }
                             keys.handle
                         }
                         Some(Waiting::UserSend(user)) => user,
@@ -2826,6 +3145,12 @@ impl ClientNode {
                 address,
             }]);
         }
+        if let Purpose::Rotate { contact, now } = keys.purpose {
+            self.rotating.remove(&contact);
+            let mut address = alloc::vec![0u8; QUEUE_ADDRESS_LEN];
+            own_address().encode(&mut address)?;
+            return self.on_rotated(contact, inbound, queue_relay, &address, now, rng);
+        }
         let identity = self.root.pairwise_identity(&keys.salt);
 
         let mut out = Vec::new();
@@ -2850,8 +3175,8 @@ impl ClientNode {
                 });
                 (Setup::Inviting(Box::new(inviter)), None, [0u8; 32], bundle)
             }
-            // The notify queue took its path above.
-            Purpose::Notify => return Err(Error::Malformed),
+            // The notify queue and the rotation took their paths above.
+            Purpose::Notify | Purpose::Rotate { .. } => return Err(Error::Malformed),
             Purpose::Accept { bundle, lock } => {
                 opening = alloc::vec![0u8; QUEUE_ADDRESS_LEN];
                 own_address().encode(&mut opening)?;
@@ -2918,12 +3243,20 @@ impl ClientNode {
             }
             return Ok(Vec::new());
         }
-        if let Some(held) = self.contacts.get_mut(&queue_id) {
+        if let Some(contact) = self.contact_of(&queue_id) {
+            let held = self.contacts.get_mut(&contact).ok_or(Error::NoPath)?;
             // Each outcome moves the cursor of the queue.
-            self.moved.insert(queue_id);
+            self.moved.insert(contact);
+            // NET-177: a record on the new queue shows that the peer took
+            // its address, thus the replaced queue ends.
+            let rotated = held.channel.previous().is_some()
+                && held.channel.inbound().recipient_id() == &queue_id;
             let mut out = Vec::new();
             let mut ceremony_record = None;
-            if let Received::App { bytes, .. } = held.channel.receive(payload, bucket, now, rng)? {
+            if let Received::App { bytes, .. } = held
+                .channel
+                .receive_on(&queue_id, payload, bucket, now, rng)?
+            {
                 let parsed = AppMessage::parse(&bytes, Channel::Pairwise).ok();
                 match parsed.as_ref().map(|parsed| parsed.kind) {
                     // NET-179, WIR-330: the receiving chain gave the address.
@@ -2945,16 +3278,19 @@ impl ClientNode {
                         ceremony_record = field(0).map(|value| (kind, value, answers));
                     }
                     _ => out.push(ClientEvent::Message {
-                        contact: ContactId(queue_id),
+                        contact: ContactId(contact),
                         app: bytes,
                     }),
                 }
             }
             if let Some((kind, value, answers)) = ceremony_record {
-                out.extend(self.on_verification(queue_id, kind, value, answers, now, rng)?);
+                out.extend(self.on_verification(contact, kind, value, answers, now, rng)?);
             }
             // The record opened the sending chain of an inviter.
-            self.send_waiting(queue_id, now, rng)?;
+            self.send_waiting(contact, now, rng)?;
+            if rotated {
+                out.extend(self.end_rotation(contact, rng)?);
+            }
             return Ok(out);
         }
         let Some(mut half) = self.halves.remove(&queue_id) else {
@@ -3051,6 +3387,9 @@ impl ClientNode {
                 salt: half.salt,
                 waiting_sends: VecDeque::new(),
                 ceremony: None,
+                since: now,
+                previous_relay: ANY_RELAY,
+                rotated_at: 0,
             },
         );
         self.moved.insert(queue_id);

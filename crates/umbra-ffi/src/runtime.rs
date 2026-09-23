@@ -150,6 +150,8 @@ pub enum Update {
         /// The `GroupQueueId` that holds records.
         group_queue_id: [u8; 32],
     },
+    /// An inbound queue of a contact ended at the end of its rotation.
+    QueueEnded([u8; 32]),
     /// The relay of an inbound queue answered its `NKEY`.
     NotifyKey {
         /// The queue.
@@ -313,6 +315,9 @@ pub async fn run_client(
     // The tick of `CIRCUIT_BUILD_TIMEOUT`. It sends nothing unless a build
     // ran out, and the cover clock stays memoryless.
     let mut tick = tokio::time::interval(Duration::from_secs(1));
+    // The check of the queue rotations of Part 3 §3.2.6. A rotation
+    // counts in days, thus a check each minute is on time.
+    let mut next_rotation_check = unix_now();
     let ended = 'run: loop {
         for capsule in node.take_capsules() {
             if link.send(&capsule).await.is_err() {
@@ -352,7 +357,17 @@ pub async fn run_client(
             }
             // NET-169: a build that no relay answers ends, and the run
             // ends with its last circuit.
-            _ = tick.tick() => node.on_tick(unix_now()),
+            _ = tick.tick() => {
+                let now = unix_now();
+                let mut events = node.on_tick(now);
+                // NET-176: a fault of one rotation ends no run, and the
+                // next check tries again.
+                if node.is_ready() && now >= next_rotation_check {
+                    next_rotation_check = now.saturating_add(60);
+                    events.extend(node.rotate_due(now, &mut rng).unwrap_or_default());
+                }
+                events
+            }
         };
         if let Err(ended) = settle(&mut node, persist.as_mut(), &events) {
             break 'run ended;
@@ -410,6 +425,7 @@ pub async fn run_client(
                     recipient_id,
                     relay_ntf_pk,
                 },
+                ClientEvent::QueueEnded { queue } => Update::QueueEnded(queue),
                 ClientEvent::CircuitLost => break 'run Ended::CircuitLost,
                 ClientEvent::CircuitAged => break 'run Ended::Aged,
             };

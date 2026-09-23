@@ -67,7 +67,7 @@ each column when a crate implements the requirement and a test covers it.
 | --- | --- | --- | --- | --- | --- | --- |
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
-| `NET` | 228 | 84 | 1 | 0 | 8 | **321** |
+| `NET` | 229 | 84 | 1 | 0 | 8 | **322** |
 | `IDN` | 120 | 43 | 1 | 0 | 5 | **169** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
 | `WIR` | 395 | 87 | 0 | 0 | 6 | **488** |
@@ -81,7 +81,7 @@ each column when a crate implements the requirement and a test covers it.
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
 | `IMP` | 112 | 41 | 0 | 0 | 2 | **155** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2236 | 718 | 7 | 0 | 54 | **3015** |
+| **All** | 2237 | 718 | 7 | 0 | 54 | **3016** |
 
 ## SCP — Scope and Conventions
 
@@ -460,6 +460,7 @@ Source: `spec/03-network-architecture.md`
 | `NET-320` | §3.4.3 | MUST | A relay | A relay MUST end a circuit at `CIRCUIT_MAX_AGE` from the arrival of its first cell at that relay, and it sends no cell for it. |  |  |
 | `NET-321` | §3.4.3 | MUST | A relay | A relay MUST count the cells of a circuit in each direction, the build cells included, and MUST end the circuit when one count passes `CIRCUIT_MAX_CELLS`. |  |  |
 | `NET-322` | §3.4.3 | MUST | A relay that ends a circuit | A relay that ends a circuit MUST tell each neighbor of it with the `CircuitDestroy` of Part 6 §6.2.3, on each link of the circuit but the one that ended it: a closed link, a `CircuitDestroy`, or a `DESTROY` cell of the client. |  |  |
+| `NET-323` | §3.2.4 | MUST | A client | A client MUST draw the jitter of a queue from a value that no relay holds. |  |  |
 
 ## IDN — Identity
 

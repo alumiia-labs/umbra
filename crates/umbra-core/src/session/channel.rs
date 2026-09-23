@@ -505,15 +505,19 @@ pub enum Received {
     },
 }
 
-/// The ratchet and the two queues of one channel.
+/// The ratchet and the two queues of one channel. During a rotation of
+/// Part 3 §3.2.6 the channel also reads the queue that the new one
+/// replaces, until the owner ends it (`NET-177`).
 pub struct PairwiseChannel {
     ratchet: Ratchet,
     outbound: Outbound,
     inbound: Inbound,
+    previous: Option<Inbound>,
 }
 
-/// The version byte of a stored channel.
-const STORED_VERSION: u8 = 0x01;
+/// The version byte of a stored channel. Version `0x01` holds no previous
+/// inbound queue.
+const STORED_VERSION: u8 = 0x02;
 
 impl PairwiseChannel {
     /// Writes the channel for the at-rest store: the two queue ends and the
@@ -525,6 +529,13 @@ impl PairwiseChannel {
         writer.u8(STORED_VERSION);
         self.outbound.export(&mut writer);
         self.inbound.export(&mut writer)?;
+        match &self.previous {
+            Some(previous) => {
+                writer.u8(1);
+                previous.export(&mut writer)?;
+            }
+            None => writer.u8(0),
+        }
         writer.var(&self.ratchet.export()?)?;
         Ok(writer.finish())
     }
@@ -532,17 +543,27 @@ impl PairwiseChannel {
     /// Reads the channel that [`PairwiseChannel::export`] wrote.
     pub fn restore(bytes: &[u8]) -> Result<Self, Error> {
         let mut reader = Reader::new(bytes);
-        if reader.u8()? != STORED_VERSION {
+        let version = reader.u8()?;
+        if version != STORED_VERSION && version != 0x01 {
             return Err(Error::Malformed);
         }
         let outbound = Outbound::restore(&mut reader)?;
         let inbound = Inbound::restore(&mut reader)?;
+        let previous = match version {
+            0x01 => None,
+            _ => match reader.u8()? {
+                0 => None,
+                1 => Some(Inbound::restore(&mut reader)?),
+                _ => return Err(Error::Malformed),
+            },
+        };
         let ratchet = Ratchet::restore(reader.var()?)?;
         reader.end()?;
         Ok(PairwiseChannel {
             ratchet,
             outbound,
             inbound,
+            previous,
         })
     }
 
@@ -552,7 +573,51 @@ impl PairwiseChannel {
             ratchet,
             outbound,
             inbound,
+            previous: None,
         }
+    }
+
+    /// Moves the channel to a new inbound queue (`NET-176`). The queue that
+    /// it replaces stays readable until [`PairwiseChannel::end_previous`].
+    /// One rotation runs at a time.
+    pub fn rotate(&mut self, inbound: Inbound) -> Result<(), Error> {
+        if self.previous.is_some() {
+            return Err(Error::Malformed);
+        }
+        self.previous = Some(core::mem::replace(&mut self.inbound, inbound));
+        Ok(())
+    }
+
+    /// The inbound queue that a rotation replaced, while the channel still
+    /// reads it.
+    pub fn previous(&self) -> Option<&Inbound> {
+        self.previous.as_ref()
+    }
+
+    /// Ends the rotation: the channel reads the replaced queue no more
+    /// (`NET-177`, `NET-178`).
+    pub fn end_previous(&mut self) -> Option<Inbound> {
+        self.previous.take()
+    }
+
+    /// Whether `queue` is an inbound queue of this channel.
+    pub fn reads(&self, queue: &[u8; 32]) -> bool {
+        self.inbound_on(queue).is_some()
+    }
+
+    fn inbound_on(&self, queue: &[u8; 32]) -> Option<&Inbound> {
+        core::iter::once(&self.inbound)
+            .chain(self.previous.as_ref())
+            .find(|inbound| inbound.recipient_id() == queue)
+    }
+
+    fn inbound_on_mut(&mut self, queue: &[u8; 32]) -> Option<&mut Inbound> {
+        if self.inbound.recipient_id() == queue {
+            return Some(&mut self.inbound);
+        }
+        self.previous
+            .as_mut()
+            .filter(|inbound| inbound.recipient_id() == queue)
     }
 
     /// Whether the ratchet holds a sending chain. The inviter holds none
@@ -618,7 +683,22 @@ impl PairwiseChannel {
         now: u64,
         rng: &mut R,
     ) -> Result<Received, Error> {
-        let (seq, inner) = match self.inbound.open(msg_payload, bucket, now)? {
+        let queue = *self.inbound.recipient_id();
+        self.receive_on(&queue, msg_payload, bucket, now, rng)
+    }
+
+    /// Opens the payload of a `MSG` of the inbound queue `queue`: the
+    /// current one, or the one that a rotation replaced.
+    pub fn receive_on<R: CryptoRng + ?Sized>(
+        &mut self,
+        queue: &[u8; 32],
+        msg_payload: &[u8],
+        bucket: Bucket,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<Received, Error> {
+        let inbound = self.inbound_on_mut(queue).ok_or(Error::NoPath)?;
+        let (seq, inner) = match inbound.open(msg_payload, bucket, now)? {
             Opened::Duplicate => return Ok(Received::Duplicate),
             Opened::Undecryptable { seq } => return Ok(Received::Undecryptable { seq }),
             Opened::Record {
@@ -660,5 +740,25 @@ impl PairwiseChannel {
     /// Commits an `ACK` that the device sent.
     pub fn acknowledged(&mut self, point: AckPoint) {
         self.inbound.acknowledged(point);
+    }
+
+    /// The `ACK` of the inbound queue `queue` that the cursor offers at
+    /// `now`, with its point.
+    pub fn acknowledge_on(
+        &self,
+        queue: &[u8; 32],
+        relay_session_pk: &[u8; 32],
+        corr_id: [u8; 16],
+        now: u64,
+    ) -> Result<Option<(AckPoint, Vec<u8>)>, Error> {
+        let inbound = self.inbound_on(queue).ok_or(Error::NoPath)?;
+        inbound.acknowledge(relay_session_pk, corr_id, now)
+    }
+
+    /// Commits an `ACK` of the inbound queue `queue` that the device sent.
+    pub fn acknowledged_on(&mut self, queue: &[u8; 32], point: AckPoint) {
+        if let Some(inbound) = self.inbound_on_mut(queue) {
+            inbound.acknowledged(point);
+        }
     }
 }
