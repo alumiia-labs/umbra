@@ -703,6 +703,11 @@ pub enum StateChange {
         /// The stored form, which holds the keys of the queue.
         state: Zeroizing<Vec<u8>>,
     },
+    /// A notify queue ended: its group closed, or a new one replaced it.
+    NotifyQueueEnded {
+        /// The `RecipientId` of the queue.
+        queue: [u8; 32],
+    },
 }
 
 /// What one slot of the cover clock carried.
@@ -967,6 +972,35 @@ impl ClientNode {
         self.assign(id, relay);
         self.notify.insert(id, NotifyQueue { inbound, relay });
         Ok(id)
+    }
+
+    /// Ends a notify queue (`NTF-103`, `NTF-105`): a `DEL` goes to its relay
+    /// when a circuit serves it, and the node holds it no more. A relay that
+    /// gets no `DEL` ends the queue at its idle lifetime.
+    pub fn end_notify_queue<R: CryptoRng + ?Sized>(
+        &mut self,
+        recipient_id: &[u8; 32],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let Some(held) = self.notify.remove(recipient_id) else {
+            return Ok(());
+        };
+        self.changes.push(StateChange::NotifyQueueEnded {
+            queue: *recipient_id,
+        });
+        self.moved.remove(recipient_id);
+        if let Some(slot) = self.slot_of(recipient_id) {
+            self.current = slot;
+            if let Ok(session_pk) = self.session_pk() {
+                let command = held.inbound.delete(&session_pk, random(rng))?;
+                self.queue_command(command, Waiting::Other)?;
+                self.pump()?;
+            }
+            if let Some(slot) = self.slots.get_mut(slot) {
+                slot.queues.remove(recipient_id);
+            }
+        }
+        Ok(())
     }
 
     /// Makes a notify queue of Part 8 §8.5.2 (`NTF-090`). A

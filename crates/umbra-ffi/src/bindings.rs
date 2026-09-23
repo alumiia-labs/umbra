@@ -1169,9 +1169,32 @@ impl Inner {
                 .answer_key_request(conversation, index, now_ms, &mut OsRng);
         }
         self.pump_epoch_transfers();
-        // NTF-090: each group with no notify queue gets one from the run of
-        // the queues.
-        if let (Ok(groups), Some(running)) = (self.client.groups_without_notify(), &self.bridge) {
+        // NTF-132, NTF-133: the notify queue of a group left, and one that
+        // a new queue replaced, leave each replica and end.
+        if let (Ok(endings), Some(running)) = (self.client.notify_endings_due(), &self.bridge) {
+            for ending in endings {
+                for registration in ending.unregistrations {
+                    commands.push(GroupCommand::Notify {
+                        relay: registration.relay,
+                        group_queue_id: registration.group_queue_id,
+                        read: registration.read,
+                        queue: registration.queue,
+                        on: false,
+                    });
+                }
+                for queue in &ending.queues {
+                    let _ = running.end_notify_queue(*queue);
+                    let _ = self.client.unbind_queue(queue, &mut OsRng);
+                }
+                let _ = self.client.notify_ended(ending.conversation, &mut OsRng);
+            }
+        }
+        // NTF-090, NTF-104: each group with no notify queue, or with one
+        // past its rotation, gets a new one from the run of the queues.
+        let now_s = crate::runtime::unix_now();
+        if let (Ok(groups), Some(running)) =
+            (self.client.groups_without_notify(now_s), &self.bridge)
+        {
             for conversation in groups {
                 if self
                     .notify_pending
@@ -1196,6 +1219,7 @@ impl Inner {
                     group_queue_id: registration.group_queue_id,
                     read: registration.read,
                     queue: registration.queue,
+                    on: registration.on,
                 });
                 let _ = self.client.notify_registered(
                     registration.conversation,
@@ -2082,8 +2106,13 @@ impl Handle {
                 address,
             } => {
                 if let Some(conversation) = notify_pending.remove(tag) {
-                    let _ =
-                        client.set_group_notify(conversation, *recipient_id, address, &mut OsRng);
+                    let _ = client.set_group_notify(
+                        conversation,
+                        *recipient_id,
+                        address,
+                        unix_now(),
+                        &mut OsRng,
+                    );
                 }
             }
             // NTF-113: the binding goes sealed to that key.
@@ -2426,10 +2455,17 @@ impl Handle {
                     .map_err(|_| FfiError::Integrity)?;
                 net_events.push_back(NetEvent::Invitation(bundle));
             }
-            // Each notify queue of a group takes its digests again.
+            // Each notify queue of a group takes its digests again, and one
+            // that no group names ends (`NTF-133`).
+            let named = client.group_notify_queues()?;
             for state in &stored.notify_queues {
-                node.restore_notify_queue(state)
+                let id = node
+                    .restore_notify_queue(state)
                     .map_err(|_| FfiError::Integrity)?;
+                if !named.contains(&id) {
+                    let _ = node.end_notify_queue(&id, &mut OsRng);
+                    let _ = client.unbind_queue(&id, &mut OsRng);
+                }
             }
             // Each record that no relay accepted in an earlier run goes
             // again. The runtime holds it until the circuit is ready.

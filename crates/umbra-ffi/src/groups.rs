@@ -48,8 +48,8 @@ const SETTLED: Duration = Duration::from_secs(30);
 /// What the caller asks of the task. Each command names one replica: the
 /// caller sends the same record to each of the two (`GRP-194`).
 pub enum GroupCommand {
-    /// `GNREG`: the notify queue of this device at one replica (Part 8
-    /// `NTF-093`). It has no answer.
+    /// `GNREG` or `GNUNREG`: the notify queue of this device at one
+    /// replica (Part 8 `NTF-093`, `NTF-103`). It has no answer.
     Notify {
         /// The relay.
         relay: [u8; 32],
@@ -59,6 +59,8 @@ pub enum GroupCommand {
         read: Secret<32>,
         /// The encoded `QueueAddress` of the notify queue.
         queue: Vec<u8>,
+        /// A `GNREG`, or a `GNUNREG`.
+        on: bool,
     },
     /// `GNEW`. Two of these, at two relays of different operators and
     /// blocs, make one group (`GRP-191`).
@@ -148,11 +150,13 @@ impl GroupCommand {
                 group_queue_id,
                 read,
                 queue,
+                on,
             } => GroupCommand::Notify {
                 relay: *relay,
                 group_queue_id: *group_queue_id,
                 read: Secret::new(*read.expose()),
                 queue: queue.clone(),
+                on: *on,
             },
             GroupCommand::Create {
                 tag,
@@ -624,6 +628,7 @@ async fn session(
                     group_queue_id,
                     read,
                     queue,
+                    on,
                 } => (
                     None,
                     *relay,
@@ -631,7 +636,7 @@ async fn session(
                     GroupJob::Notify {
                         read: StaticSecret::from(*read.expose()),
                         queue: queue.clone(),
-                        on: true,
+                        on: *on,
                     },
                 ),
             };

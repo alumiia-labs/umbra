@@ -633,6 +633,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     None,
                     Zeroizing::new([queue.as_slice(), state].concat()),
                 ),
+                StateChange::NotifyQueueEnded { queue } => {
+                    Planned::Delete(NOTIFY_STATE, open.store.row_id(NOTIFY_STATE, queue))
+                }
             });
         }
         let mut events = Vec::new();

@@ -82,6 +82,8 @@ pub enum Command {
     /// Make a notify queue of Part 8 §8.5.2. An [`Update::NotifyQueue`]
     /// with the same tag follows.
     MakeNotifyQueue(u64),
+    /// End a notify queue with a `DEL` (`NTF-103`, `NTF-105`).
+    EndNotifyQueue([u8; 32]),
     /// Send the `NKEY` of an inbound queue. An [`Update::NotifyKey`]
     /// follows with the notification key of its relay (Part 8 §8.2.3).
     NotifyQueue([u8; 32]),
@@ -479,6 +481,9 @@ pub async fn run_client(
                     if let Ok(handle) = node.make_notify_queue(&mut rng) {
                         notify_tags.insert(handle, tag);
                     }
+                }
+                Command::EndNotifyQueue(recipient_id) => {
+                    let _ = node.end_notify_queue(&recipient_id, &mut rng);
                 }
                 Command::NotifyQueue(recipient_id) => {
                     let _ = node.notify_queue(&recipient_id, &mut rng);

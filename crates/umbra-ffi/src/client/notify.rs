@@ -583,6 +583,28 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }))
     }
 
+    /// A queue ended: its binding leaves, and its group holds one queue
+    /// less.
+    pub fn unbind_queue<R: CryptoRng + ?Sized>(
+        &mut self,
+        recipient_id: &[u8; 32],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let Some(queue) = self.notify_queue(recipient_id)? else {
+            return Ok(());
+        };
+        let mut rows = Vec::new();
+        if let Some(mut group) = self
+            .notify_groups()?
+            .into_iter()
+            .find(|group| group.handle == queue.handle)
+        {
+            group.count = group.count.saturating_sub(1);
+            rows.push((NOTIFY_GROUP, group.handle.to_vec(), group.encode()));
+        }
+        self.write_rows(&rows, &[(NOTIFY_QUEUE, recipient_id.to_vec())], rng)
+    }
+
     /// The `NBIND` of a queue left. A relay gives it no answer, and a lost
     /// one binds again at the next `NKEY` after a new run.
     pub fn queue_bound<R: CryptoRng + ?Sized>(

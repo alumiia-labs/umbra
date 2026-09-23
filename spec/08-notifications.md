@@ -757,6 +757,14 @@ gives the commands `GNREG` and `GNUNREG`, and Part 12 §12.6.4 gives the
 - **[NTF-104]** A client MUST rotate a group notify queue with the triple of
   `NTF-007`. **[NTF-105]** A client MUST register the new queue before it
   drops the old one.
+- **[NTF-132]** A client that leaves a group, that the group removes, or
+  whose group closes MUST send a `GNUNREG` for its notify queue to each
+  replica while it holds a read key of the group. A client that holds no read
+  key sends none, and the replica discards the registration under `NTF-102`.
+  **[NTF-133]** A client MUST end a notify queue that it drops with a `DEL`
+  of Part 6 §6.4. At the start of a run, a client MUST end each notify queue
+  that no group of its store names. Such a queue is left from a run that
+  ended before the client wrote the queue to its group.
 - **[NTF-106]** A client in Private mode or in Off mode MUST NOT register a
   group notify queue. Those modes find a record at the next drain of the group
   queue.

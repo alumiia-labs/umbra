@@ -424,6 +424,19 @@ impl Inbound {
         )
     }
 
+    /// The `DEL` of the queue: the relay erases it and each record in it
+    /// (`WIR-039` to `WIR-042`).
+    pub fn delete(&self, relay_session_pk: &[u8; 32], corr_id: [u8; 16]) -> Result<Vec<u8>, Error> {
+        signed(
+            Cmd::Del,
+            self.recipient_id,
+            corr_id,
+            &[],
+            &self.auth_secret,
+            relay_session_pk,
+        )
+    }
+
     /// The `NBIND` of the queue: the binding sealed to the notification
     /// key of the relay (`NTF-113`).
     pub fn bind(

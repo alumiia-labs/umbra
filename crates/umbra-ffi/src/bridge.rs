@@ -79,6 +79,11 @@ impl Bridge {
         self.command(Command::MakeNotifyQueue(tag))
     }
 
+    /// Ends a notify queue with a `DEL`.
+    pub fn end_notify_queue(&self, recipient_id: [u8; 32]) -> Result<(), Error> {
+        self.command(Command::EndNotifyQueue(recipient_id))
+    }
+
     /// Sends the `NKEY` of an inbound queue (Part 8 §8.2.3).
     pub fn notify_queue(&self, recipient_id: [u8; 32]) -> Result<(), Error> {
         self.command(Command::NotifyQueue(recipient_id))

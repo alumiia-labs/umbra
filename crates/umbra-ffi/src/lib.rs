@@ -1262,6 +1262,114 @@ mod tests {
     }
 
     #[test]
+    fn a_group_notify_queue_rotates_and_each_old_queue_leaves_both_replicas() {
+        use umbra_core::notify::ROTATE_INTERVAL;
+        use umbra_wire::ndr::TokenCarrier;
+        let mut rng = Rng(117);
+        let mut client = new_client(&mut rng);
+        let relays = [[0xA1; 32], [0xB2; 32]];
+        let t0 = 1_800_000_000;
+        let conversation = client.create_group("Summit", relays, t0, &mut rng).unwrap();
+        let group_id = client.group_info(conversation).unwrap().group_id;
+        while let Some(job) = client.take_group_creation() {
+            let queue = [0xC0 | job.replica; 32];
+            client
+                .group_queue_made(&group_id, job.replica, job.relay, queue, &mut rng)
+                .unwrap();
+        }
+        assert!(client.group_info(conversation).unwrap().is_ready);
+
+        // NTF-090: a device with no push token makes no notify queue.
+        assert!(client.groups_without_notify(t0).unwrap().is_empty());
+        client
+            .set_push_token(Some((TokenCarrier::Fcm, "fcm-token")), &mut rng)
+            .unwrap();
+        assert_eq!(
+            client.groups_without_notify(t0).unwrap(),
+            vec![conversation]
+        );
+        let first = vec![0x11; umbra_wire::address::LEN];
+        let second = vec![0x22; umbra_wire::address::LEN];
+        client
+            .set_group_notify(conversation, [0x11; 32], &first, t0, &mut rng)
+            .unwrap();
+        assert!(client.groups_without_notify(t0).unwrap().is_empty());
+
+        // NTF-093: one GNREG for each replica.
+        let register =
+            |client: &mut Client<MemoryBackend, Element>, rng: &mut Rng, now: u64, queue: &[u8]| {
+                let due = client.notify_registrations_due(now).unwrap();
+                assert_eq!(due.len(), 2);
+                for registration in due {
+                    assert!(registration.on);
+                    assert_eq!(registration.queue, queue);
+                    client
+                        .notify_registered(conversation, registration.which, now, rng)
+                        .unwrap();
+                }
+                assert!(client.notify_registrations_due(now).unwrap().is_empty());
+            };
+        register(&mut client, &mut rng, t0, &first);
+        assert!(client.notify_endings_due().unwrap().is_empty());
+
+        // NTF-104: after seven days the group takes a new queue, and the
+        // old one stays until both replicas took the new GNREG (NTF-105).
+        let t1 = t0 + ROTATE_INTERVAL;
+        assert!(client.groups_without_notify(t1 - 1).unwrap().is_empty());
+        assert_eq!(
+            client.groups_without_notify(t1).unwrap(),
+            vec![conversation]
+        );
+        client
+            .set_group_notify(conversation, [0x22; 32], &second, t1, &mut rng)
+            .unwrap();
+        // A second rotation waits for the first one to end.
+        assert!(client
+            .groups_without_notify(t1 + ROTATE_INTERVAL)
+            .unwrap()
+            .is_empty());
+        assert!(client.notify_endings_due().unwrap().is_empty());
+        register(&mut client, &mut rng, t1, &second);
+        let endings = client.notify_endings_due().unwrap();
+        assert_eq!(endings.len(), 1);
+        assert_eq!(endings[0].queues, vec![[0x11; 32]]);
+        assert_eq!(endings[0].unregistrations.len(), 2);
+        for registration in &endings[0].unregistrations {
+            assert!(!registration.on);
+            assert_eq!(registration.queue, first);
+        }
+        client.notify_ended(conversation, &mut rng).unwrap();
+        assert!(client.notify_endings_due().unwrap().is_empty());
+        // The new queue stays registered and lives through a lock.
+        client.lock();
+        client.unlock(&units("correct horse"), t1).unwrap();
+        assert!(client.notify_registrations_due(t1).unwrap().is_empty());
+        assert!(client.notify_endings_due().unwrap().is_empty());
+
+        // NTF-132, NTF-133: a closed group sends GNUNREG for its queue, ends it, and
+        // takes no new one.
+        client.close_group(conversation, &mut rng).unwrap();
+        let endings = client.notify_endings_due().unwrap();
+        assert_eq!(endings.len(), 1);
+        assert_eq!(endings[0].queues, vec![[0x22; 32]]);
+        assert_eq!(endings[0].unregistrations.len(), 2);
+        assert!(endings[0]
+            .unregistrations
+            .iter()
+            .all(|registration| !registration.on && registration.queue == second));
+        client.notify_ended(conversation, &mut rng).unwrap();
+        assert!(client.notify_endings_due().unwrap().is_empty());
+        assert!(client
+            .groups_without_notify(t1 + 2 * ROTATE_INTERVAL)
+            .unwrap()
+            .is_empty());
+        assert!(client
+            .notify_registrations_due(t1 + 2 * ROTATE_INTERVAL)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
     fn a_handle_group_rotates_after_seven_days_and_its_old_handle_leaves() {
         use umbra_core::notify::{ndr::Ndr, ROTATE_INTERVAL};
         use umbra_crypto::secret::Secret;

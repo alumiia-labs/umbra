@@ -72,7 +72,7 @@ each column when a crate implements the requirement and a test covers it.
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
 | `WIR` | 395 | 87 | 0 | 0 | 6 | **488** |
 | `DEV` | 179 | 87 | 2 | 0 | 7 | **275** |
-| `NTF` | 75 | 31 | 0 | 0 | 3 | **109** |
+| `NTF` | 77 | 31 | 0 | 0 | 3 | **111** |
 | `DIS` | 123 | 37 | 0 | 0 | 1 | **161** |
 | `REL` | 124 | 32 | 1 | 0 | 2 | **159** |
 | `GRP` | 220 | 62 | 0 | 0 | 6 | **288** |
@@ -81,7 +81,7 @@ each column when a crate implements the requirement and a test covers it.
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
 | `IMP` | 112 | 41 | 0 | 0 | 2 | **155** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2234 | 718 | 7 | 0 | 54 | **3013** |
+| **All** | 2236 | 718 | 7 | 0 | 54 | **3015** |
 
 ## SCP — Scope and Conventions
 
@@ -1683,6 +1683,8 @@ Source: `spec/08-notifications.md`
 | `NTF-129` | §8.2.3 | MUST | A queue relay | A queue relay MUST keep the binding of each queue in the store of Part 3 §3.2.4, thus a restart keeps the pushes of each queue. |  |  |
 | `NTF-130` | §8.2.7 | MUST | The NDR | The NDR MUST send an FCM push through the HTTP v1 API of FCM as a data message with no `notification` field: the one data field `b` holds the blob in base64url with no padding, `android.priority` is `HIGH`, and `android.ttl` is the expiry of the push in seconds. |  |  |
 | `NTF-131` | §8.4.1 | MAY | A client that holds no push carrier | A client that holds no push carrier MAY poll: a periodic job of the platform, no more often than its least period, starts a run of an open client that has none, and that run drains each queue under Part 3 §3.7 item 4. |  |  |
+| `NTF-132` | §8.5.2 | MUST | (unstated) | A client that leaves a group, that the group removes, or whose group closes MUST send a `GNUNREG` for its notify queue to each replica while it holds a read key of the group. |  |  |
+| `NTF-133` | §8.5.2 | MUST | A client | A client MUST end a notify queue that it drops with a `DEL` of Part 6 §6.4. |  |  |
 
 ## DIS — Discovery, Handles, and Key Transparency
 

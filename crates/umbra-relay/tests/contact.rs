@@ -267,7 +267,7 @@ impl Network {
                     stored.invitations.remove(&queue);
                 }
                 // No test of this harness makes a notify queue.
-                StateChange::NotifyQueue { .. } => {}
+                StateChange::NotifyQueue { .. } | StateChange::NotifyQueueEnded { .. } => {}
             }
         }
     }

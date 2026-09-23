@@ -766,6 +766,7 @@ fn a_group_record_wakes_a_member_that_went_away_through_its_notify_queue() {
     let bob = launch(&directory, "bob.db", 2);
     bob.set_push_endpoint(Some(format!("https://localhost:{endpoint_port}/up/bob")))
         .unwrap();
+    let mut networks = Vec::new();
     for handle in [&alice, &bob] {
         let mut verified = handle
             .network_of_manifest(
@@ -780,6 +781,7 @@ fn a_group_record_wakes_a_member_that_went_away_through_its_notify_queue() {
         verified.ndr_relay_url = Some(format!("https://localhost:{}/ohttp", network.ports[0]));
         verified.ndr_key_config = Some(config.to_vec());
         verified.ndr_relay_ipv4 = Some(vec![127, 1, 0, 1]);
+        networks.push(verified.clone());
         handle.clone().connect(verified).unwrap();
     }
     alice.invite().unwrap();
@@ -857,6 +859,32 @@ fn a_group_record_wakes_a_member_that_went_away_through_its_notify_queue() {
         .expect("no push reached the endpoint of Bob")
         .unwrap();
     assert_eq!(blob.len(), umbra_wire::ndr::BLOB_LEN);
+
+    // NTF-132, NTF-133: Bob comes back and leaves the group. His notify queue leaves
+    // both replicas and ends, and his pairwise queue stays bound.
+    bob.clone().connect(networks[1].clone()).unwrap();
+    let bob_group = bob
+        .summaries()
+        .unwrap()
+        .into_iter()
+        .map(|summary| summary.conversation)
+        .find(|conversation| bob.is_group(conversation.clone()).unwrap_or(false))
+        .unwrap();
+    let start = Instant::now();
+    while bob.leave_group(bob_group.clone()).is_err() {
+        assert!(start.elapsed() < STEP, "Bob could not leave");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let start = Instant::now();
+    while bob.push_state().unwrap().0 != 1 {
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "{:?}",
+            bob.push_state()
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    bob.disconnect();
     alice.disconnect();
 }
 
