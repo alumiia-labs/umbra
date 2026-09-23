@@ -34,7 +34,7 @@ use umbra_crypto::{
 use umbra_onion::{
     build::{build_cell_body, read_cell_body, Pending, BUILD_BUCKET, HELLO_LEN},
     circuit::CircuitBuild,
-    CIRCUIT_BUILD_TIMEOUT, CIRCUIT_MAX_AGE, HOPS,
+    CIRCUIT_BUILD_TIMEOUT, CIRCUIT_MAX_AGE, CIRCUIT_MAX_CELLS, HOPS,
 };
 use umbra_queue::{params::MAX_QUEUES_PER_SESSION, Reject};
 use umbra_transport::link::ClientLink;
@@ -179,9 +179,10 @@ pub enum ClientEvent {
     /// The circuit failed its check or its build, and the runtime builds a
     /// new one.
     CircuitLost,
-    /// A circuit came near `CIRCUIT_MAX_AGE`, at which each relay of it
-    /// ends it with no cell (`NET-320`). The runtime ends the run and
-    /// starts a new one at once, and nothing failed.
+    /// A circuit came near `CIRCUIT_MAX_AGE` or `CIRCUIT_MAX_CELLS`, at
+    /// which each relay of it ends it with no cell (`NET-320`, `NET-321`).
+    /// The runtime ends the run and starts a new one at once, and nothing
+    /// failed.
     CircuitAged,
 }
 
@@ -372,6 +373,11 @@ struct Slot {
 /// (`NET-320`). The age counts from a tick, not from the first `EXTEND`,
 /// and a relay sweeps on its own period.
 pub const CIRCUIT_AGE_MARGIN: u64 = 60;
+
+/// The cells before `CIRCUIT_MAX_CELLS` at which a client ends a circuit
+/// (`NET-321`). A relay paces about one cell each second toward the
+/// client, and the client ticks once each second.
+pub const CIRCUIT_CELL_MARGIN: u32 = 64;
 
 /// A relay that a client can put into a chain: the facts that the
 /// invariants of Part 3 §3.4.6 test, and the static key of the handshake.
@@ -1011,6 +1017,11 @@ impl ClientNode {
             } else {
                 let born = *slot.born.get_or_insert(now);
                 has_aged |= slot.is_ready() && now.saturating_sub(born) >= old;
+                if let Circuit::Ready(session) = &slot.circuit {
+                    let (sent, received) = session.cells();
+                    let full = CIRCUIT_MAX_CELLS.saturating_sub(CIRCUIT_CELL_MARGIN);
+                    has_aged |= sent >= full || received >= full;
+                }
             }
             if !matches!(slot.circuit, Circuit::Building { .. }) {
                 slot.building_since = None;

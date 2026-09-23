@@ -95,6 +95,11 @@ impl CircuitSession {
         }
     }
 
+    /// The cells sent and received, against `CIRCUIT_MAX_CELLS`.
+    pub fn cells(&self) -> (u32, u32) {
+        self.circuit.cells()
+    }
+
     /// The identifier of the circuit, which leads each cell of it.
     pub fn circ_id(&self) -> [u8; 16] {
         self.circuit.circ_id()

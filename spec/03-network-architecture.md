@@ -937,6 +937,7 @@ causes does not occur.
 | `CIRCUIT_MAX_AGE` | 4 hours. The client measures it from the moment that it sends the first `EXTEND` cell |
 | `CIRCUIT_MAX_CELLS` | 8 192 |
 | `CIRCUIT_AGE_MARGIN` | 60 s. A client stops using a circuit this long before `CIRCUIT_MAX_AGE` (`NET-320`) |
+| `CIRCUIT_CELL_MARGIN` | 64 cells. A client stops using a circuit this many cells before `CIRCUIT_MAX_CELLS` in one direction (`NET-321`) |
 | `CIRCUIT_BUILD_TIMEOUT` | 5 s from the first `EXTEND` cell. Three round trips over a 200 ms path take about 0.6 s, thus the value has a wide margin |
 | Preemptive build | keep 2 spare circuits in the foreground, thus a rotation does not block a send. §3.12 forbids a spare circuit in a push-wake session |
 
@@ -956,6 +957,13 @@ causes does not occur.
   carried. The margin covers a client clock that ticks once each second
   and the sweep period of a relay, thus no relay ends a circuit that its
   client still sends on.
+- **[NET-321]** A relay MUST count the cells of a circuit in each direction,
+  the build cells included, and MUST end the circuit when one count passes
+  `CIRCUIT_MAX_CELLS`. A client MUST stop using a circuit when one of its two
+  counts reaches `CIRCUIT_MAX_CELLS` less `CIRCUIT_CELL_MARGIN`, and it
+  builds a new circuit as under `NET-320`. The relay pacing sends about one
+  cell each second toward the client (`PACING_MEAN`, §3.9), thus that count reaches the limit
+  after about 2 hours 16 minutes, before `CIRCUIT_MAX_AGE`.
 
 > *Cause of `NET-320`.* The relay ended an aged circuit with no cell and the
 > client held no age. The link to the guard stayed up, thus the client sent

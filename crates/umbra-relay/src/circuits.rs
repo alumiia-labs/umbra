@@ -17,7 +17,7 @@ use umbra_onion::{
         REPLY_LEN,
     },
     circuit::{Position, RelayHop},
-    CIRCUIT_MAX_AGE,
+    CIRCUIT_MAX_AGE, CIRCUIT_MAX_CELLS,
 };
 use umbra_wire::{
     bucket::Bucket,
@@ -87,6 +87,23 @@ struct Held {
     /// `RelaySession_sk` at a relay of layer 3 (`NET-285`).
     session_secret: Option<StaticSecret>,
     created_at: u64,
+    /// The cells toward the queue relay and toward the client, against
+    /// `CIRCUIT_MAX_CELLS` (`NET-321`).
+    cells: (u32, u32),
+}
+
+impl Held {
+    /// Counts one cell in one direction, and tells whether the circuit
+    /// stays under `CIRCUIT_MAX_CELLS` (`NET-321`).
+    fn count(&mut self, is_forward: bool) -> bool {
+        let count = if is_forward {
+            &mut self.cells.0
+        } else {
+            &mut self.cells.1
+        };
+        *count = count.saturating_add(1);
+        *count <= CIRCUIT_MAX_CELLS
+    }
 }
 
 fn cell_bytes(circ_id: &[u8; 16], tag: &[u8; 16], body: &[u8]) -> Vec<u8> {
@@ -201,6 +218,7 @@ impl CircuitTable {
                 extending: false,
                 session_secret,
                 created_at: now,
+                cells: (1, 1),
             },
         );
         let mut out = vec![0u8; BUILD_BUCKET.body_len()];
@@ -223,6 +241,9 @@ impl CircuitTable {
         let Some(held) = self.held.get_mut(&key) else {
             return Vec::new();
         };
+        if !held.count(true) {
+            return self.close(key);
+        }
         if let Some(next) = held.next {
             // NET-129: a relay in the middle makes no check.
             return match held.hop.forward(tag, body) {
@@ -296,6 +317,9 @@ impl CircuitTable {
         let Some(held) = self.held.get_mut(&client_side) else {
             return Vec::new();
         };
+        if !held.count(false) {
+            return self.close(client_side);
+        }
         let layered = if held.extending {
             // NET-164, NET-199: the answer of the next hop is plain, and it
             // goes back under this layer alone.
@@ -325,6 +349,11 @@ impl CircuitTable {
         content: &[u8],
     ) -> Option<Action> {
         let held = self.held.get_mut(circuit)?;
+        // The sweep ends a circuit past its cells, and nothing more leaves
+        // on it before that.
+        if !held.count(false) {
+            return None;
+        }
         let mut body = vec![0u8; bucket.body_len()];
         pad_body(bucket, command, content, &mut body).ok()?;
         let tag = held.hop.backward(&[0u8; 16], &mut body).ok()?;
@@ -364,12 +393,17 @@ impl CircuitTable {
             .collect()
     }
 
-    /// Ends each circuit past `CIRCUIT_MAX_AGE`.
+    /// Ends each circuit past `CIRCUIT_MAX_AGE` or past `CIRCUIT_MAX_CELLS`
+    /// in one direction (`NET-320`, `NET-321`).
     pub fn expire(&mut self, now: u64) -> Vec<Action> {
         let aged: Vec<CircuitKey> = self
             .held
             .iter()
-            .filter(|(_, held)| now.saturating_sub(held.created_at) >= CIRCUIT_MAX_AGE)
+            .filter(|(_, held)| {
+                now.saturating_sub(held.created_at) >= CIRCUIT_MAX_AGE
+                    || held.cells.0 > CIRCUIT_MAX_CELLS
+                    || held.cells.1 > CIRCUIT_MAX_CELLS
+            })
             .map(|(key, _)| *key)
             .collect();
         aged.into_iter().flat_map(|key| self.close(key)).collect()

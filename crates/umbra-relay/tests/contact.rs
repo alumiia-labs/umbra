@@ -654,6 +654,44 @@ fn a_circuit_near_its_age_ends_the_run_before_a_relay_drops_it() {
     assert_eq!(network.clients[0].on_tick(aged), [ClientEvent::CircuitAged]);
 }
 
+#[test]
+fn a_circuit_near_its_cells_ends_the_run_and_the_relay_ends_it_after() {
+    use umbra_onion::CIRCUIT_MAX_CELLS;
+    let mut network = Network::new();
+    network.settle();
+    network.take_events(0);
+    // The first cell of a circuit at the exit starts its pacing clock.
+    let now = network.now;
+    network.clients[0]
+        .on_cover_slot(true, None, now, &mut Rng(5))
+        .unwrap();
+    // The exit paces one cell toward the client at each step, thus the
+    // count toward the client reaches the limit first.
+    let mut steps = 0u32;
+    loop {
+        network.step();
+        steps += 1;
+        let events = network.clients[0].on_tick(network.now);
+        if events.contains(&ClientEvent::CircuitAged) {
+            break;
+        }
+        assert!(
+            steps < CIRCUIT_MAX_CELLS,
+            "the client never left the circuit"
+        );
+    }
+    // NET-321: the client leaves before the relay counts the limit.
+    assert!(steps < CIRCUIT_MAX_CELLS);
+    let paced = network.relays[2].paced_circuits().count();
+    for _ in 0..200 {
+        network.step();
+    }
+    // The exit counts past the limit, and its sweep ends those circuits.
+    let now = network.now;
+    network.relays[2].sweep(now);
+    assert!(network.relays[2].paced_circuits().count() < paced);
+}
+
 fn invitations_of(events: Vec<ClientEvent>) -> Vec<Vec<u8>> {
     events
         .into_iter()
