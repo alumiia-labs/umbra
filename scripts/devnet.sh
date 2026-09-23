@@ -35,6 +35,13 @@ cmp -s target/devnet/keyset.bin tests/fixtures/devnet/keyset.bin || {
     exit 1
 }
 
+# The debug build pins the gateway key of the NDR (`NTF-127`), and the seed
+# of ndr.conf gives the same one at each start.
+target/debug/umbra-ndr key-config tests/fixtures/devnet/ndr.conf     | python -c "import sys; sys.stdout.buffer.write(bytes.fromhex(sys.stdin.read().strip()))"     | cmp -s - tests/fixtures/devnet/ndr-key-config.bin || {
+    echo "the NDR key differs from tests/fixtures/devnet/ndr-key-config.bin"
+    exit 1
+}
+
 pids=()
 trap 'kill "${pids[@]}" 2>/dev/null || true' EXIT INT TERM
 # The queue relays start first, thus each dial of a lower layer finds a port

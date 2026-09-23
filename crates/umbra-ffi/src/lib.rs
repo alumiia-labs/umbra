@@ -1169,6 +1169,86 @@ mod tests {
         assert!(client.take_epoch_upload().is_none());
     }
 
+    #[test]
+    fn queues_bind_in_groups_and_each_group_registers_under_its_endpoint() {
+        use umbra_core::notify::ndr::Ndr;
+        use umbra_crypto::secret::Secret;
+        use umbra_wire::ndr::{NdrRequest, NdrResponse, BLOB_LEN, NDR_REQUEST_LEN};
+        let mut rng = Rng(91);
+        let mut client = new_client(&mut rng);
+        let queues: Vec<([u8; 32], [u8; 32])> = (0..10u8)
+            .map(|i| ([i; 32], [0xA1; 32]))
+            .chain([([0x50; 32], [0xB2; 32])])
+            .collect();
+        // No endpoint, no binding.
+        assert!(client.queues_to_bind(&queues, &mut rng).unwrap().is_empty());
+        assert!(client
+            .set_push_endpoint(Some("http://plain.example/up"), &mut rng)
+            .is_err());
+        let first = "https://push.example/up/one";
+        client.set_push_endpoint(Some(first), &mut rng).unwrap();
+        assert_eq!(client.push_endpoint().unwrap().as_deref(), Some(first));
+
+        // NTF-031: eight queues of one relay share a handle at most.
+        let unbound = client.queues_to_bind(&queues, &mut rng).unwrap();
+        assert_eq!(unbound.len(), 11);
+        let a = client.binding_of(&[0; 32]).unwrap().unwrap();
+        let b = client.binding_of(&[7; 32]).unwrap().unwrap();
+        let c = client.binding_of(&[8; 32]).unwrap().unwrap();
+        let d = client.binding_of(&[0x50; 32]).unwrap().unwrap();
+        assert_eq!(a.handle, b.handle);
+        assert_ne!(a.handle, c.handle);
+        assert_eq!(a.root.expose(), c.root.expose());
+        assert_ne!(a.queue_alias, b.queue_alias);
+        assert_ne!(a.relay_idx, d.relay_idx);
+        client.queue_bound(&[0; 32], &mut rng).unwrap();
+        let again = client.queues_to_bind(&queues, &mut rng).unwrap();
+        assert_eq!(again.len(), 10);
+        assert!(!again.contains(&[0; 32]));
+
+        // Each group registers once, and the NDR opens its token.
+        let mut ndr = Ndr::default();
+        let calls = client.ndr_calls_due(&mut rng).unwrap();
+        assert_eq!(calls.len(), 3);
+        for call in &calls {
+            assert_eq!(ndr.handle(&call.request[..]).0, NdrResponse::Taken);
+            client.ndr_call_taken(call, &mut rng).unwrap();
+        }
+        assert!(client.ndr_calls_due(&mut rng).unwrap().is_empty());
+        let mut push = [0u8; NDR_REQUEST_LEN];
+        NdrRequest::Push {
+            handle: a.handle,
+            k_tok: Secret::new(*a.k_tok.expose()),
+            ttl: 60,
+            blob: [0; BLOB_LEN],
+        }
+        .encode(&mut push)
+        .unwrap();
+        let delivery = ndr.handle(&push).1.unwrap();
+        assert_eq!(&delivery.target[..], first.as_bytes());
+
+        // NTF-124: a new endpoint moves each held handle on its removal
+        // secret, and none takes each group back.
+        let second = "https://push.example/up/two";
+        client.set_push_endpoint(Some(second), &mut rng).unwrap();
+        let calls = client.ndr_calls_due(&mut rng).unwrap();
+        assert_eq!(calls.len(), 3);
+        for call in &calls {
+            assert_eq!(ndr.handle(&call.request[..]).0, NdrResponse::Taken);
+            client.ndr_call_taken(call, &mut rng).unwrap();
+        }
+        assert_eq!(&ndr.handle(&push).1.unwrap().target[..], second.as_bytes());
+        client.set_push_endpoint(None, &mut rng).unwrap();
+        let calls = client.ndr_calls_due(&mut rng).unwrap();
+        assert!(calls.iter().all(|call| call.is_removal));
+        for call in &calls {
+            assert_eq!(ndr.handle(&call.request[..]).0, NdrResponse::Taken);
+            client.ndr_call_taken(call, &mut rng).unwrap();
+        }
+        assert!(ndr.is_empty());
+        assert!(client.ndr_calls_due(&mut rng).unwrap().is_empty());
+    }
+
     /// Puts `other` into the group of `client` with the add, the admit and
     /// the snapshot of §11.9.1, and gives its conversation there.
     fn join_group(

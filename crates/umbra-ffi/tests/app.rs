@@ -53,13 +53,19 @@ use umbra_ffi::bindings::{
 use umbra_ffi::groups::{run_groups, GroupCommand, GroupUpdate};
 use umbra_ffi::transfers::{run_transfers, TransferCommand, TransferUpdate};
 use umbra_relay::{
+    ndr_server::{run_ndr, Gateway, MemoryNdrStore},
     node::{Config as RelayConfig, RelayNode},
     placement::placement,
-    server::{run_relay, tls_acceptor, Carried, OsRng},
+    server::{run_relay, tls_acceptor, Carried, OhttpForward, OsRng},
     sqlite_store::SqliteStore,
     store::{MemoryStore, RelayStore},
 };
-use umbra_transport::{native, Dial};
+use umbra_transport::{
+    https::{self, Url},
+    native,
+    ndr::NdrRoute,
+    Dial,
+};
 
 const PACING_MEAN_MS: u64 = 20;
 const HOST: &str = "invite.umbra.test";
@@ -175,6 +181,24 @@ fn start_relays(
     directory: Option<&std::path::Path>,
     ports: Option<&[u16]>,
 ) -> (tokio::runtime::Runtime, Vec<u16>) {
+    start_relays_with(directory, ports, None)
+}
+
+/// The NDR of a test: its port, and its key id and gateway key.
+struct TestNdr {
+    port: u16,
+    key_id: u8,
+    gateway: umbra_crypto::kem::PublicKey,
+}
+
+/// Starts the relays as [`start_relays`] does. With an NDR the relay of
+/// layer 1 carries its OHTTP requests, and each queue relay pushes through
+/// that relay.
+fn start_relays_with(
+    directory: Option<&std::path::Path>,
+    ports: Option<&[u16]>,
+    ndr: Option<&TestNdr>,
+) -> (tokio::runtime::Runtime, Vec<u16>) {
     let relays = tokio::runtime::Runtime::new().unwrap();
     let client_tls = native::tls_config_with_root_file(CA).unwrap();
     let mut listeners = Vec::new();
@@ -228,10 +252,44 @@ fn start_relays(
             client_tls.clone(),
             PACING_MEAN_MS,
             store,
-            Carried::default(),
+            carried_of(layer, &ports, ndr, &client_tls),
         ));
     }
     (relays, ports)
+}
+
+/// What one relay of a test carries: the OHTTP relay role at layer 1 and
+/// the route of the pushes at layer 3, when an NDR runs.
+fn carried_of(
+    layer: u8,
+    ports: &[u16],
+    ndr: Option<&TestNdr>,
+    tls: &Arc<native::ClientConfig>,
+) -> Carried {
+    let Some(ndr) = ndr else {
+        return Carried::default();
+    };
+    match layer {
+        1 => Carried {
+            ohttp: Some(OhttpForward {
+                gateway: Url::parse(&format!("https://localhost:{}/gateway", ndr.port)).unwrap(),
+                tls: tls.clone(),
+            }),
+            ..Carried::default()
+        },
+        3 => Carried {
+            ndr: Some((
+                NdrRoute {
+                    relay: Url::parse(&format!("https://localhost:{}/ohttp", ports[0])).unwrap(),
+                    key_id: ndr.key_id,
+                    gateway: ndr.gateway.clone(),
+                },
+                tls.clone(),
+            )),
+            ..Carried::default()
+        },
+        _ => Carried::default(),
+    }
 }
 
 fn network_of(ports: &[u16]) -> Network {
@@ -261,6 +319,9 @@ fn network_of(ports: &[u16]) -> Network {
             .collect(),
         root_ca_path: Some(CA.into()),
         invitation_host: HOST.into(),
+        ndr_relay_url: None,
+        ndr_key_config: None,
+        ndr_relay_ipv4: None,
     }
 }
 
@@ -565,6 +626,94 @@ fn two_apps_meet_and_talk_through_the_exported_surface() {
     alice.disconnect();
     bob.disconnect();
     std::fs::remove_dir_all(&directory).ok();
+}
+
+#[test]
+fn a_message_to_an_app_that_went_away_reaches_its_push_endpoint() {
+    use umbra_crypto::{kem::KeyPair, ohttp};
+    // A UnifiedPush endpoint that hands each post to the test.
+    let services = tokio::runtime::Runtime::new().unwrap();
+    let endpoint = services
+        .block_on(TcpListener::bind(("127.0.0.1", 0)))
+        .unwrap();
+    let endpoint_port = endpoint.local_addr().unwrap().port();
+    let (pushed, mut posts) = tokio::sync::mpsc::unbounded_channel();
+    let acceptor = tls_acceptor(LEAF, LEAF_KEY).unwrap();
+    services.spawn(async move {
+        loop {
+            let (tcp, _) = endpoint.accept().await.unwrap();
+            let mut stream = acceptor.accept(tcp).await.unwrap();
+            let mut inbound = Vec::new();
+            if let Ok(request) = https::read_request(&mut stream, &mut inbound, 4_096).await {
+                let _ = pushed.send(request.body);
+            }
+            let _ = https::respond(&mut stream, 201, "text/plain", &[]).await;
+        }
+    });
+
+    // The NDR, and the relays that carry its requests.
+    let pair = KeyPair::generate(&mut OsRng);
+    let config = ohttp::encode_key_config(1, pair.public());
+    let ndr_listener = services
+        .block_on(TcpListener::bind(("127.0.0.1", 0)))
+        .unwrap();
+    let ndr = TestNdr {
+        port: ndr_listener.local_addr().unwrap().port(),
+        key_id: 1,
+        gateway: pair.public().clone(),
+    };
+    services.spawn(run_ndr(
+        ndr_listener,
+        tls_acceptor(LEAF, LEAF_KEY).unwrap(),
+        Gateway { key_id: 1, pair },
+        Box::new(MemoryNdrStore::default()),
+        native::tls_config_with_root_file(CA).unwrap(),
+    ));
+    let (_relays, ports) = start_relays_with(None, None, Some(&ndr));
+    let mut network = network_of(&ports);
+    network.ndr_relay_url = Some(format!("https://localhost:{}/ohttp", ports[0]));
+    network.ndr_key_config = Some(config.to_vec());
+
+    let directory = std::env::temp_dir().join(format!("umbra-push-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let alice = launch(&directory, "alice.db", 1);
+    let bob = launch(&directory, "bob.db", 2);
+    alice
+        .set_push_endpoint(Some(format!("https://localhost:{endpoint_port}/up/alice")))
+        .unwrap();
+    alice.clone().connect(network.clone()).unwrap();
+    bob.clone().connect(network.clone()).unwrap();
+    alice.invite().unwrap();
+    let link = wait_for(&alice, |event| match event {
+        FfiEvent::Invitation { link } => Some(link),
+        _ => None,
+    });
+    bob.accept(link).unwrap();
+    wait_for_contact(&alice);
+    let bob_conversation = wait_for_contact(&bob);
+
+    // NTF-112, NTF-113, NTF-122: the queue of Alice binds at its relay, and
+    // her handle group registers with the NDR through the OHTTP relay.
+    let started = std::time::Instant::now();
+    while alice.push_state().unwrap() != (1, 1) {
+        assert!(started.elapsed() < STEP, "{:?}", alice.push_state());
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // NET-322, NTF-128: Alice leaves, her circuit ends at each hop, and the
+    // next record for her goes to her endpoint as one blob.
+    alice.disconnect();
+    std::thread::sleep(Duration::from_millis(500));
+    let draft = bob.new_draft(bob_conversation).unwrap();
+    draft.set_text(units("while you are away")).unwrap();
+    bob.send_draft(draft).unwrap();
+    let blob = services
+        .block_on(async { tokio::time::timeout(STEP, posts.recv()).await })
+        .unwrap()
+        .unwrap();
+    assert_eq!(blob.len(), umbra_wire::ndr::BLOB_LEN);
+    bob.disconnect();
 }
 
 #[test]

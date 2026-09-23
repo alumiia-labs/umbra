@@ -27,6 +27,10 @@ pub struct Url {
     pub port: u16,
     /// The path, which starts with `/`.
     pub path: String,
+    /// The address to dial in the place of the host, which stays the name
+    /// of the certificate: an emulator reaches the machine of a test
+    /// network at an address of its own.
+    pub address: Option<std::net::IpAddr>,
 }
 
 impl Url {
@@ -53,6 +57,7 @@ impl Url {
             host: host.to_owned(),
             port,
             path: path.to_owned(),
+            address: None,
         })
     }
 }
@@ -123,6 +128,9 @@ async fn post_now(
 /// answers. A host name with an IPv6 address that refuses costs no wait
 /// then: a refused connect on some systems takes seconds.
 async fn connect_any(url: &Url) -> Result<TcpStream, NativeError> {
+    if let Some(address) = url.address {
+        return Ok(TcpStream::connect((address, url.port)).await?);
+    }
     let mut attempts = tokio::task::JoinSet::new();
     for addr in tokio::net::lookup_host((url.host.as_str(), url.port)).await? {
         attempts.spawn(TcpStream::connect(addr));
@@ -284,6 +292,7 @@ mod tests {
                 host: "push.example".into(),
                 port: 8443,
                 path: "/up/abc?x=1".into(),
+                address: None,
             })
         );
         assert_eq!(Url::parse("https://127.1.0.1").unwrap().path, "/");

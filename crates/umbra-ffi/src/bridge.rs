@@ -74,6 +74,19 @@ impl Bridge {
         self.commands.send(command).map_err(|_| Error::Offline)
     }
 
+    /// Sends the `NKEY` of an inbound queue (Part 8 §8.2.3).
+    pub fn notify_queue(&self, recipient_id: [u8; 32]) -> Result<(), Error> {
+        self.command(Command::NotifyQueue(recipient_id))
+    }
+
+    /// Sends the sealed binding of an inbound queue as its `NBIND`.
+    pub fn bind_queue(&self, recipient_id: [u8; 32], sealed: Vec<u8>) -> Result<(), Error> {
+        self.command(Command::BindQueue {
+            recipient_id,
+            sealed,
+        })
+    }
+
     /// Asks for one invitation. A [`NetEvent::Invitation`] follows.
     pub fn invite(&self) -> Result<(), Error> {
         self.command(Command::Invite)

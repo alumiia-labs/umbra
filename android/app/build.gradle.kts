@@ -54,6 +54,10 @@ abstract class CopyTestAuthority : DefaultTask() {
     @get:InputFile
     abstract val keyset: RegularFileProperty
 
+    /** The gateway key of the NDR of the devnet (Part 8 `NTF-127`). */
+    @get:InputFile
+    abstract val ndrKey: RegularFileProperty
+
     @get:OutputDirectory
     abstract val output: DirectoryProperty
 
@@ -63,12 +67,15 @@ abstract class CopyTestAuthority : DefaultTask() {
         authority.get().asFile.copyTo(target, overwrite = true)
         val keys = output.get().file("devnet-keyset.bin").asFile
         keyset.get().asFile.copyTo(keys, overwrite = true)
+        val ndr = output.get().file("devnet-ndr-key.bin").asFile
+        ndrKey.get().asFile.copyTo(ndr, overwrite = true)
     }
 }
 
 val copyTestAuthority = tasks.register<CopyTestAuthority>("copyTestAuthority") {
     authority.set(rootProject.layout.projectDirectory.file("../tests/fixtures/tls/ca.pem"))
     keyset.set(rootProject.layout.projectDirectory.file("../tests/fixtures/devnet/keyset.bin"))
+    ndrKey.set(rootProject.layout.projectDirectory.file("../tests/fixtures/devnet/ndr-key-config.bin"))
 }
 
 androidComponents {

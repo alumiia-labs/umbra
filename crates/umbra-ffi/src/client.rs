@@ -11,6 +11,7 @@ use std::collections::VecDeque;
 
 mod files;
 mod groups;
+mod notify;
 
 pub use files::{DownloadJob, ErasureJob, FileInfo, FileState, UploadJob};
 use files::{FileQueues, CHUNK_CRED, FILE_DATA, FILE_STATE};
@@ -18,6 +19,7 @@ pub use groups::{
     EpochUpload, GroupAdmitWaiting, GroupInfo, GroupJoiner, GroupOffer, GroupPost, GroupQueueJob,
     GroupSubscription, Silence, GROUP_NAME_MAX,
 };
+pub use notify::NdrCall;
 use umbra_core::{
     directory::path::IngressPins,
     identity::address::safety_number,

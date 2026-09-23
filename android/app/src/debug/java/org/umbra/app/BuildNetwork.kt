@@ -46,6 +46,10 @@ object BuildNetwork {
     private const val KEYSET = "devnet-keyset.bin"
     private const val MANIFEST = "devnet-manifest.bin"
     private const val DESCRIPTOR = "network-descriptor.txt"
+    private const val NDR_KEY = "devnet-ndr-key.bin"
+
+    // The OHTTP relay of the NDR of the devnet: its ingress relay.
+    private const val NDR_RELAY_URL = "https://localhost:7441/ohttp"
 
     // No party serves this host.
     private const val INVITATION_HOST = "invite.umbra.test"
@@ -112,7 +116,13 @@ object BuildNetwork {
             }
             if (manifest === fresh) kept.writeBytes(manifest)
             isClockCorrected = verified.isClockCorrected
-            return verified.network
+            // NTF-127: the build pins the route to the NDR.
+            val ndrKey = context.assets.open(NDR_KEY).use { it.readBytes() }
+            return verified.network.copy(
+                ndrRelayUrl = NDR_RELAY_URL,
+                ndrKeyConfig = ndrKey,
+                ndrRelayIpv4 = CARRIER_ADDRESS,
+            )
         }
         return null
     }

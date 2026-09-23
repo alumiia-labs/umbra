@@ -36,7 +36,13 @@ use umbra_core::{
     store::wrap::{Cost, SecureElement, WrapHeader, M_KIB_FLOOR, T_FLOOR},
 };
 use umbra_crypto::handshake::nk::RelayStatic;
-use umbra_transport::{native, Dial};
+use umbra_transport::{
+    https::Url,
+    native::{self, NativeError},
+    ndr::{self, NdrRoute},
+    Dial,
+};
+use umbra_wire::ndr::NdrResponse;
 use zeroize::Zeroizing;
 
 use crate::{
@@ -294,6 +300,16 @@ pub struct Network {
     pub root_ca_path: Option<String>,
     /// The invitation host of Part 4 §4.3.1, which each link names.
     pub invitation_host: String,
+    /// The OHTTP relay of the Notification Delivery Relay, as an `https`
+    /// URL, which the build pins (Part 8 `NTF-127`). With none the device
+    /// registers no push.
+    pub ndr_relay_url: Option<String>,
+    /// The key configuration of the gateway of the NDR, which the build
+    /// pins beside the URL.
+    pub ndr_key_config: Option<Vec<u8>>,
+    /// The IPv4 address to dial for the OHTTP relay, in the place of the
+    /// host of its URL, as a relay entry names one.
+    pub ndr_relay_ipv4: Option<Vec<u8>>,
 }
 
 /// Reads the relay manifest from an HTTPS carrier of Part 3 §3.10: the host
@@ -512,6 +528,10 @@ pub fn parse_network(text: String, root_ca_path: Option<String>) -> Result<Netwo
         relays,
         root_ca_path,
         invitation_host: invitation_host.ok_or(FfiError::Malformed)?,
+        // The build pins the route to the NDR, and no relay gives it.
+        ndr_relay_url: None,
+        ndr_key_config: None,
+        ndr_relay_ipv4: None,
     })
 }
 
@@ -925,6 +945,10 @@ struct Inner {
     /// The replicas that refused a record of a group. Two of them close
     /// the group (`GRP-210`).
     group_refusals: BTreeSet<(crate::ConversationId, [u8; 32])>,
+    /// The pinned route to the NDR, with the TLS configuration of the run.
+    ndr: Option<(NdrRoute, Arc<native::ClientConfig>)>,
+    /// The handle groups whose NDR call runs.
+    ndr_in_flight: BTreeSet<[u8; 16]>,
 }
 
 /// What one command of the transfer task belongs to.
@@ -1472,6 +1496,31 @@ impl Inner {
         }
     }
 
+    /// Sends each registration and removal that waits for the NDR, one
+    /// call for each handle group, in a task of the run (Part 8 §8.2.7).
+    fn pump_ndr(&mut self) {
+        let (Some((route, tls)), Some(spawner)) = (self.ndr.clone(), self.spawner.clone()) else {
+            return;
+        };
+        let Ok(calls) = self.client.ndr_calls_due(&mut OsRng) else {
+            return;
+        };
+        for call in calls {
+            if !self.ndr_in_flight.insert(call.handle) {
+                continue;
+            }
+            let me = self.me.clone();
+            let route = route.clone();
+            let tls = tls.clone();
+            spawner.spawn(async move {
+                let answer = ndr::call(&route, &call.request, tls, &mut OsRng).await;
+                if let Some(handle) = me.upgrade() {
+                    handle.on_ndr_answer(&call, answer);
+                }
+            });
+        }
+    }
+
     fn next_tag(&mut self, work: TransferWork) -> u64 {
         self.next_transfer_tag = self.next_transfer_tag.wrapping_add(1);
         self.transfer_tags.insert(self.next_transfer_tag, work);
@@ -1866,6 +1915,8 @@ pub fn init(
             group_reading: BTreeSet::new(),
             group_lost: BTreeSet::new(),
             group_refusals: BTreeSet::new(),
+            ndr: None,
+            ndr_in_flight: BTreeSet::new(),
         }),
         changed: Condvar::new(),
         runtime: Mutex::new(None),
@@ -1961,6 +2012,34 @@ impl Handle {
                 circuits.clone_from(chains);
                 *circuits_changed = true;
             }
+            // NTF-112: each queue with no binding asks its relay for the
+            // notification key.
+            Update::Queues(queues) => {
+                if let (Ok(unbound), Some(running)) =
+                    (client.queues_to_bind(queues, &mut OsRng), bridge.as_ref())
+                {
+                    for recipient_id in unbound {
+                        let _ = running.notify_queue(recipient_id);
+                    }
+                }
+            }
+            // NTF-113: the binding goes sealed to that key.
+            Update::NotifyKey {
+                recipient_id,
+                relay_ntf_pk,
+            } => {
+                let sealed = client
+                    .binding_of(recipient_id)
+                    .ok()
+                    .flatten()
+                    .zip(umbra_crypto::kem::PublicKey::from_bytes(relay_ntf_pk).ok())
+                    .and_then(|(binding, key)| binding.seal(&key, recipient_id, &mut OsRng).ok());
+                if let (Some(sealed), Some(running)) = (sealed, bridge.as_ref()) {
+                    if running.bind_queue(*recipient_id, sealed).is_ok() {
+                        let _ = client.queue_bound(recipient_id, &mut OsRng);
+                    }
+                }
+            }
             // A run that ended holds no circuit.
             Update::Offline(_) => {
                 circuits.clear();
@@ -2003,12 +2082,49 @@ impl Handle {
         // A record with a descriptor asks for its file.
         inner.pump_transfers();
         inner.pump_groups();
+        inner.pump_ndr();
         drop(inner);
         self.changed.notify_all();
     }
+
+    /// The answer of the NDR to one call of this device.
+    fn on_ndr_answer(
+        &self,
+        call: &crate::client::NdrCall,
+        answer: Result<NdrResponse, NativeError>,
+    ) {
+        let mut inner = locked(&self.inner);
+        inner.ndr_in_flight.remove(&call.handle);
+        // A call that failed goes again at the next pump.
+        if matches!(answer, Ok(NdrResponse::Taken)) {
+            let _ = inner.client.ndr_call_taken(call, &mut OsRng);
+        }
+    }
+}
+
+/// The route to the NDR that the build pinned, or none.
+fn ndr_route(network: &Network) -> Option<NdrRoute> {
+    let mut relay = Url::parse(network.ndr_relay_url.as_deref()?)?;
+    if let Some(ipv4) = &network.ndr_relay_ipv4 {
+        let octets: [u8; 4] = ipv4.as_slice().try_into().ok()?;
+        relay.address = Some(std::net::IpAddr::from(octets));
+    }
+    let (key_id, gateway) =
+        umbra_crypto::ohttp::parse_key_config(network.ndr_key_config.as_deref()?).ok()?;
+    Some(NdrRoute {
+        relay,
+        key_id,
+        gateway,
+    })
 }
 
 impl Handle {
+    /// The count of the queues that bound for push, and of the handle
+    /// groups that the NDR holds, for a caller in Rust.
+    pub fn push_state(&self) -> Result<(usize, usize), FfiError> {
+        Ok(locked(&self.inner).client.push_state()?)
+    }
+
     /// The file of a message, in the clear, for a caller in Rust.
     pub fn file_bytes(&self, message: &MsgHandle) -> Result<Zeroizing<Vec<u8>>, FfiError> {
         Ok(locked(&self.inner).client.file_bytes(&message.0)?)
@@ -2017,6 +2133,18 @@ impl Handle {
 
 #[uniffi::export]
 impl Handle {
+    /// Takes the push endpoint that the UnifiedPush distributor gave, or
+    /// none when it took the endpoint back. Each handle group of this
+    /// device registers with the NDR under it, or leaves (Part 8 §8.2.7).
+    pub fn set_push_endpoint(&self, endpoint: Option<String>) -> Result<(), FfiError> {
+        let mut inner = locked(&self.inner);
+        inner
+            .client
+            .set_push_endpoint(endpoint.as_deref(), &mut OsRng)?;
+        inner.pump_ndr();
+        Ok(())
+    }
+
     /// Verifies a relay manifest of Part 10 §10.5.5 under the key set that
     /// the build ships (`REL-039`), and gives its relays as a network.
     /// `shipped_epoch` is the epoch at the time of the build (`REL-045`). The
@@ -2076,6 +2204,11 @@ impl Handle {
                 relays,
                 root_ca_path,
                 invitation_host,
+                // The build pins the route to the NDR (`NTF-127`), thus no
+                // manifest carries it.
+                ndr_relay_url: None,
+                ndr_key_config: None,
+                ndr_relay_ipv4: None,
             },
             epoch: set.epoch,
             is_clock_corrected: consensus.clock_state() == ClockState::Corrected,
@@ -2190,6 +2323,7 @@ impl Handle {
             inner.me = Arc::downgrade(&self);
             inner.spawner = Some(runtime.handle().clone());
             inner.root_ca_path.clone_from(&network.root_ca_path);
+            inner.ndr = ndr_route(&network).map(|route| (route, tls.clone()));
             inner.transfers = None;
             inner.groups = None;
             inner.group_reading.clear();
