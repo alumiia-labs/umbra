@@ -293,6 +293,52 @@ latency of each mode.
 > handle, and Part 16 §16.3 records it. Private mode registers nothing, thus
 > that mode gives the residual to no party, and it pays a latency of up to 24 h.
 
+### 8.2.7 The requests of the NDR
+
+§8.2.1 names a registration and a push and gives neither a format. The NDR
+takes three requests. `NDR_REQUEST_LEN` is 640 bytes and `PUSH_TOKEN_MAX` is 512 bytes. Each
+request travels inside the OHTTP of `NTF-002`, and the
+NDR answers each with a response of 16 bytes.
+
+```
+NdrRequest {                      // NDR_REQUEST_LEN = 640 bytes
+    kind          u8              // 0x01 NREG, 0x02 NUNREG, 0x03 NPUSH
+    handle        [16]u8
+    body                          // by kind, below
+    padding                       // zero bytes to 640
+}
+NREG   body: nonce [24]u8, ct_len u16, ct_token [ct_len]u8 (17..=528),
+             removal_hash [32]u8, prior [32]u8
+NUNREG body: removal [32]u8
+NPUSH  body: k_tok [32]u8, ttl u32, blob [69]u8
+
+NdrResponse { status u8, padding [15]u8 }  // 0x00 taken, 0x01 refused, 0x02 gone
+PushToken   { carrier u8, target }         // the plaintext of ct_token, at most 512 bytes
+```
+
+- **[NTF-122]** A party MUST pad each request to `NDR_REQUEST_LEN` with zero
+  bytes, and the NDR MUST refuse a request whose padding is not zero. Thus
+  the OHTTP relay cannot tell a registration from a push by its length.
+- **[NTF-123]** The plaintext of `ct_token` MUST be a `PushToken`: carrier
+  `0x01` is UnifiedPush and its target is the `https` URL of the endpoint,
+  and carrier `0x02` is FCM and its target is the registration token. The
+  target MUST be printable ASCII.
+- **[NTF-124]** A device MUST draw a fresh 32-byte removal secret for each
+  registration and send its `SHA3-256` as `removal_hash`. The NDR MUST drop
+  a registration at an `NUNREG` whose `removal` hashes to that value, and
+  MUST refuse any other `NUNREG`. An `NREG` for a handle that the NDR holds
+  MUST carry the removal secret of that registration in `prior`, and the
+  NDR MUST refuse it otherwise. A new handle carries zero in `prior`.
+- **[NTF-125]** The NDR MUST bound the `ttl` of an `NPUSH` at
+  `PUSH_TTL_MESSAGE`, and it MUST answer `gone` and drop the registration
+  when the provider names the target gone. A queue relay MUST stop pushing
+  to a handle that got the answer `gone`.
+
+> *Cause of `NTF-124`.* A queue relay knows each handle of its queues. A
+> removal or a replacement that needed the handle alone would let that relay
+> end the pushes of a device, or point them at a token of its own. The hash
+> of a secret that only the device holds closes both.
+
 ## 8.3 The three modes
 
 UMBRA ships the three modes. The user selects one for each profile.

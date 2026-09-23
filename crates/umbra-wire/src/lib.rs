@@ -24,6 +24,7 @@ pub mod command;
 pub mod descriptor;
 pub mod group;
 pub mod nack;
+pub mod ndr;
 pub mod queue;
 pub mod ratchet;
 pub mod session;

@@ -2,13 +2,14 @@
 //! token blinding and the handle groups, the binding that gives a queue
 //! relay what it seals with, the push scheduler of a queue relay, the
 //! digest gate of a group or community relay, the Notification Delivery
-//! Relay, and the wake rules of the three modes at the client.
+//! Relay (`ndr`), and the wake rules of the three modes at the client.
 //!
 //! Each type takes the time and the random values it needs as arguments.
 
 pub mod binding;
 pub mod blob;
 pub mod digest;
+pub mod ndr;
 pub mod push;
 pub mod token;
 pub mod wake;

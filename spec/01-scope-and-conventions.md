@@ -368,6 +368,7 @@ examples. Without the table below a maintainer finds the dependents by hand.
 | `RELAY_LOOP_RATE` | Part 3 §3.6.3 | none |
 | `NTF_FAIL_MAX` | Part 8 §8.2.3 | Part 15 §15.9.2 |
 | `PUSH_TTL_MESSAGE`, `PUSH_TTL_DIGEST`, `REPUSH_INTERVAL`, `REPUSH_MAX` | Part 8 §8.4.3 | Part 2 §2.4 |
+| `NDR_REQUEST_LEN`, `PUSH_TOKEN_MAX` | Part 8 §8.2.7 | |
 | `COMMUNITY_DIGEST_BUDGET` | Part 8 §8.5.1 | Part 12 §12.6.4, Part 2 §2.4 |
 | `POST_RATE_LIMIT` | Part 12 §12.9 | Part 14 §14.2 |
 | `POW_LOOKUP_FLOOR` | Part 14 §14.13 | Part 9 §9.4.1 |

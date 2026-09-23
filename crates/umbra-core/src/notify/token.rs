@@ -2,7 +2,7 @@
 //! of §8.2.5, and the Notification Delivery Relay that holds
 //! `(handle, ct_token)` and decrypts a token transiently at the dispatch.
 
-use alloc::{collections::BTreeMap, vec::Vec};
+use alloc::vec::Vec;
 
 use umbra_crypto::{aead, rand_core::TryCryptoRng, secret::Secret};
 
@@ -179,62 +179,6 @@ impl HandleSet {
     }
 }
 
-/// The Notification Delivery Relay: the registrations, and the dispatch
-/// that decrypts a token and keeps nothing.
-#[derive(Default)]
-pub struct Ndr {
-    registrations: BTreeMap<[u8; HANDLE_LEN], Registration>,
-}
-
-impl Ndr {
-    /// Stores a registration.
-    pub fn register(&mut self, registration: Registration) {
-        self.registrations.insert(registration.handle, registration);
-    }
-
-    /// Drops a registration.
-    pub fn unregister(&mut self, handle: &[u8; HANDLE_LEN]) {
-        self.registrations.remove(handle);
-    }
-
-    /// The registrations held.
-    pub fn len(&self) -> usize {
-        self.registrations.len()
-    }
-
-    /// Whether none is held.
-    pub fn is_empty(&self) -> bool {
-        self.registrations.is_empty()
-    }
-
-    /// Decrypts the push token of `handle` under the `k_tok` that the queue
-    /// relay posted, for one dispatch. The key is a borrowed secret that
-    /// the caller drops at once (§8.2.1).
-    pub fn dispatch(
-        &self,
-        handle: &[u8; HANDLE_LEN],
-        k_tok: &Secret<32>,
-    ) -> Result<Secret<64>, Error> {
-        let registration = self.registrations.get(handle).ok_or(Error::NoPath)?;
-        if registration.ct_token.len() < aead::TAG_LEN
-            || registration.ct_token.len() > 64 + aead::TAG_LEN
-        {
-            return Err(Error::Malformed);
-        }
-        let split = registration.ct_token.len().saturating_sub(aead::TAG_LEN);
-        let mut token = Secret::<64>::zeroed();
-        let body = registration.ct_token.get(..split).ok_or(Error::Malformed)?;
-        let tag = registration.ct_token.get(split..).ok_or(Error::Malformed)?;
-        let slot = token
-            .expose_mut()
-            .get_mut(..split)
-            .ok_or(Error::Malformed)?;
-        slot.copy_from_slice(body);
-        aead::open(k_tok, &registration.nonce, handle, slot, tag)?;
-        Ok(token)
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 mod tests {
@@ -264,22 +208,5 @@ mod tests {
         assert_eq!(set.rotation_candidate(ROTATE_INTERVAL), Some(1));
         set.contact_set_changed();
         assert_eq!(set.rotation_candidate(ROTATE_INTERVAL + 1), Some(0));
-    }
-
-    #[test]
-    fn the_ndr_holds_ciphertext_and_decrypts_at_the_dispatch_only() {
-        let mut rng = Rng(2);
-        let set = HandleSet::assign(&[[1; 32]], &[], &[], 0, &mut rng).unwrap();
-        let group = &set.groups()[0];
-        let registration = group.registration(b"fcm:token-123", [4; 24]).unwrap();
-        let mut ndr = Ndr::default();
-        ndr.register(registration.clone());
-        assert_eq!(ndr.len(), 1);
-        let token = ndr.dispatch(&group.handle, &group.k_tok).unwrap();
-        assert_eq!(&token.expose()[..13], b"fcm:token-123");
-        assert!(ndr.dispatch(&group.handle, &Secret::new([0; 32])).is_err());
-        assert!(ndr.dispatch(&[0; 16], &group.k_tok).is_err());
-        ndr.unregister(&group.handle);
-        assert!(ndr.is_empty());
     }
 }

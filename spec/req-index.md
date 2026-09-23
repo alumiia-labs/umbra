@@ -72,7 +72,7 @@ each column when a crate implements the requirement and a test covers it.
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
 | `WIR` | 391 | 87 | 0 | 0 | 6 | **484** |
 | `DEV` | 179 | 87 | 2 | 0 | 7 | **275** |
-| `NTF` | 67 | 30 | 0 | 0 | 2 | **99** |
+| `NTF` | 71 | 30 | 0 | 0 | 2 | **103** |
 | `DIS` | 123 | 37 | 0 | 0 | 1 | **161** |
 | `REL` | 124 | 32 | 1 | 0 | 2 | **159** |
 | `GRP` | 220 | 62 | 0 | 0 | 6 | **288** |
@@ -81,7 +81,7 @@ each column when a crate implements the requirement and a test covers it.
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
 | `IMP` | 112 | 41 | 0 | 0 | 2 | **155** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2221 | 717 | 7 | 0 | 53 | **2998** |
+| **All** | 2225 | 717 | 7 | 0 | 53 | **3002** |
 
 ## SCP — Scope and Conventions
 
@@ -1668,6 +1668,10 @@ Source: `spec/08-notifications.md`
 | `NTF-119` | §8.4.1 | MUST | A message alert | A message alert MUST show no text of the message and no name of a contact while the content preview is off (`NTF-083`). |  |  |
 | `NTF-120` | §8.4.1 | MUST | A client | A client MUST end the service at a lock, because a locked client holds no key that reads a queue (Part 15 rule `IMP-127`). |  |  |
 | `NTF-121` | §8.4.1 | MUST NOT | A record that arrives | A record that arrives MUST NOT start the idle time of the auto-lock again. |  |  |
+| `NTF-122` | §8.2.7 | MUST | A party | A party MUST pad each request to `NDR_REQUEST_LEN` with zero bytes, and the NDR MUST refuse a request whose padding is not zero. |  |  |
+| `NTF-123` | §8.2.7 | MUST | The plaintext of `ct_token` | The plaintext of `ct_token` MUST be a `PushToken`: carrier `0x01` is UnifiedPush and its target is the `https` URL of the endpoint, and carrier `0x02` is FCM and its target is the registration token. |  |  |
+| `NTF-124` | §8.2.7 | MUST | A device | A device MUST draw a fresh 32-byte removal secret for each registration and send its `SHA3-256` as `removal_hash`. |  |  |
+| `NTF-125` | §8.2.7 | MUST | The NDR | The NDR MUST bound the `ttl` of an `NPUSH` at `PUSH_TTL_MESSAGE`, and it MUST answer `gone` and drop the registration when the provider names the target gone. |  |  |
 
 ## DIS — Discovery, Handles, and Key Transparency
 
