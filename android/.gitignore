@@ -9,3 +9,5 @@ app/src/main/jniLibs/
 app/src/main/kotlin-generated/
 # A Pro icon file must not sit in a public repository.
 app/src/main/assets/fa-pro/
+# The Firebase config of a deployment stays out of the public repository.
+app/google-services.json

@@ -18,6 +18,7 @@ import android.content.pm.PackageManager
 object Notifier {
     const val CARRIER_ID = 1
     private const val LOCKED_ID = 2
+    private const val PUSH_ID = 3
     private const val CARRIER_CHANNEL = "carrier"
     private const val MESSAGE_CHANNEL = "messages"
     private const val MESSAGE_TAG = "message"
@@ -73,6 +74,22 @@ object Notifier {
             .setVisibility(Notification.VISIBILITY_SECRET)
             .build()
         manager(context).notify(MESSAGE_TAG, conversation.hashCode(), alert)
+    }
+
+    /**
+     * The alert of a push (Part 8 rule `NTF-014`). It names no conversation,
+     * and a later push takes its place.
+     */
+    fun pushed(context: Context) {
+        if (!mayPost(context)) return
+        val alert = Notification.Builder(context, MESSAGE_CHANNEL)
+            .setSmallIcon(android.R.drawable.stat_notify_chat)
+            .setContentTitle("New message")
+            .setAutoCancel(true)
+            .setContentIntent(openApp(context))
+            .setVisibility(Notification.VISIBILITY_SECRET)
+            .build()
+        manager(context).notify(MESSAGE_TAG, PUSH_ID, alert)
     }
 
     /**

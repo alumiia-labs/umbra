@@ -42,7 +42,7 @@ use umbra_transport::{
     ndr::{self, NdrRoute},
     Dial,
 };
-use umbra_wire::ndr::NdrResponse;
+use umbra_wire::ndr::{NdrResponse, TokenCarrier};
 use zeroize::Zeroizing;
 
 use crate::{
@@ -2119,6 +2119,13 @@ fn ndr_route(network: &Network) -> Option<NdrRoute> {
 }
 
 impl Handle {
+    fn set_push_token(&self, token: Option<(TokenCarrier, &str)>) -> Result<(), FfiError> {
+        let mut inner = locked(&self.inner);
+        inner.client.set_push_token(token, &mut OsRng)?;
+        inner.pump_ndr();
+        Ok(())
+    }
+
     /// The count of the queues that bound for push, and of the handle
     /// groups that the NDR holds, for a caller in Rust.
     pub fn push_state(&self) -> Result<(usize, usize), FfiError> {
@@ -2133,16 +2140,19 @@ impl Handle {
 
 #[uniffi::export]
 impl Handle {
-    /// Takes the push endpoint that the UnifiedPush distributor gave, or
-    /// none when it took the endpoint back. Each handle group of this
-    /// device registers with the NDR under it, or leaves (Part 8 §8.2.7).
+    /// Takes the FCM registration token that Firebase gave, or none when
+    /// it took the token back. Each handle group of this device registers
+    /// with the NDR under it, or leaves (Part 8 §8.2.7).
+    pub fn set_fcm_token(&self, token: Option<String>) -> Result<(), FfiError> {
+        self.set_push_token(token.as_deref().map(|token| (TokenCarrier::Fcm, token)))
+    }
+
+    /// Takes the endpoint of a UnifiedPush distributor, or none.
     pub fn set_push_endpoint(&self, endpoint: Option<String>) -> Result<(), FfiError> {
-        let mut inner = locked(&self.inner);
-        inner
-            .client
-            .set_push_endpoint(endpoint.as_deref(), &mut OsRng)?;
-        inner.pump_ndr();
-        Ok(())
+        let token = endpoint
+            .as_deref()
+            .map(|url| (TokenCarrier::UnifiedPush, url));
+        self.set_push_token(token)
     }
 
     /// Verifies a relay manifest of Part 10 §10.5.5 under the key set that

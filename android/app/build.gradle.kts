@@ -3,6 +3,13 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+// The Firebase project of a deployment gives `google-services.json`, which the
+// repository does not hold. A build without it has no Firebase app, and the
+// app runs with no push.
+if (file("google-services.json").exists()) {
+    apply(plugin = "com.google.gms.google-services")
+}
+
 android {
     namespace = "org.umbra.app"
     compileSdk {
@@ -95,6 +102,9 @@ dependencies {
     // The QR code of an invitation link and of a safety number. The core of
     // ZXing writes and reads a code, and CameraX gives the frames.
     implementation(libs.zxing.core)
+    // The FCM carrier of Part 8 §8.4.1.
+    implementation(platform(libs.firebase.bom))
+    implementation(libs.firebase.messaging)
     implementation(libs.androidx.camera.camera2)
     implementation(libs.androidx.camera.lifecycle)
     implementation(libs.androidx.camera.view)

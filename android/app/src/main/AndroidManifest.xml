@@ -38,6 +38,15 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="An end-to-end encrypted messenger holds one connection to its relay, thus a message arrives with no push provider." />
         </service>
+        <!-- Part 8 §8.4.1: the FCM carrier. A build with no Firebase app
+             gets no event here. -->
+        <service
+            android:name=".PushService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
     </application>
 
 </manifest>

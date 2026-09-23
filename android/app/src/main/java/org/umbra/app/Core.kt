@@ -211,6 +211,7 @@ object Core {
                     // screen, and the platform permits the start.
                     DeliveryService.start(app)
                     refreshJoinFlow()
+                    Push.opened(app)
                 }
             } catch (wrong: FfiException.WrongPassphrase) {
                 fail("That passphrase does not open this device.")
@@ -413,6 +414,18 @@ object Core {
     }
 
     fun lock() = call { it.lock() }
+
+    /** Whether the client is open, thus it holds the keys of its queues. */
+    fun isOpen() = phase == Phase.Open
+
+    /** The FCM token of this device goes to the core (Part 8 §8.2.7). */
+    fun setFcmToken(token: String) = call { it.setFcmToken(token) }
+
+    /** A push came: an open client with no run starts one and drains. */
+    fun wake(context: Context) {
+        val app = context.applicationContext
+        main.post { if (isOpen() && !online) connect(app) }
+    }
 
     fun setAutoLock(seconds: Long) = call { client ->
         client.setAutoLock(seconds.toULong())

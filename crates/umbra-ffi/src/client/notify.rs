@@ -25,8 +25,9 @@ const NOTIFY_GROUP: TableId = TableId(0x1A);
 /// Each queue with a binding: `recipient_id`, `handle`, `queue_alias`, and
 /// whether its `NBIND` left.
 const NOTIFY_QUEUE: TableId = TableId(0x1B);
-/// The push endpoint of the platform, a UnifiedPush URL.
-const PUSH_ENDPOINT_SETTING: &[u8] = b"push-endpoint";
+/// The push token of the platform as the NDR takes it: the carrier byte
+/// and its target (`NTF-123`).
+const PUSH_TOKEN_SETTING: &[u8] = b"push-token";
 
 const RELAY_LEN: usize = 32 + 32 + 2;
 const GROUP_LEN: usize = 16 + 32 + 32 + 32 + 1 + 1;
@@ -173,41 +174,41 @@ fn random<const N: usize, R: CryptoRng + ?Sized>(rng: &mut R) -> [u8; N] {
 }
 
 impl<B: Backend, E: SecureElement> Client<B, E> {
-    /// The push endpoint that the platform gave, if any.
-    pub fn push_endpoint(&self) -> Result<Option<String>, Error> {
+    /// The push token that the platform gave, as the NDR takes it, if any.
+    pub fn push_token(&self) -> Result<Option<Vec<u8>>, Error> {
         let open = self.open_ref()?;
-        let row = open.store.row_id(SETTINGS, PUSH_ENDPOINT_SETTING);
+        let row = open.store.row_id(SETTINGS, PUSH_TOKEN_SETTING);
         Ok(open
             .store
             .get(SETTINGS, &row)?
-            .and_then(|bytes| String::from_utf8(bytes).ok())
-            .filter(|url| !url.is_empty()))
+            .filter(|token| !token.is_empty()))
     }
 
-    /// Takes a new push endpoint, or none when the platform took it back.
-    /// Each group that the NDR holds registers again under the new one, or
-    /// leaves with none.
-    pub fn set_push_endpoint<R: CryptoRng + ?Sized>(
+    /// Takes a new push token of a carrier, or none when the platform took
+    /// it back. Each group that the NDR holds registers again under the new
+    /// one, or leaves with none.
+    pub fn set_push_token<R: CryptoRng + ?Sized>(
         &mut self,
-        endpoint: Option<&str>,
+        token: Option<(TokenCarrier, &str)>,
         rng: &mut R,
     ) -> Result<(), Error> {
-        if let Some(url) = endpoint {
-            // NTF-123: the token of a UnifiedPush endpoint is an https URL.
-            let mut plain = [0u8; PUSH_TOKEN_MAX];
-            let n = encode_token(TokenCarrier::UnifiedPush, url.as_bytes(), &mut plain)
-                .map_err(|_| Error::TooLong)?;
-            umbra_wire::ndr::parse_token(plain.get(..n).ok_or(Error::Malformed)?)
-                .map_err(|_| Error::Malformed)?;
-        }
-        if self.push_endpoint()?.as_deref() == endpoint {
+        let plain = match token {
+            Some((carrier, target)) => {
+                // NTF-123: a token of the carrier, printable ASCII, and an
+                // https URL for UnifiedPush.
+                let mut plain = [0u8; PUSH_TOKEN_MAX];
+                let n = encode_token(carrier, target.as_bytes(), &mut plain)
+                    .map_err(|_| Error::TooLong)?;
+                let plain = plain.get(..n).ok_or(Error::Malformed)?.to_vec();
+                umbra_wire::ndr::parse_token(&plain).map_err(|_| Error::Malformed)?;
+                plain
+            }
+            None => Vec::new(),
+        };
+        if self.push_token()?.unwrap_or_default() == plain {
             return Ok(());
         }
-        let mut rows = vec![(
-            SETTINGS,
-            PUSH_ENDPOINT_SETTING.to_vec(),
-            endpoint.unwrap_or_default().as_bytes().to_vec(),
-        )];
+        let mut rows = vec![(SETTINGS, PUSH_TOKEN_SETTING.to_vec(), plain)];
         for mut group in self.notify_groups()? {
             if group.state == REGISTERED {
                 group.state = STALE;
@@ -271,7 +272,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         queues: &[([u8; 32], [u8; 32])],
         rng: &mut R,
     ) -> Result<Vec<[u8; 32]>, Error> {
-        if self.push_endpoint()?.is_none() {
+        if self.push_token()?.is_none() {
             return Ok(Vec::new());
         }
         let mut relays = self.notify_relays()?;
@@ -414,19 +415,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// it does not hold under the present endpoint, or an `NUNREG` for each
     /// group it holds when the platform took the endpoint back.
     pub fn ndr_calls_due<R: CryptoRng + ?Sized>(&self, rng: &mut R) -> Result<Vec<NdrCall>, Error> {
-        let endpoint = self.push_endpoint()?;
+        let token = self.push_token()?;
         let mut calls = Vec::new();
         for group in self.notify_groups()? {
-            let request = match (&endpoint, group.state) {
+            let request = match (&token, group.state) {
                 (Some(_), REGISTERED) | (None, UNREGISTERED) => continue,
-                (Some(url), state) => {
-                    let mut plain = [0u8; PUSH_TOKEN_MAX];
-                    let n = encode_token(TokenCarrier::UnifiedPush, url.as_bytes(), &mut plain)
-                        .map_err(|_| Error::TooLong)?;
+                (Some(plain), state) => {
                     let nonce: [u8; 24] = random(rng);
                     // NTF-123: `ct_token` seals the token under `k_tok`,
                     // bound to the handle.
-                    let mut ct_token = plain.get(..n).ok_or(Error::Malformed)?.to_vec();
+                    let mut ct_token = plain.clone();
                     let tag = aead::seal(&group.k_tok, &nonce, &group.handle, &mut ct_token)
                         .map_err(|_| Error::Malformed)?;
                     ct_token.extend_from_slice(&tag);

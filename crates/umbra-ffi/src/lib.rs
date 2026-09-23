@@ -1173,7 +1173,7 @@ mod tests {
     fn queues_bind_in_groups_and_each_group_registers_under_its_endpoint() {
         use umbra_core::notify::ndr::Ndr;
         use umbra_crypto::secret::Secret;
-        use umbra_wire::ndr::{NdrRequest, NdrResponse, BLOB_LEN, NDR_REQUEST_LEN};
+        use umbra_wire::ndr::{NdrRequest, NdrResponse, TokenCarrier, BLOB_LEN, NDR_REQUEST_LEN};
         let mut rng = Rng(91);
         let mut client = new_client(&mut rng);
         let queues: Vec<([u8; 32], [u8; 32])> = (0..10u8)
@@ -1182,12 +1182,16 @@ mod tests {
             .collect();
         // No endpoint, no binding.
         assert!(client.queues_to_bind(&queues, &mut rng).unwrap().is_empty());
+        let up = TokenCarrier::UnifiedPush;
         assert!(client
-            .set_push_endpoint(Some("http://plain.example/up"), &mut rng)
+            .set_push_token(Some((up, "http://plain.example/up")), &mut rng)
             .is_err());
         let first = "https://push.example/up/one";
-        client.set_push_endpoint(Some(first), &mut rng).unwrap();
-        assert_eq!(client.push_endpoint().unwrap().as_deref(), Some(first));
+        client.set_push_token(Some((up, first)), &mut rng).unwrap();
+        assert_eq!(
+            client.push_token().unwrap().unwrap()[1..],
+            *first.as_bytes()
+        );
 
         // NTF-031: eight queues of one relay share a handle at most.
         let unbound = client.queues_to_bind(&queues, &mut rng).unwrap();
@@ -1229,8 +1233,11 @@ mod tests {
 
         // NTF-124: a new endpoint moves each held handle on its removal
         // secret, and none takes each group back.
-        let second = "https://push.example/up/two";
-        client.set_push_endpoint(Some(second), &mut rng).unwrap();
+        // An FCM token takes the place of the endpoint.
+        let second = "fcm-token-2";
+        client
+            .set_push_token(Some((TokenCarrier::Fcm, second)), &mut rng)
+            .unwrap();
         let calls = client.ndr_calls_due(&mut rng).unwrap();
         assert_eq!(calls.len(), 3);
         for call in &calls {
@@ -1238,7 +1245,7 @@ mod tests {
             client.ndr_call_taken(call, &mut rng).unwrap();
         }
         assert_eq!(&ndr.handle(&push).1.unwrap().target[..], second.as_bytes());
-        client.set_push_endpoint(None, &mut rng).unwrap();
+        client.set_push_token(None, &mut rng).unwrap();
         let calls = client.ndr_calls_due(&mut rng).unwrap();
         assert!(calls.iter().all(|call| call.is_removal));
         for call in &calls {
