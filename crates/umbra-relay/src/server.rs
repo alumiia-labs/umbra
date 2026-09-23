@@ -23,15 +23,17 @@ use umbra_crypto::{
 };
 use umbra_transport::{
     https, native,
+    ndr::{self, NdrRoute},
     race::{Plan, Wire},
     Dial,
 };
 use umbra_transport::{upgrade, websocket};
+use umbra_wire::ndr::NdrResponse;
 
 use crate::{
     circuits::{CircuitKey, LinkId},
     node::{Output, RelayNode},
-    service::DigestDue,
+    service::{queue::NdrPush, DigestDue},
     store::RelayStore,
 };
 
@@ -103,6 +105,11 @@ pub enum Input {
         /// The link.
         link: LinkId,
     },
+    /// The NDR answered `gone` for a handle of a push of this relay.
+    NdrGone {
+        /// The handle.
+        handle: [u8; 16],
+    },
 }
 
 /// What the node task asks of the process around it.
@@ -118,6 +125,8 @@ pub enum Request {
         /// One `UMBRA_REPLICA` capsule.
         capsule: Vec<u8>,
     },
+    /// Send one `NPUSH` to the NDR.
+    NdrPush(NdrPush),
 }
 
 fn unix_now() -> u64 {
@@ -143,6 +152,7 @@ pub async fn run_node(
     let mut clock =
         tokio::time::interval(Duration::from_millis((pacing_mean_ms / 20).clamp(1, 50)));
     let mut last_sweep = unix_now();
+    let mut last_push_tick = last_sweep;
     loop {
         let outputs = tokio::select! {
             input = inputs.recv() => match input {
@@ -166,6 +176,10 @@ pub async fn run_node(
                     writers.remove(&link);
                     node.link_closed(link, unix_now())
                 }
+                Some(Input::NdrGone { handle }) => {
+                    node.ndr_gone(&handle);
+                    Vec::new()
+                }
             },
             _ = clock.tick() => {
                 let now = unix_now();
@@ -184,6 +198,12 @@ pub async fn run_node(
                         let wait = exponential(pacing_mean_ms, u32::from_le_bytes(draw));
                         *due = instant + Duration::from_millis(wait.max(1));
                     }
+                }
+                // NTF-049, NTF-066: the end of a coalescing window and
+                // each re-push, once each second.
+                if now > last_push_tick {
+                    last_push_tick = now;
+                    outputs.extend(node.push_tick(now, &mut rng));
                 }
                 if now.saturating_sub(last_sweep) >= SWEEP_PERIOD {
                     last_sweep = now;
@@ -214,6 +234,9 @@ pub async fn run_node(
                 }
                 Output::Push { relay_id, capsule } => {
                     let _ = requests.send(Request::Push { relay_id, capsule });
+                }
+                Output::NdrPush(push) => {
+                    let _ = requests.send(Request::NdrPush(push));
                 }
             }
         }
@@ -257,13 +280,18 @@ pub struct OhttpForward {
 }
 
 /// What a relay carries over HTTPS beside the upgrade: the manifest of
-/// Part 3 §3.10, and the OHTTP relay role of Part 8 §8.2.
+/// Part 3 §3.10, the OHTTP relay role of Part 8 §8.2, and the route of the
+/// pushes of its own queues.
 #[derive(Default)]
 pub struct Carried {
     /// The manifest, for a client that asks for it.
     pub manifest: Option<Vec<u8>>,
     /// The gateway, for a relay with the OHTTP relay role.
     pub ohttp: Option<OhttpForward>,
+    /// The route to the NDR that a queue relay pins (`NTF-127`), and the
+    /// configuration it trusts the OHTTP relay under. A relay with none
+    /// sends no push.
+    pub ndr: Option<(NdrRoute, Arc<rustls::ClientConfig>)>,
 }
 
 /// Forwards one encapsulated request to the gateway and gives its answer
@@ -509,6 +537,7 @@ pub async fn run_relay(
     store: Box<dyn RelayStore>,
     carried: Carried,
 ) {
+    let carried_ndr = carried.ndr.clone();
     let carried = Arc::new(carried);
     let (inputs, node_inputs) = mpsc::channel::<Input>(1_024);
     let (requests, mut node_requests) = mpsc::unbounded_channel::<Request>();
@@ -555,6 +584,24 @@ pub async fn run_relay(
                 // queue relay of the subscriber. That sender is not built
                 // yet, thus the digest stops here.
                 Request::Digest(_) => {}
+                Request::NdrPush(push) => {
+                    let Some((route, tls)) = carried_ndr.clone() else {
+                        continue;
+                    };
+                    let inputs = dial_inputs.clone();
+                    tokio::spawn(async move {
+                        let answer = ndr::call(&route, &push.request, tls, &mut OsRng).await;
+                        // NTF-125: a gone token stops the pushes of its
+                        // handle. Any other failure waits for the re-push.
+                        if matches!(answer, Ok(NdrResponse::Gone)) {
+                            let _ = inputs
+                                .send(Input::NdrGone {
+                                    handle: push.handle,
+                                })
+                                .await;
+                        }
+                    });
+                }
             }
         }
     });

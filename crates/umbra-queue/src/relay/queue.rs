@@ -3,7 +3,10 @@
 
 use alloc::{vec, vec::Vec};
 
-use umbra_crypto::stored::{Reader, Writer};
+use umbra_crypto::{
+    secret::Secret,
+    stored::{Reader, Writer},
+};
 
 use crate::{
     params::{store_time, MSG_TTL, QUEUE_IDLE_TTL, QUEUE_QUOTA},
@@ -30,9 +33,15 @@ pub struct Queue {
     next_seq: u32,
     last_ack: u32,
     notifier: Option<([u8; 32], [u8; 32])>,
+    /// The plain `NotifyBinding` of Part 8 §8.2.3, which the relay seals
+    /// the blobs of this queue under (`NTF-114`).
+    binding: Option<Secret<BINDING_LEN>>,
     last_activity: u64,
     subscribed: bool,
 }
+
+/// The length of a plain `NotifyBinding`.
+pub const BINDING_LEN: usize = 98;
 
 impl Queue {
     /// Makes a queue at `now`. The relay drew the two identifiers from its
@@ -44,15 +53,18 @@ impl Queue {
             next_seq: 1,
             last_ack: 0,
             notifier: None,
+            binding: None,
             last_activity: now,
             subscribed: false,
         }
     }
 
     /// Writes the head of the queue for the store of a relay: each field
-    /// but the records. The head holds public keys and identifiers, and no
-    /// secret. A subscription belongs to one session, thus it is not part
-    /// of the head.
+    /// but the records. The head holds public keys and identifiers, and the
+    /// notification binding, which holds `k_ntf_root` and `k_tok`: the
+    /// relay pushes after a restart with them (`NTF-129`). A subscription
+    /// belongs to one session, thus it is not part of the head. The binding
+    /// comes last, thus a head of an earlier form reads with none.
     pub fn export_head(&self, writer: &mut Writer) {
         writer.bytes(&self.keys.recipient_id);
         writer.bytes(&self.keys.sender_id);
@@ -65,6 +77,9 @@ impl Queue {
             w.bytes(id);
         });
         writer.u64(store_time(self.last_activity));
+        writer.option(self.binding.as_ref(), |w, binding| {
+            w.bytes(binding.expose());
+        });
     }
 
     /// A queue from the head that [`Queue::export_head`] wrote and from
@@ -85,6 +100,11 @@ impl Queue {
                 last_ack: reader.u32()?,
                 notifier: reader.option(|r| Ok((r.array()?, r.array()?)))?,
                 last_activity: reader.u64()?,
+                binding: if reader.end().is_ok() {
+                    None
+                } else {
+                    reader.option(|r| Ok(Secret::new(r.array()?)))?
+                },
                 subscribed: false,
             })
         };
@@ -192,6 +212,27 @@ impl Queue {
     /// The notifier credential, if one is set.
     pub fn notifier(&self) -> Option<&([u8; 32], [u8; 32])> {
         self.notifier.as_ref()
+    }
+
+    /// Stores the plain binding of an `NBIND`, in the place of an earlier
+    /// one (`NTF-114`).
+    pub fn set_binding(&mut self, binding: Secret<BINDING_LEN>) {
+        self.binding = Some(binding);
+    }
+
+    /// Drops the binding: the NDR named its handle gone (`NTF-125`).
+    pub fn clear_binding(&mut self) {
+        self.binding = None;
+    }
+
+    /// The plain binding, if one is set.
+    pub fn binding(&self) -> Option<&Secret<BINDING_LEN>> {
+        self.binding.as_ref()
+    }
+
+    /// The records that no `ACK` covers.
+    pub fn waiting(&self) -> usize {
+        self.records.len()
     }
 
     /// Erases everything a `DEL` erases (`WIR-039` to `WIR-042`), and

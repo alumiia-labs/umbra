@@ -769,6 +769,7 @@ fn start_signed_network_at(relays: &tokio::runtime::Runtime, at: Option<&[u16]>)
             Carried {
                 manifest: (placed.layer == 1).then(|| manifest.clone()),
                 ohttp: None,
+                ndr: None,
             },
         ));
     }

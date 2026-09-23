@@ -237,8 +237,11 @@ of a client brings one back. Thus the queues of a relay outlive its process.
 - **[NET-300]** The store MUST hold, for each queue: the two identifiers, the
   two authorization keys with a lock key of Part 4 §4.3.1 in the place of
   `QS_auth`, the next sequence number, the last `ACK`, the notifier
-  credential, the time of the last activity, and each record that no `ACK`
-  covers. It MUST hold each invitation with its blob. It MUST NOT hold a
+  credential, the notification binding of Part 8 §8.2.3, the time of the
+  last activity, and each record that no `ACK` covers. The binding holds
+  `k_ntf_root` and `k_tok`, thus a seized store of a queue relay gives the
+  keys of the blobs of its queues and, with the store of the NDR, their push
+  tokens; Part 8 §8.1 states that correlation point. It MUST hold each invitation with its blob. It MUST NOT hold a
   circuit, a session, a subscription, an address of a client, or a link
   between two queues. Each of those ends with its process, and §3.11 gives a
   queue relay none of the last two.

@@ -35,7 +35,8 @@ pub struct Binding {
 }
 
 impl Binding {
-    fn encode(&self) -> Result<[u8; PLAIN_LEN], Error> {
+    /// The 98 plain bytes, as the store of a queue relay holds them.
+    pub fn encode(&self) -> Result<[u8; PLAIN_LEN], Error> {
         let mut out = [0u8; PLAIN_LEN];
         let mut w = Writer::new(&mut out);
         w.put(self.root.expose())?;
@@ -46,7 +47,8 @@ impl Binding {
         Ok(out)
     }
 
-    fn parse(bytes: &[u8]) -> Result<Self, Error> {
+    /// Reads the plain bytes that [`Binding::encode`] wrote.
+    pub fn parse(bytes: &[u8]) -> Result<Self, Error> {
         let mut r = Reader::new(bytes);
         let out = Binding {
             root: Secret::new(r.array()?),

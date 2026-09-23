@@ -99,6 +99,7 @@ async fn a_registration_and_a_push_cross_the_ohttp_relay_to_the_endpoint() {
             gateway: Url::parse(&format!("https://localhost:{ndr_port}{GATEWAY_PATH}")).unwrap(),
             tls: trust.clone(),
         }),
+        ndr: None,
     };
     tokio::spawn(accept_loop(
         relay_listener,

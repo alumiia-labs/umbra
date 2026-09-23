@@ -72,7 +72,7 @@ each column when a crate implements the requirement and a test covers it.
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
 | `WIR` | 391 | 87 | 0 | 0 | 6 | **484** |
 | `DEV` | 179 | 87 | 2 | 0 | 7 | **275** |
-| `NTF` | 73 | 30 | 0 | 0 | 2 | **105** |
+| `NTF` | 74 | 31 | 0 | 0 | 2 | **107** |
 | `DIS` | 123 | 37 | 0 | 0 | 1 | **161** |
 | `REL` | 124 | 32 | 1 | 0 | 2 | **159** |
 | `GRP` | 220 | 62 | 0 | 0 | 6 | **288** |
@@ -81,7 +81,7 @@ each column when a crate implements the requirement and a test covers it.
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
 | `IMP` | 112 | 41 | 0 | 0 | 2 | **155** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2227 | 717 | 7 | 0 | 53 | **3004** |
+| **All** | 2228 | 718 | 7 | 0 | 53 | **3006** |
 
 ## SCP — Scope and Conventions
 
@@ -1674,6 +1674,8 @@ Source: `spec/08-notifications.md`
 | `NTF-125` | §8.2.7 | MUST | The NDR | The NDR MUST bound the `ttl` of an `NPUSH` at `PUSH_TTL_MESSAGE`, and it MUST answer `gone` and drop the registration when the provider names the target gone. |  |  |
 | `NTF-126` | §8.2 | MUST | The inner message of that OHTTP | The inner message of that OHTTP MUST be one `NdrRequest` of §8.2.7 and its response one `NdrResponse`, with no Binary HTTP around them. |  |  |
 | `NTF-127` | §8.2 | MUST | A client build and the settings of a queue relay | A client build and the settings of a queue relay MUST pin the route to the NDR: the URL of the OHTTP relay, the key id, and the key configuration of the gateway. |  |  |
+| `NTF-128` | §8.2.3 | MUST NOT | A queue relay | A queue relay MUST NOT push for a record that it sends at once on a live subscription of the queue, and a subscription and an `ACK` of the queue each count as a drain of its handle for `NTF-066`. |  |  |
+| `NTF-129` | §8.2.3 | MUST | A queue relay | A queue relay MUST keep the binding of each queue in the store of Part 3 §3.2.4, thus a restart keeps the pushes of each queue. |  |  |
 
 ## DIS — Discovery, Handles, and Key Transparency
 

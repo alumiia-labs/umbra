@@ -56,6 +56,11 @@
 //! OHTTP relay role of Part 8 §8.2: it forwards each `POST /ohttp` to that
 //! gateway of the Notification Delivery Relay.
 //!
+//! A queue relay pushes to the NDR through the OHTTP relay of an
+//! `ndr_route=https://relay1.example/ohttp` line, under the gateway key of
+//! an `ndr_key_config=<hex>` line, which `umbra-ndr key-config` prints.
+//! A relay with neither line sends no push.
+//!
 //! The `next` line repeats, one for each relay of the next layer. The
 //! `trust` line is for a test network: the dialer then trusts that one
 //! authority and not the web roots. A deployment leaves it out.
@@ -72,6 +77,7 @@ use umbra_core::directory::{
 use umbra_crypto::{
     handshake::nk::RelayStatic,
     hash::sha3_256,
+    ohttp,
     rsabssa::PublicKey2048,
     secret::Secret,
     sign::SigningKey,
@@ -84,7 +90,7 @@ use umbra_relay::{
     sqlite_store::SqliteStore,
     store::{MemoryStore, RelayStore},
 };
-use umbra_transport::{https, native, Dial};
+use umbra_transport::{https, native, ndr::NdrRoute, Dial};
 
 fn hex(text: &str) -> Option<Vec<u8>> {
     if !text.len().is_multiple_of(2) {
@@ -122,6 +128,8 @@ struct Settings {
     manifest: Option<Vec<u8>>,
     /// The gateway of the NDR, for a relay with the OHTTP relay role.
     ohttp_gateway: Option<https::Url>,
+    /// The pinned route to the NDR, for the pushes of a queue relay.
+    ndr_route: Option<NdrRoute>,
     /// What this relay declares of itself for a network descriptor: the
     /// operator, the country, the autonomous system, and the IPv4 /16.
     facts: BTreeMap<String, String>,
@@ -240,6 +248,18 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
         ohttp_gateway: match values.get("ohttp_gateway") {
             Some(url) => Some(https::Url::parse(url)?),
             None => None,
+        },
+        ndr_route: match (values.get("ndr_route"), values.get("ndr_key_config")) {
+            (Some(url), Some(config)) => {
+                let (key_id, gateway) = ohttp::parse_key_config(&hex(config)?).ok()?;
+                Some(NdrRoute {
+                    relay: https::Url::parse(url)?,
+                    key_id,
+                    gateway,
+                })
+            }
+            (None, None) => None,
+            _ => return None,
         },
         facts: [
             "operator", "country", "asn", "prefix", "family", "class", "roles",
@@ -482,6 +502,8 @@ async fn run() -> ExitCode {
                 gateway,
                 tls: client_tls.clone(),
             }),
+            // NTF-127: the route of the pushes of this queue relay.
+            ndr: settings.ndr_route.map(|route| (route, client_tls.clone())),
         },
     )
     .await;

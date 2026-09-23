@@ -24,7 +24,8 @@
 use std::{collections::BTreeMap, process::ExitCode};
 
 use tokio::net::TcpListener;
-use umbra_crypto::{hash::sha3_256, kem::KeyPair, ohttp, secret::Secret};
+use umbra_core::notify::seeded_pair;
+use umbra_crypto::{kem::KeyPair, ohttp};
 use umbra_relay::{
     ndr_server::{run_ndr, Gateway, NdrStore, SqliteNdrStore},
     server::tls_acceptor,
@@ -39,17 +40,9 @@ fn hex32(text: &str) -> Option<[u8; 32]> {
     bytes.try_into().ok()
 }
 
-/// The gateway key of a seed. The three parts of the KEM seed each take a
-/// label of their own.
+/// The gateway key of a seed.
 fn gateway_pair(seed: &[u8; 32]) -> KeyPair {
-    let x = sha3_256(&[b"umbra/v1/ndr/x", seed]);
-    let d = sha3_256(&[b"umbra/v1/ndr/d", seed]);
-    let z = sha3_256(&[b"umbra/v1/ndr/z", seed]);
-    let mut dz = [0u8; 64];
-    for (slot, byte) in dz.iter_mut().zip(d.iter().chain(z.iter())) {
-        *slot = *byte;
-    }
-    KeyPair::from_seeds(Secret::new(x), Secret::new(dz))
+    seeded_pair(b"umbra/v1/ndr", seed)
 }
 
 fn main() -> ExitCode {

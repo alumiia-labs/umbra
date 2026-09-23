@@ -238,6 +238,17 @@ NotifyBinding {                   // 98 bytes, sealed under NBIND
   **[NTF-114]** A queue relay MUST seal the blobs of that queue under the
   fields of the binding, and it MUST NOT hold a binding after the queue is
   deleted or after the rotation of `NTF-007` replaces it.
+- **[NTF-128]** A queue relay MUST NOT push for a record that it sends at
+  once on a live subscription of the queue, and a subscription and an `ACK`
+  of the queue each count as a drain of its handle for `NTF-066`. A device
+  that holds the record needs no wake.
+- **[NTF-129]** A queue relay MUST keep the binding of each queue in the
+  store of Part 3 §3.2.4, thus a restart keeps the pushes of each queue. An
+  `NBIND` gets no answer, and a binding that does not open under the
+  notification key of the relay is refused under `WIR-317`. The notification
+  key MUST survive a restart, thus the reference relay derives it from its
+  static secret. The blob of a push carries the alias of the queue of the
+  last arrival under its handle.
 
 The KEM ciphertext of about 1.1 KB is a one-time cost. The
 path for each notification stays symmetric only, and a symmetric path at 256-bit

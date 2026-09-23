@@ -36,11 +36,19 @@ use crate::{
         community::CommunityService,
         group::GroupService,
         nack,
-        queue::QueueService,
+        queue::{NdrPush, QueueService},
         DigestDue, Outbound, Reply,
     },
     store::{Loaded, StoreChange},
 };
+
+/// The notification key of a queue relay, from its static secret under a
+/// label of its own (`NTF-112`). A relay of another layer holds no queue.
+fn notify_pair(config: &Config) -> Option<umbra_crypto::kem::KeyPair> {
+    (config.layer == 3).then(|| {
+        umbra_core::notify::seeded_pair(b"umbra/v1/relay-ntf", &config.static_secret.to_bytes())
+    })
+}
 
 /// `DRAIN_THRESHOLD`: above this count the answer to a `SUB` goes in one
 /// unpaced response (`NET-037`).
@@ -65,6 +73,9 @@ pub enum Output {
     },
     /// Write a digest into a notify queue, as a sender.
     Digest(DigestDue),
+    /// Send one `NPUSH` to the NDR over OHTTP (Part 8 §8.2.7). The runtime
+    /// gives an answer `gone` back through [`RelayNode::ndr_gone`].
+    NdrPush(NdrPush),
     /// Send one copy of a chunk to a replica relay, on a connection of its
     /// own (`WIR-211`). The runtime keeps nothing of it after the send.
     Push {
@@ -180,6 +191,10 @@ impl RelayNode {
     /// A relay with no link and no circuit.
     pub fn new(config: Config) -> Self {
         let relay_id = config.relay.relay_id;
+        let mut queues = QueueService::default();
+        if let Some(pair) = notify_pair(&config) {
+            queues.set_notify_key(pair);
+        }
         RelayNode {
             issuer_key: config.issuer_key,
             links: BTreeMap::new(),
@@ -188,7 +203,7 @@ impl RelayNode {
             circuits: CircuitTable::new(config.relay, config.static_secret, config.layer),
             endpoints: BTreeMap::new(),
             gate: RelayGate::new(relay_id),
-            queues: QueueService::default(),
+            queues,
             communities: CommunityService::new(config.community_capacity),
             groups: GroupService::default(),
             chunks: ChunkService::new(config.chunk_capacity),
@@ -203,8 +218,26 @@ impl RelayNode {
         let mut node = RelayNode::new(config);
         node.chunks = chunks;
         node.groups = GroupService::restore(&loaded);
-        node.queues = QueueService::restore(loaded);
+        let mut queues = QueueService::restore(loaded);
+        queues.keep_notify_of(&mut node.queues);
+        node.queues = queues;
         node
+    }
+
+    /// The pushes due at `now`: the end of a coalescing window and each
+    /// re-push. The runtime calls it about once each second.
+    pub fn push_tick<R: CryptoRng + ?Sized>(&mut self, now: u64, rng: &mut R) -> Vec<Output> {
+        self.queues.push_tick(now, rng);
+        self.queues
+            .take_ndr_pushes()
+            .into_iter()
+            .map(Output::NdrPush)
+            .collect()
+    }
+
+    /// The NDR answered `gone` for a handle (`NTF-125`).
+    pub fn ndr_gone(&mut self, handle: &[u8; 16]) {
+        self.queues.ndr_gone(handle);
     }
 
     /// The changes of the stored state since the last call. The process
@@ -411,6 +444,12 @@ impl RelayNode {
                     outputs.extend(digests.into_iter().map(Output::Digest));
                     // ATT-102: one copy for each target of a `CREP`.
                     outputs.extend(self.chunks.take_pushes().iter().filter_map(push_output));
+                    outputs.extend(
+                        self.queues
+                            .take_ndr_pushes()
+                            .into_iter()
+                            .map(Output::NdrPush),
+                    );
                     for reply in unpaced {
                         work.extend(self.circuits.originate(
                             &reply.circuit,

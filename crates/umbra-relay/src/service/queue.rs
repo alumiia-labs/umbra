@@ -4,9 +4,19 @@
 
 use std::collections::BTreeMap;
 
-use umbra_core::abuse::admission::{Accepts, RelayGate};
+use umbra_core::{
+    abuse::admission::{Accepts, RelayGate},
+    notify::{
+        binding::Binding,
+        blob, epoch_of,
+        push::{Push, PushScheduler},
+        HANDLE_LEN,
+    },
+};
 use umbra_crypto::{
+    kem::KeyPair,
     rand_core::CryptoRng,
+    secret::Secret,
     stored::{Reader, Writer},
 };
 use umbra_queue::{
@@ -24,6 +34,7 @@ use umbra_wire::{
         blob_bucket, iblob_payload, iput_parse, Cmd, Command, IdsPayload, NewPayload, IGET_LEN,
         LINK_ID_LEN,
     },
+    ndr::{NdrRequest, NDR_REQUEST_LEN},
     queue::msg_from_send,
 };
 
@@ -47,6 +58,42 @@ pub struct QueueService {
     subscribers: BTreeMap<[u8; 32], CircuitKey>,
     /// The changes since the last [`QueueService::take_changes`].
     changes: Vec<StoreChange>,
+    /// The notification state of a queue relay (Part 8 §8.2.3).
+    notify: Option<Notify>,
+}
+
+/// One `NPUSH` for the NDR, which the runtime sends over OHTTP.
+#[derive(Clone, PartialEq, Eq)]
+pub struct NdrPush {
+    /// The handle, for the answer `gone`.
+    pub handle: [u8; HANDLE_LEN],
+    /// The request.
+    pub request: Box<[u8; NDR_REQUEST_LEN]>,
+}
+
+/// The request holds `k_tok`, thus no debug form shows it.
+impl core::fmt::Debug for NdrPush {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("NdrPush")
+    }
+}
+
+/// The notification key of the relay, the push scheduler, and the pushes
+/// that wait for the runtime.
+struct Notify {
+    pair: KeyPair,
+    scheduler: PushScheduler,
+    /// The queue of the last arrival of each handle, whose alias the next
+    /// blob of that handle carries.
+    latest: BTreeMap<[u8; HANDLE_LEN], [u8; 32]>,
+    pushes: Vec<NdrPush>,
+}
+
+/// The handle of the binding of a queue.
+fn handle_of(queue: &Queue) -> Option<[u8; HANDLE_LEN]> {
+    Binding::parse(queue.binding()?.expose())
+        .ok()
+        .map(|binding| binding.handle)
 }
 
 fn random_id<R: CryptoRng + ?Sized>(rng: &mut R) -> [u8; 32] {
@@ -83,6 +130,130 @@ fn msg_of<R: CryptoRng + ?Sized>(
 }
 
 impl QueueService {
+    /// Gives this relay its notification key, thus it answers `NKEY` with
+    /// an `NPK` and pushes for each queue with a binding (`NTF-112`).
+    pub fn set_notify_key(&mut self, pair: KeyPair) {
+        self.notify = Some(Notify {
+            pair,
+            scheduler: PushScheduler::default(),
+            latest: BTreeMap::new(),
+            pushes: Vec::new(),
+        });
+    }
+
+    /// Takes the notification key of `earlier`, a service of the same relay.
+    pub fn keep_notify_of(&mut self, earlier: &mut QueueService) {
+        self.notify = earlier.notify.take();
+    }
+
+    /// The pushes that wait for the runtime.
+    pub fn take_ndr_pushes(&mut self) -> Vec<NdrPush> {
+        self.notify
+            .as_mut()
+            .map(|notify| core::mem::take(&mut notify.pushes))
+            .unwrap_or_default()
+    }
+
+    /// The pushes due at `now`: the end of a coalescing window and each
+    /// re-push (`NTF-049`, `NTF-066`).
+    pub fn push_tick<R: CryptoRng + ?Sized>(&mut self, now: u64, rng: &mut R) {
+        let due = match self.notify.as_mut() {
+            Some(notify) => notify.scheduler.tick(now),
+            None => return,
+        };
+        for push in due {
+            self.queue_push(push, now, rng);
+        }
+    }
+
+    /// The NDR named a handle gone: each queue under it drops its binding,
+    /// and no push of that handle follows (`NTF-125`).
+    pub fn ndr_gone(&mut self, handle: &[u8; HANDLE_LEN]) {
+        let under: Vec<[u8; 32]> = self
+            .queues
+            .iter()
+            .filter(|(_, queue)| handle_of(queue).as_ref() == Some(handle))
+            .map(|(id, _)| *id)
+            .collect();
+        for recipient_id in under {
+            if let Some(queue) = self.queues.get_mut(&recipient_id) {
+                queue.clear_binding();
+            }
+            self.head_changed(recipient_id);
+        }
+    }
+
+    /// An arrival at a queue with a binding, which no live subscription
+    /// took (`NTF-128`).
+    fn on_arrival<R: CryptoRng + ?Sized>(&mut self, recipient_id: [u8; 32], now: u64, rng: &mut R) {
+        let Some(handle) = self.queues.get(&recipient_id).and_then(handle_of) else {
+            return;
+        };
+        let Some(notify) = self.notify.as_mut() else {
+            return;
+        };
+        notify.latest.insert(handle, recipient_id);
+        if let Some(push) = notify.scheduler.on_arrival(handle, false, now) {
+            self.queue_push(push, now, rng);
+        }
+    }
+
+    /// A drain of a queue ends the re-push of its handle (`NTF-066`).
+    fn on_drain(&mut self, recipient_id: &[u8; 32]) {
+        let handle = self.queues.get(recipient_id).and_then(handle_of);
+        if let (Some(handle), Some(notify)) = (handle, self.notify.as_mut()) {
+            notify.scheduler.on_drain(&handle);
+        }
+    }
+
+    /// Seals the blob of one push under the binding of the queue of the
+    /// last arrival of its handle, and queues the `NPUSH` (`NTF-114`).
+    fn queue_push<R: CryptoRng + ?Sized>(&mut self, push: Push, now: u64, rng: &mut R) {
+        let Some(notify) = self.notify.as_mut() else {
+            return;
+        };
+        let Some(queue) = notify
+            .latest
+            .get(&push.handle)
+            .and_then(|recipient_id| self.queues.get(recipient_id))
+        else {
+            return;
+        };
+        let Some(binding) = queue
+            .binding()
+            .and_then(|held| Binding::parse(held.expose()).ok())
+        else {
+            return;
+        };
+        let mut nonce = [0u8; 24];
+        rng.fill_bytes(&mut nonce);
+        let plain = blob::Plain {
+            relay_idx: binding.relay_idx,
+            queue_alias: binding.queue_alias,
+            waiting_count: u8::try_from(queue.waiting()).unwrap_or(u8::MAX),
+            // The field holds the low 32 bits of the clock.
+            relay_ts: u32::try_from(now & u64::from(u32::MAX)).unwrap_or(0),
+            flags: if push.digest { blob::FLAG_DIGEST } else { 0 },
+        };
+        let Ok(sealed) = blob::seal(&binding.root, epoch_of(now), nonce, &plain) else {
+            return;
+        };
+        let mut request = Box::new([0u8; NDR_REQUEST_LEN]);
+        let encoded = NdrRequest::Push {
+            handle: binding.handle,
+            k_tok: Secret::new(*binding.k_tok.expose()),
+            ttl: u32::try_from(push.ttl).unwrap_or(u32::MAX),
+            blob: sealed,
+        }
+        .encode(&mut request);
+        if encoded.is_ok() {
+            notify.pushes.push(NdrPush {
+                handle: binding.handle,
+                request,
+            });
+        }
+    }
+
     /// The queues and the invitations of an earlier run. A queue whose
     /// stored form has a fault is dropped, and the others stay.
     pub fn restore(loaded: Loaded) -> Self {
@@ -223,13 +394,17 @@ impl QueueService {
                     Cmd::Quota,
                     &remaining.to_be_bytes(),
                 )];
-                if let Some(subscriber) = self.subscribers.get(&recipient_id) {
-                    if let Some(outbound) = msg_of(recipient_id, seq, command.payload, rng) {
-                        replies.push(Reply {
-                            circuit: *subscriber,
-                            outbound,
-                        });
-                    }
+                let live = self.subscribers.get(&recipient_id).and_then(|subscriber| {
+                    msg_of(recipient_id, seq, command.payload, rng).map(|outbound| Reply {
+                        circuit: *subscriber,
+                        outbound,
+                    })
+                });
+                match live {
+                    // NTF-128: a record that a live subscription took needs
+                    // no wake.
+                    Some(reply) => replies.push(reply),
+                    None => self.on_arrival(recipient_id, now, rng),
                 }
                 Ok(replies)
             }
@@ -261,9 +436,14 @@ impl QueueService {
                 self.head_changed(recipient_id);
                 Ok(vec![answer(circuit, command, Cmd::Iblob, &payload)])
             }
-            Cmd::Sub | Cmd::Unsub | Cmd::Ack | Cmd::Del | Cmd::Nkey | Cmd::Ires | Cmd::Iput => {
-                self.recipient_command(circuit, session, command, now, rng)
-            }
+            Cmd::Sub
+            | Cmd::Unsub
+            | Cmd::Ack
+            | Cmd::Del
+            | Cmd::Nkey
+            | Cmd::Nbind
+            | Cmd::Ires
+            | Cmd::Iput => self.recipient_command(circuit, session, command, now, rng),
             // A cover command of a client names no queue. It gets no answer,
             // and it is no activity of a queue (`NET-196`).
             Cmd::Cover => Ok(Vec::new()),
@@ -283,6 +463,10 @@ impl QueueService {
         let queue = self.queues.get_mut(&recipient_id).ok_or(Reject::Rejected)?;
         session.accept(command, &queue.keys().qr_auth_pk)?;
         let replies = self.owner_command(circuit, session, command, now, rng)?;
+        // A subscription and an acknowledgment drain the queue.
+        if matches!(command.cmd, Cmd::Sub | Cmd::Ack) {
+            self.on_drain(&recipient_id);
+        }
         // Each command of the owner moves the head: the time of the last
         // activity at the least. A `DEL` left no queue, and then no head.
         self.head_changed(recipient_id);
@@ -329,7 +513,24 @@ impl QueueService {
                     command.payload.try_into().map_err(|_| Reject::Rejected)?;
                 let notifier_id = random_id(rng);
                 queue.set_notifier(notifier_pk, notifier_id);
-                Ok(vec![answer(circuit, command, Cmd::Nid, &notifier_id)])
+                let mut replies = Vec::new();
+                // NTF-112: the notification key goes before the `NID`.
+                if let Some(notify) = &self.notify {
+                    let public = notify.pair.public().to_bytes();
+                    replies.push(answer(circuit, command, Cmd::Npk, &public));
+                }
+                replies.push(answer(circuit, command, Cmd::Nid, &notifier_id));
+                Ok(replies)
+            }
+            Cmd::Nbind => {
+                // NTF-113: the binding opens under the notification key of
+                // this relay, bound to the queue. It gets no answer.
+                let notify = self.notify.as_ref().ok_or(Reject::Rejected)?;
+                let binding = Binding::open(&notify.pair, &recipient_id, command.payload)
+                    .map_err(|_| Reject::Rejected)?;
+                let plain = binding.encode().map_err(|_| Reject::Rejected)?;
+                queue.set_binding(Secret::new(plain));
+                Ok(Vec::new())
             }
             Cmd::Ires => {
                 // One queue holds one invitation. A second `IRES` takes the
@@ -436,5 +637,203 @@ impl QueueService {
                 .push(StoreChange::QueueDeleted { recipient_id });
             self.subscribers.remove(&recipient_id);
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::panic
+)]
+mod tests {
+    use super::*;
+    use umbra_core::notify::{blob::Receiver, seeded_pair};
+    use umbra_crypto::{
+        auth::CommandAuthKey,
+        rand_core::{TryCryptoRng, TryRng},
+        rsabssa::PublicKey2048,
+        x25519::{PublicKey as XPublic, StaticSecret},
+    };
+    use umbra_wire::{admission::Admission, command::NBIND_LEN};
+
+    struct Rng(u8);
+    impl TryRng for Rng {
+        type Error = core::convert::Infallible;
+        fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+            Ok(0)
+        }
+        fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+            Ok(0)
+        }
+        fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+            self.0 = self.0.wrapping_add(1);
+            dst.fill(self.0);
+            Ok(())
+        }
+    }
+    impl TryCryptoRng for Rng {}
+
+    const CIRCUIT: CircuitKey = CircuitKey {
+        link: 2,
+        circ_id: [7; 16],
+    };
+    const NOW: u64 = 1_800_000_000;
+
+    struct Bench {
+        service: QueueService,
+        session: Session,
+        gate: RelayGate,
+        issuer: PublicKey2048,
+        rng: Rng,
+        corr: u8,
+    }
+
+    impl Bench {
+        fn new() -> Self {
+            let mut service = QueueService::default();
+            service.set_notify_key(seeded_pair(b"test", &[3; 32]));
+            Bench {
+                service,
+                session: Session::for_circuit(&[7; 16], StaticSecret::from([9; 32])),
+                gate: RelayGate::new([1; 32]),
+                issuer: PublicKey2048::from_modulus(&[0xFF; 256]).unwrap(),
+                rng: Rng(0),
+                corr: 0,
+            }
+        }
+
+        fn send(
+            &mut self,
+            cmd: Cmd,
+            queue_id: [u8; 32],
+            payload: &[u8],
+            signer: &StaticSecret,
+        ) -> Result<Vec<Reply>, Reject> {
+            self.corr += 1;
+            let mut command = Command {
+                cmd,
+                corr_id: [self.corr; 16],
+                queue_id,
+                auth: [0; 32],
+                payload,
+            };
+            let key = CommandAuthKey::derive(signer, &self.session.relay_session_pk()).unwrap();
+            command.sign(&key, b"").unwrap();
+            let accepts = Accepts::CrossRelay(&self.issuer);
+            self.service.handle(
+                CIRCUIT,
+                &mut self.session,
+                &mut self.gate,
+                &accepts,
+                &command,
+                NOW,
+                &mut self.rng,
+            )
+        }
+    }
+
+    fn payloads(replies: &[Reply]) -> Vec<(Cmd, Vec<u8>)> {
+        replies
+            .iter()
+            .map(|reply| {
+                let (command, _) =
+                    Command::parse(&reply.outbound.encoded, reply.outbound.bucket).unwrap();
+                (command.cmd, command.payload.to_vec())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_bound_queue_pushes_once_for_an_arrival_that_no_subscription_took() {
+        let mut bench = Bench::new();
+        let qr = StaticSecret::from([4; 32]);
+        let qs = StaticSecret::from([5; 32]);
+        let new = NewPayload {
+            qr_auth_pk: *XPublic::from(&qr).as_bytes(),
+            qs_auth_pk: *XPublic::from(&qs).as_bytes(),
+            admission: Admission::NONE,
+        };
+        let mut out = [0u8; 128];
+        let n = new.encode(&mut out).unwrap();
+        let ids = bench.send(Cmd::New, [0; 32], &out[..n], &qr).unwrap();
+        let ids = IdsPayload::parse(&payloads(&ids)[0].1).unwrap();
+
+        // NTF-112: the `NPK` goes before the `NID`, under one `corr_id`.
+        let answers = bench
+            .send(Cmd::Nkey, ids.recipient_id, &[6; 32], &qr)
+            .unwrap();
+        let answers = payloads(&answers);
+        assert_eq!(answers.len(), 2);
+        assert_eq!(answers[0].0, Cmd::Npk);
+        assert_eq!(answers[1].0, Cmd::Nid);
+        let relay_ntf = umbra_crypto::kem::PublicKey::from_bytes(&answers[0].1).unwrap();
+
+        // NTF-113: the device seals its binding to that key.
+        let binding = Binding {
+            root: Secret::new([0x21; 32]),
+            handle: [0x22; 16],
+            k_tok: Secret::new([0x23; 32]),
+            queue_alias: [0x24; 16],
+            relay_idx: 3,
+        };
+        let sealed = binding
+            .seal(&relay_ntf, &ids.recipient_id, &mut bench.rng)
+            .unwrap();
+        assert_eq!(sealed.len(), NBIND_LEN);
+        let none = bench
+            .send(Cmd::Nbind, ids.recipient_id, &sealed, &qr)
+            .unwrap();
+        assert!(none.is_empty());
+        // A binding sealed for another queue does not open.
+        assert!(bench
+            .send(Cmd::Nbind, ids.recipient_id, &[0; NBIND_LEN], &qr)
+            .is_err());
+
+        // An arrival with no subscription gives one `NPUSH`, and a second
+        // one inside the window gives none (`NTF-048`).
+        let record = vec![0x55; Bucket::B0.l6_record()];
+        bench.send(Cmd::Send, ids.sender_id, &record, &qs).unwrap();
+        bench.send(Cmd::Send, ids.sender_id, &record, &qs).unwrap();
+        let pushes = bench.service.take_ndr_pushes();
+        assert_eq!(pushes.len(), 1);
+        let NdrRequest::Push {
+            handle, ttl, blob, ..
+        } = NdrRequest::parse(&pushes[0].request[..]).unwrap()
+        else {
+            panic!("not a push");
+        };
+        assert_eq!(handle, [0x22; 16]);
+        assert_eq!(u64::from(ttl), umbra_core::notify::PUSH_TTL_MESSAGE);
+        let plain = Receiver::new(Secret::new([0x21; 32]))
+            .open(&blob, NOW)
+            .unwrap();
+        assert_eq!(plain.queue_alias, [0x24; 16]);
+        assert_eq!(plain.relay_idx, 3);
+        assert_eq!(plain.waiting_count, 1);
+
+        // NTF-049: the end of the window gives the push of the second one.
+        bench.service.push_tick(NOW + 10, &mut Rng(9));
+        assert_eq!(bench.service.take_ndr_pushes().len(), 1);
+
+        // NTF-128: a record that a live subscription takes gives no push.
+        bench.send(Cmd::Sub, ids.recipient_id, &[], &qr).unwrap();
+        bench.send(Cmd::Send, ids.sender_id, &record, &qs).unwrap();
+        bench.service.push_tick(NOW + 30, &mut Rng(10));
+        assert!(bench.service.take_ndr_pushes().is_empty());
+
+        // NTF-129: the binding outlives a restart in the head.
+        let mut loaded = Loaded::default();
+        for change in bench.service.take_changes() {
+            loaded.apply(&change);
+        }
+        let mut restored = QueueService::restore(loaded);
+        restored.keep_notify_of(&mut bench.service);
+        assert!(restored.queues[&ids.recipient_id].binding().is_some());
+
+        // NTF-125: the answer `gone` drops the binding.
+        restored.ndr_gone(&[0x22; 16]);
+        assert!(restored.queues[&ids.recipient_id].binding().is_none());
     }
 }

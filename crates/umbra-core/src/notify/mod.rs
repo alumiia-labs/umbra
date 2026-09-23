@@ -58,3 +58,18 @@ pub const fn epoch_of(now: u64) -> u32 {
         epoch as u32
     }
 }
+
+/// An `UMBRA-KEM` key pair from a 32-byte seed under `label`: the gateway
+/// key of the NDR, and the notification key of a queue relay (`NTF-112`).
+/// A restart then keeps the key that each party pinned or sealed to.
+pub fn seeded_pair(label: &[u8], seed: &[u8; 32]) -> umbra_crypto::kem::KeyPair {
+    use umbra_crypto::{hash::sha3_256, secret::Secret};
+    let x = sha3_256(&[label, b"/x", seed]);
+    let d = sha3_256(&[label, b"/d", seed]);
+    let z = sha3_256(&[label, b"/z", seed]);
+    let mut dz = [0u8; 64];
+    for (slot, byte) in dz.iter_mut().zip(d.iter().chain(z.iter())) {
+        *slot = *byte;
+    }
+    umbra_crypto::kem::KeyPair::from_seeds(Secret::new(x), Secret::new(dz))
+}
