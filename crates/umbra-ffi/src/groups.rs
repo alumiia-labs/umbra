@@ -48,6 +48,18 @@ const SETTLED: Duration = Duration::from_secs(30);
 /// What the caller asks of the task. Each command names one replica: the
 /// caller sends the same record to each of the two (`GRP-194`).
 pub enum GroupCommand {
+    /// `GNREG`: the notify queue of this device at one replica (Part 8
+    /// `NTF-093`). It has no answer.
+    Notify {
+        /// The relay.
+        relay: [u8; 32],
+        /// The group queue at that relay.
+        group_queue_id: [u8; 32],
+        /// `read_sk` of the epoch.
+        read: Secret<32>,
+        /// The encoded `QueueAddress` of the notify queue.
+        queue: Vec<u8>,
+    },
     /// `GNEW`. Two of these, at two relays of different operators and
     /// blocs, make one group (`GRP-191`).
     Create {
@@ -131,6 +143,17 @@ impl GroupCommand {
     /// The same command, for a later session.
     pub fn copy(&self) -> GroupCommand {
         match self {
+            GroupCommand::Notify {
+                relay,
+                group_queue_id,
+                read,
+                queue,
+            } => GroupCommand::Notify {
+                relay: *relay,
+                group_queue_id: *group_queue_id,
+                read: Secret::new(*read.expose()),
+                queue: queue.clone(),
+            },
             GroupCommand::Create {
                 tag,
                 relay,
@@ -594,6 +617,21 @@ async fn session(
                     *group_queue_id,
                     GroupJob::Delete {
                         own: StaticSecret::from(*own.expose()),
+                    },
+                ),
+                GroupCommand::Notify {
+                    relay,
+                    group_queue_id,
+                    read,
+                    queue,
+                } => (
+                    None,
+                    *relay,
+                    *group_queue_id,
+                    GroupJob::Notify {
+                        read: StaticSecret::from(*read.expose()),
+                        queue: queue.clone(),
+                        on: true,
                     },
                 ),
             };

@@ -949,6 +949,9 @@ struct Inner {
     ndr: Option<(NdrRoute, Arc<native::ClientConfig>)>,
     /// The handle groups whose NDR call runs.
     ndr_in_flight: BTreeSet<[u8; 16]>,
+    /// The group of each notify queue that the run makes, by tag.
+    notify_pending: BTreeMap<u64, crate::ConversationId>,
+    next_notify_tag: u64,
 }
 
 /// What one command of the transfer task belongs to.
@@ -1164,6 +1167,42 @@ impl Inner {
                 .answer_key_request(conversation, index, now_ms, &mut OsRng);
         }
         self.pump_epoch_transfers();
+        // NTF-090: each group with no notify queue gets one from the run of
+        // the queues.
+        if let (Ok(groups), Some(running)) = (self.client.groups_without_notify(), &self.bridge) {
+            for conversation in groups {
+                if self
+                    .notify_pending
+                    .values()
+                    .any(|held| *held == conversation)
+                {
+                    continue;
+                }
+                self.next_notify_tag = self.next_notify_tag.wrapping_add(1);
+                if running.make_notify_queue(self.next_notify_tag).is_ok() {
+                    self.notify_pending
+                        .insert(self.next_notify_tag, conversation);
+                }
+            }
+        }
+        // NTF-093, NTF-102: the notify queue of each group at each replica,
+        // and again before the relay forgets it.
+        if let Ok(due) = self.client.notify_registrations_due(now_ms / 1_000) {
+            for registration in due {
+                commands.push(GroupCommand::Notify {
+                    relay: registration.relay,
+                    group_queue_id: registration.group_queue_id,
+                    read: registration.read,
+                    queue: registration.queue,
+                });
+                let _ = self.client.notify_registered(
+                    registration.conversation,
+                    registration.which,
+                    now_ms / 1_000,
+                    &mut OsRng,
+                );
+            }
+        }
         while let Some(job) = self.client.take_group_rekey() {
             commands.push(GroupCommand::Rotate {
                 relay: job.relay,
@@ -1917,6 +1956,8 @@ pub fn init(
             group_refusals: BTreeSet::new(),
             ndr: None,
             ndr_in_flight: BTreeSet::new(),
+            notify_pending: BTreeMap::new(),
+            next_notify_tag: 0,
         }),
         changed: Condvar::new(),
         runtime: Mutex::new(None),
@@ -2004,6 +2045,7 @@ impl Handle {
             uses_second_pin,
             circuits,
             circuits_changed,
+            notify_pending,
             ..
         } = &mut *inner;
         let ended = matches!(update, Update::Offline(_));
@@ -2023,6 +2065,16 @@ impl Handle {
                     }
                 }
             }
+            Update::NotifyQueue {
+                tag,
+                recipient_id,
+                address,
+            } => {
+                if let Some(conversation) = notify_pending.remove(tag) {
+                    let _ =
+                        client.set_group_notify(conversation, *recipient_id, address, &mut OsRng);
+                }
+            }
             // NTF-113: the binding goes sealed to that key.
             Update::NotifyKey {
                 recipient_id,
@@ -2040,10 +2092,12 @@ impl Handle {
                     }
                 }
             }
-            // A run that ended holds no circuit.
+            // A run that ended holds no circuit, and a notify queue that it
+            // did not make goes to the next run.
             Update::Offline(_) => {
                 circuits.clear();
                 *circuits_changed = true;
+                notify_pending.clear();
             }
             _ => {}
         }
@@ -2359,6 +2413,11 @@ impl Handle {
                     .restore_invitation(state)
                     .map_err(|_| FfiError::Integrity)?;
                 net_events.push_back(NetEvent::Invitation(bundle));
+            }
+            // Each notify queue of a group takes its digests again.
+            for state in &stored.notify_queues {
+                node.restore_notify_queue(state)
+                    .map_err(|_| FfiError::Integrity)?;
             }
             // Each record that no relay accepted in an earlier run goes
             // again. The runtime holds it until the circuit is ready.

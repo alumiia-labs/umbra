@@ -74,6 +74,11 @@ impl Bridge {
         self.commands.send(command).map_err(|_| Error::Offline)
     }
 
+    /// Makes a notify queue of Part 8 §8.5.2 under a tag of the caller.
+    pub fn make_notify_queue(&self, tag: u64) -> Result<(), Error> {
+        self.command(Command::MakeNotifyQueue(tag))
+    }
+
     /// Sends the `NKEY` of an inbound queue (Part 8 §8.2.3).
     pub fn notify_queue(&self, recipient_id: [u8; 32]) -> Result<(), Error> {
         self.command(Command::NotifyQueue(recipient_id))
@@ -169,7 +174,11 @@ impl Bridge {
         Ok(match update {
             // The handle keeps the circuits, and the bridge has no part in it.
             // The bindings of Part 8 take these before the bridge.
-            Update::Circuits(_) | Update::Queues(_) | Update::NotifyKey { .. } => None,
+            Update::Circuits(_)
+            | Update::Queues(_)
+            | Update::NotifyKey { .. }
+            | Update::NotifyQueue { .. }
+            | Update::Digest { .. } => None,
             Update::Online => Some(NetEvent::Online),
             Update::Offline(ended) => Some(NetEvent::Offline(ended)),
             Update::Invitation(bundle) => Some(NetEvent::Invitation(bundle)),

@@ -180,6 +180,26 @@ pub enum ClientEvent {
     /// The circuit failed its check or its build, and the runtime builds a
     /// new one.
     CircuitLost,
+    /// A notify queue of Part 8 §8.5.2 exists at its relay. The caller
+    /// registers `address` with each replica of its group by `GNREG`.
+    NotifyQueue {
+        /// The handle that [`ClientNode::make_notify_queue`] gave.
+        handle: u64,
+        /// The `RecipientId` of the queue.
+        recipient_id: [u8; 32],
+        /// The encoded `QueueAddress` that a relay writes to.
+        address: Vec<u8>,
+    },
+    /// A digest arrived on a notify queue (`NTF-107`): the records of a
+    /// group queue since the last digest.
+    Digest {
+        /// The notify queue.
+        recipient_id: [u8; 32],
+        /// The `GroupQueueId`, or the `community_id` (`NTF-099`).
+        id: [u8; 32],
+        /// The records since the last digest.
+        post_count: u8,
+    },
     /// The relay of an inbound queue answered its `NKEY` with its
     /// notification key (`NTF-112`). The caller seals the binding of the
     /// queue to it and sends it with [`ClientNode::bind_queue`].
@@ -499,6 +519,15 @@ enum Purpose {
         /// the inviter in the place of the `QS_auth` of the bundle.
         lock: Option<[u8; 32]>,
     },
+    /// The notify queue of a group (Part 8 §8.5.2).
+    Notify,
+}
+
+/// A notify queue of Part 8 §8.5.2: a queue of this device that no contact
+/// writes to, where a group-queue relay deposits its digests.
+struct NotifyQueue {
+    inbound: Inbound,
+    relay: [u8; 32],
 }
 
 /// The fetch of a blob between its `IGET` and its `IBLOB`.
@@ -667,6 +696,13 @@ pub enum StateChange {
         /// The `RecipientId` of the queue of the invitation.
         queue: [u8; 32],
     },
+    /// A notify queue is new, or its cursor moved.
+    NotifyQueue {
+        /// The `RecipientId` of the queue.
+        queue: [u8; 32],
+        /// The stored form, which holds the keys of the queue.
+        state: Zeroizing<Vec<u8>>,
+    },
 }
 
 /// What one slot of the cover clock carried.
@@ -690,6 +726,18 @@ const LOOP_SHARE: u8 = 51;
 
 /// The version byte of a stored contact and of a stored invitation.
 const STORED_VERSION: u8 = 0x02;
+
+/// The version of the stored form of a notify queue: the version, the relay,
+/// and the queue end.
+const NOTIFY_STORED_VERSION: u8 = 0x01;
+
+fn notify_state(held: &NotifyQueue) -> Result<Zeroizing<Vec<u8>>, Error> {
+    let mut writer = Writer::new();
+    writer.u8(NOTIFY_STORED_VERSION);
+    writer.bytes(&held.relay);
+    held.inbound.export(&mut writer)?;
+    Ok(writer.finish())
+}
 
 /// One client.
 pub struct ClientNode {
@@ -723,6 +771,8 @@ pub struct ClientNode {
     /// The contacts whose handshake runs, by `RecipientId`.
     halves: BTreeMap<[u8; 32], Half>,
     contacts: BTreeMap<[u8; 32], Contact>,
+    /// The notify queues of Part 8 §8.5.2, by `RecipientId`.
+    notify: BTreeMap<[u8; 32], NotifyQueue>,
     /// The contacts whose channel moved since the last
     /// [`ClientNode::take_changes`].
     moved: BTreeSet<[u8; 32]>,
@@ -831,6 +881,7 @@ impl ClientNode {
             waiting: BTreeMap::new(),
             halves: BTreeMap::new(),
             contacts: BTreeMap::new(),
+            notify: BTreeMap::new(),
             moved: BTreeSet::new(),
             changes: Vec::new(),
         }
@@ -840,6 +891,13 @@ impl ClientNode {
     pub fn take_changes(&mut self) -> Result<Vec<StateChange>, Error> {
         let mut changes = core::mem::take(&mut self.changes);
         for id in core::mem::take(&mut self.moved) {
+            if let Some(held) = self.notify.get(&id) {
+                changes.push(StateChange::NotifyQueue {
+                    queue: id,
+                    state: notify_state(held)?,
+                });
+                continue;
+            }
             let Some(contact) = self.contacts.get(&id) else {
                 continue;
             };
@@ -897,6 +955,27 @@ impl ClientNode {
 
     /// Takes an invitation of an earlier run from its stored form, and
     /// returns its bundle.
+    pub fn restore_notify_queue(&mut self, state: &[u8]) -> Result<[u8; 32], Error> {
+        let mut reader = Reader::new(state);
+        if reader.u8()? != NOTIFY_STORED_VERSION {
+            return Err(Error::Malformed);
+        }
+        let relay = reader.array()?;
+        let inbound = Inbound::restore(&mut reader)?;
+        reader.end()?;
+        let id = *inbound.recipient_id();
+        self.assign(id, relay);
+        self.notify.insert(id, NotifyQueue { inbound, relay });
+        Ok(id)
+    }
+
+    /// Makes a notify queue of Part 8 §8.5.2 (`NTF-090`). A
+    /// [`ClientEvent::NotifyQueue`] with the same handle follows.
+    pub fn make_notify_queue<R: CryptoRng + ?Sized>(&mut self, rng: &mut R) -> Result<u64, Error> {
+        self.make_queue(Purpose::Notify, rng)
+    }
+
+    /// Takes an invitation of an earlier run from its stored form.
     pub fn restore_invitation(&mut self, state: &[u8]) -> Result<Vec<u8>, Error> {
         let mut reader = Reader::new(state);
         let names_relay = stored_version(&mut reader)?;
@@ -990,7 +1069,9 @@ impl ClientNode {
             .contacts
             .values()
             .map(|contact| contact.channel.inbound());
-        let stored = contacts.chain(self.halves.values().map(|half| &half.inbound));
+        let stored = contacts
+            .chain(self.halves.values().map(|half| &half.inbound))
+            .chain(self.notify.values().map(|held| &held.inbound));
         for inbound in stored.filter(|inbound| queues.contains(inbound.recipient_id())) {
             commands.push(inbound.subscribe(&session_pk, random(rng))?);
             commands.extend(inbound.acknowledge_again(&session_pk, random(rng))?);
@@ -1450,6 +1531,7 @@ impl ClientNode {
             .values()
             .map(|contact| contact.channel.inbound())
             .chain(self.halves.values().map(|half| &half.inbound))
+            .chain(self.notify.values().map(|held| &held.inbound))
             .find(|inbound| inbound.recipient_id() == recipient_id)
     }
 
@@ -2218,6 +2300,12 @@ impl ClientNode {
                 return Ok(CoverSlot::Acknowledgment);
             }
         }
+        let notify: Vec<[u8; 32]> = self.notify.keys().copied().collect();
+        for queue in notify {
+            if self.slot_of(&queue).is_some() && self.acknowledge_notify(&queue, now, rng)? {
+                return Ok(CoverSlot::Acknowledgment);
+            }
+        }
         if let Some((contact, app)) = receipt {
             let can_send = self
                 .contacts
@@ -2270,6 +2358,28 @@ impl ClientNode {
         };
         channel.acknowledged(point);
         self.moved.insert(contact.0);
+        self.queue_command(encoded, Waiting::Other)?;
+        self.pump()?;
+        Ok(true)
+    }
+
+    /// Acknowledges the digests of a notify queue under the floor of
+    /// `NET-050`, as for a contact.
+    fn acknowledge_notify<R: CryptoRng + ?Sized>(
+        &mut self,
+        queue: &[u8; 32],
+        now: u64,
+        rng: &mut R,
+    ) -> Result<bool, Error> {
+        self.current = self.slot_of(queue).ok_or(Error::NoPath)?;
+        let session_pk = self.session_pk()?;
+        let held = self.notify.get_mut(queue).ok_or(Error::NoPath)?;
+        let Some((point, encoded)) = held.inbound.acknowledge(&session_pk, random(rng), now)?
+        else {
+            return Ok(false);
+        };
+        held.inbound.acknowledged(point);
+        self.moved.insert(*queue);
         self.queue_command(encoded, Waiting::Other)?;
         self.pump()?;
         Ok(true)
@@ -2664,6 +2774,24 @@ impl ClientNode {
         );
         let subscribe = inbound.subscribe(&session_pk, random(rng))?;
         self.queue_command(subscribe, Waiting::Other)?;
+        if matches!(keys.purpose, Purpose::Notify) {
+            let mut address = alloc::vec![0u8; QUEUE_ADDRESS_LEN];
+            own_address().encode(&mut address)?;
+            let held = NotifyQueue {
+                inbound,
+                relay: queue_relay,
+            };
+            self.changes.push(StateChange::NotifyQueue {
+                queue: ids.recipient_id,
+                state: notify_state(&held)?,
+            });
+            self.notify.insert(ids.recipient_id, held);
+            return Ok(alloc::vec![ClientEvent::NotifyQueue {
+                handle: keys.handle,
+                recipient_id: ids.recipient_id,
+                address,
+            }]);
+        }
         let identity = self.root.pairwise_identity(&keys.salt);
 
         let mut out = Vec::new();
@@ -2688,6 +2816,8 @@ impl ClientNode {
                 });
                 (Setup::Inviting(Box::new(inviter)), None, [0u8; 32], bundle)
             }
+            // The notify queue took its path above.
+            Purpose::Notify => return Err(Error::Malformed),
             Purpose::Accept { bundle, lock } => {
                 opening = alloc::vec![0u8; QUEUE_ADDRESS_LEN];
                 own_address().encode(&mut opening)?;
@@ -2735,6 +2865,25 @@ impl ClientNode {
         now: u64,
         rng: &mut R,
     ) -> Result<Vec<ClientEvent>, Error> {
+        if let Some(held) = self.notify.get_mut(&queue_id) {
+            self.moved.insert(queue_id);
+            // NTF-107: a digest names the group queue that holds records.
+            if let Opened::Record {
+                kind: L6Kind::NotifyDigest,
+                inner,
+                ..
+            } = held.inbound.open(payload, bucket, now)?
+            {
+                if let Ok(digest) = crate::notify::digest::NotifyDigest::parse(&inner) {
+                    return Ok(alloc::vec![ClientEvent::Digest {
+                        recipient_id: queue_id,
+                        id: digest.id,
+                        post_count: digest.post_count,
+                    }]);
+                }
+            }
+            return Ok(Vec::new());
+        }
         if let Some(held) = self.contacts.get_mut(&queue_id) {
             // Each outcome moves the cursor of the queue.
             self.moved.insert(queue_id);

@@ -79,6 +79,9 @@ pub enum Command {
     /// follows, or an [`Update::VerificationRefused`] with no complete
     /// ceremony.
     ConfirmVerified(ContactId),
+    /// Make a notify queue of Part 8 §8.5.2. An [`Update::NotifyQueue`]
+    /// with the same tag follows.
+    MakeNotifyQueue(u64),
     /// Send the `NKEY` of an inbound queue. An [`Update::NotifyKey`]
     /// follows with the notification key of its relay (Part 8 §8.2.3).
     NotifyQueue([u8; 32]),
@@ -131,6 +134,20 @@ pub enum Update {
     /// Each inbound queue that a ready circuit serves, with its relay. It
     /// comes at each change of that set, for the bindings of Part 8.
     Queues(Vec<([u8; 32], [u8; 32])>),
+    /// A notify queue exists at its relay (`NTF-090`).
+    NotifyQueue {
+        /// The tag of the command.
+        tag: u64,
+        /// The `RecipientId` of the queue.
+        recipient_id: [u8; 32],
+        /// The encoded `QueueAddress` that a group relay writes to.
+        address: Vec<u8>,
+    },
+    /// A digest arrived on a notify queue (`NTF-107`).
+    Digest {
+        /// The `GroupQueueId` that holds records.
+        group_queue_id: [u8; 32],
+    },
     /// The relay of an inbound queue answered its `NKEY`.
     NotifyKey {
         /// The queue.
@@ -287,6 +304,7 @@ pub async fn run_client(
     let mut early: VecDeque<Command> = VecDeque::new();
     let mut shown_chains: Vec<[[u8; 32]; 3]> = Vec::new();
     let mut shown_queues: Vec<([u8; 32], [u8; 32])> = Vec::new();
+    let mut notify_tags: BTreeMap<u64, u64> = BTreeMap::new();
     let mut tags: BTreeMap<u64, u64> = BTreeMap::new();
     let mut is_foreground = true;
     let mut next_slot = tokio::time::Instant::now() + cover_delay(&mut rng);
@@ -370,6 +388,19 @@ pub async fn run_client(
                 ClientEvent::Chunk { .. }
                 | ClientEvent::Group { .. }
                 | ClientEvent::GroupRecord { .. } => continue,
+                ClientEvent::NotifyQueue {
+                    handle,
+                    recipient_id,
+                    address,
+                } => match notify_tags.remove(&handle) {
+                    Some(tag) => Update::NotifyQueue {
+                        tag,
+                        recipient_id,
+                        address,
+                    },
+                    None => continue,
+                },
+                ClientEvent::Digest { id, .. } => Update::Digest { group_queue_id: id },
                 ClientEvent::NotifyKey {
                     recipient_id,
                     relay_ntf_pk,
@@ -444,6 +475,11 @@ pub async fn run_client(
                 }
                 // A queue that no circuit serves any more takes its binding
                 // in a later run, thus a failure here ends nothing.
+                Command::MakeNotifyQueue(tag) => {
+                    if let Ok(handle) = node.make_notify_queue(&mut rng) {
+                        notify_tags.insert(handle, tag);
+                    }
+                }
                 Command::NotifyQueue(recipient_id) => {
                     let _ = node.notify_queue(&recipient_id, &mut rng);
                 }

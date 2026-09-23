@@ -157,6 +157,9 @@ const LAST_DELETE_SETTING: &[u8] = b"last-delete/";
 /// The table of the settings of this device. A row holds one value under
 /// the name of its setting.
 const SETTINGS: TableId = TableId(0x0A);
+/// The stored form of each notify queue of Part 8 §8.5.2, under its
+/// `RecipientId`.
+pub(crate) const NOTIFY_STATE: TableId = TableId(0x1D);
 const AUTO_LOCK_SETTING: &[u8] = b"auto-lock";
 /// The highest epoch of a directory root that this device verified
 /// (Part 10 rule `REL-034`).
@@ -178,6 +181,8 @@ pub struct StoredNetwork {
     pub contacts: Vec<(ConversationId, Zeroizing<Vec<u8>>)>,
     /// The stored form of each invitation that waits.
     pub invitations: Vec<Zeroizing<Vec<u8>>>,
+    /// The stored form of each notify queue of Part 8 §8.5.2.
+    pub notify_queues: Vec<Zeroizing<Vec<u8>>>,
 }
 
 /// A record that waits for the send path.
@@ -622,6 +627,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 StateChange::InvitationEnded { queue } => {
                     Planned::Delete(INVITATION, open.store.row_id(INVITATION, queue))
                 }
+                StateChange::NotifyQueue { queue, state } => Planned::Put(
+                    NOTIFY_STATE,
+                    open.store.row_id(NOTIFY_STATE, queue),
+                    None,
+                    Zeroizing::new([queue.as_slice(), state].concat()),
+                ),
             });
         }
         let mut events = Vec::new();
@@ -1007,9 +1018,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for (_, plain) in store.list(INVITATION, None)? {
             invitations.push(state_of(plain)?);
         }
+        let mut notify_queues = Vec::new();
+        for (_, plain) in store.list(NOTIFY_STATE, None)? {
+            notify_queues.push(state_of(plain)?);
+        }
         Ok(StoredNetwork {
             contacts,
             invitations,
+            notify_queues,
         })
     }
 

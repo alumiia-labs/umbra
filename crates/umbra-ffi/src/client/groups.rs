@@ -173,6 +173,38 @@ pub(super) const GROUP_OWNERS: TableId = TableId(0x17);
 /// `epoch_index` of the grant, and its owner column names the group. A
 /// grant on no path leaves when the next snapshot is built (`GRP-069`).
 pub(super) const GROUP_GRANTS: TableId = TableId(0x18);
+/// The notify queue of each group of Part 8 §8.5.2: its `RecipientId`, its
+/// encoded `QueueAddress`, and the time of the last `GNREG` at each of the
+/// two replicas.
+pub(super) const GROUP_NOTIFY: TableId = TableId(0x1C);
+const GROUP_NOTIFY_LEN: usize = 32 + umbra_wire::address::LEN + 16;
+/// A registration lives 7 days plus `CLOCK_SKEW` at a group-queue relay
+/// (`NTF-102`), thus a device registers again after 6 days.
+pub const NOTIFY_REREGISTER: u64 = 6 * 86_400;
+
+/// The notify queue of one group, as its row holds it.
+struct NotifyRow {
+    queue: [u8; 32],
+    address: Vec<u8>,
+    /// The time of the last `GNREG` at each replica, or 0.
+    times: [u64; 2],
+}
+
+/// One `GNREG` that is due at one replica (`NTF-093`).
+pub struct NotifyRegistration {
+    /// The group.
+    pub conversation: ConversationId,
+    /// Which replica, 0 or 1.
+    pub which: usize,
+    /// The relay.
+    pub relay: [u8; 32],
+    /// The group queue at that relay.
+    pub group_queue_id: [u8; 32],
+    /// `read_sk` of the epoch.
+    pub read: Secret<32>,
+    /// The encoded `QueueAddress` of the notify queue.
+    pub queue: Vec<u8>,
+}
 
 const QUEUE_ROW_LEN: usize = 32 + 1 + 32;
 
@@ -2418,6 +2450,148 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             self.save_group(conversation, &group, rng)?;
         }
         Ok(out)
+    }
+
+    /// Each open group that holds no notify queue yet, while the device
+    /// holds a push token, thus it is in Instant mode (`NTF-090`,
+    /// `NTF-106`).
+    pub fn groups_without_notify(&self) -> Result<Vec<ConversationId>, Error> {
+        if self.push_token()?.is_none() {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::new();
+        for conversation in self.group_conversations()? {
+            if self.group_closed(conversation)? {
+                continue;
+            }
+            let store = &self.open_ref()?.store;
+            let row = store.row_id(GROUP_NOTIFY, &conversation.0);
+            if store.get(GROUP_NOTIFY, &row)?.is_none() {
+                out.push(conversation);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Keeps the notify queue that the run made for a group. Its `GNREG`
+    /// at each replica is due at once.
+    pub fn set_group_notify<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        recipient_id: [u8; 32],
+        address: &[u8],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        if address.len() != umbra_wire::address::LEN {
+            return Err(Error::Malformed);
+        }
+        let value = [recipient_id.as_slice(), address, &[0u8; 16]].concat();
+        let open = self.open_mut()?;
+        let row = open.store.row_id(GROUP_NOTIFY, &conversation.0);
+        let mut batch = open.store.begin();
+        batch.put(GROUP_NOTIFY, row, None, &value, rng)?;
+        batch.commit()?;
+        Ok(())
+    }
+
+    fn group_notify_row(&self, conversation: ConversationId) -> Result<Option<NotifyRow>, Error> {
+        let store = &self.open_ref()?.store;
+        let row = store.row_id(GROUP_NOTIFY, &conversation.0);
+        let Some(value) = store.get(GROUP_NOTIFY, &row)? else {
+            return Ok(None);
+        };
+        if value.len() != GROUP_NOTIFY_LEN {
+            return Err(Error::Integrity);
+        }
+        let (queue, rest) = value.split_at(32);
+        let (address, times) = rest.split_at(umbra_wire::address::LEN);
+        let at = |range: core::ops::Range<usize>| -> Result<u64, Error> {
+            Ok(u64::from_be_bytes(
+                times
+                    .get(range)
+                    .and_then(|b| b.try_into().ok())
+                    .ok_or(Error::Integrity)?,
+            ))
+        };
+        Ok(Some(NotifyRow {
+            queue: queue.try_into().map_err(|_| Error::Integrity)?,
+            address: address.to_vec(),
+            times: [at(0..8)?, at(8..16)?],
+        }))
+    }
+
+    /// Each `GNREG` that is due: a notify queue that a replica does not
+    /// hold, or holds for longer than `NOTIFY_REREGISTER` (`NTF-093`,
+    /// `NTF-102`).
+    pub fn notify_registrations_due(&self, now: u64) -> Result<Vec<NotifyRegistration>, Error> {
+        let mut out = Vec::new();
+        for conversation in self.group_conversations()? {
+            if self.group_closed(conversation)? {
+                continue;
+            }
+            let Some(NotifyRow { address, times, .. }) = self.group_notify_row(conversation)?
+            else {
+                continue;
+            };
+            let group = self.group_of(conversation)?;
+            let Some(read) = group.credentials().map(|held| held.read_secret()) else {
+                continue;
+            };
+            let Some(replicas) = group.replicas() else {
+                continue;
+            };
+            for (which, at) in times.iter().enumerate() {
+                if *at != 0 && now.saturating_sub(*at) < NOTIFY_REREGISTER {
+                    continue;
+                }
+                let Some(reference) = replicas.reference(which) else {
+                    continue;
+                };
+                out.push(NotifyRegistration {
+                    conversation,
+                    which,
+                    relay: reference.relay_id,
+                    group_queue_id: reference.group_queue_id,
+                    read: Secret::new(*read.expose()),
+                    queue: address.clone(),
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// The `GNREG` of one replica left at `now`. It has no answer.
+    pub fn notify_registered<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        which: usize,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let Some(NotifyRow {
+            queue,
+            address,
+            mut times,
+        }) = self.group_notify_row(conversation)?
+        else {
+            return Ok(());
+        };
+        if let Some(at) = times.get_mut(which) {
+            *at = now;
+        }
+        let value = [
+            queue.as_slice(),
+            &address,
+            &times[0].to_be_bytes(),
+            &times[1].to_be_bytes(),
+        ]
+        .concat();
+        let open = self.open_mut()?;
+        let row = open.store.row_id(GROUP_NOTIFY, &conversation.0);
+        let mut batch = open.store.begin();
+        batch.put(GROUP_NOTIFY, row, None, &value, rng)?;
+        batch.commit()?;
+        Ok(())
     }
 
     /// The next record that waits for the run of the group queues.

@@ -718,6 +718,149 @@ fn a_message_to_an_app_that_went_away_reaches_its_push_endpoint() {
 }
 
 #[test]
+fn a_group_record_wakes_a_member_that_went_away_through_its_notify_queue() {
+    use umbra_crypto::{kem::KeyPair, ohttp};
+    let services = tokio::runtime::Runtime::new().unwrap();
+    let endpoint = services
+        .block_on(TcpListener::bind(("127.0.0.1", 0)))
+        .unwrap();
+    let endpoint_port = endpoint.local_addr().unwrap().port();
+    let (pushed, mut posts) = tokio::sync::mpsc::unbounded_channel();
+    let acceptor = tls_acceptor(LEAF, LEAF_KEY).unwrap();
+    services.spawn(async move {
+        loop {
+            let (tcp, _) = endpoint.accept().await.unwrap();
+            let mut stream = acceptor.accept(tcp).await.unwrap();
+            let mut inbound = Vec::new();
+            if let Ok(request) = https::read_request(&mut stream, &mut inbound, 4_096).await {
+                let _ = pushed.send(request.body);
+            }
+            let _ = https::respond(&mut stream, 201, "text/plain", &[]).await;
+        }
+    });
+    let pair = KeyPair::generate(&mut OsRng);
+    let config = ohttp::encode_key_config(1, pair.public());
+    let ndr_listener = services
+        .block_on(TcpListener::bind(("127.0.0.1", 0)))
+        .unwrap();
+    let ndr = TestNdr {
+        port: ndr_listener.local_addr().unwrap().port(),
+        key_id: 1,
+        gateway: pair.public().clone(),
+    };
+    services.spawn(run_ndr(
+        ndr_listener,
+        tls_acceptor(LEAF, LEAF_KEY).unwrap(),
+        Gateway { key_id: 1, pair },
+        Box::new(MemoryNdrStore::default()),
+        native::tls_config_with_root_file(CA).unwrap(),
+        None,
+    ));
+    let relays = tokio::runtime::Runtime::new().unwrap();
+    let network = start_signed_network_with(&relays, None, Some(&ndr));
+
+    let directory = std::env::temp_dir().join(format!("umbra-gpush-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let alice = launch(&directory, "alice.db", 1);
+    let bob = launch(&directory, "bob.db", 2);
+    bob.set_push_endpoint(Some(format!("https://localhost:{endpoint_port}/up/bob")))
+        .unwrap();
+    for handle in [&alice, &bob] {
+        let mut verified = handle
+            .network_of_manifest(
+                network.manifest.clone(),
+                network.keyset.clone(),
+                0,
+                HOST.into(),
+                Some(CA.into()),
+            )
+            .unwrap()
+            .network;
+        verified.ndr_relay_url = Some(format!("https://localhost:{}/ohttp", network.ports[0]));
+        verified.ndr_key_config = Some(config.to_vec());
+        verified.ndr_relay_ipv4 = Some(vec![127, 1, 0, 1]);
+        handle.clone().connect(verified).unwrap();
+    }
+    alice.invite().unwrap();
+    let link = wait_for(&alice, |event| match event {
+        FfiEvent::Invitation { link } => Some(link),
+        _ => None,
+    });
+    bob.accept(link).unwrap();
+    let alice_conversation = wait_for_contact(&alice);
+    wait_for_contact(&bob);
+
+    let group = alice.create_group("Summit".into()).unwrap();
+    let start = Instant::now();
+    while !alice.group_info(group.clone()).unwrap().is_ready {
+        assert!(start.elapsed() < STEP, "the group took no queues");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    alice
+        .offer_group(group.clone(), alice_conversation.clone())
+        .unwrap();
+    wait_for(&bob, |event| match event {
+        FfiEvent::GroupOffer => Some(()),
+        _ => None,
+    });
+    let offers = bob.group_offers().unwrap();
+    bob.accept_group_offer(offers[0].from.clone(), offers[0].group_id.clone())
+        .unwrap();
+    wait_for(&alice, |event| match event {
+        FfiEvent::GroupJoiner => Some(()),
+        _ => None,
+    });
+    let joiners = alice.group_joiners().unwrap();
+    alice
+        .admit_joiner(joiners[0].from.clone(), joiners[0].group_id.clone())
+        .unwrap();
+    let start = Instant::now();
+    while !bob
+        .summaries()
+        .unwrap()
+        .iter()
+        .any(|summary| bob.is_group(summary.conversation.clone()).unwrap_or(false))
+    {
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "Bob did not come in"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    // NTF-090, NTF-091: Bob holds a notify queue for the group under a
+    // handle of its own, beside the handle of his pairwise queue, and both
+    // register with the NDR.
+    let start = Instant::now();
+    while bob.push_state().unwrap() != (2, 2) {
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "{:?}",
+            bob.push_state()
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // NTF-093: the GNREG of each replica leaves with the next pump.
+    std::thread::sleep(Duration::from_secs(2));
+
+    // NTF-096, WIR-526: Bob leaves, a record of Alice reaches the group
+    // queue, its relay deposits a digest into the notify queue of Bob, and
+    // the queue relay of that queue pushes.
+    bob.disconnect();
+    std::thread::sleep(Duration::from_millis(500));
+    let draft = alice.new_draft(group).unwrap();
+    draft.set_text(units("we leave at six")).unwrap();
+    alice.send_draft(draft).unwrap();
+    let blob = services
+        .block_on(async { tokio::time::timeout(Duration::from_secs(30), posts.recv()).await })
+        .expect("no push reached the endpoint of Bob")
+        .unwrap();
+    assert_eq!(blob.len(), umbra_wire::ndr::BLOB_LEN);
+    alice.disconnect();
+}
+
+#[test]
 fn a_descriptor_names_the_facts_of_each_relay_and_the_first_version_reads() {
     let key = "ab".repeat(32);
     let line =
@@ -804,6 +947,16 @@ fn start_signed_network(relays: &tokio::runtime::Runtime) -> SignedNetwork {
 /// process and starts it again. The keys come from fixed seeds, thus a
 /// client of the first network knows each relay of the second.
 fn start_signed_network_at(relays: &tokio::runtime::Runtime, at: Option<&[u16]>) -> SignedNetwork {
+    start_signed_network_with(relays, at, None)
+}
+
+/// The signed network with an NDR: the ingress relays carry its OHTTP
+/// requests, and each queue relay pushes through the first of them.
+fn start_signed_network_with(
+    relays: &tokio::runtime::Runtime,
+    at: Option<&[u16]>,
+    ndr: Option<&TestNdr>,
+) -> SignedNetwork {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -906,21 +1059,36 @@ fn start_signed_network_at(relays: &tokio::runtime::Runtime, at: Option<&[u16]>)
             chunk_capacity: 1 << 26,
         };
         let mut store: Box<dyn RelayStore> = Box::new(MemoryStore::default());
+        let mut node = RelayNode::restored(config, store.load().unwrap());
+        // WIR-526: a deposit reaches each other queue relay.
+        node.set_queue_relays(
+            placed
+                .queue_relays
+                .iter()
+                .map(|(id, (_, key))| (*id, *key))
+                .collect(),
+        );
+        let mut replicas = placed.replicas;
+        for (id, (dial, _)) in &placed.queue_relays {
+            replicas.entry(*id).or_insert_with(|| dial.clone());
+        }
+        let mut carried = carried_of(placed.layer, &ports, ndr, &client_tls);
+        if let Some(route) = carried.ndr.as_mut() {
+            // The first ingress relay has an address of its own here.
+            route.0.relay.address = Some(std::net::IpAddr::from([127, 1, 0, 1]));
+        }
+        // The ingress relay is the carrier of the manifest.
+        carried.manifest = (placed.layer == 1).then(|| manifest.clone());
         relays.spawn(run_relay(
-            RelayNode::restored(config, store.load().unwrap()),
+            node,
             listener,
             tls_acceptor(LEAF, LEAF_KEY).unwrap(),
             placed.next,
-            placed.replicas,
+            replicas,
             client_tls.clone(),
             PACING_MEAN_MS,
             store,
-            // The ingress relay is the carrier of the manifest.
-            Carried {
-                manifest: (placed.layer == 1).then(|| manifest.clone()),
-                ohttp: None,
-                ndr: None,
-            },
+            carried,
         ));
     }
     assert_eq!(layers, SIGNED_LAYERS);

@@ -30,7 +30,11 @@ const NOTIFY_QUEUE: TableId = TableId(0x1B);
 const PUSH_TOKEN_SETTING: &[u8] = b"push-token";
 
 const RELAY_LEN: usize = 32 + 32 + 2;
-const GROUP_LEN: usize = 16 + 32 + 32 + 32 + 1 + 1;
+const GROUP_LEN: usize = 16 + 32 + 32 + 32 + 1 + 1 + 1;
+/// A group of pairwise queues.
+const PAIRWISE: u8 = 0;
+/// A group of notify queues, which holds no pairwise queue (`NTF-091`).
+const DIGEST: u8 = 1;
 const QUEUE_LEN: usize = 32 + 16 + 16 + 1;
 
 /// The NDR does not hold the group.
@@ -53,6 +57,7 @@ struct Group {
     removal: Secret<32>,
     state: u8,
     count: u8,
+    class: u8,
 }
 
 struct Queue {
@@ -102,7 +107,7 @@ impl Group {
             &self.relay_id,
             self.k_tok.expose(),
             self.removal.expose(),
-            &[self.state, self.count],
+            &[self.state, self.count, self.class],
         ]
         .concat()
     }
@@ -116,7 +121,7 @@ impl Group {
         let relay_id = take(bytes, &mut at)?;
         let k_tok = Secret::new(take(bytes, &mut at)?);
         let removal = Secret::new(take(bytes, &mut at)?);
-        let [state, count] = take(bytes, &mut at)?;
+        let [state, count, class] = take(bytes, &mut at)?;
         Ok(Group {
             handle,
             relay_id,
@@ -124,6 +129,7 @@ impl Group {
             removal,
             state,
             count,
+            class,
         })
     }
 }
@@ -237,6 +243,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(())
     }
 
+    /// Whether a queue is a notify queue of Part 8 §8.5.2.
+    fn is_notify_queue(&self, recipient_id: &[u8; 32]) -> Result<bool, Error> {
+        let store = &self.open_ref()?.store;
+        let row = store.row_id(super::NOTIFY_STATE, recipient_id);
+        Ok(store.get(super::NOTIFY_STATE, &row)?.is_some())
+    }
+
     fn notify_groups(&self) -> Result<Vec<Group>, Error> {
         self.open_ref()?
             .store
@@ -297,9 +310,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 });
             }
             // NTF-031, NTF-032: a group holds at most eight queues of one
-            // relay.
+            // relay, and a notify queue shares a group with no pairwise
+            // queue (`NTF-091`).
+            let class = if self.is_notify_queue(recipient_id)? {
+                DIGEST
+            } else {
+                PAIRWISE
+            };
             let room = groups.iter().position(|group| {
-                group.relay_id == *relay_id && usize::from(group.count) < MAX_QUEUES_PER_HANDLE
+                group.relay_id == *relay_id
+                    && group.class == class
+                    && usize::from(group.count) < MAX_QUEUES_PER_HANDLE
             });
             let at = match room {
                 Some(at) => at,
@@ -311,6 +332,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         removal: Secret::new(random(rng)),
                         state: UNREGISTERED,
                         count: 0,
+                        class,
                     });
                     groups.len().saturating_sub(1)
                 }
