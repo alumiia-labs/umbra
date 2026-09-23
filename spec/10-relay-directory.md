@@ -552,9 +552,13 @@ fits one `B3` cell.
    moves. A `DirectoryRoot` is trusted material, and it names a time. Thus the
    client takes its time from the root.
 
-   The **clock correction** is `epoch_start_unix` of a `DirectoryRoot` minus the
-   device clock at the moment the client accepted that root. The **client
-   clock** is the device clock plus the correction. A client holds one
+   A `DirectoryRoot` is valid from `epoch_start_unix` to `epoch_start_unix`
+   plus `CONSENSUS_VALIDITY`. The **clock correction** is the distance from
+   the device clock, at the moment the client accepted that root, to that
+   span: `epoch_start_unix` minus the device clock when the device clock is
+   before the span, zero inside it, and the end of the span minus the device
+   clock after it. The **client clock** is the device clock plus the
+   correction. A client holds one
    correction or none. Each rule of this section that names a clock names the
    client clock.
 
@@ -567,6 +571,14 @@ fits one `B3` cell.
    client MUST record a new correction. That root gives the new correction.
    **[REL-115]** After a clock movement of Part 1 §1.9, a client MUST discard
    the correction. §10.11 gives `CLOCK_SKEW` as 1 hour.
+
+   > *Cause of the span.* An earlier form took the correction from
+   > `epoch_start_unix` alone. A root starts at the top of its hour and a
+   > client reads it up to `CONSENSUS_VALIDITY` later, thus a client with a
+   > correct clock got a correction of up to that validity, moved its clock
+   > back, and showed the `corrected` state from each root older than
+   > `CLOCK_SKEW`. A test of the reference client failed on it in the last
+   > seconds of an hour.
 
    A client is in one of three clock states. It is `unsynchronized` while it
    holds no correction. It is `synchronized` while the magnitude of the

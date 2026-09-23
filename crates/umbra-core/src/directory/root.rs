@@ -392,8 +392,19 @@ impl<'a> Consensus<'a> {
     }
 }
 
+/// The distance from the device clock to the span in which the root is
+/// valid (`REL-114`). A root proves that the time is at least its start,
+/// and that the time is no later than its end.
 fn correction(root_start: u64, device_clock: u64) -> i64 {
-    i64::try_from(root_start).unwrap_or(i64::MAX) - i64::try_from(device_clock).unwrap_or(i64::MAX)
+    let signed = |value: u64| i64::try_from(value).unwrap_or(i64::MAX);
+    let root_end = root_start.saturating_add(CONSENSUS_VALIDITY);
+    if device_clock < root_start {
+        signed(root_start) - signed(device_clock)
+    } else if device_clock <= root_end {
+        0
+    } else {
+        signed(root_end) - signed(device_clock)
+    }
 }
 
 #[cfg(test)]
@@ -524,6 +535,38 @@ pub(crate) mod tests {
         );
         consensus.clock_moved();
         assert_eq!(consensus.clock_state(), ClockState::Unsynchronized);
+    }
+
+    #[test]
+    fn a_root_inside_its_validity_moves_no_clock() {
+        let keys = authorities(10);
+        let (pks, _) = keyset_of(&keys, 1);
+        let set = keyset(&pks, 1);
+        let hash = set.hash().unwrap();
+        let bytes = signed_root(&keys, &[0, 1, 2, 3, 4], 101, hash, [9; 32]);
+        // A root of the hour before, accepted late in that hour and after
+        // it, says nothing against the device clock.
+        for late in [3_599, 3_700, CONSENSUS_VALIDITY] {
+            let mut consensus = Consensus::new(keyset(&pks, 1), 100).unwrap();
+            let clock = 101 * 3_600 + late;
+            consensus
+                .accept(DirectoryRoot::parse(&bytes).unwrap(), clock)
+                .unwrap();
+            assert_eq!(consensus.clock_state(), ClockState::Synchronized);
+            assert_eq!(consensus.client_clock(clock), Some(clock));
+        }
+        // A device clock past the end of the root by more than the skew is
+        // ahead, and the root sets it back to that end.
+        let mut consensus = Consensus::new(set, 100).unwrap();
+        let clock = 101 * 3_600 + CONSENSUS_VALIDITY + CLOCK_SKEW + 10;
+        consensus
+            .accept(DirectoryRoot::parse(&bytes).unwrap(), clock)
+            .unwrap();
+        assert_eq!(consensus.clock_state(), ClockState::Corrected);
+        assert_eq!(
+            consensus.client_clock(clock),
+            Some(101 * 3_600 + CONSENSUS_VALIDITY)
+        );
     }
 
     #[test]
