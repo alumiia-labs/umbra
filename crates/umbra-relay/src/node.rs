@@ -91,6 +91,19 @@ pub enum Output {
     },
 }
 
+/// The session capsule that tells a neighbor that the circuit of
+/// `circ_id` on their link ended (`NET-322`).
+fn destroy_output(link: LinkId, circ_id: [u8; 16]) -> Option<Output> {
+    let mut control = [0u8; 17];
+    let used = SessionControl::Destroy { circ_id }
+        .encode(&mut control)
+        .ok()?;
+    let mut capsule = vec![0u8; capsule::HEADER_LEN + used];
+    let used = capsule::encode(CapsuleType::Session, control.get(..used)?, &mut capsule).ok()?;
+    capsule.truncate(used);
+    Some(Output::Send { link, capsule })
+}
+
 /// The byte of a `CRPUT` (Part 13 §13.3.3).
 const CRPUT: u8 = 0x77;
 
@@ -373,6 +386,13 @@ impl RelayNode {
                 }
                 Err(_) => vec![Output::Close { link }],
             },
+            // NET-322: a neighbor ended a circuit on this link.
+            (SessionControl::Destroy { circ_id }, Some(framing)) => {
+                let circ_id = *circ_id;
+                self.links.insert(link, framing);
+                let actions = self.circuits.on_destroy(link, circ_id);
+                self.finish(actions, now)
+            }
             (SessionControl::Resume { .. }, Some(Framing::Accepted(mut framing))) => {
                 let resumed = framing.resume(&control, now).is_ok();
                 self.links.insert(link, Framing::Accepted(framing));
@@ -470,6 +490,7 @@ impl RelayNode {
                         endpoint.loops = endpoint.loops.saturating_add(1);
                     }
                 }
+                Action::Destroy { link, circ_id } => outputs.extend(destroy_output(link, circ_id)),
                 Action::Closed { circuit } => {
                     self.endpoints.remove(&circuit);
                     self.queues.circuit_closed(&circuit, now);
@@ -656,14 +677,29 @@ impl RelayNode {
         self.links.remove(&link);
         self.next_hops.retain(|_, held| *held != link);
         let actions = self.circuits.link_closed(link);
+        let mut outputs = self.finish(actions, now);
+        outputs.push(Output::Close { link });
+        outputs
+    }
+
+    /// Takes the end of circuits: the services drop what they held for
+    /// each, and each neighbor gets its `Destroy` (`NET-322`).
+    fn finish(&mut self, actions: Vec<Action>, now: u64) -> Vec<Output> {
+        let mut outputs = Vec::new();
         for action in actions {
-            if let Action::Closed { circuit } = action {
-                self.endpoints.remove(&circuit);
-                self.queues.circuit_closed(&circuit, now);
-                self.groups.circuit_closed(&circuit);
+            match action {
+                Action::Closed { circuit } => {
+                    self.endpoints.remove(&circuit);
+                    self.queues.circuit_closed(&circuit, now);
+                    self.groups.circuit_closed(&circuit);
+                }
+                Action::Destroy { link, circ_id } => {
+                    outputs.extend(destroy_output(link, circ_id));
+                }
+                _ => {}
             }
         }
-        vec![Output::Close { link }]
+        outputs
     }
 
     /// The periodic work: aged circuits, expired records, idle queues, the
@@ -675,20 +711,16 @@ impl RelayNode {
             waiting.retain(|held| held.is_live(now));
         }
         self.extending.retain(|_, waiting| !waiting.is_empty());
-        for action in self.circuits.expire(now) {
-            if let Action::Closed { circuit } = action {
-                self.endpoints.remove(&circuit);
-                self.queues.circuit_closed(&circuit, now);
-                self.groups.circuit_closed(&circuit);
-            }
-        }
+        let aged = self.circuits.expire(now);
+        let mut ended = self.finish(aged, now);
         self.queues.sweep(now);
         // ATT-046, ATT-168: a chunk past its erase time leaves, and the
         // store trims to its target.
         self.chunks.sweep(now);
         let mut due = self.communities.sweep(now);
         due.extend(self.groups.sweep(now));
-        due.into_iter().map(Output::Digest).collect()
+        ended.extend(due.into_iter().map(Output::Digest));
+        ended
     }
 }
 

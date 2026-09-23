@@ -967,6 +967,20 @@ causes does not occur.
   builds a new circuit as under `NET-320`. The relay pacing sends about one
   cell each second toward the client (`PACING_MEAN`, §3.9), thus that count reaches the limit
   after about 2 hours 16 minutes, before `CIRCUIT_MAX_AGE`.
+- **[NET-322]** A relay that ends a circuit MUST tell each neighbor of it
+  with the `CircuitDestroy` of Part 6 §6.2.3, on each link of the circuit
+  but the one that ended it: a closed link, a `CircuitDestroy`, or a
+  `DESTROY` cell of the client. A relay that gets one MUST end its part of
+  that circuit and tell the neighbor on the other side. A client that gets
+  one from its guard MUST take the circuit as lost and build again.
+
+> *Cause of `NET-322`.* A relay ended a circuit at a closed link and told
+> no neighbor. A client whose link to the guard dropped left its circuit at
+> the relays of layers 2 and 3 until `CIRCUIT_MAX_AGE`, and the queue relay
+> kept its subscription. That relay then took each arrival as delivered and
+> sent no push under Part 8 rule `NTF-128`, for up to 4 hours. A client whose
+> chain lost a link between two relays learned nothing either, and it sent
+> into a circuit that no exit held.
 
 > *Cause of `NET-320`.* The relay ended an aged circuit with no cell and the
 > client held no age. The link to the guard stayed up, thus the client sent

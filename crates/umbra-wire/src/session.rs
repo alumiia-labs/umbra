@@ -14,8 +14,8 @@ use crate::{
 
 /// The frame overhead: `session_id`, `seq`, and `flags`.
 pub const SESSION_FRAME_OVERHEAD: usize = 12;
-/// The lengths of the three control records, by op.
-pub const CONTROL_LENS: [usize; 3] = [41, 29, 9];
+/// The lengths of the four control records, by op.
+pub const CONTROL_LENS: [usize; 4] = [41, 29, 9, 17];
 /// The highest `seq` a frame carries.
 pub const SEQ_MAX: u32 = 0x00FF_FFFF;
 
@@ -90,6 +90,12 @@ pub enum SessionControl {
         /// The session that ends.
         session_id: [u8; 8],
     },
+    /// Op `0x04`, 17 bytes: the circuit of this `circ_id` on this link
+    /// ended at the sender (`NET-322`).
+    Destroy {
+        /// The circuit on this link.
+        circ_id: [u8; 16],
+    },
 }
 
 impl SessionControl {
@@ -128,6 +134,10 @@ impl SessionControl {
                 w.u8(0x03)?;
                 w.put(session_id)?;
             }
+            SessionControl::Destroy { circ_id } => {
+                w.u8(0x04)?;
+                w.put(circ_id)?;
+            }
         }
         Ok(w.position())
     }
@@ -147,6 +157,9 @@ impl SessionControl {
             },
             0x03 => SessionControl::Close {
                 session_id: r.array()?,
+            },
+            0x04 => SessionControl::Destroy {
+                circ_id: r.array()?,
             },
             _ => return Err(Error::Malformed),
         };

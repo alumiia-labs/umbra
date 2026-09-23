@@ -77,6 +77,14 @@ pub enum Action {
         /// The circuit.
         circuit: CircuitKey,
     },
+    /// Tell the neighbor on `link` that the circuit of `circ_id` ended
+    /// (`NET-322`).
+    Destroy {
+        /// The link to the neighbor.
+        link: LinkId,
+        /// The circuit on that link.
+        circ_id: [u8; 16],
+    },
 }
 
 struct Held {
@@ -267,7 +275,9 @@ impl CircuitTable {
             return self.close(key);
         };
         match (command, self.layer) {
-            (CellCommand::Destroy, _) => self.close(key),
+            // NET-169: the client ended its build here, and the relays
+            // after this one learn it by the link (`NET-322`).
+            (CellCommand::Destroy, _) => self.end(key, Some(key.link)),
             (CellCommand::Data, 3) => vec![Action::Serve {
                 circuit: key,
                 bucket,
@@ -364,12 +374,47 @@ impl CircuitTable {
     }
 
     fn close(&mut self, key: CircuitKey) -> Vec<Action> {
-        if let Some(held) = self.held.remove(&key) {
-            if let Some(next) = held.next {
-                self.back.remove(&next);
+        self.end(key, None)
+    }
+
+    /// Ends a circuit, and tells each neighbor on a link other than
+    /// `from` with a `Destroy` (`NET-322`). The client side of a circuit
+    /// is its key, and the next hop is `next`.
+    fn end(&mut self, key: CircuitKey, from: Option<LinkId>) -> Vec<Action> {
+        let Some(held) = self.held.remove(&key) else {
+            return Vec::new();
+        };
+        let mut actions = Vec::new();
+        if let Some(next) = held.next {
+            self.back.remove(&next);
+            if Some(next.link) != from {
+                actions.push(Action::Destroy {
+                    link: next.link,
+                    circ_id: next.circ_id,
+                });
             }
         }
-        vec![Action::Closed { circuit: key }]
+        if Some(key.link) != from {
+            actions.push(Action::Destroy {
+                link: key.link,
+                circ_id: key.circ_id,
+            });
+        }
+        actions.push(Action::Closed { circuit: key });
+        actions
+    }
+
+    /// A neighbor ended the circuit of `circ_id` on `link`: this relay ends
+    /// its part and tells the other neighbor (`NET-322`).
+    pub fn on_destroy(&mut self, link: LinkId, circ_id: [u8; 16]) -> Vec<Action> {
+        let key = CircuitKey { link, circ_id };
+        if self.held.contains_key(&key) {
+            return self.end(key, Some(link));
+        }
+        match self.back.get(&key).copied() {
+            Some(client_side) => self.end(client_side, Some(link)),
+            None => Vec::new(),
+        }
     }
 
     /// A link closed: each circuit on it ends.
@@ -389,7 +434,7 @@ impl CircuitTable {
         on_link
             .into_iter()
             .chain(behind)
-            .flat_map(|key| self.close(key))
+            .flat_map(|key| self.end(key, Some(link)))
             .collect()
     }
 

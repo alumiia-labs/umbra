@@ -139,7 +139,15 @@ fn framing() -> Value {
     };
     let resume = SessionControl::resume(&secret, id, 1);
     let close = SessionControl::Close { session_id: id };
-    for (name, op) in [("open", open), ("resume", resume), ("close", close)] {
+    let destroy = SessionControl::Destroy {
+        circ_id: [0x44; 16],
+    };
+    for (name, op) in [
+        ("open", open),
+        ("resume", resume),
+        ("close", close),
+        ("destroy", destroy),
+    ] {
         let mut buf = [0u8; 41];
         let n = op.encode(&mut buf).unwrap();
         let mut caps = vec![0u8; n + 6];

@@ -51,6 +51,7 @@ use umbra_wire::{
         GNEW_NONE_LEN, NOTIFY_REGISTRATION_LEN,
     },
     queue::L6Kind,
+    session::SessionControl,
 };
 
 use super::{
@@ -2281,7 +2282,10 @@ impl ClientNode {
         now: u64,
         rng: &mut R,
     ) -> Result<Vec<ClientEvent>, Error> {
-        let (_, value, _) = capsule::parse(bytes)?;
+        let (kind, value, _) = capsule::parse(bytes)?;
+        if kind == capsule::CapsuleType::Session {
+            return Ok(self.on_destroy(value));
+        }
         let link = self.link.as_mut().ok_or(Error::NoPath)?;
         let Some(cell) = link.receive(value).map_err(|_| Error::Unverified)? else {
             return Ok(Vec::new());
@@ -2398,6 +2402,22 @@ impl ClientNode {
             self.send_now(contact, &app, waiting, now, rng)?;
         }
         Ok(())
+    }
+
+    /// The guard ended a circuit of this client (`NET-322`): a relay of
+    /// its chain lost a link, or aged it out. The node holds it no more,
+    /// and the runtime builds again. Any other session control from a
+    /// relay names nothing that a client does.
+    fn on_destroy(&mut self, value: &[u8]) -> Vec<ClientEvent> {
+        let Ok(SessionControl::Destroy { circ_id }) = SessionControl::parse(value) else {
+            return Vec::new();
+        };
+        let of_circuit = |slot: &Slot| slot.circ_id() == Some(circ_id);
+        let Some(slot) = self.slots.iter_mut().find(|slot| of_circuit(slot)) else {
+            return Vec::new();
+        };
+        slot.circuit = Circuit::None;
+        alloc::vec![ClientEvent::CircuitLost]
     }
 
     fn on_build_cell<R: CryptoRng + ?Sized>(

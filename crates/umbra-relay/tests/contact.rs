@@ -775,6 +775,91 @@ fn a_queue_takes_its_binding_and_a_live_arrival_wakes_nobody() {
     assert!(network.pushes.is_empty());
 }
 
+#[test]
+fn a_lost_link_ends_the_circuit_at_each_hop_and_the_next_arrival_is_pushed() {
+    use umbra_core::notify::{binding::Binding, blob::Receiver};
+    use umbra_crypto::kem::PublicKey;
+    use umbra_wire::ndr::NdrRequest;
+    let mut network = Network::new();
+    let (_, bob_contact) = contacts(&mut network);
+    let (queue, _) = network.clients[0].inbound_queues()[0];
+    network.clients[0]
+        .notify_queue(&queue, &mut Rng(5))
+        .unwrap();
+    network.settle();
+    let events = network.take_events(0);
+    let [ClientEvent::NotifyKey { relay_ntf_pk, .. }] = &events[..] else {
+        panic!("{events:?}");
+    };
+    let binding = Binding {
+        root: Secret::new([0x41; 32]),
+        handle: [0x42; 16],
+        k_tok: Secret::new([0x43; 32]),
+        queue_alias: [0x44; 16],
+        relay_idx: 2,
+    };
+    let sealed = binding
+        .seal(
+            &PublicKey::from_bytes(relay_ntf_pk).unwrap(),
+            &queue,
+            &mut Rng(6),
+        )
+        .unwrap();
+    network.clients[0]
+        .bind_queue(&queue, &sealed, &mut Rng(7))
+        .unwrap();
+    network.settle();
+
+    // NET-322: the link of Alice at the guard closes, and each relay of her
+    // chain ends its part of the circuit. The exit drops her subscription.
+    let exits = network.relays[2].paced_circuits().count();
+    let now = network.now;
+    let closed = network.relays[0].link_closed(network.links[0], now);
+    network.route(0, closed);
+    let link = network.links[0];
+    network.peers[0].retain(|(held, _)| *held != link);
+    assert_eq!(network.relays[2].paced_circuits().count(), exits - 1);
+
+    // NTF-128: no subscription takes the record, thus the exit pushes.
+    network.clients[1]
+        .send(
+            &bob_contact,
+            &text(1, "while she is away"),
+            now,
+            &mut Rng(8),
+        )
+        .unwrap();
+    network.settle();
+    assert_eq!(network.pushes.len(), 1);
+    let NdrRequest::Push { handle, blob, .. } =
+        NdrRequest::parse(&network.pushes[0].request[..]).unwrap()
+    else {
+        panic!("not a push");
+    };
+    assert_eq!(handle, [0x42; 16]);
+    let plain = Receiver::new(Secret::new([0x41; 32]))
+        .open(&blob, network.now)
+        .unwrap();
+    assert_eq!(plain.queue_alias, [0x44; 16]);
+
+    // A link between two relays closes: Bob learns that his circuit ended,
+    // and his runtime builds again.
+    let (at_exit, at_middle) = network.peers[2]
+        .iter()
+        .find_map(|(link, peer)| match peer {
+            Peer::Relay(1, other) => Some((*link, *other)),
+            _ => None,
+        })
+        .unwrap();
+    let now = network.now;
+    let closed = network.relays[2].link_closed(at_exit, now);
+    network.route(2, closed);
+    let closed = network.relays[1].link_closed(at_middle, now);
+    network.route(1, closed);
+    network.step();
+    assert!(network.take_events(1).contains(&ClientEvent::CircuitLost));
+}
+
 fn invitations_of(events: Vec<ClientEvent>) -> Vec<Vec<u8>> {
     events
         .into_iter()

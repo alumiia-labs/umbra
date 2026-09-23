@@ -235,7 +235,8 @@ reject a frame whose `flags` holds a non-zero value above bit 0.
 
 Part 3 §3.8 makes the session independent of the connection. A connection drop
 rotates the connection, and the session continues. Three control records in an
-`UMBRA_SESSION` capsule give that behavior a wire form.
+`UMBRA_SESSION` capsule give that behavior a wire form, and a fourth ends one
+circuit of the link (Part 3 rule `NET-322`).
 
 ```
 SessionOpen {                     // op 0x01, 41 bytes
@@ -254,6 +255,11 @@ SessionResume {                   // op 0x02, 29 bytes
 SessionClose {                    // op 0x03, 9 bytes
     op              u8
     session_id      [8]u8
+}
+
+CircuitDestroy {                  // op 0x04, 17 bytes
+    op              u8
+    circ_id         [16]u8        // the circuit on this link
 }
 
 auth = HMAC-SHA3-256( session_secret,
@@ -298,6 +304,11 @@ auth = HMAC-SHA3-256( session_secret,
   starts inside `SESSION_RESUME_WINDOW`, the client MUST send a
   `SessionResume`. Rule `WIR-246` does not apply to that close, because the
   client does not end the session.
+- **[WIR-524]** A relay MUST send a `CircuitDestroy` under `NET-322` on the
+  link of each neighbor of a circuit that it ends, with the `circ_id` that the
+  circuit carries on that link. A receiver MUST drop a `CircuitDestroy` that
+  names no circuit of that link, and it MUST NOT close the connection for
+  it.
 
 Part 5 §5.11 holds the label. A late resume fails at the relay, and the client
 then opens a new session at the cost of one round trip. The two parties measure
@@ -2525,7 +2536,8 @@ cover these cases:
   - An `UMBRA_CELL` capsule of `length` 525.
   - A `SessionResume` of `length` 41.
 - The session control records of §6.2.3. **[WIR-296]** The vectors MUST cover
-  an open, a resume with a correct `auth`, and a close. **[WIR-297]** The relay
+  an open, a resume with a correct `auth`, a close, and a circuit destroy.
+  **[WIR-297]** The relay
   MUST reject the two cases below.
   - A resume with one changed bit of `auth`.
   - A resume whose `resume_count` repeats the last accepted value.
