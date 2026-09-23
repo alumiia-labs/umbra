@@ -184,6 +184,9 @@ pub enum Ended {
     /// The store did not take a batch, such as the store of a locked
     /// client.
     StoreFault = 5,
+    /// A circuit came near `CIRCUIT_MAX_AGE` (`NET-320`). The next run
+    /// starts at once, and the view shows no fault.
+    Aged = 6,
 }
 
 /// Commits what the last call of the node gave. The caller writes the
@@ -347,6 +350,7 @@ pub async fn run_client(
                 | ClientEvent::Group { .. }
                 | ClientEvent::GroupRecord { .. } => continue,
                 ClientEvent::CircuitLost => break 'run Ended::CircuitLost,
+                ClientEvent::CircuitAged => break 'run Ended::Aged,
             };
             let _ = updates.send(update);
         }

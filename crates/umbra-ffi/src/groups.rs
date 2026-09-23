@@ -455,7 +455,9 @@ async fn session(
                 ClientEvent::CircuitReady => {
                     ready_since.get_or_insert_with(tokio::time::Instant::now);
                 }
-                ClientEvent::CircuitLost => break 'run End::Lost,
+                // A new run takes new circuits, and `Reset` subscribes
+                // each group again.
+                ClientEvent::CircuitLost | ClientEvent::CircuitAged => break 'run End::Lost,
                 ClientEvent::Group { handle, outcome } => {
                     // GRP-398: the relay holds the credentials of a new
                     // epoch only after a `GKEY`, thus a refusal under them

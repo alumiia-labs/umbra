@@ -206,7 +206,9 @@ pub async fn run_transfers(
                     active.remove(&tag);
                     let _ = updates.send(TransferUpdate::Failed { tag });
                 }
-                Vec::new()
+                // CIRCUIT_BUILD_TIMEOUT: a build that no relay answers ends,
+                // and a run with no circuit left ends with it.
+                node.on_tick(crate::runtime::unix_now())
             }
         };
         // The node commits nothing: a transfer node holds no contact. The
@@ -215,7 +217,7 @@ pub async fn run_transfers(
         for event in events {
             match event {
                 ClientEvent::CircuitReady => is_ready = true,
-                ClientEvent::CircuitLost => break 'run,
+                ClientEvent::CircuitLost | ClientEvent::CircuitAged => break 'run,
                 ClientEvent::Chunk { handle, outcome } => {
                     let owner = active.iter().find_map(|(tag, transfer)| {
                         let owns = match transfer {

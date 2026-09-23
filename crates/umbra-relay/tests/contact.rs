@@ -637,6 +637,23 @@ fn an_invitation_waits_across_a_restart() {
     assert!(network.stored[ALICE].invitations.is_empty());
 }
 
+#[test]
+fn a_circuit_near_its_age_ends_the_run_before_a_relay_drops_it() {
+    use umbra_core::session::node::CIRCUIT_AGE_MARGIN;
+    use umbra_onion::CIRCUIT_MAX_AGE;
+    let mut network = Network::new();
+    network.settle();
+    network.take_events(0);
+    let start = network.now;
+    // The first tick starts the age, and the relays count theirs from the
+    // `EXTEND` cells before it.
+    assert!(network.clients[0].on_tick(start).is_empty());
+    let aged = start + CIRCUIT_MAX_AGE - CIRCUIT_AGE_MARGIN;
+    assert!(network.clients[0].on_tick(aged - 1).is_empty());
+    // NET-320: the client acts first, and the runtime starts a new run.
+    assert_eq!(network.clients[0].on_tick(aged), [ClientEvent::CircuitAged]);
+}
+
 fn invitations_of(events: Vec<ClientEvent>) -> Vec<Vec<u8>> {
     events
         .into_iter()

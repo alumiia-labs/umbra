@@ -178,6 +178,7 @@ object Core {
     private const val LAST_RETRY_MS = 30_000L
     private const val STOPPED = 0
     private const val DIAL_FAILED = 1
+    private const val AGED = 6
 
     /**
      * Opens the client under the passphrase. The first launch makes the
@@ -261,7 +262,11 @@ object Core {
             is FfiEvent.Offline -> {
                 online = false
                 readConnection()
-                if (event.cause.toInt() != STOPPED) {
+                if (event.cause.toInt() == AGED) {
+                    // NET-320: the circuits reached their age, and new ones
+                    // build now. Nothing failed.
+                    if (wantsNetwork()) connect(app)
+                } else if (event.cause.toInt() != STOPPED) {
                     // The two lines of Part 15 §15.9.2. The cause shows in the
                     // view of the connection.
                     degraded = if (event.cause.toInt() == DIAL_FAILED) {

@@ -67,7 +67,7 @@ each column when a crate implements the requirement and a test covers it.
 | --- | --- | --- | --- | --- | --- | --- |
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
-| `NET` | 225 | 84 | 1 | 0 | 8 | **318** |
+| `NET` | 226 | 84 | 1 | 0 | 8 | **319** |
 | `IDN` | 120 | 43 | 1 | 0 | 5 | **169** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
 | `WIR` | 391 | 87 | 0 | 0 | 6 | **484** |
@@ -81,7 +81,7 @@ each column when a crate implements the requirement and a test covers it.
 | `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
 | `IMP` | 112 | 41 | 0 | 0 | 2 | **155** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2219 | 717 | 7 | 0 | 53 | **2996** |
+| **All** | 2220 | 717 | 7 | 0 | 53 | **2997** |
 
 ## SCP — Scope and Conventions
 
@@ -457,6 +457,7 @@ Source: `spec/03-network-architecture.md`
 | `NET-317` | §3.10 | MUST | A client | A client MUST make that request under the TLS configuration of §3.8, with no cookie and no header that names the device or the user. |  |  |
 | `NET-318` | §3.10 | MUST | A client | A client MUST verify the bytes under Part 10 §10.5.5 before it uses one relay of them, and it MUST keep the last manifest that verified. |  |  |
 | `NET-319` | §3.4.3 | MUST | A relay that holds no session to the relay of `relay_id` | A relay that holds no session to the relay of `relay_id` MUST open one and hold the body until it opens, and one dial MUST serve each body that waits for that relay. |  |  |
+| `NET-320` | §3.4.3 | MUST | A relay | A relay MUST end a circuit at `CIRCUIT_MAX_AGE` from the arrival of its first cell at that relay, and it sends no cell for it. |  |  |
 
 ## IDN — Identity
 

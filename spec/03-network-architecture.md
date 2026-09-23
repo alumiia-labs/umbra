@@ -936,6 +936,7 @@ causes does not occur.
 | --- | --- |
 | `CIRCUIT_MAX_AGE` | 4 hours. The client measures it from the moment that it sends the first `EXTEND` cell |
 | `CIRCUIT_MAX_CELLS` | 8 192 |
+| `CIRCUIT_AGE_MARGIN` | 60 s. A client stops using a circuit this long before `CIRCUIT_MAX_AGE` (`NET-320`) |
 | `CIRCUIT_BUILD_TIMEOUT` | 5 s from the first `EXTEND` cell. Three round trips over a 200 ms path take about 0.6 s, thus the value has a wide margin |
 | Preemptive build | keep 2 spare circuits in the foreground, thus a rotation does not block a send. §3.12 forbids a spare circuit in a push-wake session |
 
@@ -947,6 +948,21 @@ causes does not occur.
 > 4 hours, because a circuit does not outlive its session. The cost is a longer
 > window for a seized hop 1 or hop 2 key set, and Part 16 §16.3 records it.
 > Part 2 §2.4 states the trade.
+
+- **[NET-320]** A relay MUST end a circuit at `CIRCUIT_MAX_AGE` from the
+  arrival of its first cell at that relay, and it sends no cell for it. A
+  client MUST stop using a circuit `CIRCUIT_AGE_MARGIN` of 60 s before
+  `CIRCUIT_MAX_AGE`, and it builds a new circuit for what the old one
+  carried. The margin covers a client clock that ticks once each second
+  and the sweep period of a relay, thus no relay ends a circuit that its
+  client still sends on.
+
+> *Cause of `NET-320`.* The relay ended an aged circuit with no cell and the
+> client held no age. The link to the guard stayed up, thus the client sent
+> into a circuit that no relay held and read no record, and nothing showed
+> it. The reference client ends its run at the margin and starts a new one at
+> once, and each unsent record goes again from its store. A preemptive build
+> with a spare circuit would avoid the gap of one build.
 
 **[NET-028]** A client MUST NOT use one circuit for more than one privacy mode. **[NET-029]** A client MUST
 NOT carry interactive traffic and bulk traffic on the same circuit (§3.8).

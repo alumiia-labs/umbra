@@ -34,7 +34,7 @@ use umbra_crypto::{
 use umbra_onion::{
     build::{build_cell_body, read_cell_body, Pending, BUILD_BUCKET, HELLO_LEN},
     circuit::CircuitBuild,
-    CIRCUIT_BUILD_TIMEOUT, HOPS,
+    CIRCUIT_BUILD_TIMEOUT, CIRCUIT_MAX_AGE, HOPS,
 };
 use umbra_queue::{params::MAX_QUEUES_PER_SESSION, Reject};
 use umbra_transport::link::ClientLink;
@@ -179,6 +179,10 @@ pub enum ClientEvent {
     /// The circuit failed its check or its build, and the runtime builds a
     /// new one.
     CircuitLost,
+    /// A circuit came near `CIRCUIT_MAX_AGE`, at which each relay of it
+    /// ends it with no cell (`NET-320`). The runtime ends the run and
+    /// starts a new one at once, and nothing failed.
+    CircuitAged,
 }
 
 /// One chunk command of Part 13 §13.3.3 for one relay.
@@ -359,7 +363,15 @@ struct Slot {
     chain: Option<[[u8; 32]; HOPS]>,
     /// The first tick that saw the build of this circuit run.
     building_since: Option<u64>,
+    /// The first tick that saw this circuit build or serve, from which its
+    /// age counts.
+    born: Option<u64>,
 }
+
+/// The time before `CIRCUIT_MAX_AGE` at which a client ends a circuit
+/// (`NET-320`). The age counts from a tick, not from the first `EXTEND`,
+/// and a relay sweeps on its own period.
+pub const CIRCUIT_AGE_MARGIN: u64 = 60;
 
 /// A relay that a client can put into a chain: the facts that the
 /// invariants of Part 3 §3.4.6 test, and the static key of the handshake.
@@ -383,6 +395,7 @@ impl Slot {
             exit,
             chain: None,
             building_since: None,
+            born: None,
         }
     }
 
@@ -982,12 +995,23 @@ impl ClientNode {
     /// another circuit builds or serves, thus one relay that is down stops
     /// no other contact and no other group. With none left the node gives
     /// `CircuitLost`, which the runtime reads as a build that failed.
+    ///
+    /// A ready circuit near `CIRCUIT_MAX_AGE` gives `CircuitAged`
+    /// (`NET-320`).
     pub fn on_tick(&mut self, now: u64) -> Vec<ClientEvent> {
         let mut has_ended = false;
+        let mut has_aged = false;
         let mut unreachable = Vec::new();
         let mut destroys = Vec::new();
         let is_group = self.range == Range::Group;
+        let old = CIRCUIT_MAX_AGE.saturating_sub(CIRCUIT_AGE_MARGIN);
         for slot in &mut self.slots {
+            if matches!(slot.circuit, Circuit::None) {
+                slot.born = None;
+            } else {
+                let born = *slot.born.get_or_insert(now);
+                has_aged |= slot.is_ready() && now.saturating_sub(born) >= old;
+            }
             if !matches!(slot.circuit, Circuit::Building { .. }) {
                 slot.building_since = None;
                 continue;
@@ -1024,6 +1048,9 @@ impl ClientNode {
             .any(|slot| !matches!(slot.circuit, Circuit::None));
         if has_ended && !is_left {
             events.push(ClientEvent::CircuitLost);
+        }
+        if has_aged {
+            events.push(ClientEvent::CircuitAged);
         }
         events
     }
@@ -1279,6 +1306,10 @@ impl ClientNode {
         build_cell_body(CellCommand::Extend, &hello, &mut body).map_err(|_| Error::NoPath)?;
         let tag = build.seal(&mut body).map_err(|_| Error::NoPath)?;
         let cell = [build.circ_id().as_slice(), &tag, &body].concat();
+        // A new circuit in an old slot has an age of its own.
+        if build.built() == 0 {
+            self.slot_mut()?.born = None;
+        }
         self.slot_mut()?.circuit = Circuit::Building {
             build: Box::new(build),
             pending: Box::new(pending),
