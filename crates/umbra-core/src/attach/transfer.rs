@@ -3,9 +3,10 @@
 //! relays, and a download that reads each chunk from one of them.
 //!
 //! The two drivers read no clock and draw each random value from the caller.
-//! They handle a descriptor of level `0x00`, thus a file of at most
-//! `MAX_DESCRIPTOR_REFS` chunks. The manifest level of §13.3.4 is not built
-//! here yet.
+//! A file above `MAX_DESCRIPTOR_REFS` chunks takes the manifest level of
+//! §13.3.4: the upload places the data chunks, then the manifest of their
+//! refs as a file of its own under `K_manifest`, and the download reads the
+//! manifest before the data.
 
 use alloc::{collections::BTreeMap, vec::Vec};
 
@@ -13,10 +14,12 @@ use umbra_crypto::{rand_core::CryptoRng, secret::Secret, x25519::StaticSecret};
 use umbra_wire::descriptor::{ChunkRef, FileDescriptor, Level};
 
 use super::{
+    manifest::{self, Replicas},
     place::{fetch_order, resolve_hint, AttachmentRelay, HoldOffs},
-    seal::{open_chunk, read_secret, seal_file, Assembler, SealedFile},
+    seal::{manifest_key, open_chunk, read_secret, seal_file, Assembler, SealedFile},
     upload::{sample_positions, ChunkUpload},
-    verify_sample, MAX_CONCURRENT_DOWN, MAX_CONCURRENT_UP, MAX_DESCRIPTOR_REFS, REPLICAS,
+    verify_sample, MAX_CONCURRENT_DOWN, MAX_CONCURRENT_UP, MAX_DATA_CHUNKS, MAX_DESCRIPTOR_REFS,
+    REPLICAS,
 };
 use crate::{
     session::node::{ChunkJob, ChunkOutcome, ClientNode},
@@ -108,6 +111,13 @@ pub struct Upload {
     sealed: SealedFile,
     file_key: Secret<32>,
     file_nonce: [u8; 24],
+    /// The key of the chunks of this phase: `file_key`, then `K_manifest`.
+    chunk_key: Secret<32>,
+    /// The placed data chunks of a file of level `0x01`, while its manifest
+    /// goes up (§13.3.4).
+    data: Option<DataPhase>,
+    /// The data chunk count of the file.
+    data_chunks: usize,
     shape: Shape,
     chunks: Vec<ChunkState>,
     /// The relays with the attachment role, for a new draw.
@@ -117,6 +127,15 @@ pub struct Upload {
     /// The proofs that a later tick asks for again.
     retries: Vec<(usize, usize)>,
     ticks: u32,
+}
+
+/// The credentials of the placed data chunks of a file of level `0x01`,
+/// and the fields of the file that its descriptor carries.
+struct DataPhase {
+    credentials: Vec<ChunkCredential>,
+    commit: [u8; 32],
+    digest: [u8; 32],
+    padded_size: u32,
 }
 
 /// The fields of a descriptor that the seal does not fix.
@@ -145,7 +164,8 @@ impl Upload {
         let file_key = Secret::new(random_bytes(rng));
         let file_nonce = random_bytes(rng);
         let sealed = seal_file(&file_key, &file_nonce, plain)?;
-        if sealed.chunks.len() > MAX_DESCRIPTOR_REFS {
+        // ATT-082: one manifest level holds `MAX_DATA_CHUNKS`.
+        if sealed.chunks.len() > MAX_DATA_CHUNKS {
             return Err(Error::Malformed);
         }
         let mut chunks = Vec::with_capacity(sealed.chunks.len());
@@ -153,7 +173,10 @@ impl Upload {
             chunks.push(ChunkState::draw(relays, Vec::new(), 0, rng)?);
         }
         Ok(Upload {
+            data_chunks: sealed.chunks.len(),
             sealed,
+            chunk_key: Secret::new(*file_key.expose()),
+            data: None,
             file_key,
             file_nonce,
             shape,
@@ -185,9 +208,63 @@ impl Upload {
             .count()
     }
 
-    fn done(&self) -> u32 {
-        let count = self.chunks.iter().filter(|chunk| chunk.is_done).count();
-        u32::try_from(count).unwrap_or(u32::MAX)
+    /// The chunks placed, and the chunk count of both phases.
+    fn progress(&self) -> (u32, u32) {
+        let placed = self.chunks.iter().filter(|chunk| chunk.is_done).count();
+        let manifest = if self.data_chunks > MAX_DESCRIPTOR_REFS {
+            manifest::manifest_chunks(self.data_chunks)
+        } else {
+            0
+        };
+        let done = if self.data.is_some() {
+            self.data_chunks.saturating_add(placed)
+        } else {
+            placed
+        };
+        let total = self.data_chunks.saturating_add(manifest);
+        (
+            u32::try_from(done).unwrap_or(u32::MAX),
+            u32::try_from(total).unwrap_or(u32::MAX),
+        )
+    }
+
+    /// The refs and the credentials of the placed chunks of this phase.
+    fn placed(&self) -> Result<(Vec<ChunkRef>, Vec<ChunkCredential>), Error> {
+        let mut refs: Vec<ChunkRef> = Vec::with_capacity(self.chunks.len());
+        let mut credentials = Vec::with_capacity(self.chunks.len());
+        for chunk in &self.chunks {
+            refs.extend(chunk.upload.chunk_refs()?);
+            credentials.push(ChunkCredential {
+                chunk_id: *chunk.upload.chunk_id(),
+                cred: Secret::new(chunk.cred),
+                relays: chunk.relays.clone(),
+            });
+        }
+        Ok((refs, credentials))
+    }
+
+    /// The data chunks are placed, and the manifest of their refs goes up
+    /// as a file under `K_manifest` (`ATT-073`, `ATT-075`, `ATT-077`).
+    fn start_manifest<R: CryptoRng + ?Sized>(&mut self, rng: &mut R) -> Result<(), Error> {
+        let (refs, credentials) = self.placed()?;
+        let plain = manifest::build(&refs)?;
+        let key = manifest_key(&self.file_key, &self.file_nonce);
+        let sealed = seal_file(&key, &self.file_nonce, &plain)?;
+        let mut chunks = Vec::with_capacity(sealed.chunks.len());
+        for _ in &sealed.chunks {
+            chunks.push(ChunkState::draw(&self.pool, Vec::new(), 0, rng)?);
+        }
+        let data = core::mem::replace(&mut self.sealed, sealed);
+        self.data = Some(DataPhase {
+            credentials,
+            commit: data.commit,
+            digest: data.digest,
+            padded_size: data.padded_size,
+        });
+        self.chunk_key = key;
+        self.chunks = chunks;
+        self.retries.clear();
+        Ok(())
     }
 
     fn send<R: CryptoRng + ?Sized>(
@@ -233,7 +310,7 @@ impl Upload {
             }
             Step::Register(at) | Step::RegisterFresh(at) => {
                 let index = u32::try_from(index).map_err(|_| Error::Malformed)?;
-                let read = read_secret(&self.file_key, index);
+                let read = read_secret(&self.chunk_key, index);
                 let job = ChunkJob::Register {
                     cred,
                     read_pk: *umbra_crypto::x25519::PublicKey::from(&read).as_bytes(),
@@ -352,9 +429,11 @@ impl Upload {
         }
     }
 
-    /// Starts each chunk that has room under `MAX_CONCURRENT_UP`, and asks
-    /// again for each proof that a replica did not hold at the last answer.
-    /// The caller calls it at the start and at each tick of its clock.
+    /// Moves the clock of the upload one tick: a step past
+    /// `STEP_TIMEOUT_TICKS` takes its repair, each proof that a replica did
+    /// not hold is asked for again, and each chunk that has room starts.
+    /// The caller calls it at the start and at each tick of its clock, and
+    /// an answer moves no clock.
     pub fn tick<R: CryptoRng + ?Sized>(
         &mut self,
         node: &mut ClientNode,
@@ -376,6 +455,15 @@ impl Upload {
         for (index, at) in core::mem::take(&mut self.retries) {
             self.send(node, index, Step::Verify(at), rng)?;
         }
+        self.fill(node, rng)
+    }
+
+    /// Starts each chunk that has room under `MAX_CONCURRENT_UP`.
+    fn fill<R: CryptoRng + ?Sized>(
+        &mut self,
+        node: &mut ClientNode,
+        rng: &mut R,
+    ) -> Result<(), Error> {
         while self.in_flight() < MAX_CONCURRENT_UP {
             let Some(index) = self.chunks.iter().position(|chunk| !chunk.is_started) else {
                 break;
@@ -402,9 +490,9 @@ impl Upload {
         outcome: ChunkOutcome,
         rng: &mut R,
     ) -> Result<Progress<Uploaded>, Error> {
-        let total = u32::try_from(self.chunks.len()).unwrap_or(u32::MAX);
         let Some((index, step, _)) = self.waiting.remove(&handle) else {
-            return Ok(Progress::Running(self.done(), total));
+            let (done, total) = self.progress();
+            return Ok(Progress::Running(done, total));
         };
         let chunk = self.chunks.get_mut(index).ok_or(Error::Malformed)?;
         match (step, outcome) {
@@ -492,32 +580,42 @@ impl Upload {
             _ => self.repair(node, index, step, rng)?,
         }
         if self.chunks.iter().all(|chunk| chunk.is_done) {
-            return self.finish().map(Progress::Done);
+            if self.data.is_some() || self.data_chunks <= MAX_DESCRIPTOR_REFS {
+                return self.finish().map(Progress::Done);
+            }
+            self.start_manifest(rng)?;
         }
-        self.tick(node, rng)?;
-        Ok(Progress::Running(self.done(), total))
+        // An answer fills the room it left, and it moves no clock.
+        self.fill(node, rng)?;
+        let (done, total) = self.progress();
+        Ok(Progress::Running(done, total))
     }
 
     fn finish(&mut self) -> Result<Uploaded, Error> {
-        let mut refs: Vec<ChunkRef> = Vec::with_capacity(self.chunks.len());
-        let mut credentials = Vec::with_capacity(self.chunks.len());
-        for chunk in &self.chunks {
-            refs.extend(chunk.upload.chunk_refs()?);
-            credentials.push(ChunkCredential {
-                chunk_id: *chunk.upload.chunk_id(),
-                cred: Secret::new(chunk.cred),
-                relays: chunk.relays.clone(),
-            });
-        }
+        let (refs, mut credentials) = self.placed()?;
+        // A file of level `0x01` names its manifest chunks, and the data
+        // chunks keep their credentials for a renewal and an erase.
+        let (level, commit, digest, padded_size) = match self.data.take() {
+            Some(data) => {
+                credentials.extend(data.credentials);
+                (Level::Manifest, data.commit, data.digest, data.padded_size)
+            }
+            None => (
+                Level::Data,
+                self.sealed.commit,
+                self.sealed.digest,
+                self.sealed.padded_size,
+            ),
+        };
         Ok(Uploaded {
             descriptor: FileDescriptor {
-                level: Level::Data,
+                level,
                 file_key: Secret::new(*self.file_key.expose()),
                 file_nonce: self.file_nonce,
-                commit: self.sealed.commit,
-                digest: self.sealed.digest,
+                commit,
+                digest,
                 media_seconds: self.shape.media_seconds,
-                padded_size: self.sealed.padded_size,
+                padded_size,
                 mime_class: self.shape.mime_class,
                 pixel_w: self.shape.pixel_w,
                 pixel_h: self.shape.pixel_h,
@@ -619,14 +717,59 @@ struct Wanted {
     is_asked: bool,
 }
 
-/// The download of one file of level `0x00`.
+/// The download of one file. A file of level `0x01` reads its manifest
+/// first (`ATT-079`).
 pub struct Download {
-    /// The open file, until its last chunk.
+    /// The open file or manifest, until its last chunk.
     assembler: Option<Assembler>,
-    file_key: Secret<32>,
+    /// The key of the chunks of this phase: `K_manifest`, then `file_key`.
+    chunk_key: Secret<32>,
     chunk_ids: Vec<[u8; 32]>,
     wanted: Vec<Wanted>,
     waiting: BTreeMap<u64, usize>,
+    /// The data phase of a file of level `0x01`, while its manifest comes.
+    then: Option<DataPlan>,
+}
+
+/// What the data phase of a file of level `0x01` needs.
+struct DataPlan {
+    assembler: Assembler,
+    file_key: Secret<32>,
+    data_chunks: usize,
+    relays: Vec<AttachmentRelay>,
+}
+
+/// The fetch order of each chunk: its relays and the relays its hints name
+/// (`ATT-008`), in a random order across the replicas (`ATT-019`).
+fn plan<R: CryptoRng + ?Sized>(
+    chunks: &[Replicas],
+    relays: &[AttachmentRelay],
+    rng: &mut R,
+) -> Vec<Wanted> {
+    let hold_offs = HoldOffs::default();
+    chunks
+        .iter()
+        .map(|chunk| {
+            let mut replicas = chunk.relay_ids.clone();
+            for hint in &chunk.hints {
+                let ids = relays.iter().map(|relay| relay.relay_id);
+                if let Ok(relay) = resolve_hint(hint, ids) {
+                    if !replicas.contains(&relay) {
+                        replicas.push(relay);
+                    }
+                }
+            }
+            let mut order = fetch_order(&chunk.chunk_id, &replicas, &hold_offs, 0, &mut |bound| {
+                random_below(rng, bound)
+            });
+            order.reverse();
+            Wanted {
+                order,
+                bytes: None,
+                is_asked: false,
+            }
+        })
+        .collect()
 }
 
 impl Download {
@@ -638,42 +781,59 @@ impl Download {
         relays: &[AttachmentRelay],
         rng: &mut R,
     ) -> Result<Self, Error> {
-        if descriptor.level != Level::Data {
-            return Err(Error::Malformed);
-        }
-        let assembler = Assembler::for_data(descriptor)?;
-        let hold_offs = HoldOffs::default();
-        let mut wanted = Vec::with_capacity(descriptor.refs.len());
-        for chunk_ref in &descriptor.refs {
-            let mut replicas = alloc::vec![chunk_ref.relay_id];
-            for hint in &chunk_ref.replicas {
-                let ids = relays.iter().map(|relay| relay.relay_id);
-                if let Ok(relay) = resolve_hint(hint, ids) {
-                    replicas.push(relay);
+        let data = Assembler::for_data(descriptor)?;
+        let file_key = Secret::new(*descriptor.file_key.expose());
+        let (assembler, chunk_key, expected, then) = match descriptor.level {
+            Level::Data => (data, file_key, descriptor.refs.len(), None),
+            Level::Manifest => {
+                let data_chunks =
+                    usize::try_from(data.chunk_count()).map_err(|_| Error::Malformed)?;
+                let assembler = Assembler::for_manifest(descriptor)?;
+                let manifest_chunks =
+                    usize::try_from(assembler.chunk_count()).map_err(|_| Error::Malformed)?;
+                // ATT-073: a manifest names more data chunks than one
+                // descriptor holds.
+                if data_chunks <= MAX_DESCRIPTOR_REFS
+                    || manifest_chunks != manifest::manifest_chunks(data_chunks)
+                {
+                    return Err(Error::Malformed);
                 }
+                let then = DataPlan {
+                    assembler: data,
+                    file_key,
+                    data_chunks,
+                    relays: relays.to_vec(),
+                };
+                let key = manifest_key(&descriptor.file_key, &descriptor.file_nonce);
+                (assembler, key, manifest_chunks, Some(then))
             }
-            // ATT-019: a random order across the replicas.
-            let mut order = fetch_order(
-                &chunk_ref.chunk_id,
-                &replicas,
-                &hold_offs,
-                0,
-                &mut |bound| random_below(rng, bound),
-            );
-            order.reverse();
-            wanted.push(Wanted {
-                order,
-                bytes: None,
-                is_asked: false,
-            });
-        }
+        };
+        let chunks = manifest::collapse(&descriptor.refs, expected)?;
         Ok(Download {
             assembler: Some(assembler),
-            file_key: Secret::new(*descriptor.file_key.expose()),
-            chunk_ids: descriptor.refs.iter().map(|r| r.chunk_id).collect(),
-            wanted,
+            chunk_key,
+            chunk_ids: chunks.iter().map(|chunk| chunk.chunk_id).collect(),
+            wanted: plan(&chunks, relays, rng),
             waiting: BTreeMap::new(),
+            then,
         })
+    }
+
+    /// The manifest opened: the data phase reads the chunks that it names
+    /// (`ATT-079`, `ATT-184`).
+    fn start_data<R: CryptoRng + ?Sized>(
+        &mut self,
+        manifest_plain: &[u8],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let then = self.then.take().ok_or(Error::Stale)?;
+        let refs = manifest::parse(manifest_plain)?;
+        let chunks = manifest::collapse(&refs, then.data_chunks)?;
+        self.chunk_ids = chunks.iter().map(|chunk| chunk.chunk_id).collect();
+        self.wanted = plan(&chunks, &then.relays, rng);
+        self.chunk_key = then.file_key;
+        self.assembler = Some(then.assembler);
+        Ok(())
     }
 
     fn ask<R: CryptoRng + ?Sized>(
@@ -688,7 +848,7 @@ impl Download {
         wanted.is_asked = true;
         let chunk_id = *self.chunk_ids.get(index).ok_or(Error::Malformed)?;
         let read = read_secret(
-            &self.file_key,
+            &self.chunk_key,
             u32::try_from(index).map_err(|_| Error::Malformed)?,
         );
         let handle = node.chunk(relay, chunk_id, ChunkJob::Fetch { read }, rng)?;
@@ -728,7 +888,12 @@ impl Download {
     ) -> Result<Progress<Vec<u8>>, Error> {
         if self.step(node, handle, outcome, rng)? {
             let assembler = self.assembler.take().ok_or(Error::Stale)?;
-            return assembler.finish().map(Progress::Done);
+            let plain = assembler.finish()?;
+            if self.then.is_none() {
+                return Ok(Progress::Done(plain));
+            }
+            self.start_data(&plain, rng)?;
+            self.tick(node, rng)?;
         }
         let assembler = self.assembler.as_ref().ok_or(Error::Stale)?;
         Ok(Progress::Running(

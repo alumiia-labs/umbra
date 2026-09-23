@@ -837,6 +837,72 @@ fn holder(index: usize) -> AttachmentRelay {
 }
 
 #[test]
+fn a_file_above_one_descriptor_goes_up_and_down_through_its_manifest() {
+    use umbra_core::attach::MAX_DESCRIPTOR_REFS;
+    use umbra_wire::descriptor::Level;
+    const SENDER: usize = 0;
+    const RECEIVER: usize = 1;
+    let mut mesh = Mesh::new(&[0x67, 0x68]);
+    use_transfer_node(&mut mesh, SENDER, 0x67);
+    use_transfer_node(&mut mesh, RECEIVER, 0x68);
+    mesh.settle();
+    let relays: Vec<AttachmentRelay> = (3..6).map(holder).collect();
+
+    // ATT-073: one chunk more than a descriptor holds.
+    let plain: Vec<u8> = (0..SEGMENT_SIZE * MAX_DESCRIPTOR_REFS + 17)
+        .map(|i| (i % 253) as u8)
+        .collect();
+    let mut rng = Rng(41);
+    let mut upload = Upload::new(&plain, Shape::default(), &relays, &mut rng).unwrap();
+    upload.tick(&mut mesh.clients[SENDER], &mut rng).unwrap();
+    let mut uploaded: Option<Uploaded> = None;
+    let mut last = (0, 0);
+    for _ in 0..20_000 {
+        for (handle, outcome) in chunk_answers(&mut mesh, SENDER) {
+            let node = &mut mesh.clients[SENDER];
+            match upload.on_outcome(node, handle, outcome, &mut rng).unwrap() {
+                Progress::Done(done) => uploaded = Some(done),
+                Progress::Running(done, total) => last = (done, total),
+            }
+        }
+        if uploaded.is_some() {
+            break;
+        }
+        upload.tick(&mut mesh.clients[SENDER], &mut rng).unwrap();
+    }
+    let uploaded = uploaded.expect("the upload ends");
+    // 270 data chunks, whose 270 refs fit one manifest chunk of 271. The
+    // progress counts both phases.
+    assert_eq!(last.1, MAX_DESCRIPTOR_REFS as u32 + 2);
+    assert_eq!(uploaded.descriptor.level, Level::Manifest);
+    assert_eq!(uploaded.descriptor.refs.len(), 1);
+    assert_eq!(uploaded.credentials.len(), MAX_DESCRIPTOR_REFS + 2);
+
+    // ATT-079: the receiver reads the manifest, and then the data.
+    let mut rng = Rng(42);
+    let mut download = Download::new(&uploaded.descriptor, &relays, &mut rng).unwrap();
+    download
+        .tick(&mut mesh.clients[RECEIVER], &mut rng)
+        .unwrap();
+    let mut fetched = None;
+    for _ in 0..20_000 {
+        for (handle, outcome) in chunk_answers(&mut mesh, RECEIVER) {
+            let node = &mut mesh.clients[RECEIVER];
+            if let Progress::Done(bytes) = download
+                .on_outcome(node, handle, outcome, &mut rng)
+                .unwrap()
+            {
+                fetched = Some(bytes);
+            }
+        }
+        if fetched.is_some() {
+            break;
+        }
+    }
+    assert!(fetched.expect("the download ends") == plain);
+}
+
+#[test]
 fn an_upload_leaves_a_relay_that_refuses_and_a_relay_that_holds_no_copy() {
     const SENDER: usize = 0;
     const RECEIVER: usize = 1;
