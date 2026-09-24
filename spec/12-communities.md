@@ -494,12 +494,28 @@ and a page that holds it is 8 074 bytes, which is that payload exactly.
   §12.4.6 gives the pruned state.
 - **[COM-194]** If a page under selector `0x01` holds `PULL_BATCH` entries, the
   client MUST pull again in the same session. That rule binds a steady-state
-  pull, and `COM-091` binds a first backfill.
+  pull, and `COM-091` binds a first backfill. **[COM-410]** A relay stops a
+  page at the `B3` L5 payload too (`COM-182`), thus a client MUST also pull
+  again after a steady-state page when the room that the page leaves below
+  32 650 bytes is less than 8 023 bytes, the entry of a post at
+  `MAX_POST_SIZE`. The page of the sentinel holds the newest records, and
+  its backfill takes the history that the bound left out.
 - **[COM-195]** At a join, a client MUST make its first pull under selector
   `0x01` with the sentinel. **[COM-196]** At a join, a client MUST pull the
   control chain from `epoch_index` 0, and the metadata from `meta_index` 0.
   The client fills the history behind the first page with pulls at lower
-  `from` values, under §12.4.4 rule 8.
+  `from` values, under §12.4.4 rule 8. **[COM-411]** A client MUST go on
+  with each pull of `COM-196` from the `next` value of its page until a page
+  holds no entry. A client that gets no page MUST ask again after
+  `PULL_INTERVAL` at the most.
+
+> *Cause of the byte bound.* A checkpoint and a control object each carry
+> an ML-DSA-65 key and signature, thus five checkpoints fill most of a page.
+> A page of 25 entries then ended the pulls of the session under `COM-194`
+> alone, and the newest records waited for the next `PULL_INTERVAL`. A roster
+> is up to 31 557 bytes, thus a page of the control chain holds few objects,
+> and a page that is not full says nothing of the chain after it. The empty
+> page is the one sure end, and a join pays one more pull for it.
 
 **The publication.**
 

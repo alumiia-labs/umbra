@@ -1798,6 +1798,8 @@ impl Inner {
                 {
                     self.send_pull(next);
                 }
+                // COM-091: the first backfill follows the first page.
+                self.pump_communities();
             }
             CommunityUpdate::Published { tag, .. } => {
                 let work = self.community_tags.remove(&tag);

@@ -37,6 +37,9 @@ pub const PAGE_HEADER_LEN: usize = 51;
 pub const PAGE_ENTRY_OVERHEAD: usize = 10;
 /// The `B3` L5 payload, which bounds a page (`COM-182`).
 pub const PAGE_MAX: usize = 32_650;
+/// The entry of a post at `MAX_POST_SIZE`: 8 013 bytes of record and its
+/// entry overhead (`COM-410`).
+pub const POST_ENTRY_MAX: usize = 8_023;
 /// The length of a `NotifyRegistration`.
 pub const NOTIFY_REGISTRATION_LEN: usize = 162;
 /// The `from` value that asks for the newest records.
@@ -160,6 +163,14 @@ impl<'a> PullResponse<'a> {
         })
     }
 
+    /// Whether the relay can hold records after this page: it holds
+    /// `PULL_BATCH` entries (`COM-194`), or it stopped near the byte bound
+    /// of `COM-182` (`COM-410`).
+    pub fn may_hold_more(&self) -> bool {
+        self.entries.len() == usize::from(PULL_BATCH)
+            || PAGE_MAX.saturating_sub(self.len()) < POST_ENTRY_MAX
+    }
+
     /// Whether the page holds no entry.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
@@ -272,7 +283,9 @@ pub struct PageNote {
 }
 
 /// The length of a stored [`RelayCursor`].
-pub const CURSOR_LEN: usize = 1 + 8 + 8 + 8;
+pub const CURSOR_LEN: usize = 1 + 8 + 8 + 8 + 8 + 8;
+/// The length of the stored form before the backfill window.
+pub const CURSOR_LEN_V1: usize = 1 + 8 + 8 + 8;
 
 /// The cursor of one community at one relay (`COM-190`). A `seq` of one
 /// relay has no meaning at another relay (`COM-180`), thus each relay has
@@ -282,38 +295,62 @@ pub struct RelayCursor {
     next: Option<u64>,
     lowest_seen: Option<u64>,
     floor: u64,
+    /// The backfill window in progress: its first `seq`, and the `seq`
+    /// that its next pull asks for. A relay stops a page at its byte bound
+    /// (`COM-182`), thus one window can take more than one pull.
+    walk: Option<(u64, u64)>,
 }
 
 impl RelayCursor {
-    /// The stored form: a flag byte for the two optional values, then
-    /// `next`, the lowest `seq` seen, and the floor.
+    /// The stored form: a flag byte for the three optional values, then
+    /// `next`, the lowest `seq` seen, the floor, and the backfill window.
     pub fn to_bytes(&self) -> [u8; CURSOR_LEN] {
         let mut out = [0u8; CURSOR_LEN];
-        let flags = u8::from(self.next.is_some()) | u8::from(self.lowest_seen.is_some()) << 1;
+        let flags = u8::from(self.next.is_some())
+            | u8::from(self.lowest_seen.is_some()) << 1
+            | u8::from(self.walk.is_some()) << 2;
+        let (start, at) = self.walk.unwrap_or((0, 0));
         let mut writer = Writer::new(&mut out);
         // The buffer holds each field, thus no write fails.
         let _ = writer.u8(flags);
         let _ = writer.put(&self.next.unwrap_or(0).to_be_bytes());
         let _ = writer.put(&self.lowest_seen.unwrap_or(0).to_be_bytes());
         let _ = writer.put(&self.floor.to_be_bytes());
+        let _ = writer.put(&start.to_be_bytes());
+        let _ = writer.put(&at.to_be_bytes());
         out
     }
 
-    /// Reads the stored form of [`RelayCursor::to_bytes`].
+    /// Reads the stored form of [`RelayCursor::to_bytes`], or the form of
+    /// `CURSOR_LEN_V1` bytes with no backfill window.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
+        let has_walk = match bytes.len() {
+            CURSOR_LEN => true,
+            CURSOR_LEN_V1 => false,
+            _ => return Err(Error::Malformed),
+        };
         let mut reader = Reader::new(bytes);
         let flags = reader.u8()?;
         let next = u64::from_be_bytes(reader.array()?);
         let lowest = u64::from_be_bytes(reader.array()?);
         let floor = u64::from_be_bytes(reader.array()?);
+        let (start, at) = if has_walk {
+            (
+                u64::from_be_bytes(reader.array()?),
+                u64::from_be_bytes(reader.array()?),
+            )
+        } else {
+            (0, 0)
+        };
         reader.finish()?;
-        if flags > 0x03 {
+        if flags > 0x07 || (!has_walk && flags > 0x03) {
             return Err(Error::Malformed);
         }
         Ok(RelayCursor {
             next: (flags & 0x01 != 0).then_some(next),
             lowest_seen: (flags & 0x02 != 0).then_some(lowest),
             floor,
+            walk: (flags & 0x04 != 0).then_some((start, at)),
         })
     }
 
@@ -341,10 +378,16 @@ impl RelayCursor {
     /// (`COM-091`, `COM-092`).
     pub fn backfill_request(&self, community_id: [u8; 32]) -> Option<PullRequest> {
         let lowest = self.lowest_seen?;
-        if lowest <= self.floor {
-            return None;
-        }
-        let from = lowest.saturating_sub(u64::from(PULL_BATCH)).max(self.floor);
+        let from = match self.walk {
+            // A window that a byte bound cut goes on where its page ended.
+            Some((_, at)) => at,
+            None => {
+                if lowest <= self.floor {
+                    return None;
+                }
+                lowest.saturating_sub(u64::from(PULL_BATCH)).max(self.floor)
+            }
+        };
         Some(PullRequest {
             community_id,
             selector: Selector::Sequence,
@@ -363,21 +406,36 @@ impl RelayCursor {
             .next
             .filter(|cursor| page.floor > *cursor)
             .map(|cursor| (cursor, page.floor));
+        // The first page holds the newest records, and nothing follows it
+        // yet. The history behind it is the task of the backfill.
+        let was_first = self.next.is_none();
         self.floor = page.floor;
         self.note_lowest(page);
         self.next = Some(page.next);
         Ok(PageNote {
             pruned,
-            pull_again: page.entries.len() == usize::from(PULL_BATCH),
+            pull_again: !was_first && page.may_hold_more(),
         })
     }
 
     /// Takes a page that answers [`RelayCursor::backfill_request`]. The
     /// steady-state cursor does not move.
+    ///
+    /// The relay reads forward from `from` past each record that the
+    /// cursor holds, thus a page that ends below the lowest `seq` held
+    /// stopped at its byte bound, and the window goes on at its `next`. An
+    /// empty page, or one that reaches the lowest `seq`, ends the window.
     pub fn on_backfill_page(&mut self, page: &PullResponse<'_>, from: u64) {
         self.floor = page.floor;
-        self.lowest_seen = Some(self.lowest_seen.map_or(from, |lowest| lowest.min(from)));
-        self.note_lowest(page);
+        let start = self.walk.map_or(from, |(start, _)| start);
+        let reaches = self.lowest_seen.is_none_or(|lowest| page.next >= lowest);
+        if page.entries.is_empty() || reaches {
+            self.walk = None;
+            self.lowest_seen = Some(self.lowest_seen.map_or(start, |lowest| lowest.min(start)));
+            self.note_lowest(page);
+        } else {
+            self.walk = Some((start, page.next));
+        }
     }
 
     fn note_lowest(&mut self, page: &PullResponse<'_>) {
@@ -420,12 +478,19 @@ mod tests {
             next: Some(41),
             lowest_seen: Some(12),
             floor: 3,
+            walk: Some((5, 9)),
         };
         assert_eq!(RelayCursor::from_bytes(&held.to_bytes()).unwrap(), held);
         let mut bad = held.to_bytes();
-        bad[0] = 0x04;
+        bad[0] = 0x08;
         assert!(RelayCursor::from_bytes(&bad).is_err());
         assert!(RelayCursor::from_bytes(&held.to_bytes()[..CURSOR_LEN - 1]).is_err());
+        // The first form has no window.
+        let mut first_form = held.to_bytes();
+        first_form[0] &= 0x03;
+        let first = RelayCursor::from_bytes(&first_form[..CURSOR_LEN_V1]).unwrap();
+        assert_eq!(first.walk, None);
+        assert_eq!(first.next, Some(41));
     }
 
     #[test]
@@ -530,9 +595,26 @@ mod tests {
             next: 130,
             entries: full,
         };
+        // The first page holds the newest records, and nothing follows it
+        // yet. A full steady-state page pulls again (COM-194).
         let note = cursor.on_page(&page).unwrap();
-        assert!(note.pull_again && note.pruned.is_none());
+        assert!(!note.pull_again && note.pruned.is_none());
         assert_eq!(cursor.request(community).from, 130);
+        let mut steady = cursor;
+        let later: Vec<PullEntry<'_>> = (0..30)
+            .map(|n| PullEntry {
+                seq: 130 + n,
+                record: &record,
+            })
+            .collect();
+        let note = steady
+            .on_page(&PullResponse {
+                next: 160,
+                entries: later,
+                ..page.clone()
+            })
+            .unwrap();
+        assert!(note.pull_again);
         assert_eq!(cursor.request(community).count, PULL_BATCH);
 
         // The backfill walks down to the floor in pulls of one shape.
@@ -569,6 +651,61 @@ mod tests {
             130,
             "the backfill does not move the cursor"
         );
+    }
+
+    #[test]
+    fn a_backfill_page_that_the_byte_bound_cut_goes_on_where_it_ended() {
+        let community = [9; 32];
+        let mut cursor = RelayCursor::default();
+        let record = [0u8; 8];
+        let newest: Vec<PullEntry<'_>> = (0..30)
+            .map(|n| PullEntry {
+                seq: 100 + n,
+                record: &record,
+            })
+            .collect();
+        let page = PullResponse {
+            community_id: community,
+            selector: Selector::Sequence,
+            floor: 1,
+            next: 130,
+            entries: newest,
+        };
+        cursor.on_page(&page).unwrap();
+        assert_eq!(cursor.backfill_request(community).unwrap().from, 70);
+        // The page stops at 84, below the lowest seq held: 85 to 99 stay
+        // to fetch, and the window does not end.
+        let cut: Vec<PullEntry<'_>> = (70..85)
+            .map(|seq| PullEntry {
+                seq,
+                record: &record,
+            })
+            .collect();
+        cursor.on_backfill_page(
+            &PullResponse {
+                entries: cut,
+                next: 85,
+                ..page.clone()
+            },
+            70,
+        );
+        assert_eq!(cursor.backfill_request(community).unwrap().from, 85);
+        let rest: Vec<PullEntry<'_>> = (85..115)
+            .map(|seq| PullEntry {
+                seq,
+                record: &record,
+            })
+            .collect();
+        cursor.on_backfill_page(
+            &PullResponse {
+                entries: rest,
+                next: 115,
+                ..page
+            },
+            85,
+        );
+        // The window ended at its start, 70.
+        assert_eq!(cursor.backfill_request(community).unwrap().from, 40);
 
         let later = PullResponse {
             floor: 500,

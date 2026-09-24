@@ -2861,39 +2861,64 @@ fn an_app_creates_a_community_with_a_contact_and_a_third_app_joins_it() {
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    // COM-246: a third app joins by the link, and pulls the genesis roster,
-    // the first metadata, the posts, and the checkpoint.
+    // Bob posts 20 more. SIG_MIN_INTERVAL spaces two checkpoints of one
+    // chain by 60 s, thus his first five posts take a checkpoint and the
+    // other 15 wait. The community then holds more than a page of records,
+    // and the checkpoints fill most of a page by their bytes.
+    for number in 0..20 {
+        let draft = bob.new_community_draft();
+        draft.set_text(units(&format!("reply {number}"))).unwrap();
+        bob.post_to_community(community.clone(), draft).unwrap();
+    }
+    let start = Instant::now();
+    while bob.communities().unwrap()[0].pending > 0 {
+        assert!(start.elapsed() < Duration::from_secs(90));
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    const RECORDS: u32 = 2 + 5 + 1 + 20 + 1;
+
+    // COM-195, COM-196, COM-246: a third app joins by the link. It pulls
+    // the newest records, and the control chain and the metadata from
+    // their start, thus it names the community long before the first
+    // backfill of the next tick.
     assert_eq!(carol.join_community(shared).unwrap(), community);
     let start = Instant::now();
-    while carol.communities().unwrap()[0].records < 2 + 5 + 1 {
+    loop {
+        let held = carol.communities().unwrap();
+        if held[0].records == RECORDS && held[0].name == "Trail club" {
+            break;
+        }
         assert!(
-            start.elapsed() < Duration::from_secs(60),
-            "{} records",
-            carol.communities().unwrap()[0].records
+            start.elapsed() < Duration::from_secs(20),
+            "{} records, name {:?}",
+            held[0].records,
+            held[0].name
         );
         std::thread::sleep(Duration::from_millis(100));
     }
     assert!(!carol.communities().unwrap()[0].is_owner);
-    // COM-247: the name comes from the metadata that verified under the
-    // roster, opened with the key of the link. The checkpoint settles the
-    // five posts, and each one renders into a sink.
-    assert_eq!(carol.communities().unwrap()[0].name, "Trail club");
+    // COM-247: the name came from the metadata that verified under the
+    // roster, opened with the key of the link. The two checkpoints settle
+    // ten posts, and each post renders into a sink.
     let posts = carol.community_posts(community.clone()).unwrap();
-    assert_eq!(posts.len(), 5);
-    assert!(posts.iter().all(|post| post.is_settled && !post.is_own));
+    assert_eq!(posts.len(), 25);
+    assert!(posts.iter().all(|post| !post.is_own));
+    assert_eq!(posts.iter().filter(|post| post.is_settled).count(), 10);
+    let own = alice.community_posts(community.clone()).unwrap();
+    let alice_author = own.iter().find(|post| post.is_own).unwrap().author.clone();
+    assert_eq!(own.iter().filter(|post| post.is_own).count(), 5);
+    let first = posts
+        .iter()
+        .find(|post| post.author == alice_author && post.index == 0)
+        .unwrap();
     let view = Arc::new(View::default());
     carol
-        .render_community_post(community.clone(), posts[0].key.clone(), view.clone())
+        .render_community_post(community.clone(), first.key.clone(), view.clone())
         .unwrap();
     assert_eq!(
         String::from_utf16(&view.0.lock().unwrap()).unwrap(),
         "post 0"
     );
-    let own = alice.community_posts(community.clone()).unwrap();
-    assert_eq!(own.len(), 5);
-    assert!(own
-        .iter()
-        .all(|post| post.is_own && post.author == posts[0].author));
 
     // A declined offer ends at both sides.
     let second = alice

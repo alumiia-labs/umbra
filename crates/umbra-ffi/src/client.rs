@@ -19,7 +19,7 @@ mod notify;
 mod posting;
 
 pub use backup::{BackupUpload, PendingBackup, RestoredBackup, RootWrite};
-pub use communities::{CommunityInfo, CommunityPostInfo, CommunityPull};
+pub use communities::{CommunityInfo, CommunityPostInfo, CommunityPull, PullKind};
 pub use dead::DeadWork;
 pub use files::{DownloadJob, ErasureJob, FileInfo, FileState, UploadJob};
 use files::{FileQueues, CHUNK_CRED, FILE_DATA, FILE_STATE};

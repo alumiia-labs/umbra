@@ -76,12 +76,12 @@ each column when a crate implements the requirement and a test covers it.
 | `DIS` | 123 | 37 | 0 | 0 | 1 | **161** |
 | `REL` | 124 | 32 | 1 | 0 | 2 | **159** |
 | `GRP` | 220 | 62 | 0 | 0 | 6 | **288** |
-| `COM` | 306 | 98 | 0 | 0 | 5 | **409** |
+| `COM` | 308 | 98 | 0 | 0 | 5 | **411** |
 | `ATT` | 140 | 46 | 1 | 0 | 2 | **189** |
 | `ABU` | 68 | 31 | 0 | 0 | 0 | **99** |
 | `IMP` | 112 | 41 | 0 | 0 | 2 | **155** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2264 | 722 | 7 | 0 | 54 | **3047** |
+| **All** | 2266 | 722 | 7 | 0 | 54 | **3049** |
 
 ## SCP — Scope and Conventions
 
@@ -2749,6 +2749,8 @@ Source: `spec/12-communities.md`
 | `COM-407` | §12.5.5 | MUST | (unstated) | When the relays of the first `CommunityMeta` have each answered the genesis roster and that meta with a `PUBACK`, the creator MUST send a formed step to the second owner. |  |  |
 | `COM-408` | §12.5.5 | MUST | A party | A party MUST take a formed step only for an accept that it sent to that contact. |  |  |
 | `COM-409` | §12.5.5 | MUST | A party | A party MUST drop an exchange whose `step` is not one of the four values, or whose `rest` does not have the length of its step. |  |  |
+| `COM-410` | §12.3.3 | MUST | (unstated) | A relay stops a page at the `B3` L5 payload too (`COM-182`), thus a client MUST also pull again when the room that a page leaves below 32 650 bytes is less than 8 023 bytes, the entry of a post at `MAX_POST_SIZE`. |  |  |
+| `COM-411` | §12.3.3 | MUST | A client | A client MUST go on with each pull of `COM-196` from the `next` value of its page until a page holds no entry. |  |  |
 
 ## ATT — Attachments and Large Objects
 

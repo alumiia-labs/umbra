@@ -11,8 +11,8 @@
 use umbra_core::{
     community::{
         link::CommunityLink,
-        pull::{PullResponse, RelayCursor, CURSOR_LEN},
-        pull_interval, COMMUNITY_RELAY_MAX, META_NAME_MAX,
+        pull::{PullRequest, PullResponse, RelayCursor, Selector, CURSOR_LEN, CURSOR_LEN_V1},
+        pull_interval, COMMUNITY_RELAY_MAX, META_NAME_MAX, PULL_BATCH, PULL_INTERVAL_MAX,
     },
     store::{
         engine::Backend,
@@ -32,6 +32,57 @@ const COMMUNITY_CURSOR: TableId = TableId(0x22);
 /// Each record that a pull brought, by its hash, owned by its community
 /// row. Two relays serve one record, and it is here one time (§12.2.1).
 pub(super) const COMMUNITY_RECORD: TableId = TableId(0x23);
+/// The next index of the control chain and of the metadata that the pulls
+/// of the join ask for (`COM-196`), owned by the community row. A
+/// community with no row starts both at 0.
+const COMMUNITY_JOIN: TableId = TableId(0x27);
+const JOIN_ROW_LEN: usize = 1 + 8 + 1 + 8 + 8;
+
+/// The pulls of the join of one community: the next index of each chain,
+/// or none when the chain is whole, and the time of the next try.
+struct JoinRow {
+    control: Option<u64>,
+    meta: Option<u64>,
+    retry_at: u64,
+}
+
+impl JoinRow {
+    fn new() -> Self {
+        JoinRow {
+            control: Some(0),
+            meta: Some(0),
+            retry_at: 0,
+        }
+    }
+
+    fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(JOIN_ROW_LEN);
+        for next in [self.control, self.meta] {
+            out.push(u8::from(next.is_some()));
+            out.extend_from_slice(&next.unwrap_or(0).to_be_bytes());
+        }
+        out.extend_from_slice(&self.retry_at.to_be_bytes());
+        out
+    }
+
+    fn parse(bytes: &[u8]) -> Result<Self, Error> {
+        if bytes.len() != JOIN_ROW_LEN {
+            return Err(Error::Integrity);
+        }
+        let number = |at: usize| -> Result<u64, Error> {
+            let part = bytes.get(at..at + 8).ok_or(Error::Integrity)?;
+            Ok(u64::from_be_bytes(
+                part.try_into().map_err(|_| Error::Integrity)?,
+            ))
+        };
+        let flag = |at: usize| bytes.get(at).copied() == Some(1);
+        Ok(JoinRow {
+            control: flag(0).then_some(number(1)?),
+            meta: flag(9).then_some(number(10)?),
+            retry_at: number(18)?,
+        })
+    }
+}
 
 const ROW_VERSION: u8 = 0x01;
 const CURSOR_ROW_LEN: usize = 32 + CURSOR_LEN + 8 + 8;
@@ -150,11 +201,14 @@ impl CursorRow {
     }
 
     fn parse(bytes: &[u8]) -> Result<Self, Error> {
-        if bytes.len() != CURSOR_ROW_LEN {
-            return Err(Error::Integrity);
-        }
+        // A row of the first form holds a cursor with no backfill window.
+        let cursor_len = match bytes.len() {
+            CURSOR_ROW_LEN => CURSOR_LEN,
+            len if len == CURSOR_ROW_LEN - CURSOR_LEN + CURSOR_LEN_V1 => CURSOR_LEN_V1,
+            _ => return Err(Error::Integrity),
+        };
         let (relay, rest) = bytes.split_at(32);
-        let (cursor, rest) = rest.split_at(CURSOR_LEN);
+        let (cursor, rest) = rest.split_at(cursor_len);
         let (pull_at, backfill_at) = rest.split_at(8);
         Ok(CursorRow {
             relay: relay.try_into().map_err(|_| Error::Integrity)?,
@@ -218,9 +272,33 @@ pub struct CommunityPull {
     pub relay: [u8; 32],
     /// The encoded `PullRequest`.
     pub request: Vec<u8>,
-    /// The `from` of a pull of the history behind the first page, or none
-    /// for a steady-state pull.
-    pub backfill_from: Option<u64>,
+    /// What the pull asks for.
+    pub kind: PullKind,
+}
+
+/// What one pull asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PullKind {
+    /// The records after the cursor of the relay (`COM-191`).
+    Steady,
+    /// The history behind the first page, from this `seq` (`COM-092`).
+    Backfill(u64),
+    /// The control chain from an `epoch_index` (`COM-196`).
+    Control,
+    /// The metadata from a `meta_index` (`COM-196`).
+    Meta,
+}
+
+fn chain_request(community_id: [u8; 32], selector: Selector, from: u64) -> Result<Vec<u8>, Error> {
+    Ok(PullRequest {
+        community_id,
+        selector,
+        pseudonym: [0; 32],
+        from,
+        count: PULL_BATCH,
+    }
+    .encode()?
+    .to_vec())
 }
 
 fn cursor_key(community_id: &[u8; 32], relay: &[u8; 32]) -> [u8; 64] {
@@ -343,6 +421,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let owned: Vec<(TableId, RowId)> = [
             COMMUNITY_CURSOR,
             COMMUNITY_RECORD,
+            COMMUNITY_JOIN,
             super::posting::COMMUNITY_AUTHOR,
             super::posting::COMMUNITY_OUTBOX,
         ]
@@ -408,7 +487,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     community_id,
                     relay: cursor.relay,
                     request: request.to_vec(),
-                    backfill_from: None,
+                    kind: PullKind::Steady,
                 });
                 cursor.pull_at = now.saturating_add(pull_interval(draw(rng)));
                 did_move = true;
@@ -419,7 +498,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         community_id,
                         relay: cursor.relay,
                         request: request.encode()?.to_vec(),
-                        backfill_from: Some(request.from),
+                        kind: PullKind::Backfill(request.from),
                     });
                     cursor.backfill_at = now.saturating_add(pull_interval(draw(rng)));
                     did_move = true;
@@ -429,11 +508,50 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 moved.push((owner, key, cursor));
             }
         }
-        if !moved.is_empty() {
+        // COM-196, COM-246: the join pulls the control chain and the
+        // metadata from their start, from the first relay of the community.
+        let mut joins = Vec::new();
+        {
+            let store = &self.open_ref()?.store;
+            for (owner, plain) in store.list(COMMUNITY, None)? {
+                let row = CommunityRow::parse(&Zeroizing::new(plain))?;
+                let key = store.row_id(COMMUNITY_JOIN, &row.community_id);
+                let mut join = match store.get(COMMUNITY_JOIN, &key)? {
+                    Some(plain) => JoinRow::parse(&plain)?,
+                    None => JoinRow::new(),
+                };
+                let (Some(relay), true) = (row.relays.first(), join.retry_at <= now) else {
+                    continue;
+                };
+                if join.control.is_none() && join.meta.is_none() {
+                    continue;
+                }
+                for (next, selector, kind) in [
+                    (join.control, Selector::Control, PullKind::Control),
+                    (join.meta, Selector::Meta, PullKind::Meta),
+                ] {
+                    if let Some(from) = next {
+                        pulls.push(CommunityPull {
+                            community_id: row.community_id,
+                            relay: *relay,
+                            request: chain_request(row.community_id, selector, from)?,
+                            kind,
+                        });
+                    }
+                }
+                // A pull that gets no answer goes again later.
+                join.retry_at = now.saturating_add(PULL_INTERVAL_MAX);
+                joins.push((owner, key, join));
+            }
+        }
+        if !moved.is_empty() || !joins.is_empty() {
             let open = self.open_mut()?;
             let mut batch = open.store.begin();
             for (owner, key, cursor) in &moved {
                 batch.put(COMMUNITY_CURSOR, *key, Some(*owner), &cursor.encode(), rng)?;
+            }
+            for (owner, key, join) in &joins {
+                batch.put(COMMUNITY_JOIN, *key, Some(*owner), &join.encode(), rng)?;
             }
             batch.commit()?;
         }
@@ -472,12 +590,38 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 backfill_at: now,
             },
         };
-        let again = match pull.backfill_from {
-            Some(from) => {
+        let join_key = open.store.row_id(COMMUNITY_JOIN, &pull.community_id);
+        let mut join = match open.store.get(COMMUNITY_JOIN, &join_key)? {
+            Some(plain) => Some(JoinRow::parse(&plain)?),
+            None => None,
+        };
+        let again = match pull.kind {
+            PullKind::Backfill(from) => {
                 cursor.cursor.on_backfill_page(&response, from);
-                false
+                None
             }
-            None => cursor.cursor.on_page(&response)?.pull_again,
+            PullKind::Steady => cursor
+                .cursor
+                .on_page(&response)?
+                .pull_again
+                .then_some((Selector::Sequence, 0)),
+            // COM-411: a page of a chain asks for the next one at once, and
+            // an empty page ends the pulls of that chain.
+            PullKind::Control | PullKind::Meta => {
+                let (selector, held) = match pull.kind {
+                    PullKind::Control => (
+                        Selector::Control,
+                        &mut join.get_or_insert_with(JoinRow::new).control,
+                    ),
+                    _ => (
+                        Selector::Meta,
+                        &mut join.get_or_insert_with(JoinRow::new).meta,
+                    ),
+                };
+                let goes_on = !response.entries.is_empty();
+                *held = goes_on.then_some(response.next);
+                goes_on.then_some((selector, response.next))
+            }
         };
         let mut fresh = Vec::new();
         for entry in &response.entries {
@@ -491,7 +635,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
         let fresh_count = fresh.len();
         let mut batch = open.store.begin();
-        batch.put(COMMUNITY_CURSOR, key, Some(owner), &cursor.encode(), rng)?;
+        if matches!(pull.kind, PullKind::Steady | PullKind::Backfill(_)) {
+            batch.put(COMMUNITY_CURSOR, key, Some(owner), &cursor.encode(), rng)?;
+        }
+        if let Some(join) = &join {
+            batch.put(COMMUNITY_JOIN, join_key, Some(owner), &join.encode(), rng)?;
+        }
         for (record_id, record) in fresh {
             let mut value = Vec::with_capacity(8 + record.len());
             value.extend_from_slice(&now.to_be_bytes());
@@ -502,15 +651,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if fresh_count > 0 {
             self.name_from_view(&pull.community_id, now, rng)?;
         }
-        if !again {
+        let Some((selector, from)) = again else {
             return Ok(None);
-        }
-        let request = cursor.cursor.request(pull.community_id).encode()?;
+        };
+        let request = match selector {
+            Selector::Sequence => cursor.cursor.request(pull.community_id).encode()?.to_vec(),
+            _ => chain_request(pull.community_id, selector, from)?,
+        };
         Ok(Some(CommunityPull {
             community_id: pull.community_id,
             relay: pull.relay,
-            request: request.to_vec(),
-            backfill_from: None,
+            request,
+            kind: pull.kind,
         }))
     }
 
@@ -670,6 +822,23 @@ mod tests {
             ..row
         };
         assert!(empty.encode().is_err());
+    }
+
+    #[test]
+    fn a_join_row_round_trips() {
+        let row = JoinRow {
+            control: Some(30),
+            meta: None,
+            retry_at: 99,
+        };
+        let back = JoinRow::parse(&row.encode()).unwrap();
+        assert_eq!(
+            (back.control, back.meta, back.retry_at),
+            (Some(30), None, 99)
+        );
+        let fresh = JoinRow::parse(&JoinRow::new().encode()).unwrap();
+        assert_eq!((fresh.control, fresh.meta), (Some(0), Some(0)));
+        assert!(JoinRow::parse(&[0; 3]).is_err());
     }
 
     #[test]
