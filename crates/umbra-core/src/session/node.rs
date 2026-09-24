@@ -191,6 +191,24 @@ pub enum ClientEvent {
         /// The encoded `QueueAddress` that a relay writes to.
         address: Vec<u8>,
     },
+    /// A report queue of Part 12 §12.5.3 exists at its relay. The caller
+    /// puts `address` in the `RosterEntry` of its role.
+    ReportQueue {
+        /// The handle that [`ClientNode::make_report_queue`] gave.
+        handle: u64,
+        /// The `RecipientId` of the queue.
+        recipient_id: [u8; 32],
+        /// The encoded `QueueAddress` that a member writes to.
+        address: Vec<u8>,
+    },
+    /// A report record arrived on a report queue (§12.5.3). It stays sealed
+    /// to the report key of the role.
+    Report {
+        /// The report queue.
+        recipient_id: [u8; 32],
+        /// The `ReportRecord`.
+        record: Vec<u8>,
+    },
     /// A digest arrived on a notify queue (`NTF-107`): the records of a
     /// group queue since the last digest.
     Digest {
@@ -585,6 +603,8 @@ enum Purpose {
     },
     /// The notify queue of a group (Part 8 §8.5.2).
     Notify,
+    /// The report queue of a role of a community (Part 12 §12.5.3).
+    Report,
     /// The queue and the bundle of a channel renewal that this device
     /// offers, as the responder (Part 3 §3.2.6).
     Renew {
@@ -608,11 +628,13 @@ enum Purpose {
     },
 }
 
-/// A notify queue of Part 8 §8.5.2: a queue of this device that no contact
-/// writes to, where a group-queue relay deposits its digests.
+/// A queue of this device that no contact writes to: a notify queue of
+/// Part 8 §8.5.2, where a group-queue relay deposits its digests, or a
+/// report queue of Part 12 §12.5.3, where a member writes a report.
 struct NotifyQueue {
     inbound: Inbound,
     relay: [u8; 32],
+    is_report: bool,
 }
 
 /// The fetch of a blob between its `IGET` and its `IBLOB`.
@@ -915,10 +937,16 @@ fn rotate_age(salt: &[u8; 16], queue: &[u8; 32]) -> u64 {
 /// The version of the stored form of a notify queue: the version, the relay,
 /// and the queue end.
 const NOTIFY_STORED_VERSION: u8 = 0x01;
+/// The version of the stored form of a report queue, in the same layout.
+const REPORT_STORED_VERSION: u8 = 0x02;
 
 fn notify_state(held: &NotifyQueue) -> Result<Zeroizing<Vec<u8>>, Error> {
     let mut writer = Writer::new();
-    writer.u8(NOTIFY_STORED_VERSION);
+    writer.u8(if held.is_report {
+        REPORT_STORED_VERSION
+    } else {
+        NOTIFY_STORED_VERSION
+    });
     writer.bytes(&held.relay);
     held.inbound.export(&mut writer)?;
     Ok(writer.finish())
@@ -1189,17 +1217,27 @@ impl ClientNode {
 
     /// Takes an invitation of an earlier run from its stored form, and
     /// returns its bundle.
+    /// A report queue comes back the same way.
     pub fn restore_notify_queue(&mut self, state: &[u8]) -> Result<[u8; 32], Error> {
         let mut reader = Reader::new(state);
-        if reader.u8()? != NOTIFY_STORED_VERSION {
-            return Err(Error::Malformed);
-        }
+        let is_report = match reader.u8()? {
+            NOTIFY_STORED_VERSION => false,
+            REPORT_STORED_VERSION => true,
+            _ => return Err(Error::Malformed),
+        };
         let relay = reader.array()?;
         let inbound = Inbound::restore(&mut reader)?;
         reader.end()?;
         let id = *inbound.recipient_id();
         self.assign(id, relay);
-        self.notify.insert(id, NotifyQueue { inbound, relay });
+        self.notify.insert(
+            id,
+            NotifyQueue {
+                inbound,
+                relay,
+                is_report,
+            },
+        );
         Ok(id)
     }
 
@@ -1698,6 +1736,14 @@ impl ClientNode {
     /// [`ClientEvent::NotifyQueue`] with the same handle follows.
     pub fn make_notify_queue<R: CryptoRng + ?Sized>(&mut self, rng: &mut R) -> Result<u64, Error> {
         self.make_queue(Purpose::Notify, rng)
+    }
+
+    /// Makes a report queue of Part 12 §12.5.3 for a role of a community.
+    /// A [`ClientEvent::ReportQueue`] with the same handle follows. The
+    /// node ends it as a notify queue, with
+    /// [`ClientNode::end_notify_queue`].
+    pub fn make_report_queue<R: CryptoRng + ?Sized>(&mut self, rng: &mut R) -> Result<u64, Error> {
+        self.make_queue(Purpose::Report, rng)
     }
 
     /// Takes an invitation of an earlier run from its stored form.
@@ -3723,23 +3769,34 @@ impl ClientNode {
         );
         let subscribe = inbound.subscribe(&session_pk, random(rng))?;
         self.queue_command(subscribe, Waiting::Other)?;
-        if matches!(keys.purpose, Purpose::Notify) {
+        if matches!(keys.purpose, Purpose::Notify | Purpose::Report) {
             let mut address = alloc::vec![0u8; QUEUE_ADDRESS_LEN];
             own_address().encode(&mut address)?;
+            let is_report = matches!(keys.purpose, Purpose::Report);
             let held = NotifyQueue {
                 inbound,
                 relay: queue_relay,
+                is_report,
             };
             self.changes.push(StateChange::NotifyQueue {
                 queue: ids.recipient_id,
                 state: notify_state(&held)?,
             });
             self.notify.insert(ids.recipient_id, held);
-            return Ok(alloc::vec![ClientEvent::NotifyQueue {
-                handle: keys.handle,
-                recipient_id: ids.recipient_id,
-                address,
-            }]);
+            let event = if is_report {
+                ClientEvent::ReportQueue {
+                    handle: keys.handle,
+                    recipient_id: ids.recipient_id,
+                    address,
+                }
+            } else {
+                ClientEvent::NotifyQueue {
+                    handle: keys.handle,
+                    recipient_id: ids.recipient_id,
+                    address,
+                }
+            };
+            return Ok(alloc::vec![event]);
         }
         if let Purpose::Rotate { contact, now } = keys.purpose {
             self.rotating.remove(&contact);
@@ -3786,8 +3843,11 @@ impl ClientNode {
                 });
                 (Setup::Inviting(Box::new(inviter)), None, [0u8; 32], bundle)
             }
-            // The notify queue and the rotation took their paths above.
-            Purpose::Notify | Purpose::Rotate { .. } => return Err(Error::Malformed),
+            // The notify queue, the report queue, and the rotation took
+            // their paths above.
+            Purpose::Notify | Purpose::Report | Purpose::Rotate { .. } => {
+                return Err(Error::Malformed)
+            }
             // NET-326: the bundle goes to the queue of the peer.
             Purpose::Renew { .. } => {
                 let (inviter, bundle) = Inviter::issue(&identity, own_address(), rng)?;
@@ -3874,12 +3934,30 @@ impl ClientNode {
     ) -> Result<Vec<ClientEvent>, Error> {
         if let Some(held) = self.notify.get_mut(&queue_id) {
             self.moved.insert(queue_id);
+            let is_report = held.is_report;
+            let opened = held.inbound.open(payload, bucket, now)?;
+            // COM-266: a member writes a report record to the queue that
+            // the roster names.
+            if is_report {
+                if let Opened::Record {
+                    kind: L6Kind::Report,
+                    inner,
+                    ..
+                } = opened
+                {
+                    return Ok(alloc::vec![ClientEvent::Report {
+                        recipient_id: queue_id,
+                        record: inner,
+                    }]);
+                }
+                return Ok(Vec::new());
+            }
             // NTF-107: a digest names the group queue that holds records.
             if let Opened::Record {
                 kind: L6Kind::NotifyDigest,
                 inner,
                 ..
-            } = held.inbound.open(payload, bucket, now)?
+            } = opened
             {
                 if let Ok(digest) = crate::notify::digest::NotifyDigest::parse(&inner) {
                     return Ok(alloc::vec![ClientEvent::Digest {
