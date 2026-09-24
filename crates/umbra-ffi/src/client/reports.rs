@@ -10,8 +10,9 @@
 use umbra_core::{
     community::{
         identity::RoleIdentity,
+        pull::{PullRequest, Selector},
         report::{self, CommunityReport, Reason},
-        REPORT_HOLD, REPORT_NOTE_MAX,
+        PULL_BATCH, REPORT_HOLD, REPORT_NOTE_MAX,
     },
     store::{
         engine::Backend,
@@ -122,13 +123,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// Opens a report record that reached a report queue of this device,
     /// under the role of each community that this device holds one of.
     /// A record that no role opens goes with no signal (`COM-282`). The
-    /// result says whether a report entered.
+    /// result is the pull of the post that the report names, when the view
+    /// does not hold it yet (`COM-283`).
     pub fn on_community_report<R: CryptoRng + ?Sized>(
         &mut self,
         record: &[u8],
         now: u64,
         rng: &mut R,
-    ) -> Result<bool, Error> {
+    ) -> Result<Option<super::CommunityPull>, Error> {
         let mut opened = None;
         {
             let store = &self.open_ref()?.store;
@@ -147,7 +149,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
         }
         let Some((owner, report)) = opened else {
-            return Ok(false);
+            return Ok(None);
         };
         let encoded = report.encode()?;
         let id = sha3_256(&[&encoded]);
@@ -161,7 +163,32 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut batch = open.store.begin();
         batch.put(COMMUNITY_REPORT, row_id, Some(owner), &value, rng)?;
         batch.commit()?;
-        Ok(true)
+        let view = self.community_view_of(&report.community_id, now)?;
+        let holds = view
+            .posts
+            .iter()
+            .any(|post| post.pseudonym == report.pseudonym && post.index == report.index);
+        if holds {
+            return Ok(None);
+        }
+        let (_, row) = self.community_row_of(&report.community_id)?;
+        let Some(relay) = row.relays.first() else {
+            return Ok(None);
+        };
+        let request = PullRequest {
+            community_id: report.community_id,
+            selector: Selector::Chain,
+            pseudonym: report.pseudonym,
+            from: u64::from(report.index),
+            count: PULL_BATCH,
+        }
+        .encode()?;
+        Ok(Some(super::CommunityPull {
+            community_id: report.community_id,
+            relay: *relay,
+            request: request.to_vec(),
+            kind: super::PullKind::Post,
+        }))
     }
 
     fn held_reports(&self, community_id: &[u8; 32]) -> Result<Vec<HeldReport>, Error> {

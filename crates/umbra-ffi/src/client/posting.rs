@@ -11,7 +11,7 @@ use umbra_core::{
         chain::AuthorChain,
         control::{ActionKind, ControlBody, ControlObject, ModerationAction, Role},
         identity::{AuthorIdentity, RoleIdentity},
-        social::text_body,
+        social::{reaction_body, text_body, PostRef},
         COMMUNITY_RELAY_MAX, NO_INDEX,
     },
     store::{
@@ -21,6 +21,7 @@ use umbra_core::{
     },
 };
 use umbra_crypto::{hash::sha3_256, rand_core::CryptoRng, zeroize::Zeroizing};
+use umbra_wire::app::signal::ReactionAction;
 
 use super::{communities::COMMUNITY, Client};
 use crate::Error;
@@ -88,10 +89,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// Posts a text in a community under the authoring identity of this
     /// device there. A checkpoint follows when the cadence of §12.4.1 asks
     /// for one. The post shows at once, and it goes to each relay.
+    /// `reply_to` names the post that this one answers (`COM-161`).
     pub fn post_to_community<R: CryptoRng + ?Sized>(
         &mut self,
         community_id: &[u8; 32],
         text: &[u8],
+        reply_to: Option<&[u8; 32]>,
         now: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
@@ -99,10 +102,75 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if text.trim().is_empty() {
             return Err(Error::Malformed);
         }
+        let target = match reply_to {
+            Some(key) => Some(self.post_ref(community_id, key, now)?),
+            None => None,
+        };
+        let body = text_body(community_id, text, target, &[]).map_err(|_| Error::TooLong)?;
+        self.append_own_post(community_id, &body, now, rng)
+    }
+
+    /// Adds or takes back a reaction of this device to a post (`COM-322`
+    /// to `COM-324`). A reaction is a record of the chain, thus the relays
+    /// count it and it shows in the tally of each reader.
+    pub fn react_to_community_post<R: CryptoRng + ?Sized>(
+        &mut self,
+        community_id: &[u8; 32],
+        key: &[u8; 32],
+        emoji: &str,
+        adds: bool,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        if !super::is_emoji(emoji) {
+            return Err(Error::Malformed);
+        }
+        // COM-332: a reaction that the owner dial forbids does not leave.
+        if self.community_view_of(community_id, now)?.reactions_off {
+            return Err(Error::Busy);
+        }
+        let target = self.post_ref(community_id, key, now)?;
+        let action = if adds {
+            ReactionAction::Add
+        } else {
+            ReactionAction::Remove
+        };
+        let body = reaction_body(community_id, target, action, emoji)?;
+        self.append_own_post(community_id, &body, now, rng)
+    }
+
+    /// The pseudonym and the index of a post of the view.
+    fn post_ref(
+        &self,
+        community_id: &[u8; 32],
+        key: &[u8; 32],
+        now: u64,
+    ) -> Result<PostRef, Error> {
+        let view = self.community_view_of(community_id, now)?;
+        let post = view
+            .posts
+            .iter()
+            .find(|post| post.hash == *key)
+            .ok_or(Error::NotFound)?;
+        Ok(PostRef {
+            pseudonym: post.pseudonym,
+            index: post.index,
+        })
+    }
+
+    /// Appends one body to the chain of this device, with a checkpoint when
+    /// the cadence asks for one.
+    fn append_own_post<R: CryptoRng + ?Sized>(
+        &mut self,
+        community_id: &[u8; 32],
+        body: &[u8],
+        now: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
         let (owner, row) = self.community_row_of(community_id)?;
         let author = AuthorIdentity::from_seed(&row.author_seed);
         let mut chain = self.author_chain(community_id, &author)?;
-        let body = text_body(community_id, text, None, &[]).map_err(|_| Error::TooLong)?;
+        let body = body.to_vec();
         let post = chain
             .append(&author, NO_INDEX, &body, now)
             .map_err(|_| Error::TooLong)?;
@@ -215,7 +283,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     }
 
     /// The community row and its row id, or `NotFound`.
-    fn community_row_of(
+    pub(super) fn community_row_of(
         &self,
         community_id: &[u8; 32],
     ) -> Result<(RowId, super::communities::CommunityRow), Error> {

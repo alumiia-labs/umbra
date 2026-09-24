@@ -596,8 +596,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             role_seed: Some(Secret::new(*row.role_seed.expose())),
             relays,
             name: row.name.clone(),
+            meta_flags: 0,
         };
         self.put_community(&community, rng)?;
+        // The creator holds the genesis roster and the first metadata, thus
+        // its view has the genesis before its first pull.
+        let genesis: Vec<Vec<u8>> = [&row.roster, &row.meta]
+            .into_iter()
+            .filter(|record| !record.is_empty())
+            .cloned()
+            .collect();
+        self.keep_community_records(&row.community_id, &genesis, now, rng)?;
         self.formed = true;
         self.put_forming(None, &row.community_id, rng)
     }

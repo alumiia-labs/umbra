@@ -2843,12 +2843,14 @@ fn an_app_creates_a_community_with_a_contact_and_a_third_app_joins_it() {
     for number in 0..5 {
         let draft = alice.new_community_draft();
         draft.set_text(units(&format!("post {number}"))).unwrap();
-        alice.post_to_community(community.clone(), draft).unwrap();
+        alice
+            .post_to_community(community.clone(), draft, None)
+            .unwrap();
     }
     assert_eq!(alice.communities().unwrap()[0].records, 2 + 5 + 1);
     let empty = alice.new_community_draft();
     assert_eq!(
-        alice.post_to_community(community.clone(), empty),
+        alice.post_to_community(community.clone(), empty, None),
         Err(FfiError::Malformed)
     );
     let start = Instant::now();
@@ -2868,7 +2870,8 @@ fn an_app_creates_a_community_with_a_contact_and_a_third_app_joins_it() {
     for number in 0..20 {
         let draft = bob.new_community_draft();
         draft.set_text(units(&format!("reply {number}"))).unwrap();
-        bob.post_to_community(community.clone(), draft).unwrap();
+        bob.post_to_community(community.clone(), draft, None)
+            .unwrap();
     }
     let start = Instant::now();
     while bob.communities().unwrap()[0].pending > 0 {
@@ -2986,6 +2989,61 @@ fn an_app_creates_a_community_with_a_contact_and_a_third_app_joins_it() {
             start.elapsed() < Duration::from_secs(30),
             "dave holds {} posts",
             posts.len()
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    // §12.6.1, §12.6.2: a member answers a post and reacts to it. The
+    // answer names its target, the reaction counts on the target and shows
+    // as no post, and the last action of a pseudonym decides (COM-334).
+    let target = carol
+        .community_posts(community.clone())
+        .unwrap()
+        .into_iter()
+        .find(|post| post.author == alice_author && post.index == 3)
+        .unwrap();
+    let before = carol.community_posts(community.clone()).unwrap().len();
+    let answer = carol.new_community_draft();
+    answer.set_text(units("see you there")).unwrap();
+    carol
+        .post_to_community(community.clone(), answer, Some(target.key.clone()))
+        .unwrap();
+    carol
+        .react_to_community_post(community.clone(), target.key.clone(), "👍".into(), true)
+        .unwrap();
+    assert_eq!(
+        carol.react_to_community_post(community.clone(), target.key.clone(), "hi".into(), true),
+        Err(FfiError::Malformed)
+    );
+    let held = carol.community_posts(community.clone()).unwrap();
+    assert_eq!(held.len(), before + 1);
+    let reply = held.iter().find(|post| post.is_own).unwrap();
+    assert_eq!(reply.reply_to.as_ref(), Some(&target.key));
+    let liked = held.iter().find(|post| post.key == target.key).unwrap();
+    assert_eq!(liked.reactions.len(), 1);
+    assert_eq!(
+        (
+            liked.reactions[0].emoji.as_str(),
+            liked.reactions[0].count,
+            liked.reactions[0].is_mine
+        ),
+        ("👍", 1, true)
+    );
+    carol
+        .react_to_community_post(community.clone(), target.key.clone(), "👍".into(), false)
+        .unwrap();
+    let held = carol.community_posts(community.clone()).unwrap();
+    assert!(held
+        .iter()
+        .find(|post| post.key == target.key)
+        .unwrap()
+        .reactions
+        .is_empty());
+    let start = Instant::now();
+    while carol.communities().unwrap()[0].pending > 0 {
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "the relays took no reaction"
         );
         std::thread::sleep(Duration::from_millis(100));
     }

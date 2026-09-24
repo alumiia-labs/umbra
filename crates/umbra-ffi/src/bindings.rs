@@ -243,6 +243,8 @@ pub struct FfiCommunity {
     /// The count of the posts and checkpoints of this device that a relay
     /// has not taken.
     pub pending: u32,
+    /// Whether the owners turned reactions off (`COM-330`).
+    pub reactions_off: bool,
 }
 
 /// One post of a community, as the timeline lists it. The text is not
@@ -263,6 +265,23 @@ pub struct FfiCommunityPost {
     pub is_own: bool,
     /// Whether a ban stands on the author (`COM-298`).
     pub is_author_banned: bool,
+    /// Whether the post is a repost (`COM-325`).
+    pub is_repost: bool,
+    /// The post that this one answers, when this device holds it.
+    pub reply_to: Option<Vec<u8>>,
+    /// The reactions to the post (`COM-333`).
+    pub reactions: Vec<FfiReactionCount>,
+}
+
+/// The reactions of one emoji on one community post.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiReactionCount {
+    /// The emoji.
+    pub emoji: String,
+    /// The count of the pseudonyms whose last reaction adds it.
+    pub count: u32,
+    /// Whether this device made one of them.
+    pub is_mine: bool,
 }
 
 /// A report that a role holder of this device holds (Part 12 §12.5.3).
@@ -3232,6 +3251,8 @@ impl Handle {
         if inner.run != run {
             return;
         }
+        // The pulls of the posts that reports name (`COM-283`).
+        let mut report_pulls = Vec::new();
         let Inner {
             client,
             bridge,
@@ -3324,7 +3345,9 @@ impl Handle {
             // COM-281: a report of a member reached a report queue of this
             // device.
             Update::Report { record, .. } => {
-                let _ = client.on_community_report(record, unix_now(), &mut OsRng);
+                if let Ok(Some(pull)) = client.on_community_report(record, unix_now(), &mut OsRng) {
+                    report_pulls.push(pull);
+                }
             }
             // COM-401, COM-404: the report queue of a role exists, thus the
             // exchange of the second owner goes on.
@@ -3416,6 +3439,9 @@ impl Handle {
         inner.pump_groups();
         inner.pump_ndr();
         inner.pump_forming();
+        for pull in report_pulls {
+            inner.send_pull(pull);
+        }
         // A community that formed from an exchange pulls at once.
         if inner.client.take_formed() {
             inner.pump_communities();
@@ -4608,17 +4634,25 @@ impl Handle {
         &self,
         community_id: Vec<u8>,
         draft: Arc<DraftHandle>,
+        reply_to: Option<Vec<u8>>,
     ) -> Result<(), FfiError> {
         let community_id =
             <[u8; 32]>::try_from(community_id.as_slice()).map_err(|_| FfiError::Malformed)?;
+        let reply_to = reply_to
+            .map(|key| <[u8; 32]>::try_from(key.as_slice()).map_err(|_| FfiError::Malformed))
+            .transpose()?;
         let draft = locked(&draft.0).take().ok_or(FfiError::NotFound)?;
         if draft.has_file() {
             return Err(FfiError::Malformed);
         }
         let mut inner = locked(&self.inner);
-        inner
-            .client
-            .post_to_community(&community_id, draft.text(), unix_now(), &mut OsRng)?;
+        inner.client.post_to_community(
+            &community_id,
+            draft.text(),
+            reply_to.as_ref(),
+            unix_now(),
+            &mut OsRng,
+        )?;
         drop(draft);
         inner.pump_posts();
         drop(inner);
@@ -4645,8 +4679,46 @@ impl Handle {
                 is_settled: post.is_settled,
                 is_own: post.is_own,
                 is_author_banned: post.is_author_banned,
+                is_repost: post.is_repost,
+                reply_to: post.reply_to.map(|key| key.to_vec()),
+                reactions: post
+                    .reactions
+                    .into_iter()
+                    .map(|(emoji, count, is_mine)| FfiReactionCount {
+                        emoji,
+                        count,
+                        is_mine,
+                    })
+                    .collect(),
             })
             .collect())
+    }
+
+    /// Adds or takes back a reaction of this device to a community post
+    /// (`COM-322`). The owner dial can turn reactions off (`COM-332`).
+    pub fn react_to_community_post(
+        &self,
+        community_id: Vec<u8>,
+        key: Vec<u8>,
+        emoji: String,
+        adds: bool,
+    ) -> Result<(), FfiError> {
+        let community_id =
+            <[u8; 32]>::try_from(community_id.as_slice()).map_err(|_| FfiError::Malformed)?;
+        let key = <[u8; 32]>::try_from(key.as_slice()).map_err(|_| FfiError::Malformed)?;
+        let mut inner = locked(&self.inner);
+        inner.client.react_to_community_post(
+            &community_id,
+            &key,
+            &emoji,
+            adds,
+            unix_now(),
+            &mut OsRng,
+        )?;
+        inner.pump_posts();
+        drop(inner);
+        self.changed.notify_all();
+        Ok(())
     }
 
     /// Writes the text of one post into the sink of the platform, which
@@ -4809,6 +4881,7 @@ impl Handle {
                 is_owner: info.is_owner,
                 joined_at: info.joined_at,
                 pending: u32::try_from(info.pending).unwrap_or(u32::MAX),
+                reactions_off: info.reactions_off,
             })
             .collect())
     }

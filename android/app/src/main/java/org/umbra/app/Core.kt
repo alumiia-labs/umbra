@@ -813,13 +813,19 @@ object Core {
         main.post { then() }
     }
 
+    /** Adds a reaction of this device to a community post, or takes it back. */
+    fun reactToCommunityPost(id: ByteArray, key: ByteArray, emoji: String, adds: Boolean) = call { client ->
+        client.reactToCommunityPost(id, key, emoji, adds)
+        main.post { revision++ }
+    }
+
     /** Posts a text in a community. This call overwrites the array. */
-    fun postToCommunity(id: ByteArray, text: CharArray) = call { client ->
+    fun postToCommunity(id: ByteArray, text: CharArray, replyTo: ByteArray? = null) = call { client ->
         val units = text.map { it.code.toUShort() }
         text.fill('\u0000')
         client.newCommunityDraft().use { draft ->
             draft.setText(units)
-            client.postToCommunity(id, draft)
+            client.postToCommunity(id, draft, replyTo)
         }
         refreshCommunities()
         main.post { revision++ }

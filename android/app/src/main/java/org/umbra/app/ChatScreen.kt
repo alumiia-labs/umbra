@@ -568,7 +568,7 @@ private fun Bubble(
 }
 
 /** The six reactions of the sheet, the first choices of the other messengers. */
-private val QUICK_REACTIONS = listOf("\u2764\uFE0F", "\uD83D\uDC4D", "\uD83D\uDC4E", "\uD83D\uDE02", "\uD83D\uDE2E", "\uD83D\uDE22")
+internal val QUICK_REACTIONS = listOf("\u2764\uFE0F", "\uD83D\uDC4D", "\uD83D\uDC4E", "\uD83D\uDE02", "\uD83D\uDE2E", "\uD83D\uDE22")
 
 /** One row of reactions at the top of the sheet of a message. */
 @Composable
@@ -747,7 +747,7 @@ private fun QuoteBlock(author: String?, text: CharArray?, modifier: Modifier = M
  * text.
  */
 @Composable
-private fun ComposerHeader(icon: String, words: String, onCancel: () -> Unit) {
+internal fun ComposerHeader(icon: String, words: String, onCancel: () -> Unit) {
     Column {
         Row(
             Modifier.fillMaxWidth().padding(start = 18.dp, end = 6.dp, top = 6.dp),

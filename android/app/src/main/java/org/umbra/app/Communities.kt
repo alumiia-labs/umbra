@@ -46,6 +46,8 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.layout.Arrangement
 import kotlinx.coroutines.delay
 import uniffi.umbra_ffi.FfiCommunity
 
@@ -308,9 +310,18 @@ fun CommunityScreen(id: List<Byte>, onBack: () -> Unit, push: (Screen) -> Unit) 
     }
     val composer = rememberPlatformField()
     var chosen by remember { mutableStateOf<CommunityLine?>(null) }
+    var answered by remember { mutableStateOf<CommunityLine?>(null) }
     val context = LocalContext.current
+    val react = { line: CommunityLine, emoji: String ->
+        val isMine = line.post.reactions.any { it.isMine && it.emoji == emoji }
+        Core.reactToCommunityPost(communityId, line.post.key, emoji, !isMine)
+    }
     chosen?.let { line ->
         val entries = buildList {
+            add(RowEntry("reply", "Reply") {
+                answered = line
+                composer.focus()
+            })
             add(RowEntry("copy", "Copy text") { copyPost(context, line.text) })
             // COM-273: each post that the client renders takes a report.
             if (!line.post.isOwn) {
@@ -333,7 +344,21 @@ fun CommunityScreen(id: List<Byte>, onBack: () -> Unit, push: (Screen) -> Unit) 
                 }
             }
         }
-        ActionSheet("Post", entries, onDismiss = { chosen = null })
+        ActionSheet(
+            "Post",
+            entries,
+            top = if (community.reactionsOff) {
+                null
+            } else {
+                {
+                    CommunityQuickReactions(line) { emoji ->
+                        react(line, emoji)
+                        chosen = null
+                    }
+                }
+            },
+            onDismiss = { chosen = null },
+        )
     }
     Column(Modifier.fillMaxSize()) {
         BackBar(
@@ -345,8 +370,17 @@ fun CommunityScreen(id: List<Byte>, onBack: () -> Unit, push: (Screen) -> Unit) 
         Box(Modifier.weight(1f)) {
             if (posts.isEmpty()) EmptyState("No posts yet.")
             LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
-                items(posts, key = { it.key }) { line -> PostRow(line) { chosen = line } }
+                items(posts, key = { it.key }) { line ->
+                    val target = line.post.replyTo?.let { key ->
+                        posts.firstOrNull { it.post.key.contentEquals(key) }
+                    }
+                    PostRow(line, target, onReact = { emoji -> react(line, emoji) }) { chosen = line }
+                }
             }
+        }
+        answered?.let { line ->
+            val who = if (line.post.isOwn) "yourself" else pseudonymLabel(line.post.author)
+            ComposerHeader("reply", "Replying to $who") { answered = null }
         }
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
@@ -376,7 +410,10 @@ fun CommunityScreen(id: List<Byte>, onBack: () -> Unit, push: (Screen) -> Unit) 
                     .clip(CircleShape)
                     .background(Palette.Action)
                     .clickable(role = Role.Button, onClickLabel = "Post") {
-                        composer.take()?.let { text -> Core.postToCommunity(communityId, text) }
+                        composer.take()?.let { text ->
+                            Core.postToCommunity(communityId, text, answered?.post?.key)
+                            answered = null
+                        }
                     },
                 contentAlignment = Alignment.Center,
             ) { FaIcon("paper-plane", label = "Post", size = 18.dp, tint = Color.White) }
@@ -393,8 +430,33 @@ private fun copyPost(context: Context, text: CharArray) {
     context.getSystemService(ClipboardManager::class.java).setPrimaryClip(clip)
 }
 
+/** The quick reactions at the top of the sheet of a post. */
 @Composable
-private fun PostRow(line: CommunityLine, onChoose: () -> Unit) {
+private fun CommunityQuickReactions(line: CommunityLine, onPick: (String) -> Unit) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+        for (emoji in QUICK_REACTIONS) {
+            val isMine = line.post.reactions.any { it.isMine && it.emoji == emoji }
+            Box(
+                Modifier
+                    .size(48.dp)
+                    .clip(CircleShape)
+                    .background(if (isMine) Palette.Container else Color.Transparent)
+                    .press(role = Role.Button, label = if (isMine) "Remove $emoji" else "React $emoji") {
+                        onPick(emoji)
+                    },
+                contentAlignment = Alignment.Center,
+            ) { Text(emoji, fontSize = 24.sp) }
+        }
+    }
+}
+
+@Composable
+private fun PostRow(
+    line: CommunityLine,
+    target: CommunityLine?,
+    onReact: (String) -> Unit,
+    onChoose: () -> Unit,
+) {
     val context = LocalContext.current
     Column(
         Modifier
@@ -430,8 +492,42 @@ private fun PostRow(line: CommunityLine, onChoose: () -> Unit) {
                 FaIcon("clock", label = "Not signed yet", size = 12.dp, tint = Palette.TextSecondary)
             }
         }
+        // COM-161: a reply shows the start of the post it answers.
+        if (line.post.replyTo != null) {
+            Spacer(Modifier.height(2.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                FaIcon("reply", size = 11.dp, tint = Palette.TextSecondary)
+                Spacer(Modifier.width(6.dp))
+                if (target != null) {
+                    PlatformText(target.text, Palette.TextSecondary, sizeSp = 13f, maxLines = 1)
+                } else {
+                    Text(
+                        "A post that this device does not hold",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Palette.TextSecondary,
+                    )
+                }
+            }
+        }
         Spacer(Modifier.height(2.dp))
         PlatformText(line.text, Palette.Text)
+        if (line.post.reactions.isNotEmpty()) {
+            Spacer(Modifier.height(4.dp))
+            Row {
+                for (reaction in line.post.reactions) {
+                    Box(
+                        Modifier
+                            .padding(end = 6.dp)
+                            .clip(CircleShape)
+                            .background(if (reaction.isMine) Palette.Container else Palette.Incoming)
+                            .press(role = Role.Button, label = reaction.emoji) { onReact(reaction.emoji) }
+                            .padding(horizontal = 10.dp, vertical = 3.dp),
+                    ) {
+                        Text("${reaction.emoji} ${reaction.count}", style = MaterialTheme.typography.labelMedium)
+                    }
+                }
+            }
+        }
     }
 }
 

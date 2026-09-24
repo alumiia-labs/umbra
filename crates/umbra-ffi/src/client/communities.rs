@@ -84,7 +84,9 @@ impl JoinRow {
     }
 }
 
-const ROW_VERSION: u8 = 0x01;
+/// The first form of a community row, with no flags of the metadata.
+const ROW_VERSION_V1: u8 = 0x01;
+const ROW_VERSION: u8 = 0x02;
 const CURSOR_ROW_LEN: usize = 32 + CURSOR_LEN + 8 + 8;
 
 /// One community of this device.
@@ -99,6 +101,9 @@ pub(super) struct CommunityRow {
     pub(super) role_seed: Option<Secret<32>>,
     pub(super) relays: Vec<[u8; 32]>,
     pub(super) name: String,
+    /// The `flags` of the current metadata that verified (`COM-330`,
+    /// `COM-331`).
+    pub(super) meta_flags: u8,
 }
 
 impl CommunityRow {
@@ -131,6 +136,7 @@ impl CommunityRow {
         }
         out.push(u8::try_from(self.name.len()).map_err(|_| Error::TooLong)?);
         out.extend_from_slice(self.name.as_bytes());
+        out.push(self.meta_flags);
         Ok(out)
     }
 
@@ -144,9 +150,11 @@ impl CommunityRow {
         let array32 = |part: &[u8]| -> Result<[u8; 32], Error> {
             part.try_into().map_err(|_| Error::Integrity)
         };
-        if take(1)? != [ROW_VERSION] {
-            return Err(Error::Integrity);
-        }
+        let has_flags = match take(1)? {
+            [ROW_VERSION] => true,
+            [ROW_VERSION_V1] => false,
+            _ => return Err(Error::Integrity),
+        };
         let community_id = array32(take(32)?)?;
         let fragment: [u8; 16] = take(16)?.try_into().map_err(|_| Error::Integrity)?;
         let joined_at = u64::from_be_bytes(take(8)?.try_into().map_err(|_| Error::Integrity)?);
@@ -164,6 +172,11 @@ impl CommunityRow {
         }
         let name_len = usize::from(*take(1)?.first().ok_or(Error::Integrity)?);
         let name = String::from_utf8(take(name_len)?.to_vec()).map_err(|_| Error::Integrity)?;
+        let meta_flags = if has_flags {
+            *take(1)?.first().ok_or(Error::Integrity)?
+        } else {
+            0
+        };
         if at != bytes.len() {
             return Err(Error::Integrity);
         }
@@ -175,6 +188,7 @@ impl CommunityRow {
             role_seed,
             relays,
             name,
+            meta_flags,
         })
     }
 }
@@ -236,6 +250,8 @@ pub struct CommunityInfo {
     pub is_owner: bool,
     /// The count of the records of this device that a relay has not taken.
     pub pending: usize,
+    /// Whether the owners turned reactions off (`COM-330`).
+    pub reactions_off: bool,
 }
 
 /// One post of a community as the platform lists it.
@@ -255,6 +271,13 @@ pub struct CommunityPostInfo {
     pub is_own: bool,
     /// Whether a ban stands on the author (`COM-298`).
     pub is_author_banned: bool,
+    /// Whether the post is a repost (`COM-325`).
+    pub is_repost: bool,
+    /// The post that this one answers, when the view holds it.
+    pub reply_to: Option<[u8; 32]>,
+    /// The reactions: each emoji, its count, and whether this device made
+    /// one of them.
+    pub reactions: Vec<(String, u32, bool)>,
 }
 
 /// A community row, the view of its records, and those records with the
@@ -289,6 +312,9 @@ pub enum PullKind {
     Control,
     /// The metadata from a `meta_index` (`COM-196`).
     Meta,
+    /// The post that a report names, under the selector of one chain
+    /// (`COM-283`).
+    Post,
 }
 
 fn chain_request(community_id: [u8; 32], selector: Selector, from: u64) -> Result<Vec<u8>, Error> {
@@ -361,6 +387,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             role_seed: None,
             relays,
             name: String::new(),
+            meta_flags: 0,
         };
         self.put_community(&row, rng)?;
         Ok(link.community_id)
@@ -394,6 +421,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 records,
                 is_owner: row.role_seed.is_some(),
                 pending: self.community_pending(&row_id)?,
+                reactions_off: row.meta_flags & umbra_core::community::meta::FLAG_REACTIONS_OFF
+                    != 0,
             });
         }
         out.sort_by_key(|info| (info.joined_at, info.community_id));
@@ -608,6 +637,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .on_page(&response)?
                 .pull_again
                 .then_some((Selector::Sequence, 0)),
+            PullKind::Post => None,
             // COM-411: a page of a chain asks for the next one at once, and
             // an empty page ends the pulls of that chain.
             PullKind::Control | PullKind::Meta => {
@@ -711,10 +741,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .iter()
             .map(|(at, record)| (sha3_256(&[record]), *at))
             .collect();
+        let by_reply: std::collections::BTreeMap<[u8; 16], [u8; 32]> = view
+            .posts
+            .iter()
+            .map(|post| (post.reply_id, post.hash))
+            .collect();
+        use umbra_core::community::view::PostKind;
+        // A reaction shows in the tally of its target, and as no post.
         let mut out: Vec<CommunityPostInfo> = view
             .posts
             .into_iter()
             .filter(|post| !post.is_removed && !post.is_withdrawn)
+            .filter(|post| post.kind != PostKind::Reaction)
             .map(|post| CommunityPostInfo {
                 key: post.hash,
                 author: post.pseudonym,
@@ -723,6 +761,19 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 is_settled: post.is_settled,
                 is_own: post.pseudonym == own,
                 is_author_banned: post.is_author_banned,
+                is_repost: post.kind == PostKind::Repost,
+                reply_to: post.reply_to.and_then(|id| by_reply.get(&id).copied()),
+                reactions: post
+                    .reactions
+                    .iter()
+                    .map(|count| {
+                        (
+                            count.emoji.clone(),
+                            u32::try_from(count.by.len()).unwrap_or(u32::MAX),
+                            count.by.contains(&own),
+                        )
+                    })
+                    .collect(),
             })
             .collect();
         out.sort_by_key(|post| (post.at, post.author, post.index));
@@ -774,11 +825,50 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         rng: &mut R,
     ) -> Result<(), Error> {
         let (mut row, view, _) = self.community_view(community_id, now)?;
-        let Some(name) = view.name.filter(|name| *name != row.name) else {
+        let mut flags = 0u8;
+        if view.reactions_off {
+            flags |= umbra_core::community::meta::FLAG_REACTIONS_OFF;
+        }
+        if view.reposts_off {
+            flags |= umbra_core::community::meta::FLAG_REPOSTS_OFF;
+        }
+        let name = view.name.unwrap_or_else(|| row.name.clone());
+        if name == row.name && flags == row.meta_flags {
             return Ok(());
-        };
+        }
         row.name = name;
+        row.meta_flags = flags;
         self.put_community(&row, rng)
+    }
+
+    /// Keeps records of a community that this device made or holds from
+    /// another path, as a pull keeps them: one time for each hash.
+    pub(super) fn keep_community_records<R: CryptoRng + ?Sized>(
+        &mut self,
+        community_id: &[u8; 32],
+        records: &[Vec<u8>],
+        now: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let (owner, _) = self.community_row(community_id)?.ok_or(Error::NotFound)?;
+        let open = self.open_mut()?;
+        let rows: Vec<_> = records
+            .iter()
+            .map(|record| {
+                let row_id = open
+                    .store
+                    .row_id(COMMUNITY_RECORD, &record_key(community_id, record));
+                let mut value = Vec::with_capacity(8 + record.len());
+                value.extend_from_slice(&now.to_be_bytes());
+                value.extend_from_slice(record);
+                (row_id, value)
+            })
+            .collect();
+        let mut batch = open.store.begin();
+        for (row_id, value) in rows {
+            batch.put(COMMUNITY_RECORD, row_id, Some(owner), &value, rng)?;
+        }
+        Ok(batch.commit()?)
     }
 
     /// Each record of a community that this device holds, with the time it
@@ -817,6 +907,7 @@ mod tests {
             role_seed: Some(Secret::new([4; 32])),
             relays: vec![[5; 32], [6; 32], [7; 32]],
             name: "trail club".into(),
+            meta_flags: 0,
         };
         let bytes = row.encode().unwrap();
         let back = CommunityRow::parse(&bytes).unwrap();
