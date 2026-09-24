@@ -547,7 +547,7 @@ pub async fn dial_next(
 /// deployment passes [`PACING_MEAN_MS`] (`NET-077`), and a test passes less.
 /// `carried` gives what the relay serves over HTTPS beside the upgrade.
 /// `replicas` names each other relay with the attachment role, for the
-/// copies of Part 13 §13.4.1.
+/// copies of Part 12 §12.4.1.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_relay(
     node: RelayNode,

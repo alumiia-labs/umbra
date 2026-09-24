@@ -1,5 +1,5 @@
 //! XChaCha20-Poly1305 with a 24-byte nonce, for the objects at rest and
-//! the sealed blobs of Parts 3, 4, 13, and 15. The two functions with the
+//! the sealed blobs of Parts 3, 4, 12, and 14. The two functions with the
 //! `_ietf` suffix are ChaCha20-Poly1305 with the 12-byte nonce of RFC 8439,
 //! for the HPKE seal of the OHTTP request of Part 8.
 

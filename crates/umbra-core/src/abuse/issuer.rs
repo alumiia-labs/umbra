@@ -1,4 +1,4 @@
-//! The issuer keys a client accepts (Part 14 §14.5, §14.6): one key of
+//! The issuer keys a client accepts (Part 13 §13.5, §13.6): one key of
 //! each type for each epoch, from the transparency log. The log is the
 //! combined tree of Part 9 §9.5.1. An issuer key is the entry of the label
 //! `"umbra/v1/issuer-key" || token_type || epoch`, and that label holds
@@ -29,9 +29,9 @@ pub fn issuer_label_input(token_type: u16, epoch: u32) -> Vec<u8> {
 /// The entry of one issuer key in the log.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IssuerKeyEntry {
-    /// The token type of Part 14 §14.3.
+    /// The token type of Part 13 §13.3.
     pub token_type: u16,
-    /// The epoch of Part 14 §14.6.
+    /// The epoch of Part 13 §13.6.
     pub epoch: u32,
     /// The public key of the issuer for that type and that epoch.
     pub public_key: Vec<u8>,

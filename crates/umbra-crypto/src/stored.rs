@@ -1,6 +1,6 @@
 //! The byte form of state that a client keeps between two runs. The form
 //! is local to one device: no peer reads it, and the at-rest store of
-//! Part 15 §15.6.4 seals it. A version byte leads each object, thus a later
+//! Part 14 §14.6.4 seals it. A version byte leads each object, thus a later
 //! revision reads the rows of an earlier one or rejects them.
 //!
 //! The writer overwrites its buffer at the drop, because the state holds

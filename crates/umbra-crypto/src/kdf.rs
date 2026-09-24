@@ -1,4 +1,4 @@
-//! The memory-hard KDF of Part 4 §4.7.1 and Part 15 §15.6.4: Argon2id.
+//! The memory-hard KDF of Part 4 §4.7.1 and Part 14 §14.6.4: Argon2id.
 
 use argon2::{Algorithm, Argon2, Params, Version};
 

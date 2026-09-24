@@ -1,4 +1,4 @@
-//! The upload of one chunk (Part 13 §13.4.1): a registration at each
+//! The upload of one chunk (Part 12 §12.4.1): a registration at each
 //! replica, one `CPUT`, one `CREP`, and the verification sample. The
 //! client holds the write credential until the chunk is erased.
 

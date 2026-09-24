@@ -1,4 +1,4 @@
-# Dependency policy of Part 15 §15.2.7.
+# Dependency policy of Part 14 §14.2.7.
 # Each allow entry names its register. A transitive crate that is not on the
 # list fails the build. A skip entry carries a date and a cause, and CI fails
 # on one older than 90 days.
@@ -18,10 +18,10 @@ unmaintained = "workspace"
 
 [licenses]
 version = 2
-# LGPL-3.0-only covers equix and hashx alone, which Part 14 §14.8 names; the
+# LGPL-3.0-only covers equix and hashx alone, which Part 13 §13.8 names; the
 # LGPL combines into the AGPL-3.0-only workspace under GPLv3 §13.
 allow = ["MIT", "Apache-2.0", "BSD-3-Clause", "Unicode-3.0", "AGPL-3.0-only", "LGPL-3.0-only"]
-# The platform graph of register R3 (Part 15 §15.2.3) adds three licences,
+# The platform graph of register R3 (Part 14 §14.2.3) adds three licences,
 # each for the named crates alone. MPL-2.0 is file-level copyleft: UMBRA
 # changes no uniffi file, and MPL-2.0 §3.3 lets it combine into the AGPL.
 # ISC and CDLA-Permissive-2.0 are permissive. `check.sh` checks the
@@ -50,7 +50,7 @@ skip = []
 # The allow list closes the graph. Register R1 is the message core of Part 5
 # §5.1. An entry marked `build` is a proc-macro, a build script, or a crate
 # that only those reach; no binary links it, thus it charges no register cap
-# (Part 15 §15.2.3), and DEPENDENCIES.md lists it apart.
+# (Part 14 §14.2.3), and DEPENDENCIES.md lists it apart.
 allow = [
   { crate = "aead" },                    # R1
   { crate = "argon2" },                  # R2, AUX-4

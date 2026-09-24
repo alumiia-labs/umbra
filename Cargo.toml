@@ -19,7 +19,7 @@ expect_used = "deny"
 indexing_slicing = "deny"
 panic = "deny"
 
-# A proof of work of Part 14 takes seconds in a build with no optimization,
+# A proof of work of Part 13 takes seconds in a build with no optimization,
 # thus a debug build and each test optimize the two crates of Equi-X.
 [profile.dev.package.equix]
 opt-level = 3

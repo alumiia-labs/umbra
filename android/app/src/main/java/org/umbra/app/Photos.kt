@@ -43,7 +43,7 @@ import uniffi.umbra_ffi.DraftHandle
 import uniffi.umbra_ffi.FileSink
 import uniffi.umbra_ffi.MsgFile
 
-/** The media class of an image in a descriptor (Part 13 §13.3). */
+/** The media class of an image in a descriptor (Part 12 §12.3). */
 const val CLASS_IMAGE: UByte = 1u
 
 /** The states of the file of a message, as the core gives them. */
@@ -55,7 +55,7 @@ const val FILE_FAILED = 4
 /** The longest side of a photo after the re-encode. */
 private const val PHOTO_SIDE_MAX = 2_048
 
-/** `IMAGE_REENCODE_BYTES` of Part 13 §13.7. */
+/** `IMAGE_REENCODE_BYTES` of Part 12 §12.7. */
 private const val PHOTO_BYTES_MAX = 2 * 1_024 * 1_024
 
 /** The longest side of a photo in a bubble. A larger decode wastes memory. */

@@ -43,7 +43,7 @@ available:
 > **Bound what a crawl gives.** The directory contains only ephemeral,
 > single-purpose, and rotatable values. A full crawl gives the list of the
 > handles and sufficient data to send a contact request to each one. It gives
-> nothing that names a person, and Part 16 §16.2.5 states the residual.
+> nothing that names a person, and Part 15 §15.2.5 states the residual.
 
 ## 9.2 Scope: opted-in entries only
 
@@ -135,7 +135,7 @@ apply to that picture.
    state, and no party receives it.
 
 > *Cause.* Image metadata carries GPS coordinates. A picture above `B2` becomes
-> a Part 13 attachment, and an attachment has a different metadata profile. A
+> a Part 12 attachment, and an attachment has a different metadata profile. A
 > size fingerprint is not a cause here, because Part 3 §3.3 pads each cell to
 > one of four sizes. Thus each picture inside `B2` looks the same on the wire.
 
@@ -217,7 +217,7 @@ thus no address label equals a handle label.
 > and no index resolved the string. The handle index of §9.3 holds `HK_pub`,
 > which Part 4 rule `IDN-105` keeps apart from `PublicAddressKey_j`, thus that
 > index cannot serve the address. The address is a 160-bit value, thus a crawl
-> that enumerates the handle index finds no address entry. Part 16 §16.2.5
+> that enumerates the handle index finds no address entry. Part 15 §15.2.5
 > states that difference. `DIS-106` keeps the two entries of one Profile apart
 > at the rendezvous queue, because one shared queue address links the handle to
 > the address under a crawl. Part 4 §4.2.4 gives the cause of that separation.
@@ -242,18 +242,18 @@ and it shows nothing about the handle in the query.
 ### 9.4.1 Metering with anonymous tokens
 
 The rate limit applies to the **OPRF evaluations** and not to the tree lookups.
-The rate limit uses the first-party token of Part 14 §14.3.2 and not accounts.
-There is one token for each evaluation. The issuer of Part 14 §14.9 issues the
+The rate limit uses the first-party token of Part 13 §13.3.2 and not accounts.
+There is one token for each evaluation. The issuer of Part 13 §13.9 issues the
 tokens, and its key is separate from the key of the directory.
 
 Obey the warning in RFC 9576. **Each bit of token metadata decreases the
 anonymity set exponentially, and a key rotation divides the users.** Thus UMBRA
 uses one token type, one issuer configuration, and one slow globally
-synchronized rotation schedule (Part 14 §14.6).
+synchronized rotation schedule (Part 13 §13.6).
 
 A cheap proof-of-work on the client is the layer below. It is a fallback with no
 dependency. Thus the directory degrades gracefully, and it does not fail closed,
-if the issuer is unavailable. Part 14 §14.8 rule `ABU-070` gives the directory
+if the issuer is unavailable. Part 13 §13.8 rule `ABU-070` gives the directory
 an effort floor of `POW_LOOKUP_FLOOR`, thus a lookup with no token is not free.
 
 ## 9.5 The transparency log
@@ -301,7 +301,7 @@ the log ever took, thus it only grows. The **log tree** is the left-balanced
 tree of Part 10 §10.5.3 over one `log_leaf_e` for each epoch `e`, and
 `tree_size` of §9.5.2 counts those leaves. `opening` is 32 bytes from the
 CSPRNG of the log operator. `entry` is the encoded `DirectoryEntry`,
-`AddressEntry`, or `IssuerKeyEntry` of Part 14 §14.5. Part
+`AddressEntry`, or `IssuerKeyEntry` of Part 13 §13.5. Part
 5 §5.11 holds the label.
 
 - **[DIS-145]** The VRF input of a version MUST be `search_key || BE32(version)`,
@@ -541,8 +541,8 @@ auditor holds the intent of the holder.
     that label.
 14. **[DIS-065]** A client MUST reject a `LogKeySet` whose `keyset_epoch` is at
     or below the `keyset_epoch` that the client holds.
-15. **[DIS-066]** A client build MUST ship the genesis `LogKeySet`. Part 16
-    §16.5 puts the build under binary transparency.
+15. **[DIS-066]** A client build MUST ship the genesis `LogKeySet`. Part 15
+    §15.5 puts the build under binary transparency.
 
 Two signers rotate the third out when an auditor stops, disputes, or receives
 a legal order. Thus the loss of one signer costs one rotation and not the
@@ -613,7 +613,7 @@ directory.
 > *Cause.* An earlier draft said that a client attaches the hash to a fraction of
 > the ordinary messages, and Part 6 gave no field, no application kind, and no
 > capacity row. Part 6 §6.4.2 rule 6 also fills the L6 record to a fixed length,
-> thus no spare byte holds a hash. Part 16 §16.4 names this gossip as the answer
+> thus no spare byte holds a hash. Part 15 §15.4 names this gossip as the answer
 > to directory equivocation, and Part 10 rule `REL-008` requires the same
 > mechanism for the consensus root. The record of Part 6 §6.6.4 serves the two.
 
@@ -627,7 +627,7 @@ directory.
 | **Index blinding** | **ECVRF-EDWARDS25519-SHA512-TAI (RFC 9381) — classically secure only** |
 
 **[DIS-012]** **An implementation MUST state this limit in its user-facing documentation.**
-Part 16 §16.2.6 records the same limit as a residual risk. A harvested log and a
+Part 15 §15.2.6 records the same limit as a residual risk. A harvested log and a
 future cryptographically relevant quantum computer together **de-blind the full
 historical directory**.
 
@@ -645,7 +645,7 @@ decision again before v2.
 ```
 1. Initiator looks up @alice → (HK_pub, rendezvous_queue).
 2. Initiator sends a hello to the rendezvous queue, encapsulated to HK_pub,
-   with the Admission of Part 14 §14.4 at its end.
+   with the Admission of Part 13 §13.4 at its end.
 3. Alice reviews the request and accepts.
 4. BOTH sides mint fresh pairwise identities and fresh unidirectional queues on
    INDEPENDENTLY selected relays.
@@ -662,10 +662,10 @@ directory serves a prekey, and Part 5 §5.4.5 states that rule.
 each hello. **[DIS-087]** A client that accepts a request MUST
 send flight 1 of Part 5 §5.4.2 to the `queue_address` of those fields.
 
-**[DIS-131]** A client MUST end a hello with one `Admission` of Part 14 §14.2,
+**[DIS-131]** A client MUST end a hello with one `Admission` of Part 13 §13.2,
 inside the AEAD of the hello. **[DIS-132]** That `Admission` MUST hold a
-cross-relay token of Part 14 §14.3.1 or a `PowSolution` of Part 14 §14.4. Part
-14 §14.4 gives the verification at the addressee, and the queue relay reads a
+cross-relay token of Part 13 §13.3.1 or a `PowSolution` of Part 13 §13.4. Part
+14 §13.4 gives the verification at the addressee, and the queue relay reads a
 padded message and nothing more.
 
 **[DIS-143]** A client MUST seal a hello as `0x01 || ct || nonce [24]u8 ||
@@ -679,8 +679,8 @@ Admission`. Part 5 §5.11 holds the label.
 **Contact through a Public Address.** The initiator holds the 20-byte address
 from a pasted string or from a reusable link of Part 4 §4.3.2. Step 1 then
 looks up the `AddressEntry` of §9.3.3, and it gets `(address_pk, rendezvous)`.
-**[DIS-110]** A client MUST encapsulate that hello to `address_pk`. Part 14
-§14.4 derives the proof-of-work seed from `address_pk`. Steps 3 to 5 do not
+**[DIS-110]** A client MUST encapsulate that hello to `address_pk`. Part 13
+§13.4 derives the proof-of-work seed from `address_pk`. Steps 3 to 5 do not
 change. Part 8
 §8.2.6 gives the drain of the rendezvous queue at the addressee, and Part 2
 §2.4.2 goal S1 sets the latency.
@@ -771,11 +771,11 @@ pairwise identity key, and IDN-025 makes that notice blocking.
 
 | Control | Rule |
 | --- | --- |
-| Registration cost | One first-party token of Part 14 §14.3.2, with no proof-of-work fallback (Part 14 §14.2). **A phone number or an email address is prohibited.** |
+| Registration cost | One first-party token of Part 13 §13.3.2, with no proof-of-work fallback (Part 13 §13.2). **A phone number or an email address is prohibited.** |
 | Format | `@name#dddd`. A discriminator of 2 to 9 digits prevents nickname squatting |
 | Lease | A handle has a lease of `HANDLE_LEASE`. The user renews the lease with the challenge of §9.9.1. The directory tombstones a handle with no renewal |
 | Tombstone | A tombstoned label stays reserved for its last holder for `HANDLE_RESERVE`. A registration after that period is a takeover, and §9.9.2 gives the warning |
-| Rendezvous rate limit | A cross-relay token or a proof of work for each request, and `HELLO_INBOUND_LIMIT` hellos in each epoch. Part 14 §14.4 gives both |
+| Rendezvous rate limit | A cross-relay token or a proof of work for each request, and `HELLO_INBOUND_LIMIT` hellos in each epoch. Part 13 §13.4 gives both |
 | Rotation | A rotation of the handle or of the rendezvous address is **instant and one tap**. §9.9.3 authorizes the write. The client also rotates the rendezvous address at each `RENDEZVOUS_ROTATE` |
 
 A trivial rotation is the objective. It is the real defense of the user against
@@ -793,7 +793,7 @@ holds nothing worth a second crawl.
 
 > *Cause.* An earlier draft made each rotation a user action. A published queue
 > address is a public value. The relay that holds it reads the hello count and
-> the hello times of the entry for as long as the address stands. Part 16 §16.3
+> the hello times of the entry for as long as the address stands. Part 15 §15.3
 > states that residual, and the schedule bounds it to one period. The cost is
 > one `NEW` and one directory write in each period.
 

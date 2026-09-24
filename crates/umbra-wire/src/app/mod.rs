@@ -51,7 +51,7 @@ pub enum Class {
 pub enum AppKind {
     /// UTF-8 text.
     Text = 0x01,
-    /// A `FileDescriptor` of Part 13.
+    /// A `FileDescriptor` of Part 12.
     Attachment = 0x02,
     /// A `ReactionBody`.
     Reaction = 0x03,
@@ -283,7 +283,7 @@ mod tests {
         out[31] = b'h';
         out[1] = 0x12;
         assert!(AppMessage::parse(&out, Channel::Pairwise).is_err());
-        // The kinds of the withdrawn Part 12 are retired.
+        // A kind that the table does not list fails (`WIR-433`).
         for retired in [0x0D, 0x0E, 0x11, 0x38] {
             out[1] = retired;
             assert!(AppMessage::parse(&out, Channel::Group).is_err());

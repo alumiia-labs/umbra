@@ -2,7 +2,7 @@
 # Runs a test network of seven relays on this machine, on the ports 7441 to
 # 7447, under the test authority of tests/fixtures/tls: two ingress relays,
 # two relays of layer 2, and three queue relays. The three hold the three
-# copies of a chunk (Part 13 §13.4). Thus the circuits of a client
+# copies of a chunk (Part 12 §12.4). Thus the circuits of a client
 # take chains that differ, and two clients can hold their queues at two
 # relays. A client pins the two ingress relays, and with one of them down it
 # dials the other one. An Android emulator reaches them at 10.0.2.2.

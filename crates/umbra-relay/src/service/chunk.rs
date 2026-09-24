@@ -1,4 +1,4 @@
-//! The chunk service of Part 13: the registration of a chunk, its bytes, a
+//! The chunk service of Part 12: the registration of a chunk, its bytes, a
 //! fetch, a proof of possession, and the erase. The store of
 //! `umbra_core::attach` holds the rules of the two classes, of the quota,
 //! and of the egress budget. This service authorizes each command and gives
@@ -213,7 +213,7 @@ impl ChunkService {
                 let targets = CrepPayload::parse(command.payload).map_err(|_| Reject::Rejected)?;
                 let proof = self.held_proof(command)?;
                 // A copy for a replica is no fetch, thus it takes nothing from
-                // the egress budget of §13.11.
+                // the egress budget of §12.11.
                 let chunk = self
                     .store
                     .bytes(&chunk_id)

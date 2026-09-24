@@ -11,9 +11,9 @@ repository.workspace = true
 workspace = true
 
 [features]
-# The native stack of Part 15 §15.2.8: rustls on aws-lc-rs, quinn, tokio.
+# The native stack of Part 14 §14.2.8: rustls on aws-lc-rs, quinn, tokio.
 # It builds a C library, thus it is off by default and CI turns it on
-# where the toolchain exists. The web client of §15.7 uses no stack here.
+# where the toolchain exists. The web client of §14.7 uses no stack here.
 native = ["dep:rustls", "dep:quinn", "dep:tokio", "dep:tokio-rustls", "dep:webpki-roots"]
 
 [dependencies]

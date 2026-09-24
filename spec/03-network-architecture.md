@@ -142,8 +142,8 @@ authorized_bytes = version || cmd || queue_id || BE16(payload_len)
 ```
 
 **[NET-119]** A party MUST set `bind` to the empty byte string for each command
-of Part 6 §6.4. **[NET-120]** For a `CPUT` of Part 13 §13.3.3, a party MUST set
-`bind` to the 32-byte `storage_token` of that section. Part 13 rule `ATT-042`
+of Part 6 §6.4. **[NET-120]** For a `CPUT` of Part 12 §12.3.3, a party MUST set
+`bind` to the 32-byte `storage_token` of that section. Part 12 rule `ATT-042`
 states the same binding, and this rule gives its encoding.
 
 **The session key.** A command reaches its relay over a circuit of §3.4, and
@@ -179,7 +179,7 @@ before in the same transport session. **[NET-123]** A relay MUST NOT retain a
 > queue to another queue. `corr_id` is unique for each command, thus the
 > rejection of a repeated value stops a replay inside one session. The session
 > scope bounds the state that a relay holds, and NET-123 keeps that state out of
-> the compellable set of Part 16 §16.1.
+> the compellable set of Part 15 §15.1.
 
 A relay verifies the authenticator when it computes the shared secret again. The
 authenticator is symmetric, and a shared secret keys it. Thus **the logs of a
@@ -459,8 +459,8 @@ does not arrive.
 The two parties hold the pairwise identities of Part 4 §4.2.2, and a restore
 keeps them. Each party derives one secret from the two X25519 keys. From that
 secret, it derives the handle, the read key, and the content key of a
-**dead-channel blob**. The blob is one handle-addressed chunk of Part 13
-§13.4.2, and it holds the `QueueAddress` of the current queue of the writer.
+**dead-channel blob**. The blob is one handle-addressed chunk of Part 12
+§12.4.2, and it holds the `QueueAddress` of the current queue of the writer.
 
 ```
 ss_pair       = X25519( own_pairwise_x25519_sk, peer_pairwise_x25519_pk )
@@ -471,7 +471,7 @@ read_sk(P, w) = HKDF-Expand( prk, 0x02 || BE32(w) || P_pairwise_x25519_pk, 32 )
 blob_key(P,w) = HKDF-Expand( prk, 0x03 || BE32(w) || P_pairwise_x25519_pk, 32 )
 
 DeadChannelBlob {                 // the sealed object, before the padding of
-                                  // Part 13 rule ATT-147
+                                  // Part 12 rule ATT-147
     version       u8              // 0x01
     nonce         [24]u8          // from the device CSPRNG
     sealed        [145]u8         // XChaCha20-Poly1305( blob_key, nonce, QueueAddress )
@@ -489,7 +489,7 @@ the derivation.
 7. **[NET-182]** A client whose channel to a contact is dead MUST make a new
    queue for that contact. **[NET-183]** That client MUST write a
    `DeadChannelBlob` with the `QueueAddress` of that queue under
-   `handle(own, week)` and `read_sk(own, week)`. Part 13 §13.4.2 gives the
+   `handle(own, week)` and `read_sk(own, week)`. Part 12 §12.4.2 gives the
    chunk, and `read_pk` is the public key of that `read_sk`. **[NET-184]**
    That client MUST write the blob again under the handle of each new week
    while the channel stays dead. **[NET-185]** That client MUST send a `CDEL`
@@ -497,7 +497,7 @@ the derivation.
 8. **[NET-186]** If a channel is dead or silent, the client MUST fetch
    `handle(peer, week)` and `handle(peer, week - 1)`. The `peer` is the contact
    of that channel. The fetch of a week `w` uses `read_sk(peer, w)` under Part
-   13 §13.4.2.
+   13 §12.4.2.
    **[NET-187]** A client MUST repeat that fetch one time in each week while
    the condition holds. **[NET-188]** A client MUST draw the time of each
    fetch from a uniform distribution over 24 hours. The 24 hours start at the
@@ -513,7 +513,7 @@ the derivation.
     send again each record that holds no delivery receipt. §3.7 gives the
     schedule of a retransmission.
 11. **[NET-194]** A client MUST NOT write a `DeadChannelBlob` for a contact
-    that the user blocked under Part 14 §14.12. **[NET-197]** A client MUST
+    that the user blocked under Part 13 §13.12. **[NET-197]** A client MUST
     NOT fetch the dead-channel handle of a blocked contact.
 
 > *Cause.* `QUEUE_IDLE_TTL` is 60 days, thus two contacts that lapse for two
@@ -521,7 +521,7 @@ the derivation.
 > queue. §3.2.4 calls that failure a conformance bug, and no earlier section
 > supplied the mechanism against it. A handle from the two pairwise keys needs
 > no third party, no directory entry, and no new invitation. The secret
-> `ss_pair` is classical, and Part 16 §16.3 records the quantum residual. A
+> `ss_pair` is classical, and Part 15 §15.3 records the quantum residual. A
 > full identity reset of Part 7 §7.7.1 replaces the pairwise keys. Thus an
 > attacker that holds a seized device loses the handle at that reset. A
 > restore of a backup from before such a reset restores the old keys, and that
@@ -660,8 +660,8 @@ ARQ. **[NET-239]** If a `GPOST` carries record bytes that the relay already
 holds, the relay MUST answer with the `seq` that it holds for those bytes.
 **[NET-240]** A relay MUST apply `GROUP_POST_RATE` for each group queue.
 **[NET-241]** A relay MUST answer a `GPOST` above that rate with a `NACK` of
-reason `LIMIT` (Part 6 §6.4.4). A `GNEW` carries an `Admission` of Part 14
-§14.2, and a `GPOST` carries none.
+reason `LIMIT` (Part 6 §6.4.4). A `GNEW` carries an `Admission` of Part 13
+§13.2, and a `GPOST` carries none.
 
 **The rotation of the credentials.** **[NET-242]** After a `GKEY`, a relay
 MUST keep the previous `read_pk` for `GROUP_READ_GRACE` and the previous
@@ -696,7 +696,7 @@ and Part 11 §11.8 makes the client show that gap.
   relaxation of `NET-200` to the two replicas.
 - **[NET-256]** A sender MUST send the same record bytes to each replica, each
   under the ARQ of §3.7. **[NET-257]** A client MUST put a record in the
-  `accepted` state of Part 15 §15.9.1 when the first replica returns a `GSEQ`.
+  `accepted` state of Part 14 §14.9.1 when the first replica returns a `GSEQ`.
   **[NET-258]** The client MUST continue the ARQ to the other replica in the
   background. **[NET-259]** If the ARQ to one replica ends under `NET-220` after
   the other replica accepted, the client MUST report that replica as a link
@@ -787,9 +787,9 @@ are three measured causes:
    1.97 MB with a uniform block. This difference decides if the group feature
    operates on mobile data.
 
-**[NET-026]** An attachment MUST use chunks of `CHUNK_SIZE` (Part 13 §13.7). That chunk fills
+**[NET-026]** An attachment MUST use chunks of `CHUNK_SIZE` (Part 12 §12.7). That chunk fills
 the payload of one command at bucket `B3`. Only the last chunk carries padding.
-Thus no party can infer the file size from the chunk sizes (Part 13).
+Thus no party can infer the file size from the chunk sizes (Part 12).
 
 ### 3.3.2 A link preview: the sender fetches, and the receiver does not
 
@@ -799,7 +799,7 @@ fetches the URL, because that party gives its network address to the site.
 - **[NET-142]** A receiver MUST NOT fetch a URL that a record carries.
   **[NET-143]** A client MUST NOT fetch a URL to render a preview.
 - **[NET-144]** A sender MAY attach a preview that the sender made. That
-  preview travels as an attachment descriptor of Part 6 §6.6, and Part 13 gives
+  preview travels as an attachment descriptor of Part 6 §6.6, and Part 12 gives
   the transfer.
 - **[NET-145]** A sender MUST re-encode a preview image under the rules of Part
   9 §9.3.1, thus the image carries no metadata field.
@@ -819,7 +819,7 @@ fetches the URL, because that party gives its network address to the site.
 > address that it does not hold. The cost is that a preview is a statement by
 > the sender, and a hostile sender pairs a true URL with a false preview.
 > **[NET-148]** Thus a client MUST render the host of the URL beside the
-> preview. Part 16 §16.3 records the residual.
+> preview. Part 15 §15.3 records the residual.
 
 ## 3.4 Relay chaining
 
@@ -989,7 +989,7 @@ forward cell on that circuit. §3.4.4 rule `NET-114` gives it the check.
 > relay on the path cannot answer in the place of the next hop. Rules `NET-165`
 > to `NET-167` make each relay enforce the three-hop stratified path that the
 > client selects. A replayed `EXTEND` cell opens a circuit under a fresh `er`,
-> thus the replay yields no key. Part 14 bounds the cost of such a cell.
+> thus the replay yields no key. Part 13 bounds the cost of such a cell.
 
 #### Steady-state cell
 
@@ -1025,7 +1025,7 @@ causes does not occur.
 > queue relay about 21 minutes apart, thus a circuit of 4 hours serves almost
 > all of them. Part 6 §6.2.3 sets `SESSION_RESUME_WINDOW` to the same
 > 4 hours, because a circuit does not outlive its session. The cost is a longer
-> window for a seized hop 1 or hop 2 key set, and Part 16 §16.3 records it.
+> window for a seized hop 1 or hop 2 key set, and Part 15 §15.3 records it.
 > Part 2 §2.4 states the trade.
 
 - **[NET-320]** A relay MUST end a circuit at `CIRCUIT_MAX_AGE` from the
@@ -1212,7 +1212,7 @@ hop 2.
 > *Cause.* The paper of `NET-030` runs its update at the destination layer
 > only, and a middle layer chains its tweak. A middle layer gives the
 > ciphertext of the next layer, and not a payload. Thus a seized key set of hop
-> 1 or hop 2 opens no cell beyond what that relay saw in transit. Part 16 §16.1 records what each relay holds. A key update at
+> 1 or hop 2 opens no cell beyond what that relay saw in transit. Part 15 §15.1 records what each relay holds. A key update at
 > each middle hop costs one HKDF at each relay for each cell, and it buys no
 > payload confidentiality. An earlier draft chained the value `C` and
 > replaced no key. Under that draft a queue relay that an adversary seized
@@ -1279,7 +1279,7 @@ A replayed cell also moves the chaining value of each hop after the point of the
 injection. Each later cell then fails the check of NET-114, and NET-115 tears
 the circuit down. Thus an active adversary that holds one link stops a circuit
 with one cell. The loop cover of §3.6.1 measures that event, and §10.4 feeds it
-to the relay reputation. Part 16 §16.3 records the residual, and Part 2 §2.5
+to the relay reputation. Part 15 §15.3 records the residual, and Part 2 §2.5
 gives guaranteed availability as a non-goal.
 
 This property is one of the concrete advantages of session circuits over a
@@ -1385,8 +1385,8 @@ rule.
 >
 > A backlog above 60 messages accumulates over an offline interval. The relay
 > already measures that interval, thus the unpaced response tells the relay
-> nothing new. A local observer reads the drain as one burst, and Part 16
-> §16.3 records that residual.
+> nothing new. A local observer reads the drain as one burst, and Part 15
+> §15.3 records that residual.
 
 > *What the `B0` cover cell does not conceal.* The mix model of §3.12 puts the
 > modal text in bucket `B1`. Thus a real text delivery is a 2 096-byte cell
@@ -1396,7 +1396,7 @@ rule.
 > Bucket-matched cover is not affordable. Under the §3.12 mix the mean inbound
 > wire cost is 0.85 × 2 096 + 0.05 × 8 240 + 0.10 × 32 860 = 5 480 B. At 7 200
 > ticks that cost is about 39.5 MB for each 2 h session, against 4.03 MB for
-> the `B0` stream. UMBRA does not spend that, and Part 16 §16.3 records the
+> the `B0` stream. UMBRA does not spend that, and Part 15 §15.3 records the
 > residual.
 
 This measure has the highest value of one measure in the design. The relay
@@ -1598,7 +1598,7 @@ order below.
 > acknowledgment goes before each later one.
 
 **[NET-133]** A client MUST NOT carry a backup write in a cover slot. Part 4
-§4.7.2 gives the backup the chunk path of Part 13 §13.3.3, and Part 4 §4.7.2
+§4.7.2 gives the backup the chunk path of Part 12 §12.3.3, and Part 4 §4.7.2
 gives the cause. A backup object is much larger than a `B0` cell, thus a cover
 slot cannot carry it.
 
@@ -1628,7 +1628,7 @@ The duty-cycle model is derived, and no party measured it on 2026 hardware.
 > **What the deletion of tier B costs, stated.** In the background a client
 > makes no cover cell. Thus a background outbound cell is always a real event,
 > and an ingress relay reads the send times of a backgrounded user. §3.11 states
-> that loss and Part 16 §16.3 records it. The loop sampling of §3.6.1 becomes a
+> that loss and Part 15 §15.3 records it. The loop sampling of §3.6.1 becomes a
 > foreground measurement and it gives about 72 samples each day. Part 10 §10.4
 > states that the loop-failure input comes from the foreground only.
 
@@ -1698,12 +1698,12 @@ record that no relay accepts needs a user and not a timer.
   acknowledgment `SEND_GIVE_UP` after its first send, the client MUST stop the
   ARQ of that record.
 - **[NET-221]** When the ARQ of a record stops, the client MUST put the record
-  in the `failed` state of Part 15 §15.9. **[NET-222]** A client MUST NOT send
+  in the `failed` state of Part 14 §14.9. **[NET-222]** A client MUST NOT send
   a `failed` record again without a user action.
 
 A `failed` record is a record that no relay accepted. U6 of Part 2 §2.4 counts a
 record from the moment a relay accepts it, thus a `failed` record is outside U6.
-The interface rule of Part 15 §15.9 shows it to the user. `SEND_GIVE_UP` equals
+The interface rule of Part 14 §14.9 shows it to the user. `SEND_GIVE_UP` equals
 `DEAD_CHANNEL_SILENCE` of §3.2.6, because a channel that accepts nothing for 7
 days is a channel that the dead-channel probe examines.
 
@@ -1730,7 +1730,7 @@ independently:
 
 | Layer | Content |
 | --- | --- |
-| **L1 Wire** | TLS 1.3 over TCP/443 by default. The ClientHello is the ClientHello of the rustls stack that Part 15 §15.2.8 names, with an `X25519MLKEM768` (RFC 10024) key share first and GREASE ECH. Each client sends the same ClientHello. The frame is an HTTP/1.1 Upgrade to a WebSocket-shaped stream, co-tenant with a real website behind a reverse proxy. The stream carries RFC 9297 capsules, used identically over TCP and QUIC, thus one parser serves the two transports (Part 6 §6.2.1). The web client of Part 15 §15.7 sends the same stream through the WebSocket API of its browser, and §3.8.1 states what that changes |
+| **L1 Wire** | TLS 1.3 over TCP/443 by default. The ClientHello is the ClientHello of the rustls stack that Part 14 §14.2.8 names, with an `X25519MLKEM768` (RFC 10024) key share first and GREASE ECH. Each client sends the same ClientHello. The frame is an HTTP/1.1 Upgrade to a WebSocket-shaped stream, co-tenant with a real website behind a reverse proxy. The stream carries RFC 9297 capsules, used identically over TCP and QUIC, thus one parser serves the two transports (Part 6 §6.2.1). The web client of Part 14 §14.7 sends the same stream through the WebSocket API of its browser, and §3.8.1 states what that changes |
 | **L2 Session** | Connection-independent session (64-bit session ID, monotonic sequence, and resend window). A TCP RST, a middlebox timeout, a QUIC migration, or a Wi-Fi-to-cellular handover rotates the connection **without a drop of the session**. Part 6 §6.2.3 gives the open, the resume, and the close |
 | **L3 Cell** | Fixed-size cells (§3.3) over the 3-hop chain into queues |
 
@@ -1749,8 +1749,8 @@ also uses.
 
 > *Cause of the named stack.* An earlier draft shaped the ClientHello as
 > Chrome on Android, in the manner of uTLS. No Rust TLS stack shapes a
-> ClientHello in that manner, and Part 15 §15.2.6 then rejected both providers
-> of rustls. Thus no client could send the L1 flight. Part 15 §15.2.8 now
+> ClientHello in that manner, and Part 14 §14.2.6 then rejected both providers
+> of rustls. Thus no client could send the L1 flight. Part 14 §14.2.8 now
 > names the stack, and the ClientHello is the one that the stack sends. Part 2
 > §2.5 already gives undetectable use as a non-goal, thus the change removes a
 > claim that the design did not make.
@@ -1793,7 +1793,7 @@ networks.
   it MUST NOT accept an extension. The accept token uses SHA-1 as RFC 6455
   gives it. The token proves that the relay read the key and it carries no
   secret, thus it is not a primitive of Part 5 §5.1, and the browser of the
-  web client of Part 15 §15.7 checks it under that rule. **[NET-282]** A
+  web client of Part 14 §14.7 checks it under that rule. **[NET-282]** A
   client MUST verify the TLS certificate of a relay against the `host` of
   its descriptor under the public CA roots, and it MUST NOT accept a
   connection without that check. **[NET-283]** A QUIC connection MUST
@@ -1813,7 +1813,7 @@ networks.
   injected TCP resets through the OS tunnel semantics, and payload encryption
   does not prevent this.
 - **No WebRTC or DTLS transport in v1.** A WebRTC stack does not fit the
-  dependency budget of Part 15 §15.2. TLS 1.3 and QUIC give the same
+  dependency budget of Part 14 §14.2. TLS 1.3 and QUIC give the same
   transport service at a lower cost. A third transport also divides the client
   population into classes that an adversary can tell apart (§3.9.1).
 
@@ -1833,7 +1833,7 @@ The ClientHello of §3.8 is the ClientHello of the rustls stack, and not the
 ClientHello of a browser. A classifier tells an UMBRA client from a browser on
 that flight alone, and this document accepts that under the same trade.
 
-The web client of Part 15 §15.7 sends the ClientHello of its browser. Thus a
+The web client of Part 14 §14.7 sends the ClientHello of its browser. Thus a
 classifier tells a web client from a native client on that flight, and it
 tells a web client from a page load of the co-tenant site by the WebSocket
 upgrade and by the cell sizes. The two classes send the same cells above L1,
@@ -1895,13 +1895,13 @@ All three modes are in the measured usability band. The mean added delay is
 > cover slot. This document withdraws that mechanism. It forced a cover rate
 > that differs by mode, and §3.9.1 forbids a mode that is visible in the cell
 > count. The property that a Private-mode send hides inside a cover slot is
-> gone. Part 16 §16.3 records that residual.
+> gone. Part 15 §15.3 records that residual.
 
 > **Deviation note.** An earlier draft also gave Fast mode and Balanced mode a
 > pacing mean of 2 s. It gave Private mode a constant-rate clock. This document
 > withdraws both. A pacing shape that differs by mode puts the mode in the
 > inbound cell count, and §3.9.1 forbids that result. Private mode gives up the
-> tighter delivery tail of a constant-rate clock, and Part 16 §16.3 records that
+> tighter delivery tail of a constant-rate clock, and Part 15 §15.3 records that
 > residual.
 
 > **Deviation note.** An earlier draft gave three p50 delivery figures with no
@@ -1986,7 +1986,7 @@ UMBRA has one relay population. The directory lists each relay, measures each
 relay, and ranks each relay by reputation (Part 10). The listing, the operator
 dossier (Part 10 §10.5.1), and the measurements are a public record. Legal
 process can name each relay, and an adversary can select each relay for an
-attack (A2, A5). Part 16 §16.1 and §16.3 record that exposure.
+attack (A2, A5). Part 15 §15.1 and §15.3 record that exposure.
 
 **[NET-084]** An operator MUST NOT operate an UMBRA relay that the directory does not list. **[NET-085]** A
 client MUST NOT build a chain through a relay that the signed manifest of §3.10
@@ -2014,8 +2014,8 @@ relay (G7).
 > staging of Part 10 §10.7.1, the operator dossier of §10.6, and the measurement
 > of §10.3.
 >
-> Third, a fast replacement cadence at the ingress position is a loss. Part 16
-> §16.1.1 shows that a compelled operator collects from the moment of the order.
+> Third, a fast replacement cadence at the ingress position is a loss. Part 15
+> §15.1.1 shows that a compelled operator collects from the moment of the order.
 > A client that replaces an ingress relay 30 times each year meets 30 operators
 > each year. Each one of those operators can hold that order (G7, G9, A5).
 > Fourth, the cause for a fast cadence was censorship resistance, and Part 2
@@ -2032,7 +2032,7 @@ the recipient, the content, or how many conversations the client has.
 
 **One Ingress Relay also reads the send times of a backgrounded user.** In tier
 C the client makes no cover cell (§3.6.2), thus each background outbound cell is
-a real event. UMBRA accepts this loss, and Part 16 §16.3 records it.
+a real event. UMBRA accepts this loss, and Part 15 §15.3 records it.
 
 **One Chain Relay** learns two adjacent relay addresses and the cell times. It
 learns nothing else.
@@ -2052,7 +2052,7 @@ of Part 8 §8.5.2, and each notifier names a queue relay and no handle. It does
 of a record, or a membership list, because no command of §3.2.7 carries one.
 Part 11 §11.5 states the same bound from the side of the group. Part 2 §2.2
 THR-002 covers the **count of conversations**, and it does not cover the
-**size of one conversation**. UMBRA accepts this loss, and Part 16 §16.3
+**size of one conversation**. UMBRA accepts this loss, and Part 15 §15.3
 records it.
 
 > *Cause.* An earlier draft let the ingress relay read the recipient count of
@@ -2089,7 +2089,7 @@ else.
 
 §3.11 gives the passive case. Part 2 §2.2 gives A2 and A3 the power to drop a
 cell, to delay a cell, to reorder a cell, and to inject a cell. This section
-collects what those powers add. Part 16 §16.3 holds the same rows as residuals.
+collects what those powers add. Part 15 §15.3 holds the same rows as residuals.
 
 | The probe | What the relay learns | The bound |
 | --- | --- | --- |
@@ -2100,7 +2100,7 @@ collects what those powers add. Part 16 §16.3 holds the same rows as residuals.
 | Withhold a `MSG` and watch the acknowledgment point | The reconnect cadence of the recipient | Part 6 §6.4.3 rule 7 gives one boundary for each batch |
 
 **[NET-134]** A revision that gives A2 or A3 a new active capability MUST add a
-row to this table. Part 16 §16.8 makes §3.11 a published promise, and this
+row to this table. Part 15 §15.8 makes §3.11 a published promise, and this
 section carries the same standing.
 
 Two properties limit each row above. First, an active probe is an act, and the
@@ -2241,7 +2241,7 @@ costs **32 860 B**. Each row below uses those four figures.
 | Group posts (8 × 2 replicas × `B1` cells) | 34 KB |
 | Epoch rotations as a member (6 groups × 1 `B3` cell each day) | 0 KB, an admin uploads the record |
 | Presence records (6 groups × 1 `B0` × 2 replicas in each 7 days) | 1 KB |
-| Attachment upload (2 files, 13 chunks each, 1 copy, §13.4.1) | 885 KB |
+| Attachment upload (2 files, 13 chunks each, 1 copy, §12.4.1) | 885 KB |
 | Device-set sync records (1 channel, 278 `B1` cells) | 583 KB |
 | Device-set sync acknowledgments (1 channel, 0 cells) | 0 KB, §7.5.5 of Part 7 forbids one here |
 | Ownership claims (1 channel, 4 `B2` cells) | 33 KB |
@@ -2275,8 +2275,8 @@ costs **32 860 B**. Each row below uses those four figures.
 > `GROUP_EPOCH_MAX_AGE`. The model gives each group one rotation each day as
 > an upper figure. At 25 members the epoch-key record of Part 11 §11.4.2 is
 > inline, and it is one `B3` record on the group-queue session. Above about
-> 27 members the member fetches one `B3` chunk on the chunk path of Part 13
-> §13.3.3. Each carrier costs 32 860 bytes, thus the downlink row is
+> 27 members the member fetches one `B3` chunk on the chunk path of Part 12
+> §12.3.3. Each carrier costs 32 860 bytes, thus the downlink row is
 > 6 × 32 860 = 197 160 bytes. A member of role `admin` uploads the record, and
 > the model user holds no such role, thus the uplink row is 0 bytes. The model
 > counts the record among the 120 group receives for the wake arithmetic.
@@ -2306,12 +2306,12 @@ costs **32 860 B**. Each row below uses those four figures.
 >
 > A catch-up object of Part 7 §7.5.1 is not in the model day. A peer that was
 > absent for 7 days holds 1 946 records at about 350 bytes, which is about
-> 681 KB. Part 13 §13.3.3 gives a chunk 32 650 bytes, thus the object is 21
+> 681 KB. Part 12 §12.3.3 gives a chunk 32 650 bytes, thus the object is 21
 > chunks at `B3` and about 690 KB on the wire. NET-133 keeps that object out
 > of a cover slot in the same manner as the backup.
 
 > *The derivation of the backup row.* Part 4 §4.7.2 writes the backup as chunks
-> under Part 13 §13.3.3, and NET-133 keeps it out of a cover slot. Part 4 §4.8
+> under Part 12 §12.3.3, and NET-133 keeps it out of a cover slot. Part 4 §4.8
 > sets `BACKUP_HISTORY_DAYS` to 45, `BACKUP_FULL_INTERVAL` to 30 days,
 > `BACKUP_INTERVAL` to 24 h, and `BACKUP_REPLICAS` to 2.
 >
@@ -2372,11 +2372,11 @@ below rests on the same unverified figure, and it carries the same mark.
 > half is 1 760 bytes. A group queue holds no notifier triple of its own, and
 > the notify queue holds it.
 
-> *The derivation of the attachment rows.* Part 13 §13.7 sets `CHUNK_SIZE` to
+> *The derivation of the attachment rows.* Part 12 §12.7 sets `CHUNK_SIZE` to
 > 32 650 bytes. A file of 400 KB needs 13 chunks, because 12 chunks hold
 > 391 800 bytes only. Part 6 §6.9 gives a `B3` cell a wire cost of 32 860 bytes.
 >
-> **A client uploads one copy, and the relay makes the others.** Part 13 §13.4.1
+> **A client uploads one copy, and the relay makes the others.** Part 12 §12.4.1
 > gives that flow. The 2 uploads are 2 × 13 = 26 `B3` cells, which is 854 360
 > bytes. The `CNEW` traffic is 2 × 13 × 3 = 78 commands, batched 3 to a `B0`
 > cell, which is 26 cells and 14 560 bytes. The `CREP` traffic is 26 commands,
@@ -2385,12 +2385,12 @@ below rests on the same unverified figure, and it carries the same mark.
 > and 8 960 bytes. The row is 885 160 bytes.
 >
 > `REPLICAS` stays at 3, and the relay carries the two copies on a direct
-> session. Part 13 §13.4.1 gives that traffic as about 504.0 MiB for a 250 MiB
+> session. Part 12 §12.4.1 gives that traffic as about 504.0 MiB for a 250 MiB
 > object, and no row of this table holds it, because no byte of it crosses the
 > link of the device. **[NET-104]** A revision that changes `REPLICAS`, the
 > verify sample, or the `CREP` batching MUST derive this row again.
 >
-> A download reads one replica of each chunk, and §13.4 tries a second replica
+> A download reads one replica of each chunk, and §12.4 tries a second replica
 > only after a failure. The 4 downloads are 52 chunks, which is 1 708 720 bytes.
 > The `CID` responses and the `CPRF` responses add 20 and 16 `B0` cells, which
 > is 20 160 bytes on the downlink.
@@ -2430,9 +2430,9 @@ below rests on the same unverified figure, and it carries the same mark.
 > they fall to the idle term. The batch term of the laptop is 8 and its idle
 > term is 4. The downlink row is 1 × (8 + 4) × 560 = 6 720 bytes.
 >
-> An attachment chunk does not travel on a sync channel. Part 13 §13.3 puts the
+> An attachment chunk does not travel on a sync channel. Part 12 §12.3 puts the
 > file key and the chunk references in the record, and bucket `B1` holds them.
-> Each device that opens an attachment downloads the chunks under Part 13. That
+> Each device that opens an attachment downloads the chunks under Part 12. That
 > device pays a download cost of its own, and this table does not hold it.
 >
 > This count holds the message records only. Part 7 §7.5.3 also syncs the
@@ -2538,12 +2538,10 @@ below rests on the same unverified figure, and it carries the same mark.
 text only, the total is about 9.44 MB each day and about 283 MB each month.**
 The grand total is 3.50 MB up and 8.55 MB down. The text-only total removes the
 885 KB of attachment upload, the 1 709 KB of attachment download, and the 20 KB
-of attachment responses. An earlier draft gave 13.07 MB each day, of which
-4.08 MB was uplink. The group queue of §3.2.7 removes the 402 KB fan-out row
-and 11 of the 20 sessions, and it adds the digest row, the rotation row, and
-the presence row. The day falls by about 0.6 MB. The withdrawal of Part 12
-removes the two community rows and 2 foreground circuits, and the day falls by
-about 0.43 MB more.
+of attachment responses. An earlier draft gave 12.64 MB each day. The group
+queue of §3.2.7 removes the 402 KB fan-out row and 11 of the 20 sessions, and
+it adds the digest row, the rotation row, and the presence row. The day falls
+by about 0.6 MB.
 
 At `MAX_DEVICES` of 8 the grand total is about 15.98 MB each day and about
 479 MB each month. **A device set at `MAX_DEVICES` is not affordable on a
@@ -2869,7 +2867,7 @@ ms each, the ratchet steps of the 278 records, the tag checks of the 120 group
 records, and the 6 decapsulations of the rotation slots (Part 11 §11.4.2). It
 holds the signature verifications of the 8 roots and the 86 entries. It holds
 about 10 Argon2id
-unlocks of Part 15 §15.6.4 at about 3 s each. That work is under 1 minute of CPU
+unlocks of Part 14 §14.6.4 at about 3 s each. That work is under 1 minute of CPU
 each day. At about 1 W of CPU draw it is about 0.02 Wh, which is 0.1 % of the
 battery. That figure is a model, and the measure rule below covers it.
 

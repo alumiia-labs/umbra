@@ -1,4 +1,4 @@
-//! The files of the messages (Part 13) in the store of one device.
+//! The files of the messages (Part 12) in the store of one device.
 //!
 //! The plaintext of a file sits in the encrypted store and nowhere else:
 //! from the moment the user attaches it, thus an upload continues after a

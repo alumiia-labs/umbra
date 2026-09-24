@@ -1,4 +1,4 @@
-//! The proof of work of Part 14 §14.8 over Equi-X, which is AUX-8 of Part 5
+//! The proof of work of Part 13 §13.8 over Equi-X, which is AUX-8 of Part 5
 //! §5.1: the challenge string, the solve loop with its pass test, and the
 //! verification. The interpreter runs everywhere, and the JIT of the
 //! `hashx` crate stays off.

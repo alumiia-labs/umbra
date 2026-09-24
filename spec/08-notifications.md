@@ -104,7 +104,7 @@ again at each rotation of NTF-007.
 > §8.2.4 gives each queue its own `notifier_id`, thus a queue relay held a map
 > from each `notifier_id` to that one handle. That map grouped **each** notifiable
 > queue of one device on that relay, and NTF-007 held it for 7 days. Part 2 §2.7,
-> Part 3 §3.11, and Part 16 §16.3 each bound the queue linkage of a queue relay
+> Part 3 §3.11, and Part 15 §15.3 each bound the queue linkage of a queue relay
 > at 8 queues in one transport session. Goal G7 of Part 2 §2.3 says that no relay
 > can link two queues to one person, thus the wider group was a leak that no
 > table recorded. The rule above makes the notification linkage equal to the
@@ -199,7 +199,7 @@ or after the one that the device computes.
   that window without an AEAD open.
 - **[NTF-077]** A receiver MUST count the consecutive failed opens of blobs
   inside the window. **[NTF-078]** At `NTF_FAIL_MAX` consecutive failures, the
-  client MUST show the `clock` state of Part 15 §15.9.2. **[NTF-084]** The
+  client MUST show the `clock` state of Part 14 §14.9.2. **[NTF-084]** The
   client MUST then establish `k_ntf_root` again at the next foreground session.
   **[NTF-079]** One open that succeeds MUST reset the count.
 
@@ -317,7 +317,7 @@ latency of each mode.
 > relay and the Notification Delivery Relay together link the push token to the
 > pairwise queues of the same registration. `NTF-044` keeps that group apart.
 > The residual that stays is the link between one push token and one published
-> handle, and Part 16 §16.3 records it. Private mode registers nothing, thus
+> handle, and Part 15 §15.3 records it. Private mode registers nothing, thus
 > that mode gives the residual to no party, and it pays a latency of up to 24 h.
 
 ### 8.2.7 The requests of the NDR
@@ -431,7 +431,7 @@ Balanced mode, and it states that trade.
 from the CSPRNG at each network change. **[NTF-053]** The client MUST draw it
 again at each change of its ingress relay pair. The phase is the offset of the
 wake inside the interval. One phase across two networks links the two, and Part
-16 §16.3 states that residual.
+16 §15.3 states that residual.
 
 **[NTF-009]** The UI MUST show the trade in one honest line, and **[NTF-010]**
 the UI MUST NOT hide Private mode. **[NTF-011]** Onboarding MUST NOT ask the
@@ -493,7 +493,7 @@ carrier of a build that holds no other one.
   `NTF-012` applies to a push-wake session, and it does not apply to this
   service.
 - **[NTF-117]** That service MUST hold no key and no socket of its own. The
-  one run of the network of Part 15 §15.6.1 continues under it.
+  one run of the network of Part 14 §14.6.1 continues under it.
 - **[NTF-118]** A client MUST start a new run after a run ends with a fault,
   while a view is on the screen or the service runs. The delay before a new
   run MUST double from 2 s to a ceiling of 30 s, and a run that reaches the
@@ -502,7 +502,7 @@ carrier of a build that holds no other one.
   of a contact while the content preview is off (`NTF-083`). On the lock
   screen it MUST show that an alert exists, and no more.
 - **[NTF-120]** A client MUST end the service at a lock, because a locked
-  client holds no key that reads a queue (Part 15 rule `IMP-127`). A client
+  client holds no key that reads a queue (Part 14 rule `IMP-127`). A client
   that locks with no view on the screen MUST tell the user one time, with no
   sound, that no message arrives until the unlock.
 - **[NTF-131]** A client that holds no push carrier MAY poll: a periodic
@@ -515,7 +515,7 @@ carrier of a build that holds no other one.
   auto-lock again. An action of the user alone does that. Thus a peer that
   writes each 10 minutes does not keep `K_store` in RAM.
 
-> **Open in 0.2.0-draft: a wake of a locked client.** Part 15 rule `IMP-119`
+> **Open in 0.2.0-draft: a wake of a locked client.** Part 14 rule `IMP-119`
 > locks the client after 15 minutes with no action of the user, and the
 > ceiling is 30 minutes. A locked client holds no `K_store`, thus it holds no
 > queue key, no ratchet, and no key of the blob of §8.2.2. No carrier of this
@@ -534,8 +534,8 @@ carrier of a build that holds no other one.
 >    The alert then holds the text. A seized device in the AFU state gives
 >    each later message of each channel.
 >
-> Remedy 1 keeps the claim of Part 15 §15.6.4 and costs the latency of the
-> unlock. This revision ships neither, and Part 16 §16.3 holds the residual.
+> Remedy 1 keeps the claim of Part 14 §14.6.4 and costs the latency of the
+> unlock. This revision ships neither, and Part 15 §15.3 holds the residual.
 
 **Private mode does not use FCM on Android.** §8.3 wakes the device on a fixed
 clock of 20 or 30 minutes, and a message arrival does not change that clock.
@@ -582,8 +582,8 @@ clock of 20 or 30 minutes, and a message arrival does not change that clock.
 
 ### 8.4.2 iOS
 
-This section is retired in 0.2.0-draft. iOS leaves the v1 scope under Part 15
-§15.6.3, and rule `NTF-017` of this section moved to §8.4.3 with its number.
+This section is retired in 0.2.0-draft. iOS leaves the v1 scope under Part 14
+§14.6.3, and rule `NTF-017` of this section moved to §8.4.3 with its number.
 
 ### 8.4.3 Padding, expiry, the re-push, and the peek
 
@@ -717,7 +717,7 @@ notify queue pushes as for any queue. Part 6 §6.4.5 gives the commands
   `UMBRA_DEPOSIT` of Part 6 rule `WIR-526`. That relay learns the address of
   the group-queue relay that deposits into the queue, thus it learns that the
   queue is a notify queue and which relay holds its group queue; it learns no
-  group and no member. Part 16 §16.3 holds that residual.
+  group and no member. Part 15 §15.3 holds that residual.
 - **[NTF-100]** A group-queue relay MUST hold a registration in memory only.
   **[NTF-101]** A group-queue relay MUST NOT hold more than
   `GROUP_NOTIFIER_MAX` registrations for one group queue. Part 3 §3.2.7 owns
@@ -758,7 +758,7 @@ wake, and Part 3 §3.12 prices a wake at about 19.7 KB with its drain.
 registrations, which is close to the count of the member devices in Instant
 mode, and the `relay_id` of each notify queue. It learns no handle, no push
 token, and no `k_tok`. It cannot link a registration to a member index or to a
-reader session, because a registration carries neither. Part 16 §16.3 states
+reader session, because a registration carries neither. Part 15 §15.3 states
 that residual, and Part 11 §11.5 gives the full list of what a group-queue
 relay learns.
 
@@ -771,7 +771,7 @@ relay learns.
 
 ## 8.6 The web client
 
-The web client of Part 15 §15.7 holds a live session while its browser runs,
+The web client of Part 14 §14.7 holds a live session while its browser runs,
 and that session carries each arrival. **[NTF-110]** A web client MUST NOT
 register a push token with the NDR, and it MUST NOT hold a registration of
 §8.5.2 of its own. **[NTF-111]** A web client MUST take each arrival
@@ -780,11 +780,11 @@ of the browser while the browser runs. The phone of the user carries the
 notification of the device set at each other time, under §8.4.1.
 
 Rules `NTF-020` to `NTF-025` are retired in 0.2.0-draft. They bound a Web
-Push path of a hosted page that Part 15 §15.7 does not ship, and a retired
+Push path of a hosted page that Part 14 §14.7 does not ship, and a retired
 number does not return.
 
 > *Cause.* Web Push needs a push service that the browser vendor operates, and
-> a subscription there is a durable identifier at a party that Part 16 §16.1
+> a subscription there is a durable identifier at a party that Part 15 §15.1
 > would have to list. A linked device with an open socket needs no such party,
 > and the phone already wakes for the device set.
 

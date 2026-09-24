@@ -2,8 +2,8 @@
 
 A thin Kotlin and Compose shell over `umbra-ffi`. Each network, ratchet,
 queue, onion, and store function stays on the Rust side. The shell holds the
-views, the keystore adapter of Part 15 §15.6.4, and the platform rules of
-Part 15 §15.6.6.
+views, the keystore adapter of Part 14 §14.6.4, and the platform rules of
+Part 14 §14.6.6.
 
 ## Build
 

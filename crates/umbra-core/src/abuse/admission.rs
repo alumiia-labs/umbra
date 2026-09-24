@@ -1,4 +1,4 @@
-//! The admission gate of Part 14 §14.2 at a relay and at an addressee:
+//! The admission gate of Part 13 §13.2 at a relay and at an addressee:
 //! what an `Admission` trailer must carry, and how each kind is checked.
 
 use umbra_queue::Reject;
@@ -56,7 +56,7 @@ pub struct RelayGate {
     pub relay_id: [u8; 32],
     /// The proof-of-work verifier.
     pub pow: Verifier,
-    /// The spend set of §14.7.
+    /// The spend set of §13.7.
     pub spent: SpendSet,
     /// The admissions of the period that runs, the backlog of `ABU-060`.
     admissions: u32,

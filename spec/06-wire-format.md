@@ -18,7 +18,7 @@ expressiveness. A fixed-layout format has one shape for each message type and
 each field at a known offset. Its parse function is a sequence of bounds-checked
 slices, and it has no loop over a type tag that an attacker controls. Such a
 format also fuzzes well, verifies well under bounded model checking, and gives
-byte-identical output across implementations, which UMBRA needs (Part 15 §15.5).
+byte-identical output across implementations, which UMBRA needs (Part 14 §14.5).
 
 The cost is that a new field needs a version increment. That cost is the
 intended incentive.
@@ -159,7 +159,7 @@ frame in the 16-bit length form whose length is below 126, and a frame in the
 
 **[WIR-485]** A relay MUST NOT negotiate the `permessage-deflate` extension of
 RFC 7692, or any other WebSocket extension, on an L1 connection. A browser
-offers that extension without a choice of the web client of Part 15 §15.7,
+offers that extension without a choice of the web client of Part 14 §14.7,
 and a compressed cell has a length that its plaintext shapes. **[WIR-486]** A
 web client sends each capsule through the WebSocket API of its browser, thus
 rules `WIR-225` to `WIR-228` bind the native client and the relay, and the
@@ -346,7 +346,7 @@ two separate durations from one event, and no rule compares their clocks.
 > hours, and a circuit does not outlive its session, thus the window is the same
 > 4 hours. Part 3 §3.12 gives the builds that the resume saves. The cost has two
 > parts. A relay holds the session state for 4 hours, which is about 1 KB. A
-> resume links two wakes of one client across a network change. Part 16 §16.3
+> resume links two wakes of one client across a network change. Part 15 §15.3
 > records that residual.
 
 ## 6.3 Cell
@@ -438,7 +438,7 @@ party MUST NOT compute `auth` as an AEAD ciphertext.
 
 | `cmd` | Name | Sent by | Payload |
 | --- | --- | --- | --- |
-| `0x01` | `NEW` | Recipient | `NewPayload`, 64 bytes and an `Admission` of Part 14 §14.2 |
+| `0x01` | `NEW` | Recipient | `NewPayload`, 64 bytes and an `Admission` of Part 13 §13.2 |
 | `0x02` | `IDS` | Relay | `IdsPayload`, 96 bytes |
 | `0x03` | `IRES` | Recipient | — |
 | `0x04` | `ILINK` | Relay | the link identifier of Part 4 §4.3.1, 24 bytes |
@@ -458,15 +458,14 @@ party MUST NOT compute `auth` as an AEAD ciphertext.
 | `0x50` | `QUOTA` | Relay | the remaining record count of the queue, `u32`, 4 bytes |
 | `0x51` | `NACK` | Relay | `NackPayload`, 17 B, §6.4.4 |
 | `0x60` | `COVER` | Sender or recipient | zero-filled, indistinguishable from `SEND` and `MSG` |
-| `0x70`–`0x7B` | Attachment commands | Uploader, downloader, or relay | Part 13 §13.3.3 gives the twelve commands and their payloads |
-| `0x80`–`0x85` | Reserved; the withdrawn Part 12 used them | — | none; `WIR-309` rejects each one |
+| `0x70`–`0x7B` | Attachment commands | Uploader, downloader, or relay | Part 12 §12.3.3 gives the twelve commands and their payloads |
 | `0x90`–`0x9A` | Group-queue commands | Member, admin, or relay | §6.4.5 gives the eleven commands and their payloads |
 
 ```
 NewPayload {                      // the payload of NEW, 67 bytes at an Admission of kind 0x00
     qr_auth_pk      [32]u8        // QR_auth of Part 3 §3.2.2, X25519
     qs_auth_pk      [32]u8        // QS_auth of Part 3 §3.2.2, X25519
-    admission       Admission     // Part 14 §14.2, 3 bytes and the body
+    admission       Admission     // Part 13 §13.2, 3 bytes and the body
 }
 
 IdsPayload {                      // the payload of IDS, 96 bytes
@@ -580,17 +579,13 @@ encryption. A relay that makes inbound pacing cover (Part 3 §3.5.2) emits cells
 with the shape of `MSG` in a queue session, and with the shape of `GMSG` in a
 group-queue session (§6.4.5).
 
-Part 13 §13.3.3 gives the attachment commands. Those commands put a `chunk_id`
+Part 12 §12.3.3 gives the attachment commands. Those commands put a `chunk_id`
 in `queue_id`. **[WIR-107]** An attachment command MUST travel on the separate connection of
-Part 13 §13.8. **[WIR-108]** A client MUST NOT batch an attachment command with a queue
+Part 12 §12.8. **[WIR-108]** A client MUST NOT batch an attachment command with a queue
 command.
 
-**One attachment command travels between two relays.** `CRPUT` of Part 13
-§13.4.1 carries a chunk from the relay that holds it to a replica relay.
-
-The range `0x80` to `0x85` is reserved. The withdrawn Part 12 used it, and no
-command of version 1 uses it. **[WIR-309]** A relay MUST reject a command whose
-`cmd` is in that range, and a client MUST NOT send one.
+**One attachment command travels between two relays.** `CRPUT` of Part 12
+§12.4.1 carries a chunk from the relay that holds it to a replica relay.
 
 §6.4.5 gives the group-queue commands. Those commands put a `GroupQueueId` in
 `queue_id`. **[WIR-363]** A group-queue command MUST travel on a transport
@@ -622,7 +617,7 @@ exactly as to a queue session.
   session of §6.2.3: it has no sequence number, no resend, and no answer.
   **[WIR-516]** The sender MUST set `corr_id` and `auth` of that command to
   zero bytes, and the receiver MUST NOT read them. The `storage_token` of the
-  payload is the one authority of a copy (Part 13 rules `ATT-107` and
+  payload is the one authority of a copy (Part 12 rules `ATT-107` and
   `ATT-108`).
 
 - **[WIR-526]** A relay that writes a digest of Part 8 §8.5 into a queue at
@@ -639,12 +634,12 @@ exactly as to a queue session.
   deposits that it took, and it MUST drop a deposit that repeats one. A
   deposit whose `auth` does not verify drops, and its `corr_id` is not held.
 - **[WIR-529]** A relay that sends its proof-of-work challenge to a carrier
-  of the manifest (Part 14 `ABU-102`) MUST send it as the value of one
+  of the manifest (Part 13 `ABU-102`) MUST send it as the value of one
   `UMBRA_CHALLENGE` capsule, on a connection of §6.2.1 that it opens for
-  that challenge. The value is one `PowChallenge` of Part 14 §14.8, 3 387
+  that challenge. The value is one `PowChallenge` of Part 13 §13.8, 3 387
   bytes, and a receiver MUST reject each other length. The capsule is outside
   the session of §6.2.3, and it gets no answer. The signature of the relay
-  is its one authority (Part 14 `ABU-103`).
+  is its one authority (Part 13 `ABU-103`).
 
 > *Cause of the deposit.* Part 8 rule `NTF-096` had a relay write a digest
 > "as a `SEND`", and no section gave the path. A
@@ -658,7 +653,7 @@ exactly as to a queue session.
 > *Cause of the capsule.* An earlier draft put the `CRPUT` on "a direct
 > transport session" and gave it no frame. A `SessionFrame` holds a cell of
 > one bucket, and `WIR-213` puts a `CRPUT` in no cell. The session adds a
-> resend window, and a copy needs none: rule `ATT-113` of Part 13 makes the
+> resend window, and a copy needs none: rule `ATT-113` of Part 12 makes the
 > uploader find a copy that did not arrive. A token holder that is no relay
 > can send the capsule, and it then stores the chunk that it registered,
 > which a `CPUT` gives it too.
@@ -716,10 +711,9 @@ QueueE2E {
    repeat a nonce under one `K_QE`.
 4. **[WIR-022]** A party MUST bind `version || SenderId` as the associated data.
 5. The plaintext starts with a `u16` true length and then a `u8` L6 record kind.
-   The value `0x01` names a ratchet record (§6.5). The value `0x02` named a
-   sender-key record in an earlier draft, and it is retired. The value `0x03`
-   named a report record of the withdrawn Part 12, and it is retired. The
-   value `0x04` names a `NotifyDigest` (Part 8 §8.5.1).
+   The value `0x01` names a ratchet record (§6.5). The values `0x02` and
+   `0x03` named records of an earlier draft, and they are retired. The value
+   `0x04` names a `NotifyDigest` (Part 8 §8.5.1).
    The value `0x05` names a handshake record, which the text after rule 6
    gives. The value `0x06` names a renewal record: a bundle of Part 5
    §5.4.1 of a party whose ratchet is stale (Part 3 §3.2.6, `NET-326`).
@@ -910,9 +904,9 @@ NackPayload {                     // 17 bytes
 | `reason` | Name | The relay sends it when |
 | --- | --- | --- |
 | `0x01` | `REJECTED` | the relay does not hold the object of `queue_id`, `auth` does not verify, `corr_id` repeats under `NET-122`, or the payload does not parse |
-| `0x02` | `ADMISSION` | the admission control of Part 14 refuses the command, and a credential of Part 14 §14.2 would admit it |
+| `0x02` | `ADMISSION` | the admission control of Part 13 refuses the command, and a credential of Part 13 §13.2 would admit it |
 | `0x03` | `LIMIT` | a rate limit or a size bound of this specification rejects the command, and a later retry can pass |
-| `0x04` | `BUSY` | the relay holds no capacity for the command, in the sense of Part 13 rule `ATT-091` |
+| `0x04` | `BUSY` | the relay holds no capacity for the command, in the sense of Part 12 rule `ATT-091` |
 | `0x05` | `VERSION` | the `version` of the command is not one that the relay serves |
 
 **The list above is closed.** A rejection rule of this specification maps onto
@@ -939,7 +933,7 @@ one row. A rule that names no row maps onto `REJECTED`. The object of
    command of the same transport session. **[WIR-324]** A client MUST NOT send
    the same command bytes again after a `REJECTED` or a `VERSION`.
    **[WIR-325]** After an `ADMISSION`, a client MUST obtain the credential of
-   the Part 14 §14.2 row before it sends again. That row is the row of the path
+   the Part 13 §13.2 row before it sends again. That row is the row of the path
    of the command.
 6. **[WIR-326]** A client MUST NOT report a `reason` to a party other than the
    user. Rule `WIR-032` keeps the failed check of a receiver inside the device
@@ -949,7 +943,7 @@ one row. A rule that names no row maps onto `REJECTED`. The object of
    that the relay did not accept.
 
 > *Cause.* A typed rejection costs one retry where a silent drop cost a
-> timeout, and Part 14 §14.8 makes the difference visible. A relay under load
+> timeout, and Part 13 §13.8 makes the difference visible. A relay under load
 > raises its proof-of-work effort. A client that holds a stale effort gets an
 > `ADMISSION` in one tick and a fresh challenge from the directory. Without
 > the signal that client waits for a delivery that never comes. Five reasons
@@ -992,7 +986,7 @@ GnewPayload {                     // the payload of GNEW, 99 bytes at an Admissi
     read_pk         [32]u8        // the reader credential of epoch 1, X25519
     write_pk        [32]u8        // the writer credential of epoch 1, X25519
     own_pk          [32]u8        // the owner credential, X25519
-    admission       Admission     // Part 14 §14.2, 3 bytes and the body
+    admission       Admission     // Part 13 §13.2, 3 bytes and the body
 }
 
 GseqPayload {                     // the payload of GSEQ, 20 bytes
@@ -1035,9 +1029,9 @@ writes into it.
 
 **Creation and admission.**
 
-- **[WIR-373]** A relay MUST apply the admission control of Part 14 §14.2 to
-  a `GNEW`. Part 14 §14.2 gives that path a row, and the fallback is the proof
-  of work of Part 14 §14.8. **[WIR-374]** A relay MUST NOT apply an admission
+- **[WIR-373]** A relay MUST apply the admission control of Part 13 §13.2 to
+  a `GNEW`. Part 13 §13.2 gives that path a row, and the fallback is the proof
+  of work of Part 13 §13.8. **[WIR-374]** A relay MUST NOT apply an admission
   gate to a `GPOST`. **[WIR-375]** A relay MUST answer a `GPOST` above
   `GROUP_POST_RATE` with a `NACK` of reason `LIMIT`.
 - **[WIR-376]** A relay MUST make `GroupQueueId` from its CSPRNG at each
@@ -1268,7 +1262,7 @@ EpochKeyBody {
     // carrier 0x02:
     slots_per_chunk u16
     desc_len        u16
-    descriptor      [desc_len]u8  // a FileDescriptor of Part 13 §13.3 that names the slot object
+    descriptor      [desc_len]u8  // a FileDescriptor of Part 12 §12.3 that names the slot object
 }
 
 KemSlot {                         // 1 185 bytes at own_count 0; 1 249 bytes at own_count 2
@@ -1299,9 +1293,9 @@ acceptance of a slot, and Part 5 §5.11 holds the two labels.
 **The carrier.** An inline record holds 27 plain-member slots at bucket `B3`
 (7 + 27 × 1 185 = 32 002 bytes, and the `B3` record `body` row of §6.9 is
 32 622). A one-slot record is 1 256 bytes of body, and it fits bucket `B1`.
-The chunked carrier names a slot object on the chunk path of Part 13
-§13.3.3, of class `CNEW`, under `ATT-142`. The object is a sequence of
-segments of `SEGMENT_SIZE` (Part 13 §13.7). Segment `k` holds the slots at
+The chunked carrier names a slot object on the chunk path of Part 12
+§12.3.3, of class `CNEW`, under `ATT-142`. The object is a sequence of
+segments of `SEGMENT_SIZE` (Part 12 §12.7). Segment `k` holds the slots at
 ranks `k × slots_per_chunk` to `(k + 1) × slots_per_chunk − 1`, in
 member-index order, and then zero bytes to `SEGMENT_SIZE`. The rank of a slot
 is its position among the included members, counted from 0. At 500
@@ -1499,7 +1493,7 @@ client MUST NOT copy that raw value into a different row.
 | `kind` | Meaning | Class (Part 7 §7.5.3) |
 | --- | --- | --- |
 | `0x01` | Text | Insertion |
-| `0x02` | Attachment descriptor (Part 13) | Insertion |
+| `0x02` | Attachment descriptor (Part 12) | Insertion |
 | `0x03` | Reaction (§6.6.9) | Insertion |
 | `0x04` | Edit | Revision |
 | `0x05` | Delete (tombstone) | Tombstone |
@@ -1510,10 +1504,7 @@ client MUST NOT copy that raw value into a different row.
 | `0x0A` | Poll (§6.6.6) | Insertion |
 | `0x0B` | Poll vote (§6.6.6) | Insertion |
 | `0x0C` | Contact share (§6.6.7) | Insertion |
-| `0x0D` | Retired; it was the community repost of the withdrawn Part 12 | — |
-| `0x0E` | Retired; it was the community contact of the withdrawn Part 12 | — |
 | `0x10` | Group control (§6.6.3, Part 11) | Control |
-| `0x11` | Retired; it was the community record of the withdrawn Part 12 | — |
 | `0x12` | Retired; it was the group record wrapper (§6.6.2) | — |
 | `0x20` | Device-set sync (Part 7) | Mutable state or control, by the sub-kind |
 | `0x30` | Key-change notice (Part 4 §4.5.1) | Control |
@@ -1524,7 +1515,6 @@ client MUST NOT copy that raw value into a different row.
 | `0x35` | Key supply (§6.6.11) | Control |
 | `0x36` | Verification commit (Part 4 §4.5.2) | Ephemeral |
 | `0x37` | Verification reveal (Part 4 §4.5.2) | Ephemeral |
-| `0x38` | Retired; it was the community owner exchange of the withdrawn Part 12 | — |
 
 **[WIR-362]** A parser MUST reject a body of kind `0x36` whose length is
 not 64, and a body of kind `0x37` whose length is not 32. Part 4 §4.5.2 gives
@@ -1547,10 +1537,8 @@ For kind `0x10` the body is a `GroupControl`, and §6.6.3 gives that structure.
 For kind `0x31` the body is a `DigestBody`, and §6.6.4 gives that structure.
 For kind `0x33` the body is a `QueueAddress`, and §6.6.10 gives that structure.
 
-**The retired kinds.** The kinds `0x0D`, `0x0E`, `0x11`, and `0x38` belonged
-to the withdrawn Part 12. Each one stays reserved, and no party gives it a new
-meaning in version 1. **[WIR-433]** A parser MUST reject a `kind` or an
-`inner_kind` that the table above marks as retired.
+**[WIR-433]** A parser MUST reject a `kind` or an `inner_kind` that the
+table above does not list, and one that the table marks as retired.
 
 For kind `0x04` the body is an `EditBody`, and for kind `0x05` the body is a
 `DeleteBody`. §6.6.1 gives the two structures. Part 7 §7.5.6 gives the edit
@@ -1610,7 +1598,7 @@ direction gives that authorization, and a client MUST NOT sign an edit.
 At bucket `B0` a `new_body` holds a maximum of **138 bytes**. §6.9 gives 155
 bytes to the body of an `AppMessage` at `B0`. That figure is the `Text, default
 chunk` row. The two fixed fields take 17 bytes, thus 138 bytes remain. An edit
-above that size uses bucket `B1`. Part 16 §16.3 records the consequence of that
+above that size uses bucket `B1`. Part 15 §15.3 records the consequence of that
 step.
 
 > *Cause of the resolution rule.* An earlier draft applied an edit to a message
@@ -1738,7 +1726,7 @@ InvitationAdmit {                 // 249 bytes and the descriptor
     replica_count     u8          // GROUP_REPLICAS
     replicas          [replica_count]ReplicaRef
     desc_len          u16
-    descriptor        [desc_len]u8   // a FileDescriptor of Part 13 §13.3 that names a RosterSnapshot at roster_epoch
+    descriptor        [desc_len]u8   // a FileDescriptor of Part 12 §12.3 that names a RosterSnapshot at roster_epoch
 }
 
 ReplicaRef {                      // 68 bytes
@@ -1887,7 +1875,7 @@ SnapshotNotice {                  // 39 bytes and the descriptor, control type 0
     group_id          [32]u8
     roster_epoch      u32         // the roster epoch that the snapshot describes
     desc_len          u16
-    descriptor        [desc_len]u8   // a FileDescriptor of Part 13 §13.3 that names a RosterSnapshot
+    descriptor        [desc_len]u8   // a FileDescriptor of Part 12 §12.3 that names a RosterSnapshot
 }
 
 GroupMemberEntry {                     // 99 bytes
@@ -1898,7 +1886,7 @@ GroupMemberEntry {                     // 99 bytes
     kem_pk_hash       [32]u8      // SHA3-256( GroupKemKey_g.pk )
 }
 
-RosterSnapshot {                  // an object on the chunk path of Part 13 §13.3.3, class CNEW
+RosterSnapshot {                  // an object on the chunk path of Part 12 §12.3.3, class CNEW
     version           u8          // 0x01
     group_id          [32]u8
     roster_epoch      u32
@@ -1993,15 +1981,15 @@ an `AppMessage` the record is 6 646 bytes, thus it uses bucket `B2`.
 ### 6.6.4 The transparency digest
 
 Kind `0x31` carries a transparency digest. Part 9 §9.5.3 gossips the tree head
-of the handle directory, and Part 10 §10.5 gossips the consensus root. Part 16
-§16.5 gossips the release log head. The three use one structure.
+of the handle directory, and Part 10 §10.5 gossips the consensus root. Part 15
+§15.5 gossips the release log head. The three use one structure.
 
 ```
 DigestBody {
     version   u8        // 0x01
     source    u8        // 0x01 the Part 9 tree head
                         // 0x02 the Part 10 consensus root
-                        // 0x03 the Part 16 §16.5 release log head
+                        // 0x03 the Part 15 §15.5 release log head
     epoch     u64       // the epoch or the tree size that the digest names
     digest    [32]u8
 }
@@ -2018,7 +2006,7 @@ transparency digest. Part 3 §3.6.2 rule NET-064 puts the record in a scheduled
 cover slot, thus it replaces the cover cell of that slot and it adds no cell.
 
 > *Cause.* Part 9 §9.5.3 and Part 10 rule `REL-008` each require an in-band
-> gossip, and Part 16 §16.4 names that gossip as the answer to directory
+> gossip, and Part 15 §15.4 names that gossip as the answer to directory
 > equivocation. An earlier draft gave the gossip no wire field, no application
 > kind, and no capacity row. Thus no implementation could carry it.
 
@@ -2223,7 +2211,7 @@ Carol.
 - **[WIR-196]** A client MUST show a `request` of type `0x01`, and it MUST NOT
   answer it without a user action. **[WIR-358]** A client MUST show an `offer`
   of type `0x03`, and it MUST NOT accept it without a user action. Part 2
-  §2.4.2 goal S4 names that offer as the introduction path. **[WIR-197]** A
+  §2.4.2 goal S3 names that offer as the introduction path. **[WIR-197]** A
   parser MUST reject a
   `body_len` above zero on a record of type `0x01`. **[WIR-198]** A parser MUST
   reject a `body_len` of zero on a record of type `0x02` or of type `0x03`.
@@ -2619,7 +2607,7 @@ cover these cases:
   - Four valid signatures with one invalid signature.
   - A repeated `authority_index`.
   - A `sigs` list that is not in ascending order.
-- The `FileDescriptor` of Part 13 §13.3. **[WIR-133]** The vectors MUST cover a correct
+- The `FileDescriptor` of Part 12 §12.3. **[WIR-133]** The vectors MUST cover a correct
   `commit` value and an incorrect `commit` value. **[WIR-134]** The vectors MUST cover the
   13-chunk boundary at bucket `B1`.
 - The `GroupControl` of §6.6.3. **[WIR-479]** The vectors MUST cover one record
@@ -2708,9 +2696,9 @@ cover these cases:
 - The hop 3 key update of Part 3 §3.4.4. **[WIR-354]** The vectors MUST give
   a forward cell and a backward cell after one update. **[WIR-355]** The
   vectors MUST give the key set after `CIRCUIT_MAX_CELLS` updates.
-- The at-rest store of Part 15 §15.6.4. **[WIR-356]** The test MUST run three
+- The at-rest store of Part 14 §14.6.4. **[WIR-356]** The test MUST run three
   steps on one stated plaintext record. The steps are a write, a deletion under
-  Part 7 rule `DEV-099`, and the checkpoint of Part 15 rule `IMP-043`.
+  Part 7 rule `DEV-099`, and the checkpoint of Part 14 rule `IMP-043`.
   **[WIR-357]** After each step, the test MUST assert that the three files
   hold no 16-byte window of that plaintext. The three files are the database
   file, the write-ahead log, and the journal.
@@ -2721,9 +2709,9 @@ cover these cases:
   - An `EXTEND` cell whose `relay_id` names another relay.
   - A build cell whose command byte is `DATA`.
 - Byte-for-byte equality across the portable build, the AVX2 build, and the NEON
-  build (Part 15 §15.5).
+  build (Part 14 §14.5).
 
-Part 15 §15.5.2 gives the location of the vectors, the `PROVENANCE.md` file, and
+Part 14 §14.5.2 gives the location of the vectors, the `PROVENANCE.md` file, and
 the state of that location today. A test suite that reaches the network at test
 time is a suite that an air-gapped auditor cannot run. Such a suite is also a
 supply-chain dependency at verification time.
@@ -2734,7 +2722,7 @@ supply-chain dependency at verification time.
 TCP transport of §6.2.1, from the client to the relay. A relay-to-client cell
 carries no WebSocket mask, thus it costs 4 bytes less at each bucket. Each
 budget of this specification uses the client-to-relay figure as the bound for
-the two directions. A web client of Part 15 §15.7 sends the same frames
+the two directions. A web client of Part 14 §14.7 sends the same frames
 through the stack of its browser, and that stack decides the record count;
 each budget uses the figure of this table for it.
 

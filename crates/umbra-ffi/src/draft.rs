@@ -1,4 +1,4 @@
-//! The draft of Part 15 §15.6.1: the one place where the text of a message
+//! The draft of Part 14 §14.6.1: the one place where the text of a message
 //! sits before the send. The platform writes UTF-16 code units into it,
 //! and the buffer is zero bytes after the drop, whether the send succeeded
 //! or failed (`IMP-039`).

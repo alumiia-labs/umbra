@@ -249,7 +249,7 @@ pub enum ClientEvent {
     },
 }
 
-/// One chunk command of Part 13 §13.3.3 for one relay.
+/// One chunk command of Part 12 §12.3.3 for one relay.
 pub enum ChunkJob {
     /// `CNEW`, or `BNEW` for a chunk of the backup class.
     Register {
@@ -917,7 +917,7 @@ pub struct ClientNode {
     /// The group-queue commands that wait for a circuit to their relay.
     held_groups: Vec<HeldGroup>,
     /// The range of each circuit of this node (`WIR-309`). A node for
-    /// attachments carries no queue command (Part 13 §13.8).
+    /// attachments carries no queue command (Part 12 §12.8).
     range: Range,
     capsules: VecDeque<Vec<u8>>,
     next_handle: u64,
@@ -2381,7 +2381,7 @@ impl ClientNode {
         Ok(handle)
     }
 
-    /// A node for the transfer of attachments. Part 13 §13.8 puts them on a
+    /// A node for the transfer of attachments. Part 12 §12.8 puts them on a
     /// connection of their own, thus a client runs this node beside the one
     /// of its queues. Each circuit of it carries the attachment range alone.
     pub fn for_transfers(ingress: RelayInfo, relays: Vec<RelayInfo>, root: RootIdentity) -> Self {

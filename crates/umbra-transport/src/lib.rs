@@ -6,7 +6,7 @@
 //! session link machine on both ends, and the connection race policy. The
 //! native half, behind the `native` feature, binds that machine to TLS 1.3
 //! through rustls and to QUIC through quinn on tokio. The web client of
-//! Part 15 §15.7 binds the same machine to the WebSocket API of its
+//! Part 14 §14.7 binds the same machine to the WebSocket API of its
 //! browser in the web crate.
 #![forbid(unsafe_code)]
 #![cfg_attr(not(feature = "native"), no_std)]

@@ -1,4 +1,4 @@
-//! The two token types of Part 14 §14.3: the token layout of RFC 9578, the
+//! The two token types of Part 13 §13.3: the token layout of RFC 9578, the
 //! challenge that binds a token to an epoch and a redemption context, the
 //! batched issuance at the client and at the issuer, and the verification
 //! at a relay or at an addressee.
@@ -17,9 +17,9 @@ use umbra_wire::codec::{Reader, Writer};
 use super::BATCH_MAX;
 use crate::Error;
 
-/// The cross-relay token type of §14.3.1.
+/// The cross-relay token type of §13.3.1.
 pub const TYPE_CROSS_RELAY: u16 = 0x0002;
-/// The first-party token type of §14.3.2.
+/// The first-party token type of §13.3.2.
 pub const TYPE_FIRST_PARTY: u16 = 0x0005;
 /// The bytes before the authenticator.
 pub const TOKEN_HEAD: usize = 2 + 32 + 32 + 32;
@@ -52,7 +52,7 @@ pub fn token_key_id(public_key: &[u8]) -> [u8; 32] {
 pub struct TokenChallenge {
     /// The token type.
     pub token_type: u16,
-    /// The epoch of §14.6.
+    /// The epoch of §13.6.
     pub epoch: u32,
     /// The redemption context.
     pub redemption_context: [u8; 32],

@@ -30,9 +30,9 @@ implementation. A developer does not have to read the reference implementation.
 
 **Platform scope of v1.** Android and the web are the v1 client platforms.
 The web client is the same core in a browser extension, and it is a linked
-device of a device set; Part 15 §15.7 gives its form and its limits. An iOS
+device of a device set; Part 14 §14.7 gives its form and its limits. An iOS
 client and a native desktop shell are deferred to a later revision, and Part
-15 §15.6.3 records what such a revision must revisit. The core stays
+15 §14.6.3 records what such a revision must revisit. The core stays
 platform-neutral, thus the deferral changes the scope of this text and not
 the design.
 
@@ -288,45 +288,45 @@ examples. Without the table below a maintainer finds the dependents by hand.
 
 | Constant | Owner | The parts that quote it |
 | --- | --- | --- |
-| `MSG_TTL` | Part 3 §3.2.4 | Part 5 §5.5.4, Part 7 §7.5.6, Part 13 §13.7.1, Part 16 §16.1 |
-| `QUEUE_IDLE_TTL` | Part 3 §3.2.4 | Part 7 §7.5.1, Part 16 §16.1 |
+| `MSG_TTL` | Part 3 §3.2.4 | Part 5 §5.5.4, Part 7 §7.5.6, Part 12 §12.7.1, Part 15 §15.1 |
+| `QUEUE_IDLE_TTL` | Part 3 §3.2.4 | Part 7 §7.5.1, Part 15 §15.1 |
 | `STORE_TIME_GRAIN` | Part 3 §3.2.4 | — |
-| `MAX_QUEUES_PER_SESSION` | Part 3 §3.2.5 | Part 2 §2.7, Part 3 §3.11, Part 8 §8.2.1, Part 16 §16.3 |
+| `MAX_QUEUES_PER_SESSION` | Part 3 §3.2.5 | Part 2 §2.7, Part 3 §3.11, Part 8 §8.2.1, Part 15 §15.3 |
 | The bucket ladder | Part 3 §3.3 | Part 5 §5.6, Part 6 §6.9, Part 3 §3.12, Part 11 §11.3.3 |
-| `CIRCUIT_MAX_AGE`, `CIRCUIT_MAX_CELLS`, `CIRCUIT_AGE_MARGIN`, `CIRCUIT_CELL_MARGIN` | Part 3 §3.4.3 | Part 2 §2.4, Part 3 §3.4.4, Part 3 §3.11.1, Part 3 §3.12, Part 6 §6.2.2, Part 6 §6.2.3, Part 6 §6.8, Part 16 §16.3 |
-| `SESSION_RESUME_WINDOW` | Part 6 §6.2.3 | Part 3 §3.4.3, Part 3 §3.12, Part 16 §16.3 |
+| `CIRCUIT_MAX_AGE`, `CIRCUIT_MAX_CELLS`, `CIRCUIT_AGE_MARGIN`, `CIRCUIT_CELL_MARGIN` | Part 3 §3.4.3 | Part 2 §2.4, Part 3 §3.4.4, Part 3 §3.11.1, Part 3 §3.12, Part 6 §6.2.2, Part 6 §6.2.3, Part 6 §6.8, Part 15 §15.3 |
+| `SESSION_RESUME_WINDOW` | Part 6 §6.2.3 | Part 3 §3.4.3, Part 3 §3.12, Part 15 §15.3 |
 | `PACING_MEAN` | Part 3 §3.9 | Part 3 §3.12, Part 8 §8.8, Part 10 §10.9.1 |
 | `RECEIPT_BATCH_MAX` | Part 3 §3.5.4 | Part 6 §6.6, Part 6 §6.6.9, Part 6 §6.8 |
 | The tier A cover rate | Part 3 §3.6.2 | Part 3 §3.12, Part 4 §4.7.2, Part 7 §7.5.1, Part 9 §9.5.3, Part 10 §10.4.2 |
-| The cell wire costs 560, 2 096, 8 240, 32 860 | Part 6 §6.9 | Part 3 §3.3.1, Part 3 §3.5.2, Part 3 §3.9, Part 3 §3.12, Part 7 §7.3.1, Part 7 §7.5.5, Part 10 §10.9.1, Part 11 §11.3.3, Part 11 §11.9.5, Part 11 §11.11, Part 13 §13.7.2, Part 16 §16.3 |
-| `BACKUP_*` | Part 4 §4.8 | Part 3 §3.12, Part 7 §7.5.8, Part 9 §9.9.2, Part 13 §13.3.2, Part 13 §13.3.3, Part 13 §13.4.2, Part 13 §13.9, Part 16 §16.1 |
+| The cell wire costs 560, 2 096, 8 240, 32 860 | Part 6 §6.9 | Part 3 §3.3.1, Part 3 §3.5.2, Part 3 §3.9, Part 3 §3.12, Part 7 §7.3.1, Part 7 §7.5.5, Part 10 §10.9.1, Part 11 §11.3.3, Part 11 §11.9.5, Part 11 §11.11, Part 12 §12.7.2, Part 15 §15.3 |
+| `BACKUP_*` | Part 4 §4.8 | Part 3 §3.12, Part 7 §7.5.8, Part 9 §9.9.2, Part 12 §12.3.2, Part 12 §12.3.3, Part 12 §12.4.2, Part 12 §12.9, Part 15 §15.1 |
 | `SKIP_TTL` | Part 5 §5.5.4 | Part 1 §1.9 |
 | `MAX_DEVICES`, `OWNER_CLAIM_RATE`, `OWNER_ABSENCE_RATE` | Part 7 §7.8 | Part 3 §3.12 |
 | `OWNER_ABSENCE` | Part 7 §7.8 | Part 2 §2.4 |
 | `MAX_QUEUES_PER_HANDLE` | Part 8 §8.2.1 | Part 8 §8.7 |
 | `WAKE_COALESCE_WINDOW` | Part 8 §8.5 | Part 2 §2.4, Part 3 §3.12 |
-| The consensus epoch and `CONSENSUS_VALIDITY` | Part 10 §10.11 | Part 3 §3.2.6, Part 3 §3.12, Part 4 §4.7.2, Part 13 §13.3.2 |
+| The consensus epoch and `CONSENSUS_VALIDITY` | Part 10 §10.11 | Part 3 §3.2.6, Part 3 §3.12, Part 4 §4.7.2, Part 12 §12.3.2 |
 | `RECEIPT_WINDOW` | Part 10 §10.11 | Part 10 §10.9.1 |
 | `GROUP_MAX` | Part 11 §11.10 | Part 1 §1.5.4, Part 3 §3.12, Part 11 §11.3.3, Part 11 §11.9.1 |
 | `MOD_ACTION_MAX` | Part 11 §11.9.6 | Part 6 §6.6.3 |
-| `RENDEZVOUS_ROTATE` | Part 9 §9.10 | Part 16 §16.1, Part 16 §16.3 |
-| `CHUNK_SIZE`, `REPLICAS`, `CHUNK_TTL`, `CHUNK_LIFE_MAX` | Part 13 §13.7 | Part 3 §3.12, Part 4 §4.7.2 |
-| `MAX_FILE_SIZE`, `UPLOAD_QUOTA_DAY`, `CHUNK_STORE_MIN`, `CHUNK_STORE_TARGET` | Part 13 §13.7 | Part 13 §13.7.2, Part 13 §13.10, Part 2 §2.4, Part 10 §10.5.3 |
-| `SEGMENT_SIZE`, `MAX_CONCURRENT_CHUNKS`, `IMAGE_REENCODE_BYTES` | Part 13 §13.7 | Part 13 §13.2.3, Part 13 §13.3, Part 13 §13.7.2 |
-| `CHUNK_EGRESS_BUDGET_DAY`, `CHUNK_FETCH_RATE`, `HOT_REPLICAS` | Part 13 §13.7 | Part 13 §13.11, Part 2 §2.4 |
+| `RENDEZVOUS_ROTATE` | Part 9 §9.10 | Part 15 §15.1, Part 15 §15.3 |
+| `CHUNK_SIZE`, `REPLICAS`, `CHUNK_TTL`, `CHUNK_LIFE_MAX` | Part 12 §12.7 | Part 3 §3.12, Part 4 §4.7.2 |
+| `MAX_FILE_SIZE`, `UPLOAD_QUOTA_DAY`, `CHUNK_STORE_MIN`, `CHUNK_STORE_TARGET` | Part 12 §12.7 | Part 12 §12.7.2, Part 12 §12.10, Part 2 §2.4, Part 10 §10.5.3 |
+| `SEGMENT_SIZE`, `MAX_CONCURRENT_CHUNKS`, `IMAGE_REENCODE_BYTES` | Part 12 §12.7 | Part 12 §12.2.3, Part 12 §12.3, Part 12 §12.7.2 |
+| `CHUNK_EGRESS_BUDGET_DAY`, `CHUNK_FETCH_RATE`, `HOT_REPLICAS` | Part 12 §12.7 | Part 12 §12.11, Part 2 §2.4 |
 | `MENTION_MAX`, `POLL_OPTION_MAX`, `POLL_GROUP_MAX` | Part 11 §11.10 | Part 6 §6.6.5, Part 6 §6.6.6, Part 11 §11.11 |
 | `TIMER_VALUES`, `FORWARD_MAX_DEPTH` | Part 7 §7.8 | Part 6 §6.6.5, Part 6 §6.6.8, Part 7 §7.5.8 |
 | The propagation budget of 420 ms | Part 3 §3.12 | Part 2 §2.4 U2, Part 3 §3.9 |
 | The circuit-hop flight widths 1 232 and 1 136, and the sum 2 368 | Part 5 §5.4.9 | Part 2 §2.4, Part 3 §3.4.3, Part 3 §3.12 |
 | Each U-goal target | Part 2 §2.4 | Part 2 §2.4.1 names each rule that carries a goal |
-| `QUEUE_QUOTA` | Part 3 §3.2.4 | Part 6 §6.4.3, Part 7 §7.5.1, Part 14 §14.12 |
+| `QUEUE_QUOTA` | Part 3 §3.2.4 | Part 6 §6.4.3, Part 7 §7.5.1, Part 13 §13.12 |
 | `ROTATE_AFTER` | Part 3 §3.2.4 | Part 6 §6.4.2, Part 7 §7.5.5 |
 | `ACK_HOLE_TIMEOUT` | Part 3 §3.2.4 | Part 6 §6.4.3 |
-| `DRAIN_THRESHOLD` | Part 3 §3.5.2 | Part 16 §16.3 |
+| `DRAIN_THRESHOLD` | Part 3 §3.5.2 | Part 15 §15.3 |
 | `RECEIPT_MAX_HOLD` | Part 3 §3.5.4 | Part 6 §6.6 |
-| `MAX_SKIP` | Part 5 §5.5.4 | Part 16 §16.3 |
-| `MAX_STORED` | Part 5 §5.5.4 | Part 14 §14.12, Part 16 §16.3 |
-| `MAX_BYTES`, `MAX_STORED_DEVICE` | Part 5 §5.5.4 | Part 16 §16.3 |
+| `MAX_SKIP` | Part 5 §5.5.4 | Part 15 §15.3 |
+| `MAX_STORED` | Part 5 §5.5.4 | Part 13 §13.12, Part 15 §15.3 |
+| `MAX_BYTES`, `MAX_STORED_DEVICE` | Part 5 §5.5.4 | Part 15 §15.3 |
 | `DELETE_BATCH_MAX` | Part 7 §7.5.6 | Part 6 §6.6.1, Part 6 §6.8 |
 | `SWEEP_SPREAD` | Part 7 §7.5.6 | Part 4 §4.5.1 |
 | `SYNC_MAX_AGE` | Part 7 §7.8 | Part 2 §2.4, Part 6 §6.6 |
@@ -334,8 +334,8 @@ examples. Without the table below a maintainer finds the dependents by hand.
 | `ROSTER_RATE_LIMIT`, `GROUP_EPOCH_RATE`, `GRANT_RATE` | Part 11 §11.10 | none |
 | `KEY_REQUEST_RATE` | Part 11 §11.10 | Part 6 §6.6.11 |
 | `GROUP_REPLICAS` | Part 11 §11.10 | Part 1 §1.5.3, Part 3 §3.2.7, Part 3 §3.12, Part 6 §6.4.6 |
-| `GROUP_SLOT`, `GROUP_SLOT_WINDOW`, `GROUP_SLOT_SKEW` | Part 11 §11.10 | Part 1 §1.9, Part 2 §2.4, Part 6 §6.4.6, Part 15 §15.9.2, Part 16 §16.3 |
-| `GROUP_EPOCH_MAX_AGE`, `GROUP_EPOCH_GRACE`, `GROUP_ROSTER_WAIT` | Part 11 §11.10 | Part 6 §6.6.11, Part 16 §16.3 |
+| `GROUP_SLOT`, `GROUP_SLOT_WINDOW`, `GROUP_SLOT_SKEW` | Part 11 §11.10 | Part 1 §1.9, Part 2 §2.4, Part 6 §6.4.6, Part 14 §14.9.2, Part 15 §15.3 |
+| `GROUP_EPOCH_MAX_AGE`, `GROUP_EPOCH_GRACE`, `GROUP_ROSTER_WAIT` | Part 11 §11.10 | Part 6 §6.6.11, Part 15 §15.3 |
 | `GROUP_GAP_TIMEOUT` | Part 11 §11.10 | Part 3 §3.2.7 |
 | `ROTATE_BACKOFF_ROLE`, `ROTATE_BACKOFF_MEMBER` | Part 11 §11.10 | none |
 | `GROUP_TAG_LEN` | Part 11 §11.10 | Part 6 §6.4.6, Part 6 §6.9 |
@@ -343,25 +343,25 @@ examples. Without the table below a maintainer finds the dependents by hand.
 | `GROUP_ALL_NOTIFY_MAX` | Part 11 §11.10 | Part 2 §2.4, Part 7 §7.5.9, Part 8 §8.5 |
 | `GROUP_SILENT_EVICT`, `PRESENCE_INTERVAL` | Part 11 §11.10 | Part 3 §3.2.7, Part 3 §3.12 |
 | `HISTORY_WINDOW` | Part 11 §11.10 | Part 6 §6.6.3 |
-| `GROUP_RETENTION` | Part 3 §3.2.7 | Part 2 §2.4, Part 2 §2.7, Part 11 §11.2.3, Part 11 §11.8, Part 16 §16.1 |
-| `GROUP_QUEUE_QUOTA`, `GROUP_IDLE_TTL` | Part 3 §3.2.7 | Part 11 §11.2.3, Part 16 §16.1 |
-| `GROUP_POST_RATE` | Part 3 §3.2.7 | Part 6 §6.4.5, Part 11 §11.3.4, Part 14 §14.2 |
-| `GROUP_READ_GRACE`, `GROUP_WRITE_GRACE` | Part 3 §3.2.7 | Part 6 §6.4.5, Part 11 §11.4.3, Part 16 §16.1, Part 16 §16.3 |
-| `GROUP_NOTIFIER_MAX` | Part 3 §3.2.7 | Part 8 §8.5.2, Part 16 §16.1 |
+| `GROUP_RETENTION` | Part 3 §3.2.7 | Part 2 §2.4, Part 2 §2.7, Part 11 §11.2.3, Part 11 §11.8, Part 15 §15.1 |
+| `GROUP_QUEUE_QUOTA`, `GROUP_IDLE_TTL` | Part 3 §3.2.7 | Part 11 §11.2.3, Part 15 §15.1 |
+| `GROUP_POST_RATE` | Part 3 §3.2.7 | Part 6 §6.4.5, Part 11 §11.3.4, Part 13 §13.2 |
+| `GROUP_READ_GRACE`, `GROUP_WRITE_GRACE` | Part 3 §3.2.7 | Part 6 §6.4.5, Part 11 §11.4.3, Part 15 §15.1, Part 15 §15.3 |
+| `GROUP_NOTIFIER_MAX` | Part 3 §3.2.7 | Part 8 §8.5.2, Part 15 §15.1 |
 | `GROUP_DIGEST_MIN_GAP` | Part 8 §8.5.2 | none |
 | `CLOCK_SKEW` | Part 10 §10.11 | Part 1 §1.9, Part 9 §9.5.2, Part 10 §10.5.2 |
 | `ROTATE_GRACE` | Part 3 §3.2.6 | Part 9 §9.9 |
-| `SEND_MAX_ATTEMPTS`, `SEND_GIVE_UP` | Part 3 §3.7 | Part 15 §15.9 |
+| `SEND_MAX_ATTEMPTS`, `SEND_GIVE_UP` | Part 3 §3.7 | Part 14 §14.9 |
 | `RELAY_LOOP_RATE` | Part 3 §3.6.3 | none |
-| `NTF_FAIL_MAX` | Part 8 §8.2.3 | Part 15 §15.9.2 |
+| `NTF_FAIL_MAX` | Part 8 §8.2.3 | Part 14 §14.9.2 |
 | `PUSH_TTL_MESSAGE`, `PUSH_TTL_DIGEST`, `REPUSH_INTERVAL`, `REPUSH_MAX` | Part 8 §8.4.3 | Part 2 §2.4 |
 | `NDR_REQUEST_LEN`, `PUSH_TOKEN_MAX` | Part 8 §8.2.7 | |
-| `POW_LOOKUP_FLOOR` | Part 14 §14.13 | Part 9 §9.4.1 |
-| `HELLO_POW_EFFORT`, `HELLO_INBOUND_LIMIT` | Part 14 §14.13 | Part 9 §9.9, Part 2 §2.4 |
+| `POW_LOOKUP_FLOOR` | Part 13 §13.13 | Part 9 §9.4.1 |
+| `HELLO_POW_EFFORT`, `HELLO_INBOUND_LIMIT` | Part 13 §13.13 | Part 9 §9.9, Part 2 §2.4 |
 | `INVITE_TTL` | Part 4 §4.8 | Part 5 §5.4.5 |
 | `INVITE_RESERVE_TTL` | Part 4 §4.8 | Part 6 §6.4 |
-| `CLUSTER_SAMPLE` | Part 10 §10.11 | Part 16 §16.3, Part 16 §16.6.1 |
-| `AUTHORITY_FLOOR` | Part 10 §10.11 | Part 16 §16.6.1 |
+| `CLUSTER_SAMPLE` | Part 10 §10.11 | Part 15 §15.3, Part 15 §15.6.1 |
+| `AUTHORITY_FLOOR` | Part 10 §10.11 | Part 15 §15.6.1 |
 
 - **[SCP-008]** A revision that changes a constant of this table MUST change
   each part of the third column in the same commit.
@@ -419,7 +419,7 @@ side channel that the user selects, such as a QR code scan.
 | `KeyRequest`, `KeySupply` | Part 6 §6.6.11 | `AppMessage`, kinds `0x34` and `0x35` | Client |
 | `VerifyCommit`, `VerifyReveal` | Part 4 §4.5.2 | `AppMessage`, kinds `0x36` and `0x37` | Client |
 | `RecoveryDigits` | Part 4 §4.7.7 | Out of band | Client |
-| `DeadChannelBlob` | Part 3 §3.2.6 | A handle-addressed chunk, Part 13 §13.4.2 | Client |
+| `DeadChannelBlob` | Part 3 §3.2.6 | A handle-addressed chunk, Part 12 §12.4.2 | Client |
 | Public Address string | Part 4 §4.2.3 | Out of band | Client |
 | `Profile_j` | Part 4 §4.2.5 | The invitation, Part 4 §4.3.1 | Client |
 | One-time invitation link | Part 4 §4.3.1 | Out of band | Client |
@@ -427,7 +427,7 @@ side channel that the user selects, such as a QR code scan.
 | Invitation blob | Part 5 §5.4.1 | The relay, under the link of Part 4 §4.3.1 | Client |
 | Reusable contact link (Part 4 §4.3.2) | none | Out of band | Client |
 | `KeyChangeNotice` | Part 4 §4.5.1 | `AppMessage`, kind `0x30` | Client |
-| Backup object, `BackupRootChunk`, `BackupRoot`, `BackupEntry` | Part 4 §4.7.2 | Backup-class chunks under `BNEW`, Part 13 §13.3.3, and the handle-addressed chunk of Part 13 §13.4.2 | Client |
+| Backup object, `BackupRootChunk`, `BackupRoot`, `BackupEntry` | Part 4 §4.7.2 | Backup-class chunks under `BNEW`, Part 12 §12.3.3, and the handle-addressed chunk of Part 12 §12.4.2 | Client |
 | Recovery share (Part 4 §4.7.3) | none | none | Client |
 | Handshake flights 1 to 3 | Part 5 §5.4.2 | none | Client |
 | `Roster`, `DeviceEntry`, `OwnerClaim`, `OwnerClaimRecord` | Part 7 §7.3.1 | none | Client |
@@ -435,7 +435,7 @@ side channel that the user selects, such as a QR code scan.
 | Mutable state body, kind `0x20` sub-kind `0x01` (Part 7 §7.5.3) | none | `AppMessage` | Client |
 | `DeviceSetControl`, `SyncAck` | Part 7 §7.5.5 | `AppMessage`, kind `0x20` sub-kind `0x02` | Client |
 | `SyncSeedUpdate` | Part 7 §7.7 | `DeviceSetControl`, type `0x05` | Client |
-| Catch-up object (Part 7 §7.5.1) | none | The chunk path of Part 13 §13.3.3, and `DeviceSetControl` type `0x04` carries its `FileDescriptor` | Client |
+| Catch-up object (Part 7 §7.5.1) | none | The chunk path of Part 12 §12.3.3, and `DeviceSetControl` type `0x04` carries its `FileDescriptor` | Client |
 | Push registration `(handle_i, ct_token_i)` (Part 8 §8.2.1) | none | none | Client |
 | Notification blob | Part 8 §8.2.2 | The platform push, Part 8 §8.4 | Relay |
 | `k_ntf_root` transfer (Part 8 §8.2.3) | none | none | Client |
@@ -446,7 +446,7 @@ side channel that the user selects, such as a QR code scan.
 | Profile blob (Part 9 §9.3.1) | none | none | Client |
 | Lookup request and response (Part 9 §9.4) | none | none | Client and directory |
 | `LookupProof`, `LadderStep` | Part 9 §9.5.1 | The lookup response of Part 9 §9.4 step 4 | Directory |
-| `IssuerKeyEntry` | Part 14 §14.5 | A leaf of the log of Part 9 §9.5.1 | The issuer of Part 14 §14.9 |
+| `IssuerKeyEntry` | Part 13 §13.5 | A leaf of the log of Part 9 §9.5.1 | The issuer of Part 13 §13.9 |
 | `SignedTreeHead`, `SignerSig` | Part 9 §9.5.2 | The lookup response of Part 9 §9.4 step 4 | The signers of Part 9 §9.5.2 |
 | `LogKeySet`, `SignedLogKeySet` | Part 9 §9.5.2 | The client build, and the signers of Part 9 §9.5.2 | The signers of Part 9 §9.5.2 |
 | Rendezvous hello (Part 9 §9.6), which carries the fields of Part 5 §5.4.1 and ends with an `Admission` | none | The rendezvous queue, Part 9 §9.6 | Client |
@@ -467,26 +467,26 @@ side channel that the user selects, such as a QR code scan.
 | Group-queue commands `0x90` to `0x9A` | Part 6 §6.4.5 | `Cell` | Client and relay |
 | `GroupQueueRecord` | Part 6 §6.4.6 | `GPOST` and `GMSG`, Part 6 §6.4.5 | Client |
 | `ContentPlain` | Part 6 §6.4.6 | `GroupQueueRecord`, kind `0x01` | Client |
-| `EpochKeyBody`, `KemSlot`, `SlotPayload` | Part 6 §6.4.6 | `GroupQueueRecord`, kind `0x02`, or the chunk path of Part 13 §13.3.3 | Client |
+| `EpochKeyBody`, `KemSlot`, `SlotPayload` | Part 6 §6.4.6 | `GroupQueueRecord`, kind `0x02`, or the chunk path of Part 12 §12.3.3 | Client |
 | `NotifyRegistration` for a group | Part 6 §6.4.5 | `GNREG` and `GNUNREG`, Part 6 §6.4.5 | Client |
 | `NotifyDigest` | Part 8 §8.5.1 | `SEND`, as the L6 record of kind `0x04` | Group-queue relay |
 | `JoinRecord` | Part 6 §6.6.3 | `GroupControl`, type `0x02`, on the pairwise channel of the invitee to the inviter | Client |
 | `GroupInvitation` | Part 6 §6.6.3 | `GroupControl`, type `0x07`, on the pairwise channel of the inviter to the invitee | Client |
 | `SnapshotNotice` | Part 6 §6.6.3 | `GroupQueueRecord`, as `GroupControl` type `0x08` | Client |
 | `RekeyRecord` | Part 6 §6.6.3 | `GroupControl`, type `0x09`, on a pairwise channel to an admin | Client |
-| `GroupMemberEntry`, `RosterSnapshot` | Part 6 §6.6.3 | The chunk path of Part 13 §13.3.3, under a `FileDescriptor` in a `GroupInvitation` stage `0x02` or in a `SnapshotNotice` | Client |
+| `GroupMemberEntry`, `RosterSnapshot` | Part 6 §6.6.3 | The chunk path of Part 12 §12.3.3, under a `FileDescriptor` in a `GroupInvitation` stage `0x02` or in a `SnapshotNotice` | Client |
 | Plain epoch (Part 11 §11.9.2) | none | `GroupControl`, type `0x03` | Client |
 | Granting epoch (Part 11 §11.9.2) | none | `GroupControl`, type `0x04` | Client |
 | Group moderation epoch (Part 11 §11.9.6) | none | `GroupControl`, type `0x05` | Client |
 | `GroupPresence` | Part 11 §11.9.7 | `GroupQueueRecord`, as `GroupControl` type `0x06` | Client |
-| `FileDescriptor`, `ChunkRef` | Part 13 §13.3 | `AppMessage`, kind `0x02` | Client |
-| `RelayRef` | Part 13 §13.3.2 | `ChunkRef` | Client |
-| Chunk commands `0x70` to `0x7B` | Part 13 §13.3.3 | `Cell` | Client and relay |
-| `CrepPayload`, `ReplicaTarget` | Part 13 §13.4.1 | `CREP`, Part 13 §13.3.3 | Client |
-| `Admission` | Part 14 §14.2 | `NEW`, `CNEW`, and `BNEW` | Client |
-| `PowChallenge` | Part 14 §14.8 | The descriptor path of Part 10 §10.5.3, or a rejection of the verifier | The verifier of Part 14 §14.2 |
-| `PowSolution` | Part 14 §14.8 | `Admission` | Client |
-| Cross-relay token, first-party token | The RFC of each type, Part 14 §14.3 | none | Issuer, Part 14 §14.9 |
+| `FileDescriptor`, `ChunkRef` | Part 12 §12.3 | `AppMessage`, kind `0x02` | Client |
+| `RelayRef` | Part 12 §12.3.2 | `ChunkRef` | Client |
+| Chunk commands `0x70` to `0x7B` | Part 12 §12.3.3 | `Cell` | Client and relay |
+| `CrepPayload`, `ReplicaTarget` | Part 12 §12.4.1 | `CREP`, Part 12 §12.3.3 | Client |
+| `Admission` | Part 13 §13.2 | `NEW`, `CNEW`, and `BNEW` | Client |
+| `PowChallenge` | Part 13 §13.8 | The descriptor path of Part 10 §10.5.3, or a rejection of the verifier | The verifier of Part 13 §13.2 |
+| `PowSolution` | Part 13 §13.8 | `Admission` | Client |
+| Cross-relay token, first-party token | The RFC of each type, Part 13 §13.3 | none | Issuer, Part 13 §13.9 |
 
 The table has 94 rows, and 21 of them hold at least one `none` cell.
 `Cell` has two definitions, and the two agree field for field.
@@ -502,7 +502,7 @@ The table has 94 rows, and 21 of them hold at least one `none` cell.
 
 > *Cause.* A review of draft 0.1.0 found eight named mechanisms with no wire
 > object, no issuer, or no locator. The queue address of Part 3 §3.2.2 is one
-> of them. The proof-of-work challenge of Part 14 §14.8 is a second. Each one
+> of them. The proof-of-work challenge of Part 13 §13.8 is a second. Each one
 > sat behind a requirement that an implementer could not satisfy.
 >
 > The table above found more. The handshake flights of Part 5 §5.4.2 have a
@@ -528,7 +528,7 @@ occurs while a duration runs **interrupts** that duration.
 
 Part 10 §10.11 owns `CLOCK_SKEW` and sets it to 1 hour. A party detects a clock
 movement when the device clock and the monotonic source advance by amounts that
-differ by more than `CLOCK_SKEW`. Part 16 §16.3 records that no platform gives a
+differ by more than `CLOCK_SKEW`. Part 15 §15.3 records that no platform gives a
 monotonic counter that survives a restore. A party cannot detect a clock
 movement across a restart, thus a duration that spans a restart runs on the
 device clock. This specification accepts that residual.
@@ -536,7 +536,7 @@ device clock. This specification accepts that residual.
 The group slot index of Part 11 §11.3.1 reads the device clock, thus a group
 record carries a clock comparison between two members. `GROUP_SLOT_SKEW` of
 Part 11 §11.10 is its skew tolerance under `SCP-020`, and a record outside the
-slot window is a `clock` event of Part 15 §15.9.2.
+slot window is a `clock` event of Part 14 §14.9.2.
 
 - **[SCP-016]** A revision that adds a duration MUST name the party that
   measures it. **[SCP-017]** A revision that adds a duration MUST name the
@@ -578,8 +578,7 @@ slot window is a `clock` event of Part 15 §15.9.2.
 | 9 | Discovery: Handles, the Directory, and Key Transparency |
 | 10 | Relay Directory, Measurement, and Selection |
 | 11 | Private Groups |
-| 12 | Withdrawn |
-| 13 | Attachments and Large Objects |
-| 14 | Anti-Abuse Without Identifiers |
-| 15 | Implementation Requirements and Assurance |
-| 16 | Security Considerations and Known Limitations |
+| 12 | Attachments and Large Objects |
+| 13 | Anti-Abuse Without Identifiers |
+| 14 | Implementation Requirements and Assurance |
+| 15 | Security Considerations and Known Limitations |

@@ -55,11 +55,10 @@ each column when a crate implements the requirement and a test covers it.
 | `DIS` | Discovery, Handles, and Key Transparency | `spec/09-discovery.md` |
 | `REL` | Relay Directory | `spec/10-relay-directory.md` |
 | `GRP` | Private Groups | `spec/11-private-groups.md` |
-| `COM` | Public Communities | `spec/12-communities.md` |
-| `ATT` | Attachments and Large Objects | `spec/13-attachments.md` |
-| `ABU` | Anti-Abuse Without Identifiers | `spec/14-anti-abuse.md` |
-| `IMP` | Implementation | `spec/15-implementation.md` |
-| `SEC` | Security Considerations | `spec/16-security-considerations.md` |
+| `ATT` | Attachments and Large Objects | `spec/12-attachments.md` |
+| `ABU` | Anti-Abuse Without Identifiers | `spec/13-anti-abuse.md` |
+| `IMP` | Implementation | `spec/14-implementation.md` |
+| `SEC` | Security Considerations | `spec/15-security-considerations.md` |
 
 ## Summary
 
@@ -70,18 +69,17 @@ each column when a crate implements the requirement and a test covers it.
 | `NET` | 235 | 84 | 1 | 0 | 8 | **328** |
 | `IDN` | 127 | 44 | 1 | 0 | 5 | **177** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
-| `WIR` | 391 | 86 | 0 | 0 | 6 | **483** |
+| `WIR` | 391 | 85 | 0 | 0 | 6 | **482** |
 | `DEV` | 176 | 86 | 0 | 0 | 7 | **269** |
 | `NTF` | 74 | 28 | 0 | 0 | 3 | **105** |
 | `DIS` | 109 | 33 | 0 | 0 | 1 | **143** |
 | `REL` | 124 | 32 | 1 | 0 | 2 | **159** |
 | `GRP` | 220 | 62 | 0 | 0 | 6 | **288** |
-| `COM` | 0 | 0 | 0 | 0 | 0 | **0** |
 | `ATT` | 139 | 46 | 1 | 0 | 2 | **188** |
 | `ABU` | 64 | 30 | 0 | 0 | 0 | **94** |
 | `IMP` | 112 | 41 | 0 | 0 | 2 | **155** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 1926 | 613 | 5 | 0 | 49 | **2593** |
+| **All** | 1926 | 612 | 5 | 0 | 49 | **2592** |
 
 ## SCP — Scope and Conventions
 
@@ -164,7 +162,7 @@ Source: `spec/03-network-architecture.md`
 | `NET-023` | §3.2.5 | MUST | A client | A client MUST divide its queues across independent sessions over independent relay chains. |  |  |
 | `NET-024` | §3.2.5 | MUST | A client | A client MUST do this division again at each rotation. |  |  |
 | `NET-025` | §3.3 | MUST | Implementations | Implementations MUST also pad at the transport-record layer (§3.8). |  |  |
-| `NET-026` | §3.3.1 | MUST | An attachment | An attachment MUST use chunks of `CHUNK_SIZE` (Part 13 §13.7). |  |  |
+| `NET-026` | §3.3.1 | MUST | An attachment | An attachment MUST use chunks of `CHUNK_SIZE` (Part 12 §12.7). |  |  |
 | `NET-027` | §3.4.1 | MUST NOT | The operator | The operator MUST NOT select the layer (§10.5). |  |  |
 | `NET-028` | §3.4.3 | MUST NOT | A client | A client MUST NOT use one circuit for more than one privacy mode. |  |  |
 | `NET-029` | §3.4.3 | MUST NOT | A client | A client MUST NOT carry interactive traffic and bulk traffic on the same circuit (§3.8). |  |  |
@@ -257,7 +255,7 @@ Source: `spec/03-network-architecture.md`
 | `NET-117` | §3.2.1 | MUST NOT | A recipient | A recipient MUST NOT give `RecipientId` to a sender. |  |  |
 | `NET-118` | §3.2.3 | MUST | A party | A party MUST compute `authorized_bytes` as the concatenation that §3.2.3 gives. |  |  |
 | `NET-119` | §3.2.3 | MUST | A party | A party MUST set `bind` to the empty byte string for each command of Part 6 §6.4. |  |  |
-| `NET-120` | §3.2.3 | MUST | (unstated) | For a `CPUT` of Part 13 §13.3.3, a party MUST set `bind` to the 32-byte `storage_token` of that section. |  |  |
+| `NET-120` | §3.2.3 | MUST | (unstated) | For a `CPUT` of Part 12 §12.3.3, a party MUST set `bind` to the 32-byte `storage_token` of that section. |  |  |
 | `NET-121` | §3.2.3 | MUST | A relay | A relay MUST reject a command whose `auth` does not verify. |  |  |
 | `NET-122` | §3.2.3 | MUST | A relay | A relay MUST reject a command whose `corr_id` that relay accepted before in the same transport session. |  |  |
 | `NET-123` | §3.2.3 | MUST NOT | A relay | A relay MUST NOT retain a `corr_id` after that session ends. |  |  |
@@ -330,7 +328,7 @@ Source: `spec/03-network-architecture.md`
 | `NET-191` | §3.2.6 | MUST | That client | That client MUST then send its own current `QueueAddress` as a record of kind `0x33` on that channel. |  |  |
 | `NET-192` | §3.2.6 | MUST | A client | A client MUST treat a `DeadChannelBlob` whose `sealed` field does not open under `blob_key` as an empty handle. |  |  |
 | `NET-193` | §3.2.6 | MUST | (unstated) | After a client accepts a `QueueAddress` of a contact, it MUST send again each record that holds no delivery receipt. |  |  |
-| `NET-194` | §3.2.6 | MUST NOT | A client | A client MUST NOT write a `DeadChannelBlob` for a contact that the user blocked under Part 14 §14.12. |  |  |
+| `NET-194` | §3.2.6 | MUST NOT | A client | A client MUST NOT write a `DeadChannelBlob` for a contact that the user blocked under Part 13 §13.12. |  |  |
 | `NET-195` | §3.2.4 | MUST | A relay | A relay MUST count an accepted `SEND` and a `SUB` on a queue as activity. |  |  |
 | `NET-196` | §3.2.4 | MUST NOT | A relay | A relay MUST NOT count a `COVER` as activity. |  |  |
 | `NET-197` | §3.2.6 | MUST NOT | A client | A client MUST NOT fetch the dead-channel handle of a blocked contact. |  |  |
@@ -357,7 +355,7 @@ Source: `spec/03-network-architecture.md`
 | `NET-218` | §3.7 | MUST | A client | A client MUST continue the ARQ after a `LIMIT`, a `BUSY`, or an `ADMISSION`, under the rules of that section. |  |  |
 | `NET-219` | §3.7 | MUST NOT | A client | A client MUST NOT send one record more than `SEND_MAX_ATTEMPTS` times. |  |  |
 | `NET-220` | §3.7 | MUST | (unstated) | If a record holds no relay acknowledgment `SEND_GIVE_UP` after its first send, the client MUST stop the ARQ of that record. |  |  |
-| `NET-221` | §3.7 | MUST | (unstated) | When the ARQ of a record stops, the client MUST put the record in the `failed` state of Part 15 §15.9. |  |  |
+| `NET-221` | §3.7 | MUST | (unstated) | When the ARQ of a record stops, the client MUST put the record in the `failed` state of Part 14 §14.9. |  |  |
 | `NET-222` | §3.7 | MUST NOT | A client | A client MUST NOT send a `failed` record again without a user action. |  |  |
 | `NET-223` | §3.2.7 | MUST | A relay that serves queues | A relay that serves queues MUST serve group queues. |  |  |
 | `NET-224` | §3.2.7 | MUST | A relay | A relay MUST make `GroupQueueId` from its CSPRNG at a `GNEW`. |  |  |
@@ -393,7 +391,7 @@ Source: `spec/03-network-architecture.md`
 | `NET-254` | §3.2.7 | MUST | The entries of those relays | The entries of those relays MUST carry different `operator_id` values and different jurisdiction blocs, under invariant 1 and invariant 2 of §3.4.6. |  |  |
 | `NET-255` | §3.2.7 | MUST NOT | A creator | A creator MUST NOT apply the relaxation of `NET-200` to the two replicas. |  |  |
 | `NET-256` | §3.2.7 | MUST | A sender | A sender MUST send the same record bytes to each replica, each under the ARQ of §3.7. |  |  |
-| `NET-257` | §3.2.7 | MUST | A client | A client MUST put a record in the `accepted` state of Part 15 §15.9.1 when the first replica returns a `GSEQ`. |  |  |
+| `NET-257` | §3.2.7 | MUST | A client | A client MUST put a record in the `accepted` state of Part 14 §14.9.1 when the first replica returns a `GSEQ`. |  |  |
 | `NET-258` | §3.2.7 | MUST | The client | The client MUST continue the ARQ to the other replica in the background. |  |  |
 | `NET-259` | §3.2.7 | MUST | (unstated) | If the ARQ to one replica ends under `NET-220` after the other replica accepted, the client MUST report that replica as a link fault under Part 10 §10.4.2. |  |  |
 | `NET-260` | §3.2.7 | MUST | A reader | A reader MUST subscribe to one replica in each session, and it MUST select that replica at random. |  |  |
@@ -550,7 +548,7 @@ Source: `spec/04-identity.md`
 | `IDN-074` | §4.7.2 | MUST | A revision | A revision MUST hold `BACKUP_LOOKBACK` weeks at or above `BACKUP_TTL`. |  |  |
 | `IDN-075` | §4.7.2 | MUST | A client | A client MUST divide a backup object into chunks of `CHUNK_SIZE`. |  |  |
 | `IDN-076` | §4.7.2 | MUST | A client | A client MUST write each chunk to `BACKUP_REPLICAS` relays under different operators. |  |  |
-| `IDN-077` | §4.7.2 | MUST | A client | A client MUST send a backup chunk on the separate connection of Part 13 §13.8. |  |  |
+| `IDN-077` | §4.7.2 | MUST | A client | A client MUST send a backup chunk on the separate connection of Part 12 §12.8. |  |  |
 | `IDN-078` | §4.7.2 | MUST | A client | A client MUST write a full backup object at each `BACKUP_FULL_INTERVAL`. |  |  |
 | `IDN-079` | §4.7.2 | MUST | A client | A client MUST write a delta object at each `BACKUP_INTERVAL`. |  |  |
 | `IDN-080` | §4.7.2 | MUST | A client | A client MUST write a backup in the foreground only. |  |  |
@@ -568,10 +566,10 @@ Source: `spec/04-identity.md`
 | `IDN-092` | §4.5.1 | MUST NOT | The interface | The interface MUST NOT let a user accept the notice for more than one contact in one action. |  |  |
 | `IDN-093` | §4.7.2 | MUST | A client | A client MUST write the backup root with `chunk_id` of `backup_handle_epoch`, `cred_sk` of `backup_write_cred`, and `read_sk` of `backup_read_cred`. |  |  |
 | `IDN-094` | §4.7.2 | MUST | A client | A client MUST seal the root under `backup_key_epoch` as the `sealed` field below. |  |  |
-| `IDN-095` | §4.7.2 | MUST | A client | A client MUST write each backup object as a file of Part 13 §13.3 in the backup class. |  |  |
+| `IDN-095` | §4.7.2 | MUST | A client | A client MUST write each backup object as a file of Part 12 §12.3 in the backup class. |  |  |
 | `IDN-096` | §4.7.2 | MUST | A client | A client MUST use level `0x01` for a backup object above `BACKUP_DESC_REFS` data chunks. |  |  |
 | `IDN-097` | §4.7.2 | MUST | A client | A client MUST put the latest full object at entry 0, and then each later delta in write order. |  |  |
-| `IDN-098` | §4.7.2 | MUST | A client | A client MUST write the root again after each object write, under Part 13 rule `ATT-138`. |  |  |
+| `IDN-098` | §4.7.2 | MUST | A client | A client MUST write the root again after each object write, under Part 12 rule `ATT-138`. |  |  |
 | `IDN-099` | §4.7.2 | MUST | (unstated) | After a full write succeeds, a client MUST send `CDEL` for each object that the new root does not name. |  |  |
 | `IDN-100` | §4.7.2 | MUST NOT | A client | A client MUST NOT send `CDEL` for the root of an earlier epoch. |  |  |
 | `IDN-101` | §4.7.2 | MUST | (unstated) | At a restore, the client MUST fetch the root of the current epoch, and then of each earlier epoch. |  |  |
@@ -587,7 +585,7 @@ Source: `spec/04-identity.md`
 | `IDN-111` | §4.2.4 | MUST | The client | The client MUST set `r` to the first value that matches. |  |  |
 | `IDN-112` | §4.2.4 | MUST | (unstated) | If no value matches, the client MUST show the handle as lost. |  |  |
 | `IDN-113` | §4.2.4 | MUST NOT | (unstated) | If no value matches, the client MUST NOT register the handle again without an explicit confirmation from the user. |  |  |
-| `IDN-114` | §4.7.2 | MUST | A client | A client MUST pad the result under Part 13 §13.2.3. |  |  |
+| `IDN-114` | §4.7.2 | MUST | A client | A client MUST pad the result under Part 12 §12.2.3. |  |  |
 | `IDN-115` | §4.7.2 | MUST | A client | A client MUST record the `FileDescriptor` of that file as one `BackupEntry`. |  |  |
 | `IDN-116` | §4.7.2 | MUST | The client | The client MUST stop when a root opens under its `backup_key_epoch`, or after `BACKUP_LOOKBACK` epochs. |  |  |
 | `IDN-117` | §4.7.2 | MUST | A client | A client MUST write those chunks under the attachment commands of that section, with `BNEW` as the registration. |  |  |
@@ -689,7 +687,7 @@ Source: `spec/05-cryptographic-core.md`
 | `CRY-029` | §5.11 | MUST | (unstated) | A revision that needs a new label MUST add that label to this list. |  |  |
 | `CRY-030` | §5.11 | MUST | That revision | That revision MUST give the cause. |  |  |
 | `CRY-031` | §5.11 | MUST NOT | Two object types | Two object types MUST NOT share one label. |  |  |
-| `CRY-032` | §5.11 | MUST NOT | (unstated) | The label `"umbra/v1/group-roster"` and each label that starts with `"umbra/v1/community-"` are not used, and an implementation MUST NOT add them. |  |  |
+| `CRY-032` | §5.11 | MUST NOT | (unstated) | The label `"umbra/v1/group-roster"` is not used, and an implementation MUST NOT add it. |  |  |
 | `CRY-033` | §5.11 | MUST | Implementations | Implementations MUST bind the **full handshake transcript** into the KDF. |  |  |
 | `CRY-034` | §5.3 | MUST | An implementation | An implementation MUST encode `pk_X` and `pub_X` as the 32-byte little-endian u-coordinate of RFC 7748. |  |  |
 | `CRY-035` | §5.3 | MUST | An implementation | An implementation MUST encode `pk_M`, `sk_M`, and `ct_M` in the byte encoding of FIPS 203. |  |  |
@@ -912,7 +910,7 @@ Source: `spec/06-wire-format.md`
 | `WIR-104` | §6.9 | MUST NOT | A client | A client MUST NOT put a message in a bucket that does not hold it. |  |  |
 | `WIR-105` | §6.9 | MUST NOT | A relay | A relay MUST NOT read a capacity from a served cell. |  |  |
 | `WIR-106` | §6.4.2 | MUST | A revision | A revision MUST count that true length in each capacity row of §6.9. |  |  |
-| `WIR-107` | §6.4 | MUST | An attachment command | An attachment command MUST travel on the separate connection of Part 13 §13.8. |  |  |
+| `WIR-107` | §6.4 | MUST | An attachment command | An attachment command MUST travel on the separate connection of Part 12 §12.8. |  |  |
 | `WIR-108` | §6.4 | MUST NOT | A client | A client MUST NOT batch an attachment command with a queue command. |  |  |
 | `WIR-109` | §6.4.1 | MUST NOT | A client | A client MUST NOT send a cell that carries one command when a second ready command fits the command area of that cell. |  |  |
 | `WIR-110` | §6.4.3 | MUST | A relay | A relay MUST emit each `MSG` of a queue that it holds and that no `ACK` covers. |  |  |
@@ -1092,7 +1090,6 @@ Source: `spec/06-wire-format.md`
 | `WIR-302` | §6.8 | MUST | The vectors | The vectors MUST cover the three cases below. |  |  |
 | `WIR-303` | §6.8 | MUST | The parser | The parser MUST reject the six cases that follow them. |  |  |
 | `WIR-304` | §6.8 | MUST | The parser | The parser MUST reject a body of kind `0x01` that is not valid UTF-8. |  |  |
-| `WIR-309` | §6.4 | MUST NOT | (unstated) | A relay MUST reject a command whose `cmd` is in that range, and a client MUST NOT send one. |  |  |
 | `WIR-311` | §6.8 | MUST | The vectors | The vectors MUST cover one `EXTEND` cell and one `EXTENDED` cell in bucket `B1`. |  |  |
 | `WIR-312` | §6.8 | MUST | The relay | The relay MUST drop the three cases below. |  |  |
 | `WIR-313` | §6.4.4 | MUST | A relay | A relay MUST answer a command that it rejects with one `NACK`. |  |  |
@@ -1107,7 +1104,7 @@ Source: `spec/06-wire-format.md`
 | `WIR-322` | §6.4.4 | MUST | A relay | A relay MUST send a pending `NACK` before a pending `MSG` of the same session. |  |  |
 | `WIR-323` | §6.4.4 | MUST | A client | A client MUST discard a `NACK` whose `corr_id` names no command of the same transport session. |  |  |
 | `WIR-324` | §6.4.4 | MUST NOT | A client | A client MUST NOT send the same command bytes again after a `REJECTED` or a `VERSION`. |  |  |
-| `WIR-325` | §6.4.4 | MUST | (unstated) | After an `ADMISSION`, a client MUST obtain the credential of the Part 14 §14.2 row before it sends again. |  |  |
+| `WIR-325` | §6.4.4 | MUST | (unstated) | After an `ADMISSION`, a client MUST obtain the credential of the Part 13 §13.2 row before it sends again. |  |  |
 | `WIR-326` | §6.4.4 | MUST NOT | A client | A client MUST NOT report a `reason` to a party other than the user. |  |  |
 | `WIR-327` | §6.6.10 | MUST | A parser | A parser MUST reject a `QueueAddress` whose `version` is not `0x01`. |  |  |
 | `WIR-328` | §6.6.10 | MUST | A parser | A parser MUST reject a body of kind `0x33` whose `body_len` is not 129. |  |  |
@@ -1146,7 +1143,7 @@ Source: `spec/06-wire-format.md`
 | `WIR-370` | §6.4.5 | MUST | A `GPOST` | A `GPOST` MUST carry a `payload_len` equal to the "record on a `GMSG`" row of the group-queue capacity table of §6.9. |  |  |
 | `WIR-371` | §6.4.5 | MUST | A `GMSG` | A `GMSG` MUST carry a `payload_len` equal to the L5 payload row of §6.9. |  |  |
 | `WIR-372` | §6.4.5 | MUST NOT | A relay | A relay MUST NOT move a record to a different bucket between the `GPOST` and the `GMSG`. |  |  |
-| `WIR-373` | §6.4.5 | MUST | A relay | A relay MUST apply the admission control of Part 14 §14.2 to a `GNEW`. |  |  |
+| `WIR-373` | §6.4.5 | MUST | A relay | A relay MUST apply the admission control of Part 13 §13.2 to a `GNEW`. |  |  |
 | `WIR-374` | §6.4.5 | MUST NOT | A relay | A relay MUST NOT apply an admission gate to a `GPOST`. |  |  |
 | `WIR-375` | §6.4.5 | MUST | A relay | A relay MUST answer a `GPOST` above `GROUP_POST_RATE` with a `NACK` of reason `LIMIT`. |  |  |
 | `WIR-376` | §6.4.5 | MUST | A relay | A relay MUST make `GroupQueueId` from its CSPRNG at each accepted `GNEW`. |  |  |
@@ -1205,7 +1202,7 @@ Source: `spec/06-wire-format.md`
 | `WIR-429` | §6.4.6 | MUST | A parser | A parser MUST reject a slot list that is not in strictly increasing `index` order. |  |  |
 | `WIR-430` | §6.4.6 | MUST | A parser | A parser MUST reject a repeated `index` in a slot list. |  |  |
 | `WIR-431` | §6.4.6 | MUST | A parser | A parser MUST reject an `own_count` that is not 0 or `GROUP_REPLICAS`. |  |  |
-| `WIR-433` | §6.6 | MUST | A parser | A parser MUST reject a `kind` or an `inner_kind` that the table above marks as retired. |  |  |
+| `WIR-433` | §6.6 | MUST | A parser | A parser MUST reject a `kind` or an `inner_kind` that the table above does not list, and one that the table marks as retired. |  |  |
 | `WIR-434` | §6.6.1 | MUST | A receiver | A receiver MUST resolve the target of an edit through each `RichRecord` wrapper. |  |  |
 | `WIR-435` | §6.6.3 | MUST | A parser | A parser MUST reject a `JoinRecord` whose length is not 1 313. |  |  |
 | `WIR-436` | §6.6.3 | MUST | A parser | A parser MUST reject a `stage` that is not `0x01` or `0x02`. |  |  |
@@ -1294,7 +1291,7 @@ Source: `spec/06-wire-format.md`
 | `WIR-526` | §6.4 | MUST | (unstated) | A relay that writes a digest of Part 8 §8.5 into a queue at another relay MUST send it as the value of one `UMBRA_DEPOSIT` capsule, on a connection of §6.2.1 that it opens for that deposit. |  |  |
 | `WIR-527` | §6.4 | MUST | A relay | A relay MUST hold the `corr_id` of each of the last 4 096 deposits that it took, and it MUST drop a deposit that repeats one. |  |  |
 | `WIR-528` | §6.4.2 | MUST | A receiver | A receiver MUST take the content of a renewal record as a bundle in the layout of Part 5 §5.4.1, and it MUST read it on the queue of a contact whose handshake is complete. |  |  |
-| `WIR-529` | §6.4 | MUST | (unstated) | A relay that sends its proof-of-work challenge to a carrier of the manifest (Part 14 `ABU-102`) MUST send it as the value of one `UMBRA_CHALLENGE` capsule, on a connection of §6.2.1 that it opens for that challenge. |  |  |
+| `WIR-529` | §6.4 | MUST | (unstated) | A relay that sends its proof-of-work challenge to a carrier of the manifest (Part 13 `ABU-102`) MUST send it as the value of one `UMBRA_CHALLENGE` capsule, on a connection of §6.2.1 that it opens for that challenge. |  |  |
 
 ## DEV — Device Sets
 
@@ -1493,10 +1490,10 @@ Source: `spec/07-device-sets.md`
 | `DEV-196` | §7.5.1 | MUST NOT | A client | A client MUST NOT mark a record interactive when no user action waits on it. |  |  |
 | `DEV-197` | §7.5.3 | MUST | A client | A client MUST converge each item of that table across the device set. |  |  |
 | `DEV-198` | §7.5.3 | MUST | A revision that adds a chat-list item | A revision that adds a chat-list item MUST add a row. |  |  |
-| `DEV-199` | §7.5.3 | MUST | A client | A client MUST hold a draft under the record encryption of Part 15 §15.6.4. |  |  |
+| `DEV-199` | §7.5.3 | MUST | A client | A client MUST hold a draft under the record encryption of Part 14 §14.6.4. |  |  |
 | `DEV-200` | §7.5.3 | MUST NOT | A client | A client MUST NOT put a draft in the backup of Part 4 §4.7.2. |  |  |
 | `DEV-201` | §7.5.3 | MUST | A client | A client MUST erase a draft from the device set when the user sends it or clears it. |  |  |
-| `DEV-202` | §7.5.3 | MUST | A client | A client MUST let the user turn the draft sync off, and Part 16 §16.3 records the residual. |  |  |
+| `DEV-202` | §7.5.3 | MUST | A client | A client MUST let the user turn the draft sync off, and Part 15 §15.3 records the residual. |  |  |
 | `DEV-203` | §7.5.8 | MUST | A party | A party MUST apply the timer to each record that it takes after it applied the timer record. |  |  |
 | `DEV-204` | §7.5.8 | MUST NOT | A party | A party MUST NOT apply a timer to a record that predates it. |  |  |
 | `DEV-205` | §7.5.8 | MAY | Each party of a conversation | Each party of a conversation MAY set the timer. |  |  |
@@ -1504,7 +1501,7 @@ Source: `spec/07-device-sets.md`
 | `DEV-207` | §7.5.8 | MUST | A client | A client MUST show a timer change as a record in the conversation. |  |  |
 | `DEV-208` | §7.5.8 | MUST | For a record from the other party, a client | For a record from the other party, a client MUST measure the period from its own local receive time. |  |  |
 | `DEV-209` | §7.5.8 | MUST NOT | A client | A client MUST NOT use `sent_at` for that measurement, and Part 6 rule `WIR-076` states the same rule. |  |  |
-| `DEV-210` | §7.5.8 | MUST | (unstated) | At the end of the period a client MUST discard the record key of Part 15 §15.6.4 for that record. |  |  |
+| `DEV-210` | §7.5.8 | MUST | (unstated) | At the end of the period a client MUST discard the record key of Part 14 §14.6.4 for that record. |  |  |
 | `DEV-211` | §7.5.8 | MUST | That client | That client MUST overwrite the record. |  |  |
 | `DEV-212` | §7.5.8 | MUST | A client | A client MUST apply the timer on each device of the set. |  |  |
 | `DEV-213` | §7.5.8 | MUST NOT | A client | A client MUST NOT depend on a peer device to erase a record. |  |  |
@@ -1530,7 +1527,7 @@ Source: `spec/07-device-sets.md`
 | `DEV-234` | §7.3.1 | MUST NOT | A device | A device MUST NOT put a claim of scope `0x03` together with a claim of a different scope in one record. |  |  |
 | `DEV-235` | §7.3.1 | MUST | (unstated) | Before a claimant publishes a claim of scope `0x03`, it MUST show how many subjects the absent device owns. |  |  |
 | `DEV-236` | §7.5.1 | MUST | (unstated) | If the acknowledged counter of a peer lags by more than `SYNC_CATCHUP_LAG`, the device MUST make a catch-up object. |  |  |
-| `DEV-237` | §7.5.1 | MUST | A device | A device MUST write the object on the chunk path of Part 13 §13.3.3 over the connection of Part 13 §13.8. |  |  |
+| `DEV-237` | §7.5.1 | MUST | A device | A device MUST write the object on the chunk path of Part 12 §12.3.3 over the connection of Part 12 §12.8. |  |  |
 | `DEV-238` | §7.5.1 | MUST | A device | A device MUST send the `FileDescriptor` of that object in a `DeviceSetControl` of `control_type` `0x04`. |  |  |
 | `DEV-239` | §7.5.1 | MUST | A peer | A peer MUST apply each record of the object in causal order, and then acknowledge under §7.5.5. |  |  |
 | `DEV-240` | §7.5.1 | MUST | A device | A device MUST continue the resend of §7.5.5 rule 3 for each record that the peer did not acknowledge. |  |  |
@@ -1557,7 +1554,7 @@ Source: `spec/07-device-sets.md`
 | `DEV-261` | §7.5.3 | MUST NOT | (unstated) | A client MUST hold the group-queue cursor of each replica as per-device state, and it MUST NOT put that cursor on a sync channel. |  |  |
 | `DEV-262` | §7.7 | MUST | A device that applies an epoch with a new `revoked` entry | A device that applies an epoch with a new `revoked` entry MUST start the group re-key of Part 11 §11.12 for each group of the user. |  |  |
 | `DEV-263` | §7.7.1 | MUST | A full identity reset | A full identity reset MUST also start the group re-key of Part 11 §11.12 in each group of the user. |  |  |
-| `DEV-264` | §7.4 | MUST NOT | (unstated) | A web client of Part 15 §15.7 MUST link as a device of this section, and it MUST NOT make a `RootIdentity`. |  |  |
+| `DEV-264` | §7.4 | MUST NOT | (unstated) | A web client of Part 14 §14.7 MUST link as a device of this section, and it MUST NOT make a `RootIdentity`. |  |  |
 | `DEV-265` | §7.4 | MUST | (unstated) | When a web client returns to this flow after it lost its store, the existing device MUST revoke the old entry under §7.7 before step |  |  |
 | `DEV-266` | §7.4 | MAY | The new device | The new device MAY show the QR code of step 1 in the place of the existing device. |  |  |
 | `DEV-267` | §7.4 | MUST | In that direction the existing device | In that direction the existing device MUST show the label of the new device, and it MUST get an explicit confirmation from the user, before step 4. |  |  |
@@ -1628,7 +1625,7 @@ Source: `spec/08-notifications.md`
 | `NTF-075` | §8.2.3 | MUST | A receiver | A receiver MUST accept a blob whose `epoch` is inside the window. |  |  |
 | `NTF-076` | §8.2.3 | MUST | A receiver | A receiver MUST reject a blob outside that window without an AEAD open. |  |  |
 | `NTF-077` | §8.2.3 | MUST | A receiver | A receiver MUST count the consecutive failed opens of blobs inside the window. |  |  |
-| `NTF-078` | §8.2.3 | MUST | (unstated) | At `NTF_FAIL_MAX` consecutive failures, the client MUST show the `clock` state of Part 15 §15.9.2. |  |  |
+| `NTF-078` | §8.2.3 | MUST | (unstated) | At `NTF_FAIL_MAX` consecutive failures, the client MUST show the `clock` state of Part 14 §14.9.2. |  |  |
 | `NTF-079` | §8.2.3 | MUST | One open that succeeds | One open that succeeds MUST reset the count. |  |  |
 | `NTF-080` | §8.2.5 | MUST | A device | A device MUST rotate one handle group of §8.2.1 at a time. |  |  |
 | `NTF-081` | §8.2.5 | MUST NOT | A device | A device MUST NOT rotate two handle groups inside one session. |  |  |
@@ -1669,7 +1666,7 @@ Source: `spec/08-notifications.md`
 | `NTF-117` | §8.4.1 | MUST | That service | That service MUST hold no key and no socket of its own. |  |  |
 | `NTF-118` | §8.4.1 | MUST | A client | A client MUST start a new run after a run ends with a fault, while a view is on the screen or the service runs. |  |  |
 | `NTF-119` | §8.4.1 | MUST | A message alert | A message alert MUST show no text of the message and no name of a contact while the content preview is off (`NTF-083`). |  |  |
-| `NTF-120` | §8.4.1 | MUST | A client | A client MUST end the service at a lock, because a locked client holds no key that reads a queue (Part 15 rule `IMP-127`). |  |  |
+| `NTF-120` | §8.4.1 | MUST | A client | A client MUST end the service at a lock, because a locked client holds no key that reads a queue (Part 14 rule `IMP-127`). |  |  |
 | `NTF-121` | §8.4.1 | MUST NOT | A record that arrives | A record that arrives MUST NOT start the idle time of the auto-lock again. |  |  |
 | `NTF-122` | §8.2.7 | MUST | A party | A party MUST pad each request to `NDR_REQUEST_LEN` with zero bytes, and the NDR MUST refuse a request whose padding is not zero. |  |  |
 | `NTF-123` | §8.2.7 | MUST | The plaintext of `ct_token` | The plaintext of `ct_token` MUST be a `PushToken`: carrier `0x01` is UnifiedPush and its target is the `https` URL of the endpoint, and carrier `0x02` is FCM and its target is the registration token. |  |  |
@@ -1802,8 +1799,8 @@ Source: `spec/09-discovery.md`
 | `DIS-110` | §9.6 | MUST | A client | A client MUST encapsulate that hello to `address_pk`. |  |  |
 | `DIS-128` | §9.3.3 | MUST NOT | The client | The client MUST NOT use an entry whose result differs from `address`. |  |  |
 | `DIS-129` | §9.3.3 | MUST NOT | A directory | A directory MUST NOT answer a query that names a prefix of an address. |  |  |
-| `DIS-131` | §9.6 | MUST | A client | A client MUST end a hello with one `Admission` of Part 14 §14.2, inside the AEAD of the hello. |  |  |
-| `DIS-132` | §9.6 | MUST | That `Admission` | That `Admission` MUST hold a cross-relay token of Part 14 §14.3.1 or a `PowSolution` of Part 14 §14.4. |  |  |
+| `DIS-131` | §9.6 | MUST | A client | A client MUST end a hello with one `Admission` of Part 13 §13.2, inside the AEAD of the hello. |  |  |
+| `DIS-132` | §9.6 | MUST | That `Admission` | That `Admission` MUST hold a cross-relay token of Part 13 §13.3.1 or a `PowSolution` of Part 13 §13.4. |  |  |
 | `DIS-133` | §9.9 | MUST | A client | A client MUST publish a new rendezvous queue for each published entry at each `RENDEZVOUS_ROTATE`. |  |  |
 | `DIS-134` | §9.9 | MUST | The client | The client MUST keep the previous queue for `ROTATE_GRACE` of Part 3 §3.2.6 after the write. |  |  |
 | `DIS-135` | §9.9 | MUST | The client | The client MUST drain both queues under Part 8 §8.2.6 during that period. |  |  |
@@ -1966,7 +1963,7 @@ Source: `spec/10-relay-directory.md`
 | `REL-124` | §10.5.1 | MUST | The nonprofit | The nonprofit MUST publish the legal person, the jurisdiction, and the bloc of each authority. |  |  |
 | `REL-125` | §10.5.1 | MUST | The directory authorities | The directory authorities MUST set `independent_count` of the `DirectoryKeySet` to the count of authorities under different beneficial control. |  |  |
 | `REL-126` | §10.5.1 | MUST | A client | A client MUST show the user a `provisional directory` state while `independent_count` is below `AUTHORITY_FLOOR`. |  |  |
-| `REL-127` | §10.5.3 | MUST | A relay | A relay MUST set `chunk_store_gib` to the store that it declares under Part 13 §13.7, in GiB. |  |  |
+| `REL-127` | §10.5.3 | MUST | A relay | A relay MUST set `chunk_store_gib` to the store that it declares under Part 12 §12.7, in GiB. |  |  |
 | `REL-128` | §10.5.3 | MUST | A directory authority | A directory authority MUST set `operator_id` from the beneficial-control declaration of the dossier of §10.6. |  |  |
 | `REL-129` | §10.5.3 | MUST | A directory authority | A directory authority MUST set `class` at or below `capacity_class` of the descriptor. |  |  |
 | `REL-130` | §10.5.3 | MUST | A directory authority | A directory authority MUST set `flags` bit 0 only for an ingress eligible relay. |  |  |
@@ -1992,7 +1989,7 @@ Source: `spec/10-relay-directory.md`
 | `REL-150` | §10.5.4 | MUST NOT | A client | A client MUST NOT use a relay at hop 3 when `roles` bit 0 of its descriptor is not set. |  |  |
 | `REL-151` | §10.5.4 | MUST | A client | A client MUST reject an entry that sets bit 1 with bit 0, that sets bit 1 with no queue role or no chain role in `roles`, or that sets a bit above bit 1. |  |  |
 | `REL-152` | §10.5.4 | MUST NOT | A directory authority | A directory authority MUST NOT sign a root over an entry whose bit 1 differs from the function. |  |  |
-| `REL-153` | §10.6.1 | MUST | A client | A client MUST keep its pins in the store of Part 15 §15.6.4. |  |  |
+| `REL-153` | §10.6.1 | MUST | A client | A client MUST keep its pins in the store of Part 14 §14.6.4. |  |  |
 | `REL-154` | §10.6.1 | MUST | A client | A client MUST fill an open place with a random draw from the ingress eligible relays of the accepted set. |  |  |
 | `REL-155` | §10.6.1 | MUST NOT | A client | A client MUST NOT dial an ingress relay that is no pin. |  |  |
 | `REL-156` | §10.5.4 | MUST | A directory authority | A directory authority MUST list a relay of the chain population in one root with `flags` bit 2 set and bit 1 clear before it places the relay. |  |  |
@@ -2098,9 +2095,9 @@ Source: `spec/11-private-groups.md`
 | `GRP-190` | §11.2.1 | MUST | The creator | The creator MUST make a different `own_sk` for each replica. |  |  |
 | `GRP-191` | §11.2.1 | MUST | The creator | The creator MUST send `GNEW` to two relays whose entries carry different `operator_id` values and different jurisdiction blocs, under invariant 1 and invariant 2 of Part 3 §3.4.6. |  |  |
 | `GRP-192` | §11.2.1 | MAY | A creator that finds no such pair | A creator that finds no such pair MAY relax the bloc invariant in the manner of Part 3 rule `NET-200`, and Part 3 rule `NET-201` makes it show that relaxation. |  |  |
-| `GRP-193` | §11.2.1 | MUST | A `GNEW` | A `GNEW` MUST end with an `Admission` of Part 14 §14.2. |  |  |
+| `GRP-193` | §11.2.1 | MUST | A `GNEW` | A `GNEW` MUST end with an `Admission` of Part 13 §13.2. |  |  |
 | `GRP-194` | §11.2.1 | MUST | A sender | A sender MUST send the same record bytes to each replica, each under the ARQ of Part 3 §3.7. |  |  |
-| `GRP-195` | §11.2.1 | MUST | A client | A client MUST put a record in the `accepted` state of Part 15 §15.9.1 when one replica returned `GSEQ`. |  |  |
+| `GRP-195` | §11.2.1 | MUST | A client | A client MUST put a record in the `accepted` state of Part 14 §14.9.1 when one replica returned `GSEQ`. |  |  |
 | `GRP-196` | §11.2.1 | MUST | A client | A client MUST continue the ARQ to the other replica in the background after that acceptance. |  |  |
 | `GRP-197` | §11.2.1 | MUST | A client | A client MUST report a replica that never accepts as a link fault under Part 10 §10.4.2. |  |  |
 | `GRP-198` | §11.2.1 | MUST NOT | A `GPOST` | A `GPOST` MUST NOT carry an `Admission`. |  |  |
@@ -2179,9 +2176,9 @@ Source: `spec/11-private-groups.md`
 | `GRP-278` | §11.4.2 | MUST | A rotator | A rotator MUST put `own_sk` of replica 1 and then of replica 2 in `own_sks`, in the replica order of the roster snapshot (§11.9.8). |  |  |
 | `GRP-279` | §11.4.2 | MUST | A rotator | A rotator MUST use a fresh `Encap` for each slot. |  |  |
 | `GRP-280` | §11.4.2 | MUST | A rotator | A rotator MUST carry the slots inline when the record fits the "record on a `GMSG`" row of `B3`, and chunked otherwise. |  |  |
-| `GRP-281` | §11.4.2 | MUST | In the chunked carrier, a rotator | In the chunked carrier, a rotator MUST write the object as blocks of `SEGMENT_SIZE` bytes (Part 13 §13.2.3), each block holding `slots_per_chunk` slots in index order and then zero bytes, so that no slot crosses a chunk boundary. |  |  |
+| `GRP-281` | §11.4.2 | MUST | In the chunked carrier, a rotator | In the chunked carrier, a rotator MUST write the object as blocks of `SEGMENT_SIZE` bytes (Part 12 §12.2.3), each block holding `slots_per_chunk` slots in index order and then zero bytes, so that no slot crosses a chunk boundary. |  |  |
 | `GRP-282` | §11.4.2 | MUST | A rotator | A rotator MUST set `slots_per_chunk` to the largest value at which every block fits `SEGMENT_SIZE`. |  |  |
-| `GRP-283` | §11.4.2 | MUST | A rotator | A rotator MUST write that object on the chunk path of Part 13 §13.3.3 under `CNEW`, and Part 13 §13.4 makes the replicas. |  |  |
+| `GRP-283` | §11.4.2 | MUST | A rotator | A rotator MUST write that object on the chunk path of Part 12 §12.3.3 under `CNEW`, and Part 12 §12.4 makes the replicas. |  |  |
 | `GRP-284` | §11.4.2 | MUST | A member | A member MUST fetch the one chunk that holds its slot, which is chunk `floor(p / slots_per_chunk)` for its rank `p` among the included members. |  |  |
 | `GRP-285` | §11.4.2 | MUST NOT | A member | A member MUST NOT fetch another chunk of that object. |  |  |
 | `GRP-286` | §11.4.2 | MUST | A member that reads an epoch-key record | A member that reads an epoch-key record MUST decapsulate its slot, verify `tag` under `K_{rotator,self}`, verify the rotator's role, install `(e + 1, t_{e+1}, K_{e+1,t_{e+1}})`, derive the queue credentials of `e + 1`, and keep the state of epoch `e` for `GROUP_EPOCH_GRACE`. |  |  |
@@ -2194,7 +2191,7 @@ Source: `spec/11-private-groups.md`
 | `GRP-298` | §11.4.3 | MUST | An admin that promotes a member to `admin` or above | An admin that promotes a member to `admin` or above MUST post a one-slot epoch-key record of the current epoch for that member with `own_count` = `GROUP_REPLICAS`, directly after the granting epoch. |  |  |
 | `GRP-299` | §11.6 | MUST NOT | A member | A member MUST NOT send a receipt of Part 6 §6.6.9 kind `0x06` or kind `0x07` in a group. |  |  |
 | `GRP-300` | §11.6 | MUST NOT | A member | A member MUST NOT send a typing indicator of kind `0x08` in a group. |  |  |
-| `GRP-301` | §11.6 | MUST NOT | A client | A client MUST NOT show a `delivered` or a `read` state for a group record; the states of Part 15 §15.9.1 that a group record reaches are `queued`, `accepted`, and `failed`. |  |  |
+| `GRP-301` | §11.6 | MUST NOT | A client | A client MUST NOT show a `delivered` or a `read` state for a group record; the states of Part 14 §14.9.1 that a group record reaches are `queued`, `accepted`, and `failed`. |  |  |
 | `GRP-302` | §11.7 | MUST | A receiver | A receiver MUST take that pair from the record that its verified tag attributes. |  |  |
 | `GRP-303` | §11.7 | MUST NOT | A receiver | A receiver MUST NOT take an order from a count of the arrivals or from `seq`. |  |  |
 | `GRP-304` | §11.9 | MUST NOT | A granter | A granter MUST NOT give a role at `moderator` or above when the roster already holds `ROLE_HOLDER_MAX` such members. |  |  |
@@ -2295,496 +2292,489 @@ Source: `spec/11-private-groups.md`
 | `GRP-405` | §11.4.3 | MUST | (unstated) | A member that shows a group as lapsed and then installs the epoch it lacked MUST show the group as open again. |  |  |
 | `GRP-406` | §11.4.2 | MUST | A rotator | A rotator MUST post the chunked epoch-key record only after the object reached the chunk path, and MAY write the object again when that failed. |  |  |
 
-## COM — Withdrawn
-
-Source: `spec/12-communities.md`
-
-| ID | Section | Key word | Binds | Requirement | Module | Test |
-| --- | --- | --- | --- | --- | --- | --- |
-
 ## ATT — Attachments and Large Objects
 
-Source: `spec/13-attachments.md`
+Source: `spec/12-attachments.md`
 
 | ID | Section | Key word | Binds | Requirement | Module | Test |
 | --- | --- | --- | --- | --- | --- | --- |
-| `ATT-001` | §13.1 | MUST | An attachment mechanism | An attachment mechanism MUST meet the three requirements below. |  |  |
-| `ATT-002` | §13.1 | MUST NOT | The mechanism | **The mechanism MUST NOT make the sender stay online** until each recipient fetches the file. |  |  |
-| `ATT-003` | §13.1 | MUST NOT | The mechanism | The mechanism MUST NOT make the sender upload the file again for each group member. |  |  |
-| `ATT-004` | §13.1 | MUST NOT | A relay | A relay MUST NOT be able to tell that two chunks belong to one file. |  |  |
-| `ATT-005` | §13.1 | MUST NOT | A relay | A relay MUST NOT be able to tell that two chunks belong to one user. |  |  |
-| `ATT-006` | §13.3.1 | MUST | The attachment AEAD | The attachment AEAD MUST be key-committing. |  |  |
-| `ATT-007` | §13.3.1 | MUST | (unstated) | The test suite of this specification MUST include a negative vector that fails on the construction that does not commit. |  |  |
-| `ATT-008` | §13.3.2 | MUST | A client | A client MUST resolve `relay_hint` against the current consensus. |  |  |
-| `ATT-009` | §13.3.2 | MUST NOT | A client | A client MUST NOT fetch an older consensus to resolve a reference, because Part 10 §10.5 forbids a session for the only purpose of a directory diff. |  |  |
-| `ATT-010` | §13.3.2 | MUST | (unstated) | If `relay_hint` matches no relay in the current consensus, the client MUST treat that replica as unreachable. |  |  |
-| `ATT-011` | §13.3.2 | MUST | The client | The client MUST then try another replica under §13.4. |  |  |
-| `ATT-012` | §13.3.2 | MUST | (unstated) | If `relay_hint` matches two or more relays in the current consensus, the client MUST treat that replica as unresolvable. |  |  |
-| `ATT-013` | §13.3.2 | MUST | The client | The client MUST then try another replica under §13.4. |  |  |
-| `ATT-014` | §13.3.2 | MUST | The client | The client MUST report that failure to the user. |  |  |
-| `ATT-015` | §13.3.2 | MUST NOT | (unstated) | the client MUST NOT show a partial file. |  |  |
-| `ATT-016` | §13.3.2 | MUST | A revision | A revision MUST measure the relay churn rate over 45 days before it lowers `REPLICAS`. |  |  |
-| `ATT-017` | §13.4 | MUST | A client | A client MUST register each chunk at three or more relays under different `operator_id` values of Part 10 §10.5.3. |  |  |
-| `ATT-018` | §13.4 | MUST | The descriptor | The descriptor MUST carry the three references. |  |  |
-| `ATT-019` | §13.4 | MUST NOT | The client | The client MUST NOT use a fixed order. |  |  |
-| `ATT-020` | §13.7 | MUST | (unstated) | If the bucket ladder or the command header changes, a revision MUST derive this value again. |  |  |
-| `ATT-021` | §13.7 | MUST | A client | A client MUST select the bucket of a descriptor from those four values. |  |  |
-| `ATT-022` | §13.7 | MUST NOT | Thus a v1 client | Thus a v1 client MUST NOT send an attachment above `MAX_DESCRIPTOR_CHUNKS`, which is 269 chunks and about 8.78 MB. |  |  |
-| `ATT-023` | §13.7 | MUST | A revision | A revision MUST derive §13.7.2 again before it raises that value. |  |  |
-| `ATT-024` | §13.8 | MUST | An attachment transfer | An attachment transfer MUST use a **separate connection**, or separate QUIC streams, from the interactive messaging. |  |  |
-| `ATT-025` | §13.3.1 | MUST | A sender | A sender MUST put `commit` in the `FileDescriptor` of §13.3. |  |  |
-| `ATT-026` | §13.3.1 | MUST | A receiver | A receiver MUST compute `commit` again from `file_key` and `file_nonce`. |  |  |
-| `ATT-027` | §13.3.1 | MUST | A receiver | A receiver MUST compare the two values in constant time. |  |  |
-| `ATT-028` | §13.3.1 | MUST | (unstated) | If the two values differ, a receiver MUST reject the descriptor. |  |  |
-| `ATT-029` | §13.3.1 | MUST NOT | A receiver | A receiver MUST NOT fetch a chunk of a descriptor that it rejected. |  |  |
-| `ATT-030` | §13.3.1 | MUST | A receiver | A receiver MUST make that comparison before it decrypts a chunk. |  |  |
-| `ATT-031` | §13.3.1 | MUST | A receiver | A receiver MUST verify `digest` against the full plaintext after the decryption. |  |  |
-| `ATT-032` | §13.3.1 | MUST NOT | A receiver | A receiver MUST NOT present a file as complete, save it, or forward it before that check succeeds. |  |  |
-| `ATT-033` | §13.3.3 | MUST NOT | An attachment command | An attachment command MUST NOT carry a signature. |  |  |
-| `ATT-034` | §13.3.3 | MUST | An uploader | An uploader MUST make `cred_sk` from the device CSPRNG for each chunk. |  |  |
-| `ATT-035` | §13.3.3 | MUST NOT | An uploader | An uploader MUST NOT derive `cred_sk` from `file_key`. |  |  |
-| `ATT-036` | §13.3.3 | MUST NOT | An uploader | An uploader MUST NOT use one `cred_sk` for two chunks. |  |  |
-| `ATT-037` | §13.3.3 | MUST | A client | A client MUST derive `read_sk` of a file chunk from `file_key` and the index of the chunk. |  |  |
-| `ATT-038` | §13.3.3 | MUST | A relay | A relay MUST select `storage_token` from its own CSPRNG. |  |  |
-| `ATT-039` | §13.3.3 | MUST NOT | A relay | A relay MUST NOT derive `storage_token` from `cred_pk`, from `read_pk`, or from the chunk bytes. |  |  |
-| `ATT-040` | §13.3.3 | MUST | A relay | A relay MUST authorize `CPUT` and `CDEL` against `cred_pk` only. |  |  |
-| `ATT-041` | §13.3.3 | MUST | A relay | A relay MUST authorize `CGET` and `CRNW` against `read_pk` only. |  |  |
-| `ATT-042` | §13.3.3 | MUST | (unstated) | The authorized bytes of a `CPUT` MUST hold `storage_token`. |  |  |
-| `ATT-043` | §13.3.3 | MUST | A `CPUT` and a `CDAT` | A `CPUT` and a `CDAT` MUST carry exactly `CHUNK_SIZE` bytes. |  |  |
-| `ATT-044` | §13.3.3 | MUST | A relay | A relay MUST reject a `CPUT` of a different length. |  |  |
-| `ATT-045` | §13.3.3 | MUST | A relay | A relay MUST apply the admission control of Part 14 to a `CNEW`. |  |  |
-| `ATT-046` | §13.3.3 | MUST | A relay | A relay MUST erase a chunk at `CDEL`, and at `CHUNK_TTL` after the `CPUT` or after the last accepted `CRNW`. |  |  |
-| `ATT-047` | §13.3.3 | MUST NOT | A relay | A relay MUST NOT retain the identifier of an erased chunk. |  |  |
-| `ATT-048` | §13.3.3 | MUST | A client | A client MUST send an attachment command on the separate connection of §13.8. |  |  |
-| `ATT-049` | §13.3.2 | MUST | (unstated) | A revision that adds a field to `FileDescriptor` or to `ChunkRef` MUST derive `R` again from Part 6 §6.9. |  |  |
-| `ATT-050` | §13.7.1 | MUST NOT | `CHUNK_TTL` | `CHUNK_TTL` MUST NOT be below the `MSG_TTL` of Part 3 §3.2.4. |  |  |
-| `ATT-051` | §13.7.1 | MUST NOT | (unstated) | A revision MUST hold the two values equal, and a revision MUST NOT raise `MSG_TTL` alone. |  |  |
-| `ATT-052` | §13.7.1 | MUST | (unstated) | If each replica of a chunk is gone, the client MUST report the failure to the user and MUST name the file. |  |  |
-| `ATT-053` | §13.7.1 | MUST NOT | The client | The client MUST NOT show a partial file. |  |  |
-| `ATT-054` | §13.7.1 | MUST | The client | The client MUST offer the sender a re-send of the file. |  |  |
-| `ATT-055` | §13.3.3 | MUST | An uploader | An uploader MUST select `chunk_id` from the device CSPRNG, and it MUST select one value for each chunk. |  |  |
-| `ATT-056` | §13.3.3 | MUST NOT | An uploader | An uploader MUST NOT derive `chunk_id` from `file_key`, from `cred_pk`, from `read_pk`, or from the chunk bytes. |  |  |
-| `ATT-057` | §13.3.3 | MUST | An uploader | An uploader MUST use the same `chunk_id` at each of the `REPLICAS` relays that hold one chunk. |  |  |
-| `ATT-058` | §13.3.3 | MUST | A relay | A relay MUST reject a `CNEW` whose `chunk_id` names a chunk that the relay holds. |  |  |
-| `ATT-059` | §13.2.3 | MUST | A sender | A sender MUST pad `plaintext` with one marker byte of `0x80` and then zero bytes. |  |  |
-| `ATT-060` | §13.2.3 | MUST | A sender | A sender MUST select the smallest *k* that makes the length of `padded` a whole multiple of `SEGMENT_SIZE`. |  |  |
-| `ATT-061` | §13.2.3 | MUST | A sender | A sender MUST append the marker byte even when the length of `plaintext` is already a whole multiple of `SEGMENT_SIZE`. |  |  |
-| `ATT-062` | §13.2.3 | MUST | A receiver | A receiver MUST read the last segment from its last byte toward its first byte. |  |  |
-| `ATT-063` | §13.2.3 | MUST | The first byte that is not `0x00` | The first byte that is not `0x00` MUST be `0x80`, and a receiver MUST reject the file when that byte holds a different value. |  |  |
-| `ATT-064` | §13.2.3 | MUST | A receiver | A receiver MUST remove that marker byte and each zero byte after it. |  |  |
-| `ATT-065` | §13.2.3 | MUST NOT | A receiver | A receiver MUST NOT read the padding of a segment whose tag failed under §13.3.1. |  |  |
-| `ATT-066` | §13.9 | MUST | A revision that adds a client of the chunk path | A revision that adds a client of the chunk path MUST add a row to this table. |  |  |
-| `ATT-067` | §13.3 | MUST | A receiver | A receiver MUST take the data chunk count from that division. |  |  |
-| `ATT-068` | §13.3 | MUST | A parser | A parser MUST reject a `padded_size` that `CHUNK_SIZE` does not divide. |  |  |
-| `ATT-069` | §13.3 | MUST | A sender | A sender MUST set `media_seconds` for a `mime_class` of audio, of voice, or of video. |  |  |
-| `ATT-070` | §13.3 | MUST | A sender | A sender MUST set `media_seconds` to zero for each other class. |  |  |
-| `ATT-071` | §13.3 | MUST NOT | A sender | A sender MUST NOT send a voice object above `VOICE_MAX_SECONDS`. |  |  |
-| `ATT-072` | §13.3.4 | MUST | A client | A client MUST use level `0x00` when the data chunk count is at or below the ref count that the descriptor bucket holds. |  |  |
-| `ATT-073` | §13.3.4 | MUST | A client | A client MUST use level `0x01` above that count. |  |  |
-| `ATT-074` | §13.3.4 | MUST | A parser | A parser MUST reject a `level` above `0x01`. |  |  |
-| `ATT-075` | §13.3.4 | MUST | A client | A client MUST derive `K_manifest` with the label above, and Part 5 §5.11 holds that label. |  |  |
-| `ATT-076` | §13.3.4 | MUST NOT | A client | A client MUST NOT encrypt a manifest under `file_key` itself. |  |  |
-| `ATT-077` | §13.3.4 | MUST | A client | A client MUST order the `ChunkRef` values of a manifest by the chunk index, from the lowest index to the highest index. |  |  |
-| `ATT-078` | §13.3.4 | MUST | A receiver | A receiver MUST reject a manifest whose length is not a whole multiple of 120 bytes after the padding is removed. |  |  |
-| `ATT-079` | §13.3.4 | MUST | A receiver | A receiver MUST rebuild the full manifest before it fetches a data chunk. |  |  |
-| `ATT-080` | §13.3.4 | MUST NOT | A receiver | A receiver MUST NOT present a file as complete before it verifies `digest` under `ATT-031`. |  |  |
-| `ATT-081` | §13.3.4 | MUST NOT | A relay | A relay MUST NOT tell a manifest chunk from a data chunk. |  |  |
-| `ATT-082` | §13.3.4 | MUST | A revision | A revision MUST define a second manifest level before it raises `MAX_FILE_SIZE` above 2.22 GiB. |  |  |
-| `ATT-083` | §13.7.2 | MUST | A client | A client MUST show the uplink cost of an attachment above `LARGE_FILE_WARN` before it starts the upload. |  |  |
-| `ATT-084` | §13.7.2 | MUST | A client | A client MUST let the user cancel at that point. |  |  |
-| `ATT-085` | §13.7.2 | MUST NOT | A client | A client MUST NOT start an upload above that size on a metered network without a user action. |  |  |
-| `ATT-086` | §13.10 | MUST | A relay that declares the attachment role | A relay that declares the attachment role MUST hold `CHUNK_STORE_MIN` of free storage. |  |  |
-| `ATT-087` | §13.10 | MUST | A relay | A relay MUST publish the declared store in `chunk_store_gib` of its descriptor of Part 10 §10.5.3. |  |  |
-| `ATT-088` | §13.10 | MUST | A directory authority | A directory authority MUST reject an attachment role from a relay whose `chunk_store_gib` is below `CHUNK_STORE_MIN`. |  |  |
-| `ATT-089` | §13.10 | MUST | A relay | A relay MUST reject a `CNEW` when its store holds less free space than `CHUNK_SIZE`. |  |  |
-| `ATT-090` | §13.10 | MUST NOT | A relay below `CHUNK_STORE_TARGET` of stored bytes | A relay below `CHUNK_STORE_TARGET` of stored bytes MUST NOT erase a chunk before `CHUNK_TTL` to make space. |  |  |
-| `ATT-091` | §13.10 | MUST | A relay | A relay MUST signal that condition to the directory as a capacity fault. |  |  |
-| `ATT-092` | §13.10 | MUST | A relay | A relay MUST apply `UPLOAD_QUOTA_DAY` for each credential that presents a token. |  |  |
-| `ATT-093` | §13.10 | MUST | A relay | A relay MUST reject a `CNEW` above that quota. |  |  |
-| `ATT-094` | §13.10 | MUST NOT | A relay | A relay MUST NOT hold a quota counter after 24 hours. |  |  |
-| `ATT-095` | §13.10 | MUST | A revision that raises `MAX_FILE_SIZE`, `UPLOAD_QUOTA_DAY`, `REPLICAS`, `CHUNK_TTL`, or `CHUNK_LIFE_MAX` | A revision that raises `MAX_FILE_SIZE`, `UPLOAD_QUOTA_DAY`, `REPLICAS`, `CHUNK_TTL`, or `CHUNK_LIFE_MAX` MUST derive this section again. |  |  |
-| `ATT-096` | §13.4.1 | MUST | A client | A client MUST send `CNEW` to each of the `REPLICAS` relays of a chunk before it sends `CPUT`. |  |  |
-| `ATT-097` | §13.4.1 | MUST | A client | A client MUST send `CPUT` to one of those relays only. |  |  |
-| `ATT-098` | §13.4.1 | MUST | A client | A client MUST send `CREP` to the relay that took the `CPUT`. |  |  |
-| `ATT-099` | §13.4.1 | MUST | A client | A client MUST send `CREP` after that `CPUT` succeeds. |  |  |
-| `ATT-100` | §13.4.1 | MUST | A client | A client MUST put the `storage_token` that each target issued in the target of that relay. |  |  |
-| `ATT-101` | §13.4.1 | MUST NOT | A client | A client MUST NOT put a token of one relay in the target of another relay. |  |  |
-| `ATT-102` | §13.4.1 | MUST | A relay | A relay MUST send one `CRPUT` to each target of a `CREP`. |  |  |
-| `ATT-103` | §13.4.1 | MUST | A relay | A relay MUST put the `storage_token` of that target in the `CRPUT` payload. |  |  |
-| `ATT-104` | §13.4.1 | MUST | A relay | A relay MUST send the bytes that the `CPUT` gave it, without a change. |  |  |
-| `ATT-105` | §13.4.1 | MUST NOT | A relay | A relay MUST NOT send a `CRPUT` to a relay that a `CREP` did not name. |  |  |
-| `ATT-106` | §13.4.1 | MUST NOT | A relay | A relay MUST NOT keep a `storage_token` of another relay after it sends the `CRPUT` that uses it. |  |  |
-| `ATT-107` | §13.4.1 | MUST | A relay | A relay MUST authorize a `CRPUT` against the `storage_token` that its own `CID` issued for that `chunk_id`. |  |  |
-| `ATT-108` | §13.4.1 | MUST NOT | A relay | A relay MUST NOT authorize a `CRPUT` against `cred_pk`. |  |  |
-| `ATT-109` | §13.4.1 | MUST | A relay | A relay MUST accept one `CRPUT` for each registration. |  |  |
-| `ATT-110` | §13.4.1 | MUST | A relay | A relay MUST reject a second `CRPUT` for a `chunk_id` that it holds. |  |  |
-| `ATT-111` | §13.4.1 | MUST | A relay | A relay MUST reject a `CRPUT` whose payload is not 32 682 bytes. |  |  |
-| `ATT-112` | §13.4.1 | MUST | A relay | A relay MUST erase the `storage_token` of a registration when it accepts the chunk. |  |  |
-| `ATT-113` | §13.4.1 | MUST | A client | A client MUST send a `CVFY` to each replica relay for a sample of the chunks that the relay holds. |  |  |
-| `ATT-114` | §13.4.1 | MUST | A client | A client MUST draw `nonce` from the device CSPRNG for each `CVFY`. |  |  |
-| `ATT-115` | §13.4.1 | MUST | A relay | A relay MUST answer a `CVFY` with a `CPRF` that carries the value above. |  |  |
-| `ATT-116` | §13.4.1 | MUST | A relay | A relay MUST answer with an unknown-chunk response when it holds no chunk at that `chunk_id`. |  |  |
-| `ATT-117` | §13.4.1 | MUST | A client | A client MUST compare `proof` against the value that it computes from its own copy. |  |  |
-| `ATT-118` | §13.4.1 | MUST | (unstated) | If the two values differ, or if the relay answers unknown-chunk, the client MUST send `CNEW` and `CPUT` to a fresh relay for that chunk. |  |  |
-| `ATT-119` | §13.4.1 | MUST | The client | The client MUST report the relay that failed as a link fault under Part 10 §10.4.2. |  |  |
-| `ATT-120` | §13.4.1 | MUST | A client | A client MUST select the sampled chunks at random. |  |  |
-| `ATT-121` | §13.4.1 | MUST NOT | A client | A client MUST NOT use a fixed sample position, because a relay that predicts the sample replicates that chunk and drops the others. |  |  |
-| `ATT-122` | §13.4.1 | MUST | A client | A client MUST select the `REPLICAS` relays of one chunk independently of the relays of each other chunk. |  |  |
-| `ATT-123` | §13.4 | MUST NOT | A client | A client MUST NOT upload more than one copy of a chunk, and §13.4.1 makes the relay push the others. |  |  |
-| `ATT-124` | §13.7.2 | MUST | A revision that takes the code above | A revision that takes the code above MUST make that measurement first, and it MUST state the §13.2.2 concession or the device cost in the Part 2 §2.4 table. |  |  |
-| `ATT-125` | §13.3.3 | MUST NOT | A relay | A relay MUST NOT set the erase time of a chunk later than `CHUNK_LIFE_MAX` after the `CNEW`. |  |  |
-| `ATT-126` | §13.3.3 | MUST NOT | A relay | A relay MUST NOT answer a `CRNW`. |  |  |
-| `ATT-127` | §13.3.3 | MUST | A relay | A relay MUST hold a backup-class chunk for `BACKUP_TTL` after the `CPUT` or the `CRPUT` that gave the bytes. |  |  |
-| `ATT-128` | §13.3.3 | MUST | A relay | A relay MUST reject a `CRNW` on a backup-class chunk. |  |  |
-| `ATT-129` | §13.3.3 | MUST | A relay | A relay MUST apply each other rule of this section to a backup-class chunk as to an attachment chunk. |  |  |
-| `ATT-130` | §13.3.3 | MUST | A relay | A relay MUST apply the admission control of Part 14 to a `BNEW` as to a `CNEW`. |  |  |
-| `ATT-131` | §13.3.3 | MUST NOT | A client | A client MUST NOT register a backup object under `CNEW`, and it MUST NOT register an attachment under `BNEW`. |  |  |
-| `ATT-132` | §13.3.3 | MUST | A client | A client MUST register a backup-class chunk at `BACKUP_REPLICAS` relays under different operators. |  |  |
-| `ATT-133` | §13.4.2 | MUST | A writer | A writer MUST select the first `BACKUP_REPLICAS` relays of the placement list of `h`. |  |  |
-| `ATT-134` | §13.4.2 | MUST | (unstated) | If a `BNEW` at a selected relay fails, the writer MUST replace that relay with the next of the list. |  |  |
-| `ATT-135` | §13.4.2 | MUST | A writer | A writer MUST send `CPUT` to the selected relay of the lowest rank and `CREP` for the others, under §13.4.1. |  |  |
-| `ATT-136` | §13.4.2 | MUST | A reader | A reader MUST send `CGET` to the relays of the placement list in list order, until it holds the chunk. |  |  |
-| `ATT-137` | §13.4.2 | MUST NOT | A reader | A reader MUST NOT ask more than `PLACE_PROBE` relays for one `h`. |  |  |
-| `ATT-138` | §13.4.2 | MUST | (unstated) | Before a writer replaces the chunk under one `h`, it MUST send `CDEL` to each relay that holds it. |  |  |
-| `ATT-139` | §13.4.2 | MUST | A party | A party MUST compute the placement list from the consensus that it holds. |  |  |
-| `ATT-140` | §13.4.2 | MUST | (unstated) | If a handle-addressed chunk has no named write credential, the writer MUST use a random `cred_sk` of `ATT-034`. |  |  |
-| `ATT-141` | §13.3.2 | MUST | A client | A client MUST set a `RelayRef` that names no relay to 12 zero bytes. |  |  |
-| `ATT-142` | §13.3.2 | MUST | A receiver | A receiver MUST reject a `FileDescriptor` with a null `RelayRef` on a pairwise or group channel. |  |  |
-| `ATT-143` | §13.4.2 | MUST NOT | A party | A party MUST NOT fetch a consensus for that computation. |  |  |
-| `ATT-144` | §13.10 | SHOULD | A writer | A writer SHOULD prefer a relay at store level 2 or 3 for a `CNEW` or a `BNEW`. |  |  |
-| `ATT-147` | §13.2.3 | MUST | The writer of a handle-addressed chunk | The writer of a handle-addressed chunk MUST pad its sealed object under the scheme above. |  |  |
-| `ATT-148` | §13.2.3 | MUST | A reader of such a chunk | A reader of such a chunk MUST reject a sealed object shorter than 16 bytes. |  |  |
-| `ATT-149` | §13.3.1 | MUST | A sender | A sender MUST seal each segment under `nonce_i` and the associated data above. |  |  |
-| `ATT-150` | §13.3.1 | MUST | A receiver | A receiver MUST reject a chunk whose tag fails. |  |  |
-| `ATT-151` | §13.3.1 | MUST | A receiver | A receiver MUST reject a file whose last chunk under `padded_size` carries `last_i` of `0x00`. |  |  |
-| `ATT-152` | §13.3.1 | MAY | A receiver | A receiver MAY render the verified segments of a media object in chunk order before that check completes. |  |  |
-| `ATT-153` | §13.3 | MUST | A sender | A sender MUST set `pixel_w` and `pixel_h` for an image and for a video, after the re-encode of `ATT-155`. |  |  |
-| `ATT-154` | §13.3 | MUST | A receiver | A receiver MUST size the placeholder of an image or a video from those two fields. |  |  |
-| `ATT-155` | §13.3 | MUST | A sender | A sender MUST re-encode an image, an audio, a voice, or a video object before the encryption. |  |  |
-| `ATT-156` | §13.3 | MUST | A sender | A sender MUST re-encode an image above `IMAGE_REENCODE_BYTES` to at most that size. |  |  |
-| `ATT-157` | §13.3 | MUST | (unstated) | If the user selects the original for one send, the sender MUST skip both re-encodes for that send and MUST state that the original carries its metadata fields. |  |  |
-| `ATT-158` | §13.3 | MUST NOT | A client | A client MUST NOT reuse a `file_key`, a `file_nonce`, or a `ChunkRef` across two conversations. |  |  |
-| `ATT-159` | §13.3.1 | MUST | A receiver | A receiver MUST reject a file in which a chunk before the last one carries `last_i` of `0x01`. |  |  |
-| `ATT-160` | §13.3.3 | MUST | An uploader | An uploader MUST retain the `cred_sk` of each chunk until the chunk is erased. |  |  |
-| `ATT-161` | §13.3.3 | MUST | (unstated) | When a client applies a deletion to a record with a descriptor it uploaded, it MUST send `CDEL` for each `ChunkRef`. |  |  |
-| `ATT-162` | §13.7.1 | MUST | A revision | A revision MUST hold `BACKUP_TTL` of Part 4 §4.8 at or above `BACKUP_LOOKBACK` weekly epochs less one epoch. |  |  |
-| `ATT-163` | §13.7.1 | MUST | A revision | A revision MUST hold `BACKUP_TTL` above `BACKUP_FULL_INTERVAL` plus `BACKUP_HISTORY_DAYS`. |  |  |
-| `ATT-164` | §13.7.2 | MUST NOT | A client | A client MUST NOT hold more than 8 `CPUT` in flight. |  |  |
-| `ATT-165` | §13.7.2 | MUST NOT | A client | A client MUST NOT hold more than 32 `CGET` in flight. |  |  |
-| `ATT-166` | §13.7.2 | MUST | A client | A client MUST send the `CREP` of a chunk while the `CPUT` of the next chunk is in flight. |  |  |
-| `ATT-167` | §13.7.2 | MUST | A client | A client MUST build the attachment circuit of §13.8 in the privacy mode of the conversation that carries the descriptor. |  |  |
-| `ATT-168` | §13.10 | MAY | A relay above `CHUNK_STORE_TARGET` | A relay above `CHUNK_STORE_TARGET` MAY erase attachment chunks before `CHUNK_TTL`, oldest renewal first. |  |  |
-| `ATT-169` | §13.11 | MUST NOT | A relay | A relay MUST NOT serve more than `CHUNK_EGRESS_BUDGET_DAY` of chunk bytes in one day. |  |  |
-| `ATT-170` | §13.11 | MUST | Above that budget, a relay | Above that budget, a relay MUST answer a `CGET` with a `NACK` of reason `BUSY`, and Part 6 §6.4.4 gives the reason. |  |  |
-| `ATT-171` | §13.11 | MUST NOT | A relay | A relay MUST NOT serve one chunk more than `CHUNK_FETCH_RATE` times in one hour. |  |  |
-| `ATT-172` | §13.11 | MUST | Above that rate, a relay | Above that rate, a relay MUST answer a `CGET` of that chunk with a `NACK` of reason `LIMIT`. |  |  |
-| `ATT-173` | §13.11 | MUST | A client that receives `BUSY` or `LIMIT` for a chunk | A client that receives `BUSY` or `LIMIT` for a chunk MUST fetch the next replica of the `ChunkRef`. |  |  |
-| `ATT-174` | §13.11 | MUST NOT | A client | A client MUST NOT send the same `CGET` to the same relay again inside one hour. |  |  |
-| `ATT-176` | §13.11 | MUST | A receiver | A receiver MUST treat two refs with one `chunk_id` as replicas of one chunk. |  |  |
-| `ATT-177` | §13.2.3 | MUST | A receiver | A receiver MUST pass over each `0x00` byte of that read. |  |  |
-| `ATT-178` | §13.7.2 | MUST NOT | A client | A client MUST NOT wait for the `CRPUT` of a replica before the next `CPUT`. |  |  |
-| `ATT-179` | §13.10 | MUST NOT | Such a relay | Such a relay MUST NOT erase a backup-class chunk. |  |  |
-| `ATT-180` | §13.3.3 | MUST | A relay | A relay MUST authorize `CREP` and `CVFY` against `cred_pk` only, and it MUST authorize a `CNEW` and a `BNEW` against the `cred_pk` that the payload carries, in the same manner as Part 6 §6.4 authorizes a `NEW` against the key in its payload. |  |  |
-| `ATT-181` | §13.3.3 | MUST | A pending registration whose bytes never arrive | A pending registration whose bytes never arrive MUST leave the relay at `CHUNK_TTL` after the `CNEW` or the `BNEW`, and the relay MUST count it as `CHUNK_SIZE` of used store until then. |  |  |
-| `ATT-182` | §13.3.3 | MUST | A client | A client MUST derive `read_sk` as `HKDF-SHA3-256(salt = "", ikm = file_key, info = "umbra/v1/chunk-read" || BE32(chunk_index), L = 32)`, and it MUST clamp the result as an X25519 scalar. |  |  |
-| `ATT-183` | §13.3.4 | MUST | A client | A client MUST derive `K_manifest` as `HKDF-SHA3-256(salt = "", ikm = file_key, info = "umbra/v1/file-manifest" || file_nonce, L = 32)`. |  |  |
-| `ATT-184` | §13.3.4 | MUST | (unstated) | A manifest carries no digest of its own: the tag of each manifest chunk under `K_manifest` authenticates it, and a receiver MUST accept a manifest whose chunks each verify under §13.3.1 and whose ref count equals the data chunk count of `padded_size`. |  |  |
-| `ATT-185` | §13.4.1 | MUST | A relay | A relay MUST reject a `CREP` whose `target_count` is 0 or above `HOT_REPLICAS` − 1. |  |  |
-| `ATT-186` | §13.3.3 | MUST | A relay | A relay MUST answer an accepted `CPUT` and an accepted `CREP` with a `CPRF` whose `proof` is `SHA3-256(corr_id || chunk)`, where `corr_id` is the 16 bytes of that command and `chunk` is what the relay holds. |  |  |
-| `ATT-187` | §13.3.3 | MUST | A relay | A relay MUST answer an accepted `CDEL` with a `CPRF` of 32 zero bytes. |  |  |
-| `ATT-188` | §13.3.3 | MUST | A client | A client MUST compare the `proof` of `ATT-186` against the value from its own copy, and it MUST take a difference as a failed `CPUT` under `ATT-118`. |  |  |
-| `ATT-189` | §13.4.1 | MUST | (unstated) | A registration, a `CPUT` or a `CREP` that a relay refuses, or that gets no answer, fails the chunk before its copies exist. |  |  |
-| `ATT-190` | §13.4.1 | MUST | (unstated) | A `CVFY` can arrive before the copy that it asks for, because the copy travels on a connection of its own. |  |  |
-| `ATT-191` | §13.10 | MUST | An attachment relay | An attachment relay MUST commit each chunk that a `CPUT` or a `CRPUT` gave to durable storage before it sends the answer of that command, under Part 3 rules `NET-298` and `NET-299`. |  |  |
+| `ATT-001` | §12.1 | MUST | An attachment mechanism | An attachment mechanism MUST meet the three requirements below. |  |  |
+| `ATT-002` | §12.1 | MUST NOT | The mechanism | **The mechanism MUST NOT make the sender stay online** until each recipient fetches the file. |  |  |
+| `ATT-003` | §12.1 | MUST NOT | The mechanism | The mechanism MUST NOT make the sender upload the file again for each group member. |  |  |
+| `ATT-004` | §12.1 | MUST NOT | A relay | A relay MUST NOT be able to tell that two chunks belong to one file. |  |  |
+| `ATT-005` | §12.1 | MUST NOT | A relay | A relay MUST NOT be able to tell that two chunks belong to one user. |  |  |
+| `ATT-006` | §12.3.1 | MUST | The attachment AEAD | The attachment AEAD MUST be key-committing. |  |  |
+| `ATT-007` | §12.3.1 | MUST | (unstated) | The test suite of this specification MUST include a negative vector that fails on the construction that does not commit. |  |  |
+| `ATT-008` | §12.3.2 | MUST | A client | A client MUST resolve `relay_hint` against the current consensus. |  |  |
+| `ATT-009` | §12.3.2 | MUST NOT | A client | A client MUST NOT fetch an older consensus to resolve a reference, because Part 10 §10.5 forbids a session for the only purpose of a directory diff. |  |  |
+| `ATT-010` | §12.3.2 | MUST | (unstated) | If `relay_hint` matches no relay in the current consensus, the client MUST treat that replica as unreachable. |  |  |
+| `ATT-011` | §12.3.2 | MUST | The client | The client MUST then try another replica under §12.4. |  |  |
+| `ATT-012` | §12.3.2 | MUST | (unstated) | If `relay_hint` matches two or more relays in the current consensus, the client MUST treat that replica as unresolvable. |  |  |
+| `ATT-013` | §12.3.2 | MUST | The client | The client MUST then try another replica under §12.4. |  |  |
+| `ATT-014` | §12.3.2 | MUST | The client | The client MUST report that failure to the user. |  |  |
+| `ATT-015` | §12.3.2 | MUST NOT | (unstated) | the client MUST NOT show a partial file. |  |  |
+| `ATT-016` | §12.3.2 | MUST | A revision | A revision MUST measure the relay churn rate over 45 days before it lowers `REPLICAS`. |  |  |
+| `ATT-017` | §12.4 | MUST | A client | A client MUST register each chunk at three or more relays under different `operator_id` values of Part 10 §10.5.3. |  |  |
+| `ATT-018` | §12.4 | MUST | The descriptor | The descriptor MUST carry the three references. |  |  |
+| `ATT-019` | §12.4 | MUST NOT | The client | The client MUST NOT use a fixed order. |  |  |
+| `ATT-020` | §12.7 | MUST | (unstated) | If the bucket ladder or the command header changes, a revision MUST derive this value again. |  |  |
+| `ATT-021` | §12.7 | MUST | A client | A client MUST select the bucket of a descriptor from those four values. |  |  |
+| `ATT-022` | §12.7 | MUST NOT | Thus a v1 client | Thus a v1 client MUST NOT send an attachment above `MAX_DESCRIPTOR_CHUNKS`, which is 269 chunks and about 8.78 MB. |  |  |
+| `ATT-023` | §12.7 | MUST | A revision | A revision MUST derive §12.7.2 again before it raises that value. |  |  |
+| `ATT-024` | §12.8 | MUST | An attachment transfer | An attachment transfer MUST use a **separate connection**, or separate QUIC streams, from the interactive messaging. |  |  |
+| `ATT-025` | §12.3.1 | MUST | A sender | A sender MUST put `commit` in the `FileDescriptor` of §12.3. |  |  |
+| `ATT-026` | §12.3.1 | MUST | A receiver | A receiver MUST compute `commit` again from `file_key` and `file_nonce`. |  |  |
+| `ATT-027` | §12.3.1 | MUST | A receiver | A receiver MUST compare the two values in constant time. |  |  |
+| `ATT-028` | §12.3.1 | MUST | (unstated) | If the two values differ, a receiver MUST reject the descriptor. |  |  |
+| `ATT-029` | §12.3.1 | MUST NOT | A receiver | A receiver MUST NOT fetch a chunk of a descriptor that it rejected. |  |  |
+| `ATT-030` | §12.3.1 | MUST | A receiver | A receiver MUST make that comparison before it decrypts a chunk. |  |  |
+| `ATT-031` | §12.3.1 | MUST | A receiver | A receiver MUST verify `digest` against the full plaintext after the decryption. |  |  |
+| `ATT-032` | §12.3.1 | MUST NOT | A receiver | A receiver MUST NOT present a file as complete, save it, or forward it before that check succeeds. |  |  |
+| `ATT-033` | §12.3.3 | MUST NOT | An attachment command | An attachment command MUST NOT carry a signature. |  |  |
+| `ATT-034` | §12.3.3 | MUST | An uploader | An uploader MUST make `cred_sk` from the device CSPRNG for each chunk. |  |  |
+| `ATT-035` | §12.3.3 | MUST NOT | An uploader | An uploader MUST NOT derive `cred_sk` from `file_key`. |  |  |
+| `ATT-036` | §12.3.3 | MUST NOT | An uploader | An uploader MUST NOT use one `cred_sk` for two chunks. |  |  |
+| `ATT-037` | §12.3.3 | MUST | A client | A client MUST derive `read_sk` of a file chunk from `file_key` and the index of the chunk. |  |  |
+| `ATT-038` | §12.3.3 | MUST | A relay | A relay MUST select `storage_token` from its own CSPRNG. |  |  |
+| `ATT-039` | §12.3.3 | MUST NOT | A relay | A relay MUST NOT derive `storage_token` from `cred_pk`, from `read_pk`, or from the chunk bytes. |  |  |
+| `ATT-040` | §12.3.3 | MUST | A relay | A relay MUST authorize `CPUT` and `CDEL` against `cred_pk` only. |  |  |
+| `ATT-041` | §12.3.3 | MUST | A relay | A relay MUST authorize `CGET` and `CRNW` against `read_pk` only. |  |  |
+| `ATT-042` | §12.3.3 | MUST | (unstated) | The authorized bytes of a `CPUT` MUST hold `storage_token`. |  |  |
+| `ATT-043` | §12.3.3 | MUST | A `CPUT` and a `CDAT` | A `CPUT` and a `CDAT` MUST carry exactly `CHUNK_SIZE` bytes. |  |  |
+| `ATT-044` | §12.3.3 | MUST | A relay | A relay MUST reject a `CPUT` of a different length. |  |  |
+| `ATT-045` | §12.3.3 | MUST | A relay | A relay MUST apply the admission control of Part 13 to a `CNEW`. |  |  |
+| `ATT-046` | §12.3.3 | MUST | A relay | A relay MUST erase a chunk at `CDEL`, and at `CHUNK_TTL` after the `CPUT` or after the last accepted `CRNW`. |  |  |
+| `ATT-047` | §12.3.3 | MUST NOT | A relay | A relay MUST NOT retain the identifier of an erased chunk. |  |  |
+| `ATT-048` | §12.3.3 | MUST | A client | A client MUST send an attachment command on the separate connection of §12.8. |  |  |
+| `ATT-049` | §12.3.2 | MUST | (unstated) | A revision that adds a field to `FileDescriptor` or to `ChunkRef` MUST derive `R` again from Part 6 §6.9. |  |  |
+| `ATT-050` | §12.7.1 | MUST NOT | `CHUNK_TTL` | `CHUNK_TTL` MUST NOT be below the `MSG_TTL` of Part 3 §3.2.4. |  |  |
+| `ATT-051` | §12.7.1 | MUST NOT | (unstated) | A revision MUST hold the two values equal, and a revision MUST NOT raise `MSG_TTL` alone. |  |  |
+| `ATT-052` | §12.7.1 | MUST | (unstated) | If each replica of a chunk is gone, the client MUST report the failure to the user and MUST name the file. |  |  |
+| `ATT-053` | §12.7.1 | MUST NOT | The client | The client MUST NOT show a partial file. |  |  |
+| `ATT-054` | §12.7.1 | MUST | The client | The client MUST offer the sender a re-send of the file. |  |  |
+| `ATT-055` | §12.3.3 | MUST | An uploader | An uploader MUST select `chunk_id` from the device CSPRNG, and it MUST select one value for each chunk. |  |  |
+| `ATT-056` | §12.3.3 | MUST NOT | An uploader | An uploader MUST NOT derive `chunk_id` from `file_key`, from `cred_pk`, from `read_pk`, or from the chunk bytes. |  |  |
+| `ATT-057` | §12.3.3 | MUST | An uploader | An uploader MUST use the same `chunk_id` at each of the `REPLICAS` relays that hold one chunk. |  |  |
+| `ATT-058` | §12.3.3 | MUST | A relay | A relay MUST reject a `CNEW` whose `chunk_id` names a chunk that the relay holds. |  |  |
+| `ATT-059` | §12.2.3 | MUST | A sender | A sender MUST pad `plaintext` with one marker byte of `0x80` and then zero bytes. |  |  |
+| `ATT-060` | §12.2.3 | MUST | A sender | A sender MUST select the smallest *k* that makes the length of `padded` a whole multiple of `SEGMENT_SIZE`. |  |  |
+| `ATT-061` | §12.2.3 | MUST | A sender | A sender MUST append the marker byte even when the length of `plaintext` is already a whole multiple of `SEGMENT_SIZE`. |  |  |
+| `ATT-062` | §12.2.3 | MUST | A receiver | A receiver MUST read the last segment from its last byte toward its first byte. |  |  |
+| `ATT-063` | §12.2.3 | MUST | The first byte that is not `0x00` | The first byte that is not `0x00` MUST be `0x80`, and a receiver MUST reject the file when that byte holds a different value. |  |  |
+| `ATT-064` | §12.2.3 | MUST | A receiver | A receiver MUST remove that marker byte and each zero byte after it. |  |  |
+| `ATT-065` | §12.2.3 | MUST NOT | A receiver | A receiver MUST NOT read the padding of a segment whose tag failed under §12.3.1. |  |  |
+| `ATT-066` | §12.9 | MUST | A revision that adds a client of the chunk path | A revision that adds a client of the chunk path MUST add a row to this table. |  |  |
+| `ATT-067` | §12.3 | MUST | A receiver | A receiver MUST take the data chunk count from that division. |  |  |
+| `ATT-068` | §12.3 | MUST | A parser | A parser MUST reject a `padded_size` that `CHUNK_SIZE` does not divide. |  |  |
+| `ATT-069` | §12.3 | MUST | A sender | A sender MUST set `media_seconds` for a `mime_class` of audio, of voice, or of video. |  |  |
+| `ATT-070` | §12.3 | MUST | A sender | A sender MUST set `media_seconds` to zero for each other class. |  |  |
+| `ATT-071` | §12.3 | MUST NOT | A sender | A sender MUST NOT send a voice object above `VOICE_MAX_SECONDS`. |  |  |
+| `ATT-072` | §12.3.4 | MUST | A client | A client MUST use level `0x00` when the data chunk count is at or below the ref count that the descriptor bucket holds. |  |  |
+| `ATT-073` | §12.3.4 | MUST | A client | A client MUST use level `0x01` above that count. |  |  |
+| `ATT-074` | §12.3.4 | MUST | A parser | A parser MUST reject a `level` above `0x01`. |  |  |
+| `ATT-075` | §12.3.4 | MUST | A client | A client MUST derive `K_manifest` with the label above, and Part 5 §5.11 holds that label. |  |  |
+| `ATT-076` | §12.3.4 | MUST NOT | A client | A client MUST NOT encrypt a manifest under `file_key` itself. |  |  |
+| `ATT-077` | §12.3.4 | MUST | A client | A client MUST order the `ChunkRef` values of a manifest by the chunk index, from the lowest index to the highest index. |  |  |
+| `ATT-078` | §12.3.4 | MUST | A receiver | A receiver MUST reject a manifest whose length is not a whole multiple of 120 bytes after the padding is removed. |  |  |
+| `ATT-079` | §12.3.4 | MUST | A receiver | A receiver MUST rebuild the full manifest before it fetches a data chunk. |  |  |
+| `ATT-080` | §12.3.4 | MUST NOT | A receiver | A receiver MUST NOT present a file as complete before it verifies `digest` under `ATT-031`. |  |  |
+| `ATT-081` | §12.3.4 | MUST NOT | A relay | A relay MUST NOT tell a manifest chunk from a data chunk. |  |  |
+| `ATT-082` | §12.3.4 | MUST | A revision | A revision MUST define a second manifest level before it raises `MAX_FILE_SIZE` above 2.22 GiB. |  |  |
+| `ATT-083` | §12.7.2 | MUST | A client | A client MUST show the uplink cost of an attachment above `LARGE_FILE_WARN` before it starts the upload. |  |  |
+| `ATT-084` | §12.7.2 | MUST | A client | A client MUST let the user cancel at that point. |  |  |
+| `ATT-085` | §12.7.2 | MUST NOT | A client | A client MUST NOT start an upload above that size on a metered network without a user action. |  |  |
+| `ATT-086` | §12.10 | MUST | A relay that declares the attachment role | A relay that declares the attachment role MUST hold `CHUNK_STORE_MIN` of free storage. |  |  |
+| `ATT-087` | §12.10 | MUST | A relay | A relay MUST publish the declared store in `chunk_store_gib` of its descriptor of Part 10 §10.5.3. |  |  |
+| `ATT-088` | §12.10 | MUST | A directory authority | A directory authority MUST reject an attachment role from a relay whose `chunk_store_gib` is below `CHUNK_STORE_MIN`. |  |  |
+| `ATT-089` | §12.10 | MUST | A relay | A relay MUST reject a `CNEW` when its store holds less free space than `CHUNK_SIZE`. |  |  |
+| `ATT-090` | §12.10 | MUST NOT | A relay below `CHUNK_STORE_TARGET` of stored bytes | A relay below `CHUNK_STORE_TARGET` of stored bytes MUST NOT erase a chunk before `CHUNK_TTL` to make space. |  |  |
+| `ATT-091` | §12.10 | MUST | A relay | A relay MUST signal that condition to the directory as a capacity fault. |  |  |
+| `ATT-092` | §12.10 | MUST | A relay | A relay MUST apply `UPLOAD_QUOTA_DAY` for each credential that presents a token. |  |  |
+| `ATT-093` | §12.10 | MUST | A relay | A relay MUST reject a `CNEW` above that quota. |  |  |
+| `ATT-094` | §12.10 | MUST NOT | A relay | A relay MUST NOT hold a quota counter after 24 hours. |  |  |
+| `ATT-095` | §12.10 | MUST | A revision that raises `MAX_FILE_SIZE`, `UPLOAD_QUOTA_DAY`, `REPLICAS`, `CHUNK_TTL`, or `CHUNK_LIFE_MAX` | A revision that raises `MAX_FILE_SIZE`, `UPLOAD_QUOTA_DAY`, `REPLICAS`, `CHUNK_TTL`, or `CHUNK_LIFE_MAX` MUST derive this section again. |  |  |
+| `ATT-096` | §12.4.1 | MUST | A client | A client MUST send `CNEW` to each of the `REPLICAS` relays of a chunk before it sends `CPUT`. |  |  |
+| `ATT-097` | §12.4.1 | MUST | A client | A client MUST send `CPUT` to one of those relays only. |  |  |
+| `ATT-098` | §12.4.1 | MUST | A client | A client MUST send `CREP` to the relay that took the `CPUT`. |  |  |
+| `ATT-099` | §12.4.1 | MUST | A client | A client MUST send `CREP` after that `CPUT` succeeds. |  |  |
+| `ATT-100` | §12.4.1 | MUST | A client | A client MUST put the `storage_token` that each target issued in the target of that relay. |  |  |
+| `ATT-101` | §12.4.1 | MUST NOT | A client | A client MUST NOT put a token of one relay in the target of another relay. |  |  |
+| `ATT-102` | §12.4.1 | MUST | A relay | A relay MUST send one `CRPUT` to each target of a `CREP`. |  |  |
+| `ATT-103` | §12.4.1 | MUST | A relay | A relay MUST put the `storage_token` of that target in the `CRPUT` payload. |  |  |
+| `ATT-104` | §12.4.1 | MUST | A relay | A relay MUST send the bytes that the `CPUT` gave it, without a change. |  |  |
+| `ATT-105` | §12.4.1 | MUST NOT | A relay | A relay MUST NOT send a `CRPUT` to a relay that a `CREP` did not name. |  |  |
+| `ATT-106` | §12.4.1 | MUST NOT | A relay | A relay MUST NOT keep a `storage_token` of another relay after it sends the `CRPUT` that uses it. |  |  |
+| `ATT-107` | §12.4.1 | MUST | A relay | A relay MUST authorize a `CRPUT` against the `storage_token` that its own `CID` issued for that `chunk_id`. |  |  |
+| `ATT-108` | §12.4.1 | MUST NOT | A relay | A relay MUST NOT authorize a `CRPUT` against `cred_pk`. |  |  |
+| `ATT-109` | §12.4.1 | MUST | A relay | A relay MUST accept one `CRPUT` for each registration. |  |  |
+| `ATT-110` | §12.4.1 | MUST | A relay | A relay MUST reject a second `CRPUT` for a `chunk_id` that it holds. |  |  |
+| `ATT-111` | §12.4.1 | MUST | A relay | A relay MUST reject a `CRPUT` whose payload is not 32 682 bytes. |  |  |
+| `ATT-112` | §12.4.1 | MUST | A relay | A relay MUST erase the `storage_token` of a registration when it accepts the chunk. |  |  |
+| `ATT-113` | §12.4.1 | MUST | A client | A client MUST send a `CVFY` to each replica relay for a sample of the chunks that the relay holds. |  |  |
+| `ATT-114` | §12.4.1 | MUST | A client | A client MUST draw `nonce` from the device CSPRNG for each `CVFY`. |  |  |
+| `ATT-115` | §12.4.1 | MUST | A relay | A relay MUST answer a `CVFY` with a `CPRF` that carries the value above. |  |  |
+| `ATT-116` | §12.4.1 | MUST | A relay | A relay MUST answer with an unknown-chunk response when it holds no chunk at that `chunk_id`. |  |  |
+| `ATT-117` | §12.4.1 | MUST | A client | A client MUST compare `proof` against the value that it computes from its own copy. |  |  |
+| `ATT-118` | §12.4.1 | MUST | (unstated) | If the two values differ, or if the relay answers unknown-chunk, the client MUST send `CNEW` and `CPUT` to a fresh relay for that chunk. |  |  |
+| `ATT-119` | §12.4.1 | MUST | The client | The client MUST report the relay that failed as a link fault under Part 10 §10.4.2. |  |  |
+| `ATT-120` | §12.4.1 | MUST | A client | A client MUST select the sampled chunks at random. |  |  |
+| `ATT-121` | §12.4.1 | MUST NOT | A client | A client MUST NOT use a fixed sample position, because a relay that predicts the sample replicates that chunk and drops the others. |  |  |
+| `ATT-122` | §12.4.1 | MUST | A client | A client MUST select the `REPLICAS` relays of one chunk independently of the relays of each other chunk. |  |  |
+| `ATT-123` | §12.4 | MUST NOT | A client | A client MUST NOT upload more than one copy of a chunk, and §12.4.1 makes the relay push the others. |  |  |
+| `ATT-124` | §12.7.2 | MUST | A revision that takes the code above | A revision that takes the code above MUST make that measurement first, and it MUST state the §12.2.2 concession or the device cost in the Part 2 §2.4 table. |  |  |
+| `ATT-125` | §12.3.3 | MUST NOT | A relay | A relay MUST NOT set the erase time of a chunk later than `CHUNK_LIFE_MAX` after the `CNEW`. |  |  |
+| `ATT-126` | §12.3.3 | MUST NOT | A relay | A relay MUST NOT answer a `CRNW`. |  |  |
+| `ATT-127` | §12.3.3 | MUST | A relay | A relay MUST hold a backup-class chunk for `BACKUP_TTL` after the `CPUT` or the `CRPUT` that gave the bytes. |  |  |
+| `ATT-128` | §12.3.3 | MUST | A relay | A relay MUST reject a `CRNW` on a backup-class chunk. |  |  |
+| `ATT-129` | §12.3.3 | MUST | A relay | A relay MUST apply each other rule of this section to a backup-class chunk as to an attachment chunk. |  |  |
+| `ATT-130` | §12.3.3 | MUST | A relay | A relay MUST apply the admission control of Part 13 to a `BNEW` as to a `CNEW`. |  |  |
+| `ATT-131` | §12.3.3 | MUST NOT | A client | A client MUST NOT register a backup object under `CNEW`, and it MUST NOT register an attachment under `BNEW`. |  |  |
+| `ATT-132` | §12.3.3 | MUST | A client | A client MUST register a backup-class chunk at `BACKUP_REPLICAS` relays under different operators. |  |  |
+| `ATT-133` | §12.4.2 | MUST | A writer | A writer MUST select the first `BACKUP_REPLICAS` relays of the placement list of `h`. |  |  |
+| `ATT-134` | §12.4.2 | MUST | (unstated) | If a `BNEW` at a selected relay fails, the writer MUST replace that relay with the next of the list. |  |  |
+| `ATT-135` | §12.4.2 | MUST | A writer | A writer MUST send `CPUT` to the selected relay of the lowest rank and `CREP` for the others, under §12.4.1. |  |  |
+| `ATT-136` | §12.4.2 | MUST | A reader | A reader MUST send `CGET` to the relays of the placement list in list order, until it holds the chunk. |  |  |
+| `ATT-137` | §12.4.2 | MUST NOT | A reader | A reader MUST NOT ask more than `PLACE_PROBE` relays for one `h`. |  |  |
+| `ATT-138` | §12.4.2 | MUST | (unstated) | Before a writer replaces the chunk under one `h`, it MUST send `CDEL` to each relay that holds it. |  |  |
+| `ATT-139` | §12.4.2 | MUST | A party | A party MUST compute the placement list from the consensus that it holds. |  |  |
+| `ATT-140` | §12.4.2 | MUST | (unstated) | If a handle-addressed chunk has no named write credential, the writer MUST use a random `cred_sk` of `ATT-034`. |  |  |
+| `ATT-141` | §12.3.2 | MUST | A client | A client MUST set a `RelayRef` that names no relay to 12 zero bytes. |  |  |
+| `ATT-142` | §12.3.2 | MUST | A receiver | A receiver MUST reject a `FileDescriptor` with a null `RelayRef` on a pairwise or group channel. |  |  |
+| `ATT-143` | §12.4.2 | MUST NOT | A party | A party MUST NOT fetch a consensus for that computation. |  |  |
+| `ATT-144` | §12.10 | SHOULD | A writer | A writer SHOULD prefer a relay at store level 2 or 3 for a `CNEW` or a `BNEW`. |  |  |
+| `ATT-147` | §12.2.3 | MUST | The writer of a handle-addressed chunk | The writer of a handle-addressed chunk MUST pad its sealed object under the scheme above. |  |  |
+| `ATT-148` | §12.2.3 | MUST | A reader of such a chunk | A reader of such a chunk MUST reject a sealed object shorter than 16 bytes. |  |  |
+| `ATT-149` | §12.3.1 | MUST | A sender | A sender MUST seal each segment under `nonce_i` and the associated data above. |  |  |
+| `ATT-150` | §12.3.1 | MUST | A receiver | A receiver MUST reject a chunk whose tag fails. |  |  |
+| `ATT-151` | §12.3.1 | MUST | A receiver | A receiver MUST reject a file whose last chunk under `padded_size` carries `last_i` of `0x00`. |  |  |
+| `ATT-152` | §12.3.1 | MAY | A receiver | A receiver MAY render the verified segments of a media object in chunk order before that check completes. |  |  |
+| `ATT-153` | §12.3 | MUST | A sender | A sender MUST set `pixel_w` and `pixel_h` for an image and for a video, after the re-encode of `ATT-155`. |  |  |
+| `ATT-154` | §12.3 | MUST | A receiver | A receiver MUST size the placeholder of an image or a video from those two fields. |  |  |
+| `ATT-155` | §12.3 | MUST | A sender | A sender MUST re-encode an image, an audio, a voice, or a video object before the encryption. |  |  |
+| `ATT-156` | §12.3 | MUST | A sender | A sender MUST re-encode an image above `IMAGE_REENCODE_BYTES` to at most that size. |  |  |
+| `ATT-157` | §12.3 | MUST | (unstated) | If the user selects the original for one send, the sender MUST skip both re-encodes for that send and MUST state that the original carries its metadata fields. |  |  |
+| `ATT-158` | §12.3 | MUST NOT | A client | A client MUST NOT reuse a `file_key`, a `file_nonce`, or a `ChunkRef` across two conversations. |  |  |
+| `ATT-159` | §12.3.1 | MUST | A receiver | A receiver MUST reject a file in which a chunk before the last one carries `last_i` of `0x01`. |  |  |
+| `ATT-160` | §12.3.3 | MUST | An uploader | An uploader MUST retain the `cred_sk` of each chunk until the chunk is erased. |  |  |
+| `ATT-161` | §12.3.3 | MUST | (unstated) | When a client applies a deletion to a record with a descriptor it uploaded, it MUST send `CDEL` for each `ChunkRef`. |  |  |
+| `ATT-162` | §12.7.1 | MUST | A revision | A revision MUST hold `BACKUP_TTL` of Part 4 §4.8 at or above `BACKUP_LOOKBACK` weekly epochs less one epoch. |  |  |
+| `ATT-163` | §12.7.1 | MUST | A revision | A revision MUST hold `BACKUP_TTL` above `BACKUP_FULL_INTERVAL` plus `BACKUP_HISTORY_DAYS`. |  |  |
+| `ATT-164` | §12.7.2 | MUST NOT | A client | A client MUST NOT hold more than 8 `CPUT` in flight. |  |  |
+| `ATT-165` | §12.7.2 | MUST NOT | A client | A client MUST NOT hold more than 32 `CGET` in flight. |  |  |
+| `ATT-166` | §12.7.2 | MUST | A client | A client MUST send the `CREP` of a chunk while the `CPUT` of the next chunk is in flight. |  |  |
+| `ATT-167` | §12.7.2 | MUST | A client | A client MUST build the attachment circuit of §12.8 in the privacy mode of the conversation that carries the descriptor. |  |  |
+| `ATT-168` | §12.10 | MAY | A relay above `CHUNK_STORE_TARGET` | A relay above `CHUNK_STORE_TARGET` MAY erase attachment chunks before `CHUNK_TTL`, oldest renewal first. |  |  |
+| `ATT-169` | §12.11 | MUST NOT | A relay | A relay MUST NOT serve more than `CHUNK_EGRESS_BUDGET_DAY` of chunk bytes in one day. |  |  |
+| `ATT-170` | §12.11 | MUST | Above that budget, a relay | Above that budget, a relay MUST answer a `CGET` with a `NACK` of reason `BUSY`, and Part 6 §6.4.4 gives the reason. |  |  |
+| `ATT-171` | §12.11 | MUST NOT | A relay | A relay MUST NOT serve one chunk more than `CHUNK_FETCH_RATE` times in one hour. |  |  |
+| `ATT-172` | §12.11 | MUST | Above that rate, a relay | Above that rate, a relay MUST answer a `CGET` of that chunk with a `NACK` of reason `LIMIT`. |  |  |
+| `ATT-173` | §12.11 | MUST | A client that receives `BUSY` or `LIMIT` for a chunk | A client that receives `BUSY` or `LIMIT` for a chunk MUST fetch the next replica of the `ChunkRef`. |  |  |
+| `ATT-174` | §12.11 | MUST NOT | A client | A client MUST NOT send the same `CGET` to the same relay again inside one hour. |  |  |
+| `ATT-176` | §12.11 | MUST | A receiver | A receiver MUST treat two refs with one `chunk_id` as replicas of one chunk. |  |  |
+| `ATT-177` | §12.2.3 | MUST | A receiver | A receiver MUST pass over each `0x00` byte of that read. |  |  |
+| `ATT-178` | §12.7.2 | MUST NOT | A client | A client MUST NOT wait for the `CRPUT` of a replica before the next `CPUT`. |  |  |
+| `ATT-179` | §12.10 | MUST NOT | Such a relay | Such a relay MUST NOT erase a backup-class chunk. |  |  |
+| `ATT-180` | §12.3.3 | MUST | A relay | A relay MUST authorize `CREP` and `CVFY` against `cred_pk` only, and it MUST authorize a `CNEW` and a `BNEW` against the `cred_pk` that the payload carries, in the same manner as Part 6 §6.4 authorizes a `NEW` against the key in its payload. |  |  |
+| `ATT-181` | §12.3.3 | MUST | A pending registration whose bytes never arrive | A pending registration whose bytes never arrive MUST leave the relay at `CHUNK_TTL` after the `CNEW` or the `BNEW`, and the relay MUST count it as `CHUNK_SIZE` of used store until then. |  |  |
+| `ATT-182` | §12.3.3 | MUST | A client | A client MUST derive `read_sk` as `HKDF-SHA3-256(salt = "", ikm = file_key, info = "umbra/v1/chunk-read" || BE32(chunk_index), L = 32)`, and it MUST clamp the result as an X25519 scalar. |  |  |
+| `ATT-183` | §12.3.4 | MUST | A client | A client MUST derive `K_manifest` as `HKDF-SHA3-256(salt = "", ikm = file_key, info = "umbra/v1/file-manifest" || file_nonce, L = 32)`. |  |  |
+| `ATT-184` | §12.3.4 | MUST | (unstated) | A manifest carries no digest of its own: the tag of each manifest chunk under `K_manifest` authenticates it, and a receiver MUST accept a manifest whose chunks each verify under §12.3.1 and whose ref count equals the data chunk count of `padded_size`. |  |  |
+| `ATT-185` | §12.4.1 | MUST | A relay | A relay MUST reject a `CREP` whose `target_count` is 0 or above `HOT_REPLICAS` − 1. |  |  |
+| `ATT-186` | §12.3.3 | MUST | A relay | A relay MUST answer an accepted `CPUT` and an accepted `CREP` with a `CPRF` whose `proof` is `SHA3-256(corr_id || chunk)`, where `corr_id` is the 16 bytes of that command and `chunk` is what the relay holds. |  |  |
+| `ATT-187` | §12.3.3 | MUST | A relay | A relay MUST answer an accepted `CDEL` with a `CPRF` of 32 zero bytes. |  |  |
+| `ATT-188` | §12.3.3 | MUST | A client | A client MUST compare the `proof` of `ATT-186` against the value from its own copy, and it MUST take a difference as a failed `CPUT` under `ATT-118`. |  |  |
+| `ATT-189` | §12.4.1 | MUST | (unstated) | A registration, a `CPUT` or a `CREP` that a relay refuses, or that gets no answer, fails the chunk before its copies exist. |  |  |
+| `ATT-190` | §12.4.1 | MUST | (unstated) | A `CVFY` can arrive before the copy that it asks for, because the copy travels on a connection of its own. |  |  |
+| `ATT-191` | §12.10 | MUST | An attachment relay | An attachment relay MUST commit each chunk that a `CPUT` or a `CRPUT` gave to durable storage before it sends the answer of that command, under Part 3 rules `NET-298` and `NET-299`. |  |  |
 
 ## ABU — Anti-Abuse Without Identifiers
 
-Source: `spec/14-anti-abuse.md`
+Source: `spec/13-anti-abuse.md`
 
 | ID | Section | Key word | Binds | Requirement | Module | Test |
 | --- | --- | --- | --- | --- | --- | --- |
-| `ABU-001` | §14.4 | MUST NOT | UMBRA | UMBRA MUST NOT build a three-party Attester. |  |  |
-| `ABU-002` | §14.5 | MUST | A client | A client MUST refuse a token from a key that is not in the log. |  |  |
-| `ABU-003` | §14.5 | MUST | A client | A client MUST also refuse to redeem against a relay that advertises a key that is not in the log. |  |  |
-| `ABU-004` | §14.6 | MUST | An issuer | An issuer MUST rotate each issuer key at one global 7-day epoch boundary. |  |  |
-| `ABU-005` | §14.6 | MUST NOT | An issuer | An issuer MUST NOT give one key or one relay a rotation of its own. |  |  |
-| `ABU-006` | §14.7 | MUST NOT | UMBRA | UMBRA MUST NOT build a global double-spend database. |  |  |
-| `ABU-007` | §14.8 | MUST NOT | An implementation | An implementation MUST NOT let an attacker influence the effort parameter. |  |  |
-| `ABU-008` | §14.8 | MUST | The client | The client MUST give the user visible feedback during the computation. |  |  |
-| `ABU-010` | §14.10 | MUST NOT | UMBRA | **UMBRA MUST NOT build a global moderator key**. |  |  |
-| `ABU-011` | §14.10 | MUST NOT | UMBRA | UMBRA MUST NOT frank a 1:1 message. |  |  |
-| `ABU-012` | §14.4 | MUST | An addressee client | An addressee client MUST verify the `Admission` at the end of a hello before it shows the request. |  |  |
-| `ABU-013` | §14.4 | MUST NOT | A deployment | A deployment MUST NOT put a privately verifiable credential on a path whose verifier is not its issuer. |  |  |
-| `ABU-014` | §14.2.1 | MUST | That verifier | That verifier MUST accept a correct proof of work of §14.8 in place of the credential of the row. |  |  |
-| `ABU-015` | §14.2.1 | MUST NOT | A relay | A relay MUST NOT need a token for a queue creation. |  |  |
-| `ABU-016` | §14.2.1 | MUST NOT | An issuer | An issuer MUST NOT need an identifier from a client to issue a token batch. |  |  |
-| `ABU-017` | §14.2.1 | MUST | A deployment | A deployment MUST publish the attestation that it uses for an issuance. |  |  |
-| `ABU-018` | §14.2.1 | MUST NOT | A deployment | A deployment MUST NOT use a hardware attestation for that purpose, and §14.11 gives the cause. |  |  |
-| `ABU-021` | §14.12 | MUST | A client | A client MUST hold the block state as mutable state of Part 7 §7.5.3. |  |  |
-| `ABU-022` | §14.12 | MUST | A client | A client MUST converge that state across the device set. |  |  |
-| `ABU-023` | §14.12 | MUST NOT | A client | A client MUST NOT send a record to the blocked party that names the block. |  |  |
-| `ABU-024` | §14.12 | MUST NOT | A client | A client MUST NOT change the queue set of that contact at the block. |  |  |
-| `ABU-025` | §14.12 | MUST NOT | A client | A client MUST NOT send `DEL` on the queue of a blocked contact. |  |  |
-| `ABU-026` | §14.12 | MUST | A client | A client MUST continue to send `ACK` for the records of a blocked contact. |  |  |
-| `ABU-027` | §14.12 | MUST | A client | A client MUST discard a record of a blocked contact after it acknowledges that record. |  |  |
-| `ABU-028` | §14.12 | MUST NOT | A client | A client MUST NOT render such a record. |  |  |
-| `ABU-029` | §14.12 | MUST NOT | A client | A client MUST NOT raise a notification for such a record. |  |  |
-| `ABU-030` | §14.12 | MUST | A client | A client MUST continue to emit a delivery receipt of Part 6 §6.6 kind `0x06` at the rate that held before the block. |  |  |
-| `ABU-031` | §14.12 | MUST NOT | A client | A client MUST NOT emit a read receipt of kind `0x07` for a blocked contact. |  |  |
-| `ABU-032` | §14.12 | MUST | A client | A client MUST continue to advance the ratchet of a blocked contact. |  |  |
-| `ABU-033` | §14.12 | MUST NOT | A client | A client MUST NOT let the skipped-key store of Part 5 §5.5.4 grow past `MAX_STORED` for that session. |  |  |
-| `ABU-034` | §14.12 | MUST | A client | A client MUST restore the ordinary behavior at an unblock. |  |  |
-| `ABU-035` | §14.12 | MUST NOT | A client | A client MUST NOT deliver a record that it discarded under ABU-027 to the user at an unblock. |  |  |
-| `ABU-036` | §14.12 | MUST | A client | A client MUST discard a record of a blocked member of a group. |  |  |
-| `ABU-037` | §14.12 | MUST NOT | A client | A client MUST NOT emit a group record that names the block. |  |  |
-| `ABU-038` | §14.12 | MUST | A client | A client MUST show the count of the records that it discarded, thus a user knows that the conversation has a gap. |  |  |
-| `ABU-039` | §14.12 | MUST | A client | A client MUST offer the removal of Part 11 §11.9.2 to a member that holds a role of `admin` or above, beside the block. |  |  |
-| `ABU-040` | §14.12 | MUST | The interface | The interface MUST state that a blocked party can still send. |  |  |
-| `ABU-041` | §14.12 | MUST | The interface | The interface MUST state that a block does not tell the blocked party. |  |  |
-| `ABU-042` | §14.12 | MUST NOT | The interface | The interface MUST NOT claim that a block stops a message. |  |  |
-| `ABU-044` | §14.2 | MUST | A client | A client MUST end the payload of a `NEW`, a `CNEW`, a `BNEW`, and a `PUB` with one `Admission`. |  |  |
-| `ABU-045` | §14.2 | MUST | A parser | A parser MUST reject a `kind` that the table above does not hold. |  |  |
-| `ABU-046` | §14.2 | MUST | A parser | A parser MUST reject a `len` that differs from the body length of its `kind`. |  |  |
-| `ABU-047` | §14.2 | MUST | A relay whose newest `PowChallenge` holds `effort` 0 | A relay whose newest `PowChallenge` holds `effort` 0 MUST accept an `Admission` of kind `0x00` on `NEW`, `CNEW`, and `BNEW`. |  |  |
-| `ABU-048` | §14.2 | MUST | (unstated) | If that `effort` is above 0, the relay MUST answer such a command with a `NACK` of reason `ADMISSION`. |  |  |
-| `ABU-056` | §14.4 | MUST | An addressee client | An addressee client MUST hold the spent-nonce set of an epoch until the end of the next epoch. |  |  |
-| `ABU-057` | §14.8 | MUST | A verifier | A verifier MUST make a new `PowChallenge` with a fresh `seed` at each `POW_CHALLENGE_PERIOD`. |  |  |
-| `ABU-058` | §14.8 | MUST | A verifier | A verifier MUST accept a solution to its newest challenge and to the one before it. |  |  |
-| `ABU-059` | §14.8 | MUST NOT | A verifier | A verifier MUST NOT accept a solution to an older challenge. |  |  |
-| `ABU-060` | §14.8 | MUST | A relay | A relay MUST derive `effort` from the backlog of its own admission queue over the last `POW_CHALLENGE_PERIOD`. |  |  |
-| `ABU-061` | §14.8 | MUST NOT | A verifier | A verifier MUST NOT take an `effort` value from a client or from another party. |  |  |
-| `ABU-062` | §14.8 | MUST NOT | A verifier | A verifier MUST NOT set `effort` above `POW_EFFORT_MAX`. |  |  |
-| `ABU-063` | §14.8 | MUST | A relay | A relay MUST publish its newest challenge to the directory authorities at each `POW_CHALLENGE_PERIOD`. |  |  |
-| `ABU-064` | §14.8 | MUST | A directory authority | A directory authority MUST serve the newest challenge of a relay beside the descriptor of that relay. |  |  |
-| `ABU-065` | §14.8 | MUST | A client | A client MUST fetch the challenge of a relay on the path of a descriptor fetch. |  |  |
-| `ABU-066` | §14.8 | MUST NOT | A client | A client MUST NOT open a session for the only purpose of a challenge fetch. |  |  |
-| `ABU-067` | §14.8 | MUST | A verifier other than a relay or an addressee client | A verifier other than a relay or an addressee client MUST return its newest challenge with each admission rejection. |  |  |
-| `ABU-068` | §14.8 | MUST | A client | A client MUST verify `sig` against the identity key of the verifier before it computes a solution. |  |  |
-| `ABU-069` | §14.8 | MUST NOT | A client | A client MUST NOT compute a solution to a challenge that it fetched more than `POW_CHALLENGE_PERIOD` before. |  |  |
-| `ABU-070` | §14.8 | MUST NOT | The handle directory | The handle directory MUST NOT set `effort` below `POW_LOOKUP_FLOOR`. |  |  |
-| `ABU-071` | §14.8 | MUST | A verifier | A verifier MUST reject a `PowSolution` whose `seed` is not the seed of a challenge that `ABU-058` accepts. |  |  |
-| `ABU-072` | §14.8 | MUST | A verifier | A verifier MUST reject a `PowSolution` whose `effort` is below the `effort` of that challenge. |  |  |
-| `ABU-073` | §14.8 | MUST | A verifier | A verifier MUST reject a `PowSolution` that fails the Equi-X verification or the `pass` test. |  |  |
-| `ABU-074` | §14.8 | MUST | A verifier | A verifier MUST reject a `PowSolution` whose `nonce` it accepted before under the same `seed`. |  |  |
-| `ABU-075` | §14.8 | MUST | A client | A client MUST set `effort` in a `PowSolution` at or above the `effort` of the challenge that it holds. |  |  |
-| `ABU-076` | §14.9 | MUST | (unstated) | On path 3 the issuer MUST demand one `PowSolution` at `POW_EFFORT_MAX` for each token of the batch. |  |  |
-| `ABU-077` | §14.9 | MUST NOT | The issuer | The issuer MUST NOT issue a token on path 3 for a solution at a lower effort. |  |  |
-| `ABU-078` | §14.4 | MUST | An addressee client | An addressee client MUST verify a token of a hello against an issuer key of the log of §14.5. |  |  |
-| `ABU-079` | §14.4 | MUST NOT | An addressee client | An addressee client MUST NOT accept a token of a type other than `0x0002` in a hello. |  |  |
-| `ABU-080` | §14.4 | MUST | An addressee client | An addressee client MUST accept a token of the current epoch and a token of the epoch before it. |  |  |
-| `ABU-081` | §14.4 | MUST | An addressee client | An addressee client MUST reject a token whose nonce it accepted before at the same Profile. |  |  |
-| `ABU-082` | §14.4 | MUST | A client that holds no token | A client that holds no token MUST compute the solution of a hello under the three values above. |  |  |
-| `ABU-083` | §14.4 | MUST | An addressee client | An addressee client MUST verify a `PowSolution` of a hello against the seed of the current epoch and against the seed of the epoch before it. |  |  |
-| `ABU-084` | §14.4 | MUST | An addressee client | An addressee client MUST apply `ABU-072` to `ABU-074` to that solution, with `HELLO_POW_EFFORT` as the effort of the challenge. |  |  |
-| `ABU-085` | §14.4 | MUST | An addressee client | An addressee client MUST reject a hello whose `Admission` is of kind `0x00`. |  |  |
-| `ABU-086` | §14.4 | MUST NOT | An addressee client | An addressee client MUST NOT show more than `HELLO_INBOUND_LIMIT` hellos for one published entry in one epoch. |  |  |
-| `ABU-087` | §14.4 | MUST | (unstated) | If the client reaches that limit, it MUST offer the rotation of Part 9 §9.9.3 to the user. |  |  |
-| `ABU-088` | §14.4 | MUST | The client | The client MUST discard a hello above the limit after it acknowledges the record. |  |  |
-| `ABU-089` | §14.2 | MUST | A parser | A parser MUST reject kind `0x02`, which an earlier draft gave to an ARC presentation. |  |  |
-| `ABU-090` | §14.9 | MUST | The nonprofit | The nonprofit MUST publish the price of a token batch with the cost model of Part 16 §16.6.1. |  |  |
-| `ABU-091` | §14.9 | MUST NOT | The nonprofit | The nonprofit MUST NOT set that price above the recovery of the relay cost. |  |  |
-| `ABU-092` | §14.8 | MUST | That derivation | That derivation MUST be `effort = min(POW_EFFORT_MAX, backlog / POW_BACKLOG_UNIT)`, raised to the floor of the verifier where one applies, with `backlog` the count of admissions pending in that period. |  |  |
-| `ABU-093` | §14.3.2 | MUST | A party | A party MUST compute `token_key_id` as `SHA3-256` over the issuer public key bytes: the 256-byte modulus of a `0x0002` key, or the 32-byte ristretto255 element of a `0x0005` key. |  |  |
-| `ABU-094` | §14.3.2 | MUST | A party | A party MUST compute `challenge_digest` as `SHA3-256` over `TokenChallenge = token_type u16 || epoch u32 || redemption_context [32]u8`, where `epoch` is the epoch number of §14.6 and `redemption_context` is the `relay_id` of one relay under §14.7, or 32 zero bytes for any relay of the type. |  |  |
-| `ABU-095` | §14.3.2 | MUST | A verifier | A verifier MUST accept a token whose `challenge_digest` names the current epoch or the one before it, with its own `relay_id` or the zero context, and MUST reject each other digest. |  |  |
-| `ABU-096` | §14.3.2 | MUST | (unstated) | The `0x0002` authenticator is the RFC 9474 signature over `token_input` with a 48-byte salt that the client draws at the blind, and the `0x0005` authenticator is the RFC 9497 output over `token_input` at the VOPRF mode. |  |  |
-| `ABU-097` | §14.3.2 | MUST | An issuer | An issuer MUST answer a batch of `0x0005` requests with one DLEQ proof over the batch, and a client MUST verify that proof before it finalizes a token of the batch. |  |  |
-| `ABU-098` | §14.5 | MUST | An issuer | An issuer MUST publish the key of each token type for each epoch as version 0 of the label above, before the epoch starts. |  |  |
-| `ABU-099` | §14.5 | MUST | A client | A client MUST look up that label under Part 9 §9.4, and it MUST verify the `LookupProof` of Part 9 §9.5.1 before it accepts the key. |  |  |
-| `ABU-100` | §14.5 | MUST | A client | A client MUST reject the label when its newest version is not A second version is a second key for one epoch, and the binary ladder of Part 9 §9.5.1 shows it to each client. |  |  |
-| `ABU-101` | §14.5 | MUST | A client | A client MUST reject an entry whose `token_type` or `epoch` differs from the label that it looked up. |  |  |
-| `ABU-102` | §14.8 | MUST | A relay | A relay MUST send each challenge that it makes to each relay of the manifest with the ingress flag of Part 10 §10.5.3, the carriers of the manifest. |  |  |
-| `ABU-103` | §14.8 | MUST | A carrier | A carrier MUST take a challenge only when `sig` verifies under the `identity_pk` of the entry of `verifier_id` in the manifest that it holds, and only when `issued_at` is less than two `POW_CHALLENGE_PERIOD` before its clock and at most one period after it. |  |  |
-| `ABU-104` | §14.8 | MUST | A carrier | A carrier MUST serve the challenges that it keeps at the path `/.well-known/umbra/challenges`, on the transport of its manifest fetch. |  |  |
-| `ABU-105` | §14.8 | MUST | A client | A client MUST fetch the challenges from the carrier that it pinned for the manifest, and it MUST take each one under `ABU-068`, with the `identity_pk` of the entry of the verifier. |  |  |
+| `ABU-001` | §13.4 | MUST NOT | UMBRA | UMBRA MUST NOT build a three-party Attester. |  |  |
+| `ABU-002` | §13.5 | MUST | A client | A client MUST refuse a token from a key that is not in the log. |  |  |
+| `ABU-003` | §13.5 | MUST | A client | A client MUST also refuse to redeem against a relay that advertises a key that is not in the log. |  |  |
+| `ABU-004` | §13.6 | MUST | An issuer | An issuer MUST rotate each issuer key at one global 7-day epoch boundary. |  |  |
+| `ABU-005` | §13.6 | MUST NOT | An issuer | An issuer MUST NOT give one key or one relay a rotation of its own. |  |  |
+| `ABU-006` | §13.7 | MUST NOT | UMBRA | UMBRA MUST NOT build a global double-spend database. |  |  |
+| `ABU-007` | §13.8 | MUST NOT | An implementation | An implementation MUST NOT let an attacker influence the effort parameter. |  |  |
+| `ABU-008` | §13.8 | MUST | The client | The client MUST give the user visible feedback during the computation. |  |  |
+| `ABU-010` | §13.10 | MUST NOT | UMBRA | **UMBRA MUST NOT build a global moderator key**. |  |  |
+| `ABU-011` | §13.10 | MUST NOT | UMBRA | UMBRA MUST NOT frank a 1:1 message. |  |  |
+| `ABU-012` | §13.4 | MUST | An addressee client | An addressee client MUST verify the `Admission` at the end of a hello before it shows the request. |  |  |
+| `ABU-013` | §13.4 | MUST NOT | A deployment | A deployment MUST NOT put a privately verifiable credential on a path whose verifier is not its issuer. |  |  |
+| `ABU-014` | §13.2.1 | MUST | That verifier | That verifier MUST accept a correct proof of work of §13.8 in place of the credential of the row. |  |  |
+| `ABU-015` | §13.2.1 | MUST NOT | A relay | A relay MUST NOT need a token for a queue creation. |  |  |
+| `ABU-016` | §13.2.1 | MUST NOT | An issuer | An issuer MUST NOT need an identifier from a client to issue a token batch. |  |  |
+| `ABU-017` | §13.2.1 | MUST | A deployment | A deployment MUST publish the attestation that it uses for an issuance. |  |  |
+| `ABU-018` | §13.2.1 | MUST NOT | A deployment | A deployment MUST NOT use a hardware attestation for that purpose, and §13.11 gives the cause. |  |  |
+| `ABU-021` | §13.12 | MUST | A client | A client MUST hold the block state as mutable state of Part 7 §7.5.3. |  |  |
+| `ABU-022` | §13.12 | MUST | A client | A client MUST converge that state across the device set. |  |  |
+| `ABU-023` | §13.12 | MUST NOT | A client | A client MUST NOT send a record to the blocked party that names the block. |  |  |
+| `ABU-024` | §13.12 | MUST NOT | A client | A client MUST NOT change the queue set of that contact at the block. |  |  |
+| `ABU-025` | §13.12 | MUST NOT | A client | A client MUST NOT send `DEL` on the queue of a blocked contact. |  |  |
+| `ABU-026` | §13.12 | MUST | A client | A client MUST continue to send `ACK` for the records of a blocked contact. |  |  |
+| `ABU-027` | §13.12 | MUST | A client | A client MUST discard a record of a blocked contact after it acknowledges that record. |  |  |
+| `ABU-028` | §13.12 | MUST NOT | A client | A client MUST NOT render such a record. |  |  |
+| `ABU-029` | §13.12 | MUST NOT | A client | A client MUST NOT raise a notification for such a record. |  |  |
+| `ABU-030` | §13.12 | MUST | A client | A client MUST continue to emit a delivery receipt of Part 6 §6.6 kind `0x06` at the rate that held before the block. |  |  |
+| `ABU-031` | §13.12 | MUST NOT | A client | A client MUST NOT emit a read receipt of kind `0x07` for a blocked contact. |  |  |
+| `ABU-032` | §13.12 | MUST | A client | A client MUST continue to advance the ratchet of a blocked contact. |  |  |
+| `ABU-033` | §13.12 | MUST NOT | A client | A client MUST NOT let the skipped-key store of Part 5 §5.5.4 grow past `MAX_STORED` for that session. |  |  |
+| `ABU-034` | §13.12 | MUST | A client | A client MUST restore the ordinary behavior at an unblock. |  |  |
+| `ABU-035` | §13.12 | MUST NOT | A client | A client MUST NOT deliver a record that it discarded under ABU-027 to the user at an unblock. |  |  |
+| `ABU-036` | §13.12 | MUST | A client | A client MUST discard a record of a blocked member of a group. |  |  |
+| `ABU-037` | §13.12 | MUST NOT | A client | A client MUST NOT emit a group record that names the block. |  |  |
+| `ABU-038` | §13.12 | MUST | A client | A client MUST show the count of the records that it discarded, thus a user knows that the conversation has a gap. |  |  |
+| `ABU-039` | §13.12 | MUST | A client | A client MUST offer the removal of Part 11 §11.9.2 to a member that holds a role of `admin` or above, beside the block. |  |  |
+| `ABU-040` | §13.12 | MUST | The interface | The interface MUST state that a blocked party can still send. |  |  |
+| `ABU-041` | §13.12 | MUST | The interface | The interface MUST state that a block does not tell the blocked party. |  |  |
+| `ABU-042` | §13.12 | MUST NOT | The interface | The interface MUST NOT claim that a block stops a message. |  |  |
+| `ABU-044` | §13.2 | MUST | A client | A client MUST end the payload of a `NEW`, a `CNEW`, a `BNEW`, and a `PUB` with one `Admission`. |  |  |
+| `ABU-045` | §13.2 | MUST | A parser | A parser MUST reject a `kind` that the table above does not hold. |  |  |
+| `ABU-046` | §13.2 | MUST | A parser | A parser MUST reject a `len` that differs from the body length of its `kind`. |  |  |
+| `ABU-047` | §13.2 | MUST | A relay whose newest `PowChallenge` holds `effort` 0 | A relay whose newest `PowChallenge` holds `effort` 0 MUST accept an `Admission` of kind `0x00` on `NEW`, `CNEW`, and `BNEW`. |  |  |
+| `ABU-048` | §13.2 | MUST | (unstated) | If that `effort` is above 0, the relay MUST answer such a command with a `NACK` of reason `ADMISSION`. |  |  |
+| `ABU-056` | §13.4 | MUST | An addressee client | An addressee client MUST hold the spent-nonce set of an epoch until the end of the next epoch. |  |  |
+| `ABU-057` | §13.8 | MUST | A verifier | A verifier MUST make a new `PowChallenge` with a fresh `seed` at each `POW_CHALLENGE_PERIOD`. |  |  |
+| `ABU-058` | §13.8 | MUST | A verifier | A verifier MUST accept a solution to its newest challenge and to the one before it. |  |  |
+| `ABU-059` | §13.8 | MUST NOT | A verifier | A verifier MUST NOT accept a solution to an older challenge. |  |  |
+| `ABU-060` | §13.8 | MUST | A relay | A relay MUST derive `effort` from the backlog of its own admission queue over the last `POW_CHALLENGE_PERIOD`. |  |  |
+| `ABU-061` | §13.8 | MUST NOT | A verifier | A verifier MUST NOT take an `effort` value from a client or from another party. |  |  |
+| `ABU-062` | §13.8 | MUST NOT | A verifier | A verifier MUST NOT set `effort` above `POW_EFFORT_MAX`. |  |  |
+| `ABU-063` | §13.8 | MUST | A relay | A relay MUST publish its newest challenge to the directory authorities at each `POW_CHALLENGE_PERIOD`. |  |  |
+| `ABU-064` | §13.8 | MUST | A directory authority | A directory authority MUST serve the newest challenge of a relay beside the descriptor of that relay. |  |  |
+| `ABU-065` | §13.8 | MUST | A client | A client MUST fetch the challenge of a relay on the path of a descriptor fetch. |  |  |
+| `ABU-066` | §13.8 | MUST NOT | A client | A client MUST NOT open a session for the only purpose of a challenge fetch. |  |  |
+| `ABU-067` | §13.8 | MUST | A verifier other than a relay or an addressee client | A verifier other than a relay or an addressee client MUST return its newest challenge with each admission rejection. |  |  |
+| `ABU-068` | §13.8 | MUST | A client | A client MUST verify `sig` against the identity key of the verifier before it computes a solution. |  |  |
+| `ABU-069` | §13.8 | MUST NOT | A client | A client MUST NOT compute a solution to a challenge that it fetched more than `POW_CHALLENGE_PERIOD` before. |  |  |
+| `ABU-070` | §13.8 | MUST NOT | The handle directory | The handle directory MUST NOT set `effort` below `POW_LOOKUP_FLOOR`. |  |  |
+| `ABU-071` | §13.8 | MUST | A verifier | A verifier MUST reject a `PowSolution` whose `seed` is not the seed of a challenge that `ABU-058` accepts. |  |  |
+| `ABU-072` | §13.8 | MUST | A verifier | A verifier MUST reject a `PowSolution` whose `effort` is below the `effort` of that challenge. |  |  |
+| `ABU-073` | §13.8 | MUST | A verifier | A verifier MUST reject a `PowSolution` that fails the Equi-X verification or the `pass` test. |  |  |
+| `ABU-074` | §13.8 | MUST | A verifier | A verifier MUST reject a `PowSolution` whose `nonce` it accepted before under the same `seed`. |  |  |
+| `ABU-075` | §13.8 | MUST | A client | A client MUST set `effort` in a `PowSolution` at or above the `effort` of the challenge that it holds. |  |  |
+| `ABU-076` | §13.9 | MUST | (unstated) | On path 3 the issuer MUST demand one `PowSolution` at `POW_EFFORT_MAX` for each token of the batch. |  |  |
+| `ABU-077` | §13.9 | MUST NOT | The issuer | The issuer MUST NOT issue a token on path 3 for a solution at a lower effort. |  |  |
+| `ABU-078` | §13.4 | MUST | An addressee client | An addressee client MUST verify a token of a hello against an issuer key of the log of §13.5. |  |  |
+| `ABU-079` | §13.4 | MUST NOT | An addressee client | An addressee client MUST NOT accept a token of a type other than `0x0002` in a hello. |  |  |
+| `ABU-080` | §13.4 | MUST | An addressee client | An addressee client MUST accept a token of the current epoch and a token of the epoch before it. |  |  |
+| `ABU-081` | §13.4 | MUST | An addressee client | An addressee client MUST reject a token whose nonce it accepted before at the same Profile. |  |  |
+| `ABU-082` | §13.4 | MUST | A client that holds no token | A client that holds no token MUST compute the solution of a hello under the three values above. |  |  |
+| `ABU-083` | §13.4 | MUST | An addressee client | An addressee client MUST verify a `PowSolution` of a hello against the seed of the current epoch and against the seed of the epoch before it. |  |  |
+| `ABU-084` | §13.4 | MUST | An addressee client | An addressee client MUST apply `ABU-072` to `ABU-074` to that solution, with `HELLO_POW_EFFORT` as the effort of the challenge. |  |  |
+| `ABU-085` | §13.4 | MUST | An addressee client | An addressee client MUST reject a hello whose `Admission` is of kind `0x00`. |  |  |
+| `ABU-086` | §13.4 | MUST NOT | An addressee client | An addressee client MUST NOT show more than `HELLO_INBOUND_LIMIT` hellos for one published entry in one epoch. |  |  |
+| `ABU-087` | §13.4 | MUST | (unstated) | If the client reaches that limit, it MUST offer the rotation of Part 9 §9.9.3 to the user. |  |  |
+| `ABU-088` | §13.4 | MUST | The client | The client MUST discard a hello above the limit after it acknowledges the record. |  |  |
+| `ABU-089` | §13.2 | MUST | A parser | A parser MUST reject kind `0x02`, which an earlier draft gave to an ARC presentation. |  |  |
+| `ABU-090` | §13.9 | MUST | The nonprofit | The nonprofit MUST publish the price of a token batch with the cost model of Part 15 §15.6.1. |  |  |
+| `ABU-091` | §13.9 | MUST NOT | The nonprofit | The nonprofit MUST NOT set that price above the recovery of the relay cost. |  |  |
+| `ABU-092` | §13.8 | MUST | That derivation | That derivation MUST be `effort = min(POW_EFFORT_MAX, backlog / POW_BACKLOG_UNIT)`, raised to the floor of the verifier where one applies, with `backlog` the count of admissions pending in that period. |  |  |
+| `ABU-093` | §13.3.2 | MUST | A party | A party MUST compute `token_key_id` as `SHA3-256` over the issuer public key bytes: the 256-byte modulus of a `0x0002` key, or the 32-byte ristretto255 element of a `0x0005` key. |  |  |
+| `ABU-094` | §13.3.2 | MUST | A party | A party MUST compute `challenge_digest` as `SHA3-256` over `TokenChallenge = token_type u16 || epoch u32 || redemption_context [32]u8`, where `epoch` is the epoch number of §13.6 and `redemption_context` is the `relay_id` of one relay under §13.7, or 32 zero bytes for any relay of the type. |  |  |
+| `ABU-095` | §13.3.2 | MUST | A verifier | A verifier MUST accept a token whose `challenge_digest` names the current epoch or the one before it, with its own `relay_id` or the zero context, and MUST reject each other digest. |  |  |
+| `ABU-096` | §13.3.2 | MUST | (unstated) | The `0x0002` authenticator is the RFC 9474 signature over `token_input` with a 48-byte salt that the client draws at the blind, and the `0x0005` authenticator is the RFC 9497 output over `token_input` at the VOPRF mode. |  |  |
+| `ABU-097` | §13.3.2 | MUST | An issuer | An issuer MUST answer a batch of `0x0005` requests with one DLEQ proof over the batch, and a client MUST verify that proof before it finalizes a token of the batch. |  |  |
+| `ABU-098` | §13.5 | MUST | An issuer | An issuer MUST publish the key of each token type for each epoch as version 0 of the label above, before the epoch starts. |  |  |
+| `ABU-099` | §13.5 | MUST | A client | A client MUST look up that label under Part 9 §9.4, and it MUST verify the `LookupProof` of Part 9 §9.5.1 before it accepts the key. |  |  |
+| `ABU-100` | §13.5 | MUST | A client | A client MUST reject the label when its newest version is not A second version is a second key for one epoch, and the binary ladder of Part 9 §9.5.1 shows it to each client. |  |  |
+| `ABU-101` | §13.5 | MUST | A client | A client MUST reject an entry whose `token_type` or `epoch` differs from the label that it looked up. |  |  |
+| `ABU-102` | §13.8 | MUST | A relay | A relay MUST send each challenge that it makes to each relay of the manifest with the ingress flag of Part 10 §10.5.3, the carriers of the manifest. |  |  |
+| `ABU-103` | §13.8 | MUST | A carrier | A carrier MUST take a challenge only when `sig` verifies under the `identity_pk` of the entry of `verifier_id` in the manifest that it holds, and only when `issued_at` is less than two `POW_CHALLENGE_PERIOD` before its clock and at most one period after it. |  |  |
+| `ABU-104` | §13.8 | MUST | A carrier | A carrier MUST serve the challenges that it keeps at the path `/.well-known/umbra/challenges`, on the transport of its manifest fetch. |  |  |
+| `ABU-105` | §13.8 | MUST | A client | A client MUST fetch the challenges from the carrier that it pinned for the manifest, and it MUST take each one under `ABU-068`, with the `identity_pk` of the entry of the verifier. |  |  |
 
 ## IMP — Implementation
 
-Source: `spec/15-implementation.md`
+Source: `spec/14-implementation.md`
 
 | ID | Section | Key word | Binds | Requirement | Module | Test |
 | --- | --- | --- | --- | --- | --- | --- |
-| `IMP-002` | §15.2 | MUST | A change | A change MUST name the register that it charges. |  |  |
-| `IMP-003` | §15.2 | MUST | (unstated) | A claim that a change costs no crate MUST name that register too. |  |  |
-| `IMP-004` | §15.2.1 | MUST | An implementation | An implementation **MUST** turn the `pkcs8` default off. |  |  |
-| `IMP-005` | §15.2.2 | MUST NOT | (unstated) | If the measured R2 count is more than 30, the maintainers MUST NOT tag a release. |  |  |
-| `IMP-006` | §15.2.2 | MUST | Those maintainers | Those maintainers MUST first remove a primitive, or MUST first revise this section with a written cause. |  |  |
-| `IMP-007` | §15.2.3 | MUST NOT | One subsystem in R3 | One subsystem in R3 MUST NOT add more transitive crates than its row in the table below. No single platform part costs more than the whole message core. |  |  |
-| `IMP-008` | §15.2.3 | MUST | (unstated) | At the first measurement, the maintainers MUST publish the R3 count. |  |  |
-| `IMP-009` | §15.2.3 | MUST | Those maintainers | Those maintainers MUST set the R3 cap in the same change. |  |  |
-| `IMP-010` | §15.2.4 | MUST | That commit | That commit MUST also add a `DEPENDENCIES.md` file at the root of the repository. |  |  |
-| `IMP-011` | §15.2.4 | MUST | `DEPENDENCIES.md` | `DEPENDENCIES.md` MUST hold the five items of §15.2.4. |  |  |
-| `IMP-012` | §15.2.4 | MUST | The maintainers | The maintainers MUST publish `DEPENDENCIES.md` before the first tagged release. |  |  |
-| `IMP-013` | §15.2.4 | MUST NOT | The maintainers | The maintainers MUST NOT tag a release without that file. |  |  |
-| `IMP-014` | §15.2.4 | MUST | A CI job | A CI job MUST generate that file again at each commit. |  |  |
-| `IMP-015` | §15.2.4 | MUST | That job | That job MUST fail the build on a difference against the committed file. |  |  |
-| `IMP-016` | §15.3 | MUST | That crate | That crate MUST give byte-identical output to the portable path. |  |  |
-| `IMP-017` | §15.4 | MUST NOT | (unstated) | Key material, a passphrase, and message plaintext MUST NOT be a Kotlin `String` or `ByteArray`. |  |  |
-| `IMP-019` | §15.5.2 | MUST | (unstated) | The portable build, the AVX2 build, and the NEON build MUST serialize each cryptographic object identically, at each commit. |  |  |
-| `IMP-020` | §15.5.4 | MUST | An implementation | An implementation MUST hold a `SOUNDNESS.md` file. |  |  |
-| `IMP-021` | §15.6.2 | MUST | (unstated) | `llvm-objdump -p libumbra.so \| grep LOAD` MUST show `align 2**14` or higher. |  |  |
-| `IMP-022` | §15.6.2 | MUST | `zipalign -v -c -P 16 4` | `zipalign -v -c -P 16 4` MUST pass. |  |  |
-| `IMP-023` | §15.6.4 | MUST | A client | A client MUST derive the record key with the input set of the block above, and with no other input. |  |  |
-| `IMP-024` | §15.6.4 | MUST | A client | A client MUST store the keyed form of `msg_id` that Part 6 §6.6 gives. |  |  |
-| `IMP-025` | §15.6.4 | MUST NOT | A client | A client MUST NOT store the raw value. |  |  |
-| `IMP-026` | §15.6.4 | MUST | That item | That item MUST use a different label and a different access-control policy. |  |  |
-| `IMP-027` | §15.6.4 | MUST | An implementation | An implementation MUST let the user export it and delete it from the UMBRA settings. |  |  |
-| `IMP-028` | §15.6.4 | MUST NOT | That operation | That operation MUST NOT change a local storage key. |  |  |
-| `IMP-029` | §15.6.5 | MUST | Relay reputation | Relay reputation MUST come from measured behavior only. |  |  |
-| `IMP-030` | §15.6.5 | MUST NOT | Relay reputation | Relay reputation MUST NOT come from device attestation. |  |  |
-| `IMP-031` | §15.6.5 | MUST NOT | Relay reputation | Relay reputation MUST NOT come from a "genuine device" proof. |  |  |
-| `IMP-032` | §15.8 | MUST | Two independent builds | Two independent builds MUST give the same hash. |  |  |
-| `IMP-033` | §15.8 | MUST | A minimum of one rebuilder | A minimum of one rebuilder MUST be outside the control of the nonprofit. |  |  |
-| `IMP-034` | §15.5.2 | MUST | The repository | The repository MUST vendor the NIST ACVP and CAVP corpora and the C2SP `testvectors_v1` corpus at `tests/vectors/`. |  |  |
-| `IMP-035` | §15.5.2 | MUST | The repository | The repository MUST hold a `tests/vectors/PROVENANCE.md` file that records the upstream commit of each corpus. |  |  |
-| `IMP-036` | §15.5.2 | MUST NOT | A test | A test MUST NOT fetch a vector at test time. |  |  |
-| `IMP-037` | §15.6.1 | MUST NOT | The FFI surface | The FFI surface MUST NOT carry message plaintext, key material, or a passphrase as a Kotlin `ByteArray`, a Kotlin `String`, a Swift `Data`, or a Swift `String`. |  |  |
-| `IMP-038` | §15.6.1 | MUST | `Draft` and `MsgRef` | `Draft` and `MsgRef` MUST be opaque UniFFI object handles. |  |  |
-| `IMP-039` | §15.6.1 | MUST | An implementation | An implementation MUST zeroize the buffer behind a `Draft` when that draft is dropped, and it MUST do that whether the send succeeded or failed. |  |  |
-| `IMP-040` | §15.6.4 | MUST | A client | A client MUST make a fresh `record_salt` and a fresh `nonce` from the CSPRNG at each write of a record. |  |  |
-| `IMP-041` | §15.6.4 | MUST | A client that discards a record key under Part 7 | A client that discards a record key under Part 7 MUST overwrite `record_salt` with zero bytes. |  |  |
-| `IMP-042` | §15.6.4 | MUST | A client | A client MUST open the database with `PRAGMA secure_delete=ON`. |  |  |
-| `IMP-043` | §15.6.4 | MUST | A client | After a client applies a deletion batch, it MUST run `PRAGMA wal_checkpoint(TRUNCATE)`. |  |  |
-| `IMP-044` | §15.6.6 | MUST | A client | A client MUST write a decrypted attachment inside the encrypted store of §15.6.4. |  |  |
-| `IMP-045` | §15.6.6 | MUST NOT | A client | A client MUST NOT write a decrypted attachment to the platform media store without an explicit user action. |  |  |
-| `IMP-046` | §15.6.6 | MUST | A client | Before the first such action, a client MUST show a one-time warning. |  |  |
-| `IMP-047` | §15.6.6 | MUST | That warning | That warning MUST state that the file leaves the encrypted store, and that each platform service then reads it. |  |  |
-| `IMP-048` | §15.6.6 | MUST | An Android client | An Android client MUST set `android:allowBackup="false"` on the `<application>` element, with `tools:replace="android:allowBackup"`. |  |  |
-| `IMP-050` | §15.6.6 | MUST | The settings of a client | The settings of a client MUST state that the platform backup carries no UMBRA data. |  |  |
-| `IMP-055` | §15.6.6 | MUST | A client | A client MUST draw a cover view over each conversation surface before the application leaves the foreground. |  |  |
-| `IMP-056` | §15.6.6 | MUST | A client | A client MUST mark a copied message as sensitive. |  |  |
-| `IMP-057` | §15.6.6 | MUST | An Android client | An Android client MUST set `IME_FLAG_NO_PERSONALIZED_LEARNING` on each composer and on the passphrase field. |  |  |
-| `IMP-058` | §15.6.6 | MUST | A client | A client MUST offer a screenshot block as a setting of one conversation, and not as a global setting. |  |  |
-| `IMP-059` | §15.6.6 | MUST NOT | A client | A client MUST NOT block a screenshot in a conversation by default. |  |  |
-| `IMP-060` | §15.6.6 | MUST NOT | A client | A client MUST NOT hide a message from the accessibility tree. |  |  |
-| `IMP-061` | §15.6.4 | MUST | A client | A client MUST derive `K_wrap` with the block above, and with no other input. |  |  |
-| `IMP-062` | §15.6.4 | MUST | A client | A client MUST make the secure-element key with no export path. |  |  |
-| `IMP-065` | §15.6.4 | MUST NOT | A client | A client MUST NOT demand a user authentication for each use of the secure-element key. |  |  |
-| `IMP-066` | §15.2.8 | MUST | The L1 stack | The L1 stack MUST use `rustls` with the `aws-lc-rs` provider. |  |  |
-| `IMP-067` | §15.2.8 | MUST NOT | An implementation | An implementation MUST NOT use the `ring` provider for L1. |  |  |
-| `IMP-068` | §15.2.8 | MUST | The `rustls` build | The `rustls` build MUST turn the `tls12` feature off. |  |  |
-| `IMP-069` | §15.2.8 | MUST | A build | A build MUST pin an `aws-lc-rs` version that ships the bindings for `aarch64-linux-android` and for `aarch64-apple-ios`. |  |  |
-| `IMP-072` | §15.9.1 | MUST | A client | A client MUST hold each outbound record in one state of the table above. |  |  |
-| `IMP-073` | §15.9.1 | MUST NOT | A client | A client MUST NOT add a state to the table. |  |  |
-| `IMP-074` | §15.9.1 | MUST | A client | A client MUST show a `failed` record with its cause and with a resend affordance. |  |  |
-| `IMP-075` | §15.9.1 | MUST NOT | A client | A client MUST NOT resend a `failed` record without a user action. |  |  |
-| `IMP-076` | §15.9.1 | MUST NOT | A client | A client MUST NOT show a `queued` record as a failure. |  |  |
-| `IMP-077` | §15.9.2 | MUST | A client | A client MUST show each current degraded state in one line at the top of the message list. |  |  |
-| `IMP-078` | §15.9.2 | MUST NOT | A client | A client MUST NOT show a degraded state as a security failure. |  |  |
-| `IMP-079` | §15.9.2 | MUST NOT | A client | A client MUST NOT block the message list, the composer, or a send in a degraded state. |  |  |
-| `IMP-080` | §15.9.2 | MUST | A client | A client MUST leave a degraded state without a user action when its condition ends. |  |  |
-| `IMP-081` | §15.9.2 | MUST NOT | A client | A client MUST NOT add a degraded state to the table without a row in Part 2 §2.4. |  |  |
-| `IMP-082` | §15.9.2 | MUST | (unstated) | In the `recipient queue full` state, a client MUST keep the record `queued`. |  |  |
-| `IMP-083` | §15.9.3 | MUST | Each string that a rule of this specification requires the interface to show | Each string that a rule of this specification requires the interface to show MUST carry a stable message identifier. |  |  |
-| `IMP-084` | §15.9.3 | MUST | That identifier | That identifier MUST be `umbra.ui.` followed by the rule identifier in lower case. |  |  |
-| `IMP-085` | §15.9.3 | MUST NOT | A revision | A revision MUST NOT change an identifier. |  |  |
-| `IMP-086` | §15.9.3 | MUST | A test | A test MUST check that each identifier resolves to a non-empty string in each shipped locale. |  |  |
-| `IMP-087` | §15.9.3 | MUST NOT | A release | A release MUST NOT ship a locale that fails that test. |  |  |
-| `IMP-088` | §15.9.4 | MUST | The interface | The interface MUST meet WCAG 2.2 at level AA. |  |  |
-| `IMP-089` | §15.9.4 | MUST | Text | Text MUST hold a contrast ratio of 4.5:1 or more against its background. |  |  |
-| `IMP-090` | §15.10 | MUST | A client | A client MUST take each CSPRNG output from the platform source, which is `getrandom` on Android and `SecRandomCopyBytes` on iOS. |  |  |
-| `IMP-091` | §15.10 | MUST NOT | A client | A client MUST NOT hold a userspace generator that it seeds one time. |  |  |
-| `IMP-092` | §15.10 | MUST | A relay | A relay MUST take each CSPRNG output from `getrandom` of its kernel. |  |  |
-| `IMP-093` | §15.10 | MUST | A client | A client MUST apply the hardening of Part 5 §5.9 to each value that the platform source gives. |  |  |
-| `IMP-094` | §15.7.1 | MUST | The web client | The web client MUST ship as a browser extension bundle. |  |  |
-| `IMP-095` | §15.7.1 | MUST NOT | A deployment | A deployment MUST NOT serve the web client as a hosted page, as a progressive web application, or as a script that a page loads. |  |  |
-| `IMP-096` | §15.7.1 | MUST NOT | (unstated) | The bundle MUST hold each byte of code that the web client runs, and the web client MUST NOT load a script, a module, or a WebAssembly binary from a network location. |  |  |
-| `IMP-097` | §15.7.2 | MUST NOT | (unstated) | A web client MUST be a linked device of a device set under Part 7, and it MUST NOT make a `RootIdentity`. |  |  |
-| `IMP-098` | §15.7.2 | MUST NOT | A web client | A web client MUST NOT hold a Recovery Code of Part 4 §4.7.1, a `C_social` share, or a backup key of Part 4 §4.7.2. |  |  |
-| `IMP-099` | §15.7.2 | MUST | (unstated) | A web client that finds its store absent or unreadable at start MUST return to the link flow of Part 7 §7.4, and it MUST show the line "This browser is no longer linked. |  |  |
-| `IMP-100` | §15.7.2 | MUST | The existing device | The existing device MUST revoke the old entry under Part 7 §7.7 before it links the same browser again, and Part 7 rule `DEV-265` gives that step. |  |  |
-| `IMP-101` | §15.7.3 | MUST NOT | (unstated) | A web client MUST use the WebSocket API of the browser over TLS to port 443, and it MUST NOT use WebTransport or `fetch` for the L1 stream in v1. |  |  |
-| `IMP-102` | §15.7.3 | MUST NOT | A web client | A web client MUST NOT open a connection to a host other than its two pinned ingress relays of Part 10 §10.6.1 and the bootstrap carriers of Part 3 §3.10. |  |  |
-| `IMP-103` | §15.7.3 | MUST | The extension manifest | The extension manifest MUST request no host permission on any site, no content script, and no access to the browsing data of the user. |  |  |
-| `IMP-104` | §15.7.4 | MUST | A web client | A web client MUST encrypt each record with the record key of §15.6.4, and it MUST keep each metadata-sensitive column inside the encrypted blob. |  |  |
-| `IMP-105` | §15.7.4 | MUST NOT | (unstated) | A web client MUST store in the IndexedDB of the extension origin only, and it MUST NOT use the sync storage area of the browser, the local storage area, or a cookie. |  |  |
-| `IMP-106` | §15.7.4 | MUST | A web client | A web client MUST make `k_se` of §15.6.4 as a non-extractable HMAC-SHA256 key of the Web Cryptography API, and it MUST compute `S` with that key. |  |  |
-| `IMP-107` | §15.7.4 | MUST | A web client | A web client MUST calibrate Argon2id to about 3 s for each try in the browser, in the manner of §15.6.4. |  |  |
-| `IMP-108` | §15.7.4 | MUST | A web client that applies a deletion batch of §15.6.4 | A web client that applies a deletion batch of §15.6.4 MUST overwrite `record_salt` and the ciphertext of each record with zero bytes, and then delete the record. |  |  |
-| `IMP-109` | §15.7.4 | MUST | A web client | A web client MUST call `navigator.storage.persist()` at the first launch, and it MUST treat a refusal as no error. |  |  |
-| `IMP-110` | §15.7.5 | MUST | The settings of a web client | The settings of a web client MUST state that the browser receives messages while it runs, and that the phone receives each notification. |  |  |
-| `IMP-111` | §15.7.5 | MUST | A web client | A web client MUST apply `IMP-044` to `IMP-047` with the download location as the platform media store. |  |  |
-| `IMP-112` | §15.7.5 | MUST | A web client | A web client MUST state that the screenshot block of `IMP-058` is not available in the browser, because a browser gives no equivalent of `FLAG_SECURE`. |  |  |
-| `IMP-113` | §15.7.6 | MUST NOT | The `umbra-web` crate | The `umbra-web` crate MUST NOT add more transitive crates than its row in §15.2.3. |  |  |
-| `IMP-114` | §15.7.6 | MUST | The extension bundle | The extension bundle MUST be reproducible under §15.8, and Part 16 rule `SEC-005` names it. |  |  |
-| `IMP-115` | §15.7.6 | MUST | The web client | The web client MUST verify the inclusion proof of Part 16 rule `SEC-006` for its own bundle at each start, and it MUST refuse to unlock the store while that proof is absent. |  |  |
-| `IMP-116` | §15.6.4 | MUST | A client | A client MUST run Argon2id with one lane, a memory of 64 MiB or more, and 3 passes or more. |  |  |
-| `IMP-117` | §15.6.4 | MUST | At the creation of the store, a client | At the creation of the store, a client MUST measure one try at that floor on the device, and it MUST raise the passes until one try takes about 3 s. |  |  |
-| `IMP-118` | §15.6.4 | MUST | A passphrase change | A passphrase change MUST wrap the same `K_store` under a new `salt_pw` and a new `nonce_w`. |  |  |
-| `IMP-119` | §15.6.4 | MUST NOT | A client | A client MUST NOT let the user set an auto-lock above 30 minutes of idle time, and the default MUST be 15 minutes. |  |  |
-| `IMP-120` | §15.6.4 | MUST | `table_id` | `table_id` MUST be one byte, and `row_id` MUST be the 16 bytes of the block above. |  |  |
-| `IMP-121` | §15.6.4 | MAY | A row | A row MAY carry one more indexed column, which is the `row_id` of the row that owns it, such as the conversation of a message. |  |  |
-| `IMP-122` | §15.6.4 | MUST NOT | A client | A client MUST NOT open a record whose `record_salt` is zero bytes. |  |  |
-| `IMP-123` | §15.6.4 | MUST | A client | A client MUST write the rows of a commit batch and the table MAC of each table that the batch changed in one transaction of the database. |  |  |
-| `IMP-124` | §15.6.1 | MUST | Text and the passphrase | Text and the passphrase MUST cross as UTF-16 code units, and the Rust side MUST overwrite its copy after the use. |  |  |
-| `IMP-125` | §15.6.1 | MUST | The secure-element step of §15.6.4 | The secure-element step of §15.6.4 MUST cross as one callback that takes the input of the keyed function and returns its 32 bytes. |  |  |
-| `IMP-126` | §15.6.1 | MUST | A record that waits for the send path | A record that waits for the send path MUST sit in the store under the record encryption of §15.6.4, in a table of its own. |  |  |
-| `IMP-127` | §15.6.1 | MUST | A lock | A lock MUST stop the network runtime, and the runtime MUST drop its state at that stop. |  |  |
-| `IMP-128` | §15.6.1 | MUST | A client | A client MUST order a conversation view by the time of its own store of each message. |  |  |
-| `IMP-129` | §15.6.1 | MUST NOT | (unstated) | A conversation identifier on the surface MUST be the surrogate of §15.6.4 under the store key, and it MUST NOT be a queue identifier. |  |  |
-| `IMP-130` | §15.6.4 | MUST | A stored object | A stored object MUST start with a version byte, and a client MUST reject a row whose version it does not read. |  |  |
-| `IMP-131` | §15.6.4 | MUST | A client | A client MUST commit each change of a channel to the store before it writes a byte of that call to the link. |  |  |
-| `IMP-132` | §15.6.4 | MUST | A client | A client MUST commit a received record and the channel state that opened it in one batch of `IMP-123`. |  |  |
-| `IMP-133` | §15.6.4 | MUST NOT | (unstated) | A client MUST replace the row of a channel at each commit, and it MUST NOT keep an earlier state of a channel. |  |  |
-| `IMP-134` | §15.6.4 | MUST | At the start of a run a client | At the start of a run a client MUST send a `SUB` for each stored queue. |  |  |
-| `IMP-135` | §15.6.4 | MUST NOT | (unstated) | A record that arrives a second time at or below the stored cursor, or at a stored sequence number above it, MUST NOT reach the ratchet. |  |  |
-| `IMP-136` | §15.6.4 | MUST | A client | A client MUST delete the row of an invitation in the batch that follows the flight 1 that consumed its prekey, before flight 2 leaves. |  |  |
-| `IMP-137` | §15.6.4 | MUST | A record that waits in the send queue at the start of a run | A record that waits in the send queue at the start of a run MUST go again under its `msg_id`. |  |  |
-| `IMP-138` | §15.6.1 | MUST NOT | (unstated) | The name that a user gives a contact MUST stay on the devices of that user, and a client MUST NOT send it to a peer or to a relay. |  |  |
-| `IMP-139` | §15.6.1 | MUST | A client | A client MUST count a received message as not seen while its store time is above the read marker of its conversation, and it MUST move that marker when the user looks at the conversation and at no other time. |  |  |
-| `IMP-140` | §15.6.4 | MUST | A client | A client MUST keep that setting in the store, under the record encryption of this section. |  |  |
-| `IMP-141` | §15.6.4 | MUST | A client | A client MUST ask for the current passphrase before a passphrase change. |  |  |
-| `IMP-142` | §15.6.1 | MUST | (unstated) | The short code and the safety number of Part 4 §4.5 are public values of the two devices, and they cross the surface as strings. |  |  |
-| `IMP-143` | §15.6.4 | MUST | (unstated) | A record that the client uses itself gives no message: a queue address, a record of a ceremony. |  |  |
-| `IMP-144` | §15.6.1 | MUST | A client | A client MUST ask for the camera of the platform at the moment the user opens a scanner, and at no other time. |  |  |
-| `IMP-145` | §15.6.4 | MUST | The surface | The surface MUST take the state of the app, on the screen or not, from the platform layer, and the runtime MUST select the cover tier of Part 3 §3.6.2 from that state alone. |  |  |
-| `IMP-146` | §15.6.1 | MUST | A client | A client MUST hold a receipt in table `0x0B` from the commit of the message that it reports, or from the move of the read marker of `IMP-139`, to the slot that carries it (`NET-053`). |  |  |
-| `IMP-147` | §15.6.1 | MUST NOT | A receipt is no message of a conversation, and a client | A receipt is no message of a conversation, and a client MUST NOT store it as one. |  |  |
-| `IMP-148` | §15.6.1 | MUST NOT | (unstated) | A conversation view MUST show the read state as one mark of the contact at the newest message that the contact saw, and it MUST NOT write a word for that state on each message. |  |  |
-| `IMP-149` | §15.6.1 | MUST | A stored record | A stored record MUST hold its `reply_target` as the `msg_ref` of Part 6 §6.6 (`WIR-170`). |  |  |
-| `IMP-150` | §15.6.1 | MUST NOT | (unstated) | The surface MUST give the target of a reply as a handle of a message of the same conversation, or as absent (`WIR-173`), and it MUST NOT give a `msg_id` or a `msg_ref`. |  |  |
-| `IMP-151` | §15.6.1 | MUST | The placeholder of Part 7 §7.5.6 | The placeholder of Part 7 §7.5.6 MUST be the row of the deleted message itself: the client overwrites the content of that row with a record of kind `0x05` that names the `msg_id` of the row, under a new record key (`DEV-099`, `DEV-100`). |  |  |
-| `IMP-152` | §15.6.1 | MUST | (unstated) | A deletion request of this device is a record that waits for the send path as each other record does (`DEV-112`). |  |  |
-| `IMP-153` | §15.6.1 | MUST | The surface | The surface MUST give a deleted state of a message and no text for it, and the event of a deletion MUST carry the conversation and no content. |  |  |
-| `IMP-154` | §15.6.1 | MUST | An edit | An edit MUST change the row of its target in place, under a new record key, and the client MUST keep no earlier text. |  |  |
-| `IMP-155` | §15.6.1 | MUST | An edit that arrives before its target | An edit that arrives before its target MUST wait in table `0x0C` with its new text, and the target takes that text and the edited mark in the batch that stores it. |  |  |
-| `IMP-156` | §15.6.1 | MUST | A client | A client MUST reject a reaction whose `emoji` holds a code point that no emoji sequence uses, from a contact and from its own surface. |  |  |
-| `IMP-157` | §15.6.1 | MUST | A client | A client MUST take a reaction only for a message that it holds in the conversation of the sender (`WIR-282`), and it MUST drop each other one. |  |  |
-| `IMP-158` | §15.6.4 | MUST | The stored form of a contact and of an invitation | The stored form of a contact and of an invitation MUST name the relay that holds its inbound queue, because a new run builds a circuit to that relay before it subscribes (`NET-308`). |  |  |
-| `IMP-159` | §15.6.4 | MUST | A client | A client MUST keep the highest epoch of a `DirectoryRoot` that it verified in the settings table, and it MUST give the larger of that value and the shipped epoch of `REL-045` to the consensus at each start. |  |  |
-| `IMP-160` | §15.6.4 | MUST | The plaintext of a file | The plaintext of a file MUST sit in the at-rest store and in no other place on the device: no cache file, no temporary file, and no platform media store. |  |  |
-| `IMP-161` | §15.6.4 | MUST | A lock | A lock MUST take each file job out of the memory, because a job holds its file in the clear, and an unlock MUST make the jobs again from the store. |  |  |
-| `IMP-162` | §15.6.4 | MUST | (unstated) | The record of a file holds its descriptor (Part 6 §6.6 kind `0x02`), and the descriptor exists when the relays hold each chunk. |  |  |
-| `IMP-163` | §15.6.4 | MUST | A client | A client MUST start a download for each received record of kind `0x02` whose descriptor it can read. |  |  |
-| `IMP-164` | §15.6.4 | MUST | A deletion of a message | A deletion of a message MUST erase its rows in the tables `0x0F`, `0x10` and `0x11` in the batch that takes the message, and for a file that this device uploaded it MUST then send the `CDEL` of `ATT-161` for each chunk to each relay of that chunk. |  |  |
-| `IMP-165` | §15.6.1 | MUST | The file of a draft | The file of a draft MUST cross the surface as a path that the core reads, and not as its bytes. |  |  |
-| `IMP-166` | §15.6.1 | MAY | The bytes of a file that the store holds | The bytes of a file that the store holds MAY cross the surface one time for each decode, into a sink of the platform. |  |  |
+| `IMP-002` | §14.2 | MUST | A change | A change MUST name the register that it charges. |  |  |
+| `IMP-003` | §14.2 | MUST | (unstated) | A claim that a change costs no crate MUST name that register too. |  |  |
+| `IMP-004` | §14.2.1 | MUST | An implementation | An implementation **MUST** turn the `pkcs8` default off. |  |  |
+| `IMP-005` | §14.2.2 | MUST NOT | (unstated) | If the measured R2 count is more than 30, the maintainers MUST NOT tag a release. |  |  |
+| `IMP-006` | §14.2.2 | MUST | Those maintainers | Those maintainers MUST first remove a primitive, or MUST first revise this section with a written cause. |  |  |
+| `IMP-007` | §14.2.3 | MUST NOT | One subsystem in R3 | One subsystem in R3 MUST NOT add more transitive crates than its row in the table below. No single platform part costs more than the whole message core. |  |  |
+| `IMP-008` | §14.2.3 | MUST | (unstated) | At the first measurement, the maintainers MUST publish the R3 count. |  |  |
+| `IMP-009` | §14.2.3 | MUST | Those maintainers | Those maintainers MUST set the R3 cap in the same change. |  |  |
+| `IMP-010` | §14.2.4 | MUST | That commit | That commit MUST also add a `DEPENDENCIES.md` file at the root of the repository. |  |  |
+| `IMP-011` | §14.2.4 | MUST | `DEPENDENCIES.md` | `DEPENDENCIES.md` MUST hold the five items of §14.2.4. |  |  |
+| `IMP-012` | §14.2.4 | MUST | The maintainers | The maintainers MUST publish `DEPENDENCIES.md` before the first tagged release. |  |  |
+| `IMP-013` | §14.2.4 | MUST NOT | The maintainers | The maintainers MUST NOT tag a release without that file. |  |  |
+| `IMP-014` | §14.2.4 | MUST | A CI job | A CI job MUST generate that file again at each commit. |  |  |
+| `IMP-015` | §14.2.4 | MUST | That job | That job MUST fail the build on a difference against the committed file. |  |  |
+| `IMP-016` | §14.3 | MUST | That crate | That crate MUST give byte-identical output to the portable path. |  |  |
+| `IMP-017` | §14.4 | MUST NOT | (unstated) | Key material, a passphrase, and message plaintext MUST NOT be a Kotlin `String` or `ByteArray`. |  |  |
+| `IMP-019` | §14.5.2 | MUST | (unstated) | The portable build, the AVX2 build, and the NEON build MUST serialize each cryptographic object identically, at each commit. |  |  |
+| `IMP-020` | §14.5.4 | MUST | An implementation | An implementation MUST hold a `SOUNDNESS.md` file. |  |  |
+| `IMP-021` | §14.6.2 | MUST | (unstated) | `llvm-objdump -p libumbra.so \| grep LOAD` MUST show `align 2**14` or higher. |  |  |
+| `IMP-022` | §14.6.2 | MUST | `zipalign -v -c -P 16 4` | `zipalign -v -c -P 16 4` MUST pass. |  |  |
+| `IMP-023` | §14.6.4 | MUST | A client | A client MUST derive the record key with the input set of the block above, and with no other input. |  |  |
+| `IMP-024` | §14.6.4 | MUST | A client | A client MUST store the keyed form of `msg_id` that Part 6 §6.6 gives. |  |  |
+| `IMP-025` | §14.6.4 | MUST NOT | A client | A client MUST NOT store the raw value. |  |  |
+| `IMP-026` | §14.6.4 | MUST | That item | That item MUST use a different label and a different access-control policy. |  |  |
+| `IMP-027` | §14.6.4 | MUST | An implementation | An implementation MUST let the user export it and delete it from the UMBRA settings. |  |  |
+| `IMP-028` | §14.6.4 | MUST NOT | That operation | That operation MUST NOT change a local storage key. |  |  |
+| `IMP-029` | §14.6.5 | MUST | Relay reputation | Relay reputation MUST come from measured behavior only. |  |  |
+| `IMP-030` | §14.6.5 | MUST NOT | Relay reputation | Relay reputation MUST NOT come from device attestation. |  |  |
+| `IMP-031` | §14.6.5 | MUST NOT | Relay reputation | Relay reputation MUST NOT come from a "genuine device" proof. |  |  |
+| `IMP-032` | §14.8 | MUST | Two independent builds | Two independent builds MUST give the same hash. |  |  |
+| `IMP-033` | §14.8 | MUST | A minimum of one rebuilder | A minimum of one rebuilder MUST be outside the control of the nonprofit. |  |  |
+| `IMP-034` | §14.5.2 | MUST | The repository | The repository MUST vendor the NIST ACVP and CAVP corpora and the C2SP `testvectors_v1` corpus at `tests/vectors/`. |  |  |
+| `IMP-035` | §14.5.2 | MUST | The repository | The repository MUST hold a `tests/vectors/PROVENANCE.md` file that records the upstream commit of each corpus. |  |  |
+| `IMP-036` | §14.5.2 | MUST NOT | A test | A test MUST NOT fetch a vector at test time. |  |  |
+| `IMP-037` | §14.6.1 | MUST NOT | The FFI surface | The FFI surface MUST NOT carry message plaintext, key material, or a passphrase as a Kotlin `ByteArray`, a Kotlin `String`, a Swift `Data`, or a Swift `String`. |  |  |
+| `IMP-038` | §14.6.1 | MUST | `Draft` and `MsgRef` | `Draft` and `MsgRef` MUST be opaque UniFFI object handles. |  |  |
+| `IMP-039` | §14.6.1 | MUST | An implementation | An implementation MUST zeroize the buffer behind a `Draft` when that draft is dropped, and it MUST do that whether the send succeeded or failed. |  |  |
+| `IMP-040` | §14.6.4 | MUST | A client | A client MUST make a fresh `record_salt` and a fresh `nonce` from the CSPRNG at each write of a record. |  |  |
+| `IMP-041` | §14.6.4 | MUST | A client that discards a record key under Part 7 | A client that discards a record key under Part 7 MUST overwrite `record_salt` with zero bytes. |  |  |
+| `IMP-042` | §14.6.4 | MUST | A client | A client MUST open the database with `PRAGMA secure_delete=ON`. |  |  |
+| `IMP-043` | §14.6.4 | MUST | A client | After a client applies a deletion batch, it MUST run `PRAGMA wal_checkpoint(TRUNCATE)`. |  |  |
+| `IMP-044` | §14.6.6 | MUST | A client | A client MUST write a decrypted attachment inside the encrypted store of §14.6.4. |  |  |
+| `IMP-045` | §14.6.6 | MUST NOT | A client | A client MUST NOT write a decrypted attachment to the platform media store without an explicit user action. |  |  |
+| `IMP-046` | §14.6.6 | MUST | A client | Before the first such action, a client MUST show a one-time warning. |  |  |
+| `IMP-047` | §14.6.6 | MUST | That warning | That warning MUST state that the file leaves the encrypted store, and that each platform service then reads it. |  |  |
+| `IMP-048` | §14.6.6 | MUST | An Android client | An Android client MUST set `android:allowBackup="false"` on the `<application>` element, with `tools:replace="android:allowBackup"`. |  |  |
+| `IMP-050` | §14.6.6 | MUST | The settings of a client | The settings of a client MUST state that the platform backup carries no UMBRA data. |  |  |
+| `IMP-055` | §14.6.6 | MUST | A client | A client MUST draw a cover view over each conversation surface before the application leaves the foreground. |  |  |
+| `IMP-056` | §14.6.6 | MUST | A client | A client MUST mark a copied message as sensitive. |  |  |
+| `IMP-057` | §14.6.6 | MUST | An Android client | An Android client MUST set `IME_FLAG_NO_PERSONALIZED_LEARNING` on each composer and on the passphrase field. |  |  |
+| `IMP-058` | §14.6.6 | MUST | A client | A client MUST offer a screenshot block as a setting of one conversation, and not as a global setting. |  |  |
+| `IMP-059` | §14.6.6 | MUST NOT | A client | A client MUST NOT block a screenshot in a conversation by default. |  |  |
+| `IMP-060` | §14.6.6 | MUST NOT | A client | A client MUST NOT hide a message from the accessibility tree. |  |  |
+| `IMP-061` | §14.6.4 | MUST | A client | A client MUST derive `K_wrap` with the block above, and with no other input. |  |  |
+| `IMP-062` | §14.6.4 | MUST | A client | A client MUST make the secure-element key with no export path. |  |  |
+| `IMP-065` | §14.6.4 | MUST NOT | A client | A client MUST NOT demand a user authentication for each use of the secure-element key. |  |  |
+| `IMP-066` | §14.2.8 | MUST | The L1 stack | The L1 stack MUST use `rustls` with the `aws-lc-rs` provider. |  |  |
+| `IMP-067` | §14.2.8 | MUST NOT | An implementation | An implementation MUST NOT use the `ring` provider for L1. |  |  |
+| `IMP-068` | §14.2.8 | MUST | The `rustls` build | The `rustls` build MUST turn the `tls12` feature off. |  |  |
+| `IMP-069` | §14.2.8 | MUST | A build | A build MUST pin an `aws-lc-rs` version that ships the bindings for `aarch64-linux-android` and for `aarch64-apple-ios`. |  |  |
+| `IMP-072` | §14.9.1 | MUST | A client | A client MUST hold each outbound record in one state of the table above. |  |  |
+| `IMP-073` | §14.9.1 | MUST NOT | A client | A client MUST NOT add a state to the table. |  |  |
+| `IMP-074` | §14.9.1 | MUST | A client | A client MUST show a `failed` record with its cause and with a resend affordance. |  |  |
+| `IMP-075` | §14.9.1 | MUST NOT | A client | A client MUST NOT resend a `failed` record without a user action. |  |  |
+| `IMP-076` | §14.9.1 | MUST NOT | A client | A client MUST NOT show a `queued` record as a failure. |  |  |
+| `IMP-077` | §14.9.2 | MUST | A client | A client MUST show each current degraded state in one line at the top of the message list. |  |  |
+| `IMP-078` | §14.9.2 | MUST NOT | A client | A client MUST NOT show a degraded state as a security failure. |  |  |
+| `IMP-079` | §14.9.2 | MUST NOT | A client | A client MUST NOT block the message list, the composer, or a send in a degraded state. |  |  |
+| `IMP-080` | §14.9.2 | MUST | A client | A client MUST leave a degraded state without a user action when its condition ends. |  |  |
+| `IMP-081` | §14.9.2 | MUST NOT | A client | A client MUST NOT add a degraded state to the table without a row in Part 2 §2.4. |  |  |
+| `IMP-082` | §14.9.2 | MUST | (unstated) | In the `recipient queue full` state, a client MUST keep the record `queued`. |  |  |
+| `IMP-083` | §14.9.3 | MUST | Each string that a rule of this specification requires the interface to show | Each string that a rule of this specification requires the interface to show MUST carry a stable message identifier. |  |  |
+| `IMP-084` | §14.9.3 | MUST | That identifier | That identifier MUST be `umbra.ui.` followed by the rule identifier in lower case. |  |  |
+| `IMP-085` | §14.9.3 | MUST NOT | A revision | A revision MUST NOT change an identifier. |  |  |
+| `IMP-086` | §14.9.3 | MUST | A test | A test MUST check that each identifier resolves to a non-empty string in each shipped locale. |  |  |
+| `IMP-087` | §14.9.3 | MUST NOT | A release | A release MUST NOT ship a locale that fails that test. |  |  |
+| `IMP-088` | §14.9.4 | MUST | The interface | The interface MUST meet WCAG 2.2 at level AA. |  |  |
+| `IMP-089` | §14.9.4 | MUST | Text | Text MUST hold a contrast ratio of 4.5:1 or more against its background. |  |  |
+| `IMP-090` | §14.10 | MUST | A client | A client MUST take each CSPRNG output from the platform source, which is `getrandom` on Android and `SecRandomCopyBytes` on iOS. |  |  |
+| `IMP-091` | §14.10 | MUST NOT | A client | A client MUST NOT hold a userspace generator that it seeds one time. |  |  |
+| `IMP-092` | §14.10 | MUST | A relay | A relay MUST take each CSPRNG output from `getrandom` of its kernel. |  |  |
+| `IMP-093` | §14.10 | MUST | A client | A client MUST apply the hardening of Part 5 §5.9 to each value that the platform source gives. |  |  |
+| `IMP-094` | §14.7.1 | MUST | The web client | The web client MUST ship as a browser extension bundle. |  |  |
+| `IMP-095` | §14.7.1 | MUST NOT | A deployment | A deployment MUST NOT serve the web client as a hosted page, as a progressive web application, or as a script that a page loads. |  |  |
+| `IMP-096` | §14.7.1 | MUST NOT | (unstated) | The bundle MUST hold each byte of code that the web client runs, and the web client MUST NOT load a script, a module, or a WebAssembly binary from a network location. |  |  |
+| `IMP-097` | §14.7.2 | MUST NOT | (unstated) | A web client MUST be a linked device of a device set under Part 7, and it MUST NOT make a `RootIdentity`. |  |  |
+| `IMP-098` | §14.7.2 | MUST NOT | A web client | A web client MUST NOT hold a Recovery Code of Part 4 §4.7.1, a `C_social` share, or a backup key of Part 4 §4.7.2. |  |  |
+| `IMP-099` | §14.7.2 | MUST | (unstated) | A web client that finds its store absent or unreadable at start MUST return to the link flow of Part 7 §7.4, and it MUST show the line "This browser is no longer linked. |  |  |
+| `IMP-100` | §14.7.2 | MUST | The existing device | The existing device MUST revoke the old entry under Part 7 §7.7 before it links the same browser again, and Part 7 rule `DEV-265` gives that step. |  |  |
+| `IMP-101` | §14.7.3 | MUST NOT | (unstated) | A web client MUST use the WebSocket API of the browser over TLS to port 443, and it MUST NOT use WebTransport or `fetch` for the L1 stream in v1. |  |  |
+| `IMP-102` | §14.7.3 | MUST NOT | A web client | A web client MUST NOT open a connection to a host other than its two pinned ingress relays of Part 10 §10.6.1 and the bootstrap carriers of Part 3 §3.10. |  |  |
+| `IMP-103` | §14.7.3 | MUST | The extension manifest | The extension manifest MUST request no host permission on any site, no content script, and no access to the browsing data of the user. |  |  |
+| `IMP-104` | §14.7.4 | MUST | A web client | A web client MUST encrypt each record with the record key of §14.6.4, and it MUST keep each metadata-sensitive column inside the encrypted blob. |  |  |
+| `IMP-105` | §14.7.4 | MUST NOT | (unstated) | A web client MUST store in the IndexedDB of the extension origin only, and it MUST NOT use the sync storage area of the browser, the local storage area, or a cookie. |  |  |
+| `IMP-106` | §14.7.4 | MUST | A web client | A web client MUST make `k_se` of §14.6.4 as a non-extractable HMAC-SHA256 key of the Web Cryptography API, and it MUST compute `S` with that key. |  |  |
+| `IMP-107` | §14.7.4 | MUST | A web client | A web client MUST calibrate Argon2id to about 3 s for each try in the browser, in the manner of §14.6.4. |  |  |
+| `IMP-108` | §14.7.4 | MUST | A web client that applies a deletion batch of §14.6.4 | A web client that applies a deletion batch of §14.6.4 MUST overwrite `record_salt` and the ciphertext of each record with zero bytes, and then delete the record. |  |  |
+| `IMP-109` | §14.7.4 | MUST | A web client | A web client MUST call `navigator.storage.persist()` at the first launch, and it MUST treat a refusal as no error. |  |  |
+| `IMP-110` | §14.7.5 | MUST | The settings of a web client | The settings of a web client MUST state that the browser receives messages while it runs, and that the phone receives each notification. |  |  |
+| `IMP-111` | §14.7.5 | MUST | A web client | A web client MUST apply `IMP-044` to `IMP-047` with the download location as the platform media store. |  |  |
+| `IMP-112` | §14.7.5 | MUST | A web client | A web client MUST state that the screenshot block of `IMP-058` is not available in the browser, because a browser gives no equivalent of `FLAG_SECURE`. |  |  |
+| `IMP-113` | §14.7.6 | MUST NOT | The `umbra-web` crate | The `umbra-web` crate MUST NOT add more transitive crates than its row in §14.2.3. |  |  |
+| `IMP-114` | §14.7.6 | MUST | The extension bundle | The extension bundle MUST be reproducible under §14.8, and Part 15 rule `SEC-005` names it. |  |  |
+| `IMP-115` | §14.7.6 | MUST | The web client | The web client MUST verify the inclusion proof of Part 15 rule `SEC-006` for its own bundle at each start, and it MUST refuse to unlock the store while that proof is absent. |  |  |
+| `IMP-116` | §14.6.4 | MUST | A client | A client MUST run Argon2id with one lane, a memory of 64 MiB or more, and 3 passes or more. |  |  |
+| `IMP-117` | §14.6.4 | MUST | At the creation of the store, a client | At the creation of the store, a client MUST measure one try at that floor on the device, and it MUST raise the passes until one try takes about 3 s. |  |  |
+| `IMP-118` | §14.6.4 | MUST | A passphrase change | A passphrase change MUST wrap the same `K_store` under a new `salt_pw` and a new `nonce_w`. |  |  |
+| `IMP-119` | §14.6.4 | MUST NOT | A client | A client MUST NOT let the user set an auto-lock above 30 minutes of idle time, and the default MUST be 15 minutes. |  |  |
+| `IMP-120` | §14.6.4 | MUST | `table_id` | `table_id` MUST be one byte, and `row_id` MUST be the 16 bytes of the block above. |  |  |
+| `IMP-121` | §14.6.4 | MAY | A row | A row MAY carry one more indexed column, which is the `row_id` of the row that owns it, such as the conversation of a message. |  |  |
+| `IMP-122` | §14.6.4 | MUST NOT | A client | A client MUST NOT open a record whose `record_salt` is zero bytes. |  |  |
+| `IMP-123` | §14.6.4 | MUST | A client | A client MUST write the rows of a commit batch and the table MAC of each table that the batch changed in one transaction of the database. |  |  |
+| `IMP-124` | §14.6.1 | MUST | Text and the passphrase | Text and the passphrase MUST cross as UTF-16 code units, and the Rust side MUST overwrite its copy after the use. |  |  |
+| `IMP-125` | §14.6.1 | MUST | The secure-element step of §14.6.4 | The secure-element step of §14.6.4 MUST cross as one callback that takes the input of the keyed function and returns its 32 bytes. |  |  |
+| `IMP-126` | §14.6.1 | MUST | A record that waits for the send path | A record that waits for the send path MUST sit in the store under the record encryption of §14.6.4, in a table of its own. |  |  |
+| `IMP-127` | §14.6.1 | MUST | A lock | A lock MUST stop the network runtime, and the runtime MUST drop its state at that stop. |  |  |
+| `IMP-128` | §14.6.1 | MUST | A client | A client MUST order a conversation view by the time of its own store of each message. |  |  |
+| `IMP-129` | §14.6.1 | MUST NOT | (unstated) | A conversation identifier on the surface MUST be the surrogate of §14.6.4 under the store key, and it MUST NOT be a queue identifier. |  |  |
+| `IMP-130` | §14.6.4 | MUST | A stored object | A stored object MUST start with a version byte, and a client MUST reject a row whose version it does not read. |  |  |
+| `IMP-131` | §14.6.4 | MUST | A client | A client MUST commit each change of a channel to the store before it writes a byte of that call to the link. |  |  |
+| `IMP-132` | §14.6.4 | MUST | A client | A client MUST commit a received record and the channel state that opened it in one batch of `IMP-123`. |  |  |
+| `IMP-133` | §14.6.4 | MUST NOT | (unstated) | A client MUST replace the row of a channel at each commit, and it MUST NOT keep an earlier state of a channel. |  |  |
+| `IMP-134` | §14.6.4 | MUST | At the start of a run a client | At the start of a run a client MUST send a `SUB` for each stored queue. |  |  |
+| `IMP-135` | §14.6.4 | MUST NOT | (unstated) | A record that arrives a second time at or below the stored cursor, or at a stored sequence number above it, MUST NOT reach the ratchet. |  |  |
+| `IMP-136` | §14.6.4 | MUST | A client | A client MUST delete the row of an invitation in the batch that follows the flight 1 that consumed its prekey, before flight 2 leaves. |  |  |
+| `IMP-137` | §14.6.4 | MUST | A record that waits in the send queue at the start of a run | A record that waits in the send queue at the start of a run MUST go again under its `msg_id`. |  |  |
+| `IMP-138` | §14.6.1 | MUST NOT | (unstated) | The name that a user gives a contact MUST stay on the devices of that user, and a client MUST NOT send it to a peer or to a relay. |  |  |
+| `IMP-139` | §14.6.1 | MUST | A client | A client MUST count a received message as not seen while its store time is above the read marker of its conversation, and it MUST move that marker when the user looks at the conversation and at no other time. |  |  |
+| `IMP-140` | §14.6.4 | MUST | A client | A client MUST keep that setting in the store, under the record encryption of this section. |  |  |
+| `IMP-141` | §14.6.4 | MUST | A client | A client MUST ask for the current passphrase before a passphrase change. |  |  |
+| `IMP-142` | §14.6.1 | MUST | (unstated) | The short code and the safety number of Part 4 §4.5 are public values of the two devices, and they cross the surface as strings. |  |  |
+| `IMP-143` | §14.6.4 | MUST | (unstated) | A record that the client uses itself gives no message: a queue address, a record of a ceremony. |  |  |
+| `IMP-144` | §14.6.1 | MUST | A client | A client MUST ask for the camera of the platform at the moment the user opens a scanner, and at no other time. |  |  |
+| `IMP-145` | §14.6.4 | MUST | The surface | The surface MUST take the state of the app, on the screen or not, from the platform layer, and the runtime MUST select the cover tier of Part 3 §3.6.2 from that state alone. |  |  |
+| `IMP-146` | §14.6.1 | MUST | A client | A client MUST hold a receipt in table `0x0B` from the commit of the message that it reports, or from the move of the read marker of `IMP-139`, to the slot that carries it (`NET-053`). |  |  |
+| `IMP-147` | §14.6.1 | MUST NOT | A receipt is no message of a conversation, and a client | A receipt is no message of a conversation, and a client MUST NOT store it as one. |  |  |
+| `IMP-148` | §14.6.1 | MUST NOT | (unstated) | A conversation view MUST show the read state as one mark of the contact at the newest message that the contact saw, and it MUST NOT write a word for that state on each message. |  |  |
+| `IMP-149` | §14.6.1 | MUST | A stored record | A stored record MUST hold its `reply_target` as the `msg_ref` of Part 6 §6.6 (`WIR-170`). |  |  |
+| `IMP-150` | §14.6.1 | MUST NOT | (unstated) | The surface MUST give the target of a reply as a handle of a message of the same conversation, or as absent (`WIR-173`), and it MUST NOT give a `msg_id` or a `msg_ref`. |  |  |
+| `IMP-151` | §14.6.1 | MUST | The placeholder of Part 7 §7.5.6 | The placeholder of Part 7 §7.5.6 MUST be the row of the deleted message itself: the client overwrites the content of that row with a record of kind `0x05` that names the `msg_id` of the row, under a new record key (`DEV-099`, `DEV-100`). |  |  |
+| `IMP-152` | §14.6.1 | MUST | (unstated) | A deletion request of this device is a record that waits for the send path as each other record does (`DEV-112`). |  |  |
+| `IMP-153` | §14.6.1 | MUST | The surface | The surface MUST give a deleted state of a message and no text for it, and the event of a deletion MUST carry the conversation and no content. |  |  |
+| `IMP-154` | §14.6.1 | MUST | An edit | An edit MUST change the row of its target in place, under a new record key, and the client MUST keep no earlier text. |  |  |
+| `IMP-155` | §14.6.1 | MUST | An edit that arrives before its target | An edit that arrives before its target MUST wait in table `0x0C` with its new text, and the target takes that text and the edited mark in the batch that stores it. |  |  |
+| `IMP-156` | §14.6.1 | MUST | A client | A client MUST reject a reaction whose `emoji` holds a code point that no emoji sequence uses, from a contact and from its own surface. |  |  |
+| `IMP-157` | §14.6.1 | MUST | A client | A client MUST take a reaction only for a message that it holds in the conversation of the sender (`WIR-282`), and it MUST drop each other one. |  |  |
+| `IMP-158` | §14.6.4 | MUST | The stored form of a contact and of an invitation | The stored form of a contact and of an invitation MUST name the relay that holds its inbound queue, because a new run builds a circuit to that relay before it subscribes (`NET-308`). |  |  |
+| `IMP-159` | §14.6.4 | MUST | A client | A client MUST keep the highest epoch of a `DirectoryRoot` that it verified in the settings table, and it MUST give the larger of that value and the shipped epoch of `REL-045` to the consensus at each start. |  |  |
+| `IMP-160` | §14.6.4 | MUST | The plaintext of a file | The plaintext of a file MUST sit in the at-rest store and in no other place on the device: no cache file, no temporary file, and no platform media store. |  |  |
+| `IMP-161` | §14.6.4 | MUST | A lock | A lock MUST take each file job out of the memory, because a job holds its file in the clear, and an unlock MUST make the jobs again from the store. |  |  |
+| `IMP-162` | §14.6.4 | MUST | (unstated) | The record of a file holds its descriptor (Part 6 §6.6 kind `0x02`), and the descriptor exists when the relays hold each chunk. |  |  |
+| `IMP-163` | §14.6.4 | MUST | A client | A client MUST start a download for each received record of kind `0x02` whose descriptor it can read. |  |  |
+| `IMP-164` | §14.6.4 | MUST | A deletion of a message | A deletion of a message MUST erase its rows in the tables `0x0F`, `0x10` and `0x11` in the batch that takes the message, and for a file that this device uploaded it MUST then send the `CDEL` of `ATT-161` for each chunk to each relay of that chunk. |  |  |
+| `IMP-165` | §14.6.1 | MUST | The file of a draft | The file of a draft MUST cross the surface as a path that the core reads, and not as its bytes. |  |  |
+| `IMP-166` | §14.6.1 | MAY | The bytes of a file that the store holds | The bytes of a file that the store holds MAY cross the surface one time for each decode, into a sink of the platform. |  |  |
 
 ## SEC — Security Considerations
 
-Source: `spec/16-security-considerations.md`
+Source: `spec/15-security-considerations.md`
 
 | ID | Section | Key word | Binds | Requirement | Module | Test |
 | --- | --- | --- | --- | --- | --- | --- |
-| `SEC-001` | §16.1.1 | MUST | An anonymous credential | An anonymous credential MUST authorize a queue rotation. |  |  |
-| `SEC-002` | §16.1.1 | MUST NOT | A long-lived key | A long-lived key MUST NOT authorize it. |  |  |
-| `SEC-003` | §16.3 | MAY | A client | A client MAY split the text, and this specification does not require that split. |  |  |
-| `SEC-004` | §16.4 | MUST NOT | (unstated) | local performance MUST NOT replace a relay. |  |  |
-| `SEC-005` | §16.5 | MUST | (unstated) | The rebuild of the Rust core, the Android application, and the relay MUST be byte-identical. |  |  |
-| `SEC-006` | §16.5 | MUST | The client | The client MUST verify an inclusion proof before it applies an update. |  |  |
-| `SEC-007` | §16.5 | MUST | The client | The client MUST also **gossip the log heads with peers**, thus a split view becomes detectable. |  |  |
-| `SEC-008` | §16.5 | MUST | One or more of those channels | One or more of those channels MUST be outside the control of Apple and of Google. |  |  |
-| `SEC-009` | §16.5 | MUST | One or more channels | One or more channels MUST rebuild the release independently and verify it byte-for-byte against the published artifact. |  |  |
-| `SEC-010` | §16.5 | MUST NOT | An implementation | An implementation MUST NOT treat one catalog as a dependency. |  |  |
-| `SEC-011` | §16.5 | MUST | One or more channels | One or more channels MUST be able to ship a security update in 24 hours. |  |  |
-| `SEC-012` | §16.6 | MUST | The entity that controls the release signing | The entity that controls the release signing MUST hold no seat, no staff, and no asset in such a jurisdiction. |  |  |
-| `SEC-013` | §16.6 | MAY | The project | The project MAY publish a warrant canary. |  |  |
-| `SEC-014` | §16.6 | MUST NOT | The project | The project MUST NOT present a warrant canary as a control. |  |  |
-| `SEC-015` | §16.7 | SHOULD | UMBRA | UMBRA SHOULD commission a formal analysis of the handshake, the ratchet, and the group key schedule before v1.0. |  |  |
-| `SEC-016` | §16.8 | MUST | Such a change | Such a change MUST come with a specification change and a version increment. |  |  |
-| `SEC-017` | §16.8 | MUST NOT | A revision | A revision MUST NOT make a silent amendment. |  |  |
-| `SEC-018` | §16.3 | MUST | A revision that adds a residual leak | A revision that adds a residual leak MUST add a row to this table. |  |  |
-| `SEC-019` | §16.3 | MUST | A revision that removes a leak | A revision that removes a leak MUST remove its row in the same commit. |  |  |
-| `SEC-020` | §16.5 | MUST | That channel | That channel MUST serve a non-certified Android device, which is a device without the Google services. |  |  |
-| `SEC-021` | §16.5 | MUST | A rebuilder of `SEC-009` | A rebuilder of `SEC-009` MUST fetch the extension bundle from each listed store and verify it against the published artifact, because the store and not the nonprofit serves that bundle. |  |  |
+| `SEC-001` | §15.1.1 | MUST | An anonymous credential | An anonymous credential MUST authorize a queue rotation. |  |  |
+| `SEC-002` | §15.1.1 | MUST NOT | A long-lived key | A long-lived key MUST NOT authorize it. |  |  |
+| `SEC-003` | §15.3 | MAY | A client | A client MAY split the text, and this specification does not require that split. |  |  |
+| `SEC-004` | §15.4 | MUST NOT | (unstated) | local performance MUST NOT replace a relay. |  |  |
+| `SEC-005` | §15.5 | MUST | (unstated) | The rebuild of the Rust core, the Android application, and the relay MUST be byte-identical. |  |  |
+| `SEC-006` | §15.5 | MUST | The client | The client MUST verify an inclusion proof before it applies an update. |  |  |
+| `SEC-007` | §15.5 | MUST | The client | The client MUST also **gossip the log heads with peers**, thus a split view becomes detectable. |  |  |
+| `SEC-008` | §15.5 | MUST | One or more of those channels | One or more of those channels MUST be outside the control of Apple and of Google. |  |  |
+| `SEC-009` | §15.5 | MUST | One or more channels | One or more channels MUST rebuild the release independently and verify it byte-for-byte against the published artifact. |  |  |
+| `SEC-010` | §15.5 | MUST NOT | An implementation | An implementation MUST NOT treat one catalog as a dependency. |  |  |
+| `SEC-011` | §15.5 | MUST | One or more channels | One or more channels MUST be able to ship a security update in 24 hours. |  |  |
+| `SEC-012` | §15.6 | MUST | The entity that controls the release signing | The entity that controls the release signing MUST hold no seat, no staff, and no asset in such a jurisdiction. |  |  |
+| `SEC-013` | §15.6 | MAY | The project | The project MAY publish a warrant canary. |  |  |
+| `SEC-014` | §15.6 | MUST NOT | The project | The project MUST NOT present a warrant canary as a control. |  |  |
+| `SEC-015` | §15.7 | SHOULD | UMBRA | UMBRA SHOULD commission a formal analysis of the handshake, the ratchet, and the group key schedule before v1.0. |  |  |
+| `SEC-016` | §15.8 | MUST | Such a change | Such a change MUST come with a specification change and a version increment. |  |  |
+| `SEC-017` | §15.8 | MUST NOT | A revision | A revision MUST NOT make a silent amendment. |  |  |
+| `SEC-018` | §15.3 | MUST | A revision that adds a residual leak | A revision that adds a residual leak MUST add a row to this table. |  |  |
+| `SEC-019` | §15.3 | MUST | A revision that removes a leak | A revision that removes a leak MUST remove its row in the same commit. |  |  |
+| `SEC-020` | §15.5 | MUST | That channel | That channel MUST serve a non-certified Android device, which is a device without the Google services. |  |  |
+| `SEC-021` | §15.5 | MUST | A rebuilder of `SEC-009` | A rebuilder of `SEC-009` MUST fetch the extension bundle from each listed store and verify it against the published artifact, because the store and not the nonprofit serves that bundle. |  |  |
 

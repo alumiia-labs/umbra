@@ -213,7 +213,7 @@ pub enum DigestSource {
     TreeHead = 0x01,
     /// The Part 10 consensus root.
     ConsensusRoot = 0x02,
-    /// The Part 16 §16.5 release log head.
+    /// The Part 15 §15.5 release log head.
     ReleaseLog = 0x03,
 }
 

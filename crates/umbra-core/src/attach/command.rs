@@ -1,4 +1,4 @@
-//! The twelve chunk commands of Part 13 §13.3.3 and their payloads. The
+//! The twelve chunk commands of Part 12 §12.3.3 and their payloads. The
 //! command header is the one of Part 6 §6.4, with the `chunk_id` in the
 //! `queue_id` field.
 
@@ -123,7 +123,7 @@ pub struct RegisterPayload<'a> {
     pub cred_pk: [u8; 32],
     /// The read credential.
     pub read_pk: [u8; 32],
-    /// The admission trailer of Part 14 §14.2.
+    /// The admission trailer of Part 13 §13.2.
     pub admission: Admission<'a>,
 }
 
@@ -177,7 +177,7 @@ pub struct ReplicaTarget {
     pub storage_token: [u8; TOKEN_LEN],
 }
 
-/// The payload of `CREP` (§13.4.1).
+/// The payload of `CREP` (§12.4.1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CrepPayload {
     /// The targets, one per replica after the one that took the `CPUT`.

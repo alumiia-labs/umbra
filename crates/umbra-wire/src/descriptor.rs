@@ -1,4 +1,4 @@
-//! The file descriptor of Part 13 §13.3: what a receiver needs to fetch
+//! The file descriptor of Part 12 §12.3: what a receiver needs to fetch
 //! and open one object on the chunk path.
 
 use alloc::vec::Vec;
@@ -23,7 +23,7 @@ pub const CHUNK_SIZE: u32 = 32_650;
 pub enum Level {
     /// The refs address data chunks.
     Data = 0x00,
-    /// The refs address manifest chunks (§13.3.4).
+    /// The refs address manifest chunks (§12.3.4).
     Manifest = 0x01,
 }
 
@@ -36,7 +36,7 @@ pub struct ChunkRef {
     pub chunk_id: [u8; 32],
     /// The read credential.
     pub cred_pk: [u8; 32],
-    /// The two replica hints of §13.3.2.
+    /// The two replica hints of §12.3.2.
     pub replicas: [[u8; 12]; 2],
 }
 
@@ -48,7 +48,7 @@ pub struct FileDescriptor {
     pub file_key: Secret<32>,
     /// The nonce.
     pub file_nonce: [u8; 24],
-    /// The key commitment of §13.3.1.
+    /// The key commitment of §12.3.1.
     pub commit: [u8; 32],
     /// SHA3-256 of the plaintext.
     pub digest: [u8; 32],

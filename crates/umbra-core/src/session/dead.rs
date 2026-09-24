@@ -1,6 +1,6 @@
 //! The dead-channel blob of Part 3 §3.2.6: the `QueueAddress` of the
 //! current queue of a writer, sealed under the blob key of one week and
-//! padded to one handle-addressed chunk (Part 13 `ATT-147`).
+//! padded to one handle-addressed chunk (Part 12 `ATT-147`).
 
 use alloc::vec::Vec;
 

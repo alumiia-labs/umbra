@@ -131,7 +131,7 @@ impl BackupRootKey {
 pub struct BackupEntry<'a> {
     /// `0x01` a full object, `0x02` a delta object.
     pub kind: u8,
-    /// A `FileDescriptor` of Part 13 §13.3.
+    /// A `FileDescriptor` of Part 12 §12.3.
     pub descriptor: &'a [u8],
 }
 
@@ -209,7 +209,7 @@ impl<'a> BackupRoot<'a> {
     }
 
     /// Seals the root into the chunk plaintext of `IDN-094`: the nonce and
-    /// the sealed root, before the padding of Part 13 §13.2.3.
+    /// the sealed root, before the padding of Part 12 §12.2.3.
     pub fn seal(&self, credentials: &EpochCredentials, nonce: [u8; 24]) -> Result<Vec<u8>, Error> {
         let mut out = alloc::vec![0u8; 24 + self.len() + aead::TAG_LEN];
         let (nonce_out, rest) = out.split_at_mut(24);

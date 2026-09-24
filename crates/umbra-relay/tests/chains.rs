@@ -72,7 +72,7 @@ impl TryRng for Rng {
 impl TryCryptoRng for Rng {}
 
 /// The layer of each relay of the set, by its index. Three relays of layer 3
-/// hold the three copies of a chunk (Part 13 §13.4), and two more let an
+/// hold the three copies of a chunk (Part 12 §12.4), and two more let an
 /// upload leave a relay that fails.
 const LAYERS: [u8; 8] = [1, 2, 2, 3, 3, 3, 3, 3];
 /// The relay of layer 3 whose chunk store has no room: it refuses each
@@ -539,7 +539,7 @@ fn outcome_of(mesh: &mut Mesh, client: usize, handle: u64) -> ChunkOutcome {
 fn a_chunk_goes_to_one_relay_and_that_relay_makes_the_two_copies() {
     const CLIENT: usize = 0;
     let mut mesh = Mesh::new(&[0x61]);
-    // Part 13 §13.8: the transfer has a connection and a node of its own.
+    // Part 12 §12.8: the transfer has a connection and a node of its own.
     let mut node = ClientNode::for_transfers(
         relay_info(0),
         (1..LAYERS.len()).map(relay_info).collect(),

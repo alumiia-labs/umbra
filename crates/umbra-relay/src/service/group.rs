@@ -329,7 +329,7 @@ impl GroupService {
         }
     }
 
-    /// A `GNEW`: the admission of Part 14, a `GroupQueueId` from the relay
+    /// A `GNEW`: the admission of Part 13, a `GroupQueueId` from the relay
     /// CSPRNG, and one `GIDS` in the same session (`WIR-373`, `WIR-376`,
     /// `WIR-377`).
     #[allow(clippy::too_many_arguments)]

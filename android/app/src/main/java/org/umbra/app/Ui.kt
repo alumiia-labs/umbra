@@ -357,7 +357,7 @@ private fun TabTitle(title: String) {
 }
 
 /**
- * The one line of each degraded state of Part 15 §15.9.2. A client that
+ * The one line of each degraded state of Part 14 §14.9.2. A client that
  * connects shows no line: the top bar holds that state.
  */
 @Composable

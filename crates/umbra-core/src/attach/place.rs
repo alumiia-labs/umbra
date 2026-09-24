@@ -1,6 +1,6 @@
-//! The placement list of a handle-addressed chunk (Part 13 §13.4.2), the
-//! resolution of a relay hint (§13.3.2), and the order of a fetch across
-//! the replicas (§13.4, §13.11).
+//! The placement list of a handle-addressed chunk (Part 12 §12.4.2), the
+//! resolution of a relay hint (§12.3.2), and the order of a fetch across
+//! the replicas (§12.4, §12.11).
 
 use alloc::{collections::BTreeMap, vec::Vec};
 

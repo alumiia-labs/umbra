@@ -788,7 +788,7 @@ private fun ReadMark(chat: Chat) {
 }
 
 /**
- * The closed list of Part 15 §15.9.1. "Accepted" means that a relay took the
+ * The closed list of Part 14 §14.9.1. "Accepted" means that a relay took the
  * record. It does not mean that the contact has it.
  */
 private fun deliveryLabel(state: UByte): String = when (state.toInt()) {

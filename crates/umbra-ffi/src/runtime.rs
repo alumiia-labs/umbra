@@ -426,8 +426,8 @@ pub async fn run_client(
                 },
                 // The node of the queues sends no chunk command and no
                 // group-queue command, thus it gets no such answer. The
-                // transfer of Part 13 has a node and a connection of its
-                // own (§13.8), and a group queue takes a session that
+                // transfer of Part 12 has a node and a connection of its
+                // own (§12.8), and a group queue takes a session that
                 // carries no other range (`GRP-186`).
                 ClientEvent::Chunk { .. }
                 | ClientEvent::Group { .. }

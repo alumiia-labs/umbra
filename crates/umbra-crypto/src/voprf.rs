@@ -1,6 +1,6 @@
 //! The VOPRF of RFC 9497 over ristretto255 with SHA-512, which is AUX-2 of
 //! Part 5 §5.1: the blind directory lookup of Part 9 §9.4 and the
-//! first-party token of Part 14 §14.3.2.
+//! first-party token of Part 13 §13.3.2.
 //!
 //! The client blinds its input, the server evaluates the blinded element
 //! under its key with a DLEQ proof, and the client unblinds and verifies.

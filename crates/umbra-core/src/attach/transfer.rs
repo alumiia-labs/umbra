@@ -1,10 +1,10 @@
 //! The transfer of one file over the chunk commands of a transfer node
-//! (Part 13 §13.4.1, §13.8): an upload that places each chunk at `REPLICAS`
+//! (Part 12 §12.4.1, §12.8): an upload that places each chunk at `REPLICAS`
 //! relays, and a download that reads each chunk from one of them.
 //!
 //! The two drivers read no clock and draw each random value from the caller.
 //! A file above `MAX_DESCRIPTOR_REFS` chunks takes the manifest level of
-//! §13.3.4: the upload places the data chunks, then the manifest of their
+//! §12.3.4: the upload places the data chunks, then the manifest of their
 //! refs as a file of its own under `K_manifest`, and the download reads the
 //! manifest before the data.
 
@@ -106,8 +106,8 @@ struct ChunkState {
     is_done: bool,
 }
 
-/// The class of an upload: an attachment of Part 13, or a backup object
-/// of Part 4 §4.7.2 in the backup class of §13.3.3 rule 10.
+/// The class of an upload: an attachment of Part 12, or a backup object
+/// of Part 4 §4.7.2 in the backup class of §12.3.3 rule 10.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Class {
     /// The relays of each chunk.
@@ -145,7 +145,7 @@ pub struct Upload {
     /// The key of the chunks of this phase: `file_key`, then `K_manifest`.
     chunk_key: Secret<32>,
     /// The placed data chunks of a file of level `0x01`, while its manifest
-    /// goes up (§13.3.4).
+    /// goes up (§12.3.4).
     data: Option<DataPhase>,
     /// The data chunk count of the file.
     data_chunks: usize,
@@ -738,7 +738,7 @@ fn fresh_relay<R: CryptoRng + ?Sized>(
 
 /// `replicas` relays of different operators, in a random order. A relay
 /// set with fewer operators gives no upload, because the redundancy is
-/// mandatory (§13.4).
+/// mandatory (§12.4).
 fn pick_relays<R: CryptoRng + ?Sized>(
     relays: &[AttachmentRelay],
     failed: &[[u8; 32]],

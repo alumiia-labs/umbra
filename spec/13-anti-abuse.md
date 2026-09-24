@@ -1,4 +1,4 @@
-# UMBRA Protocol Specification — Part 14: Anti-Abuse Without Identifiers
+# UMBRA Protocol Specification — Part 13: Anti-Abuse Without Identifiers
 
 **Status:** Draft
 **Version:** 0.2.0-draft
@@ -6,7 +6,7 @@
 
 ---
 
-## 14.1 The strongest anti-spam property of UMBRA is structural
+## 13.1 The strongest anti-spam property of UMBRA is structural
 
 Before a token or a puzzle, this property applies. **A party cannot send a
 message to a person unless that person gave a queue to that party.** The
@@ -17,7 +17,7 @@ to send a message to a stranger that did not opt in.
 Each mechanism in this part exists to protect the three locations that this
 structural property does not reach.
 
-## 14.2 What is gated, and what is deliberately not gated
+## 13.2 What is gated, and what is deliberately not gated
 
 The table below holds one row for each gated path. The verifier is the party
 that checks the credential. The fallback is what the verifier accepts from a
@@ -25,12 +25,12 @@ client that holds no credential. The carrier is where the credential travels.
 
 | Gated path | Verifier | Credential | Issuer | Fallback | Carrier |
 | --- | --- | --- | --- | --- | --- |
-| A queue creation, `NEW` of Part 6 §6.4 | Any relay | A token of §14.3, of the type that the relay advertises | The issuer of §14.9 | The proof of work of §14.8 | The `Admission` at the end of the payload |
-| A group-queue creation, `GNEW` of Part 6 §6.4.5 | Any relay | A token of §14.3, of the type that the relay advertises | The issuer of §14.9 | The proof of work of §14.8 | The `Admission` at the end of the payload |
-| An allocation of attachment storage, `CNEW` and `BNEW` of Part 13 §13.3.3 | An attachment relay | A token of §14.3 | The issuer of §14.9 | The proof of work of §14.8 | The `Admission` at the end of the payload |
-| A contact request at a Public Address or at a handle, by the hello of Part 9 §9.6 | The addressee client | A cross-relay token of §14.3.1 | The issuer of §14.9 | The proof of work of §14.8, at `HELLO_POW_EFFORT` | The `Admission` at the end of the hello, inside its AEAD |
-| A handle registration, Part 9 §9.9 | The handle directory | One first-party token of §14.3.2 | The issuer of §14.9 | None | The registration request of Part 9 §9.9 |
-| An OPRF evaluation of a lookup, Part 9 §9.4.1 | The handle directory | One first-party token of §14.3.2 | The issuer of §14.9 | The proof of work of §14.8, at `POW_LOOKUP_FLOOR` or above | The lookup request of Part 9 §9.4 |
+| A queue creation, `NEW` of Part 6 §6.4 | Any relay | A token of §13.3, of the type that the relay advertises | The issuer of §13.9 | The proof of work of §13.8 | The `Admission` at the end of the payload |
+| A group-queue creation, `GNEW` of Part 6 §6.4.5 | Any relay | A token of §13.3, of the type that the relay advertises | The issuer of §13.9 | The proof of work of §13.8 | The `Admission` at the end of the payload |
+| An allocation of attachment storage, `CNEW` and `BNEW` of Part 12 §12.3.3 | An attachment relay | A token of §13.3 | The issuer of §13.9 | The proof of work of §13.8 | The `Admission` at the end of the payload |
+| A contact request at a Public Address or at a handle, by the hello of Part 9 §9.6 | The addressee client | A cross-relay token of §13.3.1 | The issuer of §13.9 | The proof of work of §13.8, at `HELLO_POW_EFFORT` | The `Admission` at the end of the hello, inside its AEAD |
+| A handle registration, Part 9 §9.9 | The handle directory | One first-party token of §13.3.2 | The issuer of §13.9 | None | The registration request of Part 9 §9.9 |
+| An OPRF evaluation of a lookup, Part 9 §9.4.1 | The handle directory | One first-party token of §13.3.2 | The issuer of §13.9 | The proof of work of §13.8, at `POW_LOOKUP_FLOOR` or above | The lookup request of Part 9 §9.4 |
 
 A handle registration has no fallback. A proof of work prices a squat in
 computation, and a squat is a purchase of a name and not a surge. Part 1
@@ -56,9 +56,9 @@ anti-abuse system does not change the chat latency.
 ```
 Admission {
     kind      u8      // 0x00 none
-                      // 0x01 a token of §14.3
-                      // 0x02 retired, §14.4 gives the cause
-                      // 0x03 a PowSolution of §14.8
+                      // 0x01 a token of §13.3
+                      // 0x02 retired, §13.4 gives the cause
+                      // 0x03 a PowSolution of §13.8
     len       u16
     body      [len]u8
 }
@@ -88,42 +88,42 @@ costs 3 bytes in the steady state.
 > trailer close each of those gaps, and the trailer of 3 bytes keeps the
 > steady-state cost near zero.
 
-### 14.2.1 A new install holds no token
+### 13.2.1 A new install holds no token
 
 U1 of Part 2 §2.4 gives a new install 90 seconds to the first message, with no
 account screen and no server picker. That install has to create a queue, and the
 list above gates a queue creation.
 
-- A §14.2 row whose fallback names §14.8 gives the verifier a second path.
-  **[ABU-014]** That verifier MUST accept a correct proof of work of §14.8 in
+- A §13.2 row whose fallback names §13.8 gives the verifier a second path.
+  **[ABU-014]** That verifier MUST accept a correct proof of work of §13.8 in
   place of the credential of the row. **[ABU-015]** A relay MUST NOT need a token for a queue creation.
 
   > *Cause.* An earlier form of `ABU-014` bound a relay and a queue creation
   > only. The rendezvous path and the handle directory then had no fallback,
-  > and the two doors of §14.1 stayed locked for a new install. The rule now
+  > and the two doors of §13.1 stayed locked for a new install. The rule now
   > binds each verifier that the table names.
 - **[ABU-016]** An issuer MUST NOT need an identifier from a client to issue a
   token batch. **[ABU-017]** A deployment MUST publish the attestation that it
   uses for an issuance. **[ABU-018]** A deployment MUST NOT use a hardware
-  attestation for that purpose, and §14.11 gives the cause.
+  attestation for that purpose, and §13.11 gives the cause.
 
-**§14.8 sets the suggested effort at 0 in the steady state. Thus a new install
+**§13.8 sets the suggested effort at 0 in the steady state. Thus a new install
 pays nothing, and it reaches U1.** Under load the effort rises, and a token then
 buys the holder past the puzzle. That is the full function of a token in this
 system: a token is a fast path and it is not an admission gate.
 
 > *Cause.* An earlier draft gated a queue creation with a token and said, in
-> §14.9, that a user "receives a grant by some method". That sentence was the
+> §13.9, that a user "receives a grant by some method". That sentence was the
 > only statement of issuance, and `ABU-001` forbids the three-party Attester
 > that usually answers the question. A new install then had no path to a first
-> queue. §14.1 already carries the anti-spam property alone, and this section
+> queue. §13.1 already carries the anti-spam property alone, and this section
 > states that plainly in place of an unstated gate.
 
-## 14.3 Token architecture
+## 13.3 Token architecture
 
 UMBRA uses two token types. The `token_type` field of RFC 9578 gives the type.
 
-### 14.3.1 Cross-relay token — `0x0002`, blind RSA-2048
+### 13.3.1 Cross-relay token — `0x0002`, blind RSA-2048
 
 This token uses RFC 9474 `RSABSSA-SHA384-PSS-Deterministic`. It is **354
 bytes**, and a verifier checks it with one RSA public-exponent operation.
@@ -134,7 +134,7 @@ the nonprofit alone.** Such a relay holds no shared secret, and it keeps its own
 local set of spent nonces. A third-party operator does not trust the issuer,
 does not contact the issuer, and does not need trust from the issuer.
 
-### 14.3.2 First-party token — `0x0005`, VOPRF ristretto255-SHA512
+### 13.3.2 First-party token — `0x0005`, VOPRF ristretto255-SHA512
 
 This token comes from `draft-ietf-privacypass-batched-tokens`. It is **162
 bytes**, and a verifier checks it with one scalar multiplication, at about 60
@@ -155,8 +155,8 @@ evaluates `token_input`, which is the four fields before the authenticator.
   32-byte ristretto255 element of a `0x0005` key.
 - **[ABU-094]** A party MUST compute `challenge_digest` as `SHA3-256` over
   `TokenChallenge = token_type u16 || epoch u32 || redemption_context [32]u8`,
-  where `epoch` is the epoch number of §14.6 and `redemption_context` is the
-  `relay_id` of one relay under §14.7, or 32 zero bytes for any relay of the
+  where `epoch` is the epoch number of §13.6 and `redemption_context` is the
+  `relay_id` of one relay under §13.7, or 32 zero bytes for any relay of the
   type. **[ABU-095]** A verifier MUST accept a token whose `challenge_digest`
   names the current epoch or the one before it, with its own `relay_id` or
   the zero context, and MUST reject each other digest.
@@ -167,7 +167,7 @@ evaluates `token_input`, which is the four fields before the authenticator.
   with one DLEQ proof over the batch, and a client MUST verify that proof
   before it finalizes a token of the batch.
 
-### 14.3.3 Post-quantum status — state it accurately
+### 13.3.3 Post-quantum status — state it accurately
 
 **The token unlinkability is information-theoretic.** The blinding factor is
 uniform. Thus a future quantum adversary that breaks the issuer key can forge
@@ -184,7 +184,7 @@ Thus UMBRA ships classical tokens in v1. UMBRA reserves `token_type` space, and
 it sizes the wire format for an authenticator of 7 KB. PoMFRIT is the named
 migration target.
 
-## 14.4 Rate limiting the Public Address
+## 13.4 Rate limiting the Public Address
 
 A contact request to a Public Address or to a handle is the hello of Part 9
 §9.6. The hello travels as an ordinary padded
@@ -197,15 +197,15 @@ verifier of this path.
 hello before it shows the request. **[ABU-013]** A deployment MUST NOT put a
 privately verifiable credential on a path whose verifier is not its issuer.
 
-**The credential is the cross-relay token of §14.3.1.** A third party verifies
+**The credential is the cross-relay token of §13.3.1.** A third party verifies
 that token with the public key of the issuer alone, and the addressee is such
-a party. The addressee holds the issuer keys from the log of §14.5 under
+a party. The addressee holds the issuer keys from the log of §13.5 under
 `ABU-002`, thus the check contacts no party.
 
 - **[ABU-078]** An addressee client MUST verify a token of a hello against an
-  issuer key of the log of §14.5. **[ABU-079]** An addressee client MUST NOT
+  issuer key of the log of §13.5. **[ABU-079]** An addressee client MUST NOT
   accept a token of a type other than `0x0002` in a hello. The first-party
-  token of §14.3.2 needs the issuer secret, and the addressee does not hold it.
+  token of §13.3.2 needs the issuer secret, and the addressee does not hold it.
 - **[ABU-080]** An addressee client MUST accept a token of the current epoch
   and a token of the epoch before it. **[ABU-081]** An addressee client MUST
   reject a token whose nonce it accepted before at the same Profile.
@@ -213,27 +213,27 @@ a party. The addressee holds the issuer keys from the log of §14.5 under
   until the end of the next epoch. The set has the scope of one Profile of Part
   4 §4.2.5, and the handle entry and the address entry of one Profile share it.
 
-A token is one hello. A batch of 256 tokens of §14.9 is 256 hellos, at one
+A token is one hello. A batch of 256 tokens of §13.9 is 256 hellos, at one
 addressee or at many. The token is unlinkable, thus no rule links two hellos of
 one stranger, and no limit for each sender exists at an addressee. The limits
 of this path are the price of a token or of a solve, `HELLO_INBOUND_LIMIT`
 below, and the one-tap rotation of Part 9 §9.9.
 
 **The fallback is a proof of work with a derived challenge.** The addressee is
-offline when a stranger sends, and it publishes no `PowChallenge` of §14.8. The
+offline when a stranger sends, and it publishes no `PowChallenge` of §13.8. The
 client derives the challenge from the entry that it looked up.
 
 ```
 entry_pk     = HK_pub of a DirectoryEntry (Part 9 §9.3),
                or address_pk of an AddressEntry (Part 9 §9.3.3)
-epoch_number = the epoch number of §14.6
+epoch_number = the epoch number of §13.6
 verifier_id  = SHA3-256("umbra/v1/hello-verifier" || entry_pk)
 seed         = SHA3-256("umbra/v1/hello-seed" || entry_pk
                         || BE32(epoch_number))
 effort       = HELLO_POW_EFFORT
 ```
 
-The client builds the challenge string of §14.8 from those values, and it puts
+The client builds the challenge string of §13.8 from those values, and it puts
 the `PowSolution` in the `Admission` as kind `0x03`. Part 5 §5.11 holds the two
 labels.
 
@@ -246,7 +246,7 @@ labels.
   challenge.
 - **[ABU-085]** An addressee client MUST reject a hello whose `Admission` is of
   kind `0x00`. The addressee publishes no effort, thus the effort of this path
-  never reaches 0, and the surge valve of §14.8 does not apply here.
+  never reaches 0, and the surge valve of §13.8 does not apply here.
 
 `HELLO_POW_EFFORT` of 50 costs about 0.6 seconds on a phone, and about 0.2
 seconds on a desktop. A token adds 357 bytes to the hello, and a solution adds
@@ -284,7 +284,7 @@ and an Issuer shows which Origins a client visits.
 > numbers and name the addressee, because each one still states who verifies
 > and what that party holds.
 
-## 14.5 Key transparency for issuers — mandatory
+## 13.5 Key transparency for issuers — mandatory
 
 Each issuer public key and its epoch go into an **append-only transparency
 log**. **[ABU-002]** A client MUST refuse a token from a key that is not in the log. **[ABU-003]** A client
@@ -296,8 +296,8 @@ lookup of that log serve an issuer key with no new mechanism.
 
 ```
 IssuerKeyEntry {                  // the entry of one leaf, Part 9 §9.5.1
-    token_type     u16            // §14.3
-    epoch          u32            // §14.6
+    token_type     u16            // §13.3
+    epoch          u32            // §13.6
     key_len        u16
     public_key     [key_len]u8
 }
@@ -327,11 +327,11 @@ label input = "umbra/v1/issuer-key" || BE16(token_type) || BE32(epoch)
 > deanonymizes each user that accepted a personal key, and the client sees no
 > signal.
 
-## 14.6 Key rotation
+## 13.6 Key rotation
 
 The epoch number is the Unix seconds of the clock of a party divided by
 604 800, rounded down. An epoch boundary is a multiple of 604 800 seconds.
-§14.4 derives a seed from that number.
+§13.4 derives a seed from that number.
 
 - **[ABU-004]** **An issuer MUST rotate each issuer key at one global 7-day epoch boundary.**
   **[ABU-005]** An issuer MUST NOT give one key or one relay a rotation of its own. Such a
@@ -339,14 +339,14 @@ The epoch number is the Unix seconds of the clock of a party divided by
   rotation necessary, to limit the static-DH loss of log₂(Q)/2 bits on a VOPRF
   key.
 - Batch issuance has a limit of **256 tokens for each attestation**. A
-  stockpile costs money on path 1 of §14.9, and a grant on path 2. On path 3 it
+  stockpile costs money on path 1 of §13.9, and a grant on path 2. On path 3 it
   costs about 7 minutes of a phone for each batch. No rule caps the batch count
-  of one party, because a party is anonymous, and Part 16 §16.3 states that
+  of one party, because a party is anonymous, and Part 15 §15.3 states that
   residual.
 - Each token has the scope of its epoch. Thus a stockpile becomes worthless in
   one week.
 
-## 14.7 Spend checking is relay-local
+## 13.7 Spend checking is relay-local
 
 Each relay keeps its **own** set of spent nonces. That set is a Bloom filter or
 a hash set. Its scope is the current epoch, and its size matches the traffic of
@@ -358,7 +358,7 @@ that a party can spend a token one time *at each relay*. Where that cost
 matters, give the token the scope of one relay or of a small relay set, with the
 `redemption_context` of RFC 9577.
 
-## 14.8 Proof of work — a surge valve, and not a baseline
+## 13.8 Proof of work — a surge valve, and not a baseline
 
 UMBRA implements **Equi-X**, with the maintained Rust crates `hashx` and
 `equix`. Arti uses those two crates. The constraints are these:
@@ -386,9 +386,9 @@ puzzle checks each second.
 
 **The challenge.** A verifier publishes its current effort in a signed object.
 The `verifier_id` of a relay is its `relay_id` of Part 10 §10.5.3. The issuer of
-§14.9 and the handle directory each hold an ML-DSA-65 identity key that the log
-of §14.5 lists. The `verifier_id` of each of those two is the SHA3-256 of that
-key. §14.4 derives the `verifier_id` of an addressee from its published key.
+§13.9 and the handle directory each hold an ML-DSA-65 identity key that the log
+of §13.5 lists. The `verifier_id` of each of those two is the SHA3-256 of that
+key. §13.4 derives the `verifier_id` of an addressee from its published key.
 
 ```
 PowChallenge {
@@ -457,11 +457,11 @@ The object is 3 387 bytes. The signature covers
 > carrier already serves the manifest, thus a challenge at the carrier adds
 > no path, and the signature of the relay makes the carrier a courier only.
 > A carrier that withholds a challenge denies the admission of a proof of
-> work at that relay; a token of §14.3 still admits.
+> work at that relay; a token of §13.3 still admits.
 - **[ABU-067]** A verifier other than a relay or an addressee client MUST
   return its newest challenge with each admission rejection. An admission
   rejection is a rejection of a request that carries no accepted `Admission`.
-  An addressee client has no channel to the sender of a hello, and §14.4
+  An addressee client has no channel to the sender of a hello, and §13.4
   derives its challenge.
 - **[ABU-068]** A client MUST verify `sig` against the identity key of the
   verifier before it computes a solution. **[ABU-069]** A client MUST NOT
@@ -503,7 +503,7 @@ the third constraint above. Part 5 §5.11 holds the label `"umbra/v1/pow"`.
   the Equi-X verification or the `pass` test.
 - **[ABU-074]** A verifier MUST reject a `PowSolution` whose `nonce` it
   accepted before under the same `seed`. The set of accepted nonces has the
-  scope of the two live seeds, thus §14.7 holds.
+  scope of the two live seeds, thus §13.7 holds.
 - **[ABU-075]** A client MUST set `effort` in a `PowSolution` at or above the
   `effort` of the challenge that it holds.
 
@@ -517,16 +517,16 @@ the third constraint above. Part 5 §5.11 holds the label `"umbra/v1/pow"`.
 > one relay cannot give one client a private effort without the directory as a
 > witness.
 
-## 14.9 Funding infrastructure without identifying users
+## 13.9 Funding infrastructure without identifying users
 
 UMBRA funds the relays by a **sale or a grant of blind-signed token batches**. A
 user gets a batch of blind-RSA-signed relay-access tokens for one epoch by one
-of the three paths below. §14.2.1 states that a token is a fast path and not an
+of the three paths below. §13.2.1 states that a token is a fast path and not an
 admission gate, thus a user that takes no path still reaches U1.
 
 1. A purchase.
 2. A grant from a party that holds a batch, by a blind reissue.
-3. The proof of work of §14.8, which costs time in place of money.
+3. The proof of work of §13.8, which costs time in place of money.
 
 - **[ABU-076]** On path 3 the issuer MUST demand one `PowSolution` at
   `POW_EFFORT_MAX` for each token of the batch. **[ABU-077]** The issuer MUST
@@ -534,12 +534,12 @@ admission gate, thus a user that takes no path still reaches U1.
 
 A batch of 256 tokens costs about 7 minutes of a phone under that rule. Thus a
 token that a user buys with time costs what the puzzle of one relay costs at
-its maximum. Path 3 does not undercut the valve of §14.8.
+its maximum. Path 3 does not undercut the valve of §13.8.
 
 - **[ABU-090]** The nonprofit MUST publish the price of a token batch with the
-  cost model of Part 16 §16.6.1. **[ABU-091]** The nonprofit MUST NOT set that
+  cost model of Part 15 §15.6.1. **[ABU-091]** The nonprofit MUST NOT set that
   price above the recovery of the relay cost. A sale at cost recovery is a
-  payment for relay capacity and not for the software. Part 16 §16.6 rests the
+  payment for relay capacity and not for the software. Part 15 §15.6 rests the
   CRA position on that fact.
 
 This method gives the same unlinkability between the payer and the traffic as
@@ -557,7 +557,7 @@ holds for other functions.
   token also couples the protocol to a chain and to the regulatory exposure of
   that chain.
 
-## 14.10 Abuse reporting
+## 13.10 Abuse reporting
 
 UMBRA does **not** frank a 1:1 message or a private group message. The
 protocol has no report on the wire.
@@ -567,7 +567,7 @@ message. A report about a private conversation is a screenshot. A cryptographic
 accountability rail is the item that a government later demands access to. To
 build one voluntarily is the easiest method to lose G13.
 
-## 14.11 Rejected
+## 13.11 Rejected
 
 | Idea | Cause of the rejection |
 | --- | --- |
@@ -577,9 +577,9 @@ build one voluntarily is the easiest method to lose G13.
 | **Global reputation for senders** | This method needs a stable sender identifier. By design, UMBRA has none. |
 | **CAPTCHA** | A CAPTCHA fails on accessibility, sends user data to a third party, and an attacker defeats it at a low cost. |
 
-## 14.12 Blocking a contact
+## 13.12 Blocking a contact
 
-§14.10 refuses to frank a 1:1 message, and it gives the cause. That decision
+§13.10 refuses to frank a 1:1 message, and it gives the cause. That decision
 leaves harassment inside a pairwise conversation with no answer, and this
 section gives one. The answer is local, and it needs no relay and no report.
 
@@ -654,13 +654,13 @@ tag check of Part 11 §11.3.5, and no relay learns the block.
 > moment that it knows the block landed. The rules above cost the bytes of a
 > live queue, and Part 2 §2.4 states that trade.
 
-## 14.13 Parameters
+## 13.13 Parameters
 
 | Parameter | Value |
 | --- | --- |
-| `HELLO_POW_EFFORT` | 50 expected Equi-X solves for a hello with no token (§14.4) |
-| `HELLO_INBOUND_LIMIT` | 64 hellos for one published entry in each epoch (§14.4) |
-| `POW_CHALLENGE_PERIOD` | 10 min, measured by the verifier from the issue of the last challenge (§14.8) |
-| `POW_EFFORT_MAX` | 150 expected Equi-X solves (§14.8) |
-| `POW_LOOKUP_FLOOR` | 20 expected Equi-X solves (§14.8) |
-| `POW_BACKLOG_UNIT` | 64 pending admissions in one `POW_CHALLENGE_PERIOD` raise the effort by one (§14.8) |
+| `HELLO_POW_EFFORT` | 50 expected Equi-X solves for a hello with no token (§13.4) |
+| `HELLO_INBOUND_LIMIT` | 64 hellos for one published entry in each epoch (§13.4) |
+| `POW_CHALLENGE_PERIOD` | 10 min, measured by the verifier from the issue of the last challenge (§13.8) |
+| `POW_EFFORT_MAX` | 150 expected Equi-X solves (§13.8) |
+| `POW_LOOKUP_FLOOR` | 20 expected Equi-X solves (§13.8) |
+| `POW_BACKLOG_UNIT` | 64 pending admissions in one `POW_CHALLENGE_PERIOD` raise the effort by one (§13.8) |

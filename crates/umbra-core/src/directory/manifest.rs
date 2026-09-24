@@ -136,7 +136,7 @@ pub struct ListedRelay {
     /// Whether the descriptor offers the attachment role.
     pub has_attachment_role: bool,
     /// The ML-DSA-65 identity key, which signs the proof-of-work
-    /// challenge of the relay (Part 14 `ABU-068`).
+    /// challenge of the relay (Part 13 `ABU-068`).
     pub identity_pk: Vec<u8>,
     /// The verified class, 0 to 3.
     pub class: u8,

@@ -67,7 +67,7 @@ normative sentence stops that act. Thus the design removes the data from the
 position, and it does not ask the position for a promise.
 
 One position keeps such a datum. An ingress relay carries the connection, thus
-it reads the client IP address. Part 16 §16.1 holds that row and Part 16 §16.3
+it reads the client IP address. Part 15 §15.1 holds that row and Part 15 §15.3
 records the residual. Each other position holds a random identifier and a
 ciphertext only.
 
@@ -93,7 +93,7 @@ applies weights, thus no operator can increase its share of the paths at a low
 cost.
 
 UMBRA does **not** claim security against an adversary that controls the
-majority of the relay capacity. Part 16 quantifies that residual risk.
+majority of the relay capacity. Part 15 quantifies that residual risk.
 
 ### A4 — Global passive adversary
 
@@ -119,7 +119,7 @@ to make the compelled set empty by construction. A relay that does not hold a
 user identifier cannot receive an order to give one. This specification
 identifies each location where a party can accumulate compellable data. This
 specification then removes that data, or it records the data as a residual risk
-in Part 16.
+in Part 15.
 
 ### A6 — Endpoint adversary
 
@@ -131,14 +131,14 @@ force to the user.
 a compromised endpoint. UMBRA does limit the damage. Forward secrecy prevents
 the recovery of past messages from the current key state. Post-compromise
 security lets the channel heal when the attacker loses access. At-rest
-encryption with hardware-backed key wrapping (Part 15) makes forensic extraction
+encryption with hardware-backed key wrapping (Part 14) makes forensic extraction
 from a powered-off device more difficult.
 
 > **Note on multi-device operation.** The owner selected multi-device operation
 > *with* history sync. This is a deliberate and informed decision. If a party
 > seizes one device in a Device Set, that party gets the synced history of that
 > device. Part 7 gives the mitigations, which are per-device sync scoping,
-> retention limits, and revocation. Part 16 states the residual exposure again.
+> retention limits, and revocation. Part 15 states the residual exposure again.
 
 ### A7 — Platform adversary
 
@@ -147,26 +147,26 @@ with the software that shares that device. A7 holds no seized device, and A7
 runs no malware. A7 is the platform cloud service that copies an application
 container, the input method, an enabled accessibility service, the clipboard,
 and the task snapshot service. A7 reads each byte that the client gives to a
-platform interface. A7 cannot open the encrypted store of Part 15 §15.6.4, and
+platform interface. A7 cannot open the encrypted store of Part 14 §14.6.4, and
 A7 cannot decrypt a record in transit.
 
 Android and the web are the v1 platforms (Part 1 §1.1). On the web client of
-Part 15 §15.7, A7 is the browser, the browser profile and its sync to the
+Part 14 §14.7, A7 is the browser, the browser profile and its sync to the
 account of the user at the browser vendor, each other extension that the user
 installed, and the download location. This section keeps the abstract term
 *the platform*, because the rule below binds each platform, and each platform
 that a later revision adds.
 
 **[THR-015]** A web client MUST NOT run as a page that a host serves, because
-trust assumption 4 of §2.6 fails for such a page at each load. Part 15 §15.7
+trust assumption 4 of §2.6 fails for such a page at each load. Part 14 §14.7
 gives the form that holds that assumption.
 
 **In scope, and partially mitigated.** **[THR-013]** A client MUST NOT write a
-plaintext record, a key, or a decrypted attachment to a platform store. Part 15
-§15.6.6 defines a platform store, and it gives the rule for each platform
+plaintext record, a key, or a decrypted attachment to a platform store. Part 14
+§14.6.6 defines a platform store, and it gives the rule for each platform
 interface. An explicit user action is the one exception, and that section
-names each such action. Part 16 §16.1 gives the platform cloud services a row,
-and Part 16 §16.3 records each accepted residual.
+names each such action. Part 15 §15.1 gives the platform cloud services a row,
+and Part 15 §15.3 records each accepted residual.
 
 UMBRA cannot remove A7, because a client runs on an operating system that UMBRA
 does not control. A6 holds the device against the user, and A7 serves the user.
@@ -176,9 +176,9 @@ gets a mitigation only.
 > *Cause.* An earlier draft modeled six adversaries, and no class owned the
 > platform of an honest device. A client that decrypted a video into the
 > platform media store was conformant. That file reached a platform cloud
-> service at the next sync. The at-rest protection of Part 15 §15.6.4 ended at
+> service at the next sync. The at-rest protection of Part 14 §14.6.4 ended at
 > the disk write. The platform backup of the application container reached a
-> party that Part 16 §16.1 did not list, against G13.
+> party that Part 15 §15.1 did not list, against G13.
 
 ## 2.3 Security goals
 
@@ -199,24 +199,24 @@ realizes the goal.
 | G9 | **Cross-contact unlinkability** — two contacts of the same user cannot prove that they share a correspondent | A2, and colluding contacts | Part 4 |
 | G10 | **Deniability** — a transcript does not prove authorship cryptographically to a third party | A5, A6 | Part 5 |
 | G11 | **Membership privacy** — no relay learns the membership of a private group | A2, A5 † | Part 11 |
-| G13 | **No compellable identity data** — infrastructure operators hold no data that identifies a user | A5 † | Parts 3, 10, 16 |
+| G13 | **No compellable identity data** — infrastructure operators hold no data that identifies a user | A5 † | Parts 3, 10, 15 |
 
-> † This goal holds only to the limit that Part 16 states. For G7 and G11 the
-> limit is an active A2 or an active A3, and Part 16 §16.3 gives it. For G11 the
+> † This goal holds only to the limit that Part 15 states. For G7 and G11 the
+> limit is an active A2 or an active A3, and Part 15 §15.3 gives it. For G11 the
 > group-queue relay also holds a bounded view. It learns the member count of a
 > group at each rotation, the count of reader sessions and writer sessions, and
 > the time and the bucket of each record. It learns no identity and no
-> membership list. Part 3 §3.11 states that view, and Part 16 §16.3 records it.
+> membership list. Part 3 §3.11 states that view, and Part 15 §15.3 records it.
 > For G13 the
 > limit is the ingress relay, which sees a client IP address because it carries
-> the connection. Part 16 §16.1 holds that row, and Part 16 §16.3 records the
+> the connection. Part 15 §15.1 holds that row, and Part 15 §15.3 records the
 > residual. No protocol removes that address from the party that carries the
 > packet.
 
 > **Note on the goal numbers.** This table has no G12. An earlier draft gave G12
 > as censorship resistance. This specification withdraws that goal, and §2.5
 > gives the cause. The numbers of the other goals do not change, because Parts
-> 3, 14, and 16 refer to G13.
+> 3, 13, and 15 refer to G13.
 
 ## 2.4 Usability goals
 
@@ -237,7 +237,7 @@ implementation to them in the same manner.
 | U6 | Delivery reliability, the recipient returns in the retention window | ≥ 99.9 % delivered in 60 s after the recipient comes online. **No message is permanently undeliverable** in the window |
 | U7 | Addition of a second device | ≤ 60 s, one QR scan, and **no contact does the verification again** |
 | U8 | Cold start to a rendered inbox, the store unlocked | ≤ 1.5 s on a 2021-class mid-range Android device |
-| U8b | Unlock to a rendered inbox, after the auto-lock of Part 15 §15.6.4 | ≤ 4.5 s from the passphrase confirmation, on the same device. The Argon2id step of about 3 s is inside that figure |
+| U8b | Unlock to a rendered inbox, after the auto-lock of Part 14 §14.6.4 | ≤ 4.5 s from the passphrase confirmation, on the same device. The Argon2id step of about 3 s is inside that figure |
 | U9 | **Undecryptable-message rate** | < 1 in 10⁵ delivered, as the ratio at one device over 30 days. The numerator is the count of the records that `THR-009` lets the receiver classify as undecryptable. The denominator is the count of the delivered records |
 | U10 | Account recovery, for a user that completed the recovery setup of Part 4 §4.7.6 | ≥ 99 % recover the identity, the contacts, and the queue state. ≥ 95 % also recover 45 days or more of text history. Median ≤ 10 min |
 | U10b | Recovery setup | ≤ 4 taps from the settings screen to a confirmed recovery code. The prompts of Part 4 §4.7.6 offer that path two times, and no prompt blocks the message list |
@@ -285,21 +285,21 @@ implementation to them in the same manner.
 > that rule sets the target. Part 3 §3.12 states the figures, thus a reader
 > sees the cost.
 >
-> **U8 covers an unlocked store, and U8b covers the unlock.** Part 15 §15.6.4
+> **U8 covers an unlocked store, and U8b covers the unlock.** Part 14 §14.6.4
 > pays about 3 s of Argon2id at each unlock. Thus a start after the auto-lock
 > cannot render an inbox in 1.5 s. An earlier draft stated one figure for the
 > two paths.
 >
 > **U9 is a device-local ratio.** An earlier draft added a population target of
 > 0.1 % of the monthly active users. That target needs a report from each user,
-> and Part 16 §16.6 permits no telemetry. A client shows the ratio in its
+> and Part 15 §15.6 permits no telemetry. A client shows the ratio in its
 > diagnostics screen, and it sends the ratio to no party.
 >
 > **U10 covers a user that completed the setup.** Part 4 §4.7.6 lets a user
 > dismiss the recovery prompt two times. A user with no recovery code, no
 > backup, and no guardians recovers nothing. An earlier draft measured that user
 > against the 99 % target. U10b measures the setup path instead, because a
-> published completion rate needs the telemetry that Part 16 §16.6 forbids.
+> published completion rate needs the telemetry that Part 15 §15.6 forbids.
 
 If a usability goal conflicts with a security goal, this specification states
 the conflict explicitly and names the resolution. A silent trade of a U-goal for
@@ -336,9 +336,9 @@ adds a trade MUST add a row to this table.
 | U2 moves from 1.5 s to 2.0 s, because the earlier propagation model was optimistic and `PACING_MEAN` holds at 1 s | Part 3 §3.12 |
 | A link preview is a statement by the sender, because the receiver MUST NOT fetch the URL | Part 3 §3.3.2 |
 | A disappearing message does not enter a backup, thus a restore does not recover it | Part 4 §4.7.2 |
-| A blocked contact gets an ordinary delivery acknowledgment, thus the block costs the queue and the bytes of a live contact | Part 14 §14.12 |
-| A 250 MiB attachment costs about 259 MiB of uplink, and about 7 minutes at 5 Mbit/s | Part 13 §13.7.2 |
-| The relay that takes a chunk learns the other two relays that hold that chunk | Part 13 §13.4.1 |
+| A blocked contact gets an ordinary delivery acknowledgment, thus the block costs the queue and the bytes of a live contact | Part 13 §13.12 |
+| A 250 MiB attachment costs about 259 MiB of uplink, and about 7 minutes at 5 Mbit/s | Part 12 §12.7.2 |
+| The relay that takes a chunk learns the other two relays that hold that chunk | Part 12 §12.4.1 |
 | A poll count can differ between two members, because a group has no total order | Part 11 §11.11 |
 | A shared contact needs the consent of that contact, thus a share is three records and not one | Part 6 §6.6.7 |
 | A moderation epoch names no author, and a member folds each superseded epoch, thus the chain is not an audit log | Part 11 §11.9.6 |
@@ -346,12 +346,12 @@ adds a trade MUST add a row to this table.
 | A member that leaves a group reads the group until any other member rotates the epoch, one backoff after the first member comes online | Part 11 §11.4.1 |
 | An absence claim moves each ratchet of an absent device in one record, thus a device that is offline for `OWNER_ABSENCE` loses its ownership with no notice | Part 7 §7.3.1 |
 | A catch-up object puts the backlog of an absence on the chunk path at once, thus a relay reads that backlog as one attachment | Part 7 §7.5.1 |
-| A save to the media store and a screenshot stay as user actions, thus one tap moves a plaintext out of the encrypted store | Part 15 §15.6.6 |
-| The accessibility tree stays whole, thus an enabled accessibility service reads each rendered message | Part 15 §15.6.6 |
+| A save to the media store and a screenshot stay as user actions, thus one tap moves a plaintext out of the encrypted store | Part 14 §14.6.6 |
+| The accessibility tree stays whole, thus an enabled accessibility service reads each rendered message | Part 14 §14.6.6 |
 | The ClientHello is the ClientHello of the rustls stack and not of a browser, thus a classifier tells an UMBRA client from a browser on the first flight | Part 3 §3.8.1 |
 | A web client sends the ClientHello of its browser, thus a classifier tells a web client from a native client on the first flight | Part 3 §3.8.1 |
 | A web client receives a message while its browser runs, and the phone of the user carries each notification at another time | Part 8 §8.6 |
-| The web client is a browser extension, thus each browser vendor is a gatekeeper of that client, and a user without the extension has no web client | Part 15 §15.7 |
+| The web client is a browser extension, thus each browser vendor is a gatekeeper of that client, and a user without the extension has no web client | Part 14 §14.7 |
 | A published rendezvous queue rotates each 30 days, thus one relay holds the hello count of one period and the holder pays one queue and one write in each period | Part 9 §9.9 |
 | A record that no relay accepts in `SEND_GIVE_UP` fails, and the user resends it, thus no retransmission runs for the life of a session | Part 3 §3.7 |
 | A 1:1 conversation and a group at or below `GROUP_ALL_NOTIFY_MAX` default to a notification for each record. Thus a small conversation alerts on each record, and a large one alerts on a mention only | Part 7 §7.5.9 |
@@ -359,18 +359,18 @@ adds a trade MUST add a row to this table.
 | A delivery receipt and a read receipt are off by default. Thus a sender does not learn that a record arrived unless the peer opts in | Part 3 §3.5.4 |
 | A typing indicator is off by default, thus a peer does not learn that a user composes unless that user opts in | Part 6 §6.6.9 |
 | A message push lives 24 hours at the provider, thus a seizure there exposes one day of 69-byte blobs in place of one hour | Part 8 §8.4.3 |
-| A device that fails three consecutive blob opens shows a clock state. Thus a wrong clock is visible, and a preview stops until the root is fresh | Part 8 §8.2.3, Part 15 §15.9.2 |
-| A client takes its time from the signed directory root. Thus a device clock that is wrong by more than one hour stops nothing, and the client shows one line for it | Part 10 §10.5.2, Part 15 §15.9.2 |
-| A sender re-encodes each media object and removes its metadata fields. Thus a recipient gets a smaller file with no location, and the original needs one selection for each send | Part 13 §13.3 |
-| A forward is a new upload under a fresh key. Thus a relay joins no two conversations at one chunk, and the sender pays the upload again | Part 13 §13.3 |
-| A receiver renders the verified segments of a media object before the digest check. Thus a player starts early, and a truncated object shows its end late | Part 13 §13.3.1 |
-| A relay serves at most four times its store in a day and one chunk at most 60 times an hour. Thus a popular object moves to six replicas that its author pays for | Part 13 §13.11 |
-| A bulk circuit runs in the mode of its conversation, thus a Private-mode upload of 250 MiB takes about 80 minutes | Part 13 §13.7.2 |
+| A device that fails three consecutive blob opens shows a clock state. Thus a wrong clock is visible, and a preview stops until the root is fresh | Part 8 §8.2.3, Part 14 §14.9.2 |
+| A client takes its time from the signed directory root. Thus a device clock that is wrong by more than one hour stops nothing, and the client shows one line for it | Part 10 §10.5.2, Part 14 §14.9.2 |
+| A sender re-encodes each media object and removes its metadata fields. Thus a recipient gets a smaller file with no location, and the original needs one selection for each send | Part 12 §12.3 |
+| A forward is a new upload under a fresh key. Thus a relay joins no two conversations at one chunk, and the sender pays the upload again | Part 12 §12.3 |
+| A receiver renders the verified segments of a media object before the digest check. Thus a player starts early, and a truncated object shows its end late | Part 12 §12.3.1 |
+| A relay serves at most four times its store in a day and one chunk at most 60 times an hour. Thus a popular object moves to six replicas that its author pays for | Part 12 §12.11 |
+| A bulk circuit runs in the mode of its conversation, thus a Private-mode upload of 250 MiB takes about 80 minutes | Part 12 §12.7.2 |
 | A holder reads its own label at each tree head, thus a compelled insertion under that label raises the takeover warning at the holder, and each published label costs one metered lookup for each head | Part 9 §9.5.2 |
 | The invitation link names one invitation host, thus that host learns each browser open of a link by a party without the client | Part 4 §4.3.1 |
 | Private notifications wake the device on a fixed clock and open each queue-relay session. The idle background then rises to 148.96 MB or 196.42 MB each month. U4b names no target in this draft | Part 3 §3.12 |
 | A published Public Address sits in a second directory index, thus a party that holds its 20-byte hash reaches its rendezvous queue | Part 9 §9.3.3 |
-| The addressee verifies the token or the proof of work of a hello, thus no relay limits a contact request. No limit for each sender exists at a Public Address, because the token is unlinkable | Part 14 §14.4 |
+| The addressee verifies the token or the proof of work of a hello, thus no relay limits a contact request. No limit for each sender exists at a Public Address, because the token is unlinkable | Part 13 §13.4 |
 | A rendezvous queue in Instant mode registers with the Notification Delivery Relay. That relay then learns that a push token belongs to a published handle or address | Part 8 §8.2.6 |
 
 ### 2.4.1 Where each usability goal is realized
@@ -382,29 +382,29 @@ those rules has to check the goal again.
 
 | Goal | The rules that carry it | The test |
 | --- | --- | --- |
-| U1 | Part 3 §3.10 carriers, Part 4 §4.2.5 `IDN-015`, Part 4 §4.7.6 `IDN-054`, Part 14 §14.2.1 | A scripted first launch on a mid-tier Android device on 4G |
+| U1 | Part 3 §3.10 carriers, Part 4 §4.2.5 `IDN-015`, Part 4 §4.7.6 `IDN-054`, Part 13 §13.2.1 | A scripted first launch on a mid-tier Android device on 4G |
 | U2 | Part 3 §3.9 modes, Part 3 §3.5.2 pacing, Part 7 §7.5.1 `DEV-193`, Part 7 §7.5.4 | A two-party send, from the ratchet owner and from a peer device |
 | U3 | Part 8 §8.3 modes, Part 8 §8.4.1, Part 8 §8.4.3 | A locked and idle device, in Instant mode and in Private mode |
 | U4 | Part 3 §3.12 idle table, Part 3 §3.6.2 tier C, Part 3 §3.12 `NET-096` and `NET-097` and `NET-099` and `NET-100`, Part 4 §4.7.2 `IDN-080`, Part 6 §6.2.3 `WIR-361`, Part 8 §8.5 `WAKE_COALESCE_WINDOW` | A 24 h idle capture of the background bytes, in Instant mode, with the arrival count of the model day |
 | U4b | Part 3 §3.12 idle table and its Private notifications paragraph, Part 8 §8.3 modes | No target in this draft. A 24 h idle capture of the background bytes at each cadence of Private mode reports the figure |
 | U5 | Part 3 §3.12 battery, Part 8 §8.4.1, Part 8 §8.8 | A 24 h idle run with no arrival, and a run with a scripted arrival count, on stock Android **and** GrapheneOS, with a power monitor |
-| U6 | Part 3 §3.2.4 `MSG_TTL`, Part 3 §3.7 ARQ and `SEND_GIVE_UP`, Part 13 §13.4 replicas, Part 13 §13.7.1, Part 15 §15.9 | A recipient that returns inside the retention window |
+| U6 | Part 3 §3.2.4 `MSG_TTL`, Part 3 §3.7 ARQ and `SEND_GIVE_UP`, Part 12 §12.4 replicas, Part 12 §12.7.1, Part 14 §14.9 | A recipient that returns inside the retention window |
 | U7 | Part 7 §7.4, Part 7 §7.6 `DEV-131` | A second device link, timed, with a contact that verified before it |
-| U8 | Part 15 §15.6.2 | A cold start on a 2021-class mid-range Android device, with the store unlocked |
-| U8b | Part 15 §15.6.4 | A start after the auto-lock on the same device, timed from the passphrase confirmation |
+| U8 | Part 14 §14.6.2 | A cold start on a 2021-class mid-range Android device, with the store unlocked |
+| U8b | Part 14 §14.6.4 | A start after the auto-lock on the same device, timed from the passphrase confirmation |
 | U9 | Part 2 §2.4 `THR-009`, Part 5 §5.5.2 braid, Part 5 §5.5.4 `CRY-098`, Part 6 §6.6.11 `WIR-456`, Part 11 §11.4.3 key supply | A count of the undecryptable records against the delivered records, at one device over 30 days |
 | U10 | Part 4 §4.7.1, Part 4 §4.7.2, Part 4 §4.7.3, Part 4 §4.8 | A restore from a fresh install, timed, at each of the three recovery paths, after a completed setup |
 | U10b | Part 4 §4.7.6 `IDN-051` to `IDN-054` | A scripted setup from the settings screen, with a tap count |
-| S1 | Part 4 §4.3.3 `IDN-129` to `IDN-132`, Part 9 §9.3.3, Part 9 §9.6, Part 8 §8.2.6, Part 14 §14.4 | A pasted address string at a fresh install, timed to the shown request at the addressee, in Instant mode and in Private mode |
+| S1 | Part 4 §4.3.3 `IDN-129` to `IDN-132`, Part 9 §9.3.3, Part 9 §9.6, Part 8 §8.2.6, Part 13 §13.4 | A pasted address string at a fresh install, timed to the shown request at the addressee, in Instant mode and in Private mode |
 | S2 | Part 9 §9.4, Part 9 §9.6, Part 8 §8.2.6 | A typed handle at a fresh install, timed in the same manner as S1 |
-| S4 | Part 6 §6.6.7 `WIR-358`, Part 4 §4.3.1 | A three-party introduction, timed from the request to the shown offer |
+| S3 | Part 6 §6.6.7 `WIR-358`, Part 4 §4.3.1 | A three-party introduction, timed from the request to the shown offer |
 
 **[THR-011]** A revision that adds a usability goal or a sociality goal MUST add
 a row to this table.
 **[THR-012]** A revision that changes a rule of a row MUST measure that goal
 again.
 
-> *Cause.* Part 15 gives the assurance program of the cryptography and it gives
+> *Cause.* Part 14 gives the assurance program of the cryptography and it gives
 > no test plan for a usability goal. U5 was the one goal with a named test. Two
 > defects that this revision corrects came from that gap. Part 4 §4.7.2 gave the
 > backup no bandwidth row against U4, and Part 7 §7.5.4 gave a peer-device send
@@ -415,21 +415,17 @@ again.
 The goals of §2.4 cover the private tier of Part 4 §4.1. A user with no
 published address meets a contact through a QR code or through a link. The
 table below covers the social tier, which a user turns on. S1 and S2 need a
-published address or a published handle at the addressee. S4 needs the
+published address or a published handle at the addressee. S3 needs the
 consent of the contact that the introduction names.
 
 | # | Goal | Target |
 | --- | --- | --- |
 | S1 | **Reach from a Public Address** — a stranger that holds a pasted address or a reusable link (Part 4 §4.3.2) sends a contact request | ≤ 3 taps from the paste to a sent request. The addressee sees the request in ≤ 60 s in Instant mode, and in ≤ 24 h in Private mode. Both devices have network |
 | S2 | **Reach from a handle** — a stranger that types a handle sends a contact request | The taps and the latency of S1, plus one lookup of Part 9 §9.4 |
-| S4 | **Introduction** — a user connects one contact with another contact through the contact share of Part 6 §6.6.7 | ≤ 2 taps at each of the three parties. The offer reaches the third party inside the U2 latency after the grant |
+| S3 | **Introduction** — a user connects one contact with another contact through the contact share of Part 6 §6.6.7 | ≤ 2 taps at each of the three parties. The offer reaches the third party inside the U2 latency after the grant |
 
 **[THR-014]** A conformant implementation MUST meet each goal of the table
 above. §2.4.1 names the rules that carry each goal and the test of each goal.
-
-> **Note on the goal numbers.** This table has no S3. An earlier draft gave S3
-> as a search for a public community, and Part 12 withdraws that feature. The
-> number of S4 does not change, because Part 6 refers to it.
 
 > *Cause.* An earlier draft gave the social tier no goal. Part 9 defined a
 > handle lookup, and no rule let a stranger reach a Public Address from the
@@ -457,9 +453,9 @@ UMBRA does not give the properties below.
 - **Censorship resistance.** UMBRA does not have a goal to operate in a network
   that blocks it. Some mechanisms in Part 3 make a block more expensive. Those
   mechanisms exist for the metadata goals, and a failed block is a side-effect.
-  Part 3 §3.8.1 and Part 16 §16.2.7 give the limits.
+  Part 3 §3.8.1 and Part 15 §15.2.7 give the limits.
 - **Legal protection.** To use UMBRA is not a defense in a jurisdiction. In some
-  jurisdictions, to use UMBRA is itself a risk. Refer to Part 16.
+  jurisdictions, to use UMBRA is itself a risk. Refer to Part 15.
 
 **Two omissions of this draft.** The two items below are not non-goals. They
 are decisions that the owner has not made. This draft states each one as an
@@ -467,7 +463,7 @@ omission, thus a reader does not read silence as a position.
 
 - **Real-time media.** This draft gives no call profile and no media session.
   A revision that adds one states its latency target in §2.4, its metadata
-  cost in the trade table of §2.4, and its residual in Part 16 §16.3.
+  cost in the trade table of §2.4, and its residual in Part 15 §15.3.
 - **The ecosystem position.** This draft states no position on federation, on
   a bridge to another network, or on a local automation surface. A revision
   that takes a position states the metadata cause in this section.
@@ -482,15 +478,15 @@ lists them, thus a reader can check them and does not have to find them.
    gives.
 2. **The random number generator of the device is sound.** UMBRA derives all the
    long-term secrets from it. Part 5 §5.9 gives the hardening against a
-   generator that fails partially, and Part 15 §15.10 names the platform
+   generator that fails partially, and Part 14 §14.10 names the platform
    source.
 3. **A minimum of one relay in each chain is honest** and keeps no logs. The
    path selection in Part 10 makes this condition probable, but not certain.
 4. **The client binary that the user runs is the binary that the auditor
-   examined.** Part 15 gives reproducible builds and binary transparency.
+   examined.** Part 14 gives reproducible builds and binary transparency.
    Without these two controls, no party can check this assumption, and all the
    other guarantees become void. A web page that a host serves fails this
-   assumption at each load, and Part 15 §15.7 gives the web client a form
+   assumption at each load, and Part 14 §14.7 gives the web client a form
    that holds it.
 5. **The user verifies a contact out-of-band a minimum of one time** for a
    conversation with serious consequences after a compromise. Part 4 §4.5.2
@@ -503,7 +499,7 @@ lists them, thus a reader can check them and does not have to find them.
 
 ## 2.7 What each party learns — summary
 
-This table is the compact form of the analysis in Parts 3, 8, 10, and 16. This
+This table is the compact form of the analysis in Parts 3, 8, 10, and 15. This
 document repeats the analysis here, because a reviewer needs it first.
 
 **Part 3 §3.11 is the normative table, and this one is a summary.** The two

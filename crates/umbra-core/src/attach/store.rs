@@ -1,6 +1,6 @@
 //! The chunk store of a relay: the registrations, the held chunks, the
-//! erase times of the two classes, the upload quota of §13.10, and the
-//! egress budget of §13.11. The relay authenticates a command before it
+//! erase times of the two classes, the upload quota of §12.10, and the
+//! egress budget of §12.11. The relay authenticates a command before it
 //! calls the store, with the credentials that the store hands it.
 
 use alloc::{collections::BTreeMap, vec::Vec};

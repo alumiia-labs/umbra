@@ -2,7 +2,7 @@
 //! reader of one request. The OHTTP relay posts to the NDR, and the NDR
 //! posts to a UnifiedPush endpoint. Neither needs more than one request
 //! with a body of a plain length on one connection, thus no HTTP library
-//! enters register R3 (Part 15 §15.2.3).
+//! enters register R3 (Part 14 §14.2.3).
 
 use std::{sync::Arc, time::Duration};
 

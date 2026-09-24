@@ -1,4 +1,4 @@
-//! The exported surface of Part 15 §15.6.1, driven from Rust: the first
+//! The exported surface of Part 14 §14.6.1, driven from Rust: the first
 //! launch, a draft, a send, a render, a lock, and an unlock over a SQLite
 //! file.
 

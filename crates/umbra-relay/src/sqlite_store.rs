@@ -13,9 +13,8 @@ use umbra_queue::relay::Stored;
 use crate::store::{Loaded, RelayStore, StoreChange, StoreFault, StoredInvitation, StoredQueue};
 
 /// The schema version in `user_version`. Version 2 added the group
-/// queues of Part 11, and version 3 the chunks of Part 13. Version 4 added
-/// the communities of Part 12, and version 5 removes them again.
-const SCHEMA_VERSION: i64 = 5;
+/// queues of Part 11, and version 3 the chunks of Part 12.
+const SCHEMA_VERSION: i64 = 3;
 
 const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS queues (
@@ -115,8 +114,6 @@ impl SqliteStore {
             return Err(StoreFault);
         }
         fault(connection.execute_batch(SCHEMA))?;
-        // Part 12 is withdrawn, thus the records of a version 4 file go.
-        fault(connection.execute_batch("DROP TABLE IF EXISTS community_records;"))?;
         fault(connection.pragma_update(None, "user_version", SCHEMA_VERSION))?;
         Ok(SqliteStore { connection })
     }
@@ -679,38 +676,6 @@ mod tests {
             }])
             .unwrap();
         assert_eq!(store.load().unwrap().group_queues.len(), 1);
-    }
-
-    #[test]
-    fn a_file_of_version_4_loses_its_community_records() {
-        let path = file("withdrawn.db");
-        {
-            let connection = rusqlite::Connection::open(&path).unwrap();
-            connection
-                .execute_batch(
-                    "CREATE TABLE queues (recipient_id BLOB PRIMARY KEY, head BLOB NOT NULL);
-                     CREATE TABLE community_records (community_id BLOB NOT NULL,
-                        seq INTEGER NOT NULL, accepted_at INTEGER NOT NULL,
-                        bytes BLOB NOT NULL, PRIMARY KEY (community_id, seq));
-                     INSERT INTO community_records VALUES (x'01', 1, 1, x'C7');
-                     PRAGMA user_version = 4;",
-                )
-                .unwrap();
-        }
-        drop(SqliteStore::open(&path).unwrap());
-        let connection = rusqlite::Connection::open(&path).unwrap();
-        let tables: i64 = connection
-            .query_row(
-                "SELECT count(*) FROM sqlite_master WHERE name = 'community_records'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(tables, 0);
-        let version: i64 = connection
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(version, SCHEMA_VERSION);
     }
 
     #[test]

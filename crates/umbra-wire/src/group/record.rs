@@ -337,7 +337,7 @@ pub enum Carrier<'a> {
     Chunked {
         /// The slots in each segment.
         slots_per_chunk: u16,
-        /// The descriptor of Part 13 §13.3.
+        /// The descriptor of Part 12 §12.3.
         descriptor: &'a [u8],
     },
 }

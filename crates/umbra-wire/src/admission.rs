@@ -1,4 +1,4 @@
-//! The admission trailer of Part 14 §14.2: a token, a proof of work, or
+//! The admission trailer of Part 13 §13.2: a token, a proof of work, or
 //! nothing.
 
 use crate::{
@@ -15,9 +15,9 @@ pub const NONE_LEN: usize = 3;
 pub enum AdmissionKind {
     /// No credential; the body is empty.
     None = 0x00,
-    /// A token of Part 14 §14.3, 354 or 162 bytes by the token type.
+    /// A token of Part 13 §13.3, 354 or 162 bytes by the token type.
     Token = 0x01,
-    /// A `PowSolution` of Part 14 §14.8, 69 bytes.
+    /// A `PowSolution` of Part 13 §13.8, 69 bytes.
     Pow = 0x03,
 }
 

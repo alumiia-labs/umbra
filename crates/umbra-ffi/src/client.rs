@@ -1,5 +1,5 @@
-//! The client behind the surface of Part 15 §15.6.1: the locked and the
-//! unlocked state over the store of §15.6.4, the send of a draft, the
+//! The client behind the surface of Part 14 §14.6.1: the locked and the
+//! unlocked state over the store of §14.6.4, the send of a draft, the
 //! render of a message into a sink, and the one event stream.
 //!
 //! Each network, ratchet, queue, and onion function stays on the Rust

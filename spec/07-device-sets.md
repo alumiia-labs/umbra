@@ -53,7 +53,7 @@ The mitigations below are all mandatory:
 3. **Fast revocation** (§7.7) — the system cuts off a lost device, and that
    device cannot decrypt future traffic. §7.3 makes the roster signing key local
    to one device, thus a revoked device also cannot sign a later roster epoch.
-4. **Per-device at-rest encryption** (Part 15) — a seized device that is powered
+4. **Per-device at-rest encryption** (Part 14) — a seized device that is powered
    off is a ciphertext blob and not a transcript.
 
 ## 7.3 Structure
@@ -146,8 +146,8 @@ OwnerClaim {
 **The subject is blinded.** `K_set` is the `DeviceSetKey` of Part 4 §4.2, and
 Part 6 §6.6 uses it in the same manner for `msg_ref`. **[DEV-226]** A device
 MUST compute `subject` as `SHA3-256(K_set || scope || value)`. For scope `0x01`
-the value is the pairwise identity public key. The scope `0x02` named a
-community identity of the withdrawn Part 12, and it is retired. For scope
+the value is the pairwise identity public key. The scope `0x02` named an
+identity of an earlier draft, and it is retired. For scope
 `0x03` the value is the
 `device_id` of the absent device, and §7.5.4 gives that claim. For scope
 `0x04` the value is 32 zero bytes, thus one claim names the group sender owner
@@ -158,8 +158,8 @@ of Part 11 §11.12 for every group of the user, and §7.5.4 gives that claim.
 > device and the archive of §7.6.1 held it. `K_set` never leaves the device
 > set, thus a party outside the set cannot test a candidate against the list.
 > A seized device holds `K_set`. Thus the blinding protects the archive and a
-> roster that left the set, and it does not protect a seized device. Part 16
-> §16.3 records that residual.
+> roster that left the set, and it does not protect a seized device. Part 15
+> §15.3 records that residual.
 
 A `DeviceEntry` is 3 225 bytes and an `OwnerClaim` is 49 bytes. A roster at
 `MAX_DEVICES` with 4 tombstones and 8 claims is 29 625 bytes, thus it uses
@@ -232,7 +232,7 @@ the same time. That event is normal use, and it is not evidence of an attack.
 > fork display for each pair of successors that rule 1 or rule 2 ordered. In a
 > set of three devices a hostile device then revoked the two honest devices
 > in two competing epochs. Rule 2 selected one of them in silence at each
-> honest device. Part 16 §16.3 records that residual.
+> honest device. Part 15 §15.3 records that residual.
 
 > *The effect on a revoked device.* A revoked device holds its own
 > `DeviceRosterKey_i` and the roster chain up to the epoch that revoked it. It
@@ -422,7 +422,7 @@ channel. The target is 60 seconds or less and one QR scan (usability goal U7).
   link QR code MUST operate one time only.
 - **[DEV-007]** A device that has a provision MUST refuse a link into a second device set. **[DEV-008]** The
   client MUST make the user do an explicit local wipe before a second link.
-- **The web client.** **[DEV-264]** A web client of Part 15 §15.7 MUST link
+- **The web client.** **[DEV-264]** A web client of Part 14 §14.7 MUST link
   as a device of this section, and it MUST NOT make a `RootIdentity`.
   **[DEV-265]** When a web client returns to this flow after it lost its
   store, the existing device MUST revoke the old entry under §7.7 before step
@@ -510,8 +510,8 @@ about 24 days to drain it. The catch-up object removes that wait.
 - **[DEV-236]** If the acknowledged counter of a peer lags by more than
   `SYNC_CATCHUP_LAG`, the device MUST make a catch-up object. The object holds
   each retained record above that counter, and §7.8 gives the value.
-- **[DEV-237]** A device MUST write the object on the chunk path of Part 13
-  §13.3.3 over the connection of Part 13 §13.8. Part 4 §4.7.2 carries the
+- **[DEV-237]** A device MUST write the object on the chunk path of Part 12
+  §12.3.3 over the connection of Part 12 §12.8. Part 4 §4.7.2 carries the
   backup on that path in the same manner.
 - **[DEV-238]** A device MUST send the `FileDescriptor` of that object in a
   `DeviceSetControl` of `control_type` `0x04`. §7.5.5 gives that record, and
@@ -714,7 +714,7 @@ class in Part 6 §6.6. **[DEV-022]** A client MUST NOT process a kind that decla
   | The delivery state and the read state | Each message |
   | The local insertion sequence of Part 11 §11.7 | Each conversation |
   | The group `counter` of the group sender owner, Part 11 §11.3.4 and §7.5.4 | Each group |
-  | The block state of Part 14 §14.12 | Each contact |
+  | The block state of Part 13 §13.12 | Each contact |
   | The archive flag, the pin flag, and the folder label | Each conversation |
   | The unread marker that a user sets by hand | Each conversation |
   | The draft text | Each conversation |
@@ -732,11 +732,11 @@ class in Part 6 §6.6. **[DEV-022]** A client MUST NOT process a kind that decla
 
   > **The draft is the one item that carries content.** A draft is unsent text,
   > thus a peer device holds a message that no party sent. **[DEV-199]** A
-  > client MUST hold a draft under the record encryption of Part 15 §15.6.4.
+  > client MUST hold a draft under the record encryption of Part 14 §14.6.4.
   > **[DEV-200]** A client MUST NOT put a draft in the backup of Part 4 §4.7.2.
   > **[DEV-201]** A client MUST erase a draft from the device set when the user
   > sends it or clears it. **[DEV-202]** A client MUST let the user turn the
-  > draft sync off, and Part 16 §16.3 records the residual.
+  > draft sync off, and Part 15 §15.3 records the residual.
 - **An ephemeral record** is kind `0x08`. **[DEV-041]** A client MUST NOT store it.
   **[DEV-042]** A client MUST NOT put it on a sync channel.
 - **A control record** is not a conversation record. **[DEV-043]** A client MUST NOT put a
@@ -859,7 +859,7 @@ SyncAck {
 > the namespace rule. The value `0x01` names a sync acknowledgment, the value
 > `0x02` names a roster epoch of §7.3.1, and the value `0x03` names an ownership
 > claim record of §7.3.1. The value `0x04` names the `FileDescriptor` of a
-> catch-up object of §7.5.1, and Part 13 §13.3 gives that structure. The value
+> catch-up object of §7.5.1, and Part 12 §12.3 gives that structure. The value
 > `0x05` names a `SyncSeedUpdate` of §7.7.
 > **[DEV-053]** A revision
 > that adds a device-set control record MUST give that record a new
@@ -1018,8 +1018,8 @@ a new sync queue is rare.
 
 ### 7.5.6 The edit and the deletion
 
-A deletion that reaches a descriptor of Part 13 erases the chunks at the
-uploader only, under Part 13 rule `ATT-161`. A recipient holds no `cred_sk`. A
+A deletion that reaches a descriptor of Part 12 erases the chunks at the
+uploader only, under Part 12 rule `ATT-161`. A recipient holds no `cred_sk`. A
 recipient that deletes a record with an attachment removes its own copy and
 nothing at a relay.
 
@@ -1075,8 +1075,8 @@ below that mark.
 recipient. **[DEV-091]** A client MUST apply that mark before the first render of the new
 text. **[DEV-092]** The interface MUST NOT change a delivered message without a mark.
 
-The client does not keep the earlier text. The author discards the Part 15
-§15.6.4 record key of the superseded revision, and the recipient does the same.
+The client does not keep the earlier text. The author discards the Part 14
+§14.6.4 record key of the superseded revision, and the recipient does the same.
 
 > **This is a trade, and Part 2 §2.4 requires the text to state it.** Inside the
 > 24-hour window a sender changes what a message says, and the recipient holds
@@ -1134,7 +1134,7 @@ contact then carries the tombstone on its own sync channels. Neither party
 addresses a device of the other party.
 
 **[DEV-099]** A device that applies a tombstone MUST discard the record key of the named
-record. Part 15 §15.6.4 gives that record key. **[DEV-100]** That device MUST overwrite the
+record. Part 14 §14.6.4 gives that record key. **[DEV-100]** That device MUST overwrite the
 named record. **[DEV-101]** A client MUST NOT only hide a row.
 
 **The placeholder.** **[DEV-102]** **A client MUST NOT render an absence as the act of a named
@@ -1317,7 +1317,7 @@ A conversation timer removes a message from each device after a period. Part 6
   MUST measure `expires_in` seconds from its own receive time of that copy.
   The field is a duration, thus no clock comparison of Part 1 §1.9 occurs.
 - **[DEV-210]** At the end of the period a client MUST discard the record key of
-  Part 15 §15.6.4 for that record. **[DEV-211]** That client MUST overwrite the
+  Part 14 §14.6.4 for that record. **[DEV-211]** That client MUST overwrite the
   record. §7.5.6 rules `DEV-099` through `DEV-101` give the same erasure for a
   tombstone.
 - **[DEV-212]** A client MUST apply the timer on each device of the set.

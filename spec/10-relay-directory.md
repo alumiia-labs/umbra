@@ -69,7 +69,7 @@ This rule limits the payoff of one bandwidth-inflation step to **4×**, which is
 one class step in one 7-day epoch. The ladder has three steps, thus the payoff
 over the full ladder is **64×** in three epochs or more. The published payoffs
 were 177×, 420×, and 28×, and each one is a cumulative figure. The rule needs
-**no cryptography**. It needs the measurement fleet of §10.3, and §16.6.1
+**no cryptography**. It needs the measurement fleet of §10.3, and §15.6.1
 prices that fleet. A demotion needs no delay, because a false claim is what the
 delay defends against, and a lower class is not a claim.
 
@@ -127,7 +127,7 @@ is measured in samples.
 
 A sampled cluster keeps a residual. A relay outside the sample of a slot can
 lend capacity to a relay inside it. The VRF selection is not predictable, thus
-the cluster does not know which relays to feed. Part 16 §16.3 records that
+the cluster does not know which relays to feed. Part 15 §15.3 records that
 residual.
 
 A class test proves a **threshold** only, which is the question "does this relay
@@ -266,7 +266,7 @@ covers each field but `sig`, after the label.
 - **[REL-075]** A relay MUST NOT put a client address, a queue identifier, or a
   payload byte in a receipt. The Merkle root covers `circ_id` and `tag` only,
   and Part 3 §3.4.4 makes each hop rewrite `circ_id`. Thus a receipt names a
-  link and it does not name a user. Part 16 §16.1 holds that row.
+  link and it does not name a user. Part 15 §15.1 holds that row.
 
 **The link-fault report is from a client to a directory authority.** It carries
 no signature, because a client holds no key that a third party verifies and a
@@ -431,7 +431,7 @@ independence is a requirement, and it is not a description.
   nonprofit MUST place the seven authorities in three or more jurisdiction
   blocs of §10.6.3. **[REL-124]** The nonprofit MUST publish the legal person,
   the jurisdiction, and the bloc of each authority. The nonprofit is the entity
-  of Part 16 §16.6.
+  of Part 15 §15.6.
 - **[REL-125]** The directory authorities MUST set `independent_count` of the
   `DirectoryKeySet` to the count of authorities under different beneficial
   control. **[REL-126]** A client MUST show the user a `provisional directory`
@@ -606,7 +606,7 @@ fits one `B3` cell.
    > rules above take the time from the root, because a root that verifies is
    > authenticated evidence of the time. `REL-034` keeps the epochs monotone
    > under it. A stale root at the first launch gives a stale
-   > correction, and Part 16 §16.3 records that residual. `REL-046` bounds it
+   > correction, and Part 15 §15.3 records that residual. `REL-046` bounds it
    > to the age of the build, and `REL-044` heals it at the first fresh root.
 
 **The key-set rotation.**
@@ -621,7 +621,7 @@ fits one `B3` cell.
 9. **[REL-038]** The offline recovery arrangement MUST hold one key of the 7. That key gives
    a rotation when a legal order or a compromise removes an authority, and the
    remaining authorities cannot reach 5 without it.
-10. **[REL-039]** A client build MUST ship the genesis `DirectoryKeySet`. Part 16 §16.5 puts
+10. **[REL-039]** A client build MUST ship the genesis `DirectoryKeySet`. Part 15 §15.5 puts
     the build under binary transparency, thus that key set is under the same
     scrutiny as the code.
 
@@ -663,7 +663,7 @@ RelayDescriptor {
     family_id        [32]u8      // SHA3-256 over the family certificate of 10.6
     capacity_class   u8          // 0 to 3, for C0 to C3, the declared upper bound
     roles            u8          // bit 0 queue, 1 chain, 2 ingress offered, 3 attachment
-    chunk_store_gib  u32         // the declared store of Part 13 §13.7, in GiB
+    chunk_store_gib  u32         // the declared store of Part 12 §12.7, in GiB
     valid_after      u64         // the first consensus epoch of this descriptor
     sig              [3309]u8    // ML-DSA-65, "umbra/v1/relay-descriptor"
 }
@@ -672,7 +672,7 @@ RelayDescriptor {
 The fixed width is **5 464 bytes**. An earlier draft carried a 1 184-byte
 static ML-KEM-768 key in this descriptor, and no handshake consumed it. Part 5
 §5.4.9 gives the cause of its removal. **[REL-127]** A relay MUST set
-`chunk_store_gib` to the store that it declares under Part 13 §13.7, in GiB. A
+`chunk_store_gib` to the store that it declares under Part 12 §12.7, in GiB. A
 relay without the attachment role sets the field to 0. The queue role (bit 0)
 covers the group queues of Part 3 §3.2.7 as well as the pairwise queues: a
 relay that serves queues serves group queues, and no separate role bit exists
@@ -807,17 +807,17 @@ RelaySetDiff {
 A **store level** is a two-bit value. Level 0 is a relay without the attachment
 role, or a free store below `CHUNK_SIZE`. Level 1 is a free store below
 `CHUNK_STORE_MIN`. Level 2 is a free store below `CHUNK_STORE_TARGET`. Level 3
-is a free store at or above `CHUNK_STORE_TARGET`. Part 13 §13.7 owns the three
+is a free store at or above `CHUNK_STORE_TARGET`. Part 12 §12.7 owns the three
 constants.
 
 - **[REL-135]** A directory authority MUST publish one `RelaySetDiff` beside
   each `DirectoryRoot`. **[REL-136]** A directory authority MUST set each store
   level from the free store that the relay reported in that epoch. Rule
-  `ATT-091` of Part 13 gives the report.
+  `ATT-091` of Part 12 gives the report.
 - No signature covers the diff. The two lists are a hint, and `REL-057`
   verifies each entry against the signed root. A false store level costs a
-  writer one failed `CNEW` or `BNEW` under Part 13, and it costs nothing else.
-  Part 13 rule `ATT-144` makes a writer prefer level 2 and level 3.
+  writer one failed `CNEW` or `BNEW` under Part 12, and it costs nothing else.
+  Part 12 rule `ATT-144` makes a writer prefer level 2 and level 3.
 
 At 3 000 relays the levels are 750 bytes. At about 8 changes in each epoch the
 two lists are 256 bytes. With the 23-byte fixed part one diff is 1 029 bytes,
@@ -825,7 +825,7 @@ and the 8 fetches of one day cost 8 232 bytes. Part 3 §3.12 carries that
 figure. A free store is not a traffic counter, and a two-bit level at 100 GiB
 steps is not a raw value. Thus §10.8 does not bind it.
 
-Part 14 §14.8 puts a `PowChallenge` beside each descriptor. The relay signs
+Part 13 §13.8 puts a `PowChallenge` beside each descriptor. The relay signs
 that object, it sits outside the tree, and rule `ABU-064` makes an authority
 serve it with the descriptor. A client that holds a descriptor fetches the
 challenge alone on the same path.
@@ -1068,7 +1068,7 @@ relay claims with no audit.
 of the pin on the client clock of §10.5.2, and a confirmed flag. A pin is
 **confirmed** when a circuit through that relay held its three hops.
 
-- **[REL-153]** A client MUST keep its pins in the store of Part 15 §15.6.4.
+- **[REL-153]** A client MUST keep its pins in the store of Part 14 §14.6.4.
   At each relay set that it accepts, it MUST keep a pin while the entry of
   that relay holds `flags` bit 0 and the lifetime of the pin runs. It MUST
   end a pin for no other cause, and `REL-014` names the cause that tempts.
@@ -1200,8 +1200,8 @@ it orders the blocs by their first code. The list of §10.12 is 66 bytes.
   of the chain population. **[REL-142]** A directory authority MUST NOT
   publish a `BlocList` under which the current relay set does not reach the
   floor. §10.11 gives `BLOC_MIN` as 3 and `BLOC_LAYER_SHARE` as 10 %. Part 3
-  §3.4.6 gives the client rule for a relay set below the floor. Part 16
-  §16.6.1 gives the recruitment target that keeps the set above it.
+  §3.4.6 gives the client rule for a relay set below the floor. Part 15
+  §15.6.1 gives the recruitment target that keeps the set above it.
 
 > *Cause.* An earlier draft gave Part 3 §3.4.6 a jurisdiction **code** and gave
 > §10.6 a jurisdiction **bloc**, and no section defined a bloc. The two rules
@@ -1392,12 +1392,12 @@ or one exchange, reaches a relay in each of them.
 
 Denmark does not take part in Regulation (EU) 2023/1543, thus `DK` is a bloc of
 its own under `REL-093`. Each code that no row names is also a bloc of its own
-under that rule. Part 16 §16.6 records the regulation and its deadlines.
+under that rule. Part 15 §15.6 records the regulation and its deadlines.
 
 The list is a statement about law, and it is not a statement about the trust of
 a state. A relay in a bloc is not a worse relay. Two relays in one bloc are one
 order away from a joint view, and that is the fact that `REL-011` tests.
 
 At launch the floor of §10.6.3 needs a third bloc that holds 10 % of each
-population, and that third bloc is one state. Part 16 §16.6.1 sets the
+population, and that third bloc is one state. Part 15 §15.6.1 sets the
 recruitment target for it.

@@ -1,5 +1,5 @@
 //! The ARQ of one outbound record (Part 3 §3.7) and the delivery state of
-//! Part 15 §15.9.1 that it drives.
+//! Part 14 §14.9.1 that it drives.
 //!
 //! A retransmission never fires at a timeout: the cover clock or the next
 //! session opened for another cause carries it (`NET-071`, `NET-072`). This
@@ -21,7 +21,7 @@ pub enum FailCause {
     GiveUp,
 }
 
-/// The delivery state of Part 15 §15.9.1. The list is closed.
+/// The delivery state of Part 14 §14.9.1. The list is closed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Delivery {
     /// No relay acknowledged the send.

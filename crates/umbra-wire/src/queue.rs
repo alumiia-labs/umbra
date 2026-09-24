@@ -17,9 +17,8 @@ pub const VERSION: u8 = 0x01;
 /// The prefix of the plaintext: the true length and the kind.
 pub const PLAIN_PREFIX: usize = 3;
 
-/// The L6 record kind. The value `0x02` is retired and never returns, and
-/// the value `0x03`, the report record of the withdrawn Part 12, is
-/// retired too.
+/// The L6 record kind. The values `0x02` and `0x03` are retired and never
+/// return.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum L6Kind {

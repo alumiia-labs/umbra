@@ -7,7 +7,7 @@
 //! for a JWT that the account key signs under RS256, and it serves until
 //! shortly before its expiry. The key signs through the `aws-lc-rs` that the
 //! TLS stack holds already, and the few JSON fields that this needs are read
-//! and written here, thus no crate enters register R3 (Part 15 §15.2.3).
+//! and written here, thus no crate enters register R3 (Part 14 §14.2.3).
 
 use std::{
     sync::Arc,

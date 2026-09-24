@@ -1,4 +1,4 @@
-//! The segments of Part 13 §13.2.3 and the padding that carries the
+//! The segments of Part 12 §12.2.3 and the padding that carries the
 //! boundary of the plaintext. The descriptor holds no true size, thus the
 //! last segment holds it.
 

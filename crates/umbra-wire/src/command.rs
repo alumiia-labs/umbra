@@ -3,8 +3,7 @@
 //!
 //! One namespace holds every command byte, including the attachment and
 //! the group-queue ranges. A parser reads the byte in this namespace only
-//! (`WIR-008`). The range `0x80` to `0x85` is reserved: Part 12 is
-//! withdrawn, and a parser rejects each byte of it.
+//! (`WIR-008`).
 
 use umbra_crypto::auth::{CommandAuthKey, AUTH_LEN};
 
@@ -62,7 +61,7 @@ pub enum Cmd {
     Nack,
     /// `0x60`, indistinguishable from `SEND` and `MSG` after L4.
     Cover,
-    /// `0x70` to `0x7B`, Part 13 §13.3.3.
+    /// `0x70` to `0x7B`, Part 12 §12.3.3.
     Attachment(u8),
     /// `0x90` to `0x9A`, §6.4.5.
     Group(GroupCmd),

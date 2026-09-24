@@ -37,7 +37,6 @@ PART_TITLE = {
     "DIS": "Discovery, Handles, and Key Transparency",
     "REL": "Relay Directory",
     "GRP": "Private Groups",
-    "COM": "Withdrawn",
     "ATT": "Attachments and Large Objects",
     "ABU": "Anti-Abuse Without Identifiers",
     "IMP": "Implementation",

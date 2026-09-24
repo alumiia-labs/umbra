@@ -64,8 +64,8 @@ pub struct DeviceEntry<'a> {
     pub sync_scope: SyncScope,
 }
 
-/// The scope of an ownership claim. The value `0x02`, a community
-/// identity of the withdrawn Part 12, is retired (`DEV-192`).
+/// The scope of an ownership claim. The value `0x02` is retired and never
+/// returns (`DEV-192`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ClaimScope {

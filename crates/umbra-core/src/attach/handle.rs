@@ -1,4 +1,4 @@
-//! The write and the read of one handle-addressed chunk (Part 13 §13.4.2):
+//! The write and the read of one handle-addressed chunk (Part 12 §12.4.2):
 //! the backup root of Part 4 §4.7.2 and the dead-channel blob of Part 3
 //! §3.2.6. The two parties hold one secret, thus the reader needs no
 //! descriptor, and the placement list names the relays.

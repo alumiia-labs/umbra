@@ -1,5 +1,5 @@
 //! Known-answer tests of the ML-KEM-768 primitive against the vendored
-//! corpora (Part 15 §15.5.2). Nothing here reaches the network.
+//! corpora (Part 14 §14.5.2). Nothing here reaches the network.
 #![allow(
     clippy::expect_used,
     clippy::unwrap_used,

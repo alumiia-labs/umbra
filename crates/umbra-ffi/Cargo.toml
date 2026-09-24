@@ -18,12 +18,12 @@ workspace = true
 crate-type = ["lib"]
 
 [features]
-# The UniFFI scaffolding of Part 15 §15.6.1. It is off by default, thus the
+# The UniFFI scaffolding of Part 14 §14.6.1. It is off by default, thus the
 # client core builds and tests with no binding generator in the graph.
 bindings = ["dep:uniffi", "dep:getrandom", "sqlite", "runtime"]
 # The binding generator, which runs on the host only.
 bindgen = ["bindings", "uniffi/cli"]
-# The SQLite backend of Part 15 §15.6.4 over rusqlite with the bundled
+# The SQLite backend of Part 14 §14.6.4 over rusqlite with the bundled
 # library, which builds C code.
 sqlite = ["dep:rusqlite"]
 # The client runtime over tokio and the native transport stack.

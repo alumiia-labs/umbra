@@ -40,8 +40,8 @@ pub const ROTATE_GRACE: u64 = 7 * 86_400;
 pub const SIGNER_COUNT: usize = 3;
 /// The signatures a head or a key set needs.
 pub const SIGNATURES_NEEDED: usize = 2;
-/// `HELLO_INBOUND_LIMIT` of Part 14 §14.4, hellos for one entry in one
+/// `HELLO_INBOUND_LIMIT` of Part 13 §13.4, hellos for one entry in one
 /// epoch.
 pub const HELLO_INBOUND_LIMIT: u32 = 64;
-/// `HELLO_POW_EFFORT` of Part 14 §14.13.
+/// `HELLO_POW_EFFORT` of Part 13 §13.13.
 pub const HELLO_POW_EFFORT: u8 = 50;

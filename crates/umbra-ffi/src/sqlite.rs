@@ -1,4 +1,4 @@
-//! The SQLite backend of Part 15 §15.6.4: plain SQLite from the bundled
+//! The SQLite backend of Part 14 §14.6.4: plain SQLite from the bundled
 //! library, with each record sealed by the application. The database
 //! indexes on the keyed surrogates only, runs under `secure_delete`, and
 //! truncates its write-ahead log after a deletion batch.

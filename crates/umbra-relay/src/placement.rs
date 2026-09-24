@@ -29,7 +29,7 @@ pub struct Placement {
     /// Where to dial each relay of the next layer (`NET-167`).
     pub next: BTreeMap<[u8; 32], Dial>,
     /// Where to dial each other relay with the attachment role, for the
-    /// copy of a chunk (Part 13 §13.4.1).
+    /// copy of a chunk (Part 12 §12.4.1).
     pub replicas: BTreeMap<[u8; 32], Dial>,
     /// Where to dial each queue relay, with its static key, for the deposit
     /// of a digest (Part 6 `WIR-526`).

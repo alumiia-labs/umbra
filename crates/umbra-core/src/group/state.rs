@@ -212,7 +212,7 @@ impl Group {
         })
     }
 
-    /// Writes the group to the stored form of Part 15 §15.6.4. It holds
+    /// Writes the group to the stored form of Part 14 §14.6.4. It holds
     /// no `GroupRosterSeed_g`: the local identity table of Part 4 §4.7.2
     /// holds that seed (`GRP-055`), and [`Group::restore`] takes it.
     pub fn export(&self) -> Result<Zeroizing<Vec<u8>>, Error> {

@@ -1,4 +1,4 @@
-//! The runtime of the attachment transfers (Part 13 §13.8): one task with a
+//! The runtime of the attachment transfers (Part 12 §12.8): one task with a
 //! node and a connection of its own, beside the run of the queues. Thus the
 //! resend of one chunk stalls no message, and the two flows do not mix in
 //! one stream (`ATT-024`, `ATT-048`).
@@ -90,7 +90,7 @@ pub enum TransferCommand {
         /// The encoded object.
         plain: Zeroizing<Vec<u8>>,
     },
-    /// Write one handle-addressed chunk (Part 13 §13.4.2). A
+    /// Write one handle-addressed chunk (Part 12 §12.4.2). A
     /// `HandleWritten` or a `Failed` follows.
     WriteHandle {
         /// A value of the caller, which comes back in the update.

@@ -1,4 +1,4 @@
-//! The record layer of the local database (Part 15 §15.6.4): one key for
+//! The record layer of the local database (Part 14 §14.6.4): one key for
 //! each record from a random salt beside it, the table and the row in the
 //! associated data, and the keyed surrogate that names a row.
 

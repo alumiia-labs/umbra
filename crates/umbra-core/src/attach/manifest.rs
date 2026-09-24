@@ -1,4 +1,4 @@
-//! The manifest level of Part 13 §13.3.4: the level rule, the manifest
+//! The manifest level of Part 12 §12.3.4: the level rule, the manifest
 //! plaintext, and the replicas that a set of refs names for one chunk.
 
 use alloc::vec::Vec;
@@ -12,8 +12,8 @@ use umbra_wire::{
 use super::{segment, MANIFEST_REFS_PER_CHUNK, MAX_DESCRIPTOR_REFS, SEGMENT_SIZE};
 use crate::Error;
 
-/// The refs a descriptor holds at each bucket (§13.3.2). No descriptor
-/// fits `B0` (§13.6).
+/// The refs a descriptor holds at each bucket (§12.3.2). No descriptor
+/// fits `B0` (§12.6).
 pub const fn descriptor_refs(bucket: Bucket) -> usize {
     match bucket {
         Bucket::B0 => 0,

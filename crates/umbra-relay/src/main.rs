@@ -127,7 +127,7 @@ struct Settings {
     /// The static key of each queue relay, for the deposit of a digest.
     queue_keys: BTreeMap<[u8; 32], [u8; 32]>,
     /// The carriers of the manifest, which take the challenge of this
-    /// relay (Part 14 `ABU-102`).
+    /// relay (Part 13 `ABU-102`).
     carriers: Vec<[u8; 32]>,
     /// The identity key of each relay, for a challenge that this relay
     /// carries (`ABU-103`).

@@ -6,7 +6,7 @@
 //! A row travels under its surrogate identifier and in its plaintext. The
 //! identifier comes from `K_store`, and `K_store` comes from the root
 //! seed, thus a restore under the same seed gives each row its place
-//! again. The object is sealed as a file of Part 13, and the backup root
+//! again. The object is sealed as a file of Part 12, and the backup root
 //! names it.
 
 use alloc::vec::Vec;
@@ -68,7 +68,7 @@ pub struct BackupObject {
 }
 
 impl BackupObject {
-    /// The bytes of the object, before the seal of Part 13 §13.3.
+    /// The bytes of the object, before the seal of Part 12 §12.3.
     pub fn encode(&self) -> Result<Zeroizing<Vec<u8>>, Error> {
         if self.kind != KIND_FULL && self.kind != KIND_DELTA {
             return Err(Error::Malformed);

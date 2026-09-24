@@ -5,12 +5,12 @@
 //! the randomness hardening of §5.9. It has no dependency inside the workspace and no `std`.
 //!
 //! Each secret is a newtype that zeroizes on drop and has no `Debug`, no
-//! `Clone`, and no `Serialize` (Part 15 §15.4). A keypair is one type, never
+//! `Clone`, and no `Serialize` (Part 14 §14.4). A keypair is one type, never
 //! two values.
 #![forbid(unsafe_code)]
 #![no_std]
 
-// The skipped-key store of the ratchet lives on the heap, as Part 15 §15.4
+// The skipped-key store of the ratchet lives on the heap, as Part 14 §14.4
 // prefers for a secret.
 extern crate alloc;
 

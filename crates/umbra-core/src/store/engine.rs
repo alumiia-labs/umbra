@@ -1,4 +1,4 @@
-//! The store over a platform backend (Part 4 §4.6, Part 15 §15.6.4): the
+//! The store over a platform backend (Part 4 §4.6, Part 14 §14.6.4): the
 //! commit batch that keeps each table MAC in step with its rows, the
 //! check of each MAC at the unlock, the scan that compares a table with
 //! its accumulator, and the deletion batch.

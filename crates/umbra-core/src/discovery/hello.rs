@@ -1,5 +1,5 @@
 //! The hello of Part 9 §9.6: the sealed envelope to the entry key, the
-//! derived proof-of-work values of Part 14 §14.4, the inbound limit, and
+//! derived proof-of-work values of Part 13 §13.4, the inbound limit, and
 //! the spent-nonce set of one Profile.
 
 use alloc::{collections::BTreeSet, vec::Vec};
@@ -150,7 +150,7 @@ pub fn open(entry_key: &KeyPair, envelope: &[u8]) -> Result<Vec<u8>, Error> {
     Ok(plain)
 }
 
-/// The derived proof-of-work challenge of a hello (Part 14 §14.4).
+/// The derived proof-of-work challenge of a hello (Part 13 §13.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HelloPow {
     /// `SHA3-256("umbra/v1/hello-verifier" || entry_pk)`.

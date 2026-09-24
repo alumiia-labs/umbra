@@ -1,4 +1,4 @@
-//! The client surface of the UMBRA protocol for Android (Part 15 §15.6.1).
+//! The client surface of the UMBRA protocol for Android (Part 14 §14.6.1).
 //!
 //! The surface is narrow by design. The platform holds opaque handles: a
 //! [`draft::Draft`] that it writes text into, and a [`MsgRef`] that it
@@ -8,7 +8,7 @@
 //!
 //! [`client`] holds the client itself, which builds and tests with no
 //! binding generator. The `sqlite` feature adds the SQLite backend of
-//! §15.6.4, and the `bindings` feature adds the UniFFI scaffolding over
+//! §14.6.4, and the `bindings` feature adds the UniFFI scaffolding over
 //! both.
 #![forbid(unsafe_code)]
 
@@ -53,7 +53,7 @@ impl MsgRef {
     }
 }
 
-/// The delivery state of Part 15 §15.9.1. The list is closed.
+/// The delivery state of Part 14 §14.9.1. The list is closed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Delivery {

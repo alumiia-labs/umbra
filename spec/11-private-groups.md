@@ -147,11 +147,11 @@ relay-side name, and it carries no relation to `group_id`.
   list. **[GRP-192]** A creator that finds no such pair MAY relax the bloc
   invariant in the manner of Part 3 rule `NET-200`, and Part 3 rule `NET-201`
   makes it show that relaxation.
-- **[GRP-193]** A `GNEW` MUST end with an `Admission` of Part 14 §14.2. A
+- **[GRP-193]** A `GNEW` MUST end with an `Admission` of Part 13 §13.2. A
   group-queue creation is a gated path of that table.
 - **[GRP-194]** A sender MUST send the same record bytes to each replica, each
   under the ARQ of Part 3 §3.7. **[GRP-195]** A client MUST put a record in the
-  `accepted` state of Part 15 §15.9.1 when one replica returned `GSEQ`.
+  `accepted` state of Part 14 §14.9.1 when one replica returned `GSEQ`.
   **[GRP-196]** A client MUST continue the ARQ to the other replica in the
   background after that acceptance. **[GRP-197]** A client MUST report a
   replica that never accepts as a link fault under Part 10 §10.4.2.
@@ -165,7 +165,7 @@ keep each outbound record of that group `queued`. The line reads "The relays of
 this group do not answer. Messages wait." **[GRP-200]** That line MUST end
 without a user action when one replica accepts a session.
 
-> *Cause.* Part 15 §15.9.2 holds a closed table of client-wide degraded
+> *Cause.* Part 14 §14.9.2 holds a closed table of client-wide degraded
 > states, and rule `IMP-081` keeps it closed. Two dead replicas are a
 > condition of one conversation and not of the client, thus not a row of that
 > table. Without a line the user sees a `queued` mark for hours and reads it
@@ -399,7 +399,7 @@ open the records before the join.
   `GROUP_SLOT_SKEW` is 2 slots. **[GRP-229]** A receiver MUST store a record
   outside that window in the manner of Part 6 rule `WIR-050`, treat it as
   evidence of a clock movement of Part 1 §1.9, and retry it after the next
-  clock check. Part 15 §15.9.2 gives the `clock` line.
+  clock check. Part 14 §14.9.2 gives the `clock` line.
 - **[GRP-230]** After a rotation to `e + 1`, a receiver MUST keep the state of
   epoch `e` for `GROUP_EPOCH_GRACE`. **[GRP-231]** A receiver MUST zeroize
   that state at the end of the grace. `GROUP_EPOCH_GRACE` is 24 h.
@@ -408,7 +408,7 @@ open the records before the join.
 
 Thus a seized device opens at most the last 24 h of retained records of the
 current epoch, plus the records of the previous epoch inside the grace. This is
-the forward secrecy of a group, and Part 16 §16.3 records what a seized device
+the forward secrecy of a group, and Part 15 §15.3 records what a seized device
 plus the retained ciphertext of a replica gives.
 
 **The history window.** `HISTORY_WINDOW` is 0 by default and 7 days at most.
@@ -497,7 +497,7 @@ sender and one at the receiver.
 > key is classical, in line with Part 5 §5.4.4, which makes authentication
 > classical in v1. A quantum adversary that holds the pair public keys of two
 > members and joins the group could forge tags between them. The pair public
-> keys travel inside the group only, in the roster entries. Part 16 §16.3
+> keys travel inside the group only, in the roster entries. Part 15 §15.3
 > records that residual, and `sig_id` agility of Part 5 §5.10 is the migration
 > path. Group **confidentiality** stays post-quantum: the slot chain reaches
 > each member through `UMBRA-KEM` in the epoch-key record of §11.4.2, and Part
@@ -673,7 +673,7 @@ The relay keeps the previous `read_pk` for `GROUP_READ_GRACE` and the previous
 epoch-key record still reads and still writes inside the grace. Until an admin
 sends `GKEY`, the excluded party keeps the relay credentials of the old epoch:
 it fetches ciphertext that it cannot open, and it posts records that every
-receiver rejects under §11.3.5. Part 16 §16.3 records that residual.
+receiver rejects under §11.3.5. Part 15 §15.3 records that residual.
 
 - **[GRP-398]** A member whose `GPOST` or `GSUB` under the credentials of the
   newest epoch it holds is refused MUST send the same command again at once
@@ -689,7 +689,7 @@ receiver rejects under §11.3.5. Part 16 §16.3 records that residual.
 > admin online, each member that posted closed the group on its own device.
 > The second command costs one round trip at a switch of epoch. Two
 > rotations inside one `GROUP_EPOCH_GRACE` with no `GKEY` between them leave
-> a member with no pair that the relay holds, and Part 16 §16.3 records that
+> a member with no pair that the relay holds, and Part 15 §15.3 records that
 > residual.
 
 **Two rotators at once.** Two members can post two epoch-key records for one
@@ -722,7 +722,7 @@ secret to each replica.
 Kind `0x02` of `GroupQueueRecord`, and Part 6 §6.4.6 gives the layout of its
 `EpochKeyBody` and `KemSlot`. The body holds `roster_epoch`, a `carrier` byte
 (`0x01` inline, `0x02` chunked), `slot_count`, and then the slots inline or a
-`FileDescriptor` of Part 13 §13.3 that names an object of the concatenated
+`FileDescriptor` of Part 12 §12.3 that names an object of the concatenated
 slots. The body has no slot-key layer, because a member that missed the
 previous epoch must still open its slot. The relay therefore reads
 `slot_count`, which is the active member count at `roster_epoch` less the
@@ -760,19 +760,19 @@ member of role `admin` or above (`own_count` = `GROUP_REPLICAS`).
   "record on a `GMSG`" row of `B3`, and chunked otherwise. That row holds 27
   slots when at most 9 of them are admin slots, and 26 slots otherwise.
 - **[GRP-281]** In the chunked carrier, a rotator MUST write the object as
-  blocks of `SEGMENT_SIZE` bytes (Part 13 §13.2.3), each block holding
+  blocks of `SEGMENT_SIZE` bytes (Part 12 §12.2.3), each block holding
   `slots_per_chunk` slots in index order and then zero bytes, so that no slot
   crosses a chunk boundary. **[GRP-282]** A rotator MUST set `slots_per_chunk`
   to the largest value at which every block fits `SEGMENT_SIZE`. At
   `SEGMENT_SIZE` of 32 634 bytes that is 27, or 26 when more than 9 admin
   slots fall in one block. **[GRP-283]** A rotator MUST write that object on
-  the chunk path of Part 13 §13.3.3 under `CNEW`, and Part 13 §13.4 makes the
+  the chunk path of Part 12 §12.3.3 under `CNEW`, and Part 12 §12.4 makes the
   replicas.
 - **[GRP-284]** A member MUST fetch the one chunk that holds its slot, which is
   chunk `floor(p / slots_per_chunk)` for its rank `p` among the included
   members. **[GRP-285]** A member MUST NOT fetch another chunk of that object.
-  Part 13 rule `ATT-142` applies to the descriptor. Each segment seals on its
-  own under Part 13 §13.2.3, thus one chunk opens without the others.
+  Part 12 rule `ATT-142` applies to the descriptor. Each segment seals on its
+  own under Part 12 §12.2.3, thus one chunk opens without the others.
 - **[GRP-406]** A rotator MUST post the chunked epoch-key record only after
   the object reached the chunk path, and MAY write the object again when that
   failed. A rotator that gives up holds an epoch that no member holds; each
@@ -812,9 +812,9 @@ members it is 592 500 bytes plus 64 bytes for each admin, in 19 chunks. A
 member downloads one `B2` record, one `B3` record, or one `B3` chunk, which is
 at most 32 860 bytes. The rotator uploads the record to two replicas, or the
 chunks once and a descriptor record to two replicas, and the chunk relay pushes
-the replicas of Part 13 §13.4. Draft 0.1.0 made each of N senders upload N − 1
-`B1` cells at a change. The chunk relay learns what Part 13 §13.9 says it
-learns from one chunk, and Part 13 rule `ATT-066` adds a row for this client
+the replicas of Part 12 §12.4. Draft 0.1.0 made each of N senders upload N − 1
+`B1` cells at a change. The chunk relay learns what Part 12 §12.9 says it
+learns from one chunk, and Part 12 rule `ATT-066` adds a row for this client
 of the chunk path.
 
 > *Cause.* An epoch-key record inside a slot-key AEAD would need the previous
@@ -899,7 +899,7 @@ the relay and not of an epoch, thus a rotation of §11.4 leaves it where it was.
 > lock every member out of the queue, or a `GDEL`. Two admins that acted on
 > one departure would each draw a set, and one set would fail at the relay,
 > thus one admin acts for each departure. Two departures at once can still
-> give two sets, and Part 16 §16.3 records that residual.
+> give two sets, and Part 15 §15.3 records that residual.
 
 > *Cause of `GRP-400`.* A promotee may have joined inside the current epoch,
 > and `GRP-385` keeps `K_e` from a joiner, because `K_e` gives each slot key
@@ -934,7 +934,7 @@ because only an admin holds `own_sk`.
   notify queue. It learns no identity, no pairwise queue of any member, no
   content, no sender index, and no membership list. Part 3 §3.11 and Part 2
   §2.7 state the same list, Part 3 §3.11.1 records the active probe "delay a
-  reader session and watch the cursor", and Part 16 §16.1 holds the
+  reader session and watch the cursor", and Part 15 §15.1 holds the
   compellable row.
 - **A member learns the roster.** That property is inherent. A member cannot
   tag a record to a person without a key of that person. UMBRA hides the
@@ -944,7 +944,7 @@ because only an admin holds `own_sk`.
 > draft 0.1.0 learned, which was the queue set of the group, and that party
 > is retired. The list replaces the accepted 0.1.0 residual "the ingress relay
 > reads the recipient count from a fan-out burst" with "the group-queue relay
-> reads the member count from an epoch-key record". Part 16 §16.3 records
+> reads the member count from an epoch-key record". Part 15 §15.3 records
 > each residual below.
 
 > **This is a trade, and Part 2 §2.4 requires the text to state it.** The
@@ -995,7 +995,7 @@ because only an admin holds `own_sk`.
 
 > **This is a trade, and Part 2 §2.4 requires the text to state it.** The chunk
 > relay that holds a chunked epoch-key object sees one anonymous fetch for
-> each member at each rotation, and Part 13 §13.9 holds the row. It learns a
+> each member at each rotation, and Part 12 §12.9 holds the row. It learns a
 > download count and no group. UMBRA accepts this residual.
 
 ## 11.6 What UMBRA does *not* do
@@ -1014,8 +1014,8 @@ because only an admin holds `own_sk`.
 indicator.** **[GRP-299]** A member MUST NOT send a receipt of Part 6 §6.6.9
 kind `0x06` or kind `0x07` in a group. **[GRP-300]** A member MUST NOT send a
 typing indicator of kind `0x08` in a group. **[GRP-301]** A client MUST NOT
-show a `delivered` or a `read` state for a group record; the states of Part 15
-§15.9.1 that a group record reaches are `queued`, `accepted`, and `failed`.
+show a `delivered` or a `read` state for a group record; the states of Part 14
+§14.9.1 that a group record reaches are `queued`, `accepted`, and `failed`.
 
 > *Cause.* Every record on a group queue is a record that every reader
 > downloads. A receipt from each reader for each message is N records for one
@@ -1066,7 +1066,7 @@ show a `delivered` or a `read` state for a group record; the states of Part 15
   member that sends different content to different members. Such a member
   sends two records with two counters, and each receiver sees one of them.
   Detection needs a consistency protocol, and UMBRA has not accepted the cost
-  of that protocol for v1. Part 16 §16.2.4 states this limit. **[GRP-045]** A
+  of that protocol for v1. Part 15 §15.2.4 states this limit. **[GRP-045]** A
   member MAY compare a rolling transcript digest out of band.
 
 > *Cause.* Draft 0.1.0 took the one-sender order from the pairwise ratchet
@@ -1395,7 +1395,7 @@ plain epoch, and the tag vector names the member that leaves.
 > granting epoch is a signed statement. A party that seizes the device of a
 > member gets a transferable proof of the current role grants of the group.
 > G10 covers the message content. G10 does not cover the group
-> administration, and Part 16 §16.3 records that exposure.
+> administration, and Part 15 §15.3 records that exposure.
 >
 > A message stays unsigned, and a plain epoch stays unsigned. Part 5 §5.7 does
 > not change. The `granter_index` and the `grantee_index` in a granting epoch
@@ -1408,7 +1408,7 @@ plain epoch, and the tag vector names the member that leaves.
 > group-queue relay reads the bucket of each record, thus it learns that a
 > roster event occurred, and it learns no more than that. `GRANT_RATE` bounds
 > the frequency of a granting epoch, and it does not conceal the event. §11.5
-> states the bucket leak, and Part 16 §16.3 records it.
+> states the bucket leak, and Part 15 §15.3 records it.
 
 ### 11.9.6 The moderation epoch and the two moderator actions
 
@@ -1423,7 +1423,7 @@ an edit from the same author at each position.
 
 **A moderator action** has two forms.
 
-| Action | The Part 15 §15.6.4 record key | Reversible | The member device |
+| Action | The Part 14 §14.6.4 record key | Reversible | The member device |
 | --- | --- | --- | --- |
 | **Hide**, which is the default | Kept | Yes, by a later epoch | Keeps the data, out of the default view |
 | **Remove** | Discarded | No | Overwrites the record |
@@ -1485,13 +1485,13 @@ the act.
 > The preimage now names no author, and `GRP-181` bounds what a seized device
 > holds to the current statements. A member that inspects the chain sees the
 > hashes and the current epochs. It does not see each earlier act, and
-> mitigation 3 below keeps the count at each epoch. Part 16 §16.3 records the
+> mitigation 3 below keeps the count at each epoch. Part 15 §15.3 records the
 > residual.
 
 **The residual, stated.** A compelled moderator destroys group history on the
-device of each member. That cost is real. Part 16 §16.1 makes an empty
+device of each member. That cost is real. Part 15 §15.1 makes an empty
 compellable set the method of this specification, and a moderator is a named
-natural person inside a private group. Part 16 §16.1 records that party.
+natural person inside a private group. Part 15 §15.1 records that party.
 
 Four mitigations bound the damage.
 
@@ -1599,8 +1599,8 @@ each week at `GROUP_MAX`.
 
 A joiner needs the roster entries, the KEM public key of every active member,
 and the authority path of §11.9.3 at the moment of its admission. The
-`RosterSnapshot` carries the three as one object on the chunk path of Part 13
-§13.3.3 under `CNEW`, and Part 6 §6.6.3 gives its layout: `version`,
+`RosterSnapshot` carries the three as one object on the chunk path of Part 12
+§12.3.3 under `CNEW`, and Part 6 §6.6.3 gives its layout: `version`,
 `group_id`, `roster_epoch`, `chain_hash` (the hash of the roster epoch it
 describes), the roster entries, the `kem_pk` of every active member, and the
 authority path as the granting epochs on the path of every current role holder
@@ -1630,7 +1630,7 @@ in chain order.
 **What a snapshot costs.** A snapshot at N members is 77 + 1 317N bytes plus
 the path. At 500 members that is 50 KB of entries and 609 KB of KEM keys, 21
 chunks with two owners on the path, and at most 23 chunks at
-`ROLE_HOLDER_MAX`. The joiner fetches the chunks under Part 13 §13.3.3, which
+`ROLE_HOLDER_MAX`. The joiner fetches the chunks under Part 12 §12.3.3, which
 is 21 × 32 860 = 690 060 bytes at 500 members, once at its join. Draft 0.1.0
 made the joiner open 499 pairwise channels for the same admission.
 
@@ -1861,8 +1861,8 @@ holds the same old roster key, thus it can post a `RekeyRecord` of its own; if
 its record wins under `GRP-369`, the user is out of that group until an admin
 acts on the pairwise path, and the attacker's device is in until the user's
 self-removal or the admin's removal is rotated. The attacker must unlock the
-device first, at the cost that Part 15 §15.6.4 gives one passphrase attempt,
-while the user revokes at once. Part 16 §16.3 records the residual.
+device first, at the cost that Part 14 §14.6.4 gives one passphrase attempt,
+while the user revokes at once. Part 15 §15.3 records the residual.
 
 > *Cause.* Draft 0.1.0 said that a full identity reset does not change a
 > group roster key, and it gave no rule for a group after a revocation. Under

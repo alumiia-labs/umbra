@@ -1,4 +1,4 @@
-//! The wrap of the at-rest master key (Part 15 §15.6.4, §15.7.4): Argon2id
+//! The wrap of the at-rest master key (Part 14 §14.6.4, §14.7.4): Argon2id
 //! over the passphrase, one keyed operation in the secure element of the
 //! platform, and XChaCha20-Poly1305 over `K_store`. Each try of a
 //! passphrase needs the secure element, thus a brute force runs on the
@@ -80,7 +80,7 @@ fn wrap_key(
     element: &impl SecureElement,
 ) -> Result<Secret<32>, Error> {
     let a = kdf::argon2id(passphrase, salt, cost.m_kib, cost.t)?;
-    // IMP-061: S, and then K_wrap, take the inputs of §15.6.4 and no other.
+    // IMP-061: S, and then K_wrap, take the inputs of §14.6.4 and no other.
     let mut input = Secret::<WRAP_INPUT_LEN>::zeroed();
     let (label_part, a_part) = input.expose_mut().split_at_mut(labels::AT_REST_WRAP.len());
     label_part.copy_from_slice(labels::AT_REST_WRAP);

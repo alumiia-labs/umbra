@@ -5,7 +5,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 /// A secret of `N` bytes that zeroizes on drop.
 ///
 /// The type has no `Debug`, no `Clone`, and no `Serialize`, and a caller
-/// reads the bytes through [`Secret::expose`] only (Part 15 §15.4).
+/// reads the bytes through [`Secret::expose`] only (Part 14 §14.4).
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct Secret<const N: usize>([u8; N]);
 

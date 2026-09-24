@@ -1,4 +1,4 @@
-//! The relay-local spend set of Part 14 §14.7: the nonces of the current
+//! The relay-local spend set of Part 13 §13.7: the nonces of the current
 //! epoch and of the one before it, and nothing global.
 
 use alloc::collections::BTreeSet;

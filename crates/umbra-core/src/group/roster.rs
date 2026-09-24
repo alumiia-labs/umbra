@@ -704,7 +704,7 @@ impl Roster {
         }
     }
 
-    /// Writes the roster to the stored form of Part 15 §15.6.4.
+    /// Writes the roster to the stored form of Part 14 §14.6.4.
     pub fn export(&self, w: &mut Writer) -> Result<(), Error> {
         w.u8(STORED_VERSION);
         w.bytes(&self.group_id);

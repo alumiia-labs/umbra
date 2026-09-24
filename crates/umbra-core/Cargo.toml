@@ -1,6 +1,6 @@
 [package]
 name = "umbra-core"
-description = "Orchestration, state machines, and the objects of Parts 4, 7, 9, 10, 13, and 14 of the UMBRA protocol"
+description = "Orchestration, state machines, and the objects of Parts 4, 7, 9, 10, 12, and 13 of the UMBRA protocol"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

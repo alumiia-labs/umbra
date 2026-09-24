@@ -33,14 +33,14 @@ manner, and it carries a dependency cap of its own.
 
 | # | Primitive | Parameters | Used for | Refer to |
 | --- | --- | --- | --- | --- |
-| AUX-1 | **Blind RSA-2048** | RFC 9474, `RSABSSA-SHA384-PSS-Deterministic` | Cross-relay token that a third party verifies | Part 14 §14.3.1 |
-| AUX-2 | **ristretto255 with SHA512** | RFC 9497 VOPRF | First-party token and blind directory lookup | Part 14 §14.3.2, Part 9 §9.4 |
+| AUX-1 | **Blind RSA-2048** | RFC 9474, `RSABSSA-SHA384-PSS-Deterministic` | Cross-relay token that a third party verifies | Part 13 §13.3.1 |
+| AUX-2 | **ristretto255 with SHA512** | RFC 9497 VOPRF | First-party token and blind directory lookup | Part 13 §13.3.2, Part 9 §9.4 |
 | AUX-3 | **ECVRF-Edwards25519-SHA512-TAI** | RFC 9381, classically secure only | Index blinding for handle key transparency, and the probe selection that a relay MUST NOT predict | Part 9 §9.5, Part 10 §10.4.1 |
-| AUX-4 | **Argon2id** | about 3 s for each try on a mid-range device | Human recovery code, and the at-rest passphrase | Part 15 §15.6.4 |
-| AUX-5 | **A keyed function inside the secure element** | HMAC-SHA256 in StrongBox | Entanglement of the at-rest key with the secure element | Part 15 §15.6.4 |
+| AUX-4 | **Argon2id** | about 3 s for each try on a mid-range device | Human recovery code, and the at-rest passphrase | Part 14 §14.6.4 |
+| AUX-5 | **A keyed function inside the secure element** | HMAC-SHA256 in StrongBox | Entanglement of the at-rest key with the secure element | Part 14 §14.6.4 |
 | AUX-6 | **HPKE under OHTTP** | RFC 9180 and RFC 9458, with `UMBRA-KEM`; the suite is `UMBRA-KEM`, HKDF-SHA3-256, and ChaCha20-Poly1305 under the identifiers of §5.4, and the labels of RFC 9180 §4 hold (CRY-151) | The notification boundary, and the one-time `k_ntf_root` | Part 8 §8.2.3 |
-| AUX-7 | **XChaCha20-Poly1305** | 24-byte random nonce | Storage master key wrap, and each database record | Part 15 §15.6.4 |
-| AUX-8 | **Equi-X** | the `hashx` and `equix` crates, with the JIT off | Proof of work as a surge valve | Part 14 §14.8 |
+| AUX-7 | **XChaCha20-Poly1305** | 24-byte random nonce | Storage master key wrap, and each database record | Part 14 §14.6.4 |
+| AUX-8 | **Equi-X** | the `hashx` and `equix` crates, with the JIT off | Proof of work as a surge valve | Part 13 §13.8 |
 | AUX-9 | **Two-aggregator additive secret sharing with Laplace noise** | PrivEx-S2, `b = σ/ε` | The relay statistic that a directory publishes | Part 10 §10.8 |
 
 A per-record storage key has no counter, thus AUX-7 needs a 24-byte random
@@ -55,9 +55,9 @@ carry no information.
 primitives MUST NOT protect ordinary message content. **[CRY-004]** Those primitives MUST NOT
 be on the path of a send on a pairwise channel that exists.
 
-Part 15 §15.2 gives the dependency register R1 for the message core, and the
+Part 14 §14.2 gives the dependency register R1 for the message core, and the
 dependency register R2 for the auxiliary primitives above. Each register carries
-a cap of its own. Part 15 §15.2 states that no party has measured either count,
+a cap of its own. Part 14 §14.2 states that no party has measured either count,
 and it names the party that measures them.
 
 **[CRY-005]** An implementation MUST NOT use a cryptographic primitive that this section does
@@ -84,7 +84,7 @@ the table above.
   >
   > UMBRA declines, and there are two causes. First, the objects that need that
   > limit most are the **release manifests and the TUF signing root**. Those
-  > objects are *outside* the protocol (Part 15 §15.8, Part 16 §16.5). They are
+  > objects are *outside* the protocol (Part 14 §14.8, Part 15 §15.5). They are
   > in a separate trust domain with offline 3-of-5 threshold keys across three
   > jurisdictions. That domain can use a scheme that is not a lattice scheme.
   > Thus the limit is in place where it counts most, and the protocol does not
@@ -92,7 +92,7 @@ the table above.
   >
   > Second, `sig_id` (§5.10) is a wire field that the two parties negotiate.
   > Thus a deployment can add a hybrid without a flag day if the cryptanalysis
-  > of ML-DSA moves. This is a real residual risk, and Part 16 §16.7 records it.
+  > of ML-DSA moves. This is a real residual risk, and Part 15 §15.7 records it.
 - **The core does not use SHA-2.** TLS in the transport layer (Part 3 §3.8)
   brings its own SHA-2, and that is outside the TCB of the cryptographic core.
 - **UMBRA does not use sntrup761**, and this decision differs from SimpleX.
@@ -140,7 +140,7 @@ RootIdentity (256-bit seed, device-local, NEVER on the network and NEVER to a
               and IDN-002 makes it the only one)
 │
 ├── K_rng_harden = Expand("umbra/v1/rng-harden", 32)    RFC 8937 hardening secret
-├── K_store      = Expand("umbra/v1/storage", 32)       at-rest master (Part 15)
+├── K_store      = Expand("umbra/v1/storage", 32)       at-rest master (Part 14)
 ├── K_devset     = Expand("umbra/v1/device-set", 32)    device-set membership (Part 7)
 │
 ├── DeviceKey_i       per device: X25519 + ML-KEM-768, generated ON that device
@@ -186,7 +186,7 @@ Algorithm 16 of FIPS 203, and it takes the two 32-byte seeds `d` and `z`.
 > *Cause.* An earlier draft wrote each line as `KDF(Root, label)`, with no salt,
 > no output length, and no split of the output into the two keypairs. Two
 > clients could restore one recovery phrase to two different identities, and the
-> user reached no contact after a restore. Part 9 §9.9.1 and Part 13 §13.3.3
+> user reached no contact after a restore. Part 9 §9.9.1 and Part 12 §12.3.3
 > already write the full call, and CRY-034 to CRY-037 pin the `UMBRA-KEM`
 > encoding to the byte. This section now holds the same rigor.
 
@@ -530,7 +530,7 @@ empties, and no fallback handshake exists.
 >
 > The trial also had no cost bound. That draft made a pool 500 keys or more,
 > and no party authenticates flight 1 before the work. Thus one unauthenticated
-> record cost a phone up to 500 ML-KEM decapsulations, and Part 14 §14.2 does
+> record cost a phone up to 500 ML-KEM decapsulations, and Part 13 §13.2 does
 > not gate a send. The identifier removes the trial, the contradiction, and that
 > amplification together. It costs 16 bytes on flight 1.
 
@@ -747,7 +747,7 @@ Split():
 The value `RK` is the initial root key of §5.5.1. The two header keys protect
 the `hdr_ct` field of Part 6 §6.5, one for each direction. **[CRY-059]** An implementation
 MUST erase `ck`, `h`, `k`, and each ephemeral private key after the split, with
-the one exception of the next rule. Part 15 §15.4 gives the erasure rule. Part
+the one exception of the next rule. Part 14 §14.4 gives the erasure rule. Part
 7 §7.4 step 3 takes its 6-digit confirmation code from `h`, and it takes that
 code before the erasure.
 
@@ -916,7 +916,7 @@ thus `CRY-031` permits the shared label.
 4. **[CRY-113]** A party MUST derive the hop key material from `ss_hop` of the
    split and from no other value.
 5. **[CRY-114]** An implementation MUST erase `ck`, `h`, `k`, `e_sk`, `e1_sk`,
-   and `er_sk` after the split. Part 15 §15.4 gives the erasure rule.
+   and `er_sk` after the split. Part 14 §14.4 gives the erasure rule.
 6. **[CRY-115]** A relay MUST accept flight 1 under each `ntor_pk` that a valid
    consensus lists for that relay. A consensus is valid inside
    `CONSENSUS_VALIDITY`. A client builds from the consensus that it holds, and
@@ -1135,7 +1135,7 @@ code.
 > figure from *k* and *r* again.
 >
 > **[CRY-075]** Two implementations MUST produce byte-identical chunks for one
-> material and one schedule. Part 15 §15.5 gives the cross-backend rule that
+> material and one schedule. Part 14 §14.5 gives the cross-backend rule that
 > covers that requirement. **[CRY-083]** The test suite MUST hold a vector for
 > each of the three widths, and each vector MUST hold a loss pattern that drops
 > *r* chunks.
@@ -1237,15 +1237,15 @@ raise `MSG_TTL` alone.
 > days. A relay holds an undelivered message for 45 days. A receiver that
 > skipped the key of that message discarded that key on day 14, thus the message
 > arrived and it did not decrypt. U9 of Part 2 §2.4 sets the undecryptable rate
-> below 1 in 10⁵, and that window is 31 days wide on the ordinary path. Part 13
-> Part 13 §13.7.1 corrects the same class of error for `CHUNK_TTL`, and rules
+> below 1 in 10⁵, and that window is 31 days wide on the ordinary path. Part 12
+> Part 12 §12.7.1 corrects the same class of error for `CHUNK_TTL`, and rules
 > ATT-050 and ATT-051 give the same relation.
 >
 > **This is a trade, and Part 2 §2.4 requires the text to state it.** A skipped
 > key now lives 45 days in place of 14. A seized device therefore gives A6 a
 > wider set of message keys. `MAX_SKIP`, `MAX_STORED`, `MAX_BYTES`, and
 > `MAX_STORED_DEVICE` bound the count of that set, and only the age changes.
-> Part 16 §16.3 records the residual.
+> Part 15 §15.3 records the residual.
 
 **[CRY-023]** An implementation MUST store the skipped keys encrypted at rest under `K_store`.
 The specification records that these keys are a long-tailed hole in the forward
@@ -1534,7 +1534,7 @@ primitive register in the same manner.
 > above.
 
 > *The cause of the nine labels that this revision adds.* Part 6 §6.6.5
-> derives a mention identifier under `"umbra/v1/mention"`, and Part 13 §13.3.4
+> derives a mention identifier under `"umbra/v1/mention"`, and Part 12 §12.3.4
 > derives a manifest key under `"umbra/v1/file-manifest"`. The seven labels below
 > came with the correction pass of the same revision.
 >
@@ -1578,7 +1578,7 @@ primitive register in the same manner.
 
 > *The cause of the four storage labels.* Part 3 §3.2.6 extracts the
 > dead-channel secret under `"umbra/v1/dead-channel"`, and its three expansions
-> differ in the first info byte. Part 13 §13.4.2 ranks a relay for a
+> differ in the first info byte. Part 12 §12.4.2 ranks a relay for a
 > handle-addressed chunk under `"umbra/v1/chunk-place"`. Part 4 §4.7.2 derives
 > the read credential of the backup root under `"umbra/v1/backup-read"` and its
 > content key under `"umbra/v1/backup-key"`. The two backup labels sit beside
@@ -1591,7 +1591,7 @@ primitive register in the same manner.
 > pattern of Part 10 §10.5.2. A shared label with that pattern would put a
 > tree head and a directory root under one signing domain. CRY-031 forbids that.
 
-> *The cause of the two proof-of-work labels.* Part 14 §14.8 signs a
+> *The cause of the two proof-of-work labels.* Part 13 §13.8 signs a
 > `PowChallenge` under `"umbra/v1/pow-challenge"`, and it builds the Equi-X
 > challenge string under `"umbra/v1/pow"`. The first names a signature and the
 > second names a hash input, which are two object types.
@@ -1601,7 +1601,7 @@ primitive register in the same manner.
 > under `"umbra/v1/sas"`. The first names a hash of one nonce and the second
 > names a hash of two keys and two nonces, which are two object types.
 
-> *The cause of the two hello labels.* Part 14 §14.4 derives the proof-of-work
+> *The cause of the two hello labels.* Part 13 §13.4 derives the proof-of-work
 > challenge of a hello from the published key of the addressee, because the
 > addressee publishes no `PowChallenge`. The label `"umbra/v1/hello-verifier"`
 > makes the `verifier_id`, and `"umbra/v1/hello-seed"` makes the `seed`. The
@@ -1613,14 +1613,14 @@ primitive register in the same manner.
 > gives. The label `"umbra/v1/hello"` keeps that key apart from the challenge
 > keys of §9.9.1 and §9.9.3, which take the same shared-secret shape.
 
-> *The cause of the row label.* Part 15 §15.6.4 derives the key of the
+> *The cause of the row label.* Part 14 §14.6.4 derives the key of the
 > surrogate row identifiers from `K_store` under `"umbra/v1/row-id"`. The
 > table MAC key and each record key derive from the same master key, thus the
 > surrogate key needs a label of its own.
 
 > *The cause of the two log labels.* Part 9 §9.5.1 commits a leaf of the
 > transparency log to its entry under `"umbra/v1/log-commit"`, with the
-> opening as the HMAC key. Part 14 §14.5 names the label input of an issuer
+> opening as the HMAC key. Part 13 §13.5 names the label input of an issuer
 > key under `"umbra/v1/issuer-key"`, which keeps that input apart from a
 > handle and an address in the one VOPRF of Part 9 §9.4.
 
@@ -1648,13 +1648,13 @@ primitive register in the same manner.
 > *The cause of the six labels that an earlier revision added.* Part 7 §7.3.1 signs a
 > `Roster` under `"umbra/v1/device-roster"`. Part 11 §11.9.2 signs a granting
 > epoch under `"umbra/v1/group-grant"`, and Part 11 §11.9.6 signs a moderation
-> epoch under `"umbra/v1/group-moderation"`. Part 13 §13.3.2 hashes a relay
-> identity under `"umbra/v1/relayref"`. Part 13 §13.3.1 commits an attachment key
-> under `"umbra/v1/file-commit"`, and Part 13 §13.3.3 derives a chunk read
+> epoch under `"umbra/v1/group-moderation"`. Part 12 §12.3.2 hashes a relay
+> identity under `"umbra/v1/relayref"`. Part 12 §12.3.1 commits an attachment key
+> under `"umbra/v1/file-commit"`, and Part 12 §12.3.3 derives a chunk read
 > credential under `"umbra/v1/chunk-read"`. Each of the six names one object
 > type, and an earlier draft used three of them with no entry in this list.
 
-> *The cause of the three platform-surface labels.* Part 15 §15.6.4 derives a
+> *The cause of the three platform-surface labels.* Part 14 §14.6.4 derives a
 > record key under `"umbra/v1/record-key"`, and `"umbra/v1/storage"` names the
 > master key above it. Part 7 §7.7 derives a sync channel seed after a
 > revocation under `"umbra/v1/sync-seed"`, and `"umbra/v1/device-set"` names
@@ -1662,7 +1662,7 @@ primitive register in the same manner.
 > `"umbra/v1/handle-write"`, and `"umbra/v1/handle-renew"` names the renewal.
 > Each of the three names one object type.
 
-> *The cause of the two at-rest labels.* Part 15 §15.6.4 derives the wrap key
+> *The cause of the two at-rest labels.* Part 14 §14.6.4 derives the wrap key
 > of `K_store` from the secure-element secret under `"umbra/v1/at-rest-wrap"`.
 > Part 4 §4.6 derives the table MAC key from `K_store` under
 > `"umbra/v1/table-mac"`. The first sits above `K_store` and the second sits
@@ -1677,10 +1677,8 @@ One label names one object type. **[CRY-031]** Two object types MUST NOT share o
 Part 11 §11.9.2 signs a granting epoch of a group, and Part 11 §11.9.6 signs a
 moderation epoch of a group. The two objects use two labels of their own.
 
-**[CRY-032]** The label `"umbra/v1/group-roster"` and each label that starts
-with `"umbra/v1/community-"` are not used, and an implementation MUST NOT add
-them. The labels that start with `"umbra/v1/community-"` stay reserved for the
-withdrawn Part 12. Part 11 §11.9.1 makes `GroupRosterSeed_g` from the device
+**[CRY-032]** The label `"umbra/v1/group-roster"` is not used, and an
+implementation MUST NOT add it. Part 11 §11.9.1 makes `GroupRosterSeed_g` from the device
 CSPRNG. That value does not come from a KDF, thus it needs no derivation
 label. The pair key and the KEM key that Part 11 §11.3.3 derives from
 `GroupRosterSeed_g` use `"umbra/v1/group-pair"` and `"umbra/v1/group-kem"`. **[CRY-066]** A group signature MUST use

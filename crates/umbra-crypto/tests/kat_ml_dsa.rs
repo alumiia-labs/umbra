@@ -1,5 +1,5 @@
 //! Known-answer tests of the ML-DSA-65 primitive against the vendored ACVP
-//! corpus (Part 15 §15.5.2). Nothing here reaches the network.
+//! corpus (Part 14 §14.5.2). Nothing here reaches the network.
 //!
 //! UMBRA uses the pure variant with an empty context. The corpus also holds
 //! HashML-DSA groups (`preHash`), which this harness skips because no rule of

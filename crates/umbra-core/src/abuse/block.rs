@@ -1,4 +1,4 @@
-//! The block of a contact (Part 14 §14.12): a client state that sends
+//! The block of a contact (Part 13 §13.12): a client state that sends
 //! nothing, keeps the queue and the ratchet alive, and discards what the
 //! blocked party sends after the acknowledgement.
 

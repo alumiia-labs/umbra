@@ -1,11 +1,11 @@
 //! RSABSSA-SHA384-PSS-Deterministic of RFC 9474, which is AUX-1 of Part 5
-//! §5.1: the cross-relay token of Part 14 §14.3.1, which a third party
+//! §5.1: the cross-relay token of Part 13 §13.3.1, which a third party
 //! verifies with the public key of the issuer alone.
 //!
 //! The issuer signs, the client blinds and finalizes, and any party
 //! verifies. No key is generated here: the issuer holds its key from its
-//! own tooling, and a client holds the public key from the log of Part 14
-//! §14.5. The modulus width is a type parameter, because the RFC vectors
+//! own tooling, and a client holds the public key from the log of Part 13
+//! §13.5. The modulus width is a type parameter, because the RFC vectors
 //! use 4096 bits and UMBRA uses 2048; [`PublicKey2048`] is the UMBRA key.
 //! The variant is PSS with a 48-byte salt that the client draws at the
 //! blind, and a deterministic message preparation.

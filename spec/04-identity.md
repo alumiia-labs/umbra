@@ -369,7 +369,7 @@ time only.
 ```
 https://<invitation-host>/i#<fragment>
    fragment = 256 bits of key material || 192 bits of server-generated link ID
-              || RelayRef of the relay that holds the blob (Part 13 §13.3.2)
+              || RelayRef of the relay that holds the blob (Part 12 §12.3.2)
 ```
 
 The **invitation host** is one host that the nonprofit operates, and the
@@ -427,7 +427,7 @@ fragment.
 > the relay served a page that UMBRA did not specify. One host with a static
 > document gives the platform a list of one. The `RelayRef` in the fragment
 > names the relay to the client, and no host sees it. A hostile invitation host
-> serves a different document, and Part 16 §16.3 records that residual. The
+> serves a different document, and Part 15 §15.3 records that residual. The
 > first-access lock below detects a fetch that such a host makes.
 
 The blob carries the full invitation. The invitation holds the responder static
@@ -472,7 +472,7 @@ sends an `IGET` with a lock key that it drew for this fetch.
   relay.
 - **[IDN-169]** The store of an inviter MUST hold the fragment of an
   invitation that waits, thus the client shows the link again after a
-  restart. It MUST delete the fragment with the invitation (Part 15 rule
+  restart. It MUST delete the fragment with the invitation (Part 14 rule
   `IMP-136`).
 
 > *What the lock does not do.* A party that reads the link first fetches the
@@ -511,10 +511,10 @@ request.
   9 §9.6, it MUST check that `SHA3-256(address_pk)[0..20]` equals the address.
   Part 2 §2.4.2 goal S1 sets the tap count and the latency of that path.
 
-A request to a Public Address ends with one `Admission` of Part 14 §14.2,
-inside the hello. The addressee client verifies a cross-relay token of Part 14
-§14.3.1 or a proof of work of Part 14 §14.4, and no relay reads it. Part 14
-§14.4 gives the rules and the limit of each epoch.
+A request to a Public Address ends with one `Admission` of Part 13 §13.2,
+inside the hello. The addressee client verifies a cross-relay token of Part 13
+§13.3.1 or a proof of work of Part 13 §13.4, and no relay reads it. Part 13
+§13.4 gives the rules and the limit of each epoch.
 
 ## 4.4 What a contact learns
 
@@ -614,7 +614,7 @@ is 1 217 bytes, thus the record uses bucket `B1`.
 > The alternative is a signature under a long-term key. Part 5 §5.7 and Part 9
 > §9.7 each reject that alternative, because it ends the offline deniability of
 > G10 and it makes a perfect linker against G9. This specification keeps the
-> unsigned notice and puts the weight on the prompt. Part 16 §16.3 records the
+> unsigned notice and puts the weight on the prompt. Part 15 §15.3 records the
 > residual.
 
 8. **[IDN-089]** The blocking notice of §4.5 MUST state that acceptance ends the
@@ -708,14 +708,14 @@ value needs one. Part 5 §5.11 holds the two labels.
 > match. The commit binds each nonce before the reveal, thus the adversary
 > cannot select a nonce after it reads the other one. The adversary then
 > matches two codes with a probability of one in 10⁶ for each ceremony, and
-> Part 16 §16.3 states that residual. Without the commit, an adversary that
+> Part 15 §15.3 states that residual. Without the commit, an adversary that
 > reveals last selects its nonce against the known code, and the short code
 > gives nothing.
 
 ## 4.6 Local database integrity
 
-The local database is part of the cryptographic trusted computing base. Part 15
-§15.6.4 encrypts each record with XChaCha20-Poly1305 under a key for each
+The local database is part of the cryptographic trusted computing base. Part 14
+§14.6.4 encrypts each record with XChaCha20-Poly1305 under a key for each
 record. That construction detects a change to a record. It does not detect the
 removal of a record, and it does not detect a substitution between two records.
 Thus five rules apply, and they apply to each table.
@@ -740,9 +740,9 @@ Thus five rules apply, and they apply to each table.
    ```
 
    The value `record_tag_i` is the 16-byte XChaCha20-Poly1305 tag of that
-   record. Part 15 §15.6.4 gives that tag. The value `commit_counter` is
+   record. Part 14 §14.6.4 gives that tag. The value `commit_counter` is
    monotone for each table. `K_store` is the at-rest master key of Part 5
-   §5.2, and Part 15 §15.6.4 wraps it. **[IDN-034]** A client MUST derive
+   §5.2, and Part 14 §14.6.4 wraps it. **[IDN-034]** A client MUST derive
    `K_tab` from `K_store` under the label `"umbra/v1/table-mac"`. **[IDN-035]**
    A client MUST NOT write `K_tab` to storage. Part 5 §5.11 holds the label.
 
@@ -765,7 +765,7 @@ Thus five rules apply, and they apply to each table.
    >
    > The accumulator is an XOR of keyed tags in the manner of the XOR-MAC
    > construction of Bellare, Guérin, and Rogaway. `K_tab` derives from
-   > `K_store`, which the secure element entangles under Part 15 §15.6.4. Thus
+   > `K_store`, which the secure element entangles under Part 14 §14.6.4. Thus
    > an attacker without the unlocked store cannot compute a `row_tag`, and it
    > cannot cancel one term against another.
    >
@@ -821,8 +821,8 @@ because an enumeration omits the next table.
 > The MAC detects a change by a party that cannot run code on the device. It
 > does not detect a change by a party that holds code execution while the
 > client holds `K_store` in RAM. The cause is that `K_tab` derives from
-> `K_store`. Part 15 §15.6.4 gives the auto-lock that ends that period, and
-> Part 16 §16.2.1 documents that state.
+> `K_store`. Part 14 §14.6.4 gives the auto-lock that ends that period, and
+> Part 15 §15.2.1 documents that state.
 
 ## 4.7 Account recovery
 
@@ -930,11 +930,11 @@ that table.
   sequential handles of one user without the Recovery Code.
 - **The backup root.** The four values name one chunk, the **backup root**,
   and that chunk names each stored backup object. The root is a
-  handle-addressed chunk of Part 13 §13.4.2. **[IDN-093]** A client MUST write
+  handle-addressed chunk of Part 12 §12.4.2. **[IDN-093]** A client MUST write
   the backup root with `chunk_id` of `backup_handle_epoch`, `cred_sk` of
   `backup_write_cred`, and `read_sk` of `backup_read_cred`. **[IDN-094]** A
   client MUST seal the root under `backup_key_epoch` as the `sealed` field
-  below. **[IDN-114]** A client MUST pad the result under Part 13 §13.2.3.
+  below. **[IDN-114]** A client MUST pad the result under Part 12 §12.2.3.
 
   ```
   BackupRootChunk {                     // the chunk plaintext, before the padding
@@ -951,19 +951,19 @@ that table.
   BackupEntry {                         // 980 bytes at most
       kind         u8                   // 0x01 a full object, 0x02 a delta object
       desc_len     u16
-      descriptor   [desc_len]u8         // a FileDescriptor of Part 13 §13.3
+      descriptor   [desc_len]u8         // a FileDescriptor of Part 12 §12.3
   }
   ```
 
-  **[IDN-095]** A client MUST write each backup object as a file of Part 13
-  §13.3 in the backup class. Part 13 §13.3.3 rule 10 gives that class.
+  **[IDN-095]** A client MUST write each backup object as a file of Part 12
+  §12.3 in the backup class. Part 12 §12.3.3 rule 10 gives that class.
   **[IDN-115]** A client MUST record the `FileDescriptor` of that file as one
   `BackupEntry`. **[IDN-096]** A client MUST use level `0x01` for a backup
-  object above `BACKUP_DESC_REFS` data chunks. Part 13 rules `ATT-072` and
+  object above `BACKUP_DESC_REFS` data chunks. Part 12 rules `ATT-072` and
   `ATT-073` do not apply to a backup object. **[IDN-097]** A client MUST put
   the latest full object at entry 0, and then each later delta in write order.
   **[IDN-098]** A
-  client MUST write the root again after each object write, under Part 13 rule
+  client MUST write the root again after each object write, under Part 12 rule
   `ATT-138`. **[IDN-099]** After a full write succeeds, a client MUST send
   `CDEL` for each object that the new root does not name. **[IDN-100]** A
   client MUST NOT send `CDEL` for the root of an earlier epoch.
@@ -984,16 +984,16 @@ that table.
   > `BACKUP_FULL_INTERVAL`. `BACKUP_DESC_REFS` of 7 keeps an entry inside 980
   > bytes. At level `0x01` one entry addresses 7 × 271 = 1 897 data chunks,
   > which is about 62 MB. That figure is the ceiling of one backup object, and
-  > it bounds the opt-in media. Part 13 §13.3.2 gives the null reference that
+  > it bounds the opt-in media. Part 12 §12.3.2 gives the null reference that
   > the second `RelayRef` of a backup ref holds.
 - **The backup object.** A backup object carries rows of the local store of
-  Part 15 §15.6.4, each under its surrogate identifier and in its
+  Part 14 §14.6.4, each under its surrogate identifier and in its
   plaintext. `K_store` derives from the root seed (Part 5 §5.2), and the
   surrogate identifiers derive from `K_store`, thus a restore under the same
   seed puts each row at its place again.
 
   ```
-  BackupObject {                        // the plaintext of the file, before §13.3
+  BackupObject {                        // the plaintext of the file, before §12.3
       version      u8                   // 0x01
       kind         u8                   // 0x01 a full object, 0x02 a delta object
       written_at   u64                  // Unix seconds of the writer
@@ -1040,12 +1040,12 @@ that table.
   > recover the identity, the contacts, and the queue state. The two values
   > above give a user 180 days, and IDN-074 keeps them in agreement.
 
-- **The backup travels on the chunk path of Part 13 §13.3.3.** **[IDN-075]** A
+- **The backup travels on the chunk path of Part 12 §12.3.3.** **[IDN-075]** A
   client MUST divide a backup object into chunks of `CHUNK_SIZE`. **[IDN-117]**
   A client MUST write those chunks under the attachment commands of that
   section, with `BNEW` as the registration. **[IDN-076]** A client MUST write each chunk to
   `BACKUP_REPLICAS` relays under different operators. **[IDN-077]** A client
-  MUST send a backup chunk on the separate connection of Part 13 §13.8.
+  MUST send a backup chunk on the separate connection of Part 12 §12.8.
 
   > *Cause.* An earlier draft put a backup write in a scheduled `B0` cover slot.
   > Part 3 §3.6.2 gives a 2 h foreground day about 360 such slots, and Part 6
@@ -1111,7 +1111,7 @@ Android Block Store. **[IDN-086]** If a client puts
 `C_social` in that same item.
 
 > Thus neither set alone recovers the account. A platform account gives
-> `C_user`, and three contacts give `C_social`. Part 16 §16.1 holds the two
+> `C_user`, and three contacts give `C_social`. Part 15 §15.1 holds the two
 > rows, and A5 has to reach two different parties in two different positions.
 
 **[IDN-087]** The interface MUST state that the shares alone do not recover the
@@ -1230,7 +1230,7 @@ decodes `type`, and knows the width.
 | `INVITE_RESERVE_TTL` | 600 s, the time that a relay holds a link identifier with no blob (Part 6 rule `WIR-508`) |
 | Invitation host | One host that the nonprofit operates, named at the release tag of the client (§4.3.1) |
 
-> *The cause of `BACKUP_REPLICAS` of 2.* Part 13 §13.4 sets `REPLICAS` to 3 for
+> *The cause of `BACKUP_REPLICAS` of 2.* Part 12 §12.4 sets `REPLICAS` to 3 for
 > an attachment, because one relay outage then breaks a transfer that no party
 > repeats. A backup object is different. The client rewrites it at each
 > `BACKUP_FULL_INTERVAL`, thus a lost replica heals at the next full write. Part

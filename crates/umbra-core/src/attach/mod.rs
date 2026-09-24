@@ -1,4 +1,4 @@
-//! The attachments of Part 13: the segments and their padding, the
+//! The attachments of Part 12: the segments and their padding, the
 //! key-committing seal of each chunk, the manifest level, the twelve chunk
 //! commands, the chunk store of a relay, the placement of a
 //! handle-addressed chunk, and the upload of one chunk.
@@ -74,7 +74,7 @@ pub const VERIFY_SAMPLE_MAX: usize = 64;
 pub const VERIFY_SAMPLE_DIVISOR: usize = 32;
 
 /// `REPLICA_VERIFY_SAMPLE` for a relay that holds `chunks_held` chunks of
-/// one file (§13.4.1).
+/// one file (§12.4.1).
 pub const fn verify_sample(chunks_held: usize) -> usize {
     let share = chunks_held / VERIFY_SAMPLE_DIVISOR;
     let floored = if share < VERIFY_SAMPLE_MIN {

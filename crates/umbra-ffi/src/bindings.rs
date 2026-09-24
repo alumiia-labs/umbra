@@ -1,4 +1,4 @@
-//! The UniFFI scaffolding of Part 15 §15.6.1 over [`crate::client`] and the
+//! The UniFFI scaffolding of Part 14 §14.6.1 over [`crate::client`] and the
 //! SQLite backend.
 //!
 //! `Draft` and `MsgRef` cross as opaque object handles (`IMP-038`). Text
@@ -283,11 +283,11 @@ pub struct RelayEndpoint {
     /// network on one machine names a network for each relay here, because
     /// each of its relays has the address of that machine.
     pub prefix: Option<Vec<u8>>,
-    /// Whether the relay holds chunks of files (Part 13). A network from a
+    /// Whether the relay holds chunks of files (Part 12). A network from a
     /// descriptor text has no such relay.
     pub holds_files: bool,
     /// The ML-DSA-65 identity key of the relay, which signs its proof-of-work
-    /// challenge (Part 14 `ABU-068`). A network from a descriptor text
+    /// challenge (Part 13 `ABU-068`). A network from a descriptor text
     /// names none.
     pub identity_pk: Vec<u8>,
 }
@@ -876,7 +876,7 @@ impl DraftHandle {
     /// Gives the draft its file. The core reads the bytes at `path`, which
     /// on Android is the path of an open descriptor of this process, thus
     /// the bytes of the file cross no surface. The four values are the media
-    /// fields of the descriptor of Part 13 §13.3, after the re-encode of
+    /// fields of the descriptor of Part 12 §12.3, after the re-encode of
     /// `ATT-155`.
     pub fn attach_file(
         &self,
@@ -974,7 +974,7 @@ struct Inner {
     /// The number of the run of the network, which each connect moves.
     run: u64,
     /// The newest challenge of each relay, from the carrier of the manifest
-    /// (Part 14 `ABU-065`, `ABU-105`), and the time of the fetch.
+    /// (Part 13 `ABU-065`, `ABU-105`), and the time of the fetch.
     challenges: umbra_core::abuse::pow::ChallengeBook,
     challenges_at: u64,
 }
@@ -1170,8 +1170,8 @@ impl Inner {
         out
     }
 
-    /// Gives each file job of the store to the transfer task (Part 13
-    /// §13.8). With no run of the network the jobs wait in the store.
+    /// Gives each file job of the store to the transfer task (Part 12
+    /// §12.8). With no run of the network the jobs wait in the store.
     fn pump_transfers(&mut self) {
         if self.bridge.is_none() {
             return;
@@ -1428,7 +1428,7 @@ impl Inner {
             self.send_transfer(TransferCommand::Upload {
                 tag,
                 plain,
-                // A slot object is no media of the user (Part 13 §13.3).
+                // A slot object is no media of the user (Part 12 §12.3).
                 shape: Shape::default(),
             });
         }
@@ -3437,7 +3437,7 @@ impl Handle {
         inner.send_transfer(TransferCommand::Upload {
             tag,
             plain: Zeroizing::new(admission.snapshot),
-            // A snapshot is no media of the user (Part 13 §13.3).
+            // A snapshot is no media of the user (Part 12 §12.3).
             shape: Shape::default(),
         });
         Ok(())

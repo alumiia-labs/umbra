@@ -1,8 +1,8 @@
-//! The proof of work of Part 14 §14.8: the signed challenge, the
+//! The proof of work of Part 13 §13.8: the signed challenge, the
 //! solution, the verifier with its two live seeds and its accepted
 //! nonces, the effort from the backlog, the client that solves a fetched
 //! challenge inside its period, and the derived challenge of a hello of
-//! §14.4.
+//! §13.4.
 
 use alloc::{
     collections::{BTreeMap, BTreeSet},

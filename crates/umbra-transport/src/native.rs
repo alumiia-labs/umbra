@@ -1,4 +1,4 @@
-//! The native L1 stack of Part 15 §15.2.8: TLS 1.3 through rustls on the
+//! The native L1 stack of Part 14 §14.2.8: TLS 1.3 through rustls on the
 //! aws-lc-rs provider, QUIC through quinn, both on tokio.
 //!
 //! The client configuration is one shape for every client (Part 3 §3.8):
@@ -148,7 +148,7 @@ pub const MANIFEST_PATH: &str = "/.well-known/umbra/manifest";
 /// The largest manifest that a client reads: 3 000 proven entries are below
 /// 18 MiB (Part 10 §10.5.5).
 pub const MANIFEST_MAX: usize = 32 << 20;
-/// The path of the challenges of the relays, beside the manifest (Part 14
+/// The path of the challenges of the relays, beside the manifest (Part 13
 /// `ABU-104`).
 pub const CHALLENGES_PATH: &str = "/.well-known/umbra/challenges";
 /// The largest bundle of challenges that a client reads: one challenge of

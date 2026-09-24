@@ -1,5 +1,5 @@
-//! The key-committing seal of Part 13 §13.3.1, the key derivations of
-//! §13.3.3 and §13.3.4, the relay hint of §13.3.2, and the two ends of a
+//! The key-committing seal of Part 12 §12.3.1, the key derivations of
+//! §12.3.3 and §12.3.4, the relay hint of §12.3.2, and the two ends of a
 //! file: the sender that seals it and the receiver that opens it chunk by
 //! chunk.
 
@@ -122,7 +122,7 @@ pub fn manifest_key(file_key: &Secret<32>, file_nonce: &[u8; 24]) -> Secret<32> 
     key
 }
 
-/// The `relay_hint` of a `RelayRef` (§13.3.2).
+/// The `relay_hint` of a `RelayRef` (§12.3.2).
 pub fn relay_hint(relay_id: &[u8; 32]) -> [u8; 12] {
     let full = sha3_256(&[labels::RELAYREF, relay_id]);
     let mut hint = [0u8; 12];
@@ -130,7 +130,7 @@ pub fn relay_hint(relay_id: &[u8; 32]) -> [u8; 12] {
     hint
 }
 
-/// The proof of possession that a `CPRF` carries (§13.4.1).
+/// The proof of possession that a `CPRF` carries (§12.4.1).
 pub fn proof(nonce: &[u8; 16], chunk: &[u8]) -> [u8; 32] {
     sha3_256(&[nonce, chunk])
 }
@@ -232,7 +232,7 @@ impl Assembler {
     }
 
     /// The manifest chunks of a level `0x01` descriptor, under `K_manifest`
-    /// (§13.3.4). A manifest carries no digest, and each chunk tag
+    /// (§12.3.4). A manifest carries no digest, and each chunk tag
     /// authenticates it.
     pub fn for_manifest(descriptor: &FileDescriptor) -> Result<Self, Error> {
         verify_commit(descriptor)?;

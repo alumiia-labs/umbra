@@ -1,4 +1,4 @@
-//! The anti-abuse system of Part 14: the two token types with their
+//! The anti-abuse system of Part 13: the two token types with their
 //! issuance and verification, the proof of work with its challenge and
 //! its verifier, the admission gate of a relay, the issuer keys a client
 //! accepts, the relay-local spend set, and the block of a contact.
@@ -14,7 +14,7 @@ pub mod pow;
 pub mod spend;
 pub mod token;
 
-/// The epoch length of §14.6, in seconds.
+/// The epoch length of §13.6, in seconds.
 pub const EPOCH_SECONDS: u64 = 604_800;
 /// `POW_CHALLENGE_PERIOD`, in seconds.
 pub const POW_CHALLENGE_PERIOD: u64 = 600;
@@ -27,10 +27,10 @@ pub const HELLO_POW_EFFORT: u32 = 50;
 /// The admissions pending in one `POW_CHALLENGE_PERIOD` that raise the
 /// effort by one (`ABU-092`).
 pub const POW_BACKLOG_UNIT: u32 = 64;
-/// The most tokens in one batch (§14.6).
+/// The most tokens in one batch (§13.6).
 pub const BATCH_MAX: usize = 256;
 
-/// The epoch number of `now` (§14.6).
+/// The epoch number of `now` (§13.6).
 pub const fn epoch_number(now: u64) -> u32 {
     let epoch = now / EPOCH_SECONDS;
     if epoch > u32::MAX as u64 {

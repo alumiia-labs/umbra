@@ -12,7 +12,7 @@ import javax.crypto.SecretKey
 import uniffi.umbra_ffi.SecureElementCallback
 
 /**
- * The keyed function of Part 15 §15.6.4: `HMAC-SHA256(k_se, input)` under a
+ * The keyed function of Part 14 §14.6.4: `HMAC-SHA256(k_se, input)` under a
  * key that the keystore made and that has no export path. StrongBox holds the
  * key when the device has one, and the TEE holds it on each other device.
  *

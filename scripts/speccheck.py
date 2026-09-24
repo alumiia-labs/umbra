@@ -37,11 +37,10 @@ PREFIX_FILE = {
     "DIS": "09-discovery.md",
     "REL": "10-relay-directory.md",
     "GRP": "11-private-groups.md",
-    "COM": "12-communities.md",
-    "ATT": "13-attachments.md",
-    "ABU": "14-anti-abuse.md",
-    "IMP": "15-implementation.md",
-    "SEC": "16-security-considerations.md",
+    "ATT": "12-attachments.md",
+    "ABU": "13-anti-abuse.md",
+    "IMP": "14-implementation.md",
+    "SEC": "15-security-considerations.md",
 }
 FILE_PART = {f: i + 1 for i, f in enumerate(PREFIX_FILE.values())}
 

@@ -116,7 +116,7 @@ object Core {
         private set
     var fault by mutableStateOf<String?>(null)
 
-    /** The line of a degraded state of the link (Part 15 §15.9.2), which is no error. */
+    /** The line of a degraded state of the link (Part 14 §14.9.2), which is no error. */
     var degraded by mutableStateOf<String?>(null)
         private set
 
@@ -404,7 +404,7 @@ object Core {
                     // ended so while a view shows gets a new one.
                     if (wantsNetwork()) retryLater(app)
                 } else {
-                    // The two lines of Part 15 §15.9.2. The cause shows in the
+                    // The two lines of Part 14 §14.9.2. The cause shows in the
                     // view of the connection.
                     degraded = if (event.cause.toInt() == DIAL_FAILED) {
                         "The relays do not answer. Messages wait."

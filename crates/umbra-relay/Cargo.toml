@@ -11,7 +11,7 @@ repository.workspace = true
 workspace = true
 
 [features]
-# The server binary over the native transport stack of Part 15 §15.2.8.
+# The server binary over the native transport stack of Part 14 §14.2.8.
 # The node itself takes no socket and builds without it.
 native = ["umbra-transport/native", "dep:tokio", "dep:tokio-rustls", "dep:rustls", "dep:getrandom", "dep:rusqlite", "dep:aws-lc-rs"]
 

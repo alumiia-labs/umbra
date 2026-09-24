@@ -363,8 +363,8 @@ impl Braid {
 }
 
 impl Ratchet {
-    /// Writes the state of both ratchets for the at-rest store of Part 15
-    /// §15.6.4. The bytes hold each key of the session. A client stores
+    /// Writes the state of both ratchets for the at-rest store of Part 14
+    /// §14.6.4. The bytes hold each key of the session. A client stores
     /// them before a record of [`Ratchet::send`] leaves the device, because
     /// an earlier state would seal a second record under the same key.
     pub fn export(&self) -> Result<Zeroizing<Vec<u8>>, Error> {

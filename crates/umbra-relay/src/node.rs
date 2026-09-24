@@ -111,7 +111,7 @@ fn destroy_output(link: LinkId, circ_id: [u8; 16]) -> Option<Output> {
     Some(Output::Send { link, capsule })
 }
 
-/// The byte of a `CRPUT` (Part 13 §13.3.3).
+/// The byte of a `CRPUT` (Part 12 §12.3.3).
 const CRPUT: u8 = 0x77;
 
 /// The capsule of one copy. The header carries no authenticator, because
@@ -154,7 +154,7 @@ pub struct Config {
     pub layer: u8,
     /// The key of the token issuer for the current epoch.
     pub issuer_key: PublicKey2048,
-    /// The bytes of the chunk store of Part 13, or zero for a relay with no
+    /// The bytes of the chunk store of Part 12, or zero for a relay with no
     /// attachment role.
     pub chunk_capacity: u64,
 }

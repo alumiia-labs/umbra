@@ -1,6 +1,6 @@
 //! What a relay keeps between two runs: the pairwise queues with their
 //! records, the group queues of Part 11 with theirs, the invitations that
-//! wait for their first fetch, and the chunks of Part 13.
+//! wait for their first fetch, and the chunks of Part 12.
 //!
 //! A group lives at two relays for weeks. A relay that loses its group
 //! queues at a restart ends each group that it served, and no member

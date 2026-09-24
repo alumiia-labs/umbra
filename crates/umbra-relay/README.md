@@ -2,7 +2,7 @@
 
 The relay of the UMBRA protocol: the circuit hops of Part 3 §3.4, the pairwise
 queues of Part 3 §3.2, the invitations of Part 4 §4.3.1, the chunk store of
-Part 13, and the group queues of Part 3 §3.2.7.
+Part 12, and the group queues of Part 3 §3.2.7.
 The node is a plain state machine. The binary puts TLS 1.3, the WebSocket
 framing of Part 6 §6.2.1, a pacing clock, and an SQLite store around it.
 
@@ -205,7 +205,7 @@ that deletes, thus an acknowledged record leaves no bytes behind (`NET-302`).
 Do not copy the file of a live relay. Stop the relay, or use the backup
 command of SQLite.
 
-The chunks of Part 13 sit in memory alone. A restart drops them, and each
+The chunks of Part 12 sit in memory alone. A restart drops them, and each
 client fetches the file again from another replica or asks its sender.
 
 A file of an earlier version opens here. The schema takes nothing away, thus
