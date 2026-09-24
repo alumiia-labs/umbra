@@ -253,6 +253,8 @@ pub struct CommunityPostInfo {
     pub is_settled: bool,
     /// Whether this device wrote the post.
     pub is_own: bool,
+    /// Whether a ban stands on the author (`COM-298`).
+    pub is_author_banned: bool,
 }
 
 /// A community row, the view of its records, and those records with the
@@ -684,6 +686,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok((row, view, records))
     }
 
+    /// The view of a community, for the moderation of this device.
+    pub(super) fn community_view_of(
+        &self,
+        community_id: &[u8; 32],
+        now: u64,
+    ) -> Result<umbra_core::community::view::CommunityView, Error> {
+        Ok(self.community_view(community_id, now)?.1)
+    }
+
     /// Each post of a community that the view admits, oldest first. A post
     /// that a moderation epoch removes, or that its author withdrew, is
     /// not here.
@@ -710,6 +721,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 at: arrived.get(&post.hash).copied().unwrap_or(0),
                 is_settled: post.is_settled,
                 is_own: post.pseudonym == own,
+                is_author_banned: post.is_author_banned,
             })
             .collect();
         out.sort_by_key(|post| (post.at, post.author, post.index));

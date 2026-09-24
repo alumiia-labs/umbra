@@ -8,8 +8,11 @@
 
 use umbra_core::{
     community::{
-        chain::AuthorChain, identity::AuthorIdentity, social::text_body, COMMUNITY_RELAY_MAX,
-        NO_INDEX,
+        chain::AuthorChain,
+        control::{ActionKind, ControlBody, ControlObject, ModerationAction, Role},
+        identity::{AuthorIdentity, RoleIdentity},
+        social::text_body,
+        COMMUNITY_RELAY_MAX, NO_INDEX,
     },
     store::{
         engine::Backend,
@@ -51,6 +54,29 @@ pub struct PostSend {
     pub record: Vec<u8>,
 }
 
+/// One act of moderation that the platform asks for (§12.5.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModerationRequest {
+    /// Remove one post, by its hash.
+    RemovePost {
+        /// The hash of the post.
+        key: [u8; 32],
+    },
+    /// Ban an authoring pseudonym, and remove each post of it that this
+    /// device holds when `remove_history` holds (`COM-297`).
+    Ban {
+        /// The pseudonym.
+        author: [u8; 32],
+        /// Whether the ban removes the history too.
+        remove_history: bool,
+    },
+    /// End the ban of a pseudonym.
+    Unban {
+        /// The pseudonym.
+        author: [u8; 32],
+    },
+}
+
 fn keyed(community_id: &[u8; 32], hash: &[u8; 32]) -> [u8; 64] {
     let mut key = [0u8; 64];
     key[..32].copy_from_slice(community_id);
@@ -85,7 +111,80 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if chain.checkpoint_due(now) {
             records.push(chain.checkpoint(&author, now, rng)?);
         }
-        self.put_author_records(&owner, community_id, &chain, &records, now, rng)
+        self.put_own_records(&owner, community_id, Some(&chain), &records, now, rng)
+    }
+
+    /// Signs a moderation epoch under the owner role of this device, on the
+    /// head of the control chain that it holds (`COM-377`, `COM-378`). The
+    /// epoch shows at once, and it goes to each relay as a post does.
+    pub fn moderate_community<R: CryptoRng + ?Sized>(
+        &mut self,
+        community_id: &[u8; 32],
+        request: &ModerationRequest,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let (owner, row) = self.community_row_of(community_id)?;
+        let role_seed = row.role_seed.as_ref().ok_or(Error::NotFound)?;
+        let role = RoleIdentity::from_seed(role_seed);
+        let view = self.community_view_of(community_id, now)?;
+        // COM-121, COM-122: the roster names the signer in its role.
+        let actor_role = view
+            .roster
+            .iter()
+            .find(|(pseudonym, _)| *pseudonym == role.pseudonym())
+            .map(|(_, held)| *held)
+            .filter(|held| matches!(held, Role::Owner | Role::Admin))
+            .ok_or(Error::NotFound)?;
+        let (head, index) = view.control_head.ok_or(Error::NotFound)?;
+        let action = match request {
+            ModerationRequest::RemovePost { key } => {
+                let post = view
+                    .posts
+                    .iter()
+                    .find(|post| post.hash == *key)
+                    .ok_or(Error::NotFound)?;
+                ModerationAction {
+                    kind: ActionKind::Remove,
+                    target: post.pseudonym,
+                    index: post.index,
+                }
+            }
+            ModerationRequest::Ban {
+                author,
+                remove_history,
+            } => {
+                let highest = view
+                    .posts
+                    .iter()
+                    .filter(|post| post.pseudonym == *author)
+                    .map(|post| post.index)
+                    .max();
+                ModerationAction {
+                    kind: ActionKind::Ban,
+                    target: *author,
+                    index: highest.filter(|_| *remove_history).unwrap_or(NO_INDEX),
+                }
+            }
+            ModerationRequest::Unban { author } => ModerationAction {
+                kind: ActionKind::Unban,
+                target: *author,
+                index: NO_INDEX,
+            },
+        };
+        let record = ControlObject::sign(
+            &role,
+            *community_id,
+            index.checked_add(1).ok_or(Error::Malformed)?,
+            head,
+            ControlBody::Moderation {
+                actor_role,
+                actions: vec![action],
+            },
+            rng,
+        )?
+        .encode()?;
+        self.put_own_records(&owner, community_id, None, &[record], now, rng)
     }
 
     /// Signs the checkpoint of each chain whose cadence asks for one: a
@@ -110,7 +209,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let (owner, row) = self.community_row_of(&community_id)?;
             let author = AuthorIdentity::from_seed(&row.author_seed);
             let checkpoint = chain.checkpoint(&author, now, rng)?;
-            self.put_author_records(&owner, &community_id, &chain, &[checkpoint], now, rng)?;
+            self.put_own_records(&owner, &community_id, Some(&chain), &[checkpoint], now, rng)?;
         }
         Ok(())
     }
@@ -142,18 +241,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
     }
 
-    /// Stores the chain and puts each record in the outbox and among the
-    /// records of the community, in one batch.
-    fn put_author_records<R: CryptoRng + ?Sized>(
+    /// Stores the chain, where one moved, and puts each record in the
+    /// outbox and among the records of the community, in one batch.
+    fn put_own_records<R: CryptoRng + ?Sized>(
         &mut self,
         owner: &RowId,
         community_id: &[u8; 32],
-        chain: &AuthorChain,
+        chain: Option<&AuthorChain>,
         records: &[Vec<u8>],
         now: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
-        let chain_bytes = chain.to_bytes()?;
+        let chain_bytes = chain.map(AuthorChain::to_bytes).transpose()?;
         let open = self.open_mut()?;
         let author_row = open.store.row_id(COMMUNITY_AUTHOR, community_id);
         let mut rows = Vec::new();
@@ -176,13 +275,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             rows.push((outbox, value, shown, record_value));
         }
         let mut batch = open.store.begin();
-        batch.put(
-            COMMUNITY_AUTHOR,
-            author_row,
-            Some(*owner),
-            &chain_bytes,
-            rng,
-        )?;
+        if let Some(chain_bytes) = chain_bytes {
+            batch.put(
+                COMMUNITY_AUTHOR,
+                author_row,
+                Some(*owner),
+                &chain_bytes,
+                rng,
+            )?;
+        }
         for (outbox, value, shown, record_value) in rows {
             batch.put(COMMUNITY_OUTBOX, outbox, Some(*owner), &value, rng)?;
             batch.put(

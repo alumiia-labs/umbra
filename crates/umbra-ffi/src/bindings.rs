@@ -261,6 +261,8 @@ pub struct FfiCommunityPost {
     pub is_settled: bool,
     /// Whether this device wrote the post.
     pub is_own: bool,
+    /// Whether a ban stands on the author (`COM-298`).
+    pub is_author_banned: bool,
 }
 
 /// A community in its creation (Part 12 §12.5.5).
@@ -3183,6 +3185,23 @@ impl Handle {
         self.changed.notify_all();
     }
 
+    fn moderate(
+        &self,
+        community_id: Vec<u8>,
+        request: &crate::client::ModerationRequest,
+    ) -> Result<(), FfiError> {
+        let community_id =
+            <[u8; 32]>::try_from(community_id.as_slice()).map_err(|_| FfiError::Malformed)?;
+        let mut inner = locked(&self.inner);
+        inner
+            .client
+            .moderate_community(&community_id, request, unix_now(), &mut OsRng)?;
+        inner.pump_posts();
+        drop(inner);
+        self.changed.notify_all();
+        Ok(())
+    }
+
     fn on_community_update(&self, update: CommunityUpdate) {
         locked(&self.inner).end_community(update);
         self.changed.notify_all();
@@ -3374,6 +3393,10 @@ impl Handle {
         inner.pump_groups();
         inner.pump_ndr();
         inner.pump_forming();
+        // A community that formed from an exchange pulls at once.
+        if inner.client.take_formed() {
+            inner.pump_communities();
+        }
         if is_tick {
             inner.pump_dead_channels();
             inner.pump_backup();
@@ -4598,6 +4621,7 @@ impl Handle {
                 at: post.at,
                 is_settled: post.is_settled,
                 is_own: post.is_own,
+                is_author_banned: post.is_author_banned,
             })
             .collect())
     }
@@ -4617,6 +4641,51 @@ impl Handle {
         Ok(locked(&self.inner)
             .client
             .render_community_post(&community_id, &key, &mut sink)?)
+    }
+
+    /// Removes a post of a community, under the owner role of this device
+    /// (§12.5.2). The relays serve a stub in its place (`COM-352`).
+    pub fn remove_community_post(
+        &self,
+        community_id: Vec<u8>,
+        key: Vec<u8>,
+    ) -> Result<(), FfiError> {
+        let key = <[u8; 32]>::try_from(key.as_slice()).map_err(|_| FfiError::Malformed)?;
+        self.moderate(
+            community_id,
+            &crate::client::ModerationRequest::RemovePost { key },
+        )
+    }
+
+    /// Bans an author of a community, and removes each of its posts that
+    /// this device holds when `remove_history` holds (`COM-297`).
+    pub fn ban_community_author(
+        &self,
+        community_id: Vec<u8>,
+        author: Vec<u8>,
+        remove_history: bool,
+    ) -> Result<(), FfiError> {
+        let author = <[u8; 32]>::try_from(author.as_slice()).map_err(|_| FfiError::Malformed)?;
+        self.moderate(
+            community_id,
+            &crate::client::ModerationRequest::Ban {
+                author,
+                remove_history,
+            },
+        )
+    }
+
+    /// Ends the ban of an author of a community.
+    pub fn unban_community_author(
+        &self,
+        community_id: Vec<u8>,
+        author: Vec<u8>,
+    ) -> Result<(), FfiError> {
+        let author = <[u8; 32]>::try_from(author.as_slice()).map_err(|_| FfiError::Malformed)?;
+        self.moderate(
+            community_id,
+            &crate::client::ModerationRequest::Unban { author },
+        )
     }
 
     /// Each community of this device.

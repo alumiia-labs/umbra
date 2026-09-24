@@ -29,7 +29,7 @@ pub use groups::{
     GroupSubscription, Silence, GROUP_NAME_MAX,
 };
 pub use notify::NdrCall;
-pub use posting::PostSend;
+pub use posting::{ModerationRequest, PostSend};
 use umbra_core::{
     directory::path::IngressPins,
     identity::address::safety_number,
@@ -229,6 +229,9 @@ pub struct Client<B: Backend, E: SecureElement> {
     groups: groups::GroupQueues,
     /// The report queues that a declined creation left, for the run to end.
     ended_queues: Vec<[u8; 32]>,
+    /// Whether a community formed since the last call of
+    /// [`Client::take_formed`], thus its pulls start now.
+    formed: bool,
     auto_lock: AutoLock,
 }
 
@@ -494,6 +497,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             files: FileQueues::default(),
             groups: groups::GroupQueues::default(),
             ended_queues: Vec::new(),
+            formed: false,
             auto_lock: AutoLock::new(now),
         };
         // IDN-070: the recovery code comes at the first launch.
@@ -512,6 +516,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             files: FileQueues::default(),
             groups: groups::GroupQueues::default(),
             ended_queues: Vec::new(),
+            formed: false,
             auto_lock: AutoLock::new(now),
         }
     }
@@ -1052,6 +1057,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// with a `DEL`.
     pub fn take_ended_queues(&mut self) -> Vec<[u8; 32]> {
         core::mem::take(&mut self.ended_queues)
+    }
+
+    /// Whether a community formed since the last call.
+    pub fn take_formed(&mut self) -> bool {
+        core::mem::take(&mut self.formed)
     }
 
     /// The state of the client node from the earlier runs.

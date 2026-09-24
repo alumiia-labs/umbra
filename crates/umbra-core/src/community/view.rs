@@ -38,6 +38,8 @@ pub struct PostView {
     pub is_removed: bool,
     /// Whether the author withdrew the post in a checkpoint (`COM-094`).
     pub is_withdrawn: bool,
+    /// Whether a ban stands on the author (`COM-298`).
+    pub is_author_banned: bool,
 }
 
 /// What a reader shows of a community.
@@ -54,6 +56,12 @@ pub struct CommunityView {
     pub posts: Vec<PostView>,
     /// Each pseudonym whose checkpoints fork (`COM-019`).
     pub forked: Vec<[u8; 32]>,
+    /// The hash and the `epoch_index` of the head of the control chain,
+    /// which the next control object names (`COM-377`, `COM-378`).
+    pub control_head: Option<([u8; 32], u32)>,
+    /// The role pseudonym and the role of each entry of the current
+    /// roster.
+    pub roster: Vec<([u8; 32], super::control::Role)>,
 }
 
 /// The view of `community_id` from `records`. `now` is the clock of this
@@ -111,6 +119,13 @@ pub fn view(
     }
     let mut out = CommunityView {
         has_genesis: chain.has_genesis(),
+        control_head: chain.head(),
+        roster: chain
+            .authority()
+            .roster()
+            .iter()
+            .map(|entry| (entry.pseudonym, entry.role))
+            .collect(),
         ..CommunityView::default()
     };
     if !out.has_genesis {
@@ -182,6 +197,7 @@ pub fn view(
                     is_settled: reader.is_some_and(|held| held.is_settled(*index)),
                     is_removed: moderation.is_removed(pseudonym, *index),
                     is_withdrawn: reader.is_some_and(|held| held.is_withdrawn(*index)),
+                    is_author_banned: moderation.is_banned(pseudonym),
                 });
             }
         }

@@ -598,6 +598,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             name: row.name.clone(),
         };
         self.put_community(&community, rng)?;
+        self.formed = true;
         self.put_forming(None, &row.community_id, rng)
     }
 

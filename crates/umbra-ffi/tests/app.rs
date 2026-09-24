@@ -2920,6 +2920,76 @@ fn an_app_creates_a_community_with_a_contact_and_a_third_app_joins_it() {
         "post 0"
     );
 
+    // §12.5.2: an owner removes a post of another author. The view of the
+    // owner drops it at once, and each relay takes the epoch.
+    let start = Instant::now();
+    let target = loop {
+        let held = bob.community_posts(community.clone()).unwrap();
+        if let Some(post) = held
+            .iter()
+            .find(|post| post.author == alice_author && post.index == 1)
+        {
+            break post.key.clone();
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "bob holds no post 1"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let before = bob.community_posts(community.clone()).unwrap().len();
+    assert_eq!(
+        carol.remove_community_post(community.clone(), target.clone()),
+        Err(FfiError::NotFound)
+    );
+    bob.remove_community_post(community.clone(), target.clone())
+        .unwrap();
+    let after = bob.community_posts(community.clone()).unwrap();
+    assert_eq!(after.len(), before - 1);
+    assert!(after.iter().all(|post| post.key != target));
+    let start = Instant::now();
+    while bob.communities().unwrap()[0].pending > 0 {
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "the relays took no epoch"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    // COM-352: a later reader gets the epoch with the control chain, and
+    // no relay serves the removed body.
+    let dave = launch(&directory, "dave.db", 4);
+    let verified = dave
+        .network_of_manifest(
+            network.manifest.clone(),
+            network.keyset.clone(),
+            0,
+            HOST.into(),
+            Some(CA.into()),
+        )
+        .unwrap();
+    dave.clone().connect(verified.network).unwrap();
+    wait_for(&dave, |event| match event {
+        FfiEvent::Online => Some(()),
+        _ => None,
+    });
+    dave.join_community(alice.community_link(community.clone()).unwrap())
+        .unwrap();
+    let start = Instant::now();
+    loop {
+        let posts = dave.community_posts(community.clone()).unwrap();
+        if posts.len() == 24 {
+            assert!(posts.iter().all(|post| post.key != target));
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "dave holds {} posts",
+            posts.len()
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
     // A declined offer ends at both sides.
     let second = alice
         .create_community("Night hikes".into(), alice_conversation)
@@ -2931,7 +3001,7 @@ fn an_app_creates_a_community_with_a_contact_and_a_third_app_joins_it() {
     bob.decline_community_offer(second.clone()).unwrap();
     assert!(bob.community_offers().unwrap().is_empty());
     assert_eq!(bob.accept_community_offer(second), Err(FfiError::NotFound));
-    for handle in [&alice, &bob, &carol] {
+    for handle in [&alice, &bob, &carol, &dave] {
         handle.disconnect();
     }
     let _ = std::fs::remove_dir_all(&directory);

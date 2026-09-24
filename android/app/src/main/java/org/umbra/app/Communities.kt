@@ -2,7 +2,9 @@ package org.umbra.app
 
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.Context
 import android.os.PersistableBundle
+import java.nio.CharBuffer
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -305,6 +307,28 @@ fun CommunityScreen(id: List<Byte>, onBack: () -> Unit, push: (Screen) -> Unit) 
         if (posts.isNotEmpty()) listState.scrollToItem(posts.lastIndex)
     }
     val composer = rememberPlatformField()
+    var chosen by remember { mutableStateOf<CommunityLine?>(null) }
+    val context = LocalContext.current
+    chosen?.let { line ->
+        val entries = buildList {
+            add(RowEntry("copy", "Copy text") { copyPost(context, line.text) })
+            // §12.5.2: an owner acts on the post of another author.
+            if (community.isOwner && !line.post.isOwn) {
+                add(RowEntry("trash-can", "Remove post") {
+                    Core.removeCommunityPost(communityId, line.post.key)
+                })
+                if (!line.post.isAuthorBanned) {
+                    add(RowEntry("ban", "Ban author") {
+                        Core.banCommunityAuthor(communityId, line.post.author, false)
+                    })
+                    add(RowEntry("ban", "Ban author and remove their posts") {
+                        Core.banCommunityAuthor(communityId, line.post.author, true)
+                    })
+                }
+            }
+        }
+        ActionSheet("Post", entries, onDismiss = { chosen = null })
+    }
     Column(Modifier.fillMaxSize()) {
         BackBar(
             communityTitle(community),
@@ -315,7 +339,7 @@ fun CommunityScreen(id: List<Byte>, onBack: () -> Unit, push: (Screen) -> Unit) 
         Box(Modifier.weight(1f)) {
             if (posts.isEmpty()) EmptyState("No posts yet.")
             LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
-                items(posts, key = { it.key }) { line -> PostRow(line) }
+                items(posts, key = { it.key }) { line -> PostRow(line) { chosen = line } }
             }
         }
         Row(
@@ -354,10 +378,25 @@ fun CommunityScreen(id: List<Byte>, onBack: () -> Unit, push: (Screen) -> Unit) 
     }
 }
 
+/** IMP-056: a copied post is marked as sensitive, as a message is. */
+private fun copyPost(context: Context, text: CharArray) {
+    val clip = ClipData.newPlainText("UMBRA post", CharBuffer.wrap(text))
+    clip.description.extras = PersistableBundle().apply {
+        putBoolean("android.content.extra.IS_SENSITIVE", true)
+    }
+    context.getSystemService(ClipboardManager::class.java).setPrimaryClip(clip)
+}
+
 @Composable
-private fun PostRow(line: CommunityLine) {
+private fun PostRow(line: CommunityLine, onChoose: () -> Unit) {
     val context = LocalContext.current
-    Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp)) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .pressShadeInList()
+            .pressLong(onClick = {}, onLongClick = onChoose)
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+    ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 if (line.post.isOwn) "You" else pseudonymLabel(line.post.author),
@@ -370,6 +409,14 @@ private fun PostRow(line: CommunityLine) {
                 style = MaterialTheme.typography.labelSmall,
                 color = Palette.TextSecondary,
             )
+            if (line.post.isAuthorBanned) {
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    "Banned",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Palette.TextSecondary,
+                )
+            }
             // COM-086: a post with no checkpoint yet has no signature of its
             // author over it.
             if (!line.post.isSettled) {

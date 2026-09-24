@@ -762,6 +762,18 @@ object Core {
         main.post { onLoaded(lines) }
     }
 
+    /** Removes a post of a community under the owner role of this device. */
+    fun removeCommunityPost(id: ByteArray, key: ByteArray) = call { client ->
+        client.removeCommunityPost(id, key)
+        main.post { revision++ }
+    }
+
+    /** Bans an author of a community, with or without their posts. */
+    fun banCommunityAuthor(id: ByteArray, author: ByteArray, removeHistory: Boolean) = call { client ->
+        client.banCommunityAuthor(id, author, removeHistory)
+        main.post { revision++ }
+    }
+
     /** Posts a text in a community. This call overwrites the array. */
     fun postToCommunity(id: ByteArray, text: CharArray) = call { client ->
         val units = text.map { it.code.toUShort() }
