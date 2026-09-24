@@ -965,6 +965,8 @@ struct Inner {
     is_foreground: bool,
     /// The restore that runs, from its first root to its rows.
     restore: Option<RestoreJob>,
+    /// The number of the run of the network, which each connect moves.
+    run: u64,
 }
 
 /// A restore of Part 4 §4.7.2 while it runs: the root key of the entered
@@ -2471,6 +2473,7 @@ fn handle_of(database_path: String, client: Client<SqliteBackend, ForeignElement
             dead_work: Vec::new(),
             is_foreground: false,
             restore: None,
+            run: 0,
         }),
         changed: Condvar::new(),
         runtime: Mutex::new(None),
@@ -2487,6 +2490,9 @@ fn conversation_of(bytes: &[u8]) -> Result<ConversationId, FfiError> {
 /// weak reference, thus a handle that the platform drops ends the run.
 struct HandleStore {
     handle: Weak<Handle>,
+    /// The run of this store. A run that a later connect replaced writes
+    /// nothing.
+    run: u64,
     /// The batch of receipts that the last slot got.
     given: Option<crate::DueReceipt>,
 }
@@ -2497,6 +2503,11 @@ impl Persist for HandleStore {
             return false;
         };
         let mut inner = locked(&handle.inner);
+        // A replaced run ends with no write: the node of the new run holds
+        // the state from the store, and an older node would overwrite it.
+        if inner.run != self.run {
+            return false;
+        }
         // A locked client takes no batch, and the run ends (`IMP-127`).
         let committed = inner
             .client
@@ -2548,8 +2559,13 @@ impl Handle {
         self.changed.notify_all();
     }
 
-    fn on_update(&self, update: Update) {
+    fn on_update(&self, run: u64, update: Update) {
         let mut inner = locked(&self.inner);
+        // The end of a run that a later connect replaced must not end the
+        // new run: it would drop the bridge of that run.
+        if inner.run != run {
+            return;
+        }
         let Inner {
             client,
             bridge,
@@ -2953,8 +2969,11 @@ impl Handle {
 
         let (commands, runtime_commands) = mpsc::unbounded_channel();
         let (runtime_updates, mut updates) = mpsc::unbounded_channel();
+        let run;
         {
             let mut inner = locked(&self.inner);
+            inner.run = inner.run.wrapping_add(1);
+            run = inner.run;
             inner.invitation_host.clone_from(&network.invitation_host);
             inner.guard = Some(ingress.key.relay_id);
             inner.relays.clone_from(&network.relays);
@@ -3029,6 +3048,7 @@ impl Handle {
                 runtime_updates,
                 Box::new(HandleStore {
                     handle: Arc::downgrade(&self),
+                    run,
                     given: None,
                 }),
             ));
@@ -3041,7 +3061,7 @@ impl Handle {
                 let Some(handle) = handle.upgrade() else {
                     break;
                 };
-                handle.on_update(update);
+                handle.on_update(run, update);
             }
         });
         if let Some(earlier) = locked(&self.runtime).replace(runtime) {
@@ -3055,6 +3075,7 @@ impl Handle {
     pub fn disconnect(&self) {
         {
             let mut inner = locked(&self.inner);
+            inner.run = inner.run.wrapping_add(1);
             inner.bridge = None;
             inner.transfers = None;
             inner.groups = None;

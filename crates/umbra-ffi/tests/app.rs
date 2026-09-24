@@ -2414,3 +2414,40 @@ fn a_lost_phone_comes_back_from_its_backup_and_its_contact_talks_again() {
     back.disconnect();
     bob.disconnect();
 }
+
+#[test]
+fn a_connect_that_replaces_a_run_keeps_the_new_run() {
+    let relays = tokio::runtime::Runtime::new().unwrap();
+    let network = start_signed_network(&relays);
+    let directory = std::env::temp_dir().join(format!("umbra-reconnect-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let alice = launch(&directory, "alice.db", 1);
+    let verified = alice
+        .network_of_manifest(
+            network.manifest.clone(),
+            network.keyset.clone(),
+            0,
+            HOST.into(),
+            Some(CA.into()),
+        )
+        .unwrap()
+        .network;
+    // The app connects at the open and again when its carrier starts. The
+    // end of each replaced run must not end the run that replaced it.
+    for _ in 0..6 {
+        alice.clone().connect(verified.clone()).unwrap();
+        std::thread::sleep(Duration::from_millis(700));
+    }
+    wait_for(&alice, |event| match event {
+        FfiEvent::Online => Some(()),
+        _ => None,
+    });
+    std::thread::sleep(Duration::from_secs(2));
+    alice.invite().unwrap();
+    wait_for(&alice, |event| match event {
+        FfiEvent::Invitation { .. } => Some(()),
+        _ => None,
+    });
+    alice.disconnect();
+}

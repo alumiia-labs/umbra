@@ -399,7 +399,11 @@ object Core {
                     // NET-320: the circuits reached their age, and new ones
                     // build now. Nothing failed.
                     if (wantsNetwork()) connect(app)
-                } else if (event.cause.toInt() != STOPPED) {
+                } else if (event.cause.toInt() == STOPPED) {
+                    // The app stops no run of an open client. A run that
+                    // ended so while a view shows gets a new one.
+                    if (wantsNetwork()) retryLater(app)
+                } else {
                     // The two lines of Part 15 §15.9.2. The cause shows in the
                     // view of the connection.
                     degraded = if (event.cause.toInt() == DIAL_FAILED) {
