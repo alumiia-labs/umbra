@@ -58,6 +58,10 @@ sealed interface Screen {
     data object AutoLock : Screen
     data object ChangePassphrase : Screen
     data object RecoveryCode : Screen
+    data object JoinCommunity : Screen
+    data object NewCommunity : Screen
+    data class Community(val id: List<Byte>) : Screen
+    data class CommunityDetails(val id: List<Byte>) : Screen
     data class Chat(val conversation: Conversation) : Screen
     data class ContactDetails(val conversation: Conversation) : Screen
     data class EditName(val conversation: Conversation) : Screen
@@ -108,6 +112,7 @@ sealed interface Screen {
 
 enum class Tab(val label: String, val icon: String) {
     Chats("Chats", "comment"),
+    Communities("Communities", "people-group"),
     Contacts("Contacts", "user-group"),
     Settings("Settings", "gear"),
 }
@@ -168,6 +173,12 @@ private fun OpenApp() {
             Screen.AutoLock -> AutoLockScreen(pop)
             Screen.ChangePassphrase -> ChangePassphraseScreen(pop)
             Screen.RecoveryCode -> RecoveryCodeScreen(pop)
+            Screen.JoinCommunity -> JoinCommunityScreen(pop) { id ->
+                stack = listOf(Screen.Community(id))
+            }
+            Screen.NewCommunity -> NewCommunityScreen(pop) { stack = listOf() }
+            is Screen.Community -> CommunityScreen(top.id, pop, push)
+            is Screen.CommunityDetails -> CommunityDetailsScreen(top.id, pop) { stack = listOf() }
             else -> {
                 val chat = Core.chats.firstOrNull { it.conversation == top.contact }
                 // The list loads again after a lock or a new run.
@@ -297,10 +308,11 @@ private fun TabsScreen(tab: Tab, onTab: (Tab) -> Unit, push: (Screen) -> Unit) {
         Box(Modifier.weight(1f)) {
             when (tab) {
                 Tab.Chats -> ChatsTab(push)
+                Tab.Communities -> CommunitiesTab(push)
                 Tab.Contacts -> ContactsTab(push)
                 Tab.Settings -> SettingsTab(push)
             }
-            if (tab != Tab.Settings) {
+            if (tab == Tab.Chats || tab == Tab.Contacts) {
                 Box(
                     Modifier
                         .align(Alignment.BottomEnd)
@@ -325,7 +337,7 @@ private fun TabsScreen(tab: Tab, onTab: (Tab) -> Unit, push: (Screen) -> Unit) {
                     Modifier
                         .clip(RoundedCornerShape(20.dp))
                         .press(role = Role.Tab) { onTab(entry) }
-                        .padding(horizontal = 22.dp, vertical = 6.dp),
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     Box(
@@ -339,6 +351,7 @@ private fun TabsScreen(tab: Tab, onTab: (Tab) -> Unit, push: (Screen) -> Unit) {
                         entry.label,
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                        maxLines = 1,
                     )
                 }
                 }

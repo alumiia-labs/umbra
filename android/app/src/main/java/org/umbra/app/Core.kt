@@ -63,6 +63,12 @@ class Line(
         get() = info.isReply
 }
 
+/** One post of a community view. The text stays a `CharArray`. */
+class CommunityLine(val post: uniffi.umbra_ffi.FfiCommunityPost, val text: CharArray) {
+    /** The identity of the post. A byte array compares by identity. */
+    val key: List<Byte> = post.key.toList()
+}
+
 /** The message that a line answers: its identity, its author, and its text. */
 class Quoted(val key: List<Byte>, val isOutgoing: Boolean, val text: CharArray)
 
@@ -459,6 +465,7 @@ object Core {
                 refreshJoinFlow()
                 refreshChats()
             }
+            is FfiEvent.CommunityOffer -> refreshCommunities()
             // A reaction, an edit, and a deletion are no arrival, thus they
             // raise no alert.
             is FfiEvent.Reacted -> revision++
@@ -471,6 +478,9 @@ object Core {
                 refreshChats()
             }
             is FfiEvent.Locked -> {
+                communities.clear()
+                communityOffers.clear()
+                formingCommunities.clear()
                 groupOffers.clear()
                 groupJoiners.clear()
                 images.clear()
@@ -681,6 +691,87 @@ object Core {
         client.leaveGroup(conversation.id)
         refreshChats()
         main.post { then() }
+    }
+
+    /** The communities of this device (Part 12). */
+    val communities = mutableStateListOf<uniffi.umbra_ffi.FfiCommunity>()
+
+    /** The offers of a co-ownership that wait for this user (§12.5.5). */
+    val communityOffers = mutableStateListOf<uniffi.umbra_ffi.FfiCommunityOffer>()
+
+    /** The communities in their creation (§12.5.5). */
+    val formingCommunities = mutableStateListOf<uniffi.umbra_ffi.FfiFormingCommunity>()
+
+    fun refreshCommunities() = call { client ->
+        val list = client.communities()
+        val offers = client.communityOffers()
+        val forming = client.formingCommunities()
+        main.post {
+            communities.clear()
+            communities.addAll(list)
+            communityOffers.clear()
+            communityOffers.addAll(offers)
+            formingCommunities.clear()
+            formingCommunities.addAll(forming)
+        }
+    }
+
+    /** Joins a community by its link. A link that does not parse is a fault. */
+    fun joinCommunity(link: String, onJoined: (ByteArray) -> Unit) = call { client ->
+        val id = client.joinCommunity(link)
+        refreshCommunities()
+        main.post { onJoined(id) }
+    }
+
+    /** Starts a community with a contact as its second owner. */
+    fun createCommunity(name: String, coOwner: Conversation, onMade: () -> Unit) = call { client ->
+        client.createCommunity(name, coOwner.id)
+        refreshCommunities()
+        main.post { onMade() }
+    }
+
+    fun acceptCommunityOffer(id: ByteArray) = call { client ->
+        client.acceptCommunityOffer(id)
+        refreshCommunities()
+    }
+
+    fun declineCommunityOffer(id: ByteArray) = call { client ->
+        client.declineCommunityOffer(id)
+        refreshCommunities()
+    }
+
+    fun leaveCommunity(id: ByteArray, then: () -> Unit) = call { client ->
+        client.leaveCommunity(id)
+        refreshCommunities()
+        main.post { then() }
+    }
+
+    /** The link of a community, to share. */
+    fun communityLink(id: ByteArray, onLoaded: (String) -> Unit) = call { client ->
+        val link = client.communityLink(id)
+        main.post { onLoaded(link) }
+    }
+
+    /** Loads the posts of a community, each text in its own array. */
+    fun loadCommunityPosts(id: ByteArray, onLoaded: (List<CommunityLine>) -> Unit) = call { client ->
+        val lines = client.communityPosts(id).map { post ->
+            val sink = CharSink()
+            client.renderCommunityPost(id, post.key, sink)
+            CommunityLine(post, sink.chars)
+        }
+        main.post { onLoaded(lines) }
+    }
+
+    /** Posts a text in a community. This call overwrites the array. */
+    fun postToCommunity(id: ByteArray, text: CharArray) = call { client ->
+        val units = text.map { it.code.toUShort() }
+        text.fill('\u0000')
+        client.newCommunityDraft().use { draft ->
+            draft.setText(units)
+            client.postToCommunity(id, draft)
+        }
+        refreshCommunities()
+        main.post { revision++ }
     }
 
     private fun refreshJoinFlow() = call { client ->
