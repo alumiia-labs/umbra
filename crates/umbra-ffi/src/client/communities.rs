@@ -426,6 +426,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             COMMUNITY_JOIN,
             super::posting::COMMUNITY_AUTHOR,
             super::posting::COMMUNITY_OUTBOX,
+            super::reports::COMMUNITY_REPORT,
         ]
         .into_iter()
         .map(|table| {

@@ -2990,6 +2990,57 @@ fn an_app_creates_a_community_with_a_contact_and_a_third_app_joins_it() {
         std::thread::sleep(Duration::from_millis(100));
     }
 
+    // §12.5.3: a member reports a post to one role holder of the roster.
+    // That one holder shows it with its note, and the other holds none
+    // (COM-268). The report names no reporter (COM-272).
+    let reported = carol
+        .community_posts(community.clone())
+        .unwrap()
+        .into_iter()
+        .find(|post| post.author == alice_author && post.index == 2)
+        .unwrap();
+    let note = carol.new_community_draft();
+    note.set_text(units("a link to a scam")).unwrap();
+    carol
+        .report_community_post(community.clone(), reported.key.clone(), 1, note)
+        .unwrap();
+    let start = Instant::now();
+    let (holder, report) = loop {
+        let mut held = Vec::new();
+        for handle in [&alice, &bob] {
+            for report in handle.community_reports(community.clone()).unwrap() {
+                held.push((handle, report));
+            }
+        }
+        if let Some(found) = held.pop() {
+            assert!(held.is_empty(), "a second role holder got the report");
+            break found;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "no role holder shows the report"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    assert_eq!(report.post_key, reported.key);
+    assert_eq!(report.reason, 1);
+    assert!(report.has_note);
+    let view = Arc::new(View::default());
+    holder
+        .render_community_report_note(community.clone(), report.id.clone(), view.clone())
+        .unwrap();
+    assert_eq!(
+        String::from_utf16(&view.0.lock().unwrap()).unwrap(),
+        "a link to a scam"
+    );
+    holder
+        .dismiss_community_report(community.clone(), report.id.clone())
+        .unwrap();
+    assert!(holder
+        .community_reports(community.clone())
+        .unwrap()
+        .is_empty());
+
     // A declined offer ends at both sides.
     let second = alice
         .create_community("Night hikes".into(), alice_conversation)

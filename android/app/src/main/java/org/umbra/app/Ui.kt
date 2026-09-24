@@ -62,6 +62,8 @@ sealed interface Screen {
     data object NewCommunity : Screen
     data class Community(val id: List<Byte>) : Screen
     data class CommunityDetails(val id: List<Byte>) : Screen
+    data class ReportPost(val id: List<Byte>, val key: List<Byte>) : Screen
+    data class CommunityReports(val id: List<Byte>) : Screen
     data class Chat(val conversation: Conversation) : Screen
     data class ContactDetails(val conversation: Conversation) : Screen
     data class EditName(val conversation: Conversation) : Screen
@@ -178,7 +180,9 @@ private fun OpenApp() {
             }
             Screen.NewCommunity -> NewCommunityScreen(pop) { stack = listOf() }
             is Screen.Community -> CommunityScreen(top.id, pop, push)
-            is Screen.CommunityDetails -> CommunityDetailsScreen(top.id, pop) { stack = listOf() }
+            is Screen.CommunityDetails -> CommunityDetailsScreen(top.id, pop, push) { stack = listOf() }
+            is Screen.ReportPost -> ReportPostScreen(top.id, top.key, pop)
+            is Screen.CommunityReports -> CommunityReportsScreen(top.id, pop)
             else -> {
                 val chat = Core.chats.firstOrNull { it.conversation == top.contact }
                 // The list loads again after a lock or a new run.

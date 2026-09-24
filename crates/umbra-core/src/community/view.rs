@@ -59,9 +59,9 @@ pub struct CommunityView {
     /// The hash and the `epoch_index` of the head of the control chain,
     /// which the next control object names (`COM-377`, `COM-378`).
     pub control_head: Option<([u8; 32], u32)>,
-    /// The role pseudonym and the role of each entry of the current
-    /// roster.
-    pub roster: Vec<([u8; 32], super::control::Role)>,
+    /// Each entry of the current roster: the role, the report key, and
+    /// the report queue of each owner and admin (§12.5.3).
+    pub roster: Vec<super::control::RosterEntry>,
 }
 
 /// The view of `community_id` from `records`. `now` is the clock of this
@@ -120,12 +120,7 @@ pub fn view(
     let mut out = CommunityView {
         has_genesis: chain.has_genesis(),
         control_head: chain.head(),
-        roster: chain
-            .authority()
-            .roster()
-            .iter()
-            .map(|entry| (entry.pseudonym, entry.role))
-            .collect(),
+        roster: chain.authority().roster().to_vec(),
         ..CommunityView::default()
     };
     if !out.has_genesis {

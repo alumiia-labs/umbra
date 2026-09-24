@@ -85,6 +85,11 @@ impl Bridge {
         self.command(Command::MakeReportQueue(tag))
     }
 
+    /// Sends a report record to a report queue (Part 12 §12.5.3).
+    pub fn send_report(&self, address: Vec<u8>, record: Vec<u8>) -> Result<(), Error> {
+        self.command(Command::SendReport { address, record })
+    }
+
     /// Makes a new queue for a dead channel (`NET-182`).
     pub fn rotate_now(&self, contact: ContactId) -> Result<(), Error> {
         self.command(Command::RotateNow(contact))

@@ -312,6 +312,12 @@ fun CommunityScreen(id: List<Byte>, onBack: () -> Unit, push: (Screen) -> Unit) 
     chosen?.let { line ->
         val entries = buildList {
             add(RowEntry("copy", "Copy text") { copyPost(context, line.text) })
+            // COM-273: each post that the client renders takes a report.
+            if (!line.post.isOwn) {
+                add(RowEntry("flag", "Report") {
+                    push(Screen.ReportPost(id, line.post.key.toList()))
+                })
+            }
             // §12.5.2: an owner acts on the post of another author.
             if (community.isOwner && !line.post.isOwn) {
                 add(RowEntry("trash-can", "Remove post") {
@@ -431,7 +437,7 @@ private fun PostRow(line: CommunityLine, onChoose: () -> Unit) {
 
 /** What this device holds of a community: its link, its role, and a way out. */
 @Composable
-fun CommunityDetailsScreen(id: List<Byte>, onBack: () -> Unit, onLeft: () -> Unit) {
+fun CommunityDetailsScreen(id: List<Byte>, onBack: () -> Unit, push: (Screen) -> Unit, onLeft: () -> Unit) {
     val community = Core.communities.firstOrNull { it.communityId.toList() == id }
     if (community == null) {
         LaunchedEffect(Unit) { onBack() }
@@ -444,6 +450,10 @@ fun CommunityDetailsScreen(id: List<Byte>, onBack: () -> Unit, onLeft: () -> Uni
         Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
             Text(communitySubtitle(community), color = Palette.TextSecondary)
             Spacer(Modifier.height(20.dp))
+            if (community.isOwner) {
+                SecondaryButton("Reports") { push(Screen.CommunityReports(id)) }
+                Spacer(Modifier.height(12.dp))
+            }
             SecondaryButton(if (copied) "Link copied" else "Copy link") {
                 Core.communityLink(community.communityId) { link ->
                     // The fragment of the link opens the metadata, thus the
@@ -465,6 +475,107 @@ fun CommunityDetailsScreen(id: List<Byte>, onBack: () -> Unit, onLeft: () -> Uni
                 Note("This device holds an owner key of the community. A leave deletes it, and the roster keeps its entry.")
             } else {
                 Note("A leave sends nothing. The relays hold no member list.")
+            }
+        }
+    }
+}
+
+/** The causes of a report, in the order of the table of §12.5.3. */
+private val REPORT_REASONS = listOf(
+    "Spam",
+    "Harassment",
+    "Illegal content",
+    "A breach of the community rules",
+    "Other",
+)
+
+/** A report of one post to one role holder of the roster (§12.5.3). */
+@Composable
+fun ReportPostScreen(id: List<Byte>, key: List<Byte>, onBack: () -> Unit) {
+    var reason by remember { mutableStateOf<Int?>(null) }
+    var isSending by remember { mutableStateOf(false) }
+    val note = rememberPlatformField()
+    Column(Modifier.fillMaxSize()) {
+        BackBar("Report post", onBack = onBack)
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
+            for ((index, label) in REPORT_REASONS.withIndex()) {
+                val isChosen = reason == index
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(if (isChosen) Palette.Container else Color.Transparent)
+                        .clickable(role = Role.RadioButton) { reason = index }
+                        .padding(horizontal = 12.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(label, modifier = Modifier.weight(1f))
+                    if (isChosen) FaIcon("check", label = "Chosen", size = 16.dp, tint = Palette.Action)
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+            FramedPlatformField(note, "Note", isPassphrase = false)
+            Spacer(Modifier.height(16.dp))
+            val chosen = reason
+            PrimaryButton("Send report", enabled = Core.online && chosen != null && !isSending) {
+                if (chosen != null) {
+                    isSending = true
+                    Core.reportCommunityPost(
+                        id.toByteArray(),
+                        key.toByteArray(),
+                        (chosen + 1).toUByte(),
+                        note.take(),
+                    ) { onBack() }
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+            Note("One owner or admin of the roster, drawn at random, reads the report. It names no reporter.")
+        }
+    }
+}
+
+/** The reports that the role of this device holds, each one with its post. */
+@Composable
+fun CommunityReportsScreen(id: List<Byte>, onBack: () -> Unit) {
+    var reports by remember { mutableStateOf(emptyList<ReportLine>()) }
+    var version by remember { mutableStateOf(0) }
+    LaunchedEffect(id, version, Core.revision) {
+        Core.loadCommunityReports(id.toByteArray()) { reports = it }
+    }
+    Column(Modifier.fillMaxSize()) {
+        BackBar("Reports", onBack = onBack)
+        if (reports.isEmpty()) EmptyState("No reports.")
+        LazyColumn {
+            items(reports, key = { it.report.id.toList() }) { line ->
+                Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp)) {
+                    Text(
+                        REPORT_REASONS.getOrNull(line.report.reason.toInt() - 1) ?: "Other",
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    if (line.note.isNotEmpty()) {
+                        Spacer(Modifier.height(2.dp))
+                        PlatformText(line.note, Palette.TextSecondary, sizeSp = 14f)
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Palette.Container)
+                            .padding(12.dp),
+                    ) { PlatformText(line.post, Palette.Text) }
+                    Spacer(Modifier.height(8.dp))
+                    Row {
+                        InlineButton("Remove post") {
+                            Core.removeCommunityPost(id.toByteArray(), line.report.postKey)
+                            Core.dismissCommunityReport(id.toByteArray(), line.report.id) { version++ }
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        InlineButton("Dismiss") {
+                            Core.dismissCommunityReport(id.toByteArray(), line.report.id) { version++ }
+                        }
+                    }
+                }
             }
         }
     }

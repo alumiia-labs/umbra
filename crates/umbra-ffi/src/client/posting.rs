@@ -132,8 +132,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let actor_role = view
             .roster
             .iter()
-            .find(|(pseudonym, _)| *pseudonym == role.pseudonym())
-            .map(|(_, held)| *held)
+            .find(|entry| entry.pseudonym == role.pseudonym())
+            .map(|entry| entry.role)
             .filter(|held| matches!(held, Role::Owner | Role::Admin))
             .ok_or(Error::NotFound)?;
         let (head, index) = view.control_head.ok_or(Error::NotFound)?;

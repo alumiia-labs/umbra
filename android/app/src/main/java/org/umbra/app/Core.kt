@@ -69,6 +69,13 @@ class CommunityLine(val post: uniffi.umbra_ffi.FfiCommunityPost, val text: CharA
     val key: List<Byte> = post.key.toList()
 }
 
+/** One report of a community for a role holder: the post and the note stay arrays. */
+class ReportLine(
+    val report: uniffi.umbra_ffi.FfiCommunityReport,
+    val post: CharArray,
+    val note: CharArray,
+)
+
 /** The message that a line answers: its identity, its author, and its text. */
 class Quoted(val key: List<Byte>, val isOutgoing: Boolean, val text: CharArray)
 
@@ -772,6 +779,38 @@ object Core {
     fun banCommunityAuthor(id: ByteArray, author: ByteArray, removeHistory: Boolean) = call { client ->
         client.banCommunityAuthor(id, author, removeHistory)
         main.post { revision++ }
+    }
+
+    /**
+     * Reports a post to one role holder of the roster (§12.5.3). This call
+     * overwrites the note.
+     */
+    fun reportCommunityPost(id: ByteArray, key: ByteArray, reason: UByte, note: CharArray?, then: () -> Unit) =
+        call { client ->
+            val units = note?.map { it.code.toUShort() } ?: emptyList()
+            note?.fill('\u0000')
+            client.newCommunityDraft().use { draft ->
+                if (units.isNotEmpty()) draft.setText(units)
+                client.reportCommunityPost(id, key, reason, draft)
+            }
+            main.post { then() }
+        }
+
+    /** The reports of a community that a role holder of this device holds. */
+    fun loadCommunityReports(id: ByteArray, onLoaded: (List<ReportLine>) -> Unit) = call { client ->
+        val lines = client.communityReports(id).map { report ->
+            val post = CharSink()
+            client.renderCommunityPost(id, report.postKey, post)
+            val note = CharSink()
+            if (report.hasNote) client.renderCommunityReportNote(id, report.id, note)
+            ReportLine(report, post.chars, note.chars)
+        }
+        main.post { onLoaded(lines) }
+    }
+
+    fun dismissCommunityReport(id: ByteArray, report: ByteArray, then: () -> Unit) = call { client ->
+        client.dismissCommunityReport(id, report)
+        main.post { then() }
     }
 
     /** Posts a text in a community. This call overwrites the array. */

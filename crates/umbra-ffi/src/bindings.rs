@@ -265,6 +265,24 @@ pub struct FfiCommunityPost {
     pub is_author_banned: bool,
 }
 
+/// A report that a role holder of this device holds (Part 12 §12.5.3).
+/// The note is not here: [`Handle::render_community_report_note`] writes it
+/// into a sink.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiCommunityReport {
+    /// The report.
+    pub id: Vec<u8>,
+    /// The hash of the post that it names.
+    pub post_key: Vec<u8>,
+    /// The cause: 1 spam, 2 harassment, 3 illegal content, 4 a breach of
+    /// the rules, 5 other.
+    pub reason: u8,
+    /// Whether the report holds a note.
+    pub has_note: bool,
+    /// The time the report reached this device, in Unix seconds.
+    pub at: u64,
+}
+
 /// A community in its creation (Part 12 §12.5.5).
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct FfiFormingCommunity {
@@ -3303,6 +3321,11 @@ impl Handle {
                     );
                 }
             }
+            // COM-281: a report of a member reached a report queue of this
+            // device.
+            Update::Report { record, .. } => {
+                let _ = client.on_community_report(record, unix_now(), &mut OsRng);
+            }
             // COM-401, COM-404: the report queue of a role exists, thus the
             // exchange of the second owner goes on.
             Update::ReportQueue {
@@ -4686,6 +4709,90 @@ impl Handle {
             community_id,
             &crate::client::ModerationRequest::Unban { author },
         )
+    }
+
+    /// Reports a post of a community to one role holder of its roster
+    /// (§12.5.3). `reason` is the byte of the table, and the draft holds
+    /// the note, or nothing. The report names no reporter (`COM-272`).
+    pub fn report_community_post(
+        &self,
+        community_id: Vec<u8>,
+        key: Vec<u8>,
+        reason: u8,
+        note: Arc<DraftHandle>,
+    ) -> Result<(), FfiError> {
+        let community_id =
+            <[u8; 32]>::try_from(community_id.as_slice()).map_err(|_| FfiError::Malformed)?;
+        let key = <[u8; 32]>::try_from(key.as_slice()).map_err(|_| FfiError::Malformed)?;
+        let note = locked(&note.0).take().ok_or(FfiError::NotFound)?;
+        let inner = locked(&self.inner);
+        let running = inner.bridge.as_ref().ok_or(FfiError::Offline)?;
+        let send = inner.client.prepare_community_report(
+            &community_id,
+            &key,
+            reason,
+            note.text(),
+            unix_now_ms(),
+            &mut OsRng,
+        )?;
+        drop(note);
+        running
+            .send_report(send.address, send.record)
+            .map_err(FfiError::from)
+    }
+
+    /// The reports of a community that a role holder of this device holds,
+    /// each one with its post checked (`COM-283`, `COM-290`).
+    pub fn community_reports(
+        &self,
+        community_id: Vec<u8>,
+    ) -> Result<Vec<FfiCommunityReport>, FfiError> {
+        let community_id =
+            <[u8; 32]>::try_from(community_id.as_slice()).map_err(|_| FfiError::Malformed)?;
+        Ok(locked(&self.inner)
+            .client
+            .community_reports(&community_id, unix_now())?
+            .into_iter()
+            .map(|report| FfiCommunityReport {
+                id: report.id.to_vec(),
+                post_key: report.post_key.to_vec(),
+                reason: report.reason,
+                has_note: report.has_note,
+                at: report.at,
+            })
+            .collect())
+    }
+
+    /// Writes the note of a report into the sink of the platform.
+    pub fn render_community_report_note(
+        &self,
+        community_id: Vec<u8>,
+        id: Vec<u8>,
+        sink: Arc<dyn TextSink>,
+    ) -> Result<(), FfiError> {
+        let community_id =
+            <[u8; 32]>::try_from(community_id.as_slice()).map_err(|_| FfiError::Malformed)?;
+        let id = <[u8; 32]>::try_from(id.as_slice()).map_err(|_| FfiError::Malformed)?;
+        let mut sink = ForeignSink(sink);
+        Ok(locked(&self.inner).client.render_community_report_note(
+            &community_id,
+            &id,
+            &mut sink,
+        )?)
+    }
+
+    /// Dismisses a report.
+    pub fn dismiss_community_report(
+        &self,
+        community_id: Vec<u8>,
+        id: Vec<u8>,
+    ) -> Result<(), FfiError> {
+        let community_id =
+            <[u8; 32]>::try_from(community_id.as_slice()).map_err(|_| FfiError::Malformed)?;
+        let id = <[u8; 32]>::try_from(id.as_slice()).map_err(|_| FfiError::Malformed)?;
+        Ok(locked(&self.inner)
+            .client
+            .dismiss_community_report(&community_id, &id)?)
     }
 
     /// Each community of this device.

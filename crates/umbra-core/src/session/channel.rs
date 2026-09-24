@@ -219,6 +219,11 @@ impl Sealed {
         &self.relay_id
     }
 
+    /// The bucket of the record.
+    pub fn bucket(&self) -> Bucket {
+        self.bucket
+    }
+
     /// The encoded `SEND` for the session of one circuit.
     pub fn sign(&self, relay_session_pk: &[u8; 32], corr_id: [u8; 16]) -> Result<Vec<u8>, Error> {
         signed(

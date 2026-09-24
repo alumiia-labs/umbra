@@ -89,6 +89,13 @@ pub enum Command {
     /// Make a report queue of Part 12 §12.5.3. An
     /// [`Update::ReportQueue`] with the same tag follows.
     MakeReportQueue(u64),
+    /// Send a report record of Part 12 §12.5.3 to a report queue.
+    SendReport {
+        /// The encoded `QueueAddress` of the report queue.
+        address: Vec<u8>,
+        /// The sealed `ReportRecord`.
+        record: Vec<u8>,
+    },
     /// Make a new queue for a dead channel (`NET-182`).
     RotateNow(ContactId),
     /// The dead-channel blob of the peer gave its address (`NET-190`).
@@ -579,6 +586,9 @@ pub async fn run_client(
                     if let Ok(handle) = node.make_report_queue(&mut rng) {
                         notify_tags.insert(handle, tag);
                     }
+                }
+                Command::SendReport { address, record } => {
+                    let _ = node.send_report(&address, &record, &mut rng);
                 }
                 Command::RotateNow(contact) => {
                     let _ = node.rotate_now(&contact);

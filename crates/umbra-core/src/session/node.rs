@@ -1746,6 +1746,26 @@ impl ClientNode {
         self.make_queue(Purpose::Report, rng)
     }
 
+    /// Sends a report record of Part 12 §12.5.3 as a `SEND` to the report
+    /// queue that a roster names, over a circuit that ends at its relay
+    /// (`COM-266`, `COM-271`). `address` is the encoded `QueueAddress` of
+    /// the queue, and `record` the sealed `ReportRecord`. It gets no
+    /// answer: the report holds no identifier of the reporter.
+    pub fn send_report<R: CryptoRng + ?Sized>(
+        &mut self,
+        address: &[u8],
+        record: &[u8],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let address = QueueAddress::parse(address)?;
+        let sealed = Outbound::new(&address).seal_record(L6Kind::Report, record, random(rng))?;
+        // COM-266: a report travels in bucket B1.
+        if sealed.bucket() != Bucket::B1 {
+            return Err(Error::Malformed);
+        }
+        self.send_sealed(sealed, rng)
+    }
+
     /// Takes an invitation of an earlier run from its stored form.
     pub fn restore_invitation(&mut self, state: &[u8]) -> Result<Vec<u8>, Error> {
         let mut reader = Reader::new(state);
