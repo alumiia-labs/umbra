@@ -73,14 +73,8 @@ pub enum AppKind {
     PollVote = 0x0B,
     /// A `ContactShare`.
     ContactShare = 0x0C,
-    /// A `RepostBody`, inside a community post only.
-    CommunityRepost = 0x0D,
-    /// A `CommunityContact`, inside a community post only.
-    CommunityContact = 0x0E,
     /// A `GroupControl`.
     GroupControl = 0x10,
-    /// A community record, inside a report record only.
-    CommunityRecord = 0x11,
     /// A device-set sync record.
     DeviceSet = 0x20,
     /// A `KeyChangeNotice`.
@@ -99,9 +93,6 @@ pub enum AppKind {
     VerifyCommit = 0x36,
     /// A `VerifyReveal`, 32 bytes.
     VerifyReveal = 0x37,
-    /// A `CommunityOwnerExchange` of Part 12 §12.5.5, on a pairwise
-    /// channel only (`WIR-530`).
-    CommunityOwner = 0x38,
 }
 
 impl AppKind {
@@ -120,10 +111,7 @@ impl AppKind {
             0x0A => AppKind::Poll,
             0x0B => AppKind::PollVote,
             0x0C => AppKind::ContactShare,
-            0x0D => AppKind::CommunityRepost,
-            0x0E => AppKind::CommunityContact,
             0x10 => AppKind::GroupControl,
-            0x11 => AppKind::CommunityRecord,
             0x20 => AppKind::DeviceSet,
             0x30 => AppKind::KeyChange,
             0x31 => AppKind::TransparencyDigest,
@@ -133,7 +121,6 @@ impl AppKind {
             0x35 => AppKind::KeySupply,
             0x36 => AppKind::VerifyCommit,
             0x37 => AppKind::VerifyReveal,
-            0x38 => AppKind::CommunityOwner,
             _ => return Err(Error::Malformed),
         })
     }
@@ -146,9 +133,7 @@ impl AppKind {
             | AppKind::Reaction
             | AppKind::Poll
             | AppKind::PollVote
-            | AppKind::ContactShare
-            | AppKind::CommunityRepost
-            | AppKind::CommunityContact => Class::Insertion,
+            | AppKind::ContactShare => Class::Insertion,
             AppKind::Edit => Class::Revision,
             AppKind::Delete => Class::Tombstone,
             AppKind::DeliveryReceipt | AppKind::ReadReceipt => Class::PeerSignal,
@@ -156,24 +141,13 @@ impl AppKind {
             AppKind::Rich => Class::Inner,
             AppKind::DeviceSet => Class::BySubKind,
             AppKind::GroupControl
-            | AppKind::CommunityRecord
             | AppKind::KeyChange
             | AppKind::TransparencyDigest
             | AppKind::ConversationTimer
             | AppKind::QueueAddress
             | AppKind::KeyRequest
-            | AppKind::KeySupply
-            | AppKind::CommunityOwner => Class::Control,
+            | AppKind::KeySupply => Class::Control,
         }
-    }
-
-    /// Whether a ratchet record or a group queue record may carry the kind
-    /// (`WIR-432`, `WIR-433`).
-    pub const fn allowed_on_channel(self) -> bool {
-        !matches!(
-            self,
-            AppKind::CommunityRepost | AppKind::CommunityContact | AppKind::CommunityRecord
-        )
     }
 }
 
@@ -184,8 +158,6 @@ pub enum Channel {
     Pairwise,
     /// A group queue.
     Group,
-    /// A community post, or a report record.
-    Community,
 }
 
 /// An application message.
@@ -233,9 +205,6 @@ impl<'a> AppMessage<'a> {
             return Err(Error::Malformed);
         }
         let kind = AppKind::from_byte(r.u8()?)?;
-        if channel != Channel::Community && !kind.allowed_on_channel() {
-            return Err(Error::Malformed);
-        }
         let msg_id = r.array()?;
         let sent_at = u64::from_be_bytes(r.array()?);
         let body_len = usize::try_from(r.u32()?).map_err(|_| Error::Malformed)?;
@@ -254,10 +223,6 @@ impl<'a> AppMessage<'a> {
             AppKind::QueueAddress
                 if body.len() != crate::address::LEN || channel != Channel::Pairwise =>
             {
-                return Err(Error::Malformed);
-            }
-            // WIR-530: Part 12 reads the body.
-            AppKind::CommunityOwner if channel != Channel::Pairwise => {
                 return Err(Error::Malformed);
             }
             _ => {}
@@ -318,9 +283,11 @@ mod tests {
         out[31] = b'h';
         out[1] = 0x12;
         assert!(AppMessage::parse(&out, Channel::Pairwise).is_err());
-        out[1] = 0x0D;
-        assert!(AppMessage::parse(&out, Channel::Group).is_err());
-        assert!(AppMessage::parse(&out, Channel::Community).is_ok());
+        // The kinds of the withdrawn Part 12 are retired.
+        for retired in [0x0D, 0x0E, 0x11, 0x38] {
+            out[1] = retired;
+            assert!(AppMessage::parse(&out, Channel::Group).is_err());
+        }
         out[1] = 0x36;
         assert!(AppMessage::parse(&out, Channel::Pairwise).is_err());
         out[0] = 0x01;

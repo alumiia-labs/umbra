@@ -75,7 +75,7 @@ impl DeleteScope {
     pub const fn matches(self, channel: Channel) -> bool {
         match self {
             DeleteScope::OwnDevices => matches!(channel, Channel::Pairwise),
-            DeleteScope::OtherParty => !matches!(channel, Channel::Community),
+            DeleteScope::OtherParty => true,
         }
     }
 }

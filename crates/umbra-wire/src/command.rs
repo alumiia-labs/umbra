@@ -1,9 +1,10 @@
 //! The queue command of Part 6 §6.4 (L5) and its deniable authenticator
 //! (Part 3 §3.2.3).
 //!
-//! One namespace holds every command byte, including the attachment, the
-//! community, and the group-queue ranges. A parser reads the byte in this
-//! namespace only (`WIR-008`).
+//! One namespace holds every command byte, including the attachment and
+//! the group-queue ranges. A parser reads the byte in this namespace only
+//! (`WIR-008`). The range `0x80` to `0x85` is reserved: Part 12 is
+//! withdrawn, and a parser rejects each byte of it.
 
 use umbra_crypto::auth::{CommandAuthKey, AUTH_LEN};
 
@@ -63,8 +64,6 @@ pub enum Cmd {
     Cover,
     /// `0x70` to `0x7B`, Part 13 §13.3.3.
     Attachment(u8),
-    /// `0x80` to `0x85`, Part 12 §12.3.3.
-    Community(u8),
     /// `0x90` to `0x9A`, §6.4.5.
     Group(GroupCmd),
 }
@@ -93,7 +92,7 @@ impl Cmd {
             Cmd::Quota => 0x50,
             Cmd::Nack => 0x51,
             Cmd::Cover => 0x60,
-            Cmd::Attachment(b) | Cmd::Community(b) => b,
+            Cmd::Attachment(b) => b,
             Cmd::Group(g) => g as u8,
         }
     }
@@ -122,7 +121,6 @@ impl Cmd {
             0x51 => Cmd::Nack,
             0x60 => Cmd::Cover,
             0x70..=0x7B => Cmd::Attachment(b),
-            0x80..=0x85 => Cmd::Community(b),
             0x90..=0x9A => match GroupCmd::from_byte(b) {
                 Ok(g) => Cmd::Group(g),
                 Err(e) => return Err(e),
@@ -161,8 +159,8 @@ pub struct Command<'a> {
     pub cmd: Cmd,
     /// Random and unique for each command.
     pub corr_id: [u8; 16],
-    /// The identifier that `cmd` names: a queue, a chunk, a community, or a
-    /// group queue.
+    /// The identifier that `cmd` names: a queue, a chunk, or a group
+    /// queue.
     pub queue_id: [u8; 32],
     /// The deniable authenticator, or zero bytes where the table gives none.
     pub auth: [u8; AUTH_LEN],
@@ -536,12 +534,12 @@ mod tests {
     #[test]
     fn the_namespace_is_closed() {
         for b in [
-            0x00u8, 0x08, 0x13, 0x22, 0x34, 0x41, 0x52, 0x61, 0x6F, 0x7C, 0x86, 0x9B, 0x9F, 0xA0,
-            0xFF,
+            0x00u8, 0x08, 0x13, 0x22, 0x34, 0x41, 0x52, 0x61, 0x6F, 0x7C, 0x80, 0x85, 0x86, 0x9B,
+            0x9F, 0xA0, 0xFF,
         ] {
             assert!(Cmd::from_byte(b).is_err(), "{b:#x}");
         }
-        for b in [0x03u8, 0x07, 0x70, 0x7B, 0x80, 0x85, 0x90, 0x9A] {
+        for b in [0x03u8, 0x07, 0x70, 0x7B, 0x90, 0x9A] {
             assert_eq!(Cmd::from_byte(b).unwrap().to_byte(), b);
         }
     }

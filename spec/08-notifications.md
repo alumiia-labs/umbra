@@ -621,7 +621,7 @@ platform, and an earlier draft housed it in §8.4.2.
 > `REPUSH_INTERVAL` for a device that is reachable, and the peek covers a
 > device that is not.
 
-## 8.5 Coalescing, groups, and communities
+## 8.5 Coalescing and groups
 
 FCM permits 5 000 messages in one hour to one device. A conversation that makes
 one push for each record uses that budget. A busy one breaks the notifications of each other conversation
@@ -629,7 +629,7 @@ on the device.
 
 **The coalescing applies to each handle.** A queue relay sees queues and
 handles, and it does not see the conversation class. Thus the window below
-applies to a 1:1 conversation, to a group of each size, and to a community
+applies to a 1:1 conversation, to a group of each size, and to a group
 digest alike.
 
 | Parameter | Value |
@@ -649,9 +649,8 @@ digest alike.
   setting acts after the drain. Part 11 §11.10 owns `GROUP_ALL_NOTIFY_MAX`.
 
 > *Cause.* An earlier draft let a small group stay at one push for each
-> message, and it keyed the digest threshold on 1000 community members. A relay
-> cannot tell a group from a 1:1 conversation, thus the first rule bound
-> nothing that the relay could apply. `GROUP_ALL_NOTIFY_MAX` of Part 11 §11.10
+> message. A relay cannot tell a group from a 1:1 conversation, thus that rule
+> bound nothing that the relay could apply. `GROUP_ALL_NOTIFY_MAX` of Part 11 §11.10
 > is the member count above which one alert for each record floods the tray,
 > and the notification setting of Part 7 §7.5.9 already changes at that bound.
 > An earlier draft keyed the bound on `T1_MAX`, the tier bound of a fan-out
@@ -666,68 +665,40 @@ digest alike.
 > **[NTF-051]** An implementation MUST measure the coalesced share in a real
 > deployment before a revision re-tunes the window.
 
-### 8.5.1 The community digest queue
+### 8.5.1 The notify digest
 
-A community relay holds no subscriber list, and it holds no `k_tok`. Thus it
-cannot push. A subscriber in Instant mode gives each community one queue of its
-own at a queue relay. The community relay writes a digest into that queue. The
-queue relay then pushes as for any queue. Part 12 §12.6 gives the registration
-command and the digest record.
+A group-queue relay holds no `k_tok`, thus it cannot push. It wakes a member
+device with a digest in a notify queue, and §8.5.2 gives that path. This
+section gives the digest record.
 
-- **[NTF-069]** A client in Instant mode MUST register one notification queue
-  for each community at `mentions` or `all`. Part 7 §7.5.9 gives the setting.
-  **[NTF-070]** A client MUST put that queue under a notification handle of its
-  own. That handle holds no pairwise queue and no rendezvous queue.
-  **[NTF-071]** A client MUST rotate that queue with the triple of `NTF-007`,
-  and it MUST register the new queue before it drops the old one.
-- **[NTF-072]** A community relay MUST NOT write more than
-  `COMMUNITY_DIGEST_BUDGET` digests into one queue in one day. **[NTF-073]** A
-  community relay MUST NOT write a digest into a queue when no post arrived
-  since the previous digest to that queue.
-- **[NTF-074]** A client in Private mode or in Off mode MUST NOT register a
-  community notification queue. Those modes find a post at the pull.
+```
+NotifyDigest {                    // the L6 record of kind 0x04, Part 6 §6.4.2
+    version          u8           // 0x01
+    group_queue_id   [32]u8       // the GroupQueueId of Part 6 §6.4.5
+    post_count       u8           // records since the previous digest, at most 255
+}
+```
 
-| Parameter | Value |
-| --- | --- |
-| `COMMUNITY_DIGEST_BUDGET` | 4 digests in one day for one queue. The community relay measures the day from its first digest to that queue |
-
-**The cost.** A digest is one push wake, and Part 3 §3.12 prices a wake at about
-19.7 KB with its drain. The model user of Part 3 §3.12 follows 2 communities at
-the default setting. Thus the budget bounds the day at 8 wakes and about 158 KB,
-which is about 4.7 MB each month. Part 3 §3.12 does not count that row, and the
-margin of U4 covers it. A revision of that table adds the row.
-
-**Which party learns what.** The community relay learns the count of the
-registered queues, which is close to the count of the Instant-mode subscribers.
-It also learns the queue relay of each one. It cannot link a queue to a
-pseudonym or to a pull, because a registration carries neither. Part 16 §16.3
-states that residual.
-
-> *Cause.* An earlier draft said that the default is a digest on the server,
-> and no section named the server, the carrier, or the queue. A community
-> relay cannot push, and a queue relay holds no community. The queue above is
-> the carrier. The budget keeps a busy community inside the U4 margin, and the
-> `mentions` default of Part 7 rule `DEV-222` keeps the tray quiet after the
-> wake. A digest names no post, thus a device that wakes on a digest pulls
-> under Part 12 §12.3.3 and renders a mention only.
+A `NotifyDigest` is 34 bytes, and it travels sealed under `K_QE` of Part 6
+§6.4.2 in one `B0` cell. The queue relay of the notify queue reads
+ciphertext, thus it does not learn the group.
 
 ### 8.5.2 The notify queue of a group
 
 A group queue of Part 3 §3.2.7 holds no membership list and no `k_tok`. Thus a
-group-queue relay cannot push. The wake path of a group takes the shape of
-§8.5.1. A member device in Instant mode gives each group one notify queue of
-its own at a queue relay, and it registers that queue with each replica of the
-group queue. The group-queue relay writes a digest into the notify queue, and
-the queue relay of the notify queue pushes as for any queue. Part 6 §6.4.5
-gives the commands `GNREG` and `GNUNREG`, and Part 12 §12.6.4 gives the
-`NotifyDigest` record that a community relay and a group-queue relay share.
+group-queue relay cannot push. A member device in Instant mode gives each
+group one notify queue of its own at a queue relay, and it registers that
+queue with each replica of the group queue. The group-queue relay writes a
+`NotifyDigest` of §8.5.1 into the notify queue, and the queue relay of the
+notify queue pushes as for any queue. Part 6 §6.4.5 gives the commands
+`GNREG` and `GNUNREG`.
 
 - **[NTF-090]** A client in Instant mode MUST make one notify queue for each
   group at `mentions` or `all`, on each device. Part 7 §7.5.9 gives the
   setting. **[NTF-091]** A client MUST put a group notify queue under a
   notification handle that holds no pairwise queue and no rendezvous queue.
-  **[NTF-092]** A client MAY put a group notify queue and a community notify
-  queue under one handle.
+  **[NTF-092]** A client MAY put the notify queues of several groups under one
+  handle.
 - **[NTF-093]** A client MUST register the `QueueAddress` of the notify queue
   with each replica of the group queue by `GNREG`. **[NTF-094]** A
   registration MUST NOT carry a member index, a pseudonym, or a device
@@ -740,8 +711,8 @@ gives the commands `GNREG` and `GNUNREG`, and Part 12 §12.6.4 gives the
   gap, the group-queue relay MUST write one digest at the end of the gap.
   **[NTF-099]** A group-queue relay MUST NOT write a digest that names a
   record, a member index, or a sequence number. The relay writes its
-  `GroupQueueId` in the 32-byte identifier field of the digest, and it writes
-  the count of records since the previous digest in `post_count`.
+  `GroupQueueId` in `group_queue_id`, and it writes the count of records
+  since the previous digest in `post_count`.
   The digest travels to the queue relay of the notify queue as an
   `UMBRA_DEPOSIT` of Part 6 rule `WIR-526`. That relay learns the address of
   the group-queue relay that deposits into the queue, thus it learns that the
@@ -777,9 +748,8 @@ gives the commands `GNREG` and `GNUNREG`, and Part 12 §12.6.4 gives the
 | --- | --- |
 | `GROUP_DIGEST_MIN_GAP` | 10 s. The group-queue relay measures it from the moment that it writes a digest to one registration |
 
-A group has no daily digest budget. A group defaults to `all` under Part 7
-rule `DEV-259`, and a community defaults to `mentions` under `DEV-222` with the
-budget of §8.5.1. The gap bounds the digests at one in each 10 s for each
+A group has no daily digest budget, and it defaults to `all` under Part 7
+rule `DEV-259`. The gap bounds the digests at one in each 10 s for each
 registration, and the window of §8.5 then bounds the pushes at one in each 10 s
 for each handle at the queue relay of the notify queue. A digest is one push
 wake, and Part 3 §3.12 prices a wake at about 19.7 KB with its drain.
@@ -795,8 +765,8 @@ relay learns.
 > *Cause.* An earlier draft gave a group no wake path of its own, because each
 > group record traveled on a pairwise queue that the queue relay pushed as for
 > any queue. The group queue of Part 3 §3.2.7 holds the records of a group at
-> a relay that cannot push, thus a group needs the carrier that a community
-> already has. The gap is the value of `WAKE_COALESCE_WINDOW`, thus a busy
+> a relay that cannot push, thus a group needs a carrier of its own. The
+> notify queue is that carrier. The gap is the value of `WAKE_COALESCE_WINDOW`, thus a busy
 > group costs no more pushes than a busy pairwise queue.
 
 ## 8.6 The web client
@@ -804,7 +774,7 @@ relay learns.
 The web client of Part 15 §15.7 holds a live session while its browser runs,
 and that session carries each arrival. **[NTF-110]** A web client MUST NOT
 register a push token with the NDR, and it MUST NOT hold a registration of
-§8.5.1 or §8.5.2 of its own. **[NTF-111]** A web client MUST take each arrival
+§8.5.2 of its own. **[NTF-111]** A web client MUST take each arrival
 from its live session, and it MUST show an alert through the notification API
 of the browser while the browser runs. The phone of the user carries the
 notification of the device set at each other time, under §8.4.1.

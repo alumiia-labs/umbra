@@ -68,18 +68,14 @@ pub enum ResetStep {
     NoticeEachContact,
     /// The group re-key in each group (`DEV-263`).
     RekeyEveryGroup,
-    /// Offer a new community identity in each community (`DEV-139` to
-    /// `DEV-142`).
-    OfferNewCommunityIdentities,
 }
 
 /// The steps of a full identity reset, in order.
-pub const RESET_STEPS: [ResetStep; 5] = [
+pub const RESET_STEPS: [ResetStep; 4] = [
     ResetStep::NewRosterKeyOnEachDevice,
     ResetStep::PublishGenesis,
     ResetStep::NoticeEachContact,
     ResetStep::RekeyEveryGroup,
-    ResetStep::OfferNewCommunityIdentities,
 ];
 
 /// The two sentences the interface states about a revocation (`DEV-137`,

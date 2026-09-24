@@ -25,7 +25,7 @@ pub enum CapsuleType {
     /// One `CRPUT` between two relays, outside each session (`WIR-211`).
     Replica = 0x0B54,
     /// One `SEND` of a relay into a queue at another relay, outside each
-    /// session: the digest of a group or a community (`WIR-526`).
+    /// session: the digest of a group (`WIR-526`).
     Deposit = 0x0B55,
     /// The signed `PowChallenge` of a relay to a carrier of the relay
     /// manifest (Part 14 `ABU-102`).

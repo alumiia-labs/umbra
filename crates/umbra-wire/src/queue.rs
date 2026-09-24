@@ -17,15 +17,15 @@ pub const VERSION: u8 = 0x01;
 /// The prefix of the plaintext: the true length and the kind.
 pub const PLAIN_PREFIX: usize = 3;
 
-/// The L6 record kind. The value `0x02` is retired and never returns.
+/// The L6 record kind. The value `0x02` is retired and never returns, and
+/// the value `0x03`, the report record of the withdrawn Part 12, is
+/// retired too.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum L6Kind {
     /// A ratchet record of §6.5.
     Ratchet = 0x01,
-    /// A report record of Part 12 §12.5.3.
-    Report = 0x03,
-    /// A `NotifyDigest` of Part 12 §12.6.4.
+    /// A `NotifyDigest` of Part 8 §8.5.1.
     NotifyDigest = 0x04,
     /// One flight of the pairwise handshake of Part 5 §5.4: the flight
     /// number from 1 to 3, and then the flight.
@@ -39,7 +39,6 @@ impl L6Kind {
     const fn from_byte(b: u8) -> Result<Self, Error> {
         match b {
             0x01 => Ok(L6Kind::Ratchet),
-            0x03 => Ok(L6Kind::Report),
             0x04 => Ok(L6Kind::NotifyDigest),
             0x05 => Ok(L6Kind::Handshake),
             0x06 => Ok(L6Kind::Renewal),
@@ -209,7 +208,7 @@ mod tests {
             &key,
             [3; 12],
             &[2; 32],
-            L6Kind::Report,
+            L6Kind::NotifyDigest,
             b"short",
             Bucket::B0,
             &mut send,
@@ -217,7 +216,7 @@ mod tests {
         .unwrap();
         let mut out = vec![0u8; 400];
         let (kind, len) = open(&key, &[2; 32], &send, Bucket::B0, &mut out).unwrap();
-        assert_eq!((kind, &out[..len]), (L6Kind::Report, &b"short"[..]));
+        assert_eq!((kind, &out[..len]), (L6Kind::NotifyDigest, &b"short"[..]));
         let mut bad = send.clone();
         bad[0] = 0x02;
         assert!(open(&key, &[2; 32], &bad, Bucket::B0, &mut out).is_err());

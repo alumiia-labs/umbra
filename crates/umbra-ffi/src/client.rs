@@ -10,28 +10,20 @@
 use std::collections::VecDeque;
 
 mod backup;
-mod communities;
 mod dead;
 mod files;
-mod forming;
 mod groups;
 mod notify;
-mod posting;
-mod reports;
 
 pub use backup::{BackupUpload, PendingBackup, RestoredBackup, RootWrite};
-pub use communities::{CommunityInfo, CommunityPostInfo, CommunityPull, PullKind};
 pub use dead::DeadWork;
 pub use files::{DownloadJob, ErasureJob, FileInfo, FileState, UploadJob};
 use files::{FileQueues, CHUNK_CRED, FILE_DATA, FILE_STATE};
-pub use forming::{CommunityOffer, FormingInfo, GenesisSend};
 pub use groups::{
     EpochUpload, GroupAdmitWaiting, GroupInfo, GroupJoiner, GroupOffer, GroupPost, GroupQueueJob,
     GroupSubscription, Silence, GROUP_NAME_MAX,
 };
 pub use notify::NdrCall;
-pub use posting::{ModerationRequest, PostSend};
-pub use reports::{ReportInfo, ReportSend};
 use umbra_core::{
     directory::path::IngressPins,
     identity::address::safety_number,
@@ -229,11 +221,6 @@ pub struct Client<B: Backend, E: SecureElement> {
     outgoing: VecDeque<Outgoing>,
     files: FileQueues,
     groups: groups::GroupQueues,
-    /// The report queues that a declined creation left, for the run to end.
-    ended_queues: Vec<[u8; 32]>,
-    /// Whether a community formed since the last call of
-    /// [`Client::take_formed`], thus its pulls start now.
-    formed: bool,
     auto_lock: AutoLock,
 }
 
@@ -498,8 +485,6 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             outgoing: VecDeque::new(),
             files: FileQueues::default(),
             groups: groups::GroupQueues::default(),
-            ended_queues: Vec::new(),
-            formed: false,
             auto_lock: AutoLock::new(now),
         };
         // IDN-070: the recovery code comes at the first launch.
@@ -517,8 +502,6 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             outgoing: VecDeque::new(),
             files: FileQueues::default(),
             groups: groups::GroupQueues::default(),
-            ended_queues: Vec::new(),
-            formed: false,
             auto_lock: AutoLock::new(now),
         }
     }
@@ -649,8 +632,6 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut control: Vec<(ConversationId, Vec<u8>)> = Vec::new();
         // The requests of Part 11 §11.4.3 of a member that lacks an epoch.
         let mut key_requests: Vec<(ConversationId, Vec<u8>)> = Vec::new();
-        // The exchanges of Part 12 §12.5.5.
-        let mut owner_steps: Vec<(ConversationId, Vec<u8>)> = Vec::new();
         for change in changes {
             planned.push(match change {
                 StateChange::Contact { contact, state } => Planned::Put(
@@ -748,10 +729,6 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
             if parsed.kind == AppKind::KeyRequest {
                 key_requests.push((conversation, parsed.body.to_vec()));
-                continue;
-            }
-            if parsed.kind == AppKind::CommunityOwner {
-                owner_steps.push((conversation, parsed.body.to_vec()));
                 continue;
             }
             if parsed.kind == AppKind::Reaction {
@@ -1047,23 +1024,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for (_, body) in key_requests {
             self.on_pairwise_key_request(&body, now_ms, rng)?;
         }
-        for (conversation, body) in owner_steps {
-            if let Some(queue) = self.on_owner_exchange(conversation, &body, now_ms / 1_000, rng)? {
-                self.ended_queues.push(queue);
-            }
-        }
         Ok(())
-    }
-
-    /// The report queues that a declined creation left, for the run to end
-    /// with a `DEL`.
-    pub fn take_ended_queues(&mut self) -> Vec<[u8; 32]> {
-        core::mem::take(&mut self.ended_queues)
-    }
-
-    /// Whether a community formed since the last call.
-    pub fn take_formed(&mut self) -> bool {
-        core::mem::take(&mut self.formed)
     }
 
     /// The state of the client node from the earlier runs.
@@ -2483,11 +2444,7 @@ fn is_request(plain: &[u8]) -> Result<bool, Error> {
     // is no message of that conversation (`GRP-309`, `GRP-312`).
     Ok(matches!(
         parsed.kind,
-        AppKind::Edit
-            | AppKind::Reaction
-            | AppKind::GroupControl
-            | AppKind::KeyRequest
-            | AppKind::CommunityOwner
+        AppKind::Edit | AppKind::Reaction | AppKind::GroupControl | AppKind::KeyRequest
     ) || tombstone_of(&parsed)? == Some(Tombstone::Request))
 }
 

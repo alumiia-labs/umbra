@@ -126,26 +126,6 @@ pub enum StoreChange {
         /// The chunk identifier.
         chunk_id: [u8; 32],
     },
-    /// The relay accepted a record of a community at a `seq` (`COM-222`,
-    /// `COM-224`).
-    CommunityRecord {
-        /// The community.
-        community_id: [u8; 32],
-        /// The `seq` of the record at this relay (`COM-178`).
-        seq: u64,
-        /// The time of the acceptance.
-        accepted_at: u64,
-        /// The record.
-        record: Vec<u8>,
-    },
-    /// A prune, a successor, or the resolution of a window took a record of
-    /// a community out.
-    CommunityForget {
-        /// The community.
-        community_id: [u8; 32],
-        /// The `seq` of the record.
-        seq: u64,
-    },
 }
 
 /// One invitation of Part 4 §4.3.1, as the store holds it.
@@ -168,10 +148,6 @@ pub struct StoredQueue {
     pub records: Vec<Stored>,
 }
 
-/// The records of one community, by `seq`, with the time of their
-/// acceptance.
-pub type CommunityRecords = BTreeMap<u64, (u64, Vec<u8>)>;
-
 /// The whole stored state, which a relay reads at its start.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Loaded {
@@ -183,9 +159,6 @@ pub struct Loaded {
     pub group_queues: BTreeMap<[u8; 32], StoredQueue>,
     /// The chunks, by chunk identifier.
     pub chunks: BTreeMap<[u8; 32], HeldChunk>,
-    /// The records of each community, by `seq`, with the time of their
-    /// acceptance.
-    pub communities: BTreeMap<[u8; 32], CommunityRecords>,
 }
 
 impl Loaded {
@@ -263,25 +236,6 @@ impl Loaded {
             }
             StoreChange::ChunkDeleted { chunk_id } => {
                 self.chunks.remove(chunk_id);
-            }
-            StoreChange::CommunityRecord {
-                community_id,
-                seq,
-                accepted_at,
-                record,
-            } => {
-                self.communities
-                    .entry(*community_id)
-                    .or_default()
-                    .insert(*seq, (*accepted_at, record.clone()));
-            }
-            StoreChange::CommunityForget { community_id, seq } => {
-                if let Some(records) = self.communities.get_mut(community_id) {
-                    records.remove(seq);
-                    if records.is_empty() {
-                        self.communities.remove(community_id);
-                    }
-                }
             }
         }
     }

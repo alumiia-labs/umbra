@@ -42,7 +42,6 @@ use crate::{
     circuits::{Action, CircuitKey, CircuitTable, LinkId},
     service::{
         chunk::{ChunkService, Push},
-        community::CommunityService,
         group::GroupService,
         nack,
         queue::{NdrPush, QueueService},
@@ -155,8 +154,6 @@ pub struct Config {
     pub layer: u8,
     /// The key of the token issuer for the current epoch.
     pub issuer_key: PublicKey2048,
-    /// The bytes of post records that each community cache holds.
-    pub community_capacity: usize,
     /// The bytes of the chunk store of Part 13, or zero for a relay with no
     /// attachment role.
     pub chunk_capacity: u64,
@@ -203,7 +200,6 @@ pub struct RelayNode {
     endpoints: BTreeMap<CircuitKey, Endpoint>,
     gate: RelayGate,
     queues: QueueService,
-    communities: CommunityService,
     groups: GroupService,
     chunks: ChunkService,
     /// The identifier and the static key of this relay, for a deposit that
@@ -250,7 +246,6 @@ impl RelayNode {
             endpoints: BTreeMap::new(),
             gate: RelayGate::new(relay_id),
             queues,
-            communities: CommunityService::new(config.community_capacity),
             groups: GroupService::default(),
             chunks: ChunkService::new(config.chunk_capacity),
             relay,
@@ -358,8 +353,8 @@ impl RelayNode {
         self.queue_relays = relays;
     }
 
-    /// Hands each digest to its notify queue (Part 8 `NTF-096`, Part 12
-    /// `COM-371`): into a queue of this relay at once, and to another queue
+    /// Hands each digest to its notify queue (Part 8 `NTF-096`): into a
+    /// queue of this relay at once, and to another queue
     /// relay as an `UMBRA_DEPOSIT` capsule on a connection of its own.
     fn deliver_digests<R: CryptoRng + ?Sized>(
         &mut self,
@@ -445,10 +440,8 @@ impl RelayNode {
     /// is gone, and the clients build them again.
     pub fn restored(config: Config, loaded: Loaded) -> Self {
         let chunks = ChunkService::restore(config.chunk_capacity, &loaded);
-        let communities = CommunityService::restore(config.community_capacity, &loaded);
         let mut node = RelayNode::new(config);
         node.chunks = chunks;
-        node.communities = communities;
         node.groups = GroupService::restore(&loaded);
         let mut queues = QueueService::restore(loaded);
         queues.keep_notify_of(&mut node.queues);
@@ -478,7 +471,6 @@ impl RelayNode {
         let mut changes = self.queues.take_changes();
         changes.append(&mut self.groups.take_changes());
         changes.append(&mut self.chunks.take_changes());
-        changes.append(&mut self.communities.take_changes());
         changes
     }
 
@@ -824,14 +816,6 @@ impl RelayNode {
                     rng,
                 )
                 .map(|replies| (replies, Vec::new())),
-            Range::Community => self.communities.handle(
-                circuit,
-                &mut endpoint.session,
-                &mut self.gate,
-                &accepts,
-                command,
-                now,
-            ),
             Range::Attachment => self
                 .chunks
                 .handle(
@@ -945,8 +929,7 @@ impl RelayNode {
         // ATT-046, ATT-168: a chunk past its erase time leaves, and the
         // store trims to its target.
         self.chunks.sweep(now);
-        let mut due = self.communities.sweep(now);
-        due.extend(self.groups.sweep(now));
+        let due = self.groups.sweep(now);
         ended.extend(self.deliver_digests(due, now, rng));
         ended
     }
@@ -1015,7 +998,6 @@ mod tests {
             static_secret,
             layer: 3,
             issuer_key: PublicKey2048::from_modulus(&[0xFF; 256]).unwrap(),
-            community_capacity: 1 << 20,
             chunk_capacity: 1 << 24,
         });
         assert!(node.on_capsule(2, &capsule, 1_000, &mut Rng).is_empty());
@@ -1036,7 +1018,6 @@ mod tests {
             static_secret,
             layer: 3,
             issuer_key: PublicKey2048::from_modulus(&[0xFF; 256]).unwrap(),
-            community_capacity: 1 << 20,
             chunk_capacity: 0,
         }
     }

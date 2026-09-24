@@ -77,8 +77,8 @@ the table above.
   > **The hybrid-signature question, answered explicitly.** A reasonable
   > argument says that long-lived objects that a third party verifies have to
   > carry a *concatenated hybrid* Ed25519 and ML-DSA-65 signature. Those objects are
-  > the directory roots, the transparency tree heads, and the community roster
-  > roots. The argument is that a lattice break lets an attacker rewrite
+  > the directory roots and the transparency tree heads. The argument is that
+  > a lattice break lets an attacker rewrite
   > archived state retroactively. The argument also says that Ed25519 limits the
   > cryptanalytic risk in a much younger scheme.
   >
@@ -197,18 +197,17 @@ unrelated public keys. That observer cannot correlate the two keys without the
 `RootIdentity`. An adversary that holds the `RootIdentity` has won against each
 other measure.
 
-Three classes of key are **not** in this hierarchy. The device makes each one
+Two classes of key are **not** in this hierarchy. The device makes each one
 directly from its CSPRNG.
 
 - Queue keys (Part 3 §3.2.2), one for each queue. **[CRY-007]** A device MUST NOT derive a
   queue key from a long-term secret. Thus a seized relay cannot collect the
   queues of one user.
-- `CommunityIdentitySeed_g` (Part 12 §12.3.2), one for each community.
 - `GroupRosterSeed_g` (Part 11 §11.9.1), one for each group. The roster key,
   the pair key, and the KEM key of Part 11 §11.3.3 derive from that seed under
   the labels of §5.11.
 
-The client stores the last two classes in the **local identity table**, together
+The client stores each `GroupRosterSeed_g` in the **local identity table**, together
 with the pairwise salts of Part 4 §4.2.2. The recovery phrase restores the
 hierarchy in the diagram above. The encrypted backup of Part 4 §4.7.2 restores
 the local identity table. Thus the Recovery Code restores the full account, and
@@ -1361,17 +1360,15 @@ claim to cooperate with a judge. That user can refuse to show a long-term secret
 with good cause, because that disclosure exposes the user to key-compromise
 impersonation.
 
-## 5.8 Group and community keys
+## 5.8 Group keys
 
-Parts 11 and 12 give the details. This section gives the cryptographic rule:
+Part 11 gives the details. This section gives the cryptographic rule:
 
-**[CRY-024]** **Group content and community content MUST have post-quantum
-protection in transit.** At rest, `K_store` of §5.2 covers each record, and a
-community post is public at publication.
+**[CRY-024]** **Group content MUST have post-quantum protection in transit.**
+At rest, `K_store` of §5.2 covers each record.
 SimpleX excludes groups and files from its PQ layer explicitly. Archived group
 traffic is the harvest-now-decrypt-later target with the highest value. The v1
-scope of UMBRA holds groups of 2 to 500 members. It also holds communities, and
-Part 12 gives the design target of 1000 members or more.
+scope of UMBRA holds groups of 2 to 500 members.
 
 The mechanism is cheap. A group epoch key `K_e` travels to each member in an
 `UMBRA-KEM` slot of the epoch-key record (Part 11 §11.4), or at a join over the
@@ -1489,13 +1486,6 @@ names the object type and its lifetime:
 "umbra/v1/group-epoch-slot"
 "umbra/v1/group-epoch-tag"
 "umbra/v1/group-rekey"
-"umbra/v1/community-id"
-"umbra/v1/community-roster"
-"umbra/v1/community-chain"
-"umbra/v1/community-checkpoint"
-"umbra/v1/community-moderation"
-"umbra/v1/operator-removal"
-"umbra/v1/community-report"
 "umbra/v1/mention"
 "umbra/v1/handle-renew"
 "umbra/v1/file-manifest"
@@ -1504,15 +1494,10 @@ names the object type and its lifetime:
 "umbra/v1/avatar-color"
 "umbra/v1/session-tag"
 "umbra/v1/session-resume"
-"umbra/v1/community-reply"
-"umbra/v1/community-pull"
-"umbra/v1/community-meta-blob"
-"umbra/v1/community-metadata"
 "umbra/v1/dead-channel"
 "umbra/v1/chunk-place"
 "umbra/v1/backup-read"
 "umbra/v1/backup-key"
-"umbra/v1/report-key"
 "umbra/v1/tree-head"
 "umbra/v1/tree-head-keyset"
 "umbra/v1/pow-challenge"
@@ -1528,9 +1513,6 @@ names the object type and its lifetime:
 "umbra/v1/sync-seed"
 "umbra/v1/handle-write"
 "umbra/v1/address-index"
-"umbra/v1/community-listing"
-"umbra/v1/moderator-set"
-"umbra/v1/community-contact"
 "umbra/v1/hello"
 "umbra/v1/log-commit"
 "umbra/v1/issuer-key"
@@ -1551,9 +1533,9 @@ primitive register in the same manner.
 > Without a label the two keys share one KDF namespace with each derivation
 > above.
 
-> *The cause of the eleven labels that this revision adds.* Part 6 §6.6.5
+> *The cause of the nine labels that this revision adds.* Part 6 §6.6.5
 > derives a mention identifier under `"umbra/v1/mention"`, and Part 13 §13.3.4
-> derives a manifest key under `"umbra/v1/file-manifest"`. The nine labels below
+> derives a manifest key under `"umbra/v1/file-manifest"`. The seven labels below
 > came with the correction pass of the same revision.
 >
 > *The cause of the eleven group-queue labels.* The 0.2.0-draft revision
@@ -1579,31 +1561,20 @@ primitive register in the same manner.
 > `"umbra/v1/group-rekey"`, and it lives for one re-key. Each label names one
 > object type, and CRY-031 holds.
 >
-> *The cause of the nine correction labels.* Part 5 §5.4.8 hashes a
+> *The cause of the seven correction labels.* Part 5 §5.4.8 hashes a
 > one-time prekey under `"umbra/v1/prekey-id"`. Part 10 §10.5.4 computes the
 > relay layer under `"umbra/v1/relay-layer"`, and Part 10 §10.6.3 signs a family
 > certificate under `"umbra/v1/relay-family"`. Part 10 §10.4.2 signs a link
 > receipt under `"umbra/v1/link-receipt"`, and Part 10 §10.3.1 signs a measurer
 > certificate under `"umbra/v1/measurer-cert"`. Part 7 §7.3.1 signs an ownership
-> claim record under `"umbra/v1/device-claim"`. Part 12 §12.3.2 derives a role
-> report key under `"umbra/v1/community-report"`. Part 9 §9.9.1 derives a
+> claim record under `"umbra/v1/device-claim"`. Part 9 §9.9.1 derives a
 > renewal challenge under `"umbra/v1/handle-renew"`. Each one names one object
 > type, and CRY-031 keeps them apart.
 >
-> *The cause of the three wire labels.* Part 6 §6.5 derives the session tag of
+> *The cause of the two wire labels.* Part 6 §6.5 derives the session tag of
 > a ratchet record from the initial root key under `"umbra/v1/session-tag"`.
 > Part 6 §6.2.3 computes the authenticator of a session resume under
-> `"umbra/v1/session-resume"`. Part 6 §6.6.5 derives the reference value of a
-> community reply under `"umbra/v1/community-reply"`. Each one names one object
-> type.
-
-> *The cause of the three community control labels.* Part 12 §12.3.3 derives
-> the pull key of a community command under `"umbra/v1/community-pull"`. Part
-> 12 §12.7 derives the key of the metadata blob from `community_id` and a link
-> fragment under `"umbra/v1/community-meta-blob"`. That derivation takes a
-> different input from the two blob labels above. Part 12 §12.7.1 signs a
-> `CommunityMeta` under `"umbra/v1/community-metadata"`. Each one names one
-> object type.
+> `"umbra/v1/session-resume"`. Each one names one object type.
 
 > *The cause of the four storage labels.* Part 3 §3.2.6 extracts the
 > dead-channel secret under `"umbra/v1/dead-channel"`, and its three expansions
@@ -1613,11 +1584,6 @@ primitive register in the same manner.
 > content key under `"umbra/v1/backup-key"`. The two backup labels sit beside
 > `"umbra/v1/backup-handle"` and `"umbra/v1/backup-write"`, and each of the four
 > names one object type.
-
-> *The cause of the report label.* Part 12 §12.5.3 derives the key of a report
-> record from a `UMBRA-KEM` shared secret under `"umbra/v1/report-key"`. The
-> label `"umbra/v1/community-report"` derives the role report keypair itself,
-> which is a different object type.
 
 > *The cause of the two tree-head labels.* Part 9 §9.5.2 signs a
 > `SignedTreeHead` under `"umbra/v1/tree-head"` and a `LogKeySet` under
@@ -1656,7 +1622,7 @@ primitive register in the same manner.
 > transparency log to its entry under `"umbra/v1/log-commit"`, with the
 > opening as the HMAC key. Part 14 §14.5 names the label input of an issuer
 > key under `"umbra/v1/issuer-key"`, which keeps that input apart from a
-> handle, an address, and a listing in the one VOPRF of Part 9 §9.4.
+> handle and an address in the one VOPRF of Part 9 §9.4.
 
 > *The cause of the hop-update label.* Part 3 §3.4.4 rule `NET-204` replaces
 > the key set of the hop 3 layer after each cell under
@@ -1702,32 +1668,22 @@ primitive register in the same manner.
 > `"umbra/v1/table-mac"`. The first sits above `K_store` and the second sits
 > below it, thus CRY-031 keeps them apart.
 
-> *The cause of the four social-surface labels.* Part 9 §9.3.3 puts an address
+> *The cause of the address label.* Part 9 §9.3.3 puts an address
 > entry in the tree of the handle directory under one VOPRF key. The label
 > `"umbra/v1/address-index"` in front of the address keeps that label space
-> apart from the handle label space. Part 9 §9.12 puts a community listing in
-> the same tree under `"umbra/v1/community-listing"`, and that label also signs
-> the `CommunityListing`. One object type holds both uses, thus `CRY-031` holds.
-> Part 12 §12.5.2 signs a `ModeratorSet` under `"umbra/v1/moderator-set"`,
-> because a moderator set is not a roster. Part 12 Part 12 §12.6.3 derives
-> `CommunityContactKey_g` from `CommunityIdentitySeed_g` under
-> `"umbra/v1/community-contact"`, and that seed makes no other key with a KDF.
+> apart from the handle label space.
 
 One label names one object type. **[CRY-031]** Two object types MUST NOT share one label.
-Part 12 §12.5.2 signs a `CommunityRoster` under `"umbra/v1/community-roster"`,
-and it signs a `ModerationEpoch` under `"umbra/v1/community-moderation"`. Part
-12 §12.4.4 rule 10 signs an `OperatorRemoval` under
-`"umbra/v1/operator-removal"`, and a relay key signs that one. Part
-11 §11.9.2 and Part 11 §11.9.6 sign the two group objects under two labels of
-their own. Those two group labels are not the community labels.
+Part 11 §11.9.2 signs a granting epoch of a group, and Part 11 §11.9.6 signs a
+moderation epoch of a group. The two objects use two labels of their own.
 
-**[CRY-032]** The labels `"umbra/v1/community-pseudonym"` and `"umbra/v1/group-roster"` are not
-used, and an implementation MUST NOT add them. Part 12 §12.3.2 makes
-`CommunityIdentitySeed_g` from the device CSPRNG, and Part 11 §11.9.1 makes
-`GroupRosterSeed_g` from the device CSPRNG. Neither value comes from a KDF, thus
-neither value needs a derivation label. The pair key and the KEM key that Part
-11 §11.3.3 derives from `GroupRosterSeed_g` use `"umbra/v1/group-pair"` and
-`"umbra/v1/group-kem"`. **[CRY-066]** A group signature MUST use
+**[CRY-032]** The label `"umbra/v1/group-roster"` and each label that starts
+with `"umbra/v1/community-"` are not used, and an implementation MUST NOT add
+them. The labels that start with `"umbra/v1/community-"` stay reserved for the
+withdrawn Part 12. Part 11 §11.9.1 makes `GroupRosterSeed_g` from the device
+CSPRNG. That value does not come from a KDF, thus it needs no derivation
+label. The pair key and the KEM key that Part 11 §11.3.3 derives from
+`GroupRosterSeed_g` use `"umbra/v1/group-pair"` and `"umbra/v1/group-kem"`. **[CRY-066]** A group signature MUST use
 `"umbra/v1/group-grant"` or `"umbra/v1/group-moderation"`, and it MUST NOT use a
 label that names a seed.
 

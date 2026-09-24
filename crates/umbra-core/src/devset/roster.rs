@@ -64,14 +64,13 @@ pub struct DeviceEntry<'a> {
     pub sync_scope: SyncScope,
 }
 
-/// The scope of an ownership claim.
+/// The scope of an ownership claim. The value `0x02`, a community
+/// identity of the withdrawn Part 12, is retired (`DEV-192`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ClaimScope {
     /// A pairwise identity.
     Pairwise = 0x01,
-    /// A community identity.
-    Community = 0x02,
     /// Each subject of an absent device.
     Absence = 0x03,
     /// The group sender owner.
@@ -83,7 +82,6 @@ impl ClaimScope {
     pub const fn from_byte(b: u8) -> Result<Self, Error> {
         match b {
             0x01 => Ok(ClaimScope::Pairwise),
-            0x02 => Ok(ClaimScope::Community),
             0x03 => Ok(ClaimScope::Absence),
             0x04 => Ok(ClaimScope::GroupSender),
             _ => Err(Error::Malformed),
@@ -408,6 +406,15 @@ pub(crate) mod tests {
             .sign(&roster.preimage().unwrap(), &mut Rng(1))
             .unwrap()
             .to_bytes();
+    }
+
+    #[test]
+    fn the_retired_claim_scope_fails_to_parse() {
+        assert!(ClaimScope::from_byte(0x02).is_err());
+        assert_eq!(
+            ClaimScope::from_byte(0x04).ok(),
+            Some(ClaimScope::GroupSender)
+        );
     }
 
     #[test]

@@ -1315,7 +1315,7 @@ its condition, its end, and the one line that the client shows.
 ### 15.9.3 The interface strings
 
 Rules of this specification require the interface to show a string. Examples
-are `NTF-009`, `COM-001`, `ABU-040`, `IMP-050`, and the lines of the table
+are `NTF-009`, `ABU-040`, `IMP-050`, and the lines of the table
 above. A translation that drops such a string breaks the rule in that locale,
 and no test caught that before this section.
 

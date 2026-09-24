@@ -321,8 +321,6 @@ adds a trade MUST add a row to this table.
 | A device keeps the slot key of the last `GROUP_SLOT_WINDOW` hours of the current group epoch, thus a seized device opens 24 h of the retained records of that group | Part 11 §11.3.2 |
 | A granting epoch is a signed and transferable statement, thus G10 does not cover the group administration | Part 11 §11.9.5 |
 | A moderator removal in a private group destroys a record on the device of each member | Part 11 §11.9.6 |
-| A community post is not fully verifiable until the next checkpoint arrives | Part 12 §12.4.1 |
-| An author withdrawal in a community is a permanent and public pointer at the withdrawn post | Part 12 §12.4.5 |
 | Each queue relay holds its own session, thus each push wake pays one transport handshake for each queue relay. That row is 38 % of the idle background, and U4 moves from 25 MB to 100 MB each month | Part 3 §3.12 |
 | A circuit and its session live 4 hours and not 10 minutes. A seized hop 1 or hop 2 key set then opens 4 hours of recorded cells, and one session links the wakes of 4 hours | Part 3 §3.4.3, Part 6 §6.2.3 |
 | Each background arrival wakes the device one time, thus the battery cost of Instant mode grows with the arrival count. U5 states that cost as a term for each arrival | Part 3 §3.12 |
@@ -333,7 +331,6 @@ adds a trade MUST add a row to this table.
 | A skipped-message key lives 45 days, thus a seized device gives a wider key set | Part 5 §5.5.4 |
 | A group-queue relay holds `GROUP_RETENTION` of the ciphertext of a group and the time and the bucket of each record, thus two replica operators see the activity of a group | Part 11 §11.5 |
 | An accepted key-change notice ends the post-compromise healing for that contact | Part 4 §4.5.1 |
-| A community roster carries a report key for each role, thus it moves from bucket `B2` to bucket `B3` | Part 12 §12.5.2 |
 | A backup write costs about 492 KB each day on the chunk path, and the earlier draft counted it as free | Part 3 §3.12 |
 | A send from a device that does not own the ratchet waits for the next wake of the owner device | Part 7 §7.5.4 |
 | U2 moves from 1.5 s to 2.0 s, because the earlier propagation model was optimistic and `PACING_MEAN` holds at 1 s | Part 3 §3.12 |
@@ -355,16 +352,12 @@ adds a trade MUST add a row to this table.
 | A web client sends the ClientHello of its browser, thus a classifier tells a web client from a native client on the first flight | Part 3 §3.8.1 |
 | A web client receives a message while its browser runs, and the phone of the user carries each notification at another time | Part 8 §8.6 |
 | The web client is a browser extension, thus each browser vendor is a gatekeeper of that client, and a user without the extension has no web client | Part 15 §15.7 |
-| A relay under a legal order serves a signed operator removal beside the stub, thus the removal is attributable and it binds that relay only | Part 12 §12.4.4 |
-| A roster that removes an owner needs more than half of the owners, thus a lone hostile owner removes nobody and a community with two owners needs both | Part 12 §12.5.2 |
 | A published rendezvous queue rotates each 30 days, thus one relay holds the hello count of one period and the holder pays one queue and one write in each period | Part 9 §9.9 |
 | A record that no relay accepts in `SEND_GIVE_UP` fails, and the user resends it, thus no retransmission runs for the life of a session | Part 3 §3.7 |
 | A 1:1 conversation and a group at or below `GROUP_ALL_NOTIFY_MAX` default to a notification for each record. Thus a small conversation alerts on each record, and a large one alerts on a mention only | Part 7 §7.5.9 |
 | The manual verification is a six-digit code, thus an active adversary at the first contact passes one ceremony in 10⁶ | Part 4 §4.5.2 |
 | A delivery receipt and a read receipt are off by default. Thus a sender does not learn that a record arrived unless the peer opts in | Part 3 §3.5.4 |
 | A typing indicator is off by default, thus a peer does not learn that a user composes unless that user opts in | Part 6 §6.6.9 |
-| A community defaults to a digest, thus a subscriber learns of a post at `DIGEST_INTERVAL` and not at the post | Part 12 §12.6, Part 8 §8.5 |
-| A community defaults to `mentions` with a digest queue. Thus the device wakes at most `COMMUNITY_DIGEST_BUDGET` times a day for each community, and the community relay counts the registered queues | Part 8 §8.5.1, Part 12 §12.6.4 |
 | A message push lives 24 hours at the provider, thus a seizure there exposes one day of 69-byte blobs in place of one hour | Part 8 §8.4.3 |
 | A device that fails three consecutive blob opens shows a clock state. Thus a wrong clock is visible, and a preview stops until the root is fresh | Part 8 §8.2.3, Part 15 §15.9.2 |
 | A client takes its time from the signed directory root. Thus a device clock that is wrong by more than one hour stops nothing, and the client shows one line for it | Part 10 §10.5.2, Part 15 §15.9.2 |
@@ -379,8 +372,6 @@ adds a trade MUST add a row to this table.
 | A published Public Address sits in a second directory index, thus a party that holds its 20-byte hash reaches its rendezvous queue | Part 9 §9.3.3 |
 | The addressee verifies the token or the proof of work of a hello, thus no relay limits a contact request. No limit for each sender exists at a Public Address, because the token is unlinkable | Part 14 §14.4 |
 | A rendezvous queue in Instant mode registers with the Notification Delivery Relay. That relay then learns that a push token belongs to a published handle or address | Part 8 §8.2.6 |
-| A listed community is a crawlable public statement of its name, its topic, its language, and its activity | Part 12 §12.7.2 |
-| A community reaction and a repost sit in the chain of the author, thus a reader tallies them from the records that a relay served | Part 12 §12.6.2 |
 
 ### 2.4.1 Where each usability goal is realized
 
@@ -406,7 +397,6 @@ those rules has to check the goal again.
 | U10b | Part 4 §4.7.6 `IDN-051` to `IDN-054` | A scripted setup from the settings screen, with a tap count |
 | S1 | Part 4 §4.3.3 `IDN-129` to `IDN-132`, Part 9 §9.3.3, Part 9 §9.6, Part 8 §8.2.6, Part 14 §14.4 | A pasted address string at a fresh install, timed to the shown request at the addressee, in Instant mode and in Private mode |
 | S2 | Part 9 §9.4, Part 9 §9.6, Part 8 §8.2.6 | A typed handle at a fresh install, timed in the same manner as S1 |
-| S3 | Part 9 §9.12, Part 12 §12.7.2 | A browse by tag at a fresh install, timed to a subscribed community |
 | S4 | Part 6 §6.6.7 `WIR-358`, Part 4 §4.3.1 | A three-party introduction, timed from the request to the shown offer |
 
 **[THR-011]** A revision that adds a usability goal or a sociality goal MUST add
@@ -425,27 +415,29 @@ again.
 The goals of §2.4 cover the private tier of Part 4 §4.1. A user with no
 published address meets a contact through a QR code or through a link. The
 table below covers the social tier, which a user turns on. S1 and S2 need a
-published address or a published handle at the addressee. S3 needs a listed
-community. S4 needs the consent of the contact that the introduction names.
+published address or a published handle at the addressee. S4 needs the
+consent of the contact that the introduction names.
 
 | # | Goal | Target |
 | --- | --- | --- |
 | S1 | **Reach from a Public Address** — a stranger that holds a pasted address or a reusable link (Part 4 §4.3.2) sends a contact request | ≤ 3 taps from the paste to a sent request. The addressee sees the request in ≤ 60 s in Instant mode, and in ≤ 24 h in Private mode. Both devices have network |
 | S2 | **Reach from a handle** — a stranger that types a handle sends a contact request | The taps and the latency of S1, plus one lookup of Part 9 §9.4 |
-| S3 | **Find a community with no link** — a user finds a listed community by a topic tag or by a name | ≤ 4 taps from the community screen to a subscribed community. A browse page arrives in ≤ 5 s |
 | S4 | **Introduction** — a user connects one contact with another contact through the contact share of Part 6 §6.6.7 | ≤ 2 taps at each of the three parties. The offer reaches the third party inside the U2 latency after the grant |
 
 **[THR-014]** A conformant implementation MUST meet each goal of the table
 above. §2.4.1 names the rules that carry each goal and the test of each goal.
 
+> **Note on the goal numbers.** This table has no S3. An earlier draft gave S3
+> as a search for a public community, and Part 12 withdraws that feature. The
+> number of S4 does not change, because Part 6 refers to it.
+
 > *Cause.* An earlier draft gave the social tier no goal. Part 9 defined a
 > handle lookup, and no rule let a stranger reach a Public Address from the
-> string of Part 4 §4.2.3. Part 12 §12.7.2 let a community opt in to a listing,
-> and no directory held one. Part 6 §6.6.7 defined the offer record, and no
+> string of Part 4 §4.2.3. Part 6 §6.6.7 defined the offer record, and no
 > rule made a client show it. A goal with no mechanism is not measurable, thus
 > the mechanisms above arrive in the revision that states the goals. Part 9
-> §9.3.3 gives the address index, and Part 9 §9.12 gives the community
-> listing. Part 6 rule `WIR-358` gives the offer its interface rule.
+> §9.3.3 gives the address index, and Part 6 rule `WIR-358` gives the offer
+> its interface rule.
 
 ## 2.5 Non-goals
 

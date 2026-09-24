@@ -67,21 +67,21 @@ each column when a crate implements the requirement and a test covers it.
 | --- | --- | --- | --- | --- | --- | --- |
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
-| `NET` | 236 | 84 | 1 | 0 | 8 | **329** |
+| `NET` | 235 | 84 | 1 | 0 | 8 | **328** |
 | `IDN` | 127 | 44 | 1 | 0 | 5 | **177** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
-| `WIR` | 397 | 88 | 0 | 0 | 6 | **491** |
-| `DEV` | 179 | 87 | 2 | 0 | 7 | **275** |
-| `NTF` | 77 | 31 | 0 | 0 | 3 | **111** |
-| `DIS` | 123 | 37 | 0 | 0 | 1 | **161** |
+| `WIR` | 391 | 86 | 0 | 0 | 6 | **483** |
+| `DEV` | 176 | 86 | 0 | 0 | 7 | **269** |
+| `NTF` | 74 | 28 | 0 | 0 | 3 | **105** |
+| `DIS` | 109 | 33 | 0 | 0 | 1 | **143** |
 | `REL` | 124 | 32 | 1 | 0 | 2 | **159** |
 | `GRP` | 220 | 62 | 0 | 0 | 6 | **288** |
-| `COM` | 310 | 98 | 0 | 0 | 5 | **413** |
-| `ATT` | 140 | 46 | 1 | 0 | 2 | **189** |
-| `ABU` | 68 | 31 | 0 | 0 | 0 | **99** |
+| `COM` | 0 | 0 | 0 | 0 | 0 | **0** |
+| `ATT` | 139 | 46 | 1 | 0 | 2 | **188** |
+| `ABU` | 64 | 30 | 0 | 0 | 0 | **94** |
 | `IMP` | 112 | 41 | 0 | 0 | 2 | **155** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2268 | 722 | 7 | 0 | 54 | **3051** |
+| **All** | 1926 | 613 | 5 | 0 | 49 | **2593** |
 
 ## SCP — Scope and Conventions
 
@@ -286,7 +286,6 @@ Source: `spec/03-network-architecture.md`
 | `NET-146` | §3.3.2 | MUST | A client | A client MUST show the URL to the user before the user opens it. |  |  |
 | `NET-147` | §3.3.2 | MUST | A client | A client MUST open a URL of a scheme other than `umbra` in the browser of the platform. |  |  |
 | `NET-148` | §3.3.2 | MUST | (unstated) | Thus a client MUST render the host of the URL beside the preview. |  |  |
-| `NET-149` | §3.2.3 | MUST | A party | For a community command of Part 12 §12.3.3, a party MUST use `pull_sk` in the place of `Q*_auth_sk`. |  |  |
 | `NET-150` | §3.4.3 | MUST | A client | A client MUST send each `EXTEND` cell in bucket `B1`. |  |  |
 | `NET-151` | §3.4.3 | MUST | A relay | A relay MUST send each `EXTENDED` cell in bucket `B1`. |  |  |
 | `NET-152` | §3.4.3 | MUST | A client | A client MUST set `relay_id` to the `relay_id` of the descriptor that gave `s` for that hop. |  |  |
@@ -530,7 +529,7 @@ Source: `spec/04-identity.md`
 | `IDN-053` | §4.7.6 | MUST NOT | (unstated) | After **two** dismissals the client MUST NOT prompt again, and only the settings screen offers the operation. |  |  |
 | `IDN-054` | §4.7.6 | MUST NOT | Onboarding | Onboarding MUST NOT block on the confirmation of the recovery code if that block moves the time-to-first-message past the U1 target. |  |  |
 | `IDN-055` | §4.5.1 | MUST | A client | A client MUST send a key-change notice inside the established pairwise ratchet session with that contact. |  |  |
-| `IDN-056` | §4.5.1 | MUST NOT | A client | A client MUST NOT send it on a new session, on a group channel, or on a community channel. |  |  |
+| `IDN-056` | §4.5.1 | MUST NOT | A client | A client MUST NOT send it on a new session or on a group channel. |  |  |
 | `IDN-057` | §4.5.1 | MUST NOT | A client | A client MUST NOT sign a key-change notice. |  |  |
 | `IDN-058` | §4.5.1 | MUST NOT | A client | A client MUST NOT carry a signature over the new keys inside the notice. |  |  |
 | `IDN-059` | §4.5.1 | MUST | A receiver | A receiver MUST accept a key-change notice only from the receiving chain of that session. |  |  |
@@ -682,7 +681,7 @@ Source: `spec/05-cryptographic-core.md`
 | `CRY-021` | §5.5.2 | MUST NOT | UMBRA | UMBRA MUST NOT use the retransmit-until-acknowledged strategy of Apple PQ3. |  |  |
 | `CRY-022` | §5.5.2 | MUST NOT | UMBRA | UMBRA MUST NOT make future KEM keypairs in advance. |  |  |
 | `CRY-023` | §5.5.4 | MUST | An implementation | An implementation MUST store the skipped keys encrypted at rest under `K_store`. |  |  |
-| `CRY-024` | §5.8 | MUST | Group content and community content | Group content and community content MUST have post-quantum protection in transit. At rest, `K_store` of §5.2 covers each record, and a community post is public at publication. |  |  |
+| `CRY-024` | §5.8 | MUST | Group content | Group content MUST have post-quantum protection in transit. |  |  |
 | `CRY-025` | §5.9 | MUST | Implementations | Implementations MUST implement RFC 8937 randomness hardening unconditionally, with the construction of §5.9. |  |  |
 | `CRY-026` | §5.9 | MUST | Implementations | Implementations MUST enforce one encapsulation for each ephemeral key **at the type level**. |  |  |
 | `CRY-027` | §5.11 | MUST | (unstated) | Each KDF invocation and each signature MUST carry a label prefix. |  |  |
@@ -690,7 +689,7 @@ Source: `spec/05-cryptographic-core.md`
 | `CRY-029` | §5.11 | MUST | (unstated) | A revision that needs a new label MUST add that label to this list. |  |  |
 | `CRY-030` | §5.11 | MUST | That revision | That revision MUST give the cause. |  |  |
 | `CRY-031` | §5.11 | MUST NOT | Two object types | Two object types MUST NOT share one label. |  |  |
-| `CRY-032` | §5.11 | MUST NOT | (unstated) | The labels `"umbra/v1/community-pseudonym"` and `"umbra/v1/group-roster"` are not used, and an implementation MUST NOT add them. |  |  |
+| `CRY-032` | §5.11 | MUST NOT | (unstated) | The label `"umbra/v1/group-roster"` and each label that starts with `"umbra/v1/community-"` are not used, and an implementation MUST NOT add them. |  |  |
 | `CRY-033` | §5.11 | MUST | Implementations | Implementations MUST bind the **full handshake transcript** into the KDF. |  |  |
 | `CRY-034` | §5.3 | MUST | An implementation | An implementation MUST encode `pk_X` and `pub_X` as the 32-byte little-endian u-coordinate of RFC 7748. |  |  |
 | `CRY-035` | §5.3 | MUST | An implementation | An implementation MUST encode `pk_M`, `sk_M`, and `ct_M` in the byte encoding of FIPS 203. |  |  |
@@ -835,7 +834,7 @@ Source: `spec/06-wire-format.md`
 | `WIR-020` | §6.4.2 | MUST NOT | A sender | A sender MUST NOT use a counter. |  |  |
 | `WIR-021` | §6.4.2 | MUST NOT | A sender | A sender MUST NOT repeat a nonce under one `K_QE`. |  |  |
 | `WIR-022` | §6.4.2 | MUST | A party | A party MUST bind `version \|\| SenderId` as the associated data. |  |  |
-| `WIR-023` | §6.4.2 | MUST | A receiver | A receiver MUST reject an unknown kind. |  |  |
+| `WIR-023` | §6.4.2 | MUST | A receiver | A receiver MUST reject an unknown kind and a retired kind. |  |  |
 | `WIR-024` | §6.4.2 | MUST | A sender | A sender MUST fill the L6 record to a fixed length for the bucket. |  |  |
 | `WIR-025` | §6.4.2 | MUST | (unstated) | Thus the `payload_len` of a `SEND` MUST equal that row. |  |  |
 | `WIR-026` | §6.4.2 | MUST | The `payload_len` of a `MSG` | The `payload_len` of a `MSG` MUST equal the L5 payload row of §6.9. |  |  |
@@ -940,7 +939,6 @@ Source: `spec/06-wire-format.md`
 | `WIR-141` | §6.2.2 | MUST | A receiver | A receiver MUST ignore a frame whose `seq` it already accepted. |  |  |
 | `WIR-142` | §6.2.2 | MUST | A receiver | A receiver MUST reject a frame whose `flags` holds a non-zero value above bit 0. |  |  |
 | `WIR-143` | §6.3 | MUST | A measurer | A measurer MUST send a `MEAS_OPEN` cell in bucket `B3`. |  |  |
-| `WIR-144` | §6.6 | MUST | A parser | A parser MUST reject a body of kind `0x11` whose `type` is not `0x07`. |  |  |
 | `WIR-146` | §6.6.3 | MUST | A sender | A sender MUST wrap each group control object in a `GroupControl`. |  |  |
 | `WIR-147` | §6.6.3 | MUST | A parser | A parser MUST reject a `control_type` that the table above does not hold. |  |  |
 | `WIR-148` | §6.6.3 | MUST | An implementation | An implementation MUST give the group control type its own type. |  |  |
@@ -996,7 +994,7 @@ Source: `spec/06-wire-format.md`
 | `WIR-200` | §6.6.7 | MUST NOT | A client | A client MUST NOT reuse one invitation across two grants. |  |  |
 | `WIR-201` | §6.6.8 | MUST | A sender | A sender MUST set `seconds` to one value of the set that Part 7 §7.8 gives. |  |  |
 | `WIR-202` | §6.6.8 | MUST | A receiver | A receiver MUST reject a value that the set does not hold. |  |  |
-| `WIR-203` | §6.8 | MUST | The vectors | The vectors MUST cover the five cases below. |  |  |
+| `WIR-203` | §6.8 | MUST | The vectors | The vectors MUST cover the four cases below. |  |  |
 | `WIR-204` | §6.8 | MUST | The parser | The parser MUST reject the eight cases that follow them. |  |  |
 | `WIR-205` | §6.8 | MUST | The vectors | The vectors MUST cover the three cases below. |  |  |
 | `WIR-206` | §6.8 | MUST | The parser | The parser MUST reject the six cases that follow them. |  |  |
@@ -1056,8 +1054,6 @@ Source: `spec/06-wire-format.md`
 | `WIR-260` | §6.6.1 | MUST | A receiver | A receiver MUST apply an edit only when the innermost kind of the target is `0x01`. |  |  |
 | `WIR-261` | §6.6.1 | MUST | A receiver | A receiver MUST replace the innermost text of the target only. |  |  |
 | `WIR-262` | §6.6.1 | MUST NOT | A receiver | A receiver MUST NOT change the `reply_target`, the `thread_root`, or the mention list of the target. |  |  |
-| `WIR-263` | §6.6.5 | MUST | A sender in a community | A sender in a community MUST compute each reference value with the derivation above. |  |  |
-| `WIR-264` | §6.6.5 | MUST | A client | A client MUST compute the `community_reply_id` of each community post that it holds. |  |  |
 | `WIR-265` | §6.6.5 | MUST | A parser | A parser MUST reject a `version` that is not `0x02`. |  |  |
 | `WIR-266` | §6.6.5 | MUST | A sender | A sender MUST set `thread_root` to 16 zero bytes when the record is in no thread. |  |  |
 | `WIR-267` | §6.6.5 | MUST | A sender | A sender MUST set `thread_root` to a record whose own `reply_target` is zero. |  |  |
@@ -1096,9 +1092,7 @@ Source: `spec/06-wire-format.md`
 | `WIR-302` | §6.8 | MUST | The vectors | The vectors MUST cover the three cases below. |  |  |
 | `WIR-303` | §6.8 | MUST | The parser | The parser MUST reject the six cases that follow them. |  |  |
 | `WIR-304` | §6.8 | MUST | The parser | The parser MUST reject a body of kind `0x01` that is not valid UTF-8. |  |  |
-| `WIR-308` | §6.6.5 | MUST | A client | A client MUST match a reference value against those values. |  |  |
-| `WIR-309` | §6.4 | MUST | A community command | A community command MUST travel on a transport session that carries no queue command. |  |  |
-| `WIR-310` | §6.4 | MUST NOT | A client | A client MUST NOT batch a community command with a command of another range. |  |  |
+| `WIR-309` | §6.4 | MUST NOT | (unstated) | A relay MUST reject a command whose `cmd` is in that range, and a client MUST NOT send one. |  |  |
 | `WIR-311` | §6.8 | MUST | The vectors | The vectors MUST cover one `EXTEND` cell and one `EXTENDED` cell in bucket `B1`. |  |  |
 | `WIR-312` | §6.8 | MUST | The relay | The relay MUST drop the three cases below. |  |  |
 | `WIR-313` | §6.4.4 | MUST | A relay | A relay MUST answer a command that it rejects with one `NACK`. |  |  |
@@ -1117,7 +1111,7 @@ Source: `spec/06-wire-format.md`
 | `WIR-326` | §6.4.4 | MUST NOT | A client | A client MUST NOT report a `reason` to a party other than the user. |  |  |
 | `WIR-327` | §6.6.10 | MUST | A parser | A parser MUST reject a `QueueAddress` whose `version` is not `0x01`. |  |  |
 | `WIR-328` | §6.6.10 | MUST | A parser | A parser MUST reject a body of kind `0x33` whose `body_len` is not 129. |  |  |
-| `WIR-329` | §6.6.10 | MUST NOT | A client | A client MUST NOT send a record of kind `0x33` on a group channel or on a community channel. |  |  |
+| `WIR-329` | §6.6.10 | MUST NOT | A client | A client MUST NOT send a record of kind `0x33` on a group channel. |  |  |
 | `WIR-330` | §6.6.10 | MUST | A receiver | A receiver MUST accept a record of kind `0x33` only from the receiving chain of the session. |  |  |
 | `WIR-331` | §6.6.10 | MUST | (unstated) | After the grace period of Part 3 §3.2.6 ends, a client MUST erase the `QueueAddress` that a newer address replaced. |  |  |
 | `WIR-332` | §6.6.11 | MUST | A parser | A parser MUST reject a `scope` value or a `status` value that this section does not name. |  |  |
@@ -1211,8 +1205,7 @@ Source: `spec/06-wire-format.md`
 | `WIR-429` | §6.4.6 | MUST | A parser | A parser MUST reject a slot list that is not in strictly increasing `index` order. |  |  |
 | `WIR-430` | §6.4.6 | MUST | A parser | A parser MUST reject a repeated `index` in a slot list. |  |  |
 | `WIR-431` | §6.4.6 | MUST | A parser | A parser MUST reject an `own_count` that is not 0 or `GROUP_REPLICAS`. |  |  |
-| `WIR-432` | §6.6 | MUST | A parser | A parser MUST reject an `AppMessage` of kind `0x11` that arrives in a ratchet record or in a group queue record. |  |  |
-| `WIR-433` | §6.6 | MUST | A parser | A parser MUST reject an `inner_kind` of `0x0D` or of `0x0E` in a ratchet record or in a group queue record. |  |  |
+| `WIR-433` | §6.6 | MUST | A parser | A parser MUST reject a `kind` or an `inner_kind` that the table above marks as retired. |  |  |
 | `WIR-434` | §6.6.1 | MUST | A receiver | A receiver MUST resolve the target of an edit through each `RichRecord` wrapper. |  |  |
 | `WIR-435` | §6.6.3 | MUST | A parser | A parser MUST reject a `JoinRecord` whose length is not 1 313. |  |  |
 | `WIR-436` | §6.6.3 | MUST | A parser | A parser MUST reject a `stage` that is not `0x01` or `0x02`. |  |  |
@@ -1235,7 +1228,6 @@ Source: `spec/06-wire-format.md`
 | `WIR-455` | §6.6.11 | MUST | A client | A client MUST send a key request of scope `0x01` on the pairwise channel with the party that sent the record. |  |  |
 | `WIR-456` | §6.6.11 | MUST | A client | A client MUST send a key request of scope `0x02` or `0x03` as a group record on the group queue when it holds a write credential inside `GROUP_WRITE_GRACE` and an epoch inside `GROUP_EPOCH_GRACE`. |  |  |
 | `WIR-457` | §6.6.11 | MUST | Otherwise a client | Otherwise a client MUST send that request on a pairwise channel with a member of the group. |  |  |
-| `WIR-458` | §6.6.11 | MUST NOT | A client | A client MUST NOT send a key request on a community channel. |  |  |
 | `WIR-459` | §6.6.11 | MUST | A receiver | A receiver MUST accept a key supply of scope `0x01` only on the channel on which it sent the request. |  |  |
 | `WIR-460` | §6.6.11 | MUST | A receiver | A receiver MUST accept the answer to a request of scope `0x02` or `0x03` under the rules of Part 11 §11.4.2 and §11.9.8, and not by the channel that carried the request. |  |  |
 | `WIR-461` | §6.6.11 | MAY | A member that answers a request of scope `0x02` or `0x03` | A member that answers a request of scope `0x02` or `0x03` MAY send a `KeySupply` of status `0x01` on the channel that carried the request, and the requester takes nothing from it but the report. |  |  |
@@ -1299,11 +1291,10 @@ Source: `spec/06-wire-format.md`
 | `WIR-523` | §6.6.11 | MUST | A request of scope `0x02` on a pairwise channel | A request of scope `0x02` on a pairwise channel MUST carry 1 plus the member index of the requester in `index`, and one that another member posts on the group queue for it keeps that value; the tag of a group record names its poster and not the member that lacks the epoch. |  |  |
 | `WIR-524` | §6.2.3 | MUST | A relay | A relay MUST send a `CircuitDestroy` under `NET-322` on the link of each neighbor of a circuit that it ends, with the `circ_id` that the circuit carries on that link. |  |  |
 | `WIR-525` | §6.2.2 | MUST | A sender | A sender MUST keep the last `RESEND_WINDOW` frames of a session for a resume, 1 000 frames, and MUST drop the oldest one when a new frame comes to a full window. |  |  |
-| `WIR-526` | §6.4 | MUST | (unstated) | A relay that writes a digest of Part 8 §8.5 or Part 12 §12.6.4 into a queue at another relay MUST send it as the value of one `UMBRA_DEPOSIT` capsule, on a connection of §6.2.1 that it opens for that deposit. |  |  |
+| `WIR-526` | §6.4 | MUST | (unstated) | A relay that writes a digest of Part 8 §8.5 into a queue at another relay MUST send it as the value of one `UMBRA_DEPOSIT` capsule, on a connection of §6.2.1 that it opens for that deposit. |  |  |
 | `WIR-527` | §6.4 | MUST | A relay | A relay MUST hold the `corr_id` of each of the last 4 096 deposits that it took, and it MUST drop a deposit that repeats one. |  |  |
 | `WIR-528` | §6.4.2 | MUST | A receiver | A receiver MUST take the content of a renewal record as a bundle in the layout of Part 5 §5.4.1, and it MUST read it on the queue of a contact whose handshake is complete. |  |  |
 | `WIR-529` | §6.4 | MUST | (unstated) | A relay that sends its proof-of-work challenge to a carrier of the manifest (Part 14 `ABU-102`) MUST send it as the value of one `UMBRA_CHALLENGE` capsule, on a connection of §6.2.1 that it opens for that challenge. |  |  |
-| `WIR-530` | §6.6 | MUST NOT | (unstated) | A parser MUST reject a body of kind `0x38` that is not a `CommunityOwnerExchange` of Part 12 §12.5.5, and MUST NOT accept kind `0x38` on a channel other than a pairwise one. |  |  |
 
 ## DEV — Device Sets
 
@@ -1361,7 +1352,7 @@ Source: `spec/07-device-sets.md`
 | `DEV-048` | §7.5.4 | MUST NOT | The ratchet owner | The ratchet owner MUST NOT draw a new `msg_id`. |  |  |
 | `DEV-049` | §7.5.4 | MAY | A device | A device MAY then claim the ownership with a broadcast of an `OwnerClaimRecord` of §7.3.1. |  |  |
 | `DEV-050` | §7.5.5 | MUST | A client | A client MUST put that record on a sync channel of §7.5.1 only. |  |  |
-| `DEV-051` | §7.5.5 | MUST NOT | A client | A client MUST NOT put it on a pairwise channel, on a group channel, or on a community channel. |  |  |
+| `DEV-051` | §7.5.5 | MUST NOT | A client | A client MUST NOT put it on a pairwise channel or on a group channel. |  |  |
 | `DEV-052` | §7.5.5 | MUST | A client | A client MUST reject a sync acknowledgment that arrives on a different channel. |  |  |
 | `DEV-053` | §7.5.5 | MUST | (unstated) | A revision that adds a device-set control record MUST give that record a new `control_type` value. |  |  |
 | `DEV-054` | §7.5.5 | MUST NOT | A device | A device MUST NOT use the relay sequence number of Part 6 §6.4.3 as that counter. |  |  |
@@ -1438,7 +1429,6 @@ Source: `spec/07-device-sets.md`
 | `DEV-127` | §7.5.7 | MUST | The two operations | The two operations MUST carry two different labels and two different confirmations. |  |  |
 | `DEV-128` | §7.5.7 | MUST NOT | The interface | The interface MUST NOT make that operation the visually safer choice. |  |  |
 | `DEV-129` | §7.5.7 | MUST | After the act the interface | After the act the interface MUST show which of the two operations it performed. |  |  |
-| `DEV-130` | §7.5.7 | MUST NOT | (unstated) | A community and a private conversation MUST NOT share one deletion affordance or one wording. |  |  |
 | `DEV-131` | §7.6 | MUST NOT | That operation | That operation MUST NOT cause a safety-number change or a prompt for a new verification (usability goal U7). |  |  |
 | `DEV-132` | §7.6 | MUST NOT | A device | A device MUST NOT share the roster with a contact. |  |  |
 | `DEV-133` | §7.6.1 | MAY | A user | A user MAY export an encrypted archive. |  |  |
@@ -1447,10 +1437,6 @@ Source: `spec/07-device-sets.md`
 | `DEV-136` | §7.6.1 | MUST NOT | A client | A client MUST NOT upload the archive to UMBRA infrastructure. |  |  |
 | `DEV-137` | §7.7 | MUST | The UI | The UI MUST state this limit in those words. |  |  |
 | `DEV-138` | §7.7 | MUST | The UI | The UI MUST also recommend the identity reset from the recovery phrase for a device in hostile hands. |  |  |
-| `DEV-139` | §7.7.1 | SHOULD | In that case the user | In that case the user SHOULD also make a new community identity. |  |  |
-| `DEV-140` | §7.7.1 | SHOULD | The user | The user SHOULD do that in each community that matters. |  |  |
-| `DEV-141` | §7.7.1 | MUST | The interface | The interface MUST offer that operation in the reset flow. |  |  |
-| `DEV-142` | §7.7.1 | MUST | The interface | The interface MUST state that a new community identity loses the post history. |  |  |
 | `DEV-143` | §7.3 | MUST | A device | A device MUST make `DeviceRosterKey_i` from its own CSPRNG. |  |  |
 | `DEV-144` | §7.3 | MUST NOT | A device | A device MUST NOT derive that keypair from the `RootIdentity`, from `K_devset`, or from `SyncChannelSeed`. |  |  |
 | `DEV-145` | §7.3 | MUST NOT | A device | A device MUST NOT transmit the private half of `DeviceRosterKey_i`. |  |  |
@@ -1500,7 +1486,7 @@ Source: `spec/07-device-sets.md`
 | `DEV-189` | §7.3.1 | MUST | A device | A device MUST take the current owner of a subject from the record with the highest pair (`roster_epoch`, `claim_seq`) that names that subject. |  |  |
 | `DEV-190` | §7.3.1 | MUST | (unstated) | If two records hold that same pair, a device MUST select the lower `signer_id` in byte order. |  |  |
 | `DEV-191` | §7.3.1 | MUST NOT | A device | A device MUST NOT send more than `OWNER_CLAIM_RATE` claim records of scope `0x01` or scope `0x02` each day. |  |  |
-| `DEV-192` | §7.3.1 | MUST NOT | A device | A device MUST NOT put a claim of scope `0x01` and a claim of scope `0x02` for one subject in one record. |  |  |
+| `DEV-192` | §7.3.1 | MUST NOT | A device | A device MUST NOT put a claim of scope `0x02` in a record, and a verifier MUST reject a record that holds one. |  |  |
 | `DEV-193` | §7.5.1 | MUST | A client | A client MUST send an interactive sync record at the first opportunity. |  |  |
 | `DEV-194` | §7.5.1 | MUST NOT | A client | A client MUST NOT hold an interactive sync record for a cover slot. |  |  |
 | `DEV-195` | §7.5.1 | MUST | A client | A client MUST bound the interactive sync records on one channel by a token bucket. |  |  |
@@ -1530,7 +1516,6 @@ Source: `spec/07-device-sets.md`
 | `DEV-219` | §7.5.9 | MUST | A client | A client MUST hold the notification setting as mutable state of §7.5.3. |  |  |
 | `DEV-220` | §7.5.9 | MUST | A client | A client MUST converge that setting across the device set. |  |  |
 | `DEV-221` | §7.5.9 | MUST | A client | A client MUST default a new group above `T1_MAX` members to `mentions`. |  |  |
-| `DEV-222` | §7.5.9 | MUST | A client | A client MUST default a community to `none`, and Part 12 §12.6 states the same default. |  |  |
 | `DEV-223` | §7.5.9 | MUST NOT | A client | A client MUST NOT let the setting change the wake behavior of Part 8 §8.3. |  |  |
 | `DEV-224` | §7.3 | MUST | A device | A device MUST make its own `device_id` from its own CSPRNG at the link. |  |  |
 | `DEV-225` | §7.3 | MUST NOT | A device | A device MUST NOT derive `device_id` from a key, from a hardware identifier, or from an earlier `device_id`. |  |  |
@@ -1608,7 +1593,7 @@ Source: `spec/08-notifications.md`
 | `NTF-013` | §8.4.1 | MUST NOT | A client | A client MUST NOT build a spare circuit in a push-wake session. |  |  |
 | `NTF-014` | §8.4.1 | MUST | A high-priority FCM message | A high-priority FCM message MUST always cause a notification that the user can see. |  |  |
 | `NTF-017` | §8.4.3 | MUST | (unstated) | The response path for a message fetch MUST carry padding to a constant number of fixed cells. |  |  |
-| `NTF-018` | §8.5 | MUST NOT | (unstated) | A busy community of 1000 members or more MUST NOT make one push for each message. |  |  |
+| `NTF-018` | §8.5 | MUST NOT | A group above `GROUP_ALL_NOTIFY_MAX` members | A group above `GROUP_ALL_NOTIFY_MAX` members MUST NOT make one alert for each record at the device. |  |  |
 | `NTF-019` | §8.5 | MUST | A queue relay | A queue relay MUST apply the window to each handle, whatever the class of the conversation behind it. |  |  |
 | `NTF-027` | §8.7 | MUST | This text is normative, and it | The text of §8.7 is normative, and it MUST appear in the security documentation that the user reads. |  |  |
 | `NTF-028` | §8.7 | MUST | (unstated) | The NDR of the nonprofit and its core queue relays MUST be in different legal jurisdictions. |  |  |
@@ -1640,12 +1625,6 @@ Source: `spec/08-notifications.md`
 | `NTF-066` | §8.4.3 | MUST | (unstated) | If no drain of a handle follows a message push inside `REPUSH_INTERVAL`, the queue relay MUST hand one more push. |  |  |
 | `NTF-067` | §8.4.3 | MUST NOT | A queue relay | A queue relay MUST NOT hand more than `REPUSH_MAX` re-pushes for one message. |  |  |
 | `NTF-068` | §8.4.3 | MUST | (unstated) | At each session open and at each session resume, a client MUST run the peek of Part 3 §3.7 item 4 on each queue of that session. |  |  |
-| `NTF-069` | §8.5.1 | MUST | A client in Instant mode | A client in Instant mode MUST register one notification queue for each community at `mentions` or `all`. |  |  |
-| `NTF-070` | §8.5.1 | MUST | A client | A client MUST put that queue under a notification handle of its own. |  |  |
-| `NTF-071` | §8.5.1 | MUST | A client | A client MUST rotate that queue with the triple of `NTF-007`, and it MUST register the new queue before it drops the old one. |  |  |
-| `NTF-072` | §8.5.1 | MUST NOT | A community relay | A community relay MUST NOT write more than `COMMUNITY_DIGEST_BUDGET` digests into one queue in one day. |  |  |
-| `NTF-073` | §8.5.1 | MUST NOT | A community relay | A community relay MUST NOT write a digest into a queue when no post arrived since the previous digest to that queue. |  |  |
-| `NTF-074` | §8.5.1 | MUST NOT | A client in Private mode or in Off mode | A client in Private mode or in Off mode MUST NOT register a community notification queue. |  |  |
 | `NTF-075` | §8.2.3 | MUST | A receiver | A receiver MUST accept a blob whose `epoch` is inside the window. |  |  |
 | `NTF-076` | §8.2.3 | MUST | A receiver | A receiver MUST reject a blob outside that window without an AEAD open. |  |  |
 | `NTF-077` | §8.2.3 | MUST | A receiver | A receiver MUST count the consecutive failed opens of blobs inside the window. |  |  |
@@ -1662,7 +1641,7 @@ Source: `spec/08-notifications.md`
 | `NTF-089` | §8.4.1 | MUST | An Android client | An Android client MUST group the tray by the conversation of `queue_alias` after the AEAD open, with a notification group of the platform. |  |  |
 | `NTF-090` | §8.5.2 | MUST | A client in Instant mode | A client in Instant mode MUST make one notify queue for each group at `mentions` or `all`, on each device. |  |  |
 | `NTF-091` | §8.5.2 | MUST | A client | A client MUST put a group notify queue under a notification handle that holds no pairwise queue and no rendezvous queue. |  |  |
-| `NTF-092` | §8.5.2 | MAY | A client | A client MAY put a group notify queue and a community notify queue under one handle. |  |  |
+| `NTF-092` | §8.5.2 | MAY | A client | A client MAY put the notify queues of several groups under one handle. |  |  |
 | `NTF-093` | §8.5.2 | MUST | A client | A client MUST register the `QueueAddress` of the notify queue with each replica of the group queue by `GNREG`. |  |  |
 | `NTF-094` | §8.5.2 | MUST NOT | A registration | A registration MUST NOT carry a member index, a pseudonym, or a device identifier. |  |  |
 | `NTF-095` | §8.5.2 | MUST NOT | A group-queue relay | A group-queue relay MUST NOT link a registration to a reader session or to a writer session. |  |  |
@@ -1821,26 +1800,8 @@ Source: `spec/09-discovery.md`
 | `DIS-108` | §9.3.3 | MUST | An `AddressEntry` | An `AddressEntry` MUST use the registration, the lease, the tombstone, the renewal, and the write authorization of §9.9. |  |  |
 | `DIS-109` | §9.3.3 | MUST NOT | A directory | A directory MUST NOT serve a list of the address labels. |  |  |
 | `DIS-110` | §9.6 | MUST | A client | A client MUST encapsulate that hello to `address_pk`. |  |  |
-| `DIS-111` | §9.12 | MUST | A directory | A directory MUST verify that `SHA3-256("umbra/v1/community-id" \|\| admission \|\| actor_pk)` equals `community_id`, and that `SHA3-256(actor_pk)` equals `actor`. |  |  |
-| `DIS-112` | §9.12 | MUST | A directory | A directory MUST verify the signature under `actor_pk`. |  |  |
-| `DIS-113` | §9.12 | MUST NOT | A directory | A directory MUST NOT publish a listing that fails either check. |  |  |
-| `DIS-114` | §9.12 | MUST NOT | A directory | A directory MUST NOT publish a listing whose `listing_index` is not the current index plus one. |  |  |
-| `DIS-115` | §9.12 | MUST | A listing | A listing MUST carry the token of §9.9 at each publication. |  |  |
-| `DIS-116` | §9.12 | MUST | A directory | A directory MUST remove a listing at `LISTING_LEASE` after its acceptance, unless a later listing replaced it. |  |  |
-| `DIS-117` | §9.12 | MUST | An owner client | An owner client MUST set `activity` from the chains that the client pulled under Part 12 §12.3.3. |  |  |
-| `DIS-118` | §9.12 | MUST | An owner client | An owner client MUST set `category`, `language`, and `name` to the values of the current `CommunityMeta`. |  |  |
-| `DIS-119` | §9.12 | MUST | A directory | A directory MUST rank the listings of an answer by `activity` from high to low. |  |  |
-| `DIS-120` | §9.12 | MUST NOT | A directory | A directory MUST NOT put more than `LISTING_PAGE` listings in one page. |  |  |
-| `DIS-121` | §9.12 | MUST | A directory | A directory MUST match `prefix` against the `name` after the `UsernameCaseMapped` profile of §9.3.2 on both strings. |  |  |
-| `DIS-122` | §9.12 | MUST | A browse | A browse MUST carry one first-party token of §9.4.1. |  |  |
-| `DIS-123` | §9.12 | MUST | A client | A client MUST verify `DIS-111` and `DIS-112` on each listing that it shows. |  |  |
-| `DIS-124` | §9.12 | MUST | A client | A client MUST show a listing as unverified until the `CommunityMeta` of the link verifies under Part 12 §12.7.1. |  |  |
-| `DIS-125` | §9.12 | MUST | A client | A client MUST compare `activity` with the chains that it pulls after the join. |  |  |
-| `DIS-126` | §9.12 | MUST | (unstated) | If the pulled chains show a lower bucket, the client MUST show that difference beside the listing. |  |  |
-| `DIS-127` | §9.12 | MUST NOT | A directory | A directory MUST NOT put a listing with `link_len` 0 in a page. |  |  |
 | `DIS-128` | §9.3.3 | MUST NOT | The client | The client MUST NOT use an entry whose result differs from `address`. |  |  |
 | `DIS-129` | §9.3.3 | MUST NOT | A directory | A directory MUST NOT answer a query that names a prefix of an address. |  |  |
-| `DIS-130` | §9.12 | MUST | A directory | Inside one bucket, a directory MUST rank by the acceptance time from new to old. |  |  |
 | `DIS-131` | §9.6 | MUST | A client | A client MUST end a hello with one `Admission` of Part 14 §14.2, inside the AEAD of the hello. |  |  |
 | `DIS-132` | §9.6 | MUST | That `Admission` | That `Admission` MUST hold a cross-relay token of Part 14 §14.3.1 or a `PowSolution` of Part 14 §14.4. |  |  |
 | `DIS-133` | §9.9 | MUST | A client | A client MUST publish a new rendezvous queue for each published entry at each `RENDEZVOUS_ROTATE`. |  |  |
@@ -2334,425 +2295,12 @@ Source: `spec/11-private-groups.md`
 | `GRP-405` | §11.4.3 | MUST | (unstated) | A member that shows a group as lapsed and then installs the epoch it lacked MUST show the group as open again. |  |  |
 | `GRP-406` | §11.4.2 | MUST | A rotator | A rotator MUST post the chunked epoch-key record only after the object reached the chunk path, and MAY write the object again when that failed. |  |  |
 
-## COM — Public Communities
+## COM — Withdrawn
 
 Source: `spec/12-communities.md`
 
 | ID | Section | Key word | Binds | Requirement | Module | Test |
 | --- | --- | --- | --- | --- | --- | --- |
-| `COM-001` | §12.1.1 | MUST | The UI | The UI MUST make this difference impossible to miss. |  |  |
-| `COM-002` | §12.1.1 | MUST | A community | A community MUST look different from a private group. |  |  |
-| `COM-003` | §12.1.1 | MUST | A community | A community MUST also read differently. |  |  |
-| `COM-004` | §12.1.1 | MUST | At a join, the UI | At a join, the UI MUST show what becomes visible. |  |  |
-| `COM-005` | §12.2 | MUST | The creator | The creator MUST make that role pseudonym the §12.3.2 way, from a second and independent seed. |  |  |
-| `COM-006` | §12.2.1 | MUST | A client | A client MUST identify each post by the triple (`community_id`, `pseudonym`, `index`). |  |  |
-| `COM-007` | §12.2.1 | MUST | A relay | A relay MUST serve each post under the pseudonym of its author. |  |  |
-| `COM-008` | §12.2.1 | MUST | A client | A client MUST treat two records with the same triple as one post. |  |  |
-| `COM-009` | §12.2.1 | MUST NOT | A client | A client MUST NOT merge two records with different triples. |  |  |
-| `COM-010` | §12.2.1 | MUST NOT | A client | A client MUST NOT compare the bodies of two posts from two different pseudonyms. |  |  |
-| `COM-011` | §12.2.1 | MUST | (unstated) | If two relays serve two different bodies at one triple, the client MUST show a relay integrity warning. |  |  |
-| `COM-012` | §12.2.1 | MUST | That warning | That warning MUST name the two relays. |  |  |
-| `COM-013` | §12.2.1 | MUST NOT | A client | A client MUST NOT select one of the two bodies silently. |  |  |
-| `COM-014` | §12.2.1 | MUST | (unstated) | If the client holds `link_{n-1}` for that author, the client MUST compute `link_n` again. |  |  |
-| `COM-015` | §12.2.1 | MUST | The client | The client MUST reject a record that does not match. |  |  |
-| `COM-016` | §12.2.1 | MUST NOT | (unstated) | A relay does not serve `link_n`, and a client MUST NOT accept `link_n` from a relay. |  |  |
-| `COM-017` | §12.2.1 | MUST | A client | A client MUST treat a `PostStub` and a body at one triple as one post. |  |  |
-| `COM-018` | §12.2.1 | MUST | A client | A client MUST identify each checkpoint by the triple (`community_id`, `pseudonym`, `end_index`). |  |  |
-| `COM-019` | §12.2.1 | MUST | In that case the client | In that case the client MUST show a fork of that pseudonym. |  |  |
-| `COM-020` | §12.2.1 | MUST NOT | A client | A client MUST NOT select one checkpoint silently. |  |  |
-| `COM-021` | §12.2.1 | MUST | A client | A client MUST identify each moderation epoch and each community roster by the pair (`community_id`, `epoch_index`). |  |  |
-| `COM-022` | §12.2.1 | MUST NOT | A client | A client MUST NOT use the checkpoint signature bytes as an identifier or as a deduplication key. |  |  |
-| `COM-023` | §12.2.1 | MUST NOT | A client | A client MUST NOT use a value that comes from those bytes for either function. |  |  |
-| `COM-024` | §12.3.1 | MUST NOT | A community | A community MUST NOT carry kind `0x06` or kind `0x07`. |  |  |
-| `COM-025` | §12.3.1 | MUST NOT | A client | A client MUST NOT emit a delivery receipt or a read receipt for a community post. |  |  |
-| `COM-026` | §12.3.1 | MUST | A relay | A relay MUST reject such a record. |  |  |
-| `COM-027` | §12.3.2 | MUST | At the join, a client | At the join, a client MUST make `CommunityIdentitySeed_g` from the device CSPRNG. |  |  |
-| `COM-028` | §12.3.2 | MUST NOT | A client | A client MUST NOT derive that seed from the `RootIdentity`, from `community_id`, or from other key material. |  |  |
-| `COM-029` | §12.3.2 | MUST | (unstated) | A member that holds a role in the community MUST make a second and independent seed for that role. |  |  |
-| `COM-030` | §12.3.2 | MUST | That member | That member MUST use the resulting **role pseudonym** in a community roster and in a moderation epoch (§12.5.2). |  |  |
-| `COM-031` | §12.3.2 | MUST NOT | A member | A member MUST NOT sign a moderation epoch with the authoring pseudonym. |  |  |
-| `COM-032` | §12.3.2 | MUST | A client | A client MUST store each seed in the **local identity table**. |  |  |
-| `COM-033` | §12.3.2 | MUST | The client | The client MUST hold the local identity table under the per-record encryption of Part 15 §15.6.4. |  |  |
-| `COM-034` | §12.3.2 | MUST | The client | The client MUST cover that table with the table MAC of Part 4 §4.6. |  |  |
-| `COM-035` | §12.3.2 | MUST NOT | A post | A post MUST NOT carry a public key. |  |  |
-| `COM-036` | §12.3.2 | MUST | A checkpoint | A checkpoint MUST carry `CommunityIdentityKey_g.pk`. |  |  |
-| `COM-037` | §12.3.2 | MUST | (unstated) | A community roster and a moderation epoch MUST carry the public key of the role pseudonym that signs it. |  |  |
-| `COM-038` | §12.3.2 | MUST | (unstated) | Before a client verifies a checkpoint signature, that client MUST hash the carried public key. |  |  |
-| `COM-039` | §12.3.2 | MUST | (unstated) | If that hash differs from `pseudonym_g`, the client MUST reject the checkpoint. |  |  |
-| `COM-040` | §12.3.2 | MUST | A client | A client MUST put the local identity table in each of the three places below. |  |  |
-| `COM-041` | §12.3.2 | MUST NOT | (unstated) | `SYNC_MAX_AGE` and `SYNC_MAX_BYTES` MUST NOT remove an entry from that table. |  |  |
-| `COM-042` | §12.3.2 | MUST NOT | (unstated) | If a client does not hold `CommunityIdentitySeed_g`, that client MUST NOT post in that community. |  |  |
-| `COM-043` | §12.3.2 | MUST | The client | The client MUST tell the user that the community identity and its post history are lost. |  |  |
-| `COM-044` | §12.3.2 | MUST | (unstated) | A device that is not the chain owner MUST give the post text to the chain owner. |  |  |
-| `COM-045` | §12.4.1 | MUST | An author | An author MUST publish a checkpoint when `SIG_INTERVAL` posts have no checkpoint. |  |  |
-| `COM-046` | §12.4.1 | MUST | An author | An author MUST also publish a checkpoint when the oldest post with no checkpoint reaches `SIG_MAX_AGE`. |  |  |
-| `COM-047` | §12.4.1 | MUST NOT | An author | An author MUST NOT publish more than one checkpoint in each `SIG_MIN_INTERVAL`. |  |  |
-| `COM-048` | §12.4.1 | MUST NOT | An author | An author MUST NOT publish a checkpoint that covers zero new posts. |  |  |
-| `COM-049` | §12.4.1 | MUST | If it fits, the client | If it fits, the client MUST send the post and the checkpoint in one cell. |  |  |
-| `COM-050` | §12.4.1 | MUST | If it does not fit, the client | If it does not fit, the client MUST send the checkpoint in a separate cell. |  |  |
-| `COM-051` | §12.4.1 | MUST | The parameters of §12.9 | The parameters of §12.9 MUST satisfy `SIG_MAX_AGE` at or above `SIG_INTERVAL × 3600 / POST_RATE_LIMIT` seconds. |  |  |
-| `COM-052` | §12.4.1 | MUST | The parameters of §12.9 | The parameters of §12.9 MUST satisfy `PENDING_DEMOTE` above `SIG_MAX_AGE` plus the maximum `PULL_INTERVAL`. |  |  |
-| `COM-053` | §12.4.1 | MUST NOT | A client | A client MUST NOT display a pending post that only one relay serves. |  |  |
-| `COM-054` | §12.4.1 | MUST | A client | A client MUST hold that post until one of two events. |  |  |
-| `COM-055` | §12.4.1 | MUST | A client | A client MUST render a pending post in a visually different state that does not attribute final authorship. |  |  |
-| `COM-056` | §12.4.1 | MUST NOT | A client | A client MUST NOT use a pending post as moderation evidence. |  |  |
-| `COM-057` | §12.4.1 | MUST NOT | A client | A client MUST NOT delete a pending post on a short timer. |  |  |
-| `COM-058` | §12.4.1 | MUST | A client | A client MUST show that pattern as a relay integrity warning that names the relay. |  |  |
-| `COM-059` | §12.4.1 | MUST NOT | A client | A client MUST NOT absorb it silently as a post expiry. |  |  |
-| `COM-060` | §12.4.1 | MAY | A withdrawal | A withdrawal MAY name any index in the history of that pseudonym. |  |  |
-| `COM-061` | §12.4.1 | MUST | A client | A client MUST reject an entry that names an index outside the history of that pseudonym. |  |  |
-| `COM-062` | §12.4.1 | MUST | A client | A client MUST reject a repeated index. |  |  |
-| `COM-063` | §12.4.1 | MUST | A client | A client MUST reject a list that is not in strictly increasing order before the run of the sentinel. |  |  |
-| `COM-064` | §12.4.1 | MUST NOT | A future revision | A future revision MUST NOT fold a community checkpoint signature into a post identifier. |  |  |
-| `COM-065` | §12.4.3 | MUST | A client | A client MUST verify that the posts from different relays are consistent. |  |  |
-| `COM-066` | §12.4.3 | MUST | The community | The community MUST be the same. |  |  |
-| `COM-067` | §12.4.3 | MUST | (unstated) | the sequence MUST be the same. |  |  |
-| `COM-068` | §12.4.3 | MUST | A client | A client MUST show a divergence to the user as a **relay integrity warning** that names the relays. |  |  |
-| `COM-069` | §12.4.3.1 | MUST | A client | A client MUST show a gap as a relay integrity warning that names the relay. |  |  |
-| `COM-070` | §12.4.3.1 | MUST | In that case the client | In that case the client MUST treat a body and a stub at that index as equivalent. |  |  |
-| `COM-071` | §12.4.3.1 | MUST NOT | That client | That client MUST NOT report a divergence. |  |  |
-| `COM-072` | §12.4.3.1 | MUST NOT | (unstated) | If a client holds part of a window, that client MUST NOT report a gap inside that window. |  |  |
-| `COM-073` | §12.4.3.1 | MUST NOT | (unstated) | Before that time passes, a client MUST NOT report a checkpoint divergence. |  |  |
-| `COM-074` | §12.4.3.1 | MUST | A client | A client MUST report a divergence that stays past that time. |  |  |
-| `COM-075` | §12.4.3.1 | MUST NOT | A client | A client MUST NOT show a checkpoint divergence as a post expiry. |  |  |
-| `COM-076` | §12.4.3.1 | MUST | A client | A client MUST apply the settle window of rule 4 to a body divergence at one triple. |  |  |
-| `COM-077` | §12.4.3.1 | MUST | A client | A client MUST apply that same window to a stub divergence. |  |  |
-| `COM-078` | §12.4.3.1 | MUST NOT | A client | A client MUST NOT render an indicator on a settled post that comes from unsettled data. |  |  |
-| `COM-079` | §12.4.3.1 | MUST | The interface | The interface MUST keep a moderator removal, an author withdrawal, and a gap apart. |  |  |
-| `COM-080` | §12.4.4 | MUST | An implementation | An implementation MUST give the community record type its own type. |  |  |
-| `COM-081` | §12.4.4 | MUST NOT | An implementation | An implementation MUST NOT convert that type into another type. |  |  |
-| `COM-082` | §12.4.4 | MUST | A relay | A relay MUST serve `PostStub` in place of a body that an artifact of §12.5.2 names. |  |  |
-| `COM-083` | §12.4.4 | MUST NOT | A relay | A relay MUST NOT serve a stub for a body that no such artifact names. |  |  |
-| `COM-084` | §12.4.4 | MUST | (unstated) | If a relay serves a checkpoint, that relay MUST serve a record for each index in the window. |  |  |
-| `COM-085` | §12.4.4 | MUST | At that index a relay | At that index a relay MUST serve a `PostStub`. |  |  |
-| `COM-086` | §12.4.4 | MUST NOT | (unstated) | If a client holds part of a window, that client MUST NOT verify that window. |  |  |
-| `COM-087` | §12.4.4 | MUST NOT | That client | That client MUST NOT report a gap inside that window. |  |  |
-| `COM-088` | §12.4.4 | MUST | The client | The client MUST request the missing indexes from each of `COMMUNITY_MIN_RELAYS` relays under different operators. |  |  |
-| `COM-089` | §12.4.4 | MUST | (unstated) | If an asked relay did not prune a missing index, the client MUST show a relay integrity warning. |  |  |
-| `COM-090` | §12.4.4 | MUST | That warning | That warning MUST name each asked relay that did not prune that index. |  |  |
-| `COM-091` | §12.4.4 | MUST | A client | A client MUST spread a first-window backfill across two or more `PULL_INTERVAL` periods. |  |  |
-| `COM-092` | §12.4.4 | MUST NOT | A client | A client MUST NOT issue a pull whose size separates a first subscription from a steady-state pull. |  |  |
-| `COM-093` | §12.4.4 | MUST NOT | A private-group tombstone | A private-group tombstone MUST NOT carry a hash of the deleted plaintext. |  |  |
-| `COM-094` | §12.4.5 | MUST NOT | A client | A client MUST NOT publish a checkpoint whose cause is a withdrawal. |  |  |
-| `COM-095` | §12.4.5 | MUST | The interface | The interface MUST state this plainly. |  |  |
-| `COM-096` | §12.4.5 | MUST NOT | The interface | The interface MUST NOT show a withdrawal as complete before the checkpoint publishes. |  |  |
-| `COM-097` | §12.4.5 | MUST | A relay | A relay MUST serve `PostStub` in place of a body that a verified checkpoint withdraws. |  |  |
-| `COM-098` | §12.4.5 | MUST | A client | A client MUST render an amended post beside its amendment. |  |  |
-| `COM-099` | §12.4.5 | MUST | A client | A client MUST mark the earlier post as amended. |  |  |
-| `COM-100` | §12.4.5 | MUST | (unstated) | If the earlier body is withdrawn, the client MUST show the `PostStub` placeholder of §12.4.4 in its place. |  |  |
-| `COM-101` | §12.4.5 | MUST | A client | A client MUST reject an `amends` value that names an index outside the history of that pseudonym. |  |  |
-| `COM-102` | §12.4.5 | MUST | The interface | The interface MUST state that the withdrawal is permanent and public: "Readers see that you withdrew a post here. |  |  |
-| `COM-103` | §12.4.5 | MUST | A removed post: the interface | A removed post: the interface MUST show a placeholder that names the index and reads "a moderator removed this post". |  |  |
-| `COM-104` | §12.4.5 | MUST NOT | The entry | The entry MUST NOT vanish without a trace. |  |  |
-| `COM-105` | §12.4.5 | MUST | (unstated) | A withdrawn post: the interface MUST show a placeholder that reads "the author withdrew this post". |  |  |
-| `COM-106` | §12.4.5 | MUST NOT | The interface | The interface MUST NOT use the moderator wording. |  |  |
-| `COM-107` | §12.4.5 | MUST | (unstated) | An unexplained absence: the interface MUST show a relay integrity warning that names the relay. |  |  |
-| `COM-108` | §12.4.5 | MUST NOT | The interface | The interface MUST NOT show it as a removal or as a withdrawal. |  |  |
-| `COM-109` | §12.5 | MUST | A community | A community MUST have two or more independent owners, and §12.5.2 rule 10 gives the cause. |  |  |
-| `COM-110` | §12.5 | MUST | A community roster | A community roster MUST carry a signature from the role pseudonym of an owner. |  |  |
-| `COM-111` | §12.5 | MUST | A moderation epoch | A moderation epoch MUST carry a signature from the role pseudonym of an owner, an admin, or a moderator. |  |  |
-| `COM-112` | §12.5.1 | MUST | The community roster | The community roster MUST name the role pseudonym of that key in the admin role or above. |  |  |
-| `COM-113` | §12.5.1 | MUST | An implementation | An implementation MUST use that definition in Part 14 §14.10. |  |  |
-| `COM-114` | §12.5.2 | MUST | (unstated) | Before a client verifies the signature, that client MUST hash `actor_pk`. |  |  |
-| `COM-115` | §12.5.2 | MUST | (unstated) | If that hash differs from `actor`, the client MUST reject the object. |  |  |
-| `COM-116` | §12.5.2 | MUST | An action of kind 1 | An action of kind 1 MUST name the pair (`target`, `index`). |  |  |
-| `COM-117` | §12.5.2 | MUST NOT | A client | A client MUST NOT resolve a removal by the index alone. |  |  |
-| `COM-118` | §12.5.2 | MUST | A relay | A relay MUST serve the artifact that justifies a stub, beside that stub. |  |  |
-| `COM-119` | §12.5.2 | MUST | A client | A client MUST verify the artifact before that client accepts the absence. |  |  |
-| `COM-120` | §12.5.2 | MUST | (unstated) | If `epoch_index` is 0, the client MUST check that `SHA3-256("umbra/v1/community-id" \|\| admission \|\| actor_pk)` equals `community_id`. |  |  |
-| `COM-121` | §12.5.2 | MUST | A client | A client MUST reject a moderation epoch that neither the current `CommunityRoster` nor the current `ModeratorSet` authorizes. |  |  |
-| `COM-122` | §12.5.2 | MUST | That `CommunityRoster` or that `ModeratorSet` | That `CommunityRoster` or that `ModeratorSet` MUST name the `actor` in a role that permits the action. |  |  |
-| `COM-123` | §12.5.2 | MUST | A client | A client MUST reject a `CommunityRoster` that an owner role pseudonym did not sign. |  |  |
-| `COM-124` | §12.5.2 | MUST | A client | A client MUST reject an epoch whose `previous_epoch` names an object that the client cannot obtain. |  |  |
-| `COM-125` | §12.5.2 | MUST | (unstated) | If two verified successors name one `previous_epoch` and **one** value of `actor` signs them, the client MUST show the fork and MUST name that actor. |  |  |
-| `COM-126` | §12.5.2 | MUST NOT | That client | That client MUST NOT select one successor silently. |  |  |
-| `COM-127` | §12.5.2 | MUST NOT | (unstated) | If a verification of rule 4 fails, a client MUST NOT have changed any record. |  |  |
-| `COM-128` | §12.5.2 | MUST | A client | A client MUST render a moderator removal and an author withdrawal differently. |  |  |
-| `COM-129` | §12.5.2 | MUST NOT | A client | A client MUST NOT render a cause that a stub states. |  |  |
-| `COM-130` | §12.5.2 | MUST | A community | A community MUST have two or more owners. |  |  |
-| `COM-131` | §12.7.2 | MAY | A community | A community MAY opt in to a listing in the public directory of Part 9 §9.12. |  |  |
-| `COM-132` | §12.9 | MUST NOT | The client | The client MUST NOT rotate automatically. |  |  |
-| `COM-133` | §12.9 | MUST | This value | This value MUST satisfy rule 5 of §12.4.1. |  |  |
-| `COM-134` | §12.9 | MUST | This value | This value MUST satisfy rule 6 of §12.4.1. |  |  |
-| `COM-135` | §12.5.2 | MUST | (unstated) | Before that rejection, the client MUST request the named object from the relay that served the epoch. |  |  |
-| `COM-136` | §12.5.2 | MUST | (unstated) | If two verified successors name one `previous_epoch` and two different values of `actor` sign them, the client MUST select one successor by the order of §12.5.2. |  |  |
-| `COM-137` | §12.5.2 | MUST NOT | The client | The client MUST NOT show a fork for that case. |  |  |
-| `COM-138` | §12.5.2 | MUST NOT | A client | A client MUST NOT apply an entry of a `CommunityRoster` or of a `ModeratorSet` that it did not select. |  |  |
-| `COM-139` | §12.5.2 | MUST | An actor whose `CommunityRoster` or `ModeratorSet` the network did not select | An actor whose `CommunityRoster` or `ModeratorSet` the network did not select MUST publish that object again against the selected epoch. |  |  |
-| `COM-140` | §12.5.2 | MUST | That actor | That actor MUST use a new `epoch_index` and a new `previous_epoch` for that publication. |  |  |
-| `COM-141` | §12.5.2 | MUST NOT | A client | A client MUST NOT show an action as applied before that action lands on the selected chain. |  |  |
-| `COM-142` | §12.3.2 | MUST | A member that holds a role | A member that holds a role MUST derive `RoleReportKey_r` from the seed of that role. |  |  |
-| `COM-143` | §12.3.2 | MUST | That member | That member MUST publish the encapsulation key of `RoleReportKey_r` in its `RosterEntry` of §12.5.2. |  |  |
-| `COM-144` | §12.3.2 | MUST NOT | A member | A member MUST NOT use `RoleSigningKey_r` for a key agreement. |  |  |
-| `COM-145` | §12.3.2 | MUST NOT | A member | A member MUST NOT use `RoleReportKey_r` for a signature. |  |  |
-| `COM-146` | §12.5.2 | MUST | A client | A client MUST reject a `CommunityRoster` with more than `ROSTER_ENTRY_MAX` entries. |  |  |
-| `COM-147` | §12.5.2 | MUST | A revision | A revision MUST derive this total again if it adds a field to `RosterEntry` or raises `ROSTER_ENTRY_MAX`. |  |  |
-| `COM-148` | §12.3.2 | MUST | A relay | A relay MUST apply `POST_RATE_LIMIT` for each `pseudonym` of each community that it serves. |  |  |
-| `COM-149` | §12.3.2 | MUST NOT | A relay | A relay MUST NOT need an anonymous credential to apply that limit. |  |  |
-| `COM-150` | §12.3.2 | MUST | A relay | A relay MUST apply the proof of work of Part 14 §14.8 as the surge valve above that limit. |  |  |
-| `COM-151` | §12.3.2 | MUST NOT | A relay | A relay MUST NOT hold a rate-limit counter after `POST_RATE_WINDOW`. |  |  |
-| `COM-152` | §12.5.1 | MUST | A reporter | A reporter MUST take the encapsulation key from the `report_ek` field of the `RosterEntry` of §12.5.2. |  |  |
-| `COM-153` | §12.5.1 | MUST NOT | A reporter | A reporter MUST NOT use an ML-DSA-65 key as the designated verifier key. |  |  |
-| `COM-154` | §12.1.1 | MUST | (unstated) | At a join, the interface MUST state that the pseudonym of the user is durable in that community. |  |  |
-| `COM-155` | §12.1.1 | MUST | The interface | The interface MUST state that a party can monitor that pseudonym over time, and that a court can name it in an order against a relay. |  |  |
-| `COM-156` | §12.1.1 | MUST | The interface | The interface MUST state that a rotation loses the post history. |  |  |
-| `COM-157` | §12.1.1 | MUST NOT | The interface | The interface MUST NOT show a community pseudonym and a pairwise identity as equal in privacy. |  |  |
-| `COM-158` | §12.6.1 | MUST | A `CommunityPost` | A `CommunityPost` MUST carry a mention list and a reply target in the first bytes of its `body`, under the `RichRecord` encoding of Part 6 §6.6.5. |  |  |
-| `COM-159` | §12.6.1 | MUST | A client | A client MUST set `inner_kind` to `0x01` for a text post. |  |  |
-| `COM-160` | §12.6.1 | MUST | A sender | A sender MUST compute a mention identifier under Part 6 §6.6.5, with the `community_id` as the scope and the pseudonym of the named member as the member key. |  |  |
-| `COM-161` | §12.6.1 | MUST | A client | A client MUST resolve a reply target and a thread root through the `community_reply_id` of Part 6 §6.6.5, and it MUST NOT resolve either one as a `msg_id`. |  |  |
-| `COM-162` | §12.6.1 | MUST NOT | A client | A client MUST NOT set a `forward_depth` above zero in a community. |  |  |
-| `COM-163` | §12.6.1 | MUST NOT | A relay | A relay MUST NOT index a post by its mention list. |  |  |
-| `COM-164` | §12.6.1 | MUST NOT | A relay | A relay MUST NOT notify a party because a mention names that party. |  |  |
-| `COM-165` | §12.6.1 | MUST | A client | A client MUST find a mention of the user at the pull of §12.9, and it MUST NOT ask a relay for the posts that name it. |  |  |
-| `COM-166` | §12.6.1 | MUST | A client | A client MUST default the notification setting of Part 7 §7.5.9 to `none` for a community. |  |  |
-| `COM-167` | §12.6.1 | MUST | A client | A client MUST let the user raise that setting to `mentions` or to `all`. |  |  |
-| `COM-168` | §12.2.2 | MUST | A creator | A creator MUST set the admission byte at the creation. |  |  |
-| `COM-169` | §12.2.2 | MUST | A client | A client MUST derive `community_id` with the construction of §12.2. |  |  |
-| `COM-170` | §12.2.2 | MUST | A client | A client MUST reject a community whose admission byte this specification does not define. |  |  |
-| `COM-171` | §12.2.2 | MUST NOT | A revision | A revision MUST NOT define a mechanism that moves a community from one mode to the other. |  |  |
-| `COM-172` | §12.3.1 | MUST NOT | A `PullRequest` | A `PullRequest` MUST NOT carry a value that binds it to a client, a device, or an earlier session. |  |  |
-| `COM-173` | §12.3.1 | MUST NOT | A client | A client MUST NOT pull two communities in one transport session. |  |  |
-| `COM-174` | §12.3.1 | MUST | A client | A client MUST select the `PULL_INTERVAL` of each community and of each relay separately. |  |  |
-| `COM-175` | §12.3.3 | MUST | A party | A party MUST key the authenticator of a community command with `pull_sk` in the place of `Q*_auth_sk`. |  |  |
-| `COM-176` | §12.3.3 | MUST | A community command | A community command MUST put `community_id` in the `queue_id` field. |  |  |
-| `COM-177` | §12.3.3 | MUST | A relay | A relay MUST give each accepted record of a community a `seq` above each earlier `seq` of that community. |  |  |
-| `COM-178` | §12.3.3 | MUST NOT | A relay | A relay MUST NOT change the `seq` of a record. |  |  |
-| `COM-179` | §12.3.3 | MUST NOT | A relay | A relay MUST NOT give a pruned `seq` to a second record. |  |  |
-| `COM-180` | §12.3.3 | MUST NOT | A client | A client MUST NOT compare a `seq` of one relay with a `seq` of another relay. |  |  |
-| `COM-181` | §12.3.3 | MUST | A relay | A relay MUST fill a `PAGE` in the order of the selector table. |  |  |
-| `COM-182` | §12.3.3 | MUST | A relay | A relay MUST stop a page at `count` entries, or at the `B3` L5 payload of Part 6 §6.9. |  |  |
-| `COM-183` | §12.3.3 | MUST | (unstated) | Under selector `0x01`, a relay MUST set `floor` to the seq floor. |  |  |
-| `COM-184` | §12.3.3 | MUST | (unstated) | Under selector `0x02`, a relay MUST set `floor` to the chain floor of §12.4.6. |  |  |
-| `COM-185` | §12.3.3 | MUST | (unstated) | Under selector `0x03` and selector `0x04`, a relay MUST set `floor` to 0. |  |  |
-| `COM-186` | §12.3.3 | MUST | A relay | A relay MUST set `next` to the value that follows the last entry. |  |  |
-| `COM-187` | §12.3.3 | MUST | (unstated) | If the page holds no entry, the relay MUST set `next` to `from`, and to 0 under the sentinel. |  |  |
-| `COM-188` | §12.3.3 | MUST | A relay | A relay MUST reject a `PULL` whose `selector` is not `0x01` and whose `from` is the sentinel. |  |  |
-| `COM-189` | §12.3.3 | MUST | A relay | A relay MUST reject a `PULL` whose `count` is 0 or above `PULL_BATCH`. |  |  |
-| `COM-190` | §12.3.3 | MUST | A client | A client MUST hold `next` of the last `PAGE` under selector `0x01` for each relay and each community. |  |  |
-| `COM-191` | §12.3.3 | MUST | A client | A client MUST use that value as `from` in its next pull under selector `0x01` from that relay. |  |  |
-| `COM-192` | §12.3.3 | MUST | A client | A client MUST set `count` to `PULL_BATCH` in each pull under selector `0x01`. |  |  |
-| `COM-193` | §12.3.3 | MUST | (unstated) | If `floor` is above the cursor, the client MUST treat each `seq` between the two as pruned at that relay. |  |  |
-| `COM-194` | §12.3.3 | MUST | (unstated) | If a page under selector `0x01` holds `PULL_BATCH` entries, the client MUST pull again in the same session. |  |  |
-| `COM-195` | §12.3.3 | MUST | (unstated) | At a join, a client MUST make its first pull under selector `0x01` with the sentinel. |  |  |
-| `COM-196` | §12.3.3 | MUST | (unstated) | At a join, a client MUST pull the control chain from `epoch_index` 0, and the metadata from `meta_index` 0. |  |  |
-| `COM-197` | §12.3.3 | MUST | A `PUB` | A `PUB` MUST carry one record of type `0x01`, `0x03`, `0x04`, `0x05`, `0x06`, or `0x08`. |  |  |
-| `COM-198` | §12.3.3 | MUST | A relay | A relay MUST reject a `PUB` that carries a `PostStub`. |  |  |
-| `COM-199` | §12.3.3 | MUST | A relay | A relay MUST reject a record whose `community_id` field differs from the `queue_id` of the command. |  |  |
-| `COM-200` | §12.3.3 | MUST | A publisher | A publisher MUST send a `PUB` of each record to each relay that the selected `CommunityMeta` (§12.7) names. |  |  |
-| `COM-201` | §12.3.3 | MUST | A publisher | A publisher MUST send a `PUB` again at each session until the relay answers with a `PUBACK` or a `NACK`. |  |  |
-| `COM-202` | §12.3.3 | MUST | A relay | A relay MUST answer an accepted `PUB` with a `PUBACK` that carries the `seq` of the record. |  |  |
-| `COM-203` | §12.3.3 | MUST | (unstated) | If the relay holds that record already, the relay MUST answer with the `seq` that it holds. |  |  |
-| `COM-204` | §12.3.3 | MUST | A relay | A relay MUST answer a rejected `PUB` with a `NACK` of Part 6 §6.4.4, and not with a `PUBACK`. |  |  |
-| `COM-205` | §12.3.3 | MUST | A relay | A relay MUST apply the admission control of Part 14 to a `PUB` of a `CommunityRoster` with `epoch_index` 0. |  |  |
-| `COM-206` | §12.3.3 | MUST NOT | A relay | A relay MUST NOT accept a record of a community before it holds the `CommunityRoster` with `epoch_index` 0. |  |  |
-| `COM-207` | §12.3.3 | MUST | A relay | A relay MUST apply the identity check of §12.5.2 rule 5 to that roster. |  |  |
-| `COM-208` | §12.3.3 | MUST | A relay | A relay MUST verify the signature of a `Checkpoint`, a `CommunityRoster`, a `ModeratorSet`, a `ModerationEpoch`, or a `CommunityMeta` before acceptance. |  |  |
-| `COM-209` | §12.3.3 | MUST | A relay | A relay MUST apply §12.5.2 rule 1 and rule 5 to a `CommunityRoster`, to a `ModeratorSet`, and to a `ModerationEpoch`. |  |  |
-| `COM-210` | §12.3.3 | MUST | A relay | A relay MUST apply the hash check of `COM-038` to a `Checkpoint`. |  |  |
-| `COM-211` | §12.3.3 | MUST | A relay | A relay MUST count a `PUB` under `POST_RATE_LIMIT` against the `pseudonym` of a `CommunityPost`, or the `actor` of another record. |  |  |
-| `COM-212` | §12.3.3 | MUST | A party | A party MUST reject a `Checkpoint` whose window holds more than `SIG_INTERVAL` indexes. |  |  |
-| `COM-213` | §12.3.3 | MUST | A relay | A relay MUST accept a second `CommunityPost` with a different body at a triple that no held checkpoint covers. |  |  |
-| `COM-214` | §12.3.3 | MUST | A relay | A relay MUST reject a third body at one triple. |  |  |
-| `COM-215` | §12.3.3 | MUST | A relay | A relay MUST serve each body that it holds at a pending triple. |  |  |
-| `COM-216` | §12.3.3 | MUST | (unstated) | At that time, the relay MUST keep at each index the body that the recomputation of §12.4.4 rule 6 admits. |  |  |
-| `COM-217` | §12.3.3 | MUST | The relay | The relay MUST drop each other body at that index. |  |  |
-| `COM-218` | §12.3.3 | MUST | (unstated) | If a relay holds an admitted body at a triple, the relay MUST reject a different body at that triple. |  |  |
-| `COM-219` | §12.3.3 | MUST | (unstated) | If a relay serves two bodies at one triple, a client MUST hold both pending until a checkpoint covers it. |  |  |
-| `COM-220` | §12.3.3 | MUST | A client | A client MUST apply the selection of `COM-216` at that checkpoint. |  |  |
-| `COM-221` | §12.4.4 | MUST NOT | (unstated) | If each asked relay pruned a missing index, the client MUST NOT show a warning for that index. |  |  |
-| `COM-222` | §12.4.6 | MUST | A relay | A relay MUST keep a `CommunityPost`, a `PostStub`, and a `Checkpoint` for `COMMUNITY_RETENTION` after the relay accepts the record. |  |  |
-| `COM-223` | §12.4.6 | MUST NOT | A relay | A relay MUST NOT prune such a record before that time to make space. |  |  |
-| `COM-224` | §12.4.6 | MUST | A relay | A relay MUST keep each record of the control chain and each `CommunityMeta` while it serves that community. |  |  |
-| `COM-225` | §12.4.6 | MAY | (unstated) | After `COMMUNITY_RETENTION`, a relay MAY prune a record. |  |  |
-| `COM-226` | §12.4.6 | MUST | A relay | A relay MUST prune a window as one unit, which is the `Checkpoint` and each record that it covers. |  |  |
-| `COM-227` | §12.4.6 | MUST NOT | A relay | A relay MUST NOT prune an index of a chain while it holds a lower index of that chain. |  |  |
-| `COM-228` | §12.4.6 | MUST | A relay | A relay MUST reject a `PUB` of a `CommunityPost` whose `index` is below the chain floor of its pseudonym. |  |  |
-| `COM-229` | §12.4.6 | MUST | A relay | A relay MUST reject a `PUB` of a `Checkpoint` whose `start_index` is below that chain floor. |  |  |
-| `COM-230` | §12.4.6 | MUST | A client | A client MUST treat an index below the chain floor of a relay as pruned at that relay. |  |  |
-| `COM-231` | §12.4.6 | MUST NOT | A client | A client MUST NOT show a relay integrity warning for a pruned index. |  |  |
-| `COM-232` | §12.4.6 | MUST NOT | A client | A client MUST NOT count a pruned index as a gap under §12.4.3.1. |  |  |
-| `COM-233` | §12.4.6 | MUST NOT | A client | A client MUST NOT report a divergence between a relay that serves an index and a relay that pruned it. |  |  |
-| `COM-234` | §12.4.6 | MAY | A client | A client MAY keep a post that a relay pruned. |  |  |
-| `COM-235` | §12.4.6 | MUST | A relay whose store is full | A relay whose store is full MUST reject a `PUB` of a `CommunityPost`. |  |  |
-| `COM-236` | §12.4.6 | MUST | That relay | That relay MUST signal a capacity fault to the directory, in the manner of Part 13 rule `ATT-091`. |  |  |
-| `COM-237` | §12.4.6 | MUST | A revision that changes `POST_RATE_LIMIT`, `MAX_POST_SIZE`, `SIG_INTERVAL`, or `COMMUNITY_RETENTION` | A revision that changes `POST_RATE_LIMIT`, `MAX_POST_SIZE`, `SIG_INTERVAL`, or `COMMUNITY_RETENTION` MUST derive this section again. |  |  |
-| `COM-238` | §12.4.6 | MUST | A client that fetches a chunk from a community record | A client that fetches a chunk from a community record MUST send a `CRNW` for it in that session. |  |  |
-| `COM-239` | §12.4.6 | MUST | An owner client that adds a relay | An owner client that adds a relay MUST publish the control chain and each `CommunityMeta` to that relay. |  |  |
-| `COM-240` | §12.4.6 | MUST | That client | That client MUST then publish to the new relay each record inside `COMMUNITY_RETENTION` that it holds, newest window first. |  |  |
-| `COM-241` | §12.4.6 | MUST | A re-seed | A re-seed MUST publish a window in full, with its `Checkpoint`. |  |  |
-| `COM-242` | §12.7 | MUST | A client | A client MUST make the fragment from the device CSPRNG at the creation. |  |  |
-| `COM-243` | §12.7 | MUST | A client | A client MUST derive `meta_key` from `community_id` and the fragment. |  |  |
-| `COM-244` | §12.7 | MUST NOT | A client | A client MUST NOT send the fragment, or a value that comes from it, to a relay. |  |  |
-| `COM-245` | §12.7 | MUST | A client that shares a link | A client that shares a link MUST fill the hints from the `relays` list of the current `CommunityMeta`. |  |  |
-| `COM-246` | §12.7 | MUST | A joiner | A joiner MUST pull the metadata under `COM-196` from a hinted relay. |  |  |
-| `COM-247` | §12.7 | MUST | (unstated) | After a `CommunityMeta` verifies, a client MUST use its `relays` list in the place of the hints. |  |  |
-| `COM-248` | §12.7.1 | MUST | An owner | An owner MUST publish a `CommunityMeta` with `meta_index` 0 at the creation, after the `CommunityRoster` with `epoch_index` 0. |  |  |
-| `COM-249` | §12.7.1 | MUST | A party | A party MUST reject a `CommunityMeta` that an owner role pseudonym of the current `CommunityRoster` did not sign. |  |  |
-| `COM-250` | §12.7.1 | MUST | A party | A party MUST apply the hash check of §12.5.2 rule 1 to `actor_pk`. |  |  |
-| `COM-251` | §12.7.1 | MUST | A party | A party MUST reject a `CommunityMeta` whose `previous_meta` differs from the hash of the `CommunityMeta` at `meta_index` − 1. |  |  |
-| `COM-252` | §12.7.1 | MUST | A client | A client MUST apply the successor order of §12.5.2 rule 6 to two verified `CommunityMeta` records at one `meta_index`. |  |  |
-| `COM-253` | §12.7.1 | MUST | A client | A client MUST select the verified `CommunityMeta` with the highest `meta_index` as the current metadata. |  |  |
-| `COM-254` | §12.7.1 | MUST | A `CommunityMeta` | A `CommunityMeta` MUST name at least `COMMUNITY_MIN_RELAYS` relays under different operators. |  |  |
-| `COM-255` | §12.7.1 | MUST | A party | A party MUST reject a `CommunityMeta` with more than `COMMUNITY_RELAY_MAX` relays. |  |  |
-| `COM-256` | §12.7.1 | MUST | A revision that changes `CommunityMeta`, `CommunityMetaBody`, or a `META_*` value | A revision that changes `CommunityMeta`, `CommunityMetaBody`, or a `META_*` value MUST derive the total above again. |  |  |
-| `COM-257` | §12.7.1 | MUST | A client | A client MUST reject a `CommunityMetaBody` whose `name_len`, `text_len`, or `rules_len` is above its maximum of §12.9. |  |  |
-| `COM-258` | §12.7.1 | MUST | A client | A client MUST reject a body whose `name`, `text`, or `rules` is not valid UTF-8. |  |  |
-| `COM-259` | §12.7.1 | MUST | A client | A client MUST show a `category` that the table above does not define as `0x00`. |  |  |
-| `COM-260` | §12.7.1 | MUST | An icon | An icon MUST be one attachment of one chunk under Part 13. |  |  |
-| `COM-261` | §12.7.1 | MUST | A client | A client MUST re-encode an icon under Part 9 rules `DIS-001` and `DIS-002` before the upload. |  |  |
-| `COM-262` | §12.7.1 | MUST | An owner client | An owner client MUST upload the icon again, and publish a new `CommunityMeta`, before `CHUNK_LIFE_MAX` passes from the upload. |  |  |
-| `COM-263` | §12.7.1 | MUST | (unstated) | Before a user joins, the client MUST show the five items of the current `CommunityMeta`. |  |  |
-| `COM-264` | §12.7.1 | MUST | The client | The client MUST show the rules again before the first post of the user. |  |  |
-| `COM-265` | §12.7.1 | MUST NOT | A client | A client MUST NOT show a name, a description, or an icon from a `CommunityMeta` that did not verify. |  |  |
-| `COM-266` | §12.5.3 | MUST | A reporter | A reporter MUST send a report record in bucket `B1`. |  |  |
-| `COM-267` | §12.5.3 | MUST | A revision | A revision MUST derive this total again if it changes `REPORT_NOTE_MAX` or adds a field. |  |  |
-| `COM-268` | §12.5.3 | MUST | A reporter | A reporter MUST select one entry of the current `CommunityRoster` with the device CSPRNG. |  |  |
-| `COM-269` | §12.5.3 | MUST NOT | A reporter | A reporter MUST NOT select an entry by its role, by its position, or by an earlier selection. |  |  |
-| `COM-270` | §12.5.3 | MUST | A reporter | A reporter MUST encapsulate to `report_ek` of that entry with `UMBRA-KEM`, and it MUST derive `K_rep` with the label above. |  |  |
-| `COM-271` | §12.5.3 | MUST | A reporter | A reporter MUST send the report record as a `SEND` to the queue of `report_queue` of that entry. |  |  |
-| `COM-272` | §12.5.3 | MUST NOT | A reporter | A reporter MUST NOT put its own pseudonym, its own handle, or another identifier of itself in a report. |  |  |
-| `COM-273` | §12.5.3 | MUST | A client | A client MUST offer a report action on each community post that it renders. |  |  |
-| `COM-274` | §12.5.3 | MUST | A role holder | A role holder MUST make one report queue under Part 3 rule `NET-170` before the roster names its role. |  |  |
-| `COM-275` | §12.5.3 | MUST | A roster signer | A roster signer MUST take `report_ek` and `report_queue` of an entry from the role holder over their pairwise channel. |  |  |
-| `COM-276` | §12.5.3 | MUST | A role holder | A role holder MUST subscribe to its report queue in each session that it opens under Part 3 §3.5.1. |  |  |
-| `COM-277` | §12.5.3 | MUST | A role holder | A role holder MUST open such a session at least one time in each `REPORT_POLL_MAX`. |  |  |
-| `COM-278` | §12.5.3 | MUST NOT | A role holder | A role holder MUST NOT rotate a report queue under `ROTATE_AFTER` of Part 3 §3.2.4. |  |  |
-| `COM-279` | §12.5.3 | MUST | A role holder | A role holder MUST hold a report queue until `ROTATE_GRACE` after a roster without its entry succeeds. |  |  |
-| `COM-280` | §12.5.3 | MUST | A role holder | A role holder MUST then send the `DEL` of Part 3 rule `NET-020`. |  |  |
-| `COM-281` | §12.5.3 | MUST | A role holder | A role holder MUST decapsulate `kem_ct` with `RoleReportKey_r`, derive `K_rep`, and open `ct`. |  |  |
-| `COM-282` | §12.5.3 | MUST | A role holder | A role holder MUST discard a report record that fails one of those steps without a signal. |  |  |
-| `COM-283` | §12.5.3 | MUST | (unstated) | Before it shows a report, a role holder MUST fetch the post that `pseudonym` and `index` name under §12.3.3. |  |  |
-| `COM-284` | §12.5.3 | MUST | (unstated) | If the two hashes differ, the role holder MUST discard the report. |  |  |
-| `COM-285` | §12.5.3 | MUST | (unstated) | If the chain holds no post at that pair, the role holder MUST try again at each pull. |  |  |
-| `COM-286` | §12.5.3 | MUST NOT | A role holder | A role holder MUST NOT forward a report to a party outside the roster of that community. |  |  |
-| `COM-287` | §12.5.3 | MUST | Each entry | Each entry MUST have the same probability. |  |  |
-| `COM-288` | §12.5.3 | MUST NOT | A roster signer | A roster signer MUST NOT make either value itself. |  |  |
-| `COM-289` | §12.5.3 | MUST | A role holder | A role holder MUST parse the plaintext as an `AppMessage` of kind `0x11` with a `CommunityReport` body. |  |  |
-| `COM-290` | §12.5.3 | MUST | The role holder | The role holder MUST compare the hash of that post with `post_hash` before it shows the report. |  |  |
-| `COM-291` | §12.5.3 | MUST | The role holder | The role holder MUST discard such a report `REPORT_HOLD` after its arrival. |  |  |
-| `COM-292` | §12.5 | MUST | A moderator set | A moderator set MUST carry a signature from the role pseudonym of an owner or of an admin. |  |  |
-| `COM-293` | §12.5.2 | MUST | A client | A client MUST reject a `ModeratorSet` with more than `MODERATOR_MAX` entries. |  |  |
-| `COM-294` | §12.5.2 | MUST | A revision | A revision MUST derive this total again if it adds a field to `ModeratorSet` or raises `MODERATOR_MAX`. |  |  |
-| `COM-295` | §12.5.2 | MUST | A client | A client MUST reject a `ModerationEpoch` that carries a `kind` outside the table. |  |  |
-| `COM-296` | §12.5.2 | MUST | A client | A client MUST apply the actions on one (`target`, `index`) pair in chain order. |  |  |
-| `COM-297` | §12.5.2 | MUST | (unstated) | If a kind 2 action carries an `index`, a relay MUST serve a `PostStub` at each index of `target` up to it. |  |  |
-| `COM-298` | §12.5.2 | MUST | A relay | A relay MUST reject a `PUB` from a banned pseudonym until an action of kind 5 names that pseudonym. |  |  |
-| `COM-299` | §12.5.2 | MUST | A relay | A relay MUST keep a removed body for the retention of §12.4.6. |  |  |
-| `COM-300` | §12.5.2 | MUST | (unstated) | If a kind 8 action names an index whose body the relay holds, the relay MUST serve that body again. |  |  |
-| `COM-301` | §12.5.2 | MUST | (unstated) | If a restore stands and a relay still serves a stub, the client MUST show the restore as pending. |  |  |
-| `COM-302` | §12.5.2 | MUST NOT | The client | The client MUST NOT show a relay integrity warning for that stub. |  |  |
-| `COM-303` | §12.5.2 | MUST | A client | A client MUST show a pinned post at the top of the timeline until an action of kind 6 names it. |  |  |
-| `COM-304` | §12.5.2 | MUST | (unstated) | While a lock stands, a relay MUST reject a `PUB` of a `CommunityPost`. |  |  |
-| `COM-305` | §12.5.2 | MUST | A relay | A relay MUST measure a lock duration from its acceptance of the epoch. |  |  |
-| `COM-306` | §12.5.2 | MUST | A client | A client MUST show a lock and its end. |  |  |
-| `COM-307` | §12.5.2 | MUST | A client | A client MUST apply each action of a verified `ModerationEpoch` that names the selected `previous_epoch`. |  |  |
-| `COM-308` | §12.5.2 | MUST | (unstated) | If two such epochs reverse each other on one `target` and `index`, the client MUST apply the selected epoch. |  |  |
-| `COM-309` | §12.5.2 | MUST | A client | A client MUST reject a `ModeratorSet` that no owner or admin role pseudonym of the current `CommunityRoster` signed. |  |  |
-| `COM-310` | §12.5.2 | MUST | A relay | A relay MUST reject a `ModerationEpoch` above `MOD_EPOCH_RATE` for one `actor`. |  |  |
-| `COM-311` | §12.5.2 | MUST | A relay | A relay MUST reject a `ModerationEpoch` above `MOD_EPOCH_COMMUNITY_RATE` for one community. |  |  |
-| `COM-312` | §12.5.2 | MUST | A relay | A relay MUST reject a `CommunityRoster` or a `ModeratorSet` above `ROSTER_RATE` for one community. |  |  |
-| `COM-313` | §12.5.2 | MUST NOT | A client | A client MUST NOT walk more than `MOD_CHAIN_FETCH_MAX` predecessors under `COM-135` for one epoch. |  |  |
-| `COM-314` | §12.5.4 | MUST | A client | A client MUST let the user mute a pseudonym in one community. |  |  |
-| `COM-315` | §12.5.4 | MUST NOT | A client | A client MUST NOT render a post, a reaction, or a repost of a muted pseudonym in that community. |  |  |
-| `COM-316` | §12.5.4 | MUST | The client | The client MUST show the count of the hidden records, in the manner of Part 14 rule `ABU-038`. |  |  |
-| `COM-317` | §12.5.4 | MUST NOT | A client | A client MUST NOT show a mention from a muted pseudonym as a mention. |  |  |
-| `COM-318` | §12.5.4 | MUST | A client | A client MUST verify the chain of a muted pseudonym under §12.4.1. |  |  |
-| `COM-319` | §12.5.4 | MUST NOT | A client | A client MUST NOT send a record for a mute, and it MUST NOT tell a relay. |  |  |
-| `COM-320` | §12.5.4 | MUST | A client | A client MUST hold the mute list of a community as the mutable state of Part 7 §7.5.3. |  |  |
-| `COM-321` | §12.5.4 | MUST NOT | A client | A client MUST NOT hold more than `MUTE_LIST_MAX` pseudonyms in the mute list of one community. |  |  |
-| `COM-322` | §12.6.2 | MUST | A reaction | A reaction MUST be a `CommunityPost` whose `RichRecord` `inner_kind` is `0x03`, with a `ReactionBody` of Part 6 §6.6.9. |  |  |
-| `COM-323` | §12.6.2 | MUST | The `target` of that body | The `target` of that body MUST be the `community_reply_id` of the target post. |  |  |
-| `COM-324` | §12.6.2 | MUST NOT | A client | A client MUST NOT set a reply target or a mention in a reaction. |  |  |
-| `COM-325` | §12.6.2 | MUST | A repost | A repost MUST be a `CommunityPost` whose `RichRecord` `inner_kind` is `0x0D`, with a `RepostBody`. |  |  |
-| `COM-326` | §12.6.2 | MUST | (unstated) | If the client subscribes to the origin community, it MUST render a repost with the target post. |  |  |
-| `COM-327` | §12.6.2 | MUST NOT | A client | A client MUST NOT join the origin community for a repost without a user action. |  |  |
-| `COM-328` | §12.6.2 | MUST | A relay | A relay MUST count a reaction under `REACT_RATE_LIMIT` and a repost under `REPOST_RATE_LIMIT`. |  |  |
-| `COM-329` | §12.6.2 | MUST NOT | A relay | A relay MUST NOT count a reaction or a repost under `POST_RATE_LIMIT`. |  |  |
-| `COM-330` | §12.6.2 | MUST | (unstated) | If the `flags` field of the current `CommunityMetaBody` sets bit 0, a relay MUST reject a reaction. |  |  |
-| `COM-331` | §12.6.2 | MUST | (unstated) | If that field sets bit 1, a relay MUST reject a repost. |  |  |
-| `COM-332` | §12.6.2 | MUST NOT | A client | A client MUST NOT send a record that a set bit forbids. |  |  |
-| `COM-333` | §12.6.2 | MUST | A client | A client MUST tally a reaction count from the records that it pulled. |  |  |
-| `COM-334` | §12.6.2 | MUST | A client | A client MUST count a maximum of one reaction for each pseudonym and emoji. |  |  |
-| `COM-335` | §12.6.2 | MUST NOT | A relay | A relay MUST NOT serve an aggregate count. |  |  |
-| `COM-336` | §12.6.3 | MUST NOT | A client | A client MUST NOT publish a `CommunityContact` without an explicit act of the user for that pseudonym. |  |  |
-| `COM-337` | §12.6.3 | MUST | A `CommunityContact` | A `CommunityContact` MUST travel as a `CommunityPost` whose `RichRecord` `inner_kind` is `0x0E`. |  |  |
-| `COM-338` | §12.6.3 | MUST | A client | A client MUST take the newest verified `CommunityContact` of a pseudonym as its current one. |  |  |
-| `COM-339` | §12.6.3 | MUST NOT | The `rendezvous` queue | The `rendezvous` queue MUST NOT be a queue that a `DirectoryEntry`, an `AddressEntry`, or a pairwise contact names. |  |  |
-| `COM-340` | §12.4.7 | MAY | A `CommunityPost` | A `CommunityPost` MAY carry a `RichRecord` whose `inner_kind` is `0x02`, which is a `FileDescriptor` of Part 13 §13.3. |  |  |
-| `COM-341` | §12.4.7 | MUST | (unstated) | Before the upload, the client MUST state that each party with the link reads the file. |  |  |
-| `COM-342` | §12.4.7 | MUST | A reader that renews a chunk of a community attachment | A reader that renews a chunk of a community attachment MUST send the `CRNW` of Part 13 §13.3.3. |  |  |
-| `COM-343` | §12.4.7 | MUST NOT | A client | A client MUST NOT download a community attachment without a user action, unless the user set an automatic download for that community. |  |  |
-| `COM-344` | §12.6.3 | MUST | The author client | The author client MUST drain that queue under Part 8 §8.2.6. |  |  |
-| `COM-345` | §12.6.3 | MUST | A reader | A reader MUST send the hello of Part 9 §9.6 to that queue, and it MUST encapsulate the hello to `contact_pk`. |  |  |
-| `COM-346` | §12.6.3 | MUST | A client | A client MUST show a hello under a pseudonym as a contact request that names the community and the pseudonym. |  |  |
-| `COM-347` | §12.6.3 | MUST NOT | The client | The client MUST NOT accept that request without a user action. |  |  |
-| `COM-348` | §12.7.1 | MUST | A client | A client MUST treat a `flags` bit that §12.6.2 does not define as zero. |  |  |
-| `COM-349` | §12.7.2 | MUST | (unstated) | Before an owner lists a community, the client MUST show the five items of the statement above. |  |  |
-| `COM-350` | §12.7.2 | MUST | An owner client | An owner client MUST publish a new `CommunityListing` at each `CommunityMeta` change, and before `LISTING_LEASE` ends. |  |  |
-| `COM-351` | §12.7.2 | MUST | An owner client | An owner client MUST let the owner withdraw the listing, and a withdrawal is a `CommunityListing` with `link_len` 0. |  |  |
-| `COM-352` | §12.5.2 | MUST NOT | A relay | A relay MUST NOT serve a removed body while the removal stands. |  |  |
-| `COM-353` | §12.5.2 | MUST | A client | A client MUST measure a lock duration from its verification of the epoch. |  |  |
-| `COM-354` | §12.5.2 | MUST NOT | A client | A client MUST NOT let the user compose a post while a lock stands. |  |  |
-| `COM-355` | §12.5.2 | MUST | (unstated) | At that bound, the client MUST reject the epoch. |  |  |
-| `COM-356` | §12.6.2 | MUST | (unstated) | If it does not, the client MUST render the repost with the link. |  |  |
-| `COM-357` | §12.4.4 | MUST | A relay that removes a body under a legal order | A relay that removes a body under a legal order MUST serve an `OperatorRemoval` beside the stub. |  |  |
-| `COM-358` | §12.4.4 | MUST | A relay | A relay MUST sign it under the identity key of its own descriptor. |  |  |
-| `COM-359` | §12.4.4 | MUST | A client | A client MUST verify the signature against the descriptor of `relay_id`. |  |  |
-| `COM-360` | §12.4.4 | MUST | A client | A client MUST treat a stub with a verified `OperatorRemoval` as an authorized absence at that relay only. |  |  |
-| `COM-361` | §12.4.4 | MUST NOT | A client | A client MUST NOT apply an `OperatorRemoval` at a different relay. |  |  |
-| `COM-362` | §12.4.4 | MUST | A client that holds another relay of the community | A client that holds another relay of the community MUST fetch the body from that relay. |  |  |
-| `COM-363` | §12.4.4 | MUST | A client | A client MUST render an operator removal differently from a moderator removal and from an author withdrawal. |  |  |
-| `COM-364` | §12.5.2 | MUST | A `CommunityRoster` that drops an owner entry | A `CommunityRoster` that drops an owner entry MUST carry cosignatures from more than half of the current owners. |  |  |
-| `COM-365` | §12.5.2 | MUST | A client | A client MUST reject such a roster with fewer cosignatures. |  |  |
-| `COM-366` | §12.5.2 | MUST | A cosignature | A cosignature MUST cover the preimage of `signature`, under the key of the named owner. |  |  |
-| `COM-367` | §12.5.2 | MUST | A client | A client MUST reject a roster whose `cosign_count` is not 0 and whose entries drop no owner. |  |  |
-| `COM-368` | §12.6.4 | MUST | A subscriber | A subscriber MUST send `NREG` on the session of that community under `COM-173`. |  |  |
-| `COM-369` | §12.6.4 | MUST | A community relay | A community relay MUST hold a registration in memory only. |  |  |
-| `COM-370` | §12.6.4 | MUST | A community relay | A community relay MUST discard a registration at an `NUNREG` that names its queue. |  |  |
-| `COM-371` | §12.6.4 | MUST | A community relay | A community relay MUST write a `NotifyDigest` as a `SEND` to each registered queue when a post arrives, under the budget of Part 8 rule `NTF-072` and the silence of `NTF-073`. |  |  |
-| `COM-372` | §12.6.4 | MUST NOT | A community relay | A community relay MUST NOT write a `NotifyDigest` that names a post, a pseudonym, or an index. |  |  |
-| `COM-373` | §12.6.4 | MUST NOT | A community relay | A community relay MUST NOT link a registration to a pull. |  |  |
-| `COM-374` | §12.6.4 | MUST NOT | A subscriber | A subscriber MUST NOT put a pseudonym in a `NotifyRegistration`. |  |  |
-| `COM-375` | §12.6.4 | MUST | A community relay | A community relay MUST discard a registration 7 days plus `CLOCK_SKEW` after its `NREG`. |  |  |
-| `COM-376` | §12.3.2 | MUST | A member | A member MUST derive `RoleReportKey_r`, and `CommunityContactKey_g` of §12.6.3, as 96 bytes of HKDF-SHA3-256 output under the label as the `info`, split by `Hybrid` of Part 5 §5.2. |  |  |
-| `COM-377` | §12.5.2 | MUST | `previous_epoch` | `previous_epoch` MUST be the SHA3-256 of the predecessor bytes that its signature covers, without the label. |  |  |
-| `COM-378` | §12.5.2 | MUST | A verifier | A verifier MUST reject an object whose `epoch_index` is not one above the `epoch_index` of the object that `previous_epoch` names. |  |  |
-| `COM-379` | §12.5.2 | MUST | A verifier | A verifier MUST apply rule 1 to the `actor_pk` of each cosignature, and it MUST reject a roster with a cosignature of its signer, of one owner two times, or of a party that the roster before it does not name as an owner. |  |  |
-| `COM-380` | §12.5.2 | MUST | A `CommunityRoster` with its cosignatures | A `CommunityRoster` with its cosignatures MUST fit the 32 589 bytes of one `PAGE` record. |  |  |
-| `COM-381` | §12.5.2 | MUST | The `actor_role` byte | The `actor_role` byte MUST be 1 for an owner, 2 for an admin, and 3 for a moderator, and a verifier MUST reject an epoch whose `actor_role` differs from the role that rule 5 gives the `actor`. |  |  |
-| `COM-382` | §12.5.2 | MUST | An action of kind 4 or kind 7 | An action of kind 4 or kind 7 MUST come from an admin or an owner, because a lock stops each author of the community. |  |  |
-| `COM-383` | §12.5.2 | MUST | The `entries` of a `ModeratorSet` | The `entries` of a `ModeratorSet` MUST be in strictly increasing byte order. |  |  |
-| `COM-384` | §12.5.2 | MUST NOT | A `CommunityRoster` | A `CommunityRoster` MUST NOT name one `pseudonym` in two entries. |  |  |
-| `COM-385` | §12.5.2 | MUST | The `CommunityRoster` at `epoch_index` 0 | The `CommunityRoster` at `epoch_index` 0 MUST name its `actor` in an owner entry, and it MUST carry no cosignature. |  |  |
-| `COM-386` | §12.7.1 | MUST | The `flags` field | The `flags` field MUST sit in the signed record and not in the sealed body. |  |  |
-| `COM-387` | §12.7.1 | MUST | (unstated) | That hash is the SHA3-256 of the bytes that the signature covers, without the label, in the manner of `COM-377`. |  |  |
-| `COM-388` | §12.7.1 | MUST | (unstated) | The check of `COM-251` binds a party that holds the record at `meta_index` − 1. |  |  |
-| `COM-389` | §12.7.1 | MUST | (unstated) | When a `CommunityRoster` drops the owner that signed the current `CommunityMeta`, a remaining owner MUST publish a new `CommunityMeta`. |  |  |
-| `COM-390` | §12.7 | MUST | (unstated) | The derivation is HKDF-SHA3-256 with the fragment as the `ikm`, no salt, the label and then `community_id` as the `info`, and 32 bytes of output. |  |  |
-| `COM-391` | §12.3.3 | MUST | A relay | A relay MUST reject a `CommunityPost` whose `body` does not parse as the `RichRecord` of `COM-158`, or whose `forward_depth` is not zero. |  |  |
-| `COM-392` | §12.3.3 | MUST | A relay | A relay MUST count a `Checkpoint` against its `pseudonym` in a count of its own, at `POST_RATE_LIMIT` in each `POST_RATE_WINDOW`. |  |  |
-| `COM-393` | §12.3.3 | MUST | A relay | A relay MUST reject a `Checkpoint` whose window holds an index that a held `Checkpoint` of that pseudonym covers, unless the two are one checkpoint under `COM-203`. |  |  |
-| `COM-394` | §12.3.3 | MUST | A relay that holds two bodies at a pending triple | A relay that holds two bodies at a pending triple MUST accept a third body when a held `Checkpoint` covers the triple and the recomputation of §12.4.4 rule 6 admits that body. |  |  |
-| `COM-395` | §12.3.3 | MUST | An author whose `PUB` of a post got a `NACK` | An author whose `PUB` of a post got a `NACK` MUST send that `PUB` again after the `PUBACK` of the `Checkpoint` that covers the post. |  |  |
-| `COM-396` | §12.5.2 | MUST | (unstated) | For a moderation epoch that means selector `0x03`, and for a checkpoint it means selector `0x02`, at the relay that serves the stub. |  |  |
-| `COM-397` | §12.6.2 | MUST | The `link` of a `RepostBody` | The `link` of a `RepostBody` MUST name `origin_community`, and `link_len` MUST be 0 exactly when `origin_community` is this community. |  |  |
-| `COM-398` | §12.4.5 | MUST | (unstated) | The history of a post ends below its own `index`, thus a party MUST reject a `CommunityPost` whose `amends` is not the sentinel and is at or above its `index`. |  |  |
-| `COM-399` | §12.3.3 | MUST | (unstated) | Under selector `0x02`, the records of one `index` are one unit: each body or stub at that index, the `OperatorRemoval` of a stub, and the `Checkpoint` whose `end_index` is that index. |  |  |
-| `COM-400` | §12.3.3 | MUST | (unstated) | A `PUB` payload holds one record and then the `Admission`. |  |  |
-| `COM-401` | §12.5.5 | MUST | A creator | A creator MUST make the genesis role seed of `COM-005` and a report queue of its own before it sends an offer. |  |  |
-| `COM-402` | §12.5.5 | MUST | A creator | A creator MUST send the offer to one contact, on the pairwise channel of that contact. |  |  |
-| `COM-403` | §12.5.5 | MUST NOT | A creator | A creator MUST NOT publish a `CommunityRoster` with `epoch_index` 0 before it holds an accept of that offer. |  |  |
-| `COM-404` | §12.5.5 | MUST | A party that accepts an offer | A party that accepts an offer MUST make a role seed from the device CSPRNG, in the manner of `COM-005`, and a report queue of its own, before it sends the accept. |  |  |
-| `COM-405` | §12.5.5 | MUST NOT | A party | A party MUST NOT send an accept for an offer that it did not receive, and it MUST NOT send two accepts for one offer. |  |  |
-| `COM-406` | §12.5.5 | MUST | A creator | A creator MUST drop an accept whose `community_id` names no offer that it holds for the sending contact, a second accept of one offer, and an entry whose role is not 1 or whose pseudonym is the pseudonym of the creator. |  |  |
-| `COM-407` | §12.5.5 | MUST | (unstated) | When the relays of the first `CommunityMeta` have each answered the genesis roster and that meta with a `PUBACK`, the creator MUST send a formed step to the second owner. |  |  |
-| `COM-408` | §12.5.5 | MUST | A party | A party MUST take a formed step only for an accept that it sent to that contact. |  |  |
-| `COM-409` | §12.5.5 | MUST | A party | A party MUST drop an exchange whose `step` is not one of the four values, or whose `rest` does not have the length of its step. |  |  |
-| `COM-410` | §12.3.3 | MUST | (unstated) | A relay stops a page at the `B3` L5 payload too (`COM-182`), thus a client MUST also pull again when the room that a page leaves below 32 650 bytes is less than 8 023 bytes, the entry of a post at `MAX_POST_SIZE`. |  |  |
-| `COM-411` | §12.3.3 | MUST | A client | A client MUST go on with each pull of `COM-196` from the `next` value of its page until a page holds no entry. |  |  |
-| `COM-412` | §12.4.6 | MUST | A relay | A relay MUST commit each record of a community that it accepts to durable storage before it sends the `PUBACK` of that record, in the manner of Part 3 rule `NET-298`. |  |  |
-| `COM-413` | §12.4.6 | MUST | After a restart, a relay | After a restart, a relay MUST serve each record that it kept at the `seq` that the record had before the restart (`COM-178`). |  |  |
 
 ## ATT — Attachments and Large Objects
 
@@ -2901,7 +2449,7 @@ Source: `spec/13-attachments.md`
 | `ATT-139` | §13.4.2 | MUST | A party | A party MUST compute the placement list from the consensus that it holds. |  |  |
 | `ATT-140` | §13.4.2 | MUST | (unstated) | If a handle-addressed chunk has no named write credential, the writer MUST use a random `cred_sk` of `ATT-034`. |  |  |
 | `ATT-141` | §13.3.2 | MUST | A client | A client MUST set a `RelayRef` that names no relay to 12 zero bytes. |  |  |
-| `ATT-142` | §13.3.2 | MUST | A receiver | A receiver MUST reject a `FileDescriptor` with a null `RelayRef` on a pairwise, group, or community channel. |  |  |
+| `ATT-142` | §13.3.2 | MUST | A receiver | A receiver MUST reject a `FileDescriptor` with a null `RelayRef` on a pairwise or group channel. |  |  |
 | `ATT-143` | §13.4.2 | MUST NOT | A party | A party MUST NOT fetch a consensus for that computation. |  |  |
 | `ATT-144` | §13.10 | SHOULD | A writer | A writer SHOULD prefer a relay at store level 2 or 3 for a `CNEW` or a `BNEW`. |  |  |
 | `ATT-147` | §13.2.3 | MUST | The writer of a handle-addressed chunk | The writer of a handle-addressed chunk MUST pad its sealed object under the scheme above. |  |  |
@@ -2932,7 +2480,6 @@ Source: `spec/13-attachments.md`
 | `ATT-172` | §13.11 | MUST | Above that rate, a relay | Above that rate, a relay MUST answer a `CGET` of that chunk with a `NACK` of reason `LIMIT`. |  |  |
 | `ATT-173` | §13.11 | MUST | A client that receives `BUSY` or `LIMIT` for a chunk | A client that receives `BUSY` or `LIMIT` for a chunk MUST fetch the next replica of the `ChunkRef`. |  |  |
 | `ATT-174` | §13.11 | MUST NOT | A client | A client MUST NOT send the same `CGET` to the same relay again inside one hour. |  |  |
-| `ATT-175` | §13.11 | MUST | An author of a community attachment | An author of a community attachment MUST register `HOT_REPLICAS` copies of each chunk when the activity bucket of the community is at its top level, under Part 9 §9.12. |  |  |
 | `ATT-176` | §13.11 | MUST | A receiver | A receiver MUST treat two refs with one `chunk_id` as replicas of one chunk. |  |  |
 | `ATT-177` | §13.2.3 | MUST | A receiver | A receiver MUST pass over each `0x00` byte of that read. |  |  |
 | `ATT-178` | §13.7.2 | MUST NOT | A client | A client MUST NOT wait for the `CRPUT` of a replica before the next `CPUT`. |  |  |
@@ -2964,7 +2511,6 @@ Source: `spec/14-anti-abuse.md`
 | `ABU-006` | §14.7 | MUST NOT | UMBRA | UMBRA MUST NOT build a global double-spend database. |  |  |
 | `ABU-007` | §14.8 | MUST NOT | An implementation | An implementation MUST NOT let an attacker influence the effort parameter. |  |  |
 | `ABU-008` | §14.8 | MUST | The client | The client MUST give the user visible feedback during the computation. |  |  |
-| `ABU-009` | §14.10 | MUST | An implementation | An implementation MUST use that definition for the designated verifier of this part. |  |  |
 | `ABU-010` | §14.10 | MUST NOT | UMBRA | **UMBRA MUST NOT build a global moderator key**. |  |  |
 | `ABU-011` | §14.10 | MUST NOT | UMBRA | UMBRA MUST NOT frank a 1:1 message. |  |  |
 | `ABU-012` | §14.4 | MUST | An addressee client | An addressee client MUST verify the `Admission` at the end of a hello before it shows the request. |  |  |
@@ -2974,8 +2520,6 @@ Source: `spec/14-anti-abuse.md`
 | `ABU-016` | §14.2.1 | MUST NOT | An issuer | An issuer MUST NOT need an identifier from a client to issue a token batch. |  |  |
 | `ABU-017` | §14.2.1 | MUST | A deployment | A deployment MUST publish the attestation that it uses for an issuance. |  |  |
 | `ABU-018` | §14.2.1 | MUST NOT | A deployment | A deployment MUST NOT use a hardware attestation for that purpose, and §14.11 gives the cause. |  |  |
-| `ABU-019` | §14.10 | MUST | A reporter | A reporter MUST encapsulate to that key with `UMBRA-KEM`. |  |  |
-| `ABU-020` | §14.10 | MUST NOT | An implementation | An implementation MUST NOT name an ML-DSA-65 key as a designated verifier key. |  |  |
 | `ABU-021` | §14.12 | MUST | A client | A client MUST hold the block state as mutable state of Part 7 §7.5.3. |  |  |
 | `ABU-022` | §14.12 | MUST | A client | A client MUST converge that state across the device set. |  |  |
 | `ABU-023` | §14.12 | MUST NOT | A client | A client MUST NOT send a record to the blocked party that names the block. |  |  |
@@ -2998,13 +2542,11 @@ Source: `spec/14-anti-abuse.md`
 | `ABU-040` | §14.12 | MUST | The interface | The interface MUST state that a blocked party can still send. |  |  |
 | `ABU-041` | §14.12 | MUST | The interface | The interface MUST state that a block does not tell the blocked party. |  |  |
 | `ABU-042` | §14.12 | MUST NOT | The interface | The interface MUST NOT claim that a block stops a message. |  |  |
-| `ABU-043` | §14.10 | MUST | A reporter | A reporter MUST send a report under Part 12 §12.5.3 and under no other carrier. |  |  |
 | `ABU-044` | §14.2 | MUST | A client | A client MUST end the payload of a `NEW`, a `CNEW`, a `BNEW`, and a `PUB` with one `Admission`. |  |  |
 | `ABU-045` | §14.2 | MUST | A parser | A parser MUST reject a `kind` that the table above does not hold. |  |  |
 | `ABU-046` | §14.2 | MUST | A parser | A parser MUST reject a `len` that differs from the body length of its `kind`. |  |  |
 | `ABU-047` | §14.2 | MUST | A relay whose newest `PowChallenge` holds `effort` 0 | A relay whose newest `PowChallenge` holds `effort` 0 MUST accept an `Admission` of kind `0x00` on `NEW`, `CNEW`, and `BNEW`. |  |  |
 | `ABU-048` | §14.2 | MUST | (unstated) | If that `effort` is above 0, the relay MUST answer such a command with a `NACK` of reason `ADMISSION`. |  |  |
-| `ABU-049` | §14.2 | MUST | A relay | A relay MUST accept an `Admission` of kind `0x00` on a `PUB` under `POST_RATE_LIMIT` that is not a community creation. |  |  |
 | `ABU-056` | §14.4 | MUST | An addressee client | An addressee client MUST hold the spent-nonce set of an epoch until the end of the next epoch. |  |  |
 | `ABU-057` | §14.8 | MUST | A verifier | A verifier MUST make a new `PowChallenge` with a fresh `seed` at each `POW_CHALLENGE_PERIOD`. |  |  |
 | `ABU-058` | §14.8 | MUST | A verifier | A verifier MUST accept a solution to its newest challenge and to the one before it. |  |  |

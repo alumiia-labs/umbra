@@ -83,19 +83,8 @@ pub enum Command {
     /// Make a notify queue of Part 8 §8.5.2. An [`Update::NotifyQueue`]
     /// with the same tag follows.
     MakeNotifyQueue(u64),
-    /// End a notify queue with a `DEL` (`NTF-133`). A report queue ends
-    /// the same way.
+    /// End a notify queue with a `DEL` (`NTF-133`).
     EndNotifyQueue([u8; 32]),
-    /// Make a report queue of Part 12 §12.5.3. An
-    /// [`Update::ReportQueue`] with the same tag follows.
-    MakeReportQueue(u64),
-    /// Send a report record of Part 12 §12.5.3 to a report queue.
-    SendReport {
-        /// The encoded `QueueAddress` of the report queue.
-        address: Vec<u8>,
-        /// The sealed `ReportRecord`.
-        record: Vec<u8>,
-    },
     /// Make a new queue for a dead channel (`NET-182`).
     RotateNow(ContactId),
     /// The dead-channel blob of the peer gave its address (`NET-190`).
@@ -170,23 +159,6 @@ pub enum Update {
     Digest {
         /// The `GroupQueueId` that holds records.
         group_queue_id: [u8; 32],
-    },
-    /// A report queue exists at its relay (Part 12 §12.5.3).
-    ReportQueue {
-        /// The tag of the command.
-        tag: u64,
-        /// The `RecipientId` of the queue.
-        recipient_id: [u8; 32],
-        /// The encoded `QueueAddress` that a member writes to.
-        address: Vec<u8>,
-    },
-    /// A report record arrived on a report queue, sealed to the report key
-    /// of the role.
-    Report {
-        /// The report queue.
-        recipient_id: [u8; 32],
-        /// The `ReportRecord`.
-        record: Vec<u8>,
     },
     /// An inbound queue of a contact ended at the end of its rotation.
     QueueEnded([u8; 32]),
@@ -473,25 +445,6 @@ pub async fn run_client(
                     None => continue,
                 },
                 ClientEvent::Digest { id, .. } => Update::Digest { group_queue_id: id },
-                ClientEvent::ReportQueue {
-                    handle,
-                    recipient_id,
-                    address,
-                } => match notify_tags.remove(&handle) {
-                    Some(tag) => Update::ReportQueue {
-                        tag,
-                        recipient_id,
-                        address,
-                    },
-                    None => continue,
-                },
-                ClientEvent::Report {
-                    recipient_id,
-                    record,
-                } => Update::Report {
-                    recipient_id,
-                    record,
-                },
                 ClientEvent::NotifyKey {
                     recipient_id,
                     relay_ntf_pk,
@@ -581,14 +534,6 @@ pub async fn run_client(
                 }
                 Command::EndNotifyQueue(recipient_id) => {
                     let _ = node.end_notify_queue(&recipient_id, &mut rng);
-                }
-                Command::MakeReportQueue(tag) => {
-                    if let Ok(handle) = node.make_report_queue(&mut rng) {
-                        notify_tags.insert(handle, tag);
-                    }
-                }
-                Command::SendReport { address, record } => {
-                    let _ = node.send_report(&address, &record, &mut rng);
                 }
                 Command::RotateNow(contact) => {
                     let _ = node.rotate_now(&contact);

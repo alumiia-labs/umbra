@@ -15,8 +15,6 @@
 #[cfg(feature = "runtime")]
 pub mod bridge;
 pub mod client;
-#[cfg(feature = "runtime")]
-pub mod communities;
 pub mod draft;
 #[cfg(feature = "runtime")]
 pub mod groups;
@@ -255,13 +253,6 @@ pub enum Event {
     },
     /// A contact asked to come into a group of an admin of this device.
     GroupJoiner {
-        /// The pairwise conversation that carried it.
-        from: ConversationId,
-    },
-    /// A contact offered the co-ownership of a community of Part 12. The
-    /// user sees the offers of [`client::Client::community_offers`] and
-    /// answers one of them (§12.5.5).
-    CommunityOffer {
         /// The pairwise conversation that carried it.
         from: ConversationId,
     },

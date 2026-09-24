@@ -81,8 +81,7 @@ over the channel of §7.4.
 
 - **[DEV-224]** A device MUST make its own `device_id` from its own CSPRNG at
   the link. **[DEV-225]** A device MUST NOT derive `device_id` from a key, from
-  a hardware identifier, or from an earlier `device_id`. Part 12 §12.3.2 cites
-  this rule.
+  a hardware identifier, or from an earlier `device_id`.
 - **[DEV-143]** A device MUST make `DeviceRosterKey_i` from its own CSPRNG. **[DEV-144]** A device MUST
   NOT derive that keypair from the `RootIdentity`, from `K_devset`, or from
   `SyncChannelSeed`.
@@ -136,7 +135,7 @@ DeviceEntry {
 }
 
 OwnerClaim {
-    scope          u8           // 0x01 a pairwise identity, 0x02 a community identity,
+    scope          u8           // 0x01 a pairwise identity, 0x02 retired,
                                 // 0x03 each subject of an absent device,
                                 // 0x04 the group sender owner
     subject        [32]u8       // a blinded subject, see below
@@ -147,14 +146,15 @@ OwnerClaim {
 **The subject is blinded.** `K_set` is the `DeviceSetKey` of Part 4 §4.2, and
 Part 6 §6.6 uses it in the same manner for `msg_ref`. **[DEV-226]** A device
 MUST compute `subject` as `SHA3-256(K_set || scope || value)`. For scope `0x01`
-the value is the pairwise identity public key. For scope `0x02` the value is
-the `community_id` of Part 12 §12.2. For scope `0x03` the value is the
+the value is the pairwise identity public key. The scope `0x02` named a
+community identity of the withdrawn Part 12, and it is retired. For scope
+`0x03` the value is the
 `device_id` of the absent device, and §7.5.4 gives that claim. For scope
 `0x04` the value is 32 zero bytes, thus one claim names the group sender owner
 of Part 11 §11.12 for every group of the user, and §7.5.4 gives that claim.
 
 > *Cause.* A roster that named each subject in the clear was a list of each
-> contact and each community of the user. That list was signed, and each
+> contact of the user. That list was signed, and each
 > device and the archive of §7.6.1 held it. `K_set` never leaves the device
 > set, thus a party outside the set cannot test a candidate against the list.
 > A seized device holds `K_set`. Thus the blinding protects the archive and a
@@ -244,7 +244,7 @@ the same time. That event is normal use, and it is not evidence of an attack.
 
 **The owner claims.** A roster epoch carries the ownership changes that the
 epoch makes, and it does not carry the full ownership table. §7.5.4 gives the
-ratchet ownership and Part 12 §12.3.2 gives the community chain ownership.
+ratchet ownership and the group sender ownership.
 
 - **[DEV-158]** A device MUST take the current owner of a subject from the claim of the
   **highest** epoch that names that subject. **[DEV-159]** A device MUST treat a subject that
@@ -261,7 +261,7 @@ ratchet ownership and Part 12 §12.3.2 gives the community chain ownership.
 
 > *Cause.* An earlier draft said that the roster names the ratchet owner and the
 > chain owner, and the `Roster` structure carried no field for either name.
-> §7.5.4 and Part 12 §12.3.2 both depend on that name. A delta of claims keeps
+> §7.5.4 depends on that name. A delta of claims keeps
 > the roster small at 150 contacts, and a full ownership table in each epoch
 > does not.
 
@@ -314,12 +314,12 @@ A claim record travels as a device-set control record of §7.5.5, with the
   roster epoch, and a roster epoch ranks above a claim record at one
   `roster_epoch`.
 - **[DEV-191]** A device MUST NOT send more than `OWNER_CLAIM_RATE` claim
-  records of scope `0x01` or scope `0x02` each day. §7.8 gives that value.
+  records of scope `0x01` each day. §7.8 gives that value.
   **[DEV-260]** A device MUST count a claim record that holds a claim of scope
   `0x04` under `OWNER_CLAIM_RATE` in the same manner as a record of scope
   `0x01`.
-- **[DEV-192]** A device MUST NOT put a claim of scope `0x01` and a claim of
-  scope `0x02` for one subject in one record. **[DEV-234]** A device MUST NOT
+- **[DEV-192]** A device MUST NOT put a claim of scope `0x02` in a record, and
+  a verifier MUST reject a record that holds one. **[DEV-234]** A device MUST NOT
   put a claim of scope `0x03` together with a claim of a different scope in
   one record.
 
@@ -336,8 +336,8 @@ absent device owns. The device that publishes it is the claimant.
   record.
 - **[DEV-233]** A device MUST apply a claim of scope `0x03` to each subject
   that the absent device owns. The ownership at the point where the fold
-  reaches that claim applies. A later claim of scope `0x01` or `0x02` names
-  one subject again in the ordinary manner.
+  reaches that claim applies. A later claim of scope `0x01` names one subject
+  again in the ordinary manner.
 - **[DEV-235]** Before a claimant publishes a claim of scope `0x03`, it MUST
   show how many subjects the absent device owns.
 
@@ -410,8 +410,8 @@ channel. The target is 60 seconds or less and one QR scan (usability goal U7).
 - **[DEV-002]** The device MUST send the provisioning payload over a fresh ephemeral queue.
   **[DEV-003]** The device MUST delete that queue directly after the use.
 - **[DEV-004]** The provisioning payload MUST carry the **local identity table** of Part 4
-  §4.7.2. Without that table the new device cannot post in a community (Part 12
-  §12.3.2). It also cannot sign a granting epoch (Part 11 §11.9.1).
+  §4.7.2. Without that table the new device cannot sign a granting epoch (Part
+  11 §11.9.1).
 - **[DEV-165]** The new device MUST make its own `DeviceKey` and its own `DeviceRosterKey`
   before step 5. **[DEV-168]** The new device MUST send the public half of the two keypairs
   to the existing device over the channel of step 2. **[DEV-166]** The existing device MUST
@@ -661,7 +661,7 @@ class in Part 6 §6.6. **[DEV-022]** A client MUST NOT process a kind that decla
 | Peer signal | `0x06`, `0x07` | Part 3 §3.5.4 gives the rules. **[DEV-023]** A client MUST NOT put a peer signal on a sync channel |
 | Mutable state | `0x20` sub-kind `0x01` | The last writer wins, under `DEV-270` |
 | Ephemeral | `0x08` | The client does not store it |
-| Control | `0x10`, `0x11`, `0x20` sub-kind `0x02`, `0x30`, `0x31`, `0x32`, `0x33`, `0x34`, `0x35` | Part 11 gives `0x10`. Part 12 gives `0x11`. §7.5.5 gives `0x20` sub-kind `0x02`, which is the sync acknowledgment. Part 4 §4.5.1 gives `0x30`. Part 9 §9.5.3 gives `0x31`. §7.5.8 gives `0x32`. Part 6 §6.6.10 gives `0x33`. Part 6 §6.6.11 gives `0x34` and `0x35` |
+| Control | `0x10`, `0x20` sub-kind `0x02`, `0x30`, `0x31`, `0x32`, `0x33`, `0x34`, `0x35` | Part 11 gives `0x10`. §7.5.5 gives `0x20` sub-kind `0x02`, which is the sync acknowledgment. Part 4 §4.5.1 gives `0x30`. Part 9 §9.5.3 gives `0x31`. §7.5.8 gives `0x32`. Part 6 §6.6.10 gives `0x33`. Part 6 §6.6.11 gives `0x34` and `0x35` |
 | Wrapper | `0x09`, and `0x20` sub-kind `0x03` | Part 6 §6.6.5 gives the rich record, and `DEV-268` gives the synced record. Kind `0x12` of Part 6 §6.6.2 is retired; a group content record is the `app` of a group record of Part 11 §11.3, and its own kind gives its class. **[DEV-174]** A client MUST take the class from `inner_kind`. **[DEV-175]** A client MUST NOT give a wrapper a class of its own |
 
 - **Insertion** is commutative. **[DEV-024]** A client MUST identify each message by the
@@ -715,7 +715,6 @@ class in Part 6 §6.6. **[DEV-022]** A client MUST NOT process a kind that decla
   | The local insertion sequence of Part 11 §11.7 | Each conversation |
   | The group `counter` of the group sender owner, Part 11 §11.3.4 and §7.5.4 | Each group |
   | The block state of Part 14 §14.12 | Each contact |
-  | The mute list of Part 12 §12.5.4 | Each community |
   | The archive flag, the pin flag, and the folder label | Each conversation |
   | The unread marker that a user sets by hand | Each conversation |
   | The draft text | Each conversation |
@@ -835,7 +834,7 @@ and the seven rules that use it.
 **The sync acknowledgment record.** The report is an application record of Part
 6 §6.6. Its kind is `0x20` and its sub-kind is `0x02`. **[DEV-050]** A client MUST put that
 record on a sync channel of §7.5.1 only. **[DEV-051]** A client MUST NOT put it on a pairwise
-channel, on a group channel, or on a community channel.
+channel or on a group channel.
 
 **[DEV-052]** A client MUST reject a sync acknowledgment that arrives on a different channel.
 A sync acknowledgment is a control record of §7.5.3, and it is not a peer
@@ -1161,8 +1160,8 @@ to nothing else.
 | `DELETE_RATE_LIMIT` | 1 record of kind `0x05` in each 10 s, for each sender in each conversation and in each group |
 | `SWEEP_SPREAD` | Exponential, mean 30 minutes. It applies to the outbound request only |
 
-**One user action can produce records in more than one conversation, group, or
-community. **[DEV-107]** In that case the client MUST draw an independent delay for each
+**One user action can produce records in more than one conversation or group.
+**[DEV-107]** In that case the client MUST draw an independent delay for each
 destination. **[DEV-108]** The client MUST draw that delay from an exponential distribution
 with a mean of `SWEEP_SPREAD`. **[DEV-109]** The client MUST NOT dispatch the set as a
 burst.**
@@ -1288,10 +1287,6 @@ holds the plaintext. **[DEV-126]** Thus the interface MUST state each limit belo
   group, and a member who is offline, keeps the earlier text. UMBRA cannot show
   that every member sees the same text."
 
-**[DEV-130]** A community and a private conversation MUST NOT share one deletion affordance or
-one wording. Part 12 §12.1.1 requires the two to read differently, and a
-deletion is the sharpest point of confusion in the product.
-
 ### 7.5.8 The conversation timer
 
 A conversation timer removes a message from each device after a period. Part 6
@@ -1382,9 +1377,7 @@ setting that decides **what the device shows**, and it is per conversation.
   **[DEV-259]** A client MUST default a new group at or below
   `GROUP_ALL_NOTIFY_MAX` members to `all`. **[DEV-221]** A client MUST default
   a new group above `GROUP_ALL_NOTIFY_MAX` members to `mentions`. Part 11
-  §11.10 gives that value. **[DEV-222]** A client MUST default a community to
-  `mentions`, and Part 12 §12.6 states the same default. Part 8 §8.5.1 bounds
-  the wakes that the digest of a community costs.
+  §11.10 gives that value.
 - **[DEV-223]** A client MUST NOT let the setting change the wake behavior of
   Part 8 §8.3. The device wakes on the profile mode, and the setting decides
   what the client renders after the wake.
@@ -1545,16 +1538,10 @@ device. **[DEV-173]** The client MUST then publish a roster epoch 0 for the new 
 The old roster chain has no authority over the new one, and §7.3.1 rule 4 makes
 the new epoch 0 the trust anchor.
 
-A full identity reset does not change a community identity or a group roster
-key by derivation. Part 12 §12.3.2 and Part 11 §11.9.1 do not derive those keys
-from the `RootIdentity`. An attacker can hold a device of the user.
-**[DEV-263]** A full identity reset MUST also start the group re-key of Part
-11 §11.12 in each group of the user. **[DEV-139]** In that case the user
-SHOULD also make a new community identity. **[DEV-140]** The user SHOULD do that in each
-community that matters.
-
-**[DEV-141]** The interface MUST offer that operation in the reset flow. **[DEV-142]** The interface MUST
-state that a new community identity loses the post history.
+A full identity reset does not change a group roster key by derivation. Part
+11 §11.9.1 does not derive that key from the `RootIdentity`. An attacker can
+hold a device of the user. **[DEV-263]** A full identity reset MUST also start
+the group re-key of Part 11 §11.12 in each group of the user.
 
 ## 7.8 Limits
 

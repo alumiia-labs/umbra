@@ -50,9 +50,7 @@ impl<'a> RichRecord<'a> {
 
     fn check(&self, channel: Channel) -> Result<(), Error> {
         let zero = [0u8; 16];
-        if matches!(self.inner_kind, AppKind::Rich | AppKind::GroupControl)
-            || !self.inner_kind.allowed_on_channel() && channel != Channel::Community
-        {
+        if matches!(self.inner_kind, AppKind::Rich | AppKind::GroupControl) {
             return Err(Error::Malformed);
         }
         if self.mentions.len() > MENTION_MAX || !strictly_increasing(&self.mentions) {
@@ -128,16 +126,6 @@ impl<'a> RichRecord<'a> {
 /// (`WIR-174`).
 pub fn mention_id(scope_id: &[u8; 32], member_key: &[u8; 32]) -> [u8; 16] {
     truncate(sha3_256(&[labels::MENTION, scope_id, member_key]))
-}
-
-/// `community_reply_id` of §6.6.5 (`WIR-263`).
-pub fn community_reply_id(community_id: &[u8; 32], pseudonym: &[u8], index: u32) -> [u8; 16] {
-    truncate(sha3_256(&[
-        labels::COMMUNITY_REPLY,
-        community_id,
-        pseudonym,
-        &index.to_be_bytes(),
-    ]))
 }
 
 fn truncate(full: [u8; 32]) -> [u8; 16] {

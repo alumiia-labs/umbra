@@ -104,10 +104,9 @@ const ROOT_KEY_KEY: &[u8] = b"backup-root-key";
 const INDEX_VALUE_LEN: usize = 1 + 16 + 32;
 
 /// The tables that a backup carries (`IDN-179`). Invitations, push
-/// registrations, the dead-channel state, the files, the cursors and the
-/// records of a community, and the state of the backup itself stay on the
-/// device (`IDN-180`).
-const BACKED_UP: [TableId; 23] = [
+/// registrations, the dead-channel state, the files, and the state of the
+/// backup itself stay on the device (`IDN-180`).
+const BACKED_UP: [TableId; 20] = [
     TableId::MESSAGE,
     TableId::TOMBSTONE,
     TableId::CONTACT,
@@ -128,9 +127,6 @@ const BACKED_UP: [TableId; 23] = [
     super::groups::GROUP_PRESENCE,
     super::groups::GROUP_OWNERS,
     super::groups::GROUP_GRANTS,
-    super::communities::COMMUNITY,
-    super::posting::COMMUNITY_AUTHOR,
-    super::posting::COMMUNITY_OUTBOX,
 ];
 
 /// A backup object that is due: its bytes, which go up as a file of the

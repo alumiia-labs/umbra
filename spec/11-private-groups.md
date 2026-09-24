@@ -1154,8 +1154,8 @@ GroupKemKey_g     := UMBRA-KEM keypair from GroupRosterSeed_g    (§11.3.3)
   `RootIdentity`. **[GRP-054]** A member MUST NOT derive that seed from
   `group_id`.
 - **[GRP-055]** A member MUST store `GroupRosterSeed_g` in the **local identity
-  table** of Part 4 §4.7.2. That table also holds the community identity seeds
-  of Part 12 §12.3.2 and the pairwise salts of Part 4 §4.2.2.
+  table** of Part 4 §4.7.2. That table also holds the pairwise salts of Part 4
+  §4.2.2.
 - **[GRP-056]** A member MUST make a different roster key for each group.
   **[GRP-057]** A member MUST NOT use a roster key outside the group that its
   table row names. The same two rules hold for the pair key and the KEM key,
@@ -1353,10 +1353,10 @@ plain epoch, and the tag vector names the member that leaves.
   moderator. If that does not resolve the two epochs, the lower
   `SHA3-256(previous_epoch_hash || BE16(index))` applies, where `index` is the
   member index of the party that made the epoch. **[GRP-117]** A client MUST
-  apply that order. Part 12 §12.5.2 rule 6 gives the cause of the hash, which
-  is that a party grinds a low identifier and a hash of the predecessor is not
-  known before the race. An admin assigns an index and a member does not
-  select it, and the hash keeps the order unpredictable all the same.
+  apply that order. The hash has a cause. A party can grind a low identifier,
+  and no party knows the hash of the predecessor before the race. An admin
+  assigns an index and a member does not select it, and the hash keeps the
+  order unpredictable all the same.
 - **Two different members that make two successors is normal use.**
   **[GRP-118]** A client MUST NOT show a fork for that case. **[GRP-119]** A
   member whose epoch the order above did not select MUST publish that epoch
@@ -1371,7 +1371,6 @@ plain epoch, and the tag vector names the member that leaves.
   that the members disagree. **[GRP-074]** The client MUST NOT name a party.
   A plain epoch carries no signature, thus the attribution is not
   transferable.
-- Part 12 §12.5.2 rule 6 states the same three rules for a community.
 - The two replicas of §11.2.1 give no total order, and a roster record is one
   post to each of them. The order of the roster is the order of the chain,
   through `epoch_index` and `previous_epoch_hash`, and never the `seq` of a
@@ -1431,8 +1430,8 @@ an edit from the same author at each position.
 
 Both actions travel inside a **moderation epoch**. A moderation epoch is a
 signed and hash-chained roster object, in the manner of the granting epoch of
-§11.9.2. Thus a private group gains the evidence property that Part 12 §12.4.1
-gives a community.
+§11.9.2. Thus the signature names the acting member, and the chain records
+the act.
 
 1. **[GRP-077]** A moderation epoch MUST carry an ML-DSA-65 signature from the
    `GroupRosterKey_g` of the acting member.
@@ -1515,10 +1514,6 @@ Four mitigations bound the damage.
   undo this. Each member sees that you removed a message."
 - At a removal epoch: "A moderator removed N messages. A restore from a backup
   that predates today brings them back."
-
-> Part 12 §12.5 does **not** import this section. A community has the
-> authoritative owner devices of Part 12 §12.2, and a private group has none.
-> Part 12 states its own community roster and its own moderation epoch.
 
 > *Cause.* Draft 0.1.0 dispatched a moderation epoch with the fan-out jitter
 > and named the actor by the group-scoped member identifier. Both retire: a
@@ -1674,6 +1669,7 @@ made the joiner open 499 pairwise channels for the same admission.
 | `ROSTER_RATE_LIMIT` | 1 epoch for each member in each 60 s |
 | `GROUP_EPOCH_RATE` | 6 epochs for each group in each 60 s |
 | `GRANT_RATE` | 1 for each group in each 300 s, and 4 for each group in each 24 h |
+| `MOD_ACTION_MAX` | 20 actions in one moderation epoch (§11.9.6) |
 | `KEY_REQUEST_RATE` | 8 in each 24 h: epoch requests for one group (§11.4.3), and pairwise requests to one peer (Part 6 §6.6.11 rule `WIR-337`) |
 | `POLL_GROUP_MAX` | 100 members (§11.11) |
 | `MENTION_MAX` | 16 mentions in one record, and Part 6 §6.6.5 gives the field |
@@ -1681,9 +1677,8 @@ made the joiner open 499 pairwise channels for the same admission.
 
 Part 3 §3.2.7 owns `GROUP_RETENTION`, `GROUP_QUEUE_QUOTA`, `GROUP_POST_RATE`,
 `GROUP_READ_GRACE`, `GROUP_WRITE_GRACE`, `GROUP_IDLE_TTL`, and
-`GROUP_NOTIFIER_MAX`. Part 8 §8.5.2 owns `GROUP_DIGEST_MIN_GAP`. Part 12 §12.9
-owns `MOD_ACTION_MAX`, and §11.9.6 quotes it. Rule `SCP-010` of Part 1 gives
-one owner to each constant.
+`GROUP_NOTIFIER_MAX`. Part 8 §8.5.2 owns `GROUP_DIGEST_MIN_GAP`. Rule
+`SCP-010` of Part 1 gives one owner to each constant.
 
 **The periods hold one order.** **[GRP-331]** A revision MUST keep
 `GROUP_EPOCH_GRACE` equal to `GROUP_WRITE_GRACE`, `GROUP_EPOCH_MAX_AGE` at or

@@ -63,19 +63,6 @@ class Line(
         get() = info.isReply
 }
 
-/** One post of a community view. The text stays a `CharArray`. */
-class CommunityLine(val post: uniffi.umbra_ffi.FfiCommunityPost, val text: CharArray) {
-    /** The identity of the post. A byte array compares by identity. */
-    val key: List<Byte> = post.key.toList()
-}
-
-/** One report of a community for a role holder: the post and the note stay arrays. */
-class ReportLine(
-    val report: uniffi.umbra_ffi.FfiCommunityReport,
-    val post: CharArray,
-    val note: CharArray,
-)
-
 /** The message that a line answers: its identity, its author, and its text. */
 class Quoted(val key: List<Byte>, val isOutgoing: Boolean, val text: CharArray)
 
@@ -472,7 +459,6 @@ object Core {
                 refreshJoinFlow()
                 refreshChats()
             }
-            is FfiEvent.CommunityOffer -> refreshCommunities()
             // A reaction, an edit, and a deletion are no arrival, thus they
             // raise no alert.
             is FfiEvent.Reacted -> revision++
@@ -485,9 +471,6 @@ object Core {
                 refreshChats()
             }
             is FfiEvent.Locked -> {
-                communities.clear()
-                communityOffers.clear()
-                formingCommunities.clear()
                 groupOffers.clear()
                 groupJoiners.clear()
                 images.clear()
@@ -698,137 +681,6 @@ object Core {
         client.leaveGroup(conversation.id)
         refreshChats()
         main.post { then() }
-    }
-
-    /** The communities of this device (Part 12). */
-    val communities = mutableStateListOf<uniffi.umbra_ffi.FfiCommunity>()
-
-    /** The offers of a co-ownership that wait for this user (§12.5.5). */
-    val communityOffers = mutableStateListOf<uniffi.umbra_ffi.FfiCommunityOffer>()
-
-    /** The communities in their creation (§12.5.5). */
-    val formingCommunities = mutableStateListOf<uniffi.umbra_ffi.FfiFormingCommunity>()
-
-    fun refreshCommunities() = call { client ->
-        val list = client.communities()
-        val offers = client.communityOffers()
-        val forming = client.formingCommunities()
-        main.post {
-            communities.clear()
-            communities.addAll(list)
-            communityOffers.clear()
-            communityOffers.addAll(offers)
-            formingCommunities.clear()
-            formingCommunities.addAll(forming)
-        }
-    }
-
-    /** Joins a community by its link. A link that does not parse is a fault. */
-    fun joinCommunity(link: String, onJoined: (ByteArray) -> Unit) = call { client ->
-        val id = client.joinCommunity(link)
-        refreshCommunities()
-        main.post { onJoined(id) }
-    }
-
-    /** Starts a community with a contact as its second owner. */
-    fun createCommunity(name: String, coOwner: Conversation, onMade: () -> Unit) = call { client ->
-        client.createCommunity(name, coOwner.id)
-        refreshCommunities()
-        main.post { onMade() }
-    }
-
-    fun acceptCommunityOffer(id: ByteArray) = call { client ->
-        client.acceptCommunityOffer(id)
-        refreshCommunities()
-    }
-
-    fun declineCommunityOffer(id: ByteArray) = call { client ->
-        client.declineCommunityOffer(id)
-        refreshCommunities()
-    }
-
-    fun leaveCommunity(id: ByteArray, then: () -> Unit) = call { client ->
-        client.leaveCommunity(id)
-        refreshCommunities()
-        main.post { then() }
-    }
-
-    /** The link of a community, to share. */
-    fun communityLink(id: ByteArray, onLoaded: (String) -> Unit) = call { client ->
-        val link = client.communityLink(id)
-        main.post { onLoaded(link) }
-    }
-
-    /** Loads the posts of a community, each text in its own array. */
-    fun loadCommunityPosts(id: ByteArray, onLoaded: (List<CommunityLine>) -> Unit) = call { client ->
-        val lines = client.communityPosts(id).map { post ->
-            val sink = CharSink()
-            client.renderCommunityPost(id, post.key, sink)
-            CommunityLine(post, sink.chars)
-        }
-        main.post { onLoaded(lines) }
-    }
-
-    /** Removes a post of a community under the owner role of this device. */
-    fun removeCommunityPost(id: ByteArray, key: ByteArray) = call { client ->
-        client.removeCommunityPost(id, key)
-        main.post { revision++ }
-    }
-
-    /** Bans an author of a community, with or without their posts. */
-    fun banCommunityAuthor(id: ByteArray, author: ByteArray, removeHistory: Boolean) = call { client ->
-        client.banCommunityAuthor(id, author, removeHistory)
-        main.post { revision++ }
-    }
-
-    /**
-     * Reports a post to one role holder of the roster (§12.5.3). This call
-     * overwrites the note.
-     */
-    fun reportCommunityPost(id: ByteArray, key: ByteArray, reason: UByte, note: CharArray?, then: () -> Unit) =
-        call { client ->
-            val units = note?.map { it.code.toUShort() } ?: emptyList()
-            note?.fill('\u0000')
-            client.newCommunityDraft().use { draft ->
-                if (units.isNotEmpty()) draft.setText(units)
-                client.reportCommunityPost(id, key, reason, draft)
-            }
-            main.post { then() }
-        }
-
-    /** The reports of a community that a role holder of this device holds. */
-    fun loadCommunityReports(id: ByteArray, onLoaded: (List<ReportLine>) -> Unit) = call { client ->
-        val lines = client.communityReports(id).map { report ->
-            val post = CharSink()
-            client.renderCommunityPost(id, report.postKey, post)
-            val note = CharSink()
-            if (report.hasNote) client.renderCommunityReportNote(id, report.id, note)
-            ReportLine(report, post.chars, note.chars)
-        }
-        main.post { onLoaded(lines) }
-    }
-
-    fun dismissCommunityReport(id: ByteArray, report: ByteArray, then: () -> Unit) = call { client ->
-        client.dismissCommunityReport(id, report)
-        main.post { then() }
-    }
-
-    /** Adds a reaction of this device to a community post, or takes it back. */
-    fun reactToCommunityPost(id: ByteArray, key: ByteArray, emoji: String, adds: Boolean) = call { client ->
-        client.reactToCommunityPost(id, key, emoji, adds)
-        main.post { revision++ }
-    }
-
-    /** Posts a text in a community. This call overwrites the array. */
-    fun postToCommunity(id: ByteArray, text: CharArray, replyTo: ByteArray? = null) = call { client ->
-        val units = text.map { it.code.toUShort() }
-        text.fill('\u0000')
-        client.newCommunityDraft().use { draft ->
-            draft.setText(units)
-            client.postToCommunity(id, draft, replyTo)
-        }
-        refreshCommunities()
-        main.post { revision++ }
     }
 
     private fun refreshJoinFlow() = call { client ->

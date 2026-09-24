@@ -219,7 +219,7 @@ cover traffic that Part 3 §3.6.1 makes mandatory drives that signal.
 2. A failed client loop triggers an isolation query along the chain.
 3. A relay that acknowledged receipt but dropped is EXPELLED.
 4. An unresolvable A-B fault removes the LINK A-B, not either node.
-5. Community detection runs over the link-fault graph each epoch.
+5. A dense-subgraph search runs over the link-fault graph each epoch.
 ```
 
 **An honest relay loses O(1) links at an incident. An attacker loses Θ(n)

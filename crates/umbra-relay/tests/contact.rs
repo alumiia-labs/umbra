@@ -66,7 +66,6 @@ enum Peer {
 struct Stored {
     contacts: BTreeMap<ContactId, Vec<u8>>,
     invitations: BTreeMap<[u8; 32], Vec<u8>>,
-    own_queues: BTreeMap<[u8; 32], Vec<u8>>,
 }
 
 struct Network {
@@ -103,7 +102,6 @@ impl Network {
             static_secret,
             layer,
             issuer_key: PublicKey2048::from_modulus(&[0xFF; 256]).unwrap(),
-            community_capacity: 1 << 20,
             chunk_capacity: 1 << 26,
         }
     }
@@ -267,12 +265,8 @@ impl Network {
                 StateChange::InvitationEnded { queue } => {
                     stored.invitations.remove(&queue);
                 }
-                StateChange::NotifyQueue { queue, state } => {
-                    stored.own_queues.insert(queue, state.to_vec());
-                }
-                StateChange::NotifyQueueEnded { queue } => {
-                    stored.own_queues.remove(&queue);
-                }
+                // No test of this harness makes a notify queue.
+                StateChange::NotifyQueue { .. } | StateChange::NotifyQueueEnded { .. } => {}
             }
         }
     }
@@ -296,9 +290,6 @@ impl Network {
         }
         for state in self.stored[client].invitations.values() {
             node.restore_invitation(state).unwrap();
-        }
-        for state in self.stored[client].own_queues.values() {
-            node.restore_notify_queue(state).unwrap();
         }
         node.connected(&mut Rng(300 + u64::from(seed))).unwrap();
         self.clients[client] = node;
@@ -1377,40 +1368,4 @@ fn a_stored_contact_of_the_first_version_continues() {
     network.settle();
     assert_eq!(messages_of(network.take_events(ALICE)), [b"and still"]);
     assert!(network.clients[ALICE].contacts().count() == 1);
-}
-
-#[test]
-fn a_report_queue_of_a_role_holder_comes_back_after_a_restart() {
-    const ALICE: usize = 0;
-    let mut network = Network::new();
-    network.settle();
-    network.take_events(ALICE);
-    // COM-266: the roster names the queue where a member writes a report.
-    let handle = network.clients[ALICE]
-        .make_report_queue(&mut Rng(5))
-        .unwrap();
-    network.settle();
-    let events = network.take_events(ALICE);
-    let [ClientEvent::ReportQueue {
-        handle: made,
-        recipient_id,
-        address,
-    }] = events.as_slice()
-    else {
-        panic!("{events:?}");
-    };
-    assert_eq!(*made, handle);
-    let parsed = umbra_wire::address::QueueAddress::parse(address).unwrap();
-    assert_eq!(parsed.relay_id, relay_static(3).0.relay_id);
-    // The stored form names a report queue, thus a restart keeps its kind.
-    let state = network.stored[ALICE].own_queues[recipient_id].clone();
-    assert_eq!(state[0], 0x02);
-    network.restart(ALICE, 0x42);
-    network.settle();
-    assert!(network.stored[ALICE].own_queues.contains_key(recipient_id));
-    network.clients[ALICE]
-        .end_notify_queue(recipient_id, &mut Rng(6))
-        .unwrap();
-    network.settle();
-    assert!(network.stored[ALICE].own_queues.is_empty());
 }

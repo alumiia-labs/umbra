@@ -47,8 +47,7 @@ use zeroize::Zeroizing;
 
 use crate::{
     bridge::{Bridge, NetEvent},
-    client::{Client, CommunityPull, GenesisSend},
-    communities::{run_communities, CommunityCommand, CommunityUpdate},
+    client::Client,
     draft::Draft,
     groups::{run_groups, GroupCommand, GroupUpdate},
     runtime::{run_client, Ended, OsRng, Persist, Update},
@@ -225,116 +224,6 @@ pub struct FfiGroupInfo {
     pub is_lapsed: bool,
 }
 
-/// What a view shows of a public community of Part 12.
-#[derive(Debug, Clone, uniffi::Record)]
-pub struct FfiCommunity {
-    /// The community.
-    pub community_id: Vec<u8>,
-    /// The name of its metadata, or empty before one verifies.
-    pub name: String,
-    /// The count of the relays that serve it.
-    pub relays: u32,
-    /// The count of the records that this device holds.
-    pub records: u32,
-    /// Whether this device holds an owner role of it.
-    pub is_owner: bool,
-    /// The time of the join, in Unix seconds.
-    pub joined_at: u64,
-    /// The count of the posts and checkpoints of this device that a relay
-    /// has not taken.
-    pub pending: u32,
-    /// Whether the owners turned reactions off (`COM-330`).
-    pub reactions_off: bool,
-}
-
-/// One post of a community, as the timeline lists it. The text is not
-/// here: [`Handle::render_community_post`] writes it into a sink.
-#[derive(Debug, Clone, uniffi::Record)]
-pub struct FfiCommunityPost {
-    /// The hash of the post, which names it.
-    pub key: Vec<u8>,
-    /// The authoring pseudonym.
-    pub author: Vec<u8>,
-    /// The position in the chain of that pseudonym.
-    pub index: u32,
-    /// The time the post reached this device, in Unix seconds.
-    pub at: u64,
-    /// Whether a verified checkpoint covers the post (§12.4.1).
-    pub is_settled: bool,
-    /// Whether this device wrote the post.
-    pub is_own: bool,
-    /// Whether a ban stands on the author (`COM-298`).
-    pub is_author_banned: bool,
-    /// Whether the post is a repost (`COM-325`).
-    pub is_repost: bool,
-    /// The post that this one answers, when this device holds it.
-    pub reply_to: Option<Vec<u8>>,
-    /// The reactions to the post (`COM-333`).
-    pub reactions: Vec<FfiReactionCount>,
-}
-
-/// The reactions of one emoji on one community post.
-#[derive(Debug, Clone, uniffi::Record)]
-pub struct FfiReactionCount {
-    /// The emoji.
-    pub emoji: String,
-    /// The count of the pseudonyms whose last reaction adds it.
-    pub count: u32,
-    /// Whether this device made one of them.
-    pub is_mine: bool,
-}
-
-/// A report that a role holder of this device holds (Part 12 §12.5.3).
-/// The note is not here: [`Handle::render_community_report_note`] writes it
-/// into a sink.
-#[derive(Debug, Clone, uniffi::Record)]
-pub struct FfiCommunityReport {
-    /// The report.
-    pub id: Vec<u8>,
-    /// The hash of the post that it names.
-    pub post_key: Vec<u8>,
-    /// The cause: 1 spam, 2 harassment, 3 illegal content, 4 a breach of
-    /// the rules, 5 other.
-    pub reason: u8,
-    /// Whether the report holds a note.
-    pub has_note: bool,
-    /// The time the report reached this device, in Unix seconds.
-    pub at: u64,
-}
-
-/// A community in its creation (Part 12 §12.5.5).
-#[derive(Debug, Clone, uniffi::Record)]
-pub struct FfiFormingCommunity {
-    /// The community.
-    pub community_id: Vec<u8>,
-    /// The name of its first metadata.
-    pub name: String,
-    /// The pairwise conversation of the other owner.
-    pub contact: Vec<u8>,
-    /// Whether this device made the community.
-    pub is_creator: bool,
-    /// 0: the report queue is on its way; 1: the offer waits for the
-    /// other party; 2: the accept waits for the formed step; 3: the relays
-    /// take the genesis.
-    pub phase: u8,
-    /// The count of the relays that took both genesis records.
-    pub relays_done: u8,
-    /// Why the last genesis record did not reach a relay: the reason of
-    /// its refusal, or none that a relay gave.
-    pub last_fault: Option<String>,
-}
-
-/// An offer of the co-ownership of a community (Part 12 §12.5.5).
-#[derive(Debug, Clone, uniffi::Record)]
-pub struct FfiCommunityOffer {
-    /// The community.
-    pub community_id: Vec<u8>,
-    /// The name of its first metadata.
-    pub name: String,
-    /// The pairwise conversation that carried it.
-    pub from: Vec<u8>,
-}
-
 /// The role of one member of a group (§11.9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum FfiRole {
@@ -342,7 +231,7 @@ pub enum FfiRole {
     Observer,
     /// Reads and posts.
     Member,
-    /// Acts on a report of Part 12 §12.9.
+    /// Acts in a moderation epoch of Part 11 §11.9.6.
     Moderator,
     /// Adds a member, removes one, and holds the owner credentials.
     Admin,
@@ -840,9 +729,6 @@ pub enum FfiEvent {
     Circuits,
     /// A contact offered a group. [`Handle::group_offers`] gives it.
     GroupOffer,
-    /// A contact offered the co-ownership of a community.
-    /// [`Handle::community_offers`] gives it.
-    CommunityOffer,
     /// A contact asked to come into a group of this device.
     /// [`Handle::group_joiners`] gives it.
     GroupJoiner,
@@ -1054,24 +940,6 @@ struct Inner {
     /// same bytes to the next session (`NET-072`).
     group_sent: BTreeMap<u64, GroupCommand>,
     next_group_tag: u64,
-    /// The commands of the community task, or none before the first
-    /// community command of a run.
-    communities: Option<mpsc::UnboundedSender<CommunityCommand>>,
-    /// What each community command that runs belongs to.
-    community_tags: BTreeMap<u64, CommunityWork>,
-    next_community_tag: u64,
-    /// The community of each report queue on its way, by its tag.
-    report_pending: BTreeMap<u64, [u8; 32]>,
-    next_report_tag: u64,
-    /// The time before which a genesis record that a relay refused does
-    /// not go again, by the community, the relay, and the record.
-    genesis_backoff: BTreeMap<([u8; 32], [u8; 32], bool), u64>,
-    /// The last failure of a genesis record of each community in its
-    /// creation, for its view.
-    genesis_faults: BTreeMap<[u8; 32], String>,
-    /// The same for a post or a checkpoint of this device, by the hash of
-    /// the record.
-    post_backoff: BTreeMap<PostKey, u64>,
     /// The groups that the run of the group queues reads. A subscription
     /// lives with its session, thus this set empties when the run ends.
     group_reading: BTreeSet<crate::ConversationId>,
@@ -1109,9 +977,6 @@ struct Inner {
     /// (Part 14 `ABU-065`, `ABU-105`), and the time of the fetch.
     challenges: umbra_core::abuse::pow::ChallengeBook,
     challenges_at: u64,
-    /// The time of the last fetch of the challenges that this device
-    /// started.
-    challenges_asked_at: u64,
 }
 
 /// A restore of Part 4 §4.7.2 while it runs: the root key of the entered
@@ -1252,35 +1117,6 @@ enum TransferWork {
     },
 }
 
-/// What one command of the community task belongs to.
-enum CommunityWork {
-    /// A `PULL` of one relay.
-    Pull(CommunityPull),
-    /// A `PUB` of one genesis record at one relay (`COM-407`).
-    Genesis {
-        community_id: [u8; 32],
-        relay: [u8; 32],
-        is_meta: bool,
-    },
-    /// A `PUB` of one post or checkpoint of this device at one relay.
-    Post {
-        community_id: [u8; 32],
-        relay: [u8; 32],
-        key: [u8; 32],
-    },
-}
-
-/// A post or a checkpoint of this device at one relay: the community, the
-/// relay, and the hash of the record.
-type PostKey = ([u8; 32], [u8; 32], [u8; 32]);
-
-/// The least time between two fetches of the challenges, in seconds.
-const CHALLENGE_REFETCH: u64 = 30;
-
-/// How long a genesis record that a relay refused waits before it goes
-/// again: a refused proof of work waits for the next challenge.
-const GENESIS_RETRY: u64 = 30;
-
 /// What one command of the group task belongs to.
 enum GroupWork {
     /// A `GNEW` of one replica of a group.
@@ -1306,74 +1142,34 @@ enum GroupWork {
 }
 
 impl Inner {
-    /// Fetches the challenges of the relays from the pinned ingress in a
-    /// task of the run, at most once in `CHALLENGE_REFETCH` seconds.
-    fn fetch_challenges(&mut self) {
+    /// The `Admission` of a command that creates state at `relay_id`: the
+    /// solution of its challenge when this device holds one from a fetch
+    /// inside `POW_CHALLENGE_PERIOD` (`ABU-014`, `ABU-069`), and none else.
+    #[allow(dead_code)]
+    fn admission_for(&self, relay_id: &[u8; 32]) -> Vec<u8> {
+        use umbra_wire::admission::{Admission, AdmissionKind};
         let now = unix_now();
-        if now.saturating_sub(self.challenges_asked_at) < CHALLENGE_REFETCH {
-            return;
-        }
-        let Some(spawner) = self.spawner.clone() else {
-            return;
-        };
-        let Some(guard) = self.guard.and_then(|guard| {
-            self.relays
-                .iter()
-                .find(|relay| relay.relay_id.as_slice() == guard.as_slice())
-                .cloned()
-        }) else {
-            return;
-        };
-        let Ok(address) = <[u8; 4]>::try_from(guard.ipv4.as_slice()) else {
-            return;
-        };
-        let dial = Dial {
-            host: guard.host.clone(),
-            addr_v4: Some(address),
-            addr_v6: None,
-            port: guard.port,
-        };
-        let tls = match &self.root_ca_path {
-            Some(path) => native::tls_config_with_root_file(path),
-            None => native::tls_config(),
-        };
-        let Ok(tls) = tls else {
-            return;
-        };
-        self.challenges_asked_at = now;
-        let me = self.me.clone();
-        spawner.spawn(async move {
-            if let Ok(bundle) = native::fetch_challenges(&dial, tls).await {
-                if let Some(handle) = me.upgrade() {
-                    handle.take_challenges(&bundle);
-                }
-            }
+        let solved = self.challenges.get(relay_id, now).and_then(|challenge| {
+            let fetched = umbra_core::abuse::pow::Fetched {
+                challenge: challenge.clone(),
+                fetched_at: self.challenges_at,
+            };
+            fetched.solve(now, &mut OsRng).ok()
         });
+        let mut body = [0u8; umbra_core::abuse::pow::SOLUTION_LEN];
+        let admission = match solved.and_then(|solution| solution.encode(&mut body).ok()) {
+            Some(used) => Admission {
+                kind: AdmissionKind::Pow,
+                body: body.get(..used).unwrap_or_default(),
+            },
+            None => Admission::NONE,
+        };
+        let mut out = vec![0u8; 3 + body.len()];
+        let used = admission.encode(&mut out).unwrap_or(0);
+        out.truncate(used);
+        out
     }
-}
 
-/// The encoded `Admission` of a command that creates state at a relay: the
-/// solution of its challenge when this device holds one from a fetch
-/// inside `POW_CHALLENGE_PERIOD` (`ABU-014`, `ABU-069`), and none else. A
-/// solve takes seconds on a slow phone, thus no lock is held here.
-fn admission_of(fetched: Option<umbra_core::abuse::pow::Fetched>, now: u64) -> Vec<u8> {
-    use umbra_wire::admission::{Admission, AdmissionKind};
-    let solved = fetched.and_then(|fetched| fetched.solve(now, &mut OsRng).ok());
-    let mut body = [0u8; umbra_core::abuse::pow::SOLUTION_LEN];
-    let admission = match solved.and_then(|solution| solution.encode(&mut body).ok()) {
-        Some(used) => Admission {
-            kind: AdmissionKind::Pow,
-            body: body.get(..used).unwrap_or_default(),
-        },
-        None => Admission::NONE,
-    };
-    let mut out = vec![0u8; 3 + body.len()];
-    let used = admission.encode(&mut out).unwrap_or(0);
-    out.truncate(used);
-    out
-}
-
-impl Inner {
     /// Gives each file job of the store to the transfer task (Part 13
     /// §13.8). With no run of the network the jobs wait in the store.
     fn pump_transfers(&mut self) {
@@ -1733,415 +1529,6 @@ impl Inner {
             }
         });
         Some(commands)
-    }
-
-    /// Sends one command to the community task, and starts the task when
-    /// the link of an earlier run ended.
-    fn send_community(&mut self, command: CommunityCommand) {
-        let command = match &self.communities {
-            Some(sender) => match sender.send(command) {
-                Ok(()) => return,
-                Err(refused) => refused.0,
-            },
-            None => command,
-        };
-        self.communities = self.start_communities();
-        if let Some(sender) = &self.communities {
-            let _ = sender.send(command);
-        }
-    }
-
-    fn start_communities(&mut self) -> Option<mpsc::UnboundedSender<CommunityCommand>> {
-        let spawner = self.spawner.clone()?;
-        let guard_id = self.guard?;
-        let guard = self
-            .relays
-            .iter()
-            .find(|relay| relay.relay_id.as_slice() == guard_id.as_slice())?;
-        let dial = Dial {
-            host: guard.host.clone(),
-            addr_v4: Some(guard.ipv4.as_slice().try_into().ok()?),
-            addr_v6: None,
-            port: guard.port,
-        };
-        let ingress = relay_info(guard).ok()?;
-        let mut candidates = Vec::new();
-        for relay in self.relays.iter().filter(|relay| relay.layer != 1) {
-            candidates.push(relay_info(relay).ok()?);
-        }
-        let tls = match &self.root_ca_path {
-            Some(path) => native::tls_config_with_root_file(path),
-            None => native::tls_config(),
-        }
-        .ok()?;
-        let node =
-            ClientNode::for_communities(ingress, candidates, self.client.root_identity().ok()?);
-        let (commands, task_commands) = mpsc::unbounded_channel();
-        let (task_updates, mut updates) = mpsc::unbounded_channel();
-        spawner.spawn(run_communities(
-            node,
-            dial,
-            tls,
-            task_commands,
-            task_updates,
-        ));
-        let me = self.me.clone();
-        spawner.spawn(async move {
-            while let Some(update) = updates.recv().await {
-                let Some(handle) = me.upgrade() else {
-                    break;
-                };
-                handle.on_community_update(update);
-            }
-        });
-        Some(commands)
-    }
-
-    /// Sends each pull of a community that is due (`COM-174`).
-    fn pump_communities(&mut self) {
-        if self.bridge.is_none() {
-            return;
-        }
-        let Ok(pulls) = self.client.take_community_pulls(unix_now(), &mut OsRng) else {
-            return;
-        };
-        for pull in pulls {
-            self.send_pull(pull);
-        }
-    }
-
-    fn send_pull(&mut self, pull: CommunityPull) {
-        self.next_community_tag = self.next_community_tag.wrapping_add(1);
-        let tag = self.next_community_tag;
-        let command = CommunityCommand::Pull {
-            tag,
-            relay: pull.relay,
-            community_id: pull.community_id,
-            request: pull.request.clone(),
-        };
-        self.community_tags.insert(tag, CommunityWork::Pull(pull));
-        self.send_community(command);
-    }
-
-    /// Takes one answer of the community task into the store.
-    fn end_community(&mut self, update: CommunityUpdate) {
-        match update {
-            CommunityUpdate::Page { tag, page, .. } => {
-                let Some(CommunityWork::Pull(pull)) = self.community_tags.remove(&tag) else {
-                    return;
-                };
-                // COM-194: a full page pulls again in the same session.
-                if let Ok(Some(next)) =
-                    self.client
-                        .on_community_page(&pull, &page, unix_now(), &mut OsRng)
-                {
-                    self.send_pull(next);
-                }
-                // COM-091: the first backfill follows the first page.
-                self.pump_communities();
-            }
-            CommunityUpdate::Published { tag, .. } => {
-                let work = self.community_tags.remove(&tag);
-                if let Some(CommunityWork::Post {
-                    community_id,
-                    relay,
-                    key,
-                }) = &work
-                {
-                    let _ = self.client.community_published(
-                        community_id,
-                        key,
-                        relay,
-                        false,
-                        &mut OsRng,
-                    );
-                }
-                if let Some(CommunityWork::Genesis {
-                    community_id,
-                    relay,
-                    is_meta,
-                }) = work
-                {
-                    // COM-407: each relay holds both, thus the second owner
-                    // learns of the community, and the pulls start.
-                    if let Ok(true) = self.client.genesis_acked(
-                        &community_id,
-                        &relay,
-                        is_meta,
-                        unix_now(),
-                        &mut OsRng,
-                    ) {
-                        self.flush_outgoing();
-                        self.pump_communities();
-                    }
-                    self.pump_forming();
-                }
-            }
-            // A pull that failed or did not leave goes again at its next
-            // interval. A refused genesis record waits, and one that did
-            // not leave goes again at once (`COM-201`).
-            CommunityUpdate::Failed { tag, reason } => match self.community_tags.remove(&tag) {
-                Some(CommunityWork::Genesis {
-                    community_id,
-                    relay,
-                    is_meta,
-                }) => {
-                    let fault = match reason {
-                        Some(reason) => format!("{reason:?}"),
-                        None => "Unreachable".into(),
-                    };
-                    self.genesis_faults.insert(community_id, fault);
-                    self.genesis_backoff.insert(
-                        (community_id, relay, is_meta),
-                        unix_now().saturating_add(GENESIS_RETRY),
-                    );
-                }
-                // COM-201: a `NACK` ends the resends at that relay, but for
-                // a bound that a later retry can pass. A relay that no
-                // circuit reached waits too.
-                Some(CommunityWork::Post {
-                    community_id,
-                    relay,
-                    key,
-                }) => {
-                    let is_final = matches!(
-                        reason,
-                        Some(
-                            umbra_queue::Reject::Rejected
-                                | umbra_queue::Reject::Admission
-                                | umbra_queue::Reject::Version
-                        )
-                    );
-                    if is_final {
-                        let _ = self.client.community_published(
-                            &community_id,
-                            &key,
-                            &relay,
-                            true,
-                            &mut OsRng,
-                        );
-                    } else {
-                        self.post_backoff.insert(
-                            (community_id, relay, key),
-                            unix_now().saturating_add(GENESIS_RETRY),
-                        );
-                    }
-                }
-                _ => {}
-            },
-            CommunityUpdate::Unsent { tag } => {
-                if let Some(CommunityWork::Genesis { .. } | CommunityWork::Post { .. }) =
-                    self.community_tags.remove(&tag)
-                {
-                    self.pump_forming();
-                    self.pump_posts();
-                }
-            }
-            CommunityUpdate::Reset => {}
-            CommunityUpdate::Ended => {
-                self.communities = None;
-                self.community_tags.clear();
-            }
-        }
-    }
-
-    /// The work of a creation: the report queue of each role that waits
-    /// for one, each genesis record that a relay has not taken, and the end
-    /// of each report queue that a decline left.
-    fn pump_forming(&mut self) {
-        let Some(running) = self.bridge.as_ref() else {
-            return;
-        };
-        for queue in self.client.take_ended_queues() {
-            let _ = running.end_notify_queue(queue);
-        }
-        if let Ok(due) = self.client.forming_queues_due() {
-            for community_id in due {
-                if self
-                    .report_pending
-                    .values()
-                    .any(|held| *held == community_id)
-                {
-                    continue;
-                }
-                self.next_report_tag = self.next_report_tag.wrapping_add(1);
-                if running.make_report_queue(self.next_report_tag).is_ok() {
-                    self.report_pending
-                        .insert(self.next_report_tag, community_id);
-                }
-            }
-        }
-        let Ok(sends) = self.client.genesis_sends() else {
-            return;
-        };
-        let now = unix_now();
-        self.genesis_backoff.retain(|_, until| *until > now);
-        // ABU-069: a challenge serves for one period from its fetch, thus a
-        // roster that needs one fetches them again when they aged.
-        let needs_fresh = now.saturating_sub(self.challenges_at)
-            >= umbra_core::abuse::POW_CHALLENGE_PERIOD.saturating_sub(CHALLENGE_REFETCH);
-        if needs_fresh && sends.iter().any(|send| !send.is_meta) {
-            self.fetch_challenges();
-        }
-        let mut to_solve = Vec::new();
-        for send in sends {
-            let key = (send.community_id, send.relay, send.is_meta);
-            let in_flight = self.community_tags.values().any(|work| {
-                matches!(work, CommunityWork::Genesis { community_id, relay, is_meta }
-                    if (*community_id, *relay, *is_meta) == key)
-            });
-            if in_flight || self.genesis_backoff.contains_key(&key) {
-                continue;
-            }
-            self.next_community_tag = self.next_community_tag.wrapping_add(1);
-            let tag = self.next_community_tag;
-            self.community_tags.insert(
-                tag,
-                CommunityWork::Genesis {
-                    community_id: send.community_id,
-                    relay: send.relay,
-                    is_meta: send.is_meta,
-                },
-            );
-            // COM-205: the genesis roster takes the proof of work of the
-            // challenge of that relay, and the metadata takes none.
-            if send.is_meta {
-                let mut payload = send.record;
-                payload.extend_from_slice(&admission_of(None, now));
-                self.send_community(CommunityCommand::Publish {
-                    tag,
-                    relay: send.relay,
-                    community_id: send.community_id,
-                    payload,
-                });
-            } else {
-                let fetched = self.challenges.get(&send.relay, now).map(|challenge| {
-                    umbra_core::abuse::pow::Fetched {
-                        challenge: challenge.clone(),
-                        fetched_at: self.challenges_at,
-                    }
-                });
-                to_solve.push((tag, send, fetched));
-            }
-        }
-        // ABU-008: a solve takes seconds on a slow phone, thus it runs on a
-        // thread of its own and holds no lock of the client.
-        if to_solve.is_empty() {
-            return;
-        }
-        let Some(spawner) = self.spawner.clone() else {
-            return;
-        };
-        let me = self.me.clone();
-        spawner.spawn_blocking(move || {
-            let now = unix_now();
-            let solved: Vec<(u64, GenesisSend, Vec<u8>)> = to_solve
-                .into_iter()
-                .map(|(tag, send, fetched)| (tag, send, admission_of(fetched, now)))
-                .collect();
-            if let Some(handle) = me.upgrade() {
-                let mut inner = locked(&handle.inner);
-                for (tag, send, admission) in solved {
-                    // A run that ended in the meantime dropped the tag.
-                    if !inner.community_tags.contains_key(&tag) {
-                        continue;
-                    }
-                    let mut payload = send.record;
-                    payload.extend_from_slice(&admission);
-                    inner.send_community(CommunityCommand::Publish {
-                        tag,
-                        relay: send.relay,
-                        community_id: send.community_id,
-                        payload,
-                    });
-                }
-            }
-        });
-    }
-
-    /// Sends each post and checkpoint of this device that a relay has not
-    /// taken, with no admission (Part 14 `ABU-049`).
-    fn pump_posts(&mut self) {
-        if self.bridge.is_none() {
-            return;
-        }
-        let Ok(sends) = self.client.community_publish_sends() else {
-            return;
-        };
-        let now = unix_now();
-        self.post_backoff.retain(|_, until| *until > now);
-        for send in sends {
-            let key = (send.community_id, send.relay, send.key);
-            let in_flight = self.community_tags.values().any(|work| {
-                matches!(work, CommunityWork::Post { community_id, relay, key: held }
-                    if (*community_id, *relay, *held) == key)
-            });
-            if in_flight || self.post_backoff.contains_key(&key) {
-                continue;
-            }
-            let mut none = vec![0u8; 3];
-            let used = umbra_wire::admission::Admission::NONE
-                .encode(&mut none)
-                .unwrap_or(0);
-            none.truncate(used);
-            let mut payload = send.record;
-            payload.extend_from_slice(&none);
-            self.next_community_tag = self.next_community_tag.wrapping_add(1);
-            let tag = self.next_community_tag;
-            self.community_tags.insert(
-                tag,
-                CommunityWork::Post {
-                    community_id: send.community_id,
-                    relay: send.relay,
-                    key: send.key,
-                },
-            );
-            self.send_community(CommunityCommand::Publish {
-                tag,
-                relay: send.relay,
-                community_id: send.community_id,
-                payload,
-            });
-        }
-    }
-
-    /// The relays of a new community: one relay at the end of a chain for
-    /// each operator, up to `COMMUNITY_MIN_RELAYS` (`COM-254`).
-    fn community_relays(&self) -> Vec<[u8; 32]> {
-        let mut operators: Vec<&str> = Vec::new();
-        let mut out = Vec::new();
-        for relay in self.relays.iter().filter(|relay| relay.layer == 3) {
-            if out.len() >= umbra_core::community::COMMUNITY_MIN_RELAYS
-                || operators.contains(&relay.operator.as_str())
-            {
-                continue;
-            }
-            if let Ok(relay_id) = <[u8; 32]>::try_from(relay.relay_id.as_slice()) {
-                operators.push(relay.operator.as_str());
-                out.push(relay_id);
-            }
-        }
-        out
-    }
-
-    /// The relays of the relay set that the hints of a link name
-    /// (`COM-246`), each one a relay at the end of a chain.
-    fn resolve_hints(&self, hints: &[[u8; 12]]) -> Vec<[u8; 32]> {
-        let mut out = Vec::new();
-        for hint in hints {
-            let found = self
-                .relays
-                .iter()
-                .filter(|relay| relay.layer == 3)
-                .filter_map(|relay| <[u8; 32]>::try_from(relay.relay_id.as_slice()).ok())
-                .find(|relay_id| umbra_core::attach::seal::relay_hint(relay_id) == *hint);
-            if let Some(relay_id) = found {
-                if !out.contains(&relay_id) {
-                    out.push(relay_id);
-                }
-            }
-        }
-        out
     }
 
     /// Gives each record of this device to the send path at once.
@@ -2894,7 +2281,6 @@ impl Inner {
                     message: Arc::new(MsgHandle(message)),
                 },
                 Event::GroupOffer { .. } => FfiEvent::GroupOffer,
-                Event::CommunityOffer { .. } => FfiEvent::CommunityOffer,
                 Event::GroupJoiner { .. } => FfiEvent::GroupJoiner,
                 // The snapshot of an admit is already on its way: the
                 // commit of the record asked for it.
@@ -3112,14 +2498,6 @@ fn handle_of(database_path: String, client: Client<SqliteBackend, ForeignElement
             group_tags: BTreeMap::new(),
             group_sent: BTreeMap::new(),
             next_group_tag: 0,
-            communities: None,
-            community_tags: BTreeMap::new(),
-            next_community_tag: 0,
-            report_pending: BTreeMap::new(),
-            next_report_tag: 0,
-            genesis_backoff: BTreeMap::new(),
-            genesis_faults: BTreeMap::new(),
-            post_backoff: BTreeMap::new(),
             group_reading: BTreeSet::new(),
             group_lost: BTreeSet::new(),
             group_refusals: BTreeSet::new(),
@@ -3136,7 +2514,6 @@ fn handle_of(database_path: String, client: Client<SqliteBackend, ForeignElement
             run: 0,
             challenges: umbra_core::abuse::pow::ChallengeBook::default(),
             challenges_at: 0,
-            challenges_asked_at: 0,
         }),
         changed: Condvar::new(),
         runtime: Mutex::new(None),
@@ -3222,28 +2599,6 @@ impl Handle {
         self.changed.notify_all();
     }
 
-    fn moderate(
-        &self,
-        community_id: Vec<u8>,
-        request: &crate::client::ModerationRequest,
-    ) -> Result<(), FfiError> {
-        let community_id =
-            <[u8; 32]>::try_from(community_id.as_slice()).map_err(|_| FfiError::Malformed)?;
-        let mut inner = locked(&self.inner);
-        inner
-            .client
-            .moderate_community(&community_id, request, unix_now(), &mut OsRng)?;
-        inner.pump_posts();
-        drop(inner);
-        self.changed.notify_all();
-        Ok(())
-    }
-
-    fn on_community_update(&self, update: CommunityUpdate) {
-        locked(&self.inner).end_community(update);
-        self.changed.notify_all();
-    }
-
     fn on_update(&self, run: u64, update: Update) {
         let mut inner = locked(&self.inner);
         // The end of a run that a later connect replaced must not end the
@@ -3251,8 +2606,6 @@ impl Handle {
         if inner.run != run {
             return;
         }
-        // The pulls of the posts that reports name (`COM-283`).
-        let mut report_pulls = Vec::new();
         let Inner {
             client,
             bridge,
@@ -3262,7 +2615,6 @@ impl Handle {
             circuits,
             circuits_changed,
             notify_pending,
-            report_pending,
             rotated_in_run,
             silent,
             dead_work,
@@ -3342,33 +2694,6 @@ impl Handle {
                     );
                 }
             }
-            // COM-281: a report of a member reached a report queue of this
-            // device.
-            Update::Report { record, .. } => {
-                if let Ok(Some(pull)) = client.on_community_report(record, unix_now(), &mut OsRng) {
-                    report_pulls.push(pull);
-                }
-            }
-            // COM-401, COM-404: the report queue of a role exists, thus the
-            // exchange of the second owner goes on.
-            Update::ReportQueue {
-                tag,
-                recipient_id,
-                address,
-            } => {
-                if let Some(community_id) = report_pending.remove(tag) {
-                    let _ = client.forming_queue_made(
-                        &community_id,
-                        *recipient_id,
-                        address.clone(),
-                        unix_now_ms(),
-                        &mut OsRng,
-                    );
-                    if let Some(running) = bridge.as_mut() {
-                        let _ = running.flush(client, &mut OsRng);
-                    }
-                }
-            }
             // NTF-113: the binding goes sealed to that key.
             Update::NotifyKey {
                 recipient_id,
@@ -3431,31 +2756,15 @@ impl Handle {
             inner.transfers = None;
             inner.groups = None;
             inner.group_reading.clear();
-            inner.communities = None;
-            inner.community_tags.clear();
         }
         // A record with a descriptor asks for its file.
         inner.pump_transfers();
         inner.pump_groups();
         inner.pump_ndr();
-        inner.pump_forming();
-        for pull in report_pulls {
-            inner.send_pull(pull);
-        }
-        // A community that formed from an exchange pulls at once.
-        if inner.client.take_formed() {
-            inner.pump_communities();
-        }
         if is_tick {
             inner.pump_dead_channels();
             inner.pump_backup();
-            inner.pump_communities();
-            // COM-046: a post with no checkpoint for `SIG_MAX_AGE` gets one.
-            let _ = inner
-                .client
-                .community_checkpoints_due(unix_now(), &mut OsRng);
         }
-        inner.pump_posts();
         let work = core::mem::take(&mut inner.dead_work);
         for step in work {
             inner.send_dead_work(step);
@@ -3749,16 +3058,13 @@ impl Handle {
                 }
             }
             // Each notify queue of a group takes its digests again, and one
-            // that no group names ends (`NTF-133`). A report queue of a
-            // community role is no notify queue, and this rule keeps it.
+            // that no group names ends (`NTF-133`).
             let named = client.group_notify_queues()?;
             for state in &stored.notify_queues {
                 let id = node
                     .restore_notify_queue(state)
                     .map_err(|_| FfiError::Integrity)?;
-                let is_report =
-                    state.first() == Some(&umbra_core::session::node::REPORT_STORED_VERSION);
-                if !is_report && !named.contains(&id) {
+                if !named.contains(&id) {
                     let _ = node.end_notify_queue(&id, &mut OsRng);
                     let _ = client.unbind_queue(&id, &mut OsRng);
                 }
@@ -3809,7 +3115,46 @@ impl Handle {
     /// carrier of the manifest, on the path of the manifest fetch and on no
     /// session (`ABU-065`, `ABU-066`, `ABU-105`).
     fn fetch_challenges(self: &Arc<Self>) {
-        locked(&self.inner).fetch_challenges();
+        let (spawner, dial, tls) = {
+            let inner = locked(&self.inner);
+            let Some(spawner) = inner.spawner.clone() else {
+                return;
+            };
+            let Some(guard) = inner.guard.and_then(|guard| {
+                inner
+                    .relays
+                    .iter()
+                    .find(|relay| relay.relay_id.as_slice() == guard.as_slice())
+                    .cloned()
+            }) else {
+                return;
+            };
+            let Ok(address) = <[u8; 4]>::try_from(guard.ipv4.as_slice()) else {
+                return;
+            };
+            let dial = Dial {
+                host: guard.host.clone(),
+                addr_v4: Some(address),
+                addr_v6: None,
+                port: guard.port,
+            };
+            let tls = match &inner.root_ca_path {
+                Some(path) => native::tls_config_with_root_file(path),
+                None => native::tls_config(),
+            };
+            let Ok(tls) = tls else {
+                return;
+            };
+            (spawner, dial, tls)
+        };
+        let me = Arc::downgrade(self);
+        spawner.spawn(async move {
+            if let Ok(bundle) = native::fetch_challenges(&dial, tls).await {
+                if let Some(handle) = me.upgrade() {
+                    handle.take_challenges(&bundle);
+                }
+            }
+        });
     }
 
     /// Takes each challenge of a bundle under the identity key of its relay
@@ -3833,8 +3178,6 @@ impl Handle {
             }
         }
         inner.challenges_at = now;
-        // A genesis that waited for a challenge goes now.
-        inner.pump_forming();
     }
 
     /// The count of the relays whose challenge this device holds.
@@ -4519,388 +3862,6 @@ impl Handle {
         let file = SqliteBackend::open(&self.database_path).map_err(|_| FfiError::Storage)?;
         file.set_header(&header).map_err(|_| FfiError::Storage)?;
         inner.client.set_header(header);
-        Ok(())
-    }
-
-    /// Joins the community of a link of Part 12 §12.7, and pulls it from
-    /// the relays that its hints name. It gives the `community_id`.
-    pub fn join_community(&self, link: String) -> Result<Vec<u8>, FfiError> {
-        let link = umbra_core::community::link::CommunityLink::parse(link.trim())
-            .map_err(|_| FfiError::Malformed)?;
-        let mut inner = locked(&self.inner);
-        let relays = inner.resolve_hints(&link.hints);
-        if relays.is_empty() {
-            return Err(FfiError::Malformed);
-        }
-        let community_id = inner
-            .client
-            .join_community(&link, relays, unix_now(), &mut OsRng)?;
-        inner.pump_communities();
-        drop(inner);
-        self.changed.notify_all();
-        Ok(community_id.to_vec())
-    }
-
-    /// Starts a community with the name of its first metadata and one
-    /// contact as its second owner (Part 12 §12.5.5). The community forms
-    /// when the contact accepts and each relay takes the genesis. It gives
-    /// the `community_id`.
-    pub fn create_community(&self, name: String, co_owner: Vec<u8>) -> Result<Vec<u8>, FfiError> {
-        let co_owner = conversation_of(&co_owner)?;
-        let mut inner = locked(&self.inner);
-        let relays = inner.community_relays();
-        let community_id = inner
-            .client
-            .create_community(&name, co_owner, relays, &mut OsRng)?;
-        inner.pump_forming();
-        drop(inner);
-        self.changed.notify_all();
-        Ok(community_id.to_vec())
-    }
-
-    /// The communities in their creation.
-    pub fn forming_communities(&self) -> Result<Vec<FfiFormingCommunity>, FfiError> {
-        let inner = locked(&self.inner);
-        Ok(inner
-            .client
-            .forming_communities()?
-            .into_iter()
-            .map(|forming| FfiFormingCommunity {
-                last_fault: inner.genesis_faults.get(&forming.community_id).cloned(),
-                community_id: forming.community_id.to_vec(),
-                name: forming.name,
-                contact: forming.contact.0.to_vec(),
-                is_creator: forming.is_creator,
-                phase: forming.phase,
-                relays_done: forming.relays_done,
-            })
-            .collect())
-    }
-
-    /// The offers of the co-ownership of a community that wait for the
-    /// user.
-    pub fn community_offers(&self) -> Result<Vec<FfiCommunityOffer>, FfiError> {
-        Ok(locked(&self.inner)
-            .client
-            .community_offers()?
-            .into_iter()
-            .map(|offer| FfiCommunityOffer {
-                community_id: offer.community_id.to_vec(),
-                name: offer.name,
-                from: offer.from.0.to_vec(),
-            })
-            .collect())
-    }
-
-    /// Accepts an offer of the co-ownership of a community (`COM-404`).
-    pub fn accept_community_offer(&self, community_id: Vec<u8>) -> Result<(), FfiError> {
-        let community_id =
-            <[u8; 32]>::try_from(community_id.as_slice()).map_err(|_| FfiError::Malformed)?;
-        let mut inner = locked(&self.inner);
-        inner
-            .client
-            .accept_community_offer(&community_id, &mut OsRng)?;
-        inner.pump_forming();
-        drop(inner);
-        self.changed.notify_all();
-        Ok(())
-    }
-
-    /// Declines an offer of the co-ownership of a community.
-    pub fn decline_community_offer(&self, community_id: Vec<u8>) -> Result<(), FfiError> {
-        let community_id =
-            <[u8; 32]>::try_from(community_id.as_slice()).map_err(|_| FfiError::Malformed)?;
-        let mut inner = locked(&self.inner);
-        inner
-            .client
-            .decline_community_offer(&community_id, unix_now_ms(), &mut OsRng)?;
-        inner.flush_outgoing();
-        drop(inner);
-        self.changed.notify_all();
-        Ok(())
-    }
-
-    /// An empty draft for a post in a community. It names no conversation.
-    pub fn new_community_draft(&self) -> Arc<DraftHandle> {
-        Arc::new(DraftHandle(Mutex::new(Some(Draft::new(
-            crate::ConversationId([0; 16]),
-        )))))
-    }
-
-    /// Posts the text of a draft in a community (§12.4.1). The post shows
-    /// at once, and it goes to each relay of the community. The handle of
-    /// the draft is empty after this call.
-    pub fn post_to_community(
-        &self,
-        community_id: Vec<u8>,
-        draft: Arc<DraftHandle>,
-        reply_to: Option<Vec<u8>>,
-    ) -> Result<(), FfiError> {
-        let community_id =
-            <[u8; 32]>::try_from(community_id.as_slice()).map_err(|_| FfiError::Malformed)?;
-        let reply_to = reply_to
-            .map(|key| <[u8; 32]>::try_from(key.as_slice()).map_err(|_| FfiError::Malformed))
-            .transpose()?;
-        let draft = locked(&draft.0).take().ok_or(FfiError::NotFound)?;
-        if draft.has_file() {
-            return Err(FfiError::Malformed);
-        }
-        let mut inner = locked(&self.inner);
-        inner.client.post_to_community(
-            &community_id,
-            draft.text(),
-            reply_to.as_ref(),
-            unix_now(),
-            &mut OsRng,
-        )?;
-        drop(draft);
-        inner.pump_posts();
-        drop(inner);
-        self.changed.notify_all();
-        Ok(())
-    }
-
-    /// The posts of a community, oldest first.
-    pub fn community_posts(
-        &self,
-        community_id: Vec<u8>,
-    ) -> Result<Vec<FfiCommunityPost>, FfiError> {
-        let community_id =
-            <[u8; 32]>::try_from(community_id.as_slice()).map_err(|_| FfiError::Malformed)?;
-        Ok(locked(&self.inner)
-            .client
-            .community_posts(&community_id, unix_now())?
-            .into_iter()
-            .map(|post| FfiCommunityPost {
-                key: post.key.to_vec(),
-                author: post.author.to_vec(),
-                index: post.index,
-                at: post.at,
-                is_settled: post.is_settled,
-                is_own: post.is_own,
-                is_author_banned: post.is_author_banned,
-                is_repost: post.is_repost,
-                reply_to: post.reply_to.map(|key| key.to_vec()),
-                reactions: post
-                    .reactions
-                    .into_iter()
-                    .map(|(emoji, count, is_mine)| FfiReactionCount {
-                        emoji,
-                        count,
-                        is_mine,
-                    })
-                    .collect(),
-            })
-            .collect())
-    }
-
-    /// Adds or takes back a reaction of this device to a community post
-    /// (`COM-322`). The owner dial can turn reactions off (`COM-332`).
-    pub fn react_to_community_post(
-        &self,
-        community_id: Vec<u8>,
-        key: Vec<u8>,
-        emoji: String,
-        adds: bool,
-    ) -> Result<(), FfiError> {
-        let community_id =
-            <[u8; 32]>::try_from(community_id.as_slice()).map_err(|_| FfiError::Malformed)?;
-        let key = <[u8; 32]>::try_from(key.as_slice()).map_err(|_| FfiError::Malformed)?;
-        let mut inner = locked(&self.inner);
-        inner.client.react_to_community_post(
-            &community_id,
-            &key,
-            &emoji,
-            adds,
-            unix_now(),
-            &mut OsRng,
-        )?;
-        inner.pump_posts();
-        drop(inner);
-        self.changed.notify_all();
-        Ok(())
-    }
-
-    /// Writes the text of one post into the sink of the platform, which
-    /// holds it for one frame (`IMP-037`).
-    pub fn render_community_post(
-        &self,
-        community_id: Vec<u8>,
-        key: Vec<u8>,
-        sink: Arc<dyn TextSink>,
-    ) -> Result<(), FfiError> {
-        let community_id =
-            <[u8; 32]>::try_from(community_id.as_slice()).map_err(|_| FfiError::Malformed)?;
-        let key = <[u8; 32]>::try_from(key.as_slice()).map_err(|_| FfiError::Malformed)?;
-        let mut sink = ForeignSink(sink);
-        Ok(locked(&self.inner)
-            .client
-            .render_community_post(&community_id, &key, &mut sink)?)
-    }
-
-    /// Removes a post of a community, under the owner role of this device
-    /// (§12.5.2). The relays serve a stub in its place (`COM-352`).
-    pub fn remove_community_post(
-        &self,
-        community_id: Vec<u8>,
-        key: Vec<u8>,
-    ) -> Result<(), FfiError> {
-        let key = <[u8; 32]>::try_from(key.as_slice()).map_err(|_| FfiError::Malformed)?;
-        self.moderate(
-            community_id,
-            &crate::client::ModerationRequest::RemovePost { key },
-        )
-    }
-
-    /// Bans an author of a community, and removes each of its posts that
-    /// this device holds when `remove_history` holds (`COM-297`).
-    pub fn ban_community_author(
-        &self,
-        community_id: Vec<u8>,
-        author: Vec<u8>,
-        remove_history: bool,
-    ) -> Result<(), FfiError> {
-        let author = <[u8; 32]>::try_from(author.as_slice()).map_err(|_| FfiError::Malformed)?;
-        self.moderate(
-            community_id,
-            &crate::client::ModerationRequest::Ban {
-                author,
-                remove_history,
-            },
-        )
-    }
-
-    /// Ends the ban of an author of a community.
-    pub fn unban_community_author(
-        &self,
-        community_id: Vec<u8>,
-        author: Vec<u8>,
-    ) -> Result<(), FfiError> {
-        let author = <[u8; 32]>::try_from(author.as_slice()).map_err(|_| FfiError::Malformed)?;
-        self.moderate(
-            community_id,
-            &crate::client::ModerationRequest::Unban { author },
-        )
-    }
-
-    /// Reports a post of a community to one role holder of its roster
-    /// (§12.5.3). `reason` is the byte of the table, and the draft holds
-    /// the note, or nothing. The report names no reporter (`COM-272`).
-    pub fn report_community_post(
-        &self,
-        community_id: Vec<u8>,
-        key: Vec<u8>,
-        reason: u8,
-        note: Arc<DraftHandle>,
-    ) -> Result<(), FfiError> {
-        let community_id =
-            <[u8; 32]>::try_from(community_id.as_slice()).map_err(|_| FfiError::Malformed)?;
-        let key = <[u8; 32]>::try_from(key.as_slice()).map_err(|_| FfiError::Malformed)?;
-        let note = locked(&note.0).take().ok_or(FfiError::NotFound)?;
-        let inner = locked(&self.inner);
-        let running = inner.bridge.as_ref().ok_or(FfiError::Offline)?;
-        let send = inner.client.prepare_community_report(
-            &community_id,
-            &key,
-            reason,
-            note.text(),
-            unix_now_ms(),
-            &mut OsRng,
-        )?;
-        drop(note);
-        running
-            .send_report(send.address, send.record)
-            .map_err(FfiError::from)
-    }
-
-    /// The reports of a community that a role holder of this device holds,
-    /// each one with its post checked (`COM-283`, `COM-290`).
-    pub fn community_reports(
-        &self,
-        community_id: Vec<u8>,
-    ) -> Result<Vec<FfiCommunityReport>, FfiError> {
-        let community_id =
-            <[u8; 32]>::try_from(community_id.as_slice()).map_err(|_| FfiError::Malformed)?;
-        Ok(locked(&self.inner)
-            .client
-            .community_reports(&community_id, unix_now())?
-            .into_iter()
-            .map(|report| FfiCommunityReport {
-                id: report.id.to_vec(),
-                post_key: report.post_key.to_vec(),
-                reason: report.reason,
-                has_note: report.has_note,
-                at: report.at,
-            })
-            .collect())
-    }
-
-    /// Writes the note of a report into the sink of the platform.
-    pub fn render_community_report_note(
-        &self,
-        community_id: Vec<u8>,
-        id: Vec<u8>,
-        sink: Arc<dyn TextSink>,
-    ) -> Result<(), FfiError> {
-        let community_id =
-            <[u8; 32]>::try_from(community_id.as_slice()).map_err(|_| FfiError::Malformed)?;
-        let id = <[u8; 32]>::try_from(id.as_slice()).map_err(|_| FfiError::Malformed)?;
-        let mut sink = ForeignSink(sink);
-        Ok(locked(&self.inner).client.render_community_report_note(
-            &community_id,
-            &id,
-            &mut sink,
-        )?)
-    }
-
-    /// Dismisses a report.
-    pub fn dismiss_community_report(
-        &self,
-        community_id: Vec<u8>,
-        id: Vec<u8>,
-    ) -> Result<(), FfiError> {
-        let community_id =
-            <[u8; 32]>::try_from(community_id.as_slice()).map_err(|_| FfiError::Malformed)?;
-        let id = <[u8; 32]>::try_from(id.as_slice()).map_err(|_| FfiError::Malformed)?;
-        Ok(locked(&self.inner)
-            .client
-            .dismiss_community_report(&community_id, &id)?)
-    }
-
-    /// Each community of this device.
-    pub fn communities(&self) -> Result<Vec<FfiCommunity>, FfiError> {
-        Ok(locked(&self.inner)
-            .client
-            .communities()?
-            .into_iter()
-            .map(|info| FfiCommunity {
-                community_id: info.community_id.to_vec(),
-                name: info.name,
-                relays: u32::try_from(info.relays.len()).unwrap_or(u32::MAX),
-                records: u32::try_from(info.records).unwrap_or(u32::MAX),
-                is_owner: info.is_owner,
-                joined_at: info.joined_at,
-                pending: u32::try_from(info.pending).unwrap_or(u32::MAX),
-                reactions_off: info.reactions_off,
-            })
-            .collect())
-    }
-
-    /// The link of a community, to share (`COM-245`).
-    pub fn community_link(&self, community_id: Vec<u8>) -> Result<String, FfiError> {
-        let community_id =
-            <[u8; 32]>::try_from(community_id.as_slice()).map_err(|_| FfiError::Malformed)?;
-        let link = locked(&self.inner).client.community_link(&community_id)?;
-        link.format().map_err(|_| FfiError::Malformed)
-    }
-
-    /// Leaves a community. The relays learn nothing of it: a pull names no
-    /// subscriber (`COM-172`).
-    pub fn leave_community(&self, community_id: Vec<u8>) -> Result<(), FfiError> {
-        let community_id =
-            <[u8; 32]>::try_from(community_id.as_slice()).map_err(|_| FfiError::Malformed)?;
-        locked(&self.inner).client.leave_community(&community_id)?;
-        self.changed.notify_all();
         Ok(())
     }
 

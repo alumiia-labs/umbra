@@ -355,8 +355,8 @@ revision MUST measure the relay churn rate over 45 days before it lowers
 object of Part 4 §4.7.2 lives at `BACKUP_REPLICAS` relays, which is 2, thus the
 second `RelayRef` of each of its refs is null. **[ATT-141]** A client MUST set a
 `RelayRef` that names no relay to 12 zero bytes. **[ATT-142]** A receiver MUST
-reject a `FileDescriptor` with a null `RelayRef` on a pairwise, group, or
-community channel. `ATT-018` requires three references on those channels.
+reject a `FileDescriptor` with a null `RelayRef` on a pairwise or group
+channel. `ATT-018` requires three references on those channels.
 ### 13.3.3 The chunk commands
 
 Part 6 §6.4 gives the command header. An attachment command uses that header,
@@ -464,12 +464,10 @@ read_sk    := HKDF-SHA3-256("umbra/v1/chunk-read", file_key, chunk_index_be32)
    **[ATT-126]** A relay MUST NOT answer a `CRNW`. A client that needs the chunk
    fetches it, and the fetch shows the state.
 
-   > *Cause.* Part 12 §12.4.6 keeps a community post for `COMMUNITY_RETENTION`,
-   > which is 90 days, and a chunk lives 45 days. A `CRNW` at each fetch keeps
-   > the attachment of a post that a party still reads. `CHUNK_LIFE_MAX` equals
-   > `COMMUNITY_RETENTION`, thus a renewal cannot keep a chunk past the post
-   > that names it. An uploader that wants a chunk gone sends `CDEL`, and a
-   > renewal does not override that command.
+   > *Cause.* A chunk lives 45 days. A `CRNW` at a fetch keeps a chunk that a
+   > party still reads. `CHUNK_LIFE_MAX` bounds each renewal, thus a renewal
+   > cannot keep a chunk for ever. An uploader that wants a chunk gone sends
+   > `CDEL`, and a renewal does not override that command.
 9. **[ATT-048]** A client MUST send an attachment command on the separate
    connection of §13.8.
 10. **The backup class.** A `BNEW` registers a **backup-class chunk**, and a
@@ -816,7 +814,7 @@ no PQ layer. Thus an archived attachment to a group is fully exposed
 harvest-now-decrypt-later material. Part 5 §5.8 makes group PQ protection
 mandatory in UMBRA, and that rule is the cause that this inheritance operates.
 
-## 13.6 Group and community attachments
+## 13.6 Group attachments
 
 The sender uploads the file **one time for the group**. §13.4 makes that upload
 `REPLICAS` copies of each chunk, and that factor does not follow the group size.
@@ -830,10 +828,6 @@ three properties hold:
   default chunk and 226 bytes with no chunk. Thus no descriptor fits `B0`.
 - A relay that holds a chunk learns a download count and nothing else. That
   relay does not learn the group, the membership, or the file.
-- A community post carries a descriptor in the open, under Part 12 §12.4.7.
-  Each party with the community link reads `file_key`, thus that attachment is
-  public at publication. A relay that holds its chunk still learns the count
-  and nothing else, because the descriptor does not reach that relay.
 
 ## 13.7 Parameters
 
@@ -843,7 +837,7 @@ three properties hold:
 | `SEGMENT_SIZE` | 32 634 B, which is `CHUNK_SIZE` less the 16-byte tag (§13.2.3) |
 | `MAX_FILE_SIZE` | **250 MiB** (§13.7.2) |
 | `CHUNK_TTL` | 45 days, which equals `MSG_TTL` |
-| `CHUNK_LIFE_MAX` | 90 days, which equals `COMMUNITY_RETENTION` of Part 12 §12.9. §13.3.3 rule 8 bounds a renewed chunk |
+| `CHUNK_LIFE_MAX` | 90 days. §13.3.3 rule 8 bounds a renewed chunk |
 | `REPLICAS` | 3, on different operators |
 | `MAX_CONCURRENT_CHUNKS` | 8 up, 32 down, and §13.7.2 derives both from the bandwidth-delay product |
 | `RELAYREF_WIDTH` | 12 B (§13.3.2) |
@@ -860,7 +854,7 @@ three properties hold:
 | `IMAGE_REENCODE_BYTES` | 2 MiB (§13.3) |
 | `CHUNK_EGRESS_BUDGET_DAY` | 4 × `CHUNK_STORE_TARGET` of egress in one day, measured by the relay from midnight UTC (§13.11) |
 | `CHUNK_FETCH_RATE` | 60 `CGET` for one chunk in one hour, measured by the relay from the first fetch of the hour (§13.11) |
-| `HOT_REPLICAS` | 6 replicas for a community attachment at the top activity bucket (§13.11) |
+| `HOT_REPLICAS` | 6 replicas of one chunk at the most. It bounds the targets of a `CREP` (§13.4.1) |
 
 > *The derivation of `CHUNK_SIZE`.* A chunk travels as the whole payload of one
 > command at bucket `B3`. Part 6 §6.9 gives the `L5 payload` row 32 650 bytes at
@@ -1041,16 +1035,14 @@ property, which is G8. This rule makes no claim of flow-level undetectability
 | **Chunk relay that holds a backup object** | The same items. Part 4 §4.7.2 writes a backup under the rotating handle of that section, thus the relay reads a random 32-byte handle and ciphertext | Which user owns the backup, and the Recovery Code that opens it. Part 4 §4.7.1 splits that code, and Part 16 §16.1 holds the two rows |
 | **The three replica operators in collusion** | That one chunk is in three locations | Nothing that links that chunk to a different chunk or to a user |
 | **Each relay that holds a chunk of one file, in collusion** | The chunk count, and thus an approximate padded file size | The content, the participants, and the filename |
-| **Chunk relay that holds a chunk of a community attachment (Part 12 §12.4.7)** | The same items as the first row, and a download count that follows the pull volume of the community | The community, because the descriptor travels in the community record and not to the chunk relay |
 | **Chunk relay that holds the catch-up object of Part 7 §7.5.1** | The same items as the first row, under the random credential of that object | The device set, and which device of the set wrote or read it |
 | **Chunk relay that holds the dead-channel blob of Part 3 §3.2.6** | The same items as the second row, under the handle of that section | The two parties of the channel, because the handle is a derived value that neither party publishes |
 | **Chunk relay that holds a chunk of the epoch-key object of Part 11 §11.4.2** | That one member fetched one chunk of an object of the size the member count gives, and the download count of each chunk, which is the number of members whose slot sits in that chunk | The member index of the fetcher and the group. The relay does not learn a group identifier, because the descriptor travels in a group record and not to the chunk relay |
 | **Chunk relay that holds a chunk of a roster snapshot of Part 11 §11.9.8** | The same items as the first row, and a download count of one for each joiner that the same snapshot served | The group, the roster, and the joiner, because the descriptor travels in the admit stage of the invitation on a pairwise channel |
 
-The community row is the residual leak, and Part 16 states it. **[ATT-066]** A
-revision that adds a client of the chunk path MUST add a row to this table.
-The clients of that path today are the attachment of §13.3, the backup of Part
-4 §4.7.2, the community attachment of Part 12 §12.4.7, the catch-up object of
+**[ATT-066]** A revision that adds a client of the chunk path MUST add a row to
+this table. The clients of that path today are the attachment of §13.3, the
+backup of Part 4 §4.7.2, the catch-up object of
 Part 7 §7.5.1, the dead-channel blob of Part 3 §3.2.6, the epoch-key object of
 Part 11 §11.4.2, and the roster snapshot of Part 11 §11.9.8.
 
@@ -1143,8 +1135,8 @@ held, and a restart of many relays at one time loses whole files.
 
 ## 13.11 The relay egress budget
 
-A store bounds what a relay holds, and this section bounds what it serves. A
-popular community attachment fetches many times from one chunk. A relay without
+A store bounds what a relay holds, and this section bounds what it serves. An
+attachment to a large group fetches many times from one chunk. A relay without
 a bound serves it until its link fails for each other client.
 
 - **[ATT-169]** A relay MUST NOT serve more than `CHUNK_EGRESS_BUDGET_DAY` of
@@ -1156,17 +1148,12 @@ a bound serves it until its link fails for each other client.
 - **[ATT-173]** A client that receives `BUSY` or `LIMIT` for a chunk MUST fetch
   the next replica of the `ChunkRef`. **[ATT-174]** A client MUST NOT send the
   same `CGET` to the same relay again inside one hour.
-- **[ATT-175]** An author of a community attachment MUST register
-  `HOT_REPLICAS` copies of each chunk when the activity bucket of the
-  community is at its top level, under Part 9 §9.12. The `ChunkRef` holds two
-  replica hints, thus the author puts the extra copies in the manifest of
-  §13.3.4 as further refs of the same chunk. **[ATT-176]** A receiver MUST
-  treat two refs with one `chunk_id` as replicas of one chunk.
+- A manifest of §13.3.4 can hold further refs of one chunk. **[ATT-176]** A
+  receiver MUST treat two refs with one `chunk_id` as replicas of one chunk.
 
 > *Cause.* `CHUNK_EGRESS_BUDGET_DAY` is four times the store, thus a relay
 > serves each stored byte about four times a day at most, and Part 10 §10.9.1
 > sizes the outbound link that carries it. `CHUNK_FETCH_RATE` of 60 caps one
-> chunk at one fetch a minute, which a community of 1 000 readers exceeds at a
-> popular post. `HOT_REPLICAS` moves that load to six relays, and the author
-> pays the copies, because the author chose to publish. A relay that shed a
-> fetch under an earlier draft did so in silence, and the client waited.
+> chunk at one fetch a minute. A client that meets the cap fetches the next
+> replica. A relay that shed a fetch under an earlier draft did so in silence,
+> and the client waited.

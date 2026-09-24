@@ -79,8 +79,8 @@ emulator is the clipboard of the machine.
   with its invitation host, are open.
 - The interface follows `design/mockups/light` for the flows that exist:
   unlock, chats, contacts, add contact, invitation, use invitation, name a
-  contact, conversation, settings. It has three tabs. Communities, groups,
-  profiles, devices, and recovery have no view yet.
+  contact, conversation, settings. It has three tabs. Profiles, devices,
+  and recovery have no view yet.
 - The wrapping key of the keystore asks for no biometric and no device
   credential at each use. That step needs a `BiometricPrompt` around the
   keyed function.

@@ -1,8 +1,8 @@
 # umbra-relay
 
 The relay of the UMBRA protocol: the circuit hops of Part 3 §3.4, the pairwise
-queues of Part 3 §3.2, the invitations of Part 4 §4.3.1, the community cache
-of Part 12, the chunk store of Part 13, and the group queues of Part 3 §3.2.7.
+queues of Part 3 §3.2, the invitations of Part 4 §4.3.1, the chunk store of
+Part 13, and the group queues of Part 3 §3.2.7.
 The node is a plain state machine. The binary puts TLS 1.3, the WebSocket
 framing of Part 6 §6.2.1, a pacing clock, and an SQLite store around it.
 
@@ -55,7 +55,6 @@ static_secret=<from keygen>
 cert=/etc/letsencrypt/live/relay1.example.org/fullchain.pem
 key=/etc/letsencrypt/live/relay1.example.org/privkey.pem
 issuer_modulus=<512 hex characters; a test network uses ff repeated 256 times>
-community_capacity=67108864
 store=/var/lib/umbra/relay.db
 public=relay1.example.org,203.0.113.7,443
 next=<relay_id of the layer 2 relay>,relay2.example.org,203.0.113.8,443

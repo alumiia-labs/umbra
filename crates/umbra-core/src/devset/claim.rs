@@ -45,8 +45,8 @@ impl<'a> OwnerClaimRecord<'a> {
         {
             return Err(Error::Malformed);
         }
-        // DEV-192 and DEV-234: one subject under one scope, and an absence
-        // claim travels alone.
+        // DEV-234: an absence claim travels alone. A subject shows once.
+        // The parse of the scope rejects the retired `0x02` (DEV-192).
         let has_absence = self.claims.iter().any(|c| c.scope == ClaimScope::Absence);
         if has_absence && self.claims.iter().any(|c| c.scope != ClaimScope::Absence) {
             return Err(Error::Malformed);

@@ -172,11 +172,6 @@ pub fn address_label_input(address: &[u8; 20]) -> Vec<u8> {
     [labels::ADDRESS_INDEX, address].concat()
 }
 
-/// The VOPRF input of the listing index (§9.12).
-pub fn listing_label_input(community_id: &[u8; 32]) -> Vec<u8> {
-    [labels::COMMUNITY_LISTING, community_id].concat()
-}
-
 /// A profile for tests and for a platform without the PRECIS tables: ASCII
 /// letters, digits, and a few marks, lower-cased. It is not the profile
 /// of `DIS-088`.
@@ -212,10 +207,6 @@ mod tests {
         assert!(Handle::parse(&long, &ascii_profile).is_err());
         assert!(Handle::is_canonical_name("alice", &ascii_profile));
         assert!(!Handle::is_canonical_name("Alice", &ascii_profile));
-        assert_ne!(
-            address_label_input(&[1; 20]),
-            listing_label_input(&[1; 32])[..32].to_vec()
-        );
     }
 
     #[test]

@@ -524,8 +524,6 @@ async fn session(
                             tag: held.tag,
                             reason: None,
                         },
-                        // A group node sends no community command.
-                        GroupOutcome::Page(_) | GroupOutcome::Published(_) => continue,
                     };
                     let _ = updates.send(update);
                 }

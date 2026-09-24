@@ -17,7 +17,7 @@ pub enum HandleClass {
     Pairwise,
     /// A rendezvous queue, one for each handle (`NTF-043`).
     Rendezvous,
-    /// The notify queues of groups and communities.
+    /// The notify queues of groups.
     Digest,
 }
 

@@ -144,10 +144,7 @@ authorized_bytes = version || cmd || queue_id || BE16(payload_len)
 **[NET-119]** A party MUST set `bind` to the empty byte string for each command
 of Part 6 §6.4. **[NET-120]** For a `CPUT` of Part 13 §13.3.3, a party MUST set
 `bind` to the 32-byte `storage_token` of that section. Part 13 rule `ATT-042`
-states the same binding, and this rule gives its encoding. **[NET-149]** For a
-community command of Part 12 §12.3.3, a party MUST use `pull_sk` in the place of
-`Q*_auth_sk`. Part 12 rule `COM-175` states the same binding. A community has no
-queue secret, and `pull_sk` comes from `community_id`.
+states the same binding, and this rule gives its encoding.
 
 **The session key.** A command reaches its relay over a circuit of §3.4, and
 that relay is the last hop of the circuit. The handshake of §3.4.3 gives that
@@ -191,8 +188,7 @@ command.**
 
 **[NET-015]** Implementations MUST NOT use a digital signature for a queue command. Signatures
 are for objects that a third party with no earlier relation has to verify. These
-objects are relay descriptors, directory documents, and community roster
-operations (Part 12).
+objects are relay descriptors and directory documents.
 
 ### 3.2.4 Queue lifecycle and parameters
 
@@ -809,9 +805,8 @@ fetches the URL, because that party gives its network address to the site.
   9 §9.3.1, thus the image carries no metadata field.
 - **[NET-146]** A client MUST show the URL to the user before the user opens it.
   **[NET-147]** A client MUST open a URL of a scheme other than `umbra` in the
-  browser of the platform. A link of the `umbra` scheme of Part 4 §4.3 and of
-  Part 12 §12.7 stays in the application. The application is the only handler of
-  that scheme.
+  browser of the platform. A link of the `umbra` scheme of Part 4 §4.3 stays in
+  the application. The application is the only handler of that scheme.
 
 > *Cause.* An automatic fetch at the receiver gives the linked site the network
 > address of that receiver, at the moment the message arrives. A site that a
@@ -1514,12 +1509,11 @@ and not six cells.
 across two opportunities. **[NET-057]** A client MUST NOT select a larger bucket to carry more
 receipts, because the bucket then names the count.
 
-**A group and a community.** A group carries no delivery receipt, no read
-receipt, and no typing indicator, and Part 11 §11.6 gives the cause. Each such
-signal is a record that every reader of the group queue downloads, thus the
-aggregate cost is quadratic in the member count. Part 12 §12.3.1 prohibits a
-receipt in a community. Thus a receipt goes to one peer, and this section
-needs no fan-out rule.
+**A group.** A group carries no delivery receipt, no read receipt, and no
+typing indicator, and Part 11 §11.6 gives the cause. Each such signal is a
+record that every reader of the group queue downloads, thus the aggregate cost
+is quadratic in the member count. Thus a receipt goes to one peer, and this
+section needs no fan-out rule.
 
 > *Cause.* An earlier draft made a client apply the fan-out jitter of the
 > group tier to a receipt that went to more than one peer. That draft gave a
@@ -2119,8 +2113,7 @@ to another queue, and Part 4 §4.2.2 keeps a queue apart from an identity.
 The budget below applies to a moderate user. That user sends 60 direct messages
 and receives 90. That user has 6 groups with a mean of 25 members, and sends 8
 group messages and receives 120. That user sends 2 attachments and receives 4,
-at about 400 KB each. That user follows 2 communities, and each community takes
-50 posts each day. The application is about 2 h in the foreground and about
+at about 400 KB each. The application is about 2 h in the foreground and about
 14 h in the background. The device is a mid-range Android device on LTE in
 Balanced mode.
 
@@ -2253,16 +2246,15 @@ costs **32 860 B**. Each row below uses those four figures.
 | Device-set sync acknowledgments (1 channel, 0 cells) | 0 KB, §7.5.5 of Part 7 forbids one here |
 | Ownership claims (1 channel, 4 `B2` cells) | 33 KB |
 | Backup writes (Part 4 §4.7.2, 9 `B3` cells) | 493 KB |
-| Circuit builds, the `EXTEND` cells (45 builds × 3 `B1` cells) | 283 KB |
-| Transport handshakes, the client half (219 × 2 400 B) | 526 KB |
+| Circuit builds, the `EXTEND` cells (43 builds × 3 `B1` cells) | 270 KB |
+| Transport handshakes, the client half (217 × 2 400 B) | 521 KB |
 | Session resubscriptions (297 `B0` cells) | 166 KB |
-| Community pulls (2 communities, 138 `B0` cells) | 77 KB |
 | Tier A cover (2 h at 0.05/s, 360 `B0` cells) | 202 KB |
 | Foreground receipts and acknowledgments | 0 KB, carried in the cover slots above (§3.5.4) |
 | Background acknowledgments of the drains (184 `B0` cells) | 103 KB |
 | Notifier rotation, the client half (Part 8 §8.2.5) | 3 KB |
 | Directory requests, measurement, token refill | 80 KB |
-| **Total up** | **≈ 3.59 MB** |
+| **Total up** | **≈ 3.50 MB** |
 
 > *The derivation of the group rows.* A group post is one `GPOST` of the same
 > record to each of the 2 replicas under `NET-256`. A 25-member group carries
@@ -2348,35 +2340,25 @@ below rests on the same unverified figure, and it carries the same mark.
 > *The derivation of the circuit-build rows.* The background pays 10 builds, and
 > the model paragraphs above derive that count. The 2 h foreground pays one
 > build for each circuit that it opens, because `CIRCUIT_MAX_AGE` of 4 hours
-> exceeds the foreground period. The foreground opens 35 circuits. Those are
+> exceeds the foreground period. The foreground opens 33 circuits. Those are
 > the 8 conversation sessions, 2 spare circuits of §3.4.3, and one send
-> circuit to each of the 22 recipient relays. The 2 community circuits and one
-> attachment circuit complete the count. A `GPOST` to the replica that the
-> user reads travels on the group-queue session, thus it opens no circuit of
-> its own. The day holds 45 builds. The 135 `EXTEND` cells cost 282 960 bytes
-> on the uplink, and the 135 `EXTENDED` cells cost the same on the downlink.
+> circuit to each of the 22 recipient relays. One attachment circuit completes
+> the count. A `GPOST` to the replica that the user reads travels on the
+> group-queue session, thus it opens no circuit of its own. The day holds 43
+> builds. The 129 `EXTEND` cells cost 270 384 bytes on the uplink, and the 129
+> `EXTENDED` cells cost the same on the downlink.
 
 > *The derivation of the two handshake rows.* Each connection of the day pays
 > one handshake. The 184 wakes pay 184 handshakes, and a group wake carries
-> its two sessions on one connection. The 35 foreground circuits pay at most
-> 35 handshakes, because two circuits to one ingress can share a connection.
-> The day holds 219 handshakes. The client half is 219 × 2 400 = 525 600
-> bytes, and the relay half is 219 × 3 600 = 788 400 bytes.
+> its two sessions on one connection. The 33 foreground circuits pay at most
+> 33 handshakes, because two circuits to one ingress can share a connection.
+> The day holds 217 handshakes. The client half is 217 × 2 400 = 520 800
+> bytes, and the relay half is 217 × 3 600 = 781 200 bytes.
 >
 > A resubscription follows each session open. The 184 wakes open 289 sessions,
 > and the foreground opens the 8 conversation sessions, which is 297 `B0`
 > cells and 166 320 bytes. On a group-queue session the cell is the `GSUB`. A
-> send session, a community session, and an attachment session carry no
-> subscription.
-
-> *The derivation of the two community rows.* Part 12 §12.3.1 pulls through the
-> ordinary chain, and `COM-173` holds one community in each session. The
-> `PULL_INTERVAL` of Part 12 §12.9 has a mean of 105 s while the client is
-> active. The 2 h foreground gives 7 200 / 105 = 69 pulls for each community,
-> which is 138 pulls. A pull request is one `B0` cell, thus the uplink row is
-> 138 × 560 = 77 280 bytes. A page that holds the posts since the last pull
-> fits bucket `B1`, because 50 posts each day give under one post for each
-> pull. The downlink row is 138 × 2 096 = 289 248 bytes.
+> send session and an attachment session carry no subscription.
 
 > *The derivation of the two rotation rows.* Rule `NTF-007` of Part 8 §8.2.5
 > rotates the notifier triple of each queue each 7 days. The 16 pairwise
@@ -2493,8 +2475,8 @@ below rests on the same unverified figure, and it carries the same mark.
 > 7 × 12 × 560 = 47 040 bytes. The ownership claim rows also grow with *d* − 1.
 > The phone sends 4 claims on each of its 7 channels, which is 28 × 8 240 =
 > 230 720 bytes, and it takes 4 from each of its 7 peers for the same figure.
-> The uplink total is then about 7.29 MB, and the downlink total is about
-> 9.12 MB.
+> The uplink total is then about 7.19 MB, and the downlink total is about
+> 8.79 MB.
 
 | Downlink | |
 | --- | --- |
@@ -2508,14 +2490,13 @@ below rests on the same unverified figure, and it carries the same mark.
 | Ownership claims (1 channel, 4 `B2` cells) | 33 KB |
 | Loop returns (72 `B0` cells) | 40 KB |
 | Relay-paced inbound cover (7 752 `B0` cells) | 4 341 KB |
-| Circuit builds, the `EXTENDED` cells (45 builds × 3 `B1` cells) | 283 KB |
-| Transport handshakes, the relay half (219 × 3 600 B) | 788 KB |
-| Relay entries with proofs (90 × 5 818 B) | 524 KB |
+| Circuit builds, the `EXTENDED` cells (43 builds × 3 `B1` cells) | 270 KB |
+| Transport handshakes, the relay half (217 × 3 600 B) | 781 KB |
+| Relay entries with proofs (86 × 5 818 B) | 500 KB |
 | Directory (8 `DirectoryRoot` objects and 8 `RelaySetDiff` objects) | 142 KB |
-| Community pages (138 `B1` cells) | 289 KB |
 | Notifier rotation, the relay half (Part 8 §8.2.5) | 2 KB |
 | Family certificates (Part 10 rule `REL-138`) | 0 KB |
-| **Total down** | **≈ 8.88 MB** |
+| **Total down** | **≈ 8.55 MB** |
 
 > *The derivation of the two cover rows.* §3.6.2 makes about 20 % of the 360
 > tier A cover cells loops. That count is 72 cells, which is 40 320 B.
@@ -2537,9 +2518,9 @@ below rests on the same unverified figure, and it carries the same mark.
 
 > *The derivation of the entry row.* The model paragraphs above give 2 entries
 > for each build in Instant mode. The 10 background builds fetch 20 entries. The
-> 35 foreground builds fetch 70 entries. Each foreground circuit selects a fresh
+> 33 foreground builds fetch 66 entries. Each foreground circuit selects a fresh
 > hop 2, and it reaches a hop 3 whose entry the client verifies against the root
-> of that period. The day holds 90 entries, which is 90 × 5 818 = 523 620
+> of that period. The day holds 86 entries, which is 86 × 5 818 = 500 348
 > bytes. Part 10 rule `REL-059` names this row.
 
 > *The derivation of the directory row.* Part 10 §10.11 gives the consensus a
@@ -2553,19 +2534,21 @@ below rests on the same unverified figure, and it carries the same mark.
 > row above. **[NET-105]** A revision that changes the signature count, the
 > validity, or the diff width MUST derive this row again.
 
-**The grand total is about 12.48 MB each day and about 374 MB each month. For
-text only, the total is about 9.86 MB each day and about 296 MB each month.**
-The grand total is 3.59 MB up and 8.88 MB down. The text-only total removes the
+**The grand total is about 12.05 MB each day and about 362 MB each month. For
+text only, the total is about 9.44 MB each day and about 283 MB each month.**
+The grand total is 3.50 MB up and 8.55 MB down. The text-only total removes the
 885 KB of attachment upload, the 1 709 KB of attachment download, and the 20 KB
 of attachment responses. An earlier draft gave 13.07 MB each day, of which
 4.08 MB was uplink. The group queue of §3.2.7 removes the 402 KB fan-out row
 and 11 of the 20 sessions, and it adds the digest row, the rotation row, and
-the presence row. The day falls by about 0.6 MB.
+the presence row. The day falls by about 0.6 MB. The withdrawal of Part 12
+removes the two community rows and 2 foreground circuits, and the day falls by
+about 0.43 MB more.
 
-At `MAX_DEVICES` of 8 the grand total is about 16.41 MB each day and about
-492 MB each month. **A device set at `MAX_DEVICES` is not affordable on a
+At `MAX_DEVICES` of 8 the grand total is about 15.98 MB each day and about
+479 MB each month. **A device set at `MAX_DEVICES` is not affordable on a
 metered mobile plan, and this section states that plainly.** The sync record row
-alone is 4.08 MB each day. That row is about 1.5 times the 2.71 MB text-only
+alone is 4.08 MB each day. That row is about 1.6 times the 2.62 MB text-only
 uplink of the 2-device day. No usability goal of Part 2 §2.4 caps a monthly
 total, thus no goal forbids that figure. This specification states the cost, and
 it does not claim that a user can pay it. The cost grows with *d − 1*. Thus a
@@ -2881,10 +2864,10 @@ each day. Private mode at 20 min costs less above 72. The model day of 184
 arrivals is above both counts, thus Private mode is the cheaper mode on that
 day. The user who receives 20 messages each day sees the opposite order.
 
-**Client compute.** The compute row holds the 45 circuit builds at less than 2
+**Client compute.** The compute row holds the 43 circuit builds at less than 2
 ms each, the ratchet steps of the 278 records, the tag checks of the 120 group
 records, and the 6 decapsulations of the rotation slots (Part 11 §11.4.2). It
-holds the signature verifications of the 8 roots and the 90 entries. It holds
+holds the signature verifications of the 8 roots and the 86 entries. It holds
 about 10 Argon2id
 unlocks of Part 15 §15.6.4 at about 3 s each. That work is under 1 minute of CPU
 each day. At about 1 W of CPU draw it is about 0.02 Wh, which is 0.1 % of the

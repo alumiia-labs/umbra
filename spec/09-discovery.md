@@ -47,9 +47,8 @@ available:
 
 ## 9.2 Scope: opted-in entries only
 
-**The transparency log covers opted-in handles, opted-in Public Addresses, and
-listed communities only. It does not cover pairwise contacts.** §9.3.3 gives
-the address entry, and §9.12 gives the community listing.
+**The transparency log covers opted-in handles and opted-in Public Addresses
+only. It does not cover pairwise contacts.** §9.3.3 gives the address entry.
 
 A contact from a QR code or from a shared link received the key on an
 authenticated out-of-band channel. Thus key transparency adds nothing for such a
@@ -234,8 +233,7 @@ thus no address label equals a handle label.
 ```
 
 An address lookup blinds `"umbra/v1/address-index" || address` in step 1, and
-steps 2 to 4 do not change. A listing lookup of §9.12 blinds
-`"umbra/v1/community-listing" || community_id` in the same manner.
+steps 2 to 4 do not change.
 
 The directory **does not see the plaintext handle**. An anonymous crawler has to
 pass one chokepoint. That chokepoint is one operation that a party can meter,
@@ -303,7 +301,7 @@ the log ever took, thus it only grows. The **log tree** is the left-balanced
 tree of Part 10 §10.5.3 over one `log_leaf_e` for each epoch `e`, and
 `tree_size` of §9.5.2 counts those leaves. `opening` is 32 bytes from the
 CSPRNG of the log operator. `entry` is the encoded `DirectoryEntry`,
-`AddressEntry`, `CommunityListing`, or `IssuerKeyEntry` of Part 14 §14.5. Part
+`AddressEntry`, or `IssuerKeyEntry` of Part 14 §14.5. Part
 5 §5.11 holds the label.
 
 - **[DIS-145]** The VRF input of a version MUST be `search_key || BE32(version)`,
@@ -946,9 +944,7 @@ holder:      ss  <- UMBRA-KEM.Decap( HK_sk, HK_pub_current, ct )
 | `TREE_HEAD_RETAIN` | 14 days, measured by the client from the acceptance of the head (§9.5.2) |
 | `HANDLE_RESERVE` | 180 days, measured by the directory from the tombstone, equal to `BACKUP_TTL` of Part 4 §4.8 (§9.9.2) |
 | `HANDLE_HISTORY_MAX` | 64 versions, the version scan bound of §9.9.2 |
-| `LISTING_LEASE` | 30 days, measured by the directory from the acceptance of a `CommunityListing` (§9.12) |
 | `RENDEZVOUS_ROTATE` | 30 days, measured by the client from the write of the current rendezvous version (§9.9) |
-| `LISTING_PAGE` | 20 listings in one `ListingPage` (§9.12) |
 | Directory scale | 10⁵ to 10⁷ entries (§9.2) |
 
 ## 9.11 Implementation note
@@ -969,113 +965,3 @@ Use NCC-E008327 as the test checklist of UMBRA:
 - reject non-canonical encodings
 - zeroize expanded private keys on drop
 - enforce a maximum of one update for each label in each epoch
-
-## 9.12 The community listing
-
-Part 12 §12.7.2 lets a community opt in to a public listing. This section gives
-the listing record, its index, and the browse query. A listed community is a
-public statement, and Part 12 §12.7.2 states what that statement shows.
-
-```
-CommunityListing {
-    version         u8            // 0x01
-    community_id    [32]u8
-    admission       u8            // the admission byte of Part 12 §12.2.2
-    actor           [32]u8        // the genesis owner role pseudonym
-    actor_pk        [1952]u8      // genesis_root_public_key of Part 12 §12.2
-    listing_index   u32           // increases by one at each publication
-    category        u8            // the category table of Part 12 §12.7.1
-    language        [2]u8         // ISO 639-1, lower case
-    activity        u8            // the activity bucket of the table below
-    name_len        u8
-    name            [name_len]u8  // UTF-8, ≤ META_NAME_MAX of Part 12 §12.9
-    link_len        u8
-    link            [link_len]u8  // the community link of Part 12 §12.7
-    signature       [3309]u8      // ML-DSA-65, label "umbra/v1/community-listing"
-}
-
-label = VOPRF over ( "umbra/v1/community-listing" || community_id )
-```
-
-The signature covers each field before it, with the label in front. A link is
-259 characters at `COMMUNITY_RELAY_MAX` hints. That count is 10 characters
-of scheme and path, 52 of `community_id`, and 3 of `?r=`. It is then 167 of
-eight 20-character hints with seven commas, and 27 of the fragment with its
-`#`. The fields before the name are 2 028 bytes. Thus a listing
-is a maximum of 5 660 bytes. Part 5 §5.11 holds the two labels.
-
-| `activity` | The distinct pseudonyms that posted in the last 7 days |
-| --- | --- |
-| `0x00` | 0 |
-| `0x01` | 1 to 9 |
-| `0x02` | 10 to 99 |
-| `0x03` | 100 to 999 |
-| `0x04` | 1 000 or more |
-
-**The publication.**
-
-- **[DIS-111]** A directory MUST verify that
-  `SHA3-256("umbra/v1/community-id" || admission || actor_pk)` equals
-  `community_id`, and that `SHA3-256(actor_pk)` equals `actor`. **[DIS-112]** A
-  directory MUST verify the signature under `actor_pk`. **[DIS-113]** A
-  directory MUST NOT publish a listing that fails either check.
-- **[DIS-114]** A directory MUST NOT publish a listing whose `listing_index` is
-  not the current index plus one. A first listing has index 0.
-- **[DIS-115]** A listing MUST carry the token of §9.9 at each publication.
-- **[DIS-116]** A directory MUST remove a listing at `LISTING_LEASE` after its
-  acceptance, unless a later listing replaced it.
-- **[DIS-117]** An owner client MUST set `activity` from the chains that the
-  client pulled under Part 12 §12.3.3. **[DIS-118]** An owner client MUST set
-  `category`, `language`, and `name` to the values of the current
-  `CommunityMeta`.
-
-**The browse query.** A browse asks for the listings of one category, of one
-language, or of a name prefix, and the directory answers with a page.
-
-```
-ListingQuery {
-    version         u8            // 0x01
-    category        u8            // 0xFF names each category
-    language        [2]u8         // two zero bytes name each language
-    prefix_len      u8            // 0 names each name
-    prefix          [prefix_len]u8
-    page            u16
-}
-
-ListingPage {
-    version         u8
-    count           u8            // 0 to LISTING_PAGE
-    listings        [count]CommunityListing
-}
-```
-
-- **[DIS-127]** A directory MUST NOT put a listing with `link_len` 0 in a
-  page. Part 12 rule `COM-351` makes that listing the withdrawal.
-- **[DIS-119]** A directory MUST rank the listings of an answer by `activity`
-  from high to low. **[DIS-130]** Inside one bucket, a directory MUST rank by
-  the acceptance time from new to old. **[DIS-120]** A directory MUST NOT put more than `LISTING_PAGE` listings
-  in one page.
-- **[DIS-121]** A directory MUST match `prefix` against the `name` after the
-  `UsernameCaseMapped` profile of §9.3.2 on both strings.
-- **[DIS-122]** A browse MUST carry one first-party token of §9.4.1. The
-  proof-of-work floor of Part 14 rule `ABU-070` applies to a browse with no
-  token.
-- **[DIS-123]** A client MUST verify `DIS-111` and `DIS-112` on each listing
-  that it shows. **[DIS-124]** A client MUST show a listing as unverified until
-  the `CommunityMeta` of the link verifies under Part 12 §12.7.1.
-- **[DIS-125]** A client MUST compare `activity` with the chains that it pulls
-  after the join. **[DIS-126]** If the pulled chains show a lower bucket, the
-  client MUST show that difference beside the listing.
-
-> *Cause.* Part 12 §12.7.2 named a directory that no part defined, thus Part 2
-> §2.4.2 goal S3 had no mechanism. The listing puts a signed record under a
-> label in the tree of §9.5, thus an owner audits the record that the directory
-> serves. The genesis owner is the one party that the directory can verify,
-> because `community_id` commits to `actor_pk`. A community that lost the
-> genesis key cannot list, and no other party can list it. The activity bucket
-> comes from the chain and not from a subscriber count. No party holds a
-> subscriber count, because Part 12 §12.8 states that no subscriber list
-> exists. A relay could report a pull volume through the aggregate of Part 10
-> §10.8, and this draft does not add that path. The owner already signs the
-> listing, and a subscriber checks the bucket against the chain under
-> `DIS-125`.

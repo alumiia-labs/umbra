@@ -12,16 +12,13 @@ use umbra_wire::{
 use crate::Error;
 
 /// The range of a command. A transport session carries one range, and a
-/// cell holds one range (`WIR-108`, `WIR-309`, `WIR-310`, `WIR-363`,
-/// `WIR-364`).
+/// cell holds one range (`WIR-108`, `WIR-363`, `WIR-364`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Range {
     /// The queue commands `0x01` to `0x60`.
     Queue,
     /// The attachment commands.
     Attachment,
-    /// The community commands.
-    Community,
     /// The group-queue commands.
     Group,
 }
@@ -31,7 +28,6 @@ impl Range {
     pub fn of(cmd: Cmd) -> Self {
         match cmd {
             Cmd::Attachment(_) => Range::Attachment,
-            Cmd::Community(_) => Range::Community,
             Cmd::Group(_) => Range::Group,
             _ => Range::Queue,
         }
@@ -164,12 +160,14 @@ mod tests {
     #[test]
     fn a_cell_holds_one_range() {
         let mut batcher = Batcher::new(Range::Queue);
-        let pull = encoded(Cmd::Community(0x80), 75);
-        assert!(batcher.push(Cmd::Community(0x80), pull.clone()).is_err());
-        let mut community = Batcher::new(Range::Community);
-        community.push(Cmd::Community(0x80), pull.clone()).unwrap();
+        let chunk = encoded(Cmd::Attachment(0x70), 75);
+        assert!(batcher.push(Cmd::Attachment(0x70), chunk.clone()).is_err());
+        let mut attachment = Batcher::new(Range::Attachment);
+        attachment
+            .push(Cmd::Attachment(0x70), chunk.clone())
+            .unwrap();
 
-        let mixed = [encoded(Cmd::Sub, 0), pull].concat();
+        let mixed = [encoded(Cmd::Sub, 0), chunk].concat();
         assert!(unpack(&mixed, Bucket::B0).is_err());
     }
 }

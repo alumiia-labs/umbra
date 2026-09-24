@@ -28,9 +28,7 @@ client that holds no credential. The carrier is where the credential travels.
 | A queue creation, `NEW` of Part 6 §6.4 | Any relay | A token of §14.3, of the type that the relay advertises | The issuer of §14.9 | The proof of work of §14.8 | The `Admission` at the end of the payload |
 | A group-queue creation, `GNEW` of Part 6 §6.4.5 | Any relay | A token of §14.3, of the type that the relay advertises | The issuer of §14.9 | The proof of work of §14.8 | The `Admission` at the end of the payload |
 | An allocation of attachment storage, `CNEW` and `BNEW` of Part 13 §13.3.3 | An attachment relay | A token of §14.3 | The issuer of §14.9 | The proof of work of §14.8 | The `Admission` at the end of the payload |
-| A community creation, the `PUB` of a roster with `epoch_index` 0, Part 12 §12.3.3 | A community relay | A token of §14.3 | The issuer of §14.9 | The proof of work of §14.8 | The `Admission` at the end of the payload |
-| A community post above `POST_RATE_LIMIT`, Part 12 §12.3.2 | A community relay | None, the limit is relay-local for each pseudonym | None | The proof of work of §14.8 | The `Admission` at the end of the payload |
-| A contact request at a Public Address, at a handle, or at a community pseudonym, by the hello of Part 9 §9.6 | The addressee client | A cross-relay token of §14.3.1 | The issuer of §14.9 | The proof of work of §14.8, at `HELLO_POW_EFFORT` | The `Admission` at the end of the hello, inside its AEAD |
+| A contact request at a Public Address or at a handle, by the hello of Part 9 §9.6 | The addressee client | A cross-relay token of §14.3.1 | The issuer of §14.9 | The proof of work of §14.8, at `HELLO_POW_EFFORT` | The `Admission` at the end of the hello, inside its AEAD |
 | A handle registration, Part 9 §9.9 | The handle directory | One first-party token of §14.3.2 | The issuer of §14.9 | None | The registration request of Part 9 §9.9 |
 | An OPRF evaluation of a lookup, Part 9 §9.4.1 | The handle directory | One first-party token of §14.3.2 | The issuer of §14.9 | The proof of work of §14.8, at `POW_LOOKUP_FLOOR` or above | The lookup request of Part 9 §9.4 |
 
@@ -48,13 +46,11 @@ layout in this draft.
   cause. The relay applies `GROUP_POST_RATE` of Part 3 §3.2.7 for each group
   queue, and it answers a post above that rate with a `NACK` of reason
   `LIMIT`.
-- **A community pull.** Part 12 rule `COM-172` forbids a value that binds a
-  pull to a client, and a credential is such a value.
 
 This design keeps the anti-abuse system fully off the critical path. Thus the
 anti-abuse system does not change the chat latency.
 
-**The carrier.** Five commands and the hello of Part 9 §9.6 end with one
+**The carrier.** Four commands and the hello of Part 9 §9.6 end with one
 `Admission`.
 
 ```
@@ -73,7 +69,7 @@ of kind `0x03` is 69 bytes. The body of kind `0x00` is empty, thus the trailer
 costs 3 bytes in the steady state.
 
 - **[ABU-044]** A client MUST end the payload of a `NEW`, a `GNEW`, a `CNEW`,
-  a `BNEW`, and a `PUB` with one `Admission`. **[ABU-045]** A parser MUST reject a `kind`
+  and a `BNEW` with one `Admission`. **[ABU-045]** A parser MUST reject a `kind`
   that the table above does not hold. **[ABU-046]** A parser MUST reject a `len`
   that differs from the body length of its `kind`. **[ABU-089]** A parser MUST
   reject kind `0x02`, which an earlier draft gave to an ARC presentation.
@@ -83,8 +79,6 @@ costs 3 bytes in the steady state.
   command with a `NACK` of reason `ADMISSION`. Part 6 §6.4.4 gives the reason.
   The client then fetches the challenge and sends the command again, thus a
   stale effort costs one retry.
-- **[ABU-049]** A relay MUST accept an `Admission` of kind `0x00` on a `PUB`
-  under `POST_RATE_LIMIT` that is not a community creation.
 
 > *Cause.* An earlier draft listed three gated paths in prose. It named no
 > verifier, no issuer, and no carrier. It left a handle registration off the
@@ -192,8 +186,8 @@ migration target.
 
 ## 14.4 Rate limiting the Public Address
 
-A contact request to a Public Address, to a handle, or to a community
-pseudonym is the hello of Part 9 §9.6. The hello travels as an ordinary padded
+A contact request to a Public Address or to a handle is the hello of Part 9
+§9.6. The hello travels as an ordinary padded
 message to a rendezvous queue, and any queue relay holds that queue. The queue
 relay reads a padded message and nothing more. Thus the only party on the path
 that can check a credential is the addressee. The addressee client is the
@@ -218,7 +212,6 @@ a party. The addressee holds the issuer keys from the log of §14.5 under
   **[ABU-056]** An addressee client MUST hold the spent-nonce set of an epoch
   until the end of the next epoch. The set has the scope of one Profile of Part
   4 §4.2.5, and the handle entry and the address entry of one Profile share it.
-  A community pseudonym holds a set of its own.
 
 A token is one hello. A batch of 256 tokens of §14.9 is 256 hellos, at one
 addressee or at many. The token is unlinkable, thus no rule links two hellos of
@@ -232,8 +225,7 @@ client derives the challenge from the entry that it looked up.
 
 ```
 entry_pk     = HK_pub of a DirectoryEntry (Part 9 §9.3),
-               address_pk of an AddressEntry (Part 9 §9.3.3),
-               or contact_pk of a CommunityContact (Part 12 §12.6.3)
+               or address_pk of an AddressEntry (Part 9 §9.3.3)
 epoch_number = the epoch number of §14.6
 verifier_id  = SHA3-256("umbra/v1/hello-verifier" || entry_pk)
 seed         = SHA3-256("umbra/v1/hello-seed" || entry_pk
@@ -290,9 +282,7 @@ and an Issuer shows which Origins a client visits.
 > `ARC_PRESENTATIONS` retires with it. Rules `ABU-050` to `ABU-055` retire,
 > because no ARC issuer exists. `ABU-012`, `ABU-013`, and `ABU-056` keep their
 > numbers and name the addressee, because each one still states who verifies
-> and what that party holds. Part 12 §12.6.3 cited an admission at the queue
-> relay for the community contact path, and §14.2 gates no message send. The
-> rules above cover that path, because it sends the same hello.
+> and what that party holds.
 
 ## 14.5 Key transparency for issuers — mandatory
 
@@ -569,32 +559,8 @@ holds for other functions.
 
 ## 14.10 Abuse reporting
 
-**The scope is large public communities only.** UMBRA does **not** frank a 1:1
-message or a private group message.
-
-A community post carries the signature of its author pseudonym under Part 12
-§12.4.1, thus a report needs no franking tag. A report names the post by its
-hash, and the role holder verifies the signature of the chain. An earlier draft
-named an onion franking construction here, and no object of Part 12 carried a
-franking tag. The report travels sealed to the **`RoleReportKey_r` of a member
-that the community roster names in the admin role or above**. Part 12 §12.3.2
-derives that key and Part 12 §12.5.1 gives the definition. **[ABU-009]** An
-implementation MUST use that definition for the designated verifier of this
-part. **[ABU-019]** A reporter MUST encapsulate to that key with `UMBRA-KEM`.
-**[ABU-020]** An implementation MUST NOT name an ML-DSA-65 key as a designated
-verifier key.
-
-> *Cause.* An earlier draft named the ML-DSA-65 role pseudonym itself. ML-DSA is
-> a signature scheme and it holds no decapsulation, thus no party could act as
-> the verifier of a designated-verifier construction under that key. Part 12
-> §12.3.2 gives each role a `UMBRA-KEM` keypair beside its signing key, and
-> §12.5.2 publishes the encapsulation key in the roster.
-
-Part 12 §12.5.3 gives the report object, the report record that carries it, and
-the report queue that receives it. It also gives the rules of the role holder
-that reads it.
-**[ABU-043]** A reporter MUST send a report under Part 12 §12.5.3 and under no
-other carrier.
+UMBRA does **not** frank a 1:1 message or a private group message. The
+protocol has no report on the wire.
 
 **[ABU-010]** **UMBRA MUST NOT build a global moderator key**, and **[ABU-011]** UMBRA MUST NOT frank a 1:1
 message. A report about a private conversation is a screenshot. A cryptographic
@@ -679,9 +645,6 @@ tag check of Part 11 §11.3.5, and no relay learns the block.
 - **[ABU-041]** The interface MUST state that a block does not tell the blocked
   party. **[ABU-042]** The interface MUST NOT claim that a block stops a
   message.
-- A community has no pairwise queue, thus this section does not apply to a
-  community pseudonym. Part 12 §12.5.4 gives the community mute, and that
-  mute sends nothing on the wire in the same manner as a block.
 
 > *Why the block is not a queue teardown.* A teardown is the cheap
 > implementation, and it is the wrong one. Part 3 §3.2.4 rotates a queue on a

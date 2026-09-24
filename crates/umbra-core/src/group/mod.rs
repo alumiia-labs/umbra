@@ -67,7 +67,7 @@ pub const POLL_GROUP_MAX: usize = 100;
 pub const MENTION_MAX: usize = 16;
 /// `POLL_OPTION_MAX`.
 pub const POLL_OPTION_MAX: usize = 12;
-/// `MOD_ACTION_MAX` of Part 12 §12.9.
+/// `MOD_ACTION_MAX` of §11.9.6.
 pub const MOD_ACTION_MAX: usize = 20;
 /// The owner floor (`GRP-051`).
 pub const OWNER_MIN: usize = 2;

@@ -14,8 +14,7 @@ Two demands pull in opposite directions:
   person. This applies to a relay, to a contact, and to a government. The
   strongest form of this property is an identity with no global identifier.
 - **Discoverability.** Ordinary persons want other persons to find them. A
-  "message me" link, a handle, and a public community make a messenger social
-  and not clinical. A reconnection with a contact that lost your address does
+  "message me" link and a handle make a messenger social and not clinical. A reconnection with a contact that lost your address does
   the same. Matrix does this correctly, and designs without identifiers give it
   up.
 
@@ -584,7 +583,7 @@ is 1 217 bytes, thus the record uses bucket `B1`.
 
 1. **[IDN-055]** A client MUST send a key-change notice inside the established pairwise
    ratchet session with that contact. **[IDN-056]** A client MUST NOT send it on a new
-   session, on a group channel, or on a community channel.
+   session or on a group channel.
 2. **[IDN-057]** A client MUST NOT sign a key-change notice. **[IDN-058]** A client MUST NOT carry a
    signature over the new keys inside the notice.
 3. **[IDN-059]** A receiver MUST accept a key-change notice only from the receiving chain of
@@ -895,11 +894,10 @@ as opaque blobs**. The backup holds these items:
 - the text history
 - media, which is opt-in and has a size limit
 
-The **local identity table** holds the pairwise salts of §4.2.2 and the
-community identity seeds of Part 12 §12.3.2. That table also holds the group
-roster seed `GroupRosterSeed_g` of each group, and the three group keys of
-Part 11 §11.9.1 (the roster key, the pair key, and the KEM key) derive from
-that seed. The client makes each of these values from the
+The **local identity table** holds the pairwise salts of §4.2.2. That table
+also holds the group roster seed `GroupRosterSeed_g` of each group, and the
+three group keys of Part 11 §11.9.1 (the roster key, the pair key, and the KEM
+key) derive from that seed. The client makes each of these values from the
 device CSPRNG, thus the recovery phrase alone does not rebuild them. The local
 identity table is not history. **[IDN-047]** A retention limit MUST NOT remove an entry from
 that table.
@@ -1096,8 +1094,8 @@ share. **[IDN-085]** A client MUST NOT put a value from which a party derives
 > reconstructed the code, computed the handle, fetched the object from the
 > relay, and opened it. That object holds the `RootIdentity`, the local identity
 > table, and the history. §5.2 of Part 5 states that the local identity table is
-> the one object that links the pairwise salts, the group roster seeds, and the
-> community identity seeds of a user. Goal G9 of Part 2 §2.3 holds against
+> the one object that links the pairwise salts and the group roster seeds of a
+> user. Goal G9 of Part 2 §2.3 holds against
 > **colluding contacts**, thus three contacts that take an account defeat a
 > stated goal. The earlier text called the method graceful because the share
 > holders are authenticated contacts. That is a usability statement and it is

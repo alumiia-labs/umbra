@@ -28,7 +28,7 @@ pub const LARGE_FILE_WARN: u64 = 25 * 1_024 * 1_024;
 pub const IMAGE_REENCODE_BYTES: u64 = 2 * 1_024 * 1_024;
 /// `CHUNK_TTL`, in seconds; it equals `MSG_TTL`.
 pub const CHUNK_TTL: u64 = 45 * 86_400;
-/// `CHUNK_LIFE_MAX`, in seconds; it equals `COMMUNITY_RETENTION`.
+/// `CHUNK_LIFE_MAX`, in seconds.
 pub const CHUNK_LIFE_MAX: u64 = 90 * 86_400;
 /// `BACKUP_TTL` of Part 4 §4.8, in seconds.
 pub const BACKUP_TTL: u64 = 180 * 86_400;

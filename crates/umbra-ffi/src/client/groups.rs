@@ -791,7 +791,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
     /// Sends one `AppMessage` of `kind` that no view shows on a pairwise
     /// channel.
-    pub(super) fn send_pairwise_app<R: CryptoRng + ?Sized>(
+    fn send_pairwise_app<R: CryptoRng + ?Sized>(
         &mut self,
         conversation: ConversationId,
         kind: AppKind,

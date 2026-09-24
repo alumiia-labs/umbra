@@ -1,12 +1,12 @@
-//! The digest path of a group queue and of a community (Part 8 §8.5.1,
-//! §8.5.2): the `NotifyDigest` record, the registrations a relay holds in
-//! memory, the daily budget of a community, and the minimum gap of a group.
+//! The digest path of a group queue (Part 8 §8.5.1, §8.5.2): the
+//! `NotifyDigest` record, the registrations a relay holds in memory, and
+//! the minimum gap of a group.
 
 use alloc::{collections::BTreeMap, vec::Vec};
 
 use umbra_wire::codec::{Reader, Writer};
 
-use super::{COMMUNITY_DIGEST_BUDGET, GROUP_DIGEST_MIN_GAP, REGISTRATION_MAX, REGISTRATION_TTL};
+use super::{GROUP_DIGEST_MIN_GAP, REGISTRATION_MAX, REGISTRATION_TTL};
 use crate::Error;
 
 /// The length of a `NotifyDigest`.
@@ -15,7 +15,7 @@ pub const DIGEST_LEN: usize = 34;
 /// The L6 record of kind `0x04`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NotifyDigest {
-    /// The `community_id`, or the `GroupQueueId` of a group (`NTF-099`).
+    /// The `GroupQueueId` of the group (`NTF-099`).
     pub id: [u8; 32],
     /// The posts since the previous digest, saturated at 255.
     pub post_count: u8,
@@ -49,9 +49,6 @@ impl NotifyDigest {
 /// The digest policy of a relay class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Policy {
-    /// A community relay: `COMMUNITY_DIGEST_BUDGET` in one day, and no
-    /// digest with no post (`NTF-072`, `NTF-073`).
-    Community,
     /// A group-queue relay: one digest in each `GROUP_DIGEST_MIN_GAP`, with
     /// one at the end of the gap when a record arrived inside it
     /// (`NTF-096` to `NTF-098`).
@@ -62,12 +59,10 @@ pub enum Policy {
 struct Registered {
     registered_at: u64,
     last_digest: Option<u64>,
-    day_start: u64,
-    day_count: u32,
     unsent: u32,
 }
 
-/// The registrations of one group queue or one community, keyed by the
+/// The registrations of one group queue, keyed by the
 /// `sender_id` of the notify queue.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DigestGate {
@@ -93,7 +88,7 @@ impl DigestGate {
         }
     }
 
-    /// Registers a notify queue (`NTF-100`, `NTF-101`, `COM-369`).
+    /// Registers a notify queue (`NTF-100`, `NTF-101`).
     pub fn register(&mut self, queue: [u8; 32], now: u64) -> Result<(), Error> {
         if self.registrations.contains_key(&queue) {
             return Ok(());
@@ -106,15 +101,13 @@ impl DigestGate {
             Registered {
                 registered_at: now,
                 last_digest: None,
-                day_start: now,
-                day_count: 0,
                 unsent: 0,
             },
         );
         Ok(())
     }
 
-    /// Drops a registration (`NTF-103`, `COM-370`).
+    /// Drops a registration (`NTF-103`).
     pub fn unregister(&mut self, queue: &[u8; 32]) {
         self.registrations.remove(queue);
     }
@@ -136,7 +129,6 @@ impl DigestGate {
 
     fn allowed(policy: Policy, r: &Registered, now: u64) -> bool {
         match policy {
-            Policy::Community => r.day_count < COMMUNITY_DIGEST_BUDGET,
             Policy::Group => r
                 .last_digest
                 .is_none_or(|at| now.saturating_sub(at) >= GROUP_DIGEST_MIN_GAP),
@@ -147,7 +139,6 @@ impl DigestGate {
         let count = u8::try_from(r.unsent).unwrap_or(u8::MAX);
         r.unsent = 0;
         r.last_digest = Some(now);
-        r.day_count = r.day_count.saturating_add(1);
         Due {
             queue: [0; 32],
             post_count: count,
@@ -160,10 +151,6 @@ impl DigestGate {
         let policy = self.policy;
         let mut due = Vec::new();
         for (queue, r) in &mut self.registrations {
-            if now.saturating_sub(r.day_start) >= 86_400 {
-                r.day_start = now;
-                r.day_count = 0;
-            }
             r.unsent = r.unsent.saturating_add(1);
             if Self::allowed(policy, r, now) {
                 let mut d = Self::take(r, now);
@@ -175,17 +162,13 @@ impl DigestGate {
     }
 
     /// The digests due at `now` for posts held back, and the registrations
-    /// past their retention dropped (`NTF-102`, `COM-375`).
+    /// past their retention dropped (`NTF-102`).
     pub fn tick(&mut self, now: u64) -> Vec<Due> {
         self.registrations
             .retain(|_, r| now.saturating_sub(r.registered_at) < REGISTRATION_TTL);
         let policy = self.policy;
         let mut due = Vec::new();
         for (queue, r) in &mut self.registrations {
-            if now.saturating_sub(r.day_start) >= 86_400 {
-                r.day_start = now;
-                r.day_count = 0;
-            }
             if r.unsent > 0 && Self::allowed(policy, r, now) {
                 let mut d = Self::take(r, now);
                 d.queue = *queue;
@@ -235,21 +218,5 @@ mod tests {
         gate.register([2; 32], 0).unwrap();
         assert!(gate.tick(REGISTRATION_TTL).is_empty());
         assert!(gate.is_empty());
-    }
-
-    #[test]
-    fn a_community_gate_writes_four_a_day_and_nothing_in_silence() {
-        let mut gate = DigestGate::new(Policy::Community);
-        gate.register([1; 32], 0).unwrap();
-        for i in 0..COMMUNITY_DIGEST_BUDGET {
-            assert_eq!(gate.on_post(u64::from(i) * 100).len(), 1);
-        }
-        assert!(gate.on_post(1_000).is_empty());
-        assert!(gate.tick(2_000).is_empty());
-        // The next day the held post goes out, and silence writes nothing.
-        let next_day = gate.tick(86_400);
-        assert_eq!(next_day.len(), 1);
-        assert_eq!(next_day[0].post_count, 1);
-        assert!(gate.tick(86_500).is_empty());
     }
 }

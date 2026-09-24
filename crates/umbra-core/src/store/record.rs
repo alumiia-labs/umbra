@@ -39,7 +39,7 @@ impl TableId {
     pub const QUEUE: TableId = TableId(0x04);
     /// The verification states.
     pub const VERIFICATION: TableId = TableId(0x05);
-    /// The local identity table of Part 12 §12.3.2.
+    /// The local identity table of Part 4 §4.2.4.
     pub const LOCAL_IDENTITY: TableId = TableId(0x06);
 }
 

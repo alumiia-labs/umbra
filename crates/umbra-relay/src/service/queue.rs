@@ -297,7 +297,7 @@ impl QueueService {
     }
 
     /// One `SEND` of another relay, from an `UMBRA_DEPOSIT` capsule: the
-    /// digest of a group or a community (`WIR-526`). Its auth derives from
+    /// digest of a group (`WIR-526`). Its auth derives from
     /// the static key of this relay, a `corr_id` that came before drops,
     /// and no answer goes back. The result is the `MSG` of a live
     /// subscription.

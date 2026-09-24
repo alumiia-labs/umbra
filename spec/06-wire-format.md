@@ -61,9 +61,8 @@ intended incentive.
    (§6.4), the L6 record kind (§6.4.2), the group queue record kind (§6.4.6),
    the `PqFrame` kind (§6.5), the application kind (§6.6), and the group
    control type (§6.6.3). A byte value has a meaning only inside its own namespace. **[WIR-007]** A part
-   outside Part 6 MAY declare a namespace of its own. Part 12 §12.4.4 declares
-   the community record type, and Part 7 §7.5.5 declares the device-set control
-   type.
+   outside Part 6 MAY declare a namespace of its own. Part 7 §7.5.5 declares
+   the device-set control type.
 
    The two rules below hold for each namespace.
 
@@ -427,7 +426,7 @@ Command {
     version         u8            // 0x01
     cmd             u8            // see table
     corr_id         [16]u8        // random, unique for each command
-    queue_id        [32]u8        // RecipientId, SenderId, ChunkId, community_id, or GroupQueueId, by cmd
+    queue_id        [32]u8        // RecipientId, SenderId, ChunkId, or GroupQueueId, by cmd
     auth            [32]u8        // deniable authenticator (Part 3 §3.2.3)
     payload_len     u16
     payload         [payload_len]u8
@@ -460,7 +459,7 @@ party MUST NOT compute `auth` as an AEAD ciphertext.
 | `0x51` | `NACK` | Relay | `NackPayload`, 17 B, §6.4.4 |
 | `0x60` | `COVER` | Sender or recipient | zero-filled, indistinguishable from `SEND` and `MSG` |
 | `0x70`–`0x7B` | Attachment commands | Uploader, downloader, or relay | Part 13 §13.3.3 gives the twelve commands and their payloads |
-| `0x80`–`0x85` | Community commands | Subscriber, publisher, or relay | Part 12 §12.3.3 gives the six commands and their payloads |
+| `0x80`–`0x85` | Reserved; the withdrawn Part 12 used them | — | none; `WIR-309` rejects each one |
 | `0x90`–`0x9A` | Group-queue commands | Member, admin, or relay | §6.4.5 gives the eleven commands and their payloads |
 
 ```
@@ -549,8 +548,7 @@ of its own, such as a `MSG`, a `GMSG`, and a `COVER`.
 > A `GPOST` had the `GSEQ`, and a pairwise `SEND` had no acknowledgment on the
 > wire. Rule `NET-017` already made the relay signal the quota of a queue,
 > thus the `QUOTA` carries the acknowledgment and no new command exists. An
-> `IDS`, a `PAGE`, a `PUBACK`, and each attachment answer name their command
-> through the same field.
+> `IDS` and each attachment answer name their command through the same field.
 
 A `NEW` requests no parameter. The relay applies its own quota of Part 3
 §3.2.4, and `QUOTA` reports it. **[WIR-487]** A party MUST reject a command
@@ -590,15 +588,9 @@ command.
 **One attachment command travels between two relays.** `CRPUT` of Part 13
 §13.4.1 carries a chunk from the relay that holds it to a replica relay.
 
-Part 12 §12.3.3 gives the community commands. Those commands put a
-`community_id` in `queue_id`. **[WIR-309]** A community command MUST travel on
-a transport session that carries no queue command. **[WIR-310]** A client MUST
-NOT batch a community command with a command of another range.
-
-> *Cause.* A pull carries no client identifier (Part 12 §12.3.1). A queue
-> command in the same session would give the relay one, because a queue names
-> its recipient. The batch rule keeps a `Cell` inside one range. Thus a relay
-> that serves a queue and a community reads no pull beside a queue command.
+The range `0x80` to `0x85` is reserved. The withdrawn Part 12 used it, and no
+command of version 1 uses it. **[WIR-309]** A relay MUST reject a command whose
+`cmd` is in that range, and a client MUST NOT send one.
 
 §6.4.5 gives the group-queue commands. Those commands put a `GroupQueueId` in
 `queue_id`. **[WIR-363]** A group-queue command MUST travel on a transport
@@ -633,8 +625,8 @@ exactly as to a queue session.
   payload is the one authority of a copy (Part 13 rules `ATT-107` and
   `ATT-108`).
 
-- **[WIR-526]** A relay that writes a digest of Part 8 §8.5 or Part 12
-  §12.6.4 into a queue at another relay MUST send it as the value of one
+- **[WIR-526]** A relay that writes a digest of Part 8 §8.5 into a queue at
+  another relay MUST send it as the value of one
   `UMBRA_DEPOSIT` capsule, on a connection of §6.2.1 that it opens for that
   deposit. The value is one `SEND` of bucket `B0` with its header, and a
   receiver MUST reject each other length and each other command. The sender
@@ -654,8 +646,8 @@ exactly as to a queue session.
   the session of §6.2.3, and it gets no answer. The signature of the relay
   is its one authority (Part 14 `ABU-103`).
 
-> *Cause of the deposit.* Part 8 rule `NTF-096` and Part 12 rule `COM-371`
-> had a relay write a digest "as a `SEND`", and no section gave the path. A
+> *Cause of the deposit.* Part 8 rule `NTF-096` had a relay write a digest
+> "as a `SEND`", and no section gave the path. A
 > `SEND` travels at the end of a circuit under the key of its session, and a
 > relay holds no circuit to another relay of layer 3. The static key of the
 > receiving relay takes the place of the session key, and the held `corr_id`
@@ -683,7 +675,7 @@ the command area of the bucket. **[WIR-109]** A client MUST NOT send a cell that
 command when a second ready command fits the command area of that cell.
 **Batching is mandatory and it is not optional.** Without batching, an `ACK` of
 88 bytes costs a full cell, and the fixed-size design then destroys the mobile
-data budget. Part 12 §12.4.1 rule 4 depends on this rule.
+data budget.
 
 A `SEND` and a `MSG` each take the command area of the bucket (§6.4.2 rule 6). A
 `MSG` fills that area exactly, and a `SEND` leaves 4 bytes. A `GPOST` and a
@@ -726,14 +718,15 @@ QueueE2E {
 5. The plaintext starts with a `u16` true length and then a `u8` L6 record kind.
    The value `0x01` names a ratchet record (§6.5). The value `0x02` named a
    sender-key record in an earlier draft, and it is retired. The value `0x03`
-   names a report record (Part 12 §12.5.3). The value `0x04` names a `NotifyDigest` (Part 12 §12.6.4).
+   named a report record of the withdrawn Part 12, and it is retired. The
+   value `0x04` names a `NotifyDigest` (Part 8 §8.5.1).
    The value `0x05` names a handshake record, which the text after rule 6
    gives. The value `0x06` names a renewal record: a bundle of Part 5
    §5.4.1 of a party whose ratchet is stale (Part 3 §3.2.6, `NET-326`).
-   **[WIR-023]** A receiver MUST reject an unknown kind. **[WIR-528]** A
-   receiver MUST take the content of a renewal record as a bundle in the
-   layout of Part 5 §5.4.1, and it MUST read it on the queue of a contact
-   whose handshake is complete. No ratchet covers the record.
+   **[WIR-023]** A receiver MUST reject an unknown kind and a retired kind.
+   **[WIR-528]** A receiver MUST take the content of a renewal record as a
+   bundle in the layout of Part 5 §5.4.1, and it MUST read it on the queue of
+   a contact whose handshake is complete. No ratchet covers the record.
 6. **[WIR-024]** **A sender MUST fill the L6 record to a fixed length for the bucket.** That
    length is the "L6 record on a `MSG`" row of §6.9. That row gives 390 bytes at
    bucket `B0`. **[WIR-025]** Thus the `payload_len` of a `SEND` MUST equal that row.
@@ -924,7 +917,7 @@ NackPayload {                     // 17 bytes
 
 **The list above is closed.** A rejection rule of this specification maps onto
 one row. A rule that names no row maps onto `REJECTED`. The object of
-`queue_id` is a queue, a chunk, a community, or a group queue.
+`queue_id` is a queue, a chunk, or a group queue.
 
 1. **[WIR-313]** A relay MUST answer a command that it rejects with one `NACK`.
    **[WIR-314]** That `NACK` MUST carry the `corr_id` of the rejected command.
@@ -1023,9 +1016,8 @@ GroupNotifyRegistration {         // the payload of GNREG and of GNUNREG, 130 by
 }
 ```
 
-A `GroupNotifyRegistration` has the shape of the `NotifyRegistration` of Part
-12 §12.6.4 without `community_id`, because `queue_id` names the group queue.
-Part 8 §8.5.2 gives the notify queue of a group and the digest that the relay
+A `GroupNotifyRegistration` names no group, because `queue_id` names the group
+queue. Part 8 §8.5.2 gives the notify queue of a group and the digest that the relay
 writes into it.
 
 **The parser.**
@@ -1085,8 +1077,7 @@ manner of §6.4.3 rule 5.
   `GroupQueueRecord` of a `GPOST`, it MUST answer with the `seq` that it
   holds. **[WIR-386]** That relay MUST NOT store a second copy. A sender under
   the ARQ of Part 3 §3.7 sends one record to a replica again in a later
-  session, and this rule makes that send idempotent, in the manner of Part 12
-  rule `COM-203`. The comparison selects nothing but a stored `seq`, and
+  session, and this rule makes that send idempotent. The comparison selects nothing but a stored `seq`, and
   `WIR-382` keeps that value out of the three functions of `WIR-004`. A
   comparison that fails stores a second record, and the `msg_id` rule
   `WIR-065` removes the duplicate at each reader.
@@ -1519,10 +1510,10 @@ client MUST NOT copy that raw value into a different row.
 | `0x0A` | Poll (§6.6.6) | Insertion |
 | `0x0B` | Poll vote (§6.6.6) | Insertion |
 | `0x0C` | Contact share (§6.6.7) | Insertion |
-| `0x0D` | Community repost (Part 12 §12.6.2), inside a `CommunityPost` only | Insertion |
-| `0x0E` | Community contact (Part 12 §12.6.3), inside a `CommunityPost` only | Insertion |
+| `0x0D` | Retired; it was the community repost of the withdrawn Part 12 | — |
+| `0x0E` | Retired; it was the community contact of the withdrawn Part 12 | — |
 | `0x10` | Group control (§6.6.3, Part 11) | Control |
-| `0x11` | Community record (Part 12 §12.4.4), inside a report record only | Control |
+| `0x11` | Retired; it was the community record of the withdrawn Part 12 | — |
 | `0x12` | Retired; it was the group record wrapper (§6.6.2) | — |
 | `0x20` | Device-set sync (Part 7) | Mutable state or control, by the sub-kind |
 | `0x30` | Key-change notice (Part 4 §4.5.1) | Control |
@@ -1533,13 +1524,11 @@ client MUST NOT copy that raw value into a different row.
 | `0x35` | Key supply (§6.6.11) | Control |
 | `0x36` | Verification commit (Part 4 §4.5.2) | Ephemeral |
 | `0x37` | Verification reveal (Part 4 §4.5.2) | Ephemeral |
-| `0x38` | Community owner exchange (Part 12 §12.5.5) | Control |
+| `0x38` | Retired; it was the community owner exchange of the withdrawn Part 12 | — |
 
 **[WIR-362]** A parser MUST reject a body of kind `0x36` whose length is
 not 64, and a body of kind `0x37` whose length is not 32. Part 4 §4.5.2 gives
-the two layouts. **[WIR-530]** A parser MUST reject a body of kind `0x38`
-that is not a `CommunityOwnerExchange` of Part 12 §12.5.5, and MUST NOT
-accept kind `0x38` on a channel other than a pairwise one.
+the two layouts.
 
 For kind `0x01` the body is UTF-8 text with no further structure.
 **[WIR-259]** A parser MUST reject a body of kind `0x01` that is not valid
@@ -1558,24 +1547,10 @@ For kind `0x10` the body is a `GroupControl`, and §6.6.3 gives that structure.
 For kind `0x31` the body is a `DigestBody`, and §6.6.4 gives that structure.
 For kind `0x33` the body is a `QueueAddress`, and §6.6.10 gives that structure.
 
-**Kind `0x11` carries a community record.** Its type namespace is the
-community record type of Part 12 §12.4.4, and the body starts with the
-`version` and `type` bytes of that namespace. One carrier holds that kind,
-which is the report record of Part 12 §12.5.3. **[WIR-144]** A parser MUST
-reject a body of kind `0x11` whose `type` is not `0x07`. **[WIR-432]** A parser
-MUST reject an `AppMessage` of kind `0x11` that arrives in a ratchet record or
-in a group queue record.
-
-> *Cause.* An earlier draft reserved this kind, and `WIR-144` required a type
-> namespace before an object used it. The report record is that object, and
-> the two rules now bound the kind to its one carrier. Part 12 delivers each
-> other community object over the pull path of §12.3.3.
-
-**Kinds `0x0D` and `0x0E` travel inside a community post only.** For kind
-`0x0D` the body is a `RepostBody`, and Part 12 §12.6.2 gives that structure.
-For kind `0x0E` the body is a `CommunityContact`, and Part 12 §12.6.3 gives
-that structure. **[WIR-433]** A parser MUST reject an `inner_kind` of `0x0D`
-or of `0x0E` in a ratchet record or in a group queue record.
+**The retired kinds.** The kinds `0x0D`, `0x0E`, `0x11`, and `0x38` belonged
+to the withdrawn Part 12. Each one stays reserved, and no party gives it a new
+meaning in version 1. **[WIR-433]** A parser MUST reject a `kind` or an
+`inner_kind` that the table above marks as retired.
 
 For kind `0x04` the body is an `EditBody`, and for kind `0x05` the body is a
 `DeleteBody`. §6.6.1 gives the two structures. Part 7 §7.5.6 gives the edit
@@ -2074,21 +2049,7 @@ an `inner_body` with no mention holds a maximum of **115 bytes**. §6.9 gives 15
 bytes to the body of an `AppMessage` at `B0`.
 
 **The reference value.** In a pairwise conversation and in a group,
-`reply_target` and `thread_root` each hold a `msg_id`. In a community the two
-fields each hold a `community_reply_id`, because a community post carries no
-`msg_id` (Part 12 §12.2.1).
-
-```
-community_reply_id = SHA3-256( "umbra/v1/community-reply"
-                               || community_id || pseudonym || BE32(index) )[0..16]
-```
-
-The values `community_id`, `pseudonym`, and `index` are the fields of Part 12
-§12.2.1, and Part 5 §5.11 holds the label. **[WIR-263]** A sender in a community
-MUST compute each reference value with the derivation above. **[WIR-264]** A
-client MUST compute the `community_reply_id` of each community post that it
-holds. **[WIR-308]** A client MUST match a reference value against those
-values.
+`reply_target` and `thread_root` each hold a `msg_id`.
 
 - **[WIR-161]** A parser MUST reject a `body_len` below 41. **[WIR-162]** A
   parser MUST reject a record where `body_len` does not equal 40 plus
@@ -2127,17 +2088,16 @@ and the root is a record that answers no message.
   `thread_root` as the `msg_ref` of §6.6 in a group. **[WIR-273]** A client MUST
   group the records that share one `thread_root` in its interface.
 
-**The mention identifier.** A mention names a member of a group or of a
-community, and it never names a party of a pairwise conversation.
+**The mention identifier.** A mention names a member of a group, and it never
+names a party of a pairwise conversation.
 
 ```
 mention_id = SHA3-256( "umbra/v1/mention" || scope_id || member_key )[0..16]
 ```
 
-The value `scope_id` is the `group_id` of Part 11 §11.2 or the `community_id`
-of Part 12 §12.2. The value `member_key` is the 32-byte `GroupPairKey_g`
-public key of that member (Part 11 §11.3.3), or the community pseudonym of
-that member. Part 5 §5.11 holds the label.
+The value `scope_id` is the `group_id` of Part 11 §11.2. The value
+`member_key` is the 32-byte `GroupPairKey_g` public key of that member (Part
+11 §11.3.3). Part 5 §5.11 holds the label.
 
 > *Cause of the pair key.* An earlier draft took `member_key` from the
 > ML-DSA-65 roster key of the member. In 0.2.0-draft the full roster key of a
@@ -2151,8 +2111,8 @@ that member. Part 5 §5.11 holds the label.
   pairwise channel.
 
 > *Cause of the scope binding.* The derivation takes the conversation
-> identifier, thus one member holds a different mention identifier in each group
-> and in each community. Two hostile members of two different groups therefore
+> identifier, thus one member holds a different mention identifier in each
+> group. Two hostile members of two different groups therefore
 > cannot match a mention list across those groups. Goal G9 of Part 2 §2.3 holds
 > against colluding contacts, and an unscoped member identifier would be a
 > perfect linker in the manner of Part 9 §9.7.
@@ -2418,7 +2378,7 @@ resolves `relay_id` in the consensus that it holds, under Part 10 rule
    `0x01`. **[WIR-328]** A parser MUST reject a body of kind `0x33` whose
    `body_len` is not 129.
 2. **[WIR-329]** A client MUST NOT send a record of kind `0x33` on a group
-   channel or on a community channel. A queue belongs to one pairwise channel.
+   channel. A queue belongs to one pairwise channel.
 3. **[WIR-330]** A receiver MUST accept a record of kind `0x33` only from the
    receiving chain of the session. The ratchet direction gives the
    authorization, and Part 4 rule `IDN-059` uses the same basis.
@@ -2492,8 +2452,7 @@ record.
    on the group queue when it holds a write credential inside
    `GROUP_WRITE_GRACE` and an epoch inside `GROUP_EPOCH_GRACE`. **[WIR-457]**
    Otherwise a client MUST send that request on a pairwise channel with a
-   member of the group. **[WIR-458]** A client MUST NOT send a key request on
-   a community channel. **[WIR-523]** A request of scope `0x02` on a pairwise
+   member of the group. **[WIR-523]** A request of scope `0x02` on a pairwise
    channel MUST carry 1 plus the member index of the requester in `index`,
    and one that another member posts on the group queue for it keeps that
    value; the tag of a group record names its poster and not the member that
@@ -2683,14 +2642,13 @@ cover these cases:
   buckets. **[WIR-159]** The vectors MUST assert that the cell length does not
   change at a hop. **[WIR-160]** The vectors MUST hold a negative case where one
   bit of `body` changes at hop 2, and the endpoint rejects the cell.
-- The `RichRecord` of §6.6.5. **[WIR-203]** The vectors MUST cover the five
+- The `RichRecord` of §6.6.5. **[WIR-203]** The vectors MUST cover the four
   cases below. **[WIR-204]** The parser MUST reject the eight cases that follow
   them.
   - A record with no reply and no mention.
   - A record with a reply target.
   - A record with a reply target and a thread root.
   - A record at `MENTION_MAX`.
-  - A community reply with its `community_reply_id`.
   - A nested `inner_kind` of `0x09`.
   - A `mention_count` above `MENTION_MAX`.
   - A repeated mention, and a mention list out of order.

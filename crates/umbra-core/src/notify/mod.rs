@@ -1,7 +1,7 @@
 //! The notifications of Part 8: the fixed blob and its key schedule, the
 //! token blinding and the handle groups, the binding that gives a queue
 //! relay what it seals with, the push scheduler of a queue relay, the
-//! digest gate of a group or community relay, the Notification Delivery
+//! digest gate of a group-queue relay, the Notification Delivery
 //! Relay (`ndr`), and the wake rules of the three modes at the client.
 //!
 //! Each type takes the time and the random values it needs as arguments.
@@ -34,14 +34,12 @@ pub const PUSH_TTL_DIGEST: u64 = 3_600;
 pub const REPUSH_INTERVAL: u64 = 3_600;
 /// `REPUSH_MAX`.
 pub const REPUSH_MAX: u32 = 3;
-/// `COMMUNITY_DIGEST_BUDGET`, digests in one day for one queue.
-pub const COMMUNITY_DIGEST_BUDGET: u32 = 4;
 /// `GROUP_DIGEST_MIN_GAP`, in seconds.
 pub const GROUP_DIGEST_MIN_GAP: u64 = 10;
-/// The retention of a notify registration (`NTF-102`, `COM-375`), in
+/// The retention of a notify registration (`NTF-102`), in
 /// seconds.
 pub const REGISTRATION_TTL: u64 = 7 * 86_400 + crate::directory::CLOCK_SKEW;
-/// The most registrations one group queue or community holds.
+/// The most registrations one group queue holds.
 pub const REGISTRATION_MAX: usize = umbra_queue::params::GROUP_NOTIFIER_MAX;
 /// The longest push-wake session (`NTF-012`), in seconds.
 pub const WAKE_SESSION_MAX: u64 = 6;

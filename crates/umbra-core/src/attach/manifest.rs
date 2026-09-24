@@ -138,7 +138,7 @@ pub fn collapse(refs: &[ChunkRef], expected: usize) -> Result<Vec<Replicas>, Err
     Ok(out)
 }
 
-/// Rejects a null `RelayRef` on a pairwise, group, or community channel
+/// Rejects a null `RelayRef` on a pairwise or group channel
 /// (`ATT-142`).
 pub fn reject_null_hints(refs: &[ChunkRef]) -> Result<(), Error> {
     if refs.iter().any(|r| r.replicas.contains(&[0; 12])) {
