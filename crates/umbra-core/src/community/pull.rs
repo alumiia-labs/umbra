@@ -271,6 +271,9 @@ pub struct PageNote {
     pub pull_again: bool,
 }
 
+/// The length of a stored [`RelayCursor`].
+pub const CURSOR_LEN: usize = 1 + 8 + 8 + 8;
+
 /// The cursor of one community at one relay (`COM-190`). A `seq` of one
 /// relay has no meaning at another relay (`COM-180`), thus each relay has
 /// its own cursor.
@@ -282,6 +285,44 @@ pub struct RelayCursor {
 }
 
 impl RelayCursor {
+    /// The stored form: a flag byte for the two optional values, then
+    /// `next`, the lowest `seq` seen, and the floor.
+    pub fn to_bytes(&self) -> [u8; CURSOR_LEN] {
+        let mut out = [0u8; CURSOR_LEN];
+        let flags = u8::from(self.next.is_some()) | u8::from(self.lowest_seen.is_some()) << 1;
+        let mut writer = Writer::new(&mut out);
+        // The buffer holds each field, thus no write fails.
+        let _ = writer.u8(flags);
+        let _ = writer.put(&self.next.unwrap_or(0).to_be_bytes());
+        let _ = writer.put(&self.lowest_seen.unwrap_or(0).to_be_bytes());
+        let _ = writer.put(&self.floor.to_be_bytes());
+        out
+    }
+
+    /// Reads the stored form of [`RelayCursor::to_bytes`].
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
+        let mut reader = Reader::new(bytes);
+        let flags = reader.u8()?;
+        let next = u64::from_be_bytes(reader.array()?);
+        let lowest = u64::from_be_bytes(reader.array()?);
+        let floor = u64::from_be_bytes(reader.array()?);
+        reader.finish()?;
+        if flags > 0x03 {
+            return Err(Error::Malformed);
+        }
+        Ok(RelayCursor {
+            next: (flags & 0x01 != 0).then_some(next),
+            lowest_seen: (flags & 0x02 != 0).then_some(lowest),
+            floor,
+        })
+    }
+
+    /// Whether the cursor took a page yet. A cursor that took none makes
+    /// the first pull of a join (`COM-195`).
+    pub fn has_page(&self) -> bool {
+        self.next.is_some()
+    }
+
     /// The next steady-state request. The first one asks for the newest
     /// records (`COM-195`), and each one asks for `PULL_BATCH` (`COM-192`).
     pub fn request(&self, community_id: [u8; 32]) -> PullRequest {
@@ -370,6 +411,22 @@ impl PullSession {
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cursor_round_trips_through_its_stored_form() {
+        let empty = RelayCursor::default();
+        assert_eq!(RelayCursor::from_bytes(&empty.to_bytes()).unwrap(), empty);
+        let held = RelayCursor {
+            next: Some(41),
+            lowest_seen: Some(12),
+            floor: 3,
+        };
+        assert_eq!(RelayCursor::from_bytes(&held.to_bytes()).unwrap(), held);
+        let mut bad = held.to_bytes();
+        bad[0] = 0x04;
+        assert!(RelayCursor::from_bytes(&bad).is_err());
+        assert!(RelayCursor::from_bytes(&held.to_bytes()[..CURSOR_LEN - 1]).is_err());
+    }
 
     #[test]
     fn a_request_holds_75_bytes_and_obeys_the_selector_rules() {

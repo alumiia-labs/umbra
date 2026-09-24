@@ -10,12 +10,14 @@
 use std::collections::VecDeque;
 
 mod backup;
+mod communities;
 mod dead;
 mod files;
 mod groups;
 mod notify;
 
 pub use backup::{BackupUpload, PendingBackup, RestoredBackup, RootWrite};
+pub use communities::{CommunityInfo, CommunityPull};
 pub use dead::DeadWork;
 pub use files::{DownloadJob, ErasureJob, FileInfo, FileState, UploadJob};
 use files::{FileQueues, CHUNK_CRED, FILE_DATA, FILE_STATE};

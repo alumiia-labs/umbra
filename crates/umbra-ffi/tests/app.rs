@@ -51,6 +51,7 @@ use umbra_ffi::bindings::{
     FfiEvent, Handle, MsgHandle, Network, RelayEndpoint, RestoreStatus, SecureElementCallback,
     TextSink,
 };
+use umbra_ffi::communities::{run_communities, CommunityCommand, CommunityUpdate};
 use umbra_ffi::groups::{run_groups, GroupCommand, GroupUpdate};
 use umbra_ffi::transfers::{run_transfers, TransferCommand, TransferUpdate};
 use umbra_relay::{
@@ -2505,4 +2506,255 @@ fn a_client_takes_the_signed_challenge_of_each_relay_from_the_carrier() {
         std::thread::sleep(Duration::from_millis(100));
     }
     alice.disconnect();
+}
+
+fn community_update(
+    updates: &mut tokio::sync::mpsc::UnboundedReceiver<CommunityUpdate>,
+) -> CommunityUpdate {
+    let start = Instant::now();
+    loop {
+        if let Ok(update) = updates.try_recv() {
+            return update;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "no community update"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn an_app_joins_a_community_by_its_link_and_pulls_its_records() {
+    use umbra_core::{
+        abuse::pow::{ChallengeBook, Fetched, SOLUTION_LEN},
+        attach::seal::relay_hint,
+        community::{
+            chain::AuthorChain,
+            community_id,
+            control::{ControlBody, ControlObject, Role, RosterEntry},
+            identity::{AuthorIdentity, RoleIdentity},
+            link::CommunityLink,
+            social::text_body,
+            ADMISSION_OPEN, NO_INDEX,
+        },
+    };
+    use umbra_wire::{
+        address::QueueAddress,
+        admission::{Admission as Credential, AdmissionKind},
+    };
+    let relays = tokio::runtime::Runtime::new().unwrap();
+    let network = start_signed_network(&relays);
+    // ABU-057: each relay signs its first challenge at its start.
+    std::thread::sleep(Duration::from_secs(3));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let (keyset, _) = DirectoryKeySet::parse(&network.keyset).unwrap();
+    let mut consensus = Consensus::new(keyset, 0).unwrap();
+    let manifest = RelayManifest::parse(&network.manifest).unwrap();
+    let set = RelaySet::accept(&mut consensus, &manifest, &BlocList::v1(), now).unwrap();
+    let info_of = |relay: &ListedRelay| RelayInfo {
+        candidate: relay.candidate,
+        key: RelayStatic {
+            s: relay.ntor_pk,
+            relay_id: relay.candidate.relay_id,
+        },
+    };
+    let ingress = set
+        .relays
+        .iter()
+        .find(|relay| relay.candidate.ingress)
+        .unwrap();
+    let guard = Dial {
+        host: ingress.host.clone(),
+        addr_v4: Some(ingress.addr_v4),
+        addr_v6: None,
+        port: ingress.port,
+    };
+    let exits: Vec<[u8; 32]> = set
+        .relays
+        .iter()
+        .filter(|relay| relay.candidate.is_exit())
+        .map(|relay| relay.candidate.relay_id)
+        .collect();
+    assert_eq!(exits.len(), 3);
+
+    // COM-205: the genesis at each relay answers the challenge of that
+    // relay, which the carrier serves (ABU-104).
+    let clients = tokio::runtime::Runtime::new().unwrap();
+    let tls = native::tls_config_with_root_file(CA).unwrap();
+    let bundle = clients
+        .block_on(native::fetch_challenges(&guard, tls.clone()))
+        .unwrap();
+    let mut book = ChallengeBook::default();
+    for challenge in ChallengeBook::parse_bundle(&bundle).unwrap() {
+        let relay = set
+            .relays
+            .iter()
+            .find(|relay| relay.candidate.relay_id == challenge.verifier_id)
+            .unwrap();
+        let identity = umbra_crypto::sign::VerifyingKey::from_bytes(&relay.identity_pk).unwrap();
+        book.take(challenge, &identity, now).unwrap();
+    }
+    let admission_at = |relay: &[u8; 32]| {
+        let fetched = Fetched {
+            challenge: book.get(relay, now).unwrap().clone(),
+            fetched_at: now,
+        };
+        let solution = fetched.solve(now, &mut OsRng).unwrap();
+        let mut body = [0u8; SOLUTION_LEN];
+        let used = solution.encode(&mut body).unwrap();
+        let mut out = [0u8; 3 + SOLUTION_LEN];
+        let used = Credential {
+            kind: AdmissionKind::Pow,
+            body: &body[..used],
+        }
+        .encode(&mut out)
+        .unwrap();
+        out[..used].to_vec()
+    };
+
+    // The genesis roster with two owners (COM-130), and one post.
+    let owner = RoleIdentity::from_seed(&Secret::new([0x71; 32]));
+    let second = RoleIdentity::from_seed(&Secret::new([0x72; 32]));
+    let community = community_id(ADMISSION_OPEN, owner.public_key()).unwrap();
+    let queue = |tag: u8| QueueAddress {
+        relay_id: [tag; 32],
+        sender_id: [tag; 32],
+        qs_auth_sk: Secret::new([tag; 32]),
+        qe: Secret::new([tag; 32]),
+    };
+    let roster = ControlObject::sign(
+        &owner,
+        community,
+        0,
+        [0; 32],
+        ControlBody::Roster {
+            entries: vec![
+                RosterEntry::new(Role::Owner, &owner, &queue(1)).unwrap(),
+                RosterEntry::new(Role::Owner, &second, &queue(2)).unwrap(),
+            ],
+            cosigns: Vec::new(),
+        },
+        &mut OsRng,
+    )
+    .unwrap()
+    .encode()
+    .unwrap();
+    let author = AuthorIdentity::from_seed(&Secret::new([0x73; 32]));
+    let mut chain = AuthorChain::new(community, &author.pseudonym());
+    let text = text_body(&community, "the trail opens at eight", None, &[]).unwrap();
+    let post = chain.append(&author, NO_INDEX, &text, now).unwrap();
+    let none = {
+        let mut out = [0u8; 3];
+        let used = Credential::NONE.encode(&mut out).unwrap();
+        out[..used].to_vec()
+    };
+
+    // COM-200: the publisher sends each record to each relay.
+    let node = ClientNode::for_communities(
+        info_of(ingress),
+        set.relays
+            .iter()
+            .filter(|relay| !relay.candidate.ingress)
+            .map(info_of)
+            .collect(),
+        umbra_crypto::hierarchy::RootIdentity::new(Secret::new([0x74; 32])),
+    );
+    let (commands, task_commands) = tokio::sync::mpsc::unbounded_channel();
+    let (task_updates, mut updates) = tokio::sync::mpsc::unbounded_channel();
+    clients.spawn(run_communities(
+        node,
+        guard,
+        tls,
+        task_commands,
+        task_updates,
+    ));
+    let mut tag = 0u64;
+    for (record, credential) in [(&roster, None), (&post, Some(&none))] {
+        for relay in &exits {
+            tag += 1;
+            let mut payload = record.clone();
+            match credential {
+                Some(credential) => payload.extend_from_slice(credential),
+                None => payload.extend_from_slice(&admission_at(relay)),
+            }
+            commands
+                .send(CommunityCommand::Publish {
+                    tag,
+                    relay: *relay,
+                    community_id: community,
+                    payload,
+                })
+                .ok()
+                .unwrap();
+        }
+        let mut published = 0;
+        while published < exits.len() {
+            match community_update(&mut updates) {
+                CommunityUpdate::Published { .. } => published += 1,
+                CommunityUpdate::Reset => {}
+                CommunityUpdate::Failed { reason, .. } => panic!("refused: {reason:?}"),
+                _ => panic!("no answer to the publication"),
+            }
+        }
+    }
+
+    // COM-195, COM-246: the app joins by the link, pulls the newest
+    // records from each hinted relay, and holds each record one time.
+    let directory = std::env::temp_dir().join(format!("umbra-community-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let bob = launch(&directory, "bob.db", 2);
+    let verified = bob
+        .network_of_manifest(
+            network.manifest.clone(),
+            network.keyset.clone(),
+            0,
+            HOST.into(),
+            Some(CA.into()),
+        )
+        .unwrap()
+        .network;
+    bob.clone().connect(verified).unwrap();
+    wait_for(&bob, |event| match event {
+        FfiEvent::Online => Some(()),
+        _ => None,
+    });
+    let link = CommunityLink {
+        community_id: community,
+        hints: exits.iter().map(relay_hint).collect(),
+        fragment: [0x75; 16],
+    }
+    .format()
+    .unwrap();
+    assert_eq!(
+        bob.join_community("umbra://c/nothing".into()),
+        Err(FfiError::Malformed)
+    );
+    let joined = bob.join_community(link.clone()).unwrap();
+    assert_eq!(joined, community.to_vec());
+    let start = Instant::now();
+    loop {
+        let held = bob.communities().unwrap();
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].relays, 3);
+        if held[0].records == 2 {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "{} records",
+            held[0].records
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // COM-245: the link that the app shares names the same relays.
+    assert_eq!(bob.community_link(joined.clone()).unwrap(), link);
+    bob.leave_community(joined).unwrap();
+    assert!(bob.communities().unwrap().is_empty());
+    bob.disconnect();
+    drop(commands);
 }

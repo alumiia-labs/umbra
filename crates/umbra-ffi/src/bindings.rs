@@ -47,7 +47,8 @@ use zeroize::Zeroizing;
 
 use crate::{
     bridge::{Bridge, NetEvent},
-    client::Client,
+    client::{Client, CommunityPull},
+    communities::{run_communities, CommunityCommand, CommunityUpdate},
     draft::Draft,
     groups::{run_groups, GroupCommand, GroupUpdate},
     runtime::{run_client, Ended, OsRng, Persist, Update},
@@ -222,6 +223,23 @@ pub struct FfiGroupInfo {
     /// Whether this device lacks the current epoch and the relay refused
     /// its request, thus it needs a new invitation (`GRP-297`).
     pub is_lapsed: bool,
+}
+
+/// What a view shows of a public community of Part 12.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiCommunity {
+    /// The community.
+    pub community_id: Vec<u8>,
+    /// The name of its metadata, or empty before one verifies.
+    pub name: String,
+    /// The count of the relays that serve it.
+    pub relays: u32,
+    /// The count of the records that this device holds.
+    pub records: u32,
+    /// Whether this device holds an owner role of it.
+    pub is_owner: bool,
+    /// The time of the join, in Unix seconds.
+    pub joined_at: u64,
 }
 
 /// The role of one member of a group (§11.9).
@@ -940,6 +958,12 @@ struct Inner {
     /// same bytes to the next session (`NET-072`).
     group_sent: BTreeMap<u64, GroupCommand>,
     next_group_tag: u64,
+    /// The commands of the community task, or none before the first
+    /// community command of a run.
+    communities: Option<mpsc::UnboundedSender<CommunityCommand>>,
+    /// What each community command that runs belongs to.
+    community_tags: BTreeMap<u64, CommunityWork>,
+    next_community_tag: u64,
     /// The groups that the run of the group queues reads. A subscription
     /// lives with its session, thus this set empties when the run ends.
     group_reading: BTreeSet<crate::ConversationId>,
@@ -1115,6 +1139,12 @@ enum TransferWork {
         /// The chunk and the facts of its record.
         wanted: Box<umbra_core::group::state::WantedChunk>,
     },
+}
+
+/// What one command of the community task belongs to.
+enum CommunityWork {
+    /// A `PULL` of one relay.
+    Pull(CommunityPull),
 }
 
 /// What one command of the group task belongs to.
@@ -1529,6 +1559,144 @@ impl Inner {
             }
         });
         Some(commands)
+    }
+
+    /// Sends one command to the community task, and starts the task when
+    /// the link of an earlier run ended.
+    fn send_community(&mut self, command: CommunityCommand) {
+        let command = match &self.communities {
+            Some(sender) => match sender.send(command) {
+                Ok(()) => return,
+                Err(refused) => refused.0,
+            },
+            None => command,
+        };
+        self.communities = self.start_communities();
+        if let Some(sender) = &self.communities {
+            let _ = sender.send(command);
+        }
+    }
+
+    fn start_communities(&mut self) -> Option<mpsc::UnboundedSender<CommunityCommand>> {
+        let spawner = self.spawner.clone()?;
+        let guard_id = self.guard?;
+        let guard = self
+            .relays
+            .iter()
+            .find(|relay| relay.relay_id.as_slice() == guard_id.as_slice())?;
+        let dial = Dial {
+            host: guard.host.clone(),
+            addr_v4: Some(guard.ipv4.as_slice().try_into().ok()?),
+            addr_v6: None,
+            port: guard.port,
+        };
+        let ingress = relay_info(guard).ok()?;
+        let mut candidates = Vec::new();
+        for relay in self.relays.iter().filter(|relay| relay.layer != 1) {
+            candidates.push(relay_info(relay).ok()?);
+        }
+        let tls = match &self.root_ca_path {
+            Some(path) => native::tls_config_with_root_file(path),
+            None => native::tls_config(),
+        }
+        .ok()?;
+        let node =
+            ClientNode::for_communities(ingress, candidates, self.client.root_identity().ok()?);
+        let (commands, task_commands) = mpsc::unbounded_channel();
+        let (task_updates, mut updates) = mpsc::unbounded_channel();
+        spawner.spawn(run_communities(
+            node,
+            dial,
+            tls,
+            task_commands,
+            task_updates,
+        ));
+        let me = self.me.clone();
+        spawner.spawn(async move {
+            while let Some(update) = updates.recv().await {
+                let Some(handle) = me.upgrade() else {
+                    break;
+                };
+                handle.on_community_update(update);
+            }
+        });
+        Some(commands)
+    }
+
+    /// Sends each pull of a community that is due (`COM-174`).
+    fn pump_communities(&mut self) {
+        if self.bridge.is_none() {
+            return;
+        }
+        let Ok(pulls) = self.client.take_community_pulls(unix_now(), &mut OsRng) else {
+            return;
+        };
+        for pull in pulls {
+            self.send_pull(pull);
+        }
+    }
+
+    fn send_pull(&mut self, pull: CommunityPull) {
+        self.next_community_tag = self.next_community_tag.wrapping_add(1);
+        let tag = self.next_community_tag;
+        let command = CommunityCommand::Pull {
+            tag,
+            relay: pull.relay,
+            community_id: pull.community_id,
+            request: pull.request.clone(),
+        };
+        self.community_tags.insert(tag, CommunityWork::Pull(pull));
+        self.send_community(command);
+    }
+
+    /// Takes one answer of the community task into the store.
+    fn end_community(&mut self, update: CommunityUpdate) {
+        match update {
+            CommunityUpdate::Page { tag, page, .. } => {
+                let Some(CommunityWork::Pull(pull)) = self.community_tags.remove(&tag) else {
+                    return;
+                };
+                // COM-194: a full page pulls again in the same session.
+                if let Ok(Some(next)) =
+                    self.client
+                        .on_community_page(&pull, &page, unix_now(), &mut OsRng)
+                {
+                    self.send_pull(next);
+                }
+            }
+            // A pull that failed or did not leave goes again at its next
+            // interval.
+            CommunityUpdate::Published { tag, .. }
+            | CommunityUpdate::Failed { tag, .. }
+            | CommunityUpdate::Unsent { tag } => {
+                self.community_tags.remove(&tag);
+            }
+            CommunityUpdate::Reset => {}
+            CommunityUpdate::Ended => {
+                self.communities = None;
+                self.community_tags.clear();
+            }
+        }
+    }
+
+    /// The relays of the relay set that the hints of a link name
+    /// (`COM-246`), each one a relay at the end of a chain.
+    fn resolve_hints(&self, hints: &[[u8; 12]]) -> Vec<[u8; 32]> {
+        let mut out = Vec::new();
+        for hint in hints {
+            let found = self
+                .relays
+                .iter()
+                .filter(|relay| relay.layer == 3)
+                .filter_map(|relay| <[u8; 32]>::try_from(relay.relay_id.as_slice()).ok())
+                .find(|relay_id| umbra_core::attach::seal::relay_hint(relay_id) == *hint);
+            if let Some(relay_id) = found {
+                if !out.contains(&relay_id) {
+                    out.push(relay_id);
+                }
+            }
+        }
+        out
     }
 
     /// Gives each record of this device to the send path at once.
@@ -2498,6 +2666,9 @@ fn handle_of(database_path: String, client: Client<SqliteBackend, ForeignElement
             group_tags: BTreeMap::new(),
             group_sent: BTreeMap::new(),
             next_group_tag: 0,
+            communities: None,
+            community_tags: BTreeMap::new(),
+            next_community_tag: 0,
             group_reading: BTreeSet::new(),
             group_lost: BTreeSet::new(),
             group_refusals: BTreeSet::new(),
@@ -2596,6 +2767,11 @@ impl Handle {
 
     fn on_group_update(&self, update: GroupUpdate) {
         locked(&self.inner).end_group(update);
+        self.changed.notify_all();
+    }
+
+    fn on_community_update(&self, update: CommunityUpdate) {
+        locked(&self.inner).end_community(update);
         self.changed.notify_all();
     }
 
@@ -2756,6 +2932,8 @@ impl Handle {
             inner.transfers = None;
             inner.groups = None;
             inner.group_reading.clear();
+            inner.communities = None;
+            inner.community_tags.clear();
         }
         // A record with a descriptor asks for its file.
         inner.pump_transfers();
@@ -2764,6 +2942,7 @@ impl Handle {
         if is_tick {
             inner.pump_dead_channels();
             inner.pump_backup();
+            inner.pump_communities();
         }
         let work = core::mem::take(&mut inner.dead_work);
         for step in work {
@@ -3862,6 +4041,60 @@ impl Handle {
         let file = SqliteBackend::open(&self.database_path).map_err(|_| FfiError::Storage)?;
         file.set_header(&header).map_err(|_| FfiError::Storage)?;
         inner.client.set_header(header);
+        Ok(())
+    }
+
+    /// Joins the community of a link of Part 12 §12.7, and pulls it from
+    /// the relays that its hints name. It gives the `community_id`.
+    pub fn join_community(&self, link: String) -> Result<Vec<u8>, FfiError> {
+        let link = umbra_core::community::link::CommunityLink::parse(link.trim())
+            .map_err(|_| FfiError::Malformed)?;
+        let mut inner = locked(&self.inner);
+        let relays = inner.resolve_hints(&link.hints);
+        if relays.is_empty() {
+            return Err(FfiError::Malformed);
+        }
+        let community_id = inner
+            .client
+            .join_community(&link, relays, unix_now(), &mut OsRng)?;
+        inner.pump_communities();
+        drop(inner);
+        self.changed.notify_all();
+        Ok(community_id.to_vec())
+    }
+
+    /// Each community of this device.
+    pub fn communities(&self) -> Result<Vec<FfiCommunity>, FfiError> {
+        Ok(locked(&self.inner)
+            .client
+            .communities()?
+            .into_iter()
+            .map(|info| FfiCommunity {
+                community_id: info.community_id.to_vec(),
+                name: info.name,
+                relays: u32::try_from(info.relays.len()).unwrap_or(u32::MAX),
+                records: u32::try_from(info.records).unwrap_or(u32::MAX),
+                is_owner: info.is_owner,
+                joined_at: info.joined_at,
+            })
+            .collect())
+    }
+
+    /// The link of a community, to share (`COM-245`).
+    pub fn community_link(&self, community_id: Vec<u8>) -> Result<String, FfiError> {
+        let community_id =
+            <[u8; 32]>::try_from(community_id.as_slice()).map_err(|_| FfiError::Malformed)?;
+        let link = locked(&self.inner).client.community_link(&community_id)?;
+        link.format().map_err(|_| FfiError::Malformed)
+    }
+
+    /// Leaves a community. The relays learn nothing of it: a pull names no
+    /// subscriber (`COM-172`).
+    pub fn leave_community(&self, community_id: Vec<u8>) -> Result<(), FfiError> {
+        let community_id =
+            <[u8; 32]>::try_from(community_id.as_slice()).map_err(|_| FfiError::Malformed)?;
+        locked(&self.inner).client.leave_community(&community_id)?;
+        self.changed.notify_all();
         Ok(())
     }
 
