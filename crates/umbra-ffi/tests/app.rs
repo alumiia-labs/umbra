@@ -315,6 +315,7 @@ fn network_of(ports: &[u16]) -> Network {
                     asn: 64_500 + u32::from(number),
                     prefix: Some(vec![10, number]),
                     holds_files: false,
+                    identity_pk: Vec::new(),
                 }
             })
             .collect(),
@@ -1047,7 +1048,7 @@ fn start_signed_network_with(
         )
         .unwrap();
         let relay_id = RelayEntry::parse(&entry).unwrap().descriptor.relay_id;
-        identities.push((relay_id, relay.s, static_secret));
+        identities.push((relay_id, relay.s, static_secret, *seed));
         entries.push(entry);
         listeners.push(listener);
     }
@@ -1073,7 +1074,9 @@ fn start_signed_network_with(
         .iter()
         .map(|listener| listener.local_addr().unwrap().port())
         .collect();
-    for (listener, (relay_id, static_key, static_secret)) in listeners.into_iter().zip(identities) {
+    for (listener, (relay_id, static_key, static_secret, seed)) in
+        listeners.into_iter().zip(identities)
+    {
         let placed = placement(&manifest, &keyset, &relay_id, &static_key, now).unwrap();
         layers.push(placed.layer);
         let config = RelayConfig {
@@ -1097,8 +1100,18 @@ fn start_signed_network_with(
                 .map(|(id, (_, key))| (*id, *key))
                 .collect(),
         );
+        // ABU-057, ABU-102: each relay signs its challenge, and the ingress
+        // relays carry it beside the manifest.
+        node.set_challenge_signer(
+            SigningKey::from_seed(Secret::new([seed; 32])),
+            placed.carriers.keys().copied().collect(),
+        );
+        node.set_relay_identities(placed.identities.clone());
         let mut replicas = placed.replicas;
         for (id, (dial, _)) in &placed.queue_relays {
+            replicas.entry(*id).or_insert_with(|| dial.clone());
+        }
+        for (id, dial) in &placed.carriers {
             replicas.entry(*id).or_insert_with(|| dial.clone());
         }
         let mut carried = carried_of(placed.layer, &ports, ndr, &client_tls);
@@ -2449,5 +2462,47 @@ fn a_connect_that_replaces_a_run_keeps_the_new_run() {
         FfiEvent::Invitation { .. } => Some(()),
         _ => None,
     });
+    alice.disconnect();
+}
+
+#[test]
+fn a_client_takes_the_signed_challenge_of_each_relay_from_the_carrier() {
+    let relays = tokio::runtime::Runtime::new().unwrap();
+    let network = start_signed_network(&relays);
+    // ABU-057, ABU-102: each relay signs its challenge at its start and
+    // hands it to the carriers of the manifest.
+    std::thread::sleep(Duration::from_secs(3));
+    let directory = std::env::temp_dir().join(format!("umbra-challenges-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let alice = launch(&directory, "alice.db", 1);
+    let verified = alice
+        .network_of_manifest(
+            network.manifest.clone(),
+            network.keyset.clone(),
+            0,
+            HOST.into(),
+            Some(CA.into()),
+        )
+        .unwrap()
+        .network;
+    let relay_count = verified.relays.len() as u32;
+    assert!(verified
+        .relays
+        .iter()
+        .all(|relay| !relay.identity_pk.is_empty()));
+    assert_eq!(alice.challenges_held(), 0);
+    // ABU-065, ABU-105: the connect fetches them from the ingress, and each
+    // one verifies under the identity key of its relay.
+    alice.clone().connect(verified).unwrap();
+    let start = Instant::now();
+    while alice.challenges_held() < relay_count {
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "{} of {relay_count}",
+            alice.challenges_held()
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
     alice.disconnect();
 }

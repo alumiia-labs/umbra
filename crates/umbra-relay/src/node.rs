@@ -9,7 +9,10 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use umbra_core::{
-    abuse::admission::{Accepts, RelayGate},
+    abuse::{
+        admission::{Accepts, RelayGate},
+        pow::{ChallengeBook, PowChallenge},
+    },
     attach::command::{CrputPayload, CRPUT_LEN},
     notify::digest::NotifyDigest,
     session::{
@@ -210,6 +213,19 @@ pub struct RelayNode {
     static_secret: StaticSecret,
     /// The static key of each queue relay of the relay set, for a deposit.
     queue_relays: BTreeMap<[u8; 32], [u8; 32]>,
+    /// The identity key that signs the challenges of this relay.
+    pow_key: Option<umbra_crypto::sign::SigningKey>,
+    /// The carriers of the relay manifest, which serve the challenge of
+    /// this relay beside it (`ABU-102`).
+    carriers: Vec<[u8; 32]>,
+    /// The identity key of each relay of the set, for a challenge that
+    /// this relay carries (`ABU-103`).
+    identities: BTreeMap<[u8; 32], Vec<u8>>,
+    /// The newest challenge of each relay, when this relay carries the
+    /// manifest.
+    challenges: ChallengeBook,
+    /// Whether the book moved since the last read of it.
+    challenges_moved: bool,
 }
 
 impl RelayNode {
@@ -240,7 +256,100 @@ impl RelayNode {
             relay,
             static_secret,
             queue_relays: BTreeMap::new(),
+            pow_key: None,
+            carriers: Vec::new(),
+            identities: BTreeMap::new(),
+            challenges: ChallengeBook::default(),
+            challenges_moved: false,
         }
+    }
+
+    /// The identity key that signs the challenges of this relay, and the
+    /// carriers of the manifest that take them (`ABU-057`, `ABU-102`).
+    pub fn set_challenge_signer(
+        &mut self,
+        key: umbra_crypto::sign::SigningKey,
+        carriers: Vec<[u8; 32]>,
+    ) {
+        self.pow_key = Some(key);
+        self.carriers = carriers;
+    }
+
+    /// The identity key of each relay of the set, by `relay_id`: a carrier
+    /// takes a challenge under the key of its relay alone (`ABU-103`).
+    pub fn set_relay_identities(&mut self, identities: BTreeMap<[u8; 32], Vec<u8>>) {
+        self.identities = identities;
+    }
+
+    /// Issues the challenge of the period from the admissions of the last
+    /// one, signs it, and hands it to each carrier of the manifest
+    /// (`ABU-057`, `ABU-060`, `ABU-092`, `ABU-102`). A relay that carries
+    /// the manifest keeps its own. The runtime calls this at each
+    /// `POW_CHALLENGE_PERIOD`.
+    pub fn issue_challenge<R: CryptoRng + ?Sized>(&mut self, now: u64, rng: &mut R) -> Vec<Output> {
+        let Some(key) = self.pow_key.as_ref() else {
+            return Vec::new();
+        };
+        let backlog = self.gate.take_backlog();
+        let Ok(mut challenge) = self.gate.pow.issue(backlog, now, rng) else {
+            return Vec::new();
+        };
+        if challenge.sign(key, rng).is_err() {
+            return Vec::new();
+        }
+        let mut encoded = vec![0u8; capsule::CHALLENGE_LEN];
+        if challenge.encode(&mut encoded).is_err() {
+            return Vec::new();
+        }
+        let mut outputs = Vec::new();
+        for carrier in self.carriers.clone() {
+            if carrier == self.relay.relay_id {
+                let identity = key.verifying_key();
+                if let Ok(moved) = self.challenges.take(challenge.clone(), &identity, now) {
+                    self.challenges_moved |= moved;
+                }
+                continue;
+            }
+            let mut capsule = vec![0u8; capsule::HEADER_LEN + encoded.len()];
+            if let Ok(used) = capsule::encode(CapsuleType::Challenge, &encoded, &mut capsule) {
+                capsule.truncate(used);
+                outputs.push(Output::Push {
+                    relay_id: carrier,
+                    capsule,
+                });
+            }
+        }
+        outputs
+    }
+
+    /// Takes the challenge of another relay, when this relay carries the
+    /// manifest and the challenge verifies under the identity key of that
+    /// relay (`ABU-103`).
+    fn take_challenge(&mut self, value: &[u8], now: u64) {
+        let Ok(challenge) = PowChallenge::parse(value) else {
+            return;
+        };
+        let Some(identity) = self
+            .identities
+            .get(&challenge.verifier_id)
+            .and_then(|bytes| umbra_crypto::sign::VerifyingKey::from_bytes(bytes).ok())
+        else {
+            return;
+        };
+        if let Ok(moved) = self.challenges.take(challenge, &identity, now) {
+            self.challenges_moved |= moved;
+        }
+    }
+
+    /// The newest challenge of each relay as one bundle, when the book
+    /// moved since the last call, for the carrier to serve beside the
+    /// manifest (`ABU-104`).
+    pub fn take_challenge_bundle(&mut self, now: u64) -> Option<Vec<u8>> {
+        if !core::mem::take(&mut self.challenges_moved) {
+            return None;
+        }
+        self.challenges.expire(now);
+        self.challenges.encode(now).ok()
     }
 
     /// The static key of each queue relay of the relay set, which the
@@ -465,6 +574,11 @@ impl RelayNode {
             // WIR-526: the digest of another relay, on a connection that
             // holds no session.
             CapsuleType::Deposit => self.take_deposit(value, now, rng),
+            // ABU-103: the challenge of another relay, for a carrier.
+            CapsuleType::Challenge => {
+                self.take_challenge(value, now);
+                Vec::new()
+            }
             CapsuleType::Cell => {
                 let cell = match self.links.get_mut(&link) {
                     Some(Framing::Accepted(framing)) => framing.receive(value),

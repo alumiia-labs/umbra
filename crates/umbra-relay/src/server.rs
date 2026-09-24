@@ -16,7 +16,7 @@ use tokio::{
     sync::mpsc,
 };
 use tokio_rustls::TlsAcceptor;
-use umbra_core::group::backoff::exponential;
+use umbra_core::{abuse::POW_CHALLENGE_PERIOD, group::backoff::exponential};
 use umbra_crypto::{
     rand_core::{TryCryptoRng, TryRng},
     secret::Secret,
@@ -125,6 +125,9 @@ pub enum Request {
     },
     /// Send one `NPUSH` to the NDR.
     NdrPush(NdrPush),
+    /// The newest challenge of each relay moved, for the carrier to serve
+    /// (`ABU-104`).
+    Challenges(Vec<u8>),
 }
 
 fn unix_now() -> u64 {
@@ -151,6 +154,9 @@ pub async fn run_node(
         tokio::time::interval(Duration::from_millis((pacing_mean_ms / 20).clamp(1, 50)));
     let mut last_sweep = unix_now();
     let mut last_push_tick = last_sweep;
+    // ABU-057: the first challenge at the start, and a new one at each
+    // period.
+    let mut last_challenge: Option<u64> = None;
     loop {
         let outputs = tokio::select! {
             input = inputs.recv() => match input {
@@ -207,12 +213,19 @@ pub async fn run_node(
                     last_sweep = now;
                     outputs.extend(node.sweep(now, &mut rng));
                 }
+                if last_challenge.is_none_or(|at| now.saturating_sub(at) >= POW_CHALLENGE_PERIOD) {
+                    last_challenge = Some(now);
+                    outputs.extend(node.issue_challenge(now, &mut rng));
+                }
                 outputs
             }
         };
         if store.commit(&node.take_changes()).is_err() {
             eprintln!("the store took no commit, and the relay stops");
             return;
+        }
+        if let Some(bundle) = node.take_challenge_bundle(unix_now()) {
+            let _ = requests.send(Request::Challenges(bundle));
         }
         for output in outputs {
             match output {
@@ -287,6 +300,9 @@ pub struct Carried {
     /// configuration it trusts the OHTTP relay under. A relay with none
     /// sends no push.
     pub ndr: Option<(NdrRoute, Arc<rustls::ClientConfig>)>,
+    /// The newest challenge of each relay, which a carrier of the manifest
+    /// serves beside it (`ABU-104`). The node moves it.
+    pub challenges: std::sync::Mutex<Vec<u8>>,
 }
 
 /// Forwards one encapsulated request to the gateway and gives its answer
@@ -342,6 +358,18 @@ pub async fn serve_connection<S>(
     let request = loop {
         if inbound.starts_with(format!("POST {OHTTP_PATH} ").as_bytes()) {
             relay_ohttp(&mut stream, &mut inbound, carried.ohttp.as_ref()).await;
+            return;
+        }
+        if native::asks_challenges(&inbound) && inbound.windows(4).any(|w| w == b"\r\n\r\n") {
+            let bundle = carried
+                .challenges
+                .lock()
+                .map(|held| held.clone())
+                .unwrap_or_default();
+            let head = native::manifest_response_head(bundle.len());
+            let _ = stream.write_all(head.as_bytes()).await;
+            let _ = stream.write_all(&bundle).await;
+            let _ = stream.shutdown().await;
             return;
         }
         if native::asks_manifest(&inbound) && inbound.windows(4).any(|w| w == b"\r\n\r\n") {
@@ -534,6 +562,7 @@ pub async fn run_relay(
 ) {
     let carried_ndr = carried.ndr.clone();
     let carried = Arc::new(carried);
+    let carried_challenges = carried.clone();
     let (inputs, node_inputs) = mpsc::channel::<Input>(1_024);
     let (requests, mut node_requests) = mpsc::unbounded_channel::<Request>();
     let node_task = tokio::spawn(run_node(node, node_inputs, requests, pacing_mean_ms, store));
@@ -575,6 +604,11 @@ pub async fn run_relay(
                     // and a deposit to a queue relay (`WIR-526`).
                     if let Some(target) = replicas.get(&relay_id) {
                         tokio::spawn(push_copy(target.clone(), client_tls.clone(), capsule));
+                    }
+                }
+                Request::Challenges(bundle) => {
+                    if let Ok(mut held) = carried_challenges.challenges.lock() {
+                        *held = bundle;
                     }
                 }
                 Request::NdrPush(push) => {

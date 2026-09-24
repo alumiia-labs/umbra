@@ -4,7 +4,10 @@
 //! challenge inside its period, and the derived challenge of a hello of
 //! §14.4.
 
-use alloc::{collections::BTreeSet, vec::Vec};
+use alloc::{
+    collections::{BTreeMap, BTreeSet},
+    vec::Vec,
+};
 
 use umbra_crypto::{
     labels, pow as equix,
@@ -18,6 +21,7 @@ use crate::{discovery::hello::HelloPow, Error};
 
 /// The length of a `PowChallenge`.
 pub const CHALLENGE_LEN: usize = 1 + 32 + 1 + 32 + 4 + 8 + SIGNATURE_LEN;
+const _: () = assert!(CHALLENGE_LEN == umbra_wire::capsule::CHALLENGE_LEN);
 /// The bytes of a challenge before `sig`.
 pub const CHALLENGE_SIGNED_LEN: usize = CHALLENGE_LEN - SIGNATURE_LEN;
 /// The length of a `PowSolution`.
@@ -308,6 +312,87 @@ impl Verifier {
     }
 }
 
+/// The newest signed challenge of each relay, as a carrier of the relay
+/// manifest serves them beside it and as a client holds them after a fetch
+/// (`ABU-064`, `ABU-065`, `ABU-102` to `ABU-105`). A challenge enters only
+/// under the identity key of its verifier.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChallengeBook {
+    held: BTreeMap<[u8; 32], PowChallenge>,
+}
+
+impl ChallengeBook {
+    /// Takes `challenge` when its signature verifies under `identity`, its
+    /// time is inside two periods of `now`, and it is newer than the one
+    /// held. The result says whether the book moved.
+    pub fn take(
+        &mut self,
+        challenge: PowChallenge,
+        identity: &VerifyingKey,
+        now: u64,
+    ) -> Result<bool, Error> {
+        challenge.verify(identity)?;
+        if !is_live(challenge.issued_at, now) {
+            return Err(Error::Stale);
+        }
+        let is_newer = self
+            .held
+            .get(&challenge.verifier_id)
+            .is_none_or(|held| held.issued_at < challenge.issued_at);
+        if is_newer {
+            self.held.insert(challenge.verifier_id, challenge);
+        }
+        Ok(is_newer)
+    }
+
+    /// The newest challenge of one verifier that is still live at `now`.
+    pub fn get(&self, verifier_id: &[u8; 32], now: u64) -> Option<&PowChallenge> {
+        self.held
+            .get(verifier_id)
+            .filter(|held| is_live(held.issued_at, now))
+    }
+
+    /// Drops each challenge past two periods.
+    pub fn expire(&mut self, now: u64) {
+        self.held.retain(|_, held| is_live(held.issued_at, now));
+    }
+
+    /// Each live challenge, one after another at `CHALLENGE_LEN`.
+    pub fn encode(&self, now: u64) -> Result<Vec<u8>, Error> {
+        let mut out = Vec::new();
+        for held in self
+            .held
+            .values()
+            .filter(|held| is_live(held.issued_at, now))
+        {
+            let mut one = alloc::vec![0u8; CHALLENGE_LEN];
+            held.encode(&mut one)?;
+            out.extend_from_slice(&one);
+        }
+        Ok(out)
+    }
+
+    /// The challenges of a bundle that [`ChallengeBook::encode`] wrote.
+    /// The caller takes each one under the key of its verifier.
+    pub fn parse_bundle(bytes: &[u8]) -> Result<Vec<PowChallenge>, Error> {
+        if !bytes.len().is_multiple_of(CHALLENGE_LEN) {
+            return Err(Error::Malformed);
+        }
+        bytes
+            .chunks(CHALLENGE_LEN)
+            .map(PowChallenge::parse)
+            .collect()
+    }
+}
+
+/// Whether a challenge of `issued_at` serves at `now`: a verifier accepts
+/// its newest and its previous one (`ABU-058`), thus two periods, and a
+/// clock of the verifier ahead of this one by one period at most.
+fn is_live(issued_at: u64, now: u64) -> bool {
+    now.saturating_sub(issued_at) < 2 * POW_CHALLENGE_PERIOD
+        && issued_at <= now.saturating_add(POW_CHALLENGE_PERIOD)
+}
+
 /// A challenge a client fetched, usable inside `POW_CHALLENGE_PERIOD` of
 /// the fetch (`ABU-069`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -385,6 +470,63 @@ mod tests {
     use super::*;
     use crate::abuse::test_rng::Rng;
     use umbra_crypto::secret::Secret;
+
+    #[test]
+    fn a_book_holds_the_newest_signed_challenge_of_each_relay() {
+        let key = SigningKey::from_seed(Secret::new([1; 32]));
+        let other = SigningKey::from_seed(Secret::new([2; 32]));
+        let signed = |verifier: u8, issued_at: u64, key: &SigningKey| {
+            let mut challenge = PowChallenge {
+                verifier_id: [verifier; 32],
+                seed: [issued_at as u8; 32],
+                effort: 3,
+                issued_at,
+                signature: Vec::new(),
+            };
+            challenge.sign(key, &mut Rng(9)).unwrap();
+            challenge
+        };
+        let now = 10_000;
+        let mut book = ChallengeBook::default();
+        // ABU-068: a challenge enters under the key of its verifier alone.
+        assert!(book
+            .take(signed(5, now, &other), &key.verifying_key(), now)
+            .is_err());
+        assert!(book
+            .take(signed(5, now, &key), &key.verifying_key(), now)
+            .unwrap());
+        // An older one leaves the book as it was, and a stale one fails.
+        assert!(!book
+            .take(signed(5, now - 10, &key), &key.verifying_key(), now)
+            .unwrap());
+        assert_eq!(
+            book.take(
+                signed(6, now - 2 * POW_CHALLENGE_PERIOD, &key),
+                &key.verifying_key(),
+                now
+            ),
+            Err(Error::Stale)
+        );
+        assert_eq!(book.get(&[5; 32], now).unwrap().issued_at, now);
+        // The bundle carries each live challenge, and it reads back.
+        let bundle = book.encode(now).unwrap();
+        assert_eq!(bundle.len(), CHALLENGE_LEN);
+        let back = ChallengeBook::parse_bundle(&bundle).unwrap();
+        assert_eq!(
+            back,
+            [signed(5, now, &key)].map(|mut c| {
+                c.signature = back[0].signature.clone();
+                c
+            })
+        );
+        assert!(ChallengeBook::parse_bundle(&bundle[1..]).is_err());
+        // Two periods on, the book serves nothing.
+        assert!(book.get(&[5; 32], now + 2 * POW_CHALLENGE_PERIOD).is_none());
+        assert!(book
+            .encode(now + 2 * POW_CHALLENGE_PERIOD)
+            .unwrap()
+            .is_empty());
+    }
 
     #[test]
     fn a_challenge_signs_round_trips_and_bounds_its_effort() {

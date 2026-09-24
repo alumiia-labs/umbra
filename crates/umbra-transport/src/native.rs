@@ -148,6 +148,12 @@ pub const MANIFEST_PATH: &str = "/.well-known/umbra/manifest";
 /// The largest manifest that a client reads: 3 000 proven entries are below
 /// 18 MiB (Part 10 §10.5.5).
 pub const MANIFEST_MAX: usize = 32 << 20;
+/// The path of the challenges of the relays, beside the manifest (Part 14
+/// `ABU-104`).
+pub const CHALLENGES_PATH: &str = "/.well-known/umbra/challenges";
+/// The largest bundle of challenges that a client reads: one challenge of
+/// 3 387 bytes for each of 3 000 relays is below 10 MiB.
+pub const CHALLENGES_MAX: usize = 16 << 20;
 const MANIFEST_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// The head of a response to a manifest request, for a carrier that holds
@@ -164,6 +170,27 @@ pub fn asks_manifest(head: &[u8]) -> bool {
     head.starts_with(format!("GET {MANIFEST_PATH} HTTP/1.1\r\n").as_bytes())
 }
 
+/// Whether the head of a request asks for the challenges of the relays.
+pub fn asks_challenges(head: &[u8]) -> bool {
+    head.starts_with(format!("GET {CHALLENGES_PATH} HTTP/1.1\r\n").as_bytes())
+}
+
+/// Reads the challenges of the relays from the carrier of the manifest, on
+/// the path of the manifest fetch (`ABU-065`, `ABU-105`). Each challenge is
+/// under the signature of its relay, thus the caller verifies them and
+/// trusts this carrier with nothing.
+pub async fn fetch_challenges(
+    dial: &Dial,
+    config: Arc<ClientConfig>,
+) -> Result<Vec<u8>, NativeError> {
+    timeout(
+        MANIFEST_TIMEOUT,
+        fetch_carried(dial, config, CHALLENGES_PATH, CHALLENGES_MAX),
+    )
+    .await
+    .map_err(|_| NativeError::Timeout)?
+}
+
 /// Reads the relay manifest from an HTTPS carrier. The bytes are under the
 /// signatures of the directory, thus the caller verifies them and trusts
 /// this carrier with nothing (Part 10 §10.5).
@@ -171,14 +198,21 @@ pub async fn fetch_manifest(
     dial: &Dial,
     config: Arc<ClientConfig>,
 ) -> Result<Vec<u8>, NativeError> {
-    timeout(MANIFEST_TIMEOUT, fetch_manifest_now(dial, config))
-        .await
-        .map_err(|_| NativeError::Timeout)?
+    timeout(
+        MANIFEST_TIMEOUT,
+        fetch_carried(dial, config, MANIFEST_PATH, MANIFEST_MAX),
+    )
+    .await
+    .map_err(|_| NativeError::Timeout)?
 }
 
-async fn fetch_manifest_now(
+/// One `GET` of `path` from an HTTPS carrier, with a body of `max` bytes at
+/// most.
+async fn fetch_carried(
     dial: &Dial,
     config: Arc<ClientConfig>,
+    path: &str,
+    max: usize,
 ) -> Result<Vec<u8>, NativeError> {
     let addr = socket_addr(dial, false).ok_or(Error::Refused)?;
     let tcp = TcpStream::connect(addr).await?;
@@ -187,7 +221,7 @@ async fn fetch_manifest_now(
         .connect(name, tcp)
         .await?;
     let request = format!(
-        "GET {MANIFEST_PATH} HTTP/1.1\r\nHost: {}\r\nAccept: application/octet-stream\r\n\
+        "GET {path} HTTP/1.1\r\nHost: {}\r\nAccept: application/octet-stream\r\n\
          Connection: close\r\n\r\n",
         dial.host
     );
@@ -202,7 +236,7 @@ async fn fetch_manifest_now(
             break;
         }
         inbound.extend_from_slice(chunk.get(..n).unwrap_or(&[]));
-        if inbound.len() > MANIFEST_MAX {
+        if inbound.len() > max {
             return Err(Error::Refused.into());
         }
     }

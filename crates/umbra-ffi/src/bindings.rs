@@ -286,6 +286,10 @@ pub struct RelayEndpoint {
     /// Whether the relay holds chunks of files (Part 13). A network from a
     /// descriptor text has no such relay.
     pub holds_files: bool,
+    /// The ML-DSA-65 identity key of the relay, which signs its proof-of-work
+    /// challenge (Part 14 `ABU-068`). A network from a descriptor text
+    /// names none.
+    pub identity_pk: Vec<u8>,
 }
 
 /// The network of the client: a set of relays for its chains. The first
@@ -425,6 +429,7 @@ fn endpoints_of(set: &RelaySet) -> Vec<RelayEndpoint> {
             asn: relay.candidate.asn,
             prefix: None,
             holds_files: relay.has_attachment_role && relay.candidate.is_exit(),
+            identity_pk: relay.identity_pk.clone(),
         })
         .collect()
 }
@@ -493,6 +498,7 @@ pub fn parse_network(text: String, root_ca_path: Option<String>) -> Result<Netwo
                     asn: 0,
                     prefix: None,
                     holds_files: false,
+                    identity_pk: Vec::new(),
                 };
                 if has_facts {
                     read_facts(&mut relay, facts)?;
@@ -967,6 +973,10 @@ struct Inner {
     restore: Option<RestoreJob>,
     /// The number of the run of the network, which each connect moves.
     run: u64,
+    /// The newest challenge of each relay, from the carrier of the manifest
+    /// (Part 14 `ABU-065`, `ABU-105`), and the time of the fetch.
+    challenges: umbra_core::abuse::pow::ChallengeBook,
+    challenges_at: u64,
 }
 
 /// A restore of Part 4 §4.7.2 while it runs: the root key of the entered
@@ -1132,6 +1142,34 @@ enum GroupWork {
 }
 
 impl Inner {
+    /// The `Admission` of a command that creates state at `relay_id`: the
+    /// solution of its challenge when this device holds one from a fetch
+    /// inside `POW_CHALLENGE_PERIOD` (`ABU-014`, `ABU-069`), and none else.
+    #[allow(dead_code)]
+    fn admission_for(&self, relay_id: &[u8; 32]) -> Vec<u8> {
+        use umbra_wire::admission::{Admission, AdmissionKind};
+        let now = unix_now();
+        let solved = self.challenges.get(relay_id, now).and_then(|challenge| {
+            let fetched = umbra_core::abuse::pow::Fetched {
+                challenge: challenge.clone(),
+                fetched_at: self.challenges_at,
+            };
+            fetched.solve(now, &mut OsRng).ok()
+        });
+        let mut body = [0u8; umbra_core::abuse::pow::SOLUTION_LEN];
+        let admission = match solved.and_then(|solution| solution.encode(&mut body).ok()) {
+            Some(used) => Admission {
+                kind: AdmissionKind::Pow,
+                body: body.get(..used).unwrap_or_default(),
+            },
+            None => Admission::NONE,
+        };
+        let mut out = vec![0u8; 3 + body.len()];
+        let used = admission.encode(&mut out).unwrap_or(0);
+        out.truncate(used);
+        out
+    }
+
     /// Gives each file job of the store to the transfer task (Part 13
     /// §13.8). With no run of the network the jobs wait in the store.
     fn pump_transfers(&mut self) {
@@ -2474,6 +2512,8 @@ fn handle_of(database_path: String, client: Client<SqliteBackend, ForeignElement
             is_foreground: false,
             restore: None,
             run: 0,
+            challenges: umbra_core::abuse::pow::ChallengeBook::default(),
+            challenges_at: 0,
         }),
         changed: Condvar::new(),
         runtime: Mutex::new(None),
@@ -3067,7 +3107,90 @@ impl Handle {
         if let Some(earlier) = locked(&self.runtime).replace(runtime) {
             earlier.shutdown_background();
         }
+        self.fetch_challenges();
         Ok(())
+    }
+
+    /// Fetches the challenges of the relays from the pinned ingress, the
+    /// carrier of the manifest, on the path of the manifest fetch and on no
+    /// session (`ABU-065`, `ABU-066`, `ABU-105`).
+    fn fetch_challenges(self: &Arc<Self>) {
+        let (spawner, dial, tls) = {
+            let inner = locked(&self.inner);
+            let Some(spawner) = inner.spawner.clone() else {
+                return;
+            };
+            let Some(guard) = inner.guard.and_then(|guard| {
+                inner
+                    .relays
+                    .iter()
+                    .find(|relay| relay.relay_id.as_slice() == guard.as_slice())
+                    .cloned()
+            }) else {
+                return;
+            };
+            let Ok(address) = <[u8; 4]>::try_from(guard.ipv4.as_slice()) else {
+                return;
+            };
+            let dial = Dial {
+                host: guard.host.clone(),
+                addr_v4: Some(address),
+                addr_v6: None,
+                port: guard.port,
+            };
+            let tls = match &inner.root_ca_path {
+                Some(path) => native::tls_config_with_root_file(path),
+                None => native::tls_config(),
+            };
+            let Ok(tls) = tls else {
+                return;
+            };
+            (spawner, dial, tls)
+        };
+        let me = Arc::downgrade(self);
+        spawner.spawn(async move {
+            if let Ok(bundle) = native::fetch_challenges(&dial, tls).await {
+                if let Some(handle) = me.upgrade() {
+                    handle.take_challenges(&bundle);
+                }
+            }
+        });
+    }
+
+    /// Takes each challenge of a bundle under the identity key of its relay
+    /// (`ABU-068`). The carrier is trusted with nothing.
+    fn take_challenges(&self, bundle: &[u8]) {
+        let Ok(challenges) = umbra_core::abuse::pow::ChallengeBook::parse_bundle(bundle) else {
+            return;
+        };
+        let now = unix_now();
+        let mut inner = locked(&self.inner);
+        for challenge in challenges {
+            let identity = inner
+                .relays
+                .iter()
+                .find(|relay| relay.relay_id.as_slice() == challenge.verifier_id.as_slice())
+                .and_then(|relay| {
+                    umbra_crypto::sign::VerifyingKey::from_bytes(&relay.identity_pk).ok()
+                });
+            if let Some(identity) = identity {
+                let _ = inner.challenges.take(challenge, &identity, now);
+            }
+        }
+        inner.challenges_at = now;
+    }
+
+    /// The count of the relays whose challenge this device holds.
+    pub fn challenges_held(&self) -> u32 {
+        let inner = locked(&self.inner);
+        let now = unix_now();
+        let count = inner
+            .relays
+            .iter()
+            .filter_map(|relay| <[u8; 32]>::try_from(relay.relay_id.as_slice()).ok())
+            .filter(|relay_id| inner.challenges.get(relay_id, now).is_some())
+            .count();
+        u32::try_from(count).unwrap_or(u32::MAX)
     }
 
     /// Ends the network. Each contact stays in the store, and the next

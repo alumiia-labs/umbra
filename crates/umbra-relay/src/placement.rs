@@ -34,6 +34,12 @@ pub struct Placement {
     /// Where to dial each queue relay, with its static key, for the deposit
     /// of a digest (Part 6 `WIR-526`).
     pub queue_relays: BTreeMap<[u8; 32], (Dial, [u8; 32])>,
+    /// Where to dial each carrier of the manifest, the relays with the
+    /// ingress flag, which serve the challenge of this relay (`ABU-102`).
+    pub carriers: BTreeMap<[u8; 32], Dial>,
+    /// The identity key of each relay of the set, for a challenge that this
+    /// relay carries (`ABU-103`).
+    pub identities: BTreeMap<[u8; 32], Vec<u8>>,
     /// Whether this relay has the attachment role.
     pub has_attachment_role: bool,
     /// The epoch of the root.
@@ -98,11 +104,24 @@ pub fn placement(
         .filter(|relay| layer_of(relay) == 3 && relay.candidate.relay_id != *relay_id)
         .map(|relay| (relay.candidate.relay_id, (dial_of(relay), relay.ntor_pk)))
         .collect();
+    let carriers = set
+        .relays
+        .iter()
+        .filter(|relay| relay.candidate.ingress)
+        .map(|relay| (relay.candidate.relay_id, dial_of(relay)))
+        .collect();
+    let identities = set
+        .relays
+        .iter()
+        .map(|relay| (relay.candidate.relay_id, relay.identity_pk.clone()))
+        .collect();
     Ok(Placement {
         layer,
         next,
         replicas,
         queue_relays,
+        carriers,
+        identities,
         has_attachment_role: own.has_attachment_role,
         epoch: set.epoch,
     })

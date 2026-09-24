@@ -58,6 +58,8 @@ pub struct RelayGate {
     pub pow: Verifier,
     /// The spend set of §14.7.
     pub spent: SpendSet,
+    /// The admissions of the period that runs, the backlog of `ABU-060`.
+    admissions: u32,
 }
 
 impl RelayGate {
@@ -67,7 +69,14 @@ impl RelayGate {
             relay_id,
             pow: Verifier::new(relay_id, 0),
             spent: SpendSet::default(),
+            admissions: 0,
         }
+    }
+
+    /// The admissions since the last call, which the next challenge takes
+    /// as its backlog (`ABU-060`, `ABU-092`).
+    pub fn take_backlog(&mut self) -> u32 {
+        core::mem::take(&mut self.admissions)
     }
 
     fn token_epoch(&self, token: &Token, now: u64) -> Option<u32> {
@@ -95,6 +104,7 @@ impl RelayGate {
         accepts: &Accepts<'_>,
         now: u64,
     ) -> Result<Admitted, Reject> {
+        self.admissions = self.admissions.saturating_add(1);
         match admission.kind {
             AdmissionKind::None => {
                 if self.pow.effort() == 0 {

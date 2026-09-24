@@ -115,11 +115,13 @@ receiver the length of the frame that it carries.
 ```
 Capsule {
     type      varint      // 0x0B52 UMBRA_CELL, 0x0B53 UMBRA_SESSION,
-                          // 0x0B54 UMBRA_REPLICA, or 0x0B55 UMBRA_DEPOSIT
+                          // 0x0B54 UMBRA_REPLICA, 0x0B55 UMBRA_DEPOSIT,
+                          // or 0x0B56 UMBRA_CHALLENGE
     length    varint      // the byte count of value, in the 4-byte form
     value     [length]u8  // a SessionFrame (§6.2.2), a session control
-                          // record (§6.2.3), one CRPUT command (§6.4), or
-                          // one SEND command of a relay (WIR-526)
+                          // record (§6.2.3), one CRPUT command (§6.4),
+                          // one SEND command of a relay (WIR-526), or one
+                          // PowChallenge (WIR-529)
 }
 ```
 
@@ -128,7 +130,7 @@ sender MUST encode `type` in the 2-byte form. **[WIR-217]** A sender MUST encode
 `length` in the 4-byte form. Thus the capsule header is 6 bytes at each bucket.
 RFC 9000 §16 permits a longer form than the minimum, and §6.1.1 rule 4 permits
 one form only. **[WIR-218]** A receiver MUST reject a capsule whose `type` is
-not `0x0B52`, `0x0B53`, `0x0B54`, or `0x0B55`.
+not `0x0B52`, `0x0B53`, `0x0B54`, `0x0B55`, or `0x0B56`.
 
 **The cell length comes from the capsule.** **[WIR-219]** A receiver MUST take
 the cell length from `length`, and that length is `length` minus 12.
@@ -644,6 +646,13 @@ exactly as to a queue session.
 - **[WIR-527]** A relay MUST hold the `corr_id` of each of the last 4 096
   deposits that it took, and it MUST drop a deposit that repeats one. A
   deposit whose `auth` does not verify drops, and its `corr_id` is not held.
+- **[WIR-529]** A relay that sends its proof-of-work challenge to a carrier
+  of the manifest (Part 14 `ABU-102`) MUST send it as the value of one
+  `UMBRA_CHALLENGE` capsule, on a connection of §6.2.1 that it opens for
+  that challenge. The value is one `PowChallenge` of Part 14 §14.8, 3 387
+  bytes, and a receiver MUST reject each other length. The capsule is outside
+  the session of §6.2.3, and it gets no answer. The signature of the relay
+  is its one authority (Part 14 `ABU-103`).
 
 > *Cause of the deposit.* Part 8 rule `NTF-096` and Part 12 rule `COM-371`
 > had a relay write a digest "as a `SEND`", and no section gave the path. A

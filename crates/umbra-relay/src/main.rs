@@ -123,6 +123,12 @@ struct Settings {
     replicas: BTreeMap<[u8; 32], Dial>,
     /// The static key of each queue relay, for the deposit of a digest.
     queue_keys: BTreeMap<[u8; 32], [u8; 32]>,
+    /// The carriers of the manifest, which take the challenge of this
+    /// relay (Part 14 `ABU-102`).
+    carriers: Vec<[u8; 32]>,
+    /// The identity key of each relay, for a challenge that this relay
+    /// carries (`ABU-103`).
+    identities: BTreeMap<[u8; 32], Vec<u8>>,
     /// The key that signs the descriptor of this relay.
     identity: Option<SigningKey>,
     /// The manifest that gave this relay its place. The relay serves it to
@@ -220,10 +226,27 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
             .ok()
             .filter(|l| (1..=3).contains(l))?,
     };
-    let (next, mut replicas, queue_relays) = match placed {
-        Some(placed) => (placed.next, placed.replicas, placed.queue_relays),
-        None => (next, BTreeMap::new(), BTreeMap::new()),
+    let (next, mut replicas, queue_relays, carriers, identities) = match placed {
+        Some(placed) => (
+            placed.next,
+            placed.replicas,
+            placed.queue_relays,
+            placed.carriers,
+            placed.identities,
+        ),
+        None => (
+            next,
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        ),
     };
+    // ABU-102: a challenge goes on the same one-shot connection as a copy.
+    for (relay_id, dial) in &carriers {
+        replicas.entry(*relay_id).or_insert_with(|| dial.clone());
+    }
+    let carriers = carriers.into_keys().collect();
     // WIR-526: a deposit goes on the same one-shot connection as a copy.
     for (relay_id, (dial, _)) in &queue_relays {
         replicas.entry(*relay_id).or_insert_with(|| dial.clone());
@@ -254,6 +277,8 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
         next,
         replicas,
         queue_keys,
+        carriers,
+        identities,
         identity,
         manifest,
         ohttp_gateway: match values.get("ohttp_gateway") {
@@ -501,6 +526,12 @@ async fn run() -> ExitCode {
         {
             let mut node = RelayNode::restored(settings.config, loaded);
             node.set_queue_relays(settings.queue_keys);
+            // ABU-057, ABU-102: the identity key signs the challenge of each
+            // period, and the carriers of the manifest serve it.
+            if let Some(identity) = settings.identity {
+                node.set_challenge_signer(identity, settings.carriers);
+            }
+            node.set_relay_identities(settings.identities);
             node
         },
         listener,
@@ -519,6 +550,7 @@ async fn run() -> ExitCode {
             }),
             // NTF-127: the route of the pushes of this queue relay.
             ndr: settings.ndr_route.map(|route| (route, client_tls.clone())),
+            ..Carried::default()
         },
     )
     .await;

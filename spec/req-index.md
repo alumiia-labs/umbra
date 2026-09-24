@@ -70,7 +70,7 @@ each column when a crate implements the requirement and a test covers it.
 | `NET` | 236 | 84 | 1 | 0 | 8 | **329** |
 | `IDN` | 127 | 44 | 1 | 0 | 5 | **177** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
-| `WIR` | 396 | 87 | 0 | 0 | 6 | **489** |
+| `WIR` | 397 | 87 | 0 | 0 | 6 | **490** |
 | `DEV` | 179 | 87 | 2 | 0 | 7 | **275** |
 | `NTF` | 77 | 31 | 0 | 0 | 3 | **111** |
 | `DIS` | 123 | 37 | 0 | 0 | 1 | **161** |
@@ -78,10 +78,10 @@ each column when a crate implements the requirement and a test covers it.
 | `GRP` | 220 | 62 | 0 | 0 | 6 | **288** |
 | `COM` | 299 | 96 | 0 | 0 | 5 | **400** |
 | `ATT` | 140 | 46 | 1 | 0 | 2 | **189** |
-| `ABU` | 64 | 31 | 0 | 0 | 0 | **95** |
+| `ABU` | 68 | 31 | 0 | 0 | 0 | **99** |
 | `IMP` | 112 | 41 | 0 | 0 | 2 | **155** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2252 | 719 | 7 | 0 | 54 | **3032** |
+| **All** | 2257 | 719 | 7 | 0 | 54 | **3037** |
 
 ## SCP — Scope and Conventions
 
@@ -1302,6 +1302,7 @@ Source: `spec/06-wire-format.md`
 | `WIR-526` | §6.4 | MUST | (unstated) | A relay that writes a digest of Part 8 §8.5 or Part 12 §12.6.4 into a queue at another relay MUST send it as the value of one `UMBRA_DEPOSIT` capsule, on a connection of §6.2.1 that it opens for that deposit. |  |  |
 | `WIR-527` | §6.4 | MUST | A relay | A relay MUST hold the `corr_id` of each of the last 4 096 deposits that it took, and it MUST drop a deposit that repeats one. |  |  |
 | `WIR-528` | §6.4.2 | MUST | A receiver | A receiver MUST take the content of a renewal record as a bundle in the layout of Part 5 §5.4.1, and it MUST read it on the queue of a contact whose handshake is complete. |  |  |
+| `WIR-529` | §6.4 | MUST | (unstated) | A relay that sends its proof-of-work challenge to a carrier of the manifest (Part 14 `ABU-102`) MUST send it as the value of one `UMBRA_CHALLENGE` capsule, on a connection of §6.2.1 that it opens for that challenge. |  |  |
 
 ## DEV — Device Sets
 
@@ -3036,6 +3037,10 @@ Source: `spec/14-anti-abuse.md`
 | `ABU-099` | §14.5 | MUST | A client | A client MUST look up that label under Part 9 §9.4, and it MUST verify the `LookupProof` of Part 9 §9.5.1 before it accepts the key. |  |  |
 | `ABU-100` | §14.5 | MUST | A client | A client MUST reject the label when its newest version is not A second version is a second key for one epoch, and the binary ladder of Part 9 §9.5.1 shows it to each client. |  |  |
 | `ABU-101` | §14.5 | MUST | A client | A client MUST reject an entry whose `token_type` or `epoch` differs from the label that it looked up. |  |  |
+| `ABU-102` | §14.8 | MUST | A relay | A relay MUST send each challenge that it makes to each relay of the manifest with the ingress flag of Part 10 §10.5.3, the carriers of the manifest. |  |  |
+| `ABU-103` | §14.8 | MUST | A carrier | A carrier MUST take a challenge only when `sig` verifies under the `identity_pk` of the entry of `verifier_id` in the manifest that it holds, and only when `issued_at` is less than two `POW_CHALLENGE_PERIOD` before its clock and at most one period after it. |  |  |
+| `ABU-104` | §14.8 | MUST | A carrier | A carrier MUST serve the challenges that it keeps at the path `/.well-known/umbra/challenges`, on the transport of its manifest fetch. |  |  |
+| `ABU-105` | §14.8 | MUST | A client | A client MUST fetch the challenges from the carrier that it pinned for the manifest, and it MUST take each one under `ABU-068`, with the `identity_pk` of the entry of the verifier. |  |  |
 
 ## IMP — Implementation
 

@@ -27,11 +27,18 @@ pub enum CapsuleType {
     /// One `SEND` of a relay into a queue at another relay, outside each
     /// session: the digest of a group or a community (`WIR-526`).
     Deposit = 0x0B55,
+    /// The signed `PowChallenge` of a relay to a carrier of the relay
+    /// manifest (Part 14 `ABU-102`).
+    Challenge = 0x0B56,
 }
 
 /// The value of an `UMBRA_REPLICA` capsule: the command header, and the
 /// 32 682 bytes of a `CRPUT` payload (`WIR-213`).
 pub const REPLICA_LEN: usize = crate::bucket::COMMAND_HEADER + 32 + 32_650;
+
+/// The value of an `UMBRA_CHALLENGE` capsule: one `PowChallenge` of Part 14
+/// §14.8, 3 387 bytes (`WIR-529`).
+pub const CHALLENGE_LEN: usize = 1 + 32 + 1 + 32 + 4 + 8 + 3_309;
 
 /// The value of an `UMBRA_DEPOSIT` capsule: one `SEND` of bucket `B0`, with
 /// its header (`WIR-526`).
@@ -45,6 +52,7 @@ impl CapsuleType {
             0x0B53 => Ok(CapsuleType::Session),
             0x0B54 => Ok(CapsuleType::Replica),
             0x0B55 => Ok(CapsuleType::Deposit),
+            0x0B56 => Ok(CapsuleType::Challenge),
             _ => Err(Error::Malformed),
         }
     }
@@ -111,6 +119,14 @@ fn check_value_len(kind: CapsuleType, len: usize) -> Result<(), Error> {
         // WIR-526: one length.
         CapsuleType::Deposit => {
             if len == DEPOSIT_LEN {
+                Ok(())
+            } else {
+                Err(Error::Malformed)
+            }
+        }
+        // WIR-529: one length.
+        CapsuleType::Challenge => {
+            if len == CHALLENGE_LEN {
                 Ok(())
             } else {
                 Err(Error::Malformed)

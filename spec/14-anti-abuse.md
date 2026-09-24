@@ -428,16 +428,46 @@ The object is 3 387 bytes. The signature covers
   verifier MUST NOT take an `effort` value from a client or from another
   party. **[ABU-062]** A verifier MUST NOT set `effort` above
   `POW_EFFORT_MAX`. These three rules give `ABU-007` its mechanism.
-- **[ABU-063]** A relay MUST publish its newest challenge to the directory
-  authorities at each `POW_CHALLENGE_PERIOD`. **[ABU-064]** A directory
-  authority MUST serve the newest challenge of a relay beside the descriptor of
-  that relay. Part 10 §10.5.3 gives the descriptor fetch. The challenge sits
-  outside the relay-set tree, and the relay signs it, thus a consensus epoch
-  does not bound it.
+- **[ABU-063]** A relay MUST publish its newest challenge at each
+  `POW_CHALLENGE_PERIOD`, under `ABU-102`. **[ABU-064]** A carrier of the
+  relay manifest MUST serve the newest challenge of each relay that the
+  manifest lists, beside the manifest, under `ABU-104`. Part 10 §10.5.5 gives
+  the manifest. The challenge sits outside the relay-set tree, and the relay
+  signs it, thus a consensus epoch does not bound it.
 - **[ABU-065]** A client MUST fetch the challenge of a relay on the path of a
   descriptor fetch. **[ABU-066]** A client MUST NOT open a session for the only
   purpose of a challenge fetch. A challenge fetch shows the same fact as a
   descriptor fetch, which is the relay that the client selected.
+- **[ABU-102]** A relay MUST send each challenge that it makes to each relay
+  of the manifest with the ingress flag of Part 10 §10.5.3, the carriers of
+  the manifest. It sends it as the value of one `UMBRA_CHALLENGE` capsule of
+  Part 6 `WIR-529`. A carrier keeps its own challenge with no capsule.
+- **[ABU-103]** A carrier MUST take a challenge only when `sig` verifies under
+  the `identity_pk` of the entry of `verifier_id` in the manifest that it
+  holds, and only when `issued_at` is less than two `POW_CHALLENGE_PERIOD`
+  before its clock and at most one period after it. A carrier MUST keep only
+  the newest challenge of each verifier, and it MUST drop a challenge that
+  passes the two periods.
+- **[ABU-104]** A carrier MUST serve the challenges that it keeps at the path
+  `/.well-known/umbra/challenges`, on the transport of its manifest fetch. The
+  body is the `PowChallenge` objects one after another, 3 387 bytes each, in
+  ascending order of `verifier_id`.
+- **[ABU-105]** A client MUST fetch the challenges from the carrier that it
+  pinned for the manifest, and it MUST take each one under `ABU-068`, with the
+  `identity_pk` of the entry of the verifier. That fetch meets `ABU-065`. A
+  client MUST drop a body whose length is not a multiple of 3 387 bytes. It
+  trusts the carrier with no challenge: a carrier can withhold one, and it
+  cannot forge one.
+
+> *Cause of the carrier.* An earlier draft had the relay publish its
+> challenge to the directory authorities, and an authority serve it beside
+> the descriptor. An authority of Part 10 signs a root once in an epoch, and
+> it serves no fetch to a client: the manifest reaches a client from a
+> carrier. A challenge lives for two periods, and an epoch is longer. The
+> carrier already serves the manifest, thus a challenge at the carrier adds
+> no path, and the signature of the relay makes the carrier a courier only.
+> A carrier that withholds a challenge denies the admission of a proof of
+> work at that relay; a token of §14.3 still admits.
 - **[ABU-067]** A verifier other than a relay or an addressee client MUST
   return its newest challenge with each admission rejection. An admission
   rejection is a rejection of a request that carries no accepted `Admission`.

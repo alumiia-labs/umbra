@@ -135,6 +135,9 @@ pub struct ListedRelay {
     pub jurisdiction: [u8; 2],
     /// Whether the descriptor offers the attachment role.
     pub has_attachment_role: bool,
+    /// The ML-DSA-65 identity key, which signs the proof-of-work
+    /// challenge of the relay (Part 14 `ABU-068`).
+    pub identity_pk: Vec<u8>,
     /// The verified class, 0 to 3.
     pub class: u8,
 }
@@ -195,6 +198,7 @@ impl RelaySet {
                 host: descriptor.host_str().into(),
                 jurisdiction: descriptor.jurisdiction,
                 has_attachment_role: descriptor.roles & roles::ATTACHMENT != 0,
+                identity_pk: descriptor.identity_pk.to_vec(),
                 class: entry.class,
             });
         }
