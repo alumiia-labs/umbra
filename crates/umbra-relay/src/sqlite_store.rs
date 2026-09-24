@@ -13,8 +13,9 @@ use umbra_queue::relay::Stored;
 use crate::store::{Loaded, RelayStore, StoreChange, StoreFault, StoredInvitation, StoredQueue};
 
 /// The schema version in `user_version`. Version 2 added the group
-/// queues of Part 11, and version 3 the chunks of Part 13.
-const SCHEMA_VERSION: i64 = 3;
+/// queues of Part 11, version 3 the chunks of Part 13, and version 4 the
+/// records of the communities of Part 12.
+const SCHEMA_VERSION: i64 = 4;
 
 const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS queues (
@@ -56,6 +57,13 @@ const SCHEMA: &str = "
         erase_at      INTEGER NOT NULL,
         bytes         BLOB NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS community_records (
+        community_id BLOB NOT NULL,
+        seq          INTEGER NOT NULL,
+        accepted_at  INTEGER NOT NULL,
+        bytes        BLOB NOT NULL,
+        PRIMARY KEY (community_id, seq)
+    ) WITHOUT ROWID;
 ";
 
 /// The class of a chunk in its column.
@@ -266,6 +274,27 @@ impl RelayStore for SqliteStore {
             };
             loaded.chunks.insert(id(chunk_id)?, held);
         }
+
+        let mut communities = fault(
+            self.connection
+                .prepare("SELECT community_id, seq, accepted_at, bytes FROM community_records"),
+        )?;
+        let rows = fault(communities.query_map([], |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Vec<u8>>(3)?,
+            ))
+        }))?;
+        for row in rows {
+            let (community_id, seq, accepted_at, bytes) = fault(row)?;
+            loaded
+                .communities
+                .entry(id(community_id)?)
+                .or_default()
+                .insert(unsigned(seq)?, (unsigned(accepted_at)?, bytes));
+        }
         Ok(loaded)
     }
 
@@ -414,6 +443,28 @@ impl RelayStore for SqliteStore {
                     fault(transaction.execute(
                         "DELETE FROM chunks WHERE chunk_id = ?1",
                         params![chunk_id.as_slice()],
+                    ))?
+                }
+                StoreChange::CommunityRecord {
+                    community_id,
+                    seq,
+                    accepted_at,
+                    record,
+                } => fault(transaction.execute(
+                    "INSERT OR REPLACE INTO community_records
+                     (community_id, seq, accepted_at, bytes) VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        community_id.as_slice(),
+                        signed(*seq)?,
+                        signed(*accepted_at)?,
+                        record
+                    ],
+                ))?,
+                StoreChange::CommunityForget { community_id, seq } => {
+                    deleted = true;
+                    fault(transaction.execute(
+                        "DELETE FROM community_records WHERE community_id = ?1 AND seq = ?2",
+                        params![community_id.as_slice(), signed(*seq)?],
                     ))?
                 }
             };
@@ -569,6 +620,22 @@ mod tests {
                 erase_at: 1_500,
             },
             StoreChange::ChunkDeleted { chunk_id: [8; 32] },
+            StoreChange::CommunityRecord {
+                community_id: [9; 32],
+                seq: 1,
+                accepted_at: 100,
+                record: vec![1, 2, 3],
+            },
+            StoreChange::CommunityRecord {
+                community_id: [9; 32],
+                seq: 4,
+                accepted_at: 110,
+                record: vec![4],
+            },
+            StoreChange::CommunityForget {
+                community_id: [9; 32],
+                seq: 1,
+            },
         ]
     }
 

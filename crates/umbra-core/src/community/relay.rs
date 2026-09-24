@@ -125,6 +125,9 @@ pub struct CommunityCache {
     roster_time: Option<u64>,
     stored_bytes: usize,
     capacity_bytes: usize,
+    /// Each `seq` that the cache dropped since the last call of
+    /// [`CommunityCache::take_forgotten`], for the store of the relay.
+    forgotten: Vec<u64>,
 }
 
 impl CommunityCache {
@@ -144,7 +147,33 @@ impl CommunityCache {
             roster_time: None,
             stored_bytes: 0,
             capacity_bytes,
+            forgotten: Vec::new(),
         }
+    }
+
+    /// The `seq` that the next accepted record takes.
+    pub fn next_seq(&self) -> u64 {
+        self.next_seq
+    }
+
+    /// Each `seq` that the cache dropped since the last call: a record
+    /// that a prune, a successor, or a resolution took out.
+    pub fn take_forgotten(&mut self) -> Vec<u64> {
+        core::mem::take(&mut self.forgotten)
+    }
+
+    /// Takes again a record that the cache accepted in an earlier run, at
+    /// the `seq` it had then (`COM-178`). The records come in `seq` order,
+    /// and a record that the store of the relay holds passed each check of
+    /// admission once.
+    pub fn restore(
+        &mut self,
+        record: &[u8],
+        seq: u64,
+        accepted_at: u64,
+    ) -> Result<Published, Reject> {
+        self.next_seq = self.next_seq.max(seq);
+        self.publish(record, true, accepted_at)
     }
 
     /// The control chain that the cache verified.
@@ -276,6 +305,7 @@ impl CommunityCache {
         for gone in displaced {
             if let Some(seq) = self.fixed_seq.remove(&gone) {
                 self.by_seq.remove(&seq);
+                self.forgotten.push(seq);
             }
         }
         Ok(Published {
@@ -324,6 +354,7 @@ impl CommunityCache {
         for gone in held_above.iter().filter(|hash| !self.meta.holds(hash)) {
             if let Some(seq) = self.fixed_seq.remove(gone) {
                 self.by_seq.remove(&seq);
+                self.forgotten.push(seq);
             }
         }
         let seq = self.store_fixed(hash, record)?;
@@ -465,6 +496,7 @@ impl CommunityCache {
         }
         for (seq, len) in dropped {
             self.by_seq.remove(&seq);
+            self.forgotten.push(seq);
             self.stored_bytes = self.stored_bytes.saturating_sub(len);
         }
     }
@@ -548,6 +580,7 @@ impl CommunityCache {
         if replaces {
             for body in bodies.drain(..) {
                 self.by_seq.remove(&body.seq);
+                self.forgotten.push(body.seq);
                 self.stored_bytes = self.stored_bytes.saturating_sub(body.bytes.len());
             }
         }
@@ -811,13 +844,16 @@ impl CommunityCache {
                 }
                 if let Some(window) = author.windows.remove(&end).filter(|_| has_window) {
                     self.by_seq.remove(&window.seq);
+                    self.forgotten.push(window.seq);
                 }
                 let indexes: Vec<u32> = author.posts.range(start..=end).map(|(i, _)| *i).collect();
                 for index in indexes {
                     for body in author.posts.remove(&index).unwrap_or_default() {
                         self.by_seq.remove(&body.seq);
+                        self.forgotten.push(body.seq);
                         if let Some((seq, _)) = body.operator_removal {
                             self.by_seq.remove(&seq);
+                            self.forgotten.push(seq);
                         }
                         self.stored_bytes = self.stored_bytes.saturating_sub(body.bytes.len());
                     }

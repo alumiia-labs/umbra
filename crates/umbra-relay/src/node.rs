@@ -445,8 +445,10 @@ impl RelayNode {
     /// is gone, and the clients build them again.
     pub fn restored(config: Config, loaded: Loaded) -> Self {
         let chunks = ChunkService::restore(config.chunk_capacity, &loaded);
+        let communities = CommunityService::restore(config.community_capacity, &loaded);
         let mut node = RelayNode::new(config);
         node.chunks = chunks;
+        node.communities = communities;
         node.groups = GroupService::restore(&loaded);
         let mut queues = QueueService::restore(loaded);
         queues.keep_notify_of(&mut node.queues);
@@ -476,6 +478,7 @@ impl RelayNode {
         let mut changes = self.queues.take_changes();
         changes.append(&mut self.groups.take_changes());
         changes.append(&mut self.chunks.take_changes());
+        changes.append(&mut self.communities.take_changes());
         changes
     }
 

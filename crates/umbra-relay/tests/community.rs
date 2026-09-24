@@ -40,6 +40,7 @@ use umbra_queue::{relay::session::Session, Reject};
 use umbra_relay::{
     circuits::CircuitKey,
     service::{community::CommunityService, DigestDue, Reply},
+    store::{MemoryStore, RelayStore},
 };
 use umbra_wire::{
     address::{QueueAddress, LEN as QUEUE_ADDRESS_LEN},
@@ -228,6 +229,38 @@ fn a_community_starts_with_an_admitted_roster_and_serves_a_pull() {
     let response = PullResponse::parse(page.payload).unwrap();
     assert_eq!(response.entries.len(), 2);
     assert_eq!(response.entries[1].record, post.as_slice());
+
+    // COM-222, COM-224: the relay keeps the community across a restart.
+    // A new service from the stored changes serves the same page, with the
+    // same seq of each record (COM-178).
+    let mut store = MemoryStore::default();
+    store.commit(&harness.service.take_changes()).unwrap();
+    let before = response
+        .entries
+        .iter()
+        .map(|e| (e.seq, e.record.to_vec()))
+        .collect::<Vec<_>>();
+    harness.service = CommunityService::restore(1 << 20, &store.load().unwrap());
+    assert_eq!(harness.service.len(), 1);
+    let (replies, _) = harness.command(CMD_PULL, &request, 310).unwrap();
+    let outbound = &replies[0].outbound;
+    let (page, _) = Command::parse(&outbound.encoded, outbound.bucket).unwrap();
+    let again = PullResponse::parse(page.payload).unwrap();
+    let after = again
+        .entries
+        .iter()
+        .map(|e| (e.seq, e.record.to_vec()))
+        .collect::<Vec<_>>();
+    assert_eq!(after, before);
+    // A second post after the restart takes the next seq.
+    let body = text_body(&community, "after the restart", None, &[]).unwrap();
+    let later = chain.append(&author, NO_INDEX, &body, 320).unwrap();
+    let (replies, _) = harness.publish(&later, None, 320).unwrap();
+    let outbound = &replies[0].outbound;
+    let (ack, _) = Command::parse(&outbound.encoded, outbound.bucket).unwrap();
+    let seq = u64::from_be_bytes(ack.payload[..8].try_into().unwrap());
+    assert_eq!(seq, before.last().unwrap().0 + 1);
+    assert_eq!(harness.service.take_changes().len(), 1);
 
     // A command under another key than the pull key is rejected.
     harness.key = CommandAuthKey::derive(&StaticSecret::from([8; 32]), &session_pk).unwrap();

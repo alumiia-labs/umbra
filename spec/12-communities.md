@@ -1125,6 +1125,17 @@ the record. A pruned index is not a gap, and a client shows no warning for it.
   `CommunityMeta` while it serves that community. §12.3.3 gives the three
   record types of the control chain. A join reads the control chain from `epoch_index` 0
   under `COM-196`, thus that chain has no retention bound.
+- **[COM-412]** A relay MUST commit each record of a community that it
+  accepts to durable storage before it sends the `PUBACK` of that record,
+  in the manner of Part 3 rule `NET-298`. **[COM-413]** After a restart, a
+  relay MUST serve each record that it kept at the `seq` that the record had
+  before the restart (`COM-178`).
+
+  > *Cause.* An earlier relay held its communities in RAM. A restart then
+  > lost each community, the relay refused each later `PUB` under
+  > `COM-206`, and a subscriber pulled nothing from it. `COM-222` and
+  > `COM-224` named what a relay keeps, and no rule said that the keeping
+  > outlives the process.
 - **[COM-225]** After `COMMUNITY_RETENTION`, a relay MAY prune a record. The
   two rules below give the order of a prune.
 - **[COM-226]** A relay MUST prune a window as one unit, which is the

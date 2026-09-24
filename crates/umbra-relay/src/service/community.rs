@@ -22,6 +22,8 @@ use umbra_core::{
     notify::digest::{DigestGate, Policy},
 };
 use umbra_crypto::x25519::{PublicKey as XPublic, StaticSecret};
+
+use crate::store::{Loaded, StoreChange};
 use umbra_queue::{relay::session::Session, Reject};
 use umbra_wire::{
     address::LEN as QUEUE_ADDRESS_LEN,
@@ -44,6 +46,9 @@ struct Served {
 pub struct CommunityService {
     served: BTreeMap<[u8; 32], Served>,
     capacity_bytes: usize,
+    /// The changes of the stored state since the last call of
+    /// [`CommunityService::take_changes`] (`COM-412`).
+    changes: Vec<StoreChange>,
 }
 
 /// `pull_pk`, which each party derives from `community_id` (`COM-175`).
@@ -65,6 +70,55 @@ impl CommunityService {
         CommunityService {
             served: BTreeMap::new(),
             capacity_bytes,
+            changes: Vec::new(),
+        }
+    }
+
+    /// The service of an earlier run: each community takes its records
+    /// again, in `seq` order and at the `seq` each one had (`COM-413`).
+    /// A registration of a notify queue does not come back, as the
+    /// session that carried it ended.
+    pub fn restore(capacity_bytes: usize, loaded: &Loaded) -> Self {
+        let mut service = CommunityService::new(capacity_bytes);
+        for (community_id, records) in &loaded.communities {
+            let mut cache = CommunityCache::new(*community_id, capacity_bytes);
+            for (seq, (accepted_at, record)) in records {
+                let _ = cache.restore(record, *seq, *accepted_at);
+            }
+            // A replay can drop a record that the store still holds, as the
+            // resolution of a window does.
+            for seq in cache.take_forgotten() {
+                service.changes.push(StoreChange::CommunityForget {
+                    community_id: *community_id,
+                    seq,
+                });
+            }
+            if cache.control().has_genesis() {
+                service.served.insert(
+                    *community_id,
+                    Served {
+                        cache,
+                        digests: DigestGate::new(Policy::Community),
+                        queues: BTreeMap::new(),
+                    },
+                );
+            }
+        }
+        service
+    }
+
+    /// The changes of the stored state since the last call.
+    pub fn take_changes(&mut self) -> Vec<StoreChange> {
+        core::mem::take(&mut self.changes)
+    }
+
+    fn note_forgotten(&mut self, community_id: [u8; 32]) {
+        let Some(served) = self.served.get_mut(&community_id) else {
+            return;
+        };
+        for seq in served.cache.take_forgotten() {
+            self.changes
+                .push(StoreChange::CommunityForget { community_id, seq });
         }
     }
 
@@ -165,11 +219,24 @@ impl CommunityService {
             digests: DigestGate::new(Policy::Community),
             queues: BTreeMap::new(),
         });
+        let before = served.cache.next_seq();
         let published = served.cache.publish(record, admitted, now);
+        let is_new = served.cache.next_seq() > before;
         if !served.cache.control().has_genesis() {
             self.served.remove(&community_id);
         }
         let published = published?;
+        // COM-412: the relay keeps what it accepted across a
+        // restart.
+        if is_new {
+            self.changes.push(StoreChange::CommunityRecord {
+                community_id,
+                seq: published.seq,
+                accepted_at: now,
+                record: record.to_vec(),
+            });
+        }
+        self.note_forgotten(community_id);
         let reply = answer(
             circuit,
             command,
@@ -208,6 +275,13 @@ impl CommunityService {
         let mut due = Vec::new();
         for (community_id, served) in &mut self.served {
             served.cache.sweep(now);
+            // A pruned record leaves the store too (`COM-227`).
+            for seq in served.cache.take_forgotten() {
+                self.changes.push(StoreChange::CommunityForget {
+                    community_id: *community_id,
+                    seq,
+                });
+            }
             due.extend(Self::digests_of(*community_id, served, Tick::Clock(now)));
             let digests = &served.digests;
             // COM-375: the address leaves with its registration.

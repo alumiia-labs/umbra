@@ -76,12 +76,12 @@ each column when a crate implements the requirement and a test covers it.
 | `DIS` | 123 | 37 | 0 | 0 | 1 | **161** |
 | `REL` | 124 | 32 | 1 | 0 | 2 | **159** |
 | `GRP` | 220 | 62 | 0 | 0 | 6 | **288** |
-| `COM` | 308 | 98 | 0 | 0 | 5 | **411** |
+| `COM` | 310 | 98 | 0 | 0 | 5 | **413** |
 | `ATT` | 140 | 46 | 1 | 0 | 2 | **189** |
 | `ABU` | 68 | 31 | 0 | 0 | 0 | **99** |
 | `IMP` | 112 | 41 | 0 | 0 | 2 | **155** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2266 | 722 | 7 | 0 | 54 | **3049** |
+| **All** | 2268 | 722 | 7 | 0 | 54 | **3051** |
 
 ## SCP — Scope and Conventions
 
@@ -2751,6 +2751,8 @@ Source: `spec/12-communities.md`
 | `COM-409` | §12.5.5 | MUST | A party | A party MUST drop an exchange whose `step` is not one of the four values, or whose `rest` does not have the length of its step. |  |  |
 | `COM-410` | §12.3.3 | MUST | (unstated) | A relay stops a page at the `B3` L5 payload too (`COM-182`), thus a client MUST also pull again when the room that a page leaves below 32 650 bytes is less than 8 023 bytes, the entry of a post at `MAX_POST_SIZE`. |  |  |
 | `COM-411` | §12.3.3 | MUST | A client | A client MUST go on with each pull of `COM-196` from the `next` value of its page until a page holds no entry. |  |  |
+| `COM-412` | §12.4.6 | MUST | A relay | A relay MUST commit each record of a community that it accepts to durable storage before it sends the `PUBACK` of that record, in the manner of Part 3 rule `NET-298`. |  |  |
+| `COM-413` | §12.4.6 | MUST | After a restart, a relay | After a restart, a relay MUST serve each record that it kept at the `seq` that the record had before the restart (`COM-178`). |  |  |
 
 ## ATT — Attachments and Large Objects
 
