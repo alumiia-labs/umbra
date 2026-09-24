@@ -47,7 +47,7 @@ use zeroize::Zeroizing;
 
 use crate::{
     bridge::{Bridge, NetEvent},
-    client::{Client, CommunityPull},
+    client::{Client, CommunityPull, GenesisSend},
     communities::{run_communities, CommunityCommand, CommunityUpdate},
     draft::Draft,
     groups::{run_groups, GroupCommand, GroupUpdate},
@@ -261,6 +261,28 @@ pub struct FfiCommunityPost {
     pub is_settled: bool,
     /// Whether this device wrote the post.
     pub is_own: bool,
+}
+
+/// A community in its creation (Part 12 §12.5.5).
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiFormingCommunity {
+    /// The community.
+    pub community_id: Vec<u8>,
+    /// The name of its first metadata.
+    pub name: String,
+    /// The pairwise conversation of the other owner.
+    pub contact: Vec<u8>,
+    /// Whether this device made the community.
+    pub is_creator: bool,
+    /// 0: the report queue is on its way; 1: the offer waits for the
+    /// other party; 2: the accept waits for the formed step; 3: the relays
+    /// take the genesis.
+    pub phase: u8,
+    /// The count of the relays that took both genesis records.
+    pub relays_done: u8,
+    /// Why the last genesis record did not reach a relay: the reason of
+    /// its refusal, or none that a relay gave.
+    pub last_fault: Option<String>,
 }
 
 /// An offer of the co-ownership of a community (Part 12 §12.5.5).
@@ -1005,6 +1027,9 @@ struct Inner {
     /// The time before which a genesis record that a relay refused does
     /// not go again, by the community, the relay, and the record.
     genesis_backoff: BTreeMap<([u8; 32], [u8; 32], bool), u64>,
+    /// The last failure of a genesis record of each community in its
+    /// creation, for its view.
+    genesis_faults: BTreeMap<[u8; 32], String>,
     /// The same for a post or a checkpoint of this device, by the hash of
     /// the record.
     post_backoff: BTreeMap<PostKey, u64>,
@@ -1045,6 +1070,9 @@ struct Inner {
     /// (Part 14 `ABU-065`, `ABU-105`), and the time of the fetch.
     challenges: umbra_core::abuse::pow::ChallengeBook,
     challenges_at: u64,
+    /// The time of the last fetch of the challenges that this device
+    /// started.
+    challenges_asked_at: u64,
 }
 
 /// A restore of Part 4 §4.7.2 while it runs: the root key of the entered
@@ -1207,6 +1235,9 @@ enum CommunityWork {
 /// relay, and the hash of the record.
 type PostKey = ([u8; 32], [u8; 32], [u8; 32]);
 
+/// The least time between two fetches of the challenges, in seconds.
+const CHALLENGE_REFETCH: u64 = 30;
+
 /// How long a genesis record that a relay refused waits before it goes
 /// again: a refused proof of work waits for the next challenge.
 const GENESIS_RETRY: u64 = 30;
@@ -1236,33 +1267,74 @@ enum GroupWork {
 }
 
 impl Inner {
-    /// The `Admission` of a command that creates state at `relay_id`: the
-    /// solution of its challenge when this device holds one from a fetch
-    /// inside `POW_CHALLENGE_PERIOD` (`ABU-014`, `ABU-069`), and none else.
-    fn admission_for(&self, relay_id: &[u8; 32]) -> Vec<u8> {
-        use umbra_wire::admission::{Admission, AdmissionKind};
+    /// Fetches the challenges of the relays from the pinned ingress in a
+    /// task of the run, at most once in `CHALLENGE_REFETCH` seconds.
+    fn fetch_challenges(&mut self) {
         let now = unix_now();
-        let solved = self.challenges.get(relay_id, now).and_then(|challenge| {
-            let fetched = umbra_core::abuse::pow::Fetched {
-                challenge: challenge.clone(),
-                fetched_at: self.challenges_at,
-            };
-            fetched.solve(now, &mut OsRng).ok()
-        });
-        let mut body = [0u8; umbra_core::abuse::pow::SOLUTION_LEN];
-        let admission = match solved.and_then(|solution| solution.encode(&mut body).ok()) {
-            Some(used) => Admission {
-                kind: AdmissionKind::Pow,
-                body: body.get(..used).unwrap_or_default(),
-            },
-            None => Admission::NONE,
+        if now.saturating_sub(self.challenges_asked_at) < CHALLENGE_REFETCH {
+            return;
+        }
+        let Some(spawner) = self.spawner.clone() else {
+            return;
         };
-        let mut out = vec![0u8; 3 + body.len()];
-        let used = admission.encode(&mut out).unwrap_or(0);
-        out.truncate(used);
-        out
+        let Some(guard) = self.guard.and_then(|guard| {
+            self.relays
+                .iter()
+                .find(|relay| relay.relay_id.as_slice() == guard.as_slice())
+                .cloned()
+        }) else {
+            return;
+        };
+        let Ok(address) = <[u8; 4]>::try_from(guard.ipv4.as_slice()) else {
+            return;
+        };
+        let dial = Dial {
+            host: guard.host.clone(),
+            addr_v4: Some(address),
+            addr_v6: None,
+            port: guard.port,
+        };
+        let tls = match &self.root_ca_path {
+            Some(path) => native::tls_config_with_root_file(path),
+            None => native::tls_config(),
+        };
+        let Ok(tls) = tls else {
+            return;
+        };
+        self.challenges_asked_at = now;
+        let me = self.me.clone();
+        spawner.spawn(async move {
+            if let Ok(bundle) = native::fetch_challenges(&dial, tls).await {
+                if let Some(handle) = me.upgrade() {
+                    handle.take_challenges(&bundle);
+                }
+            }
+        });
     }
+}
 
+/// The encoded `Admission` of a command that creates state at a relay: the
+/// solution of its challenge when this device holds one from a fetch
+/// inside `POW_CHALLENGE_PERIOD` (`ABU-014`, `ABU-069`), and none else. A
+/// solve takes seconds on a slow phone, thus no lock is held here.
+fn admission_of(fetched: Option<umbra_core::abuse::pow::Fetched>, now: u64) -> Vec<u8> {
+    use umbra_wire::admission::{Admission, AdmissionKind};
+    let solved = fetched.and_then(|fetched| fetched.solve(now, &mut OsRng).ok());
+    let mut body = [0u8; umbra_core::abuse::pow::SOLUTION_LEN];
+    let admission = match solved.and_then(|solution| solution.encode(&mut body).ok()) {
+        Some(used) => Admission {
+            kind: AdmissionKind::Pow,
+            body: body.get(..used).unwrap_or_default(),
+        },
+        None => Admission::NONE,
+    };
+    let mut out = vec![0u8; 3 + body.len()];
+    let used = admission.encode(&mut out).unwrap_or(0);
+    out.truncate(used);
+    out
+}
+
+impl Inner {
     /// Gives each file job of the store to the transfer task (Part 13
     /// §13.8). With no run of the network the jobs wait in the store.
     fn pump_transfers(&mut self) {
@@ -1773,6 +1845,11 @@ impl Inner {
                     relay,
                     is_meta,
                 }) => {
+                    let fault = match reason {
+                        Some(reason) => format!("{reason:?}"),
+                        None => "Unreachable".into(),
+                    };
+                    self.genesis_faults.insert(community_id, fault);
                     self.genesis_backoff.insert(
                         (community_id, relay, is_meta),
                         unix_now().saturating_add(GENESIS_RETRY),
@@ -1858,6 +1935,14 @@ impl Inner {
         };
         let now = unix_now();
         self.genesis_backoff.retain(|_, until| *until > now);
+        // ABU-069: a challenge serves for one period from its fetch, thus a
+        // roster that needs one fetches them again when they aged.
+        let needs_fresh = now.saturating_sub(self.challenges_at)
+            >= umbra_core::abuse::POW_CHALLENGE_PERIOD.saturating_sub(CHALLENGE_REFETCH);
+        if needs_fresh && sends.iter().any(|send| !send.is_meta) {
+            self.fetch_challenges();
+        }
+        let mut to_solve = Vec::new();
         for send in sends {
             let key = (send.community_id, send.relay, send.is_meta);
             let in_flight = self.community_tags.values().any(|work| {
@@ -1867,20 +1952,6 @@ impl Inner {
             if in_flight || self.genesis_backoff.contains_key(&key) {
                 continue;
             }
-            // COM-205: the genesis roster takes the proof of work of the
-            // challenge of that relay, and the metadata takes none.
-            let admission = if send.is_meta {
-                let mut none = vec![0u8; 3];
-                let used = umbra_wire::admission::Admission::NONE
-                    .encode(&mut none)
-                    .unwrap_or(0);
-                none.truncate(used);
-                none
-            } else {
-                self.admission_for(&send.relay)
-            };
-            let mut payload = send.record;
-            payload.extend_from_slice(&admission);
             self.next_community_tag = self.next_community_tag.wrapping_add(1);
             let tag = self.next_community_tag;
             self.community_tags.insert(
@@ -1891,13 +1962,60 @@ impl Inner {
                     is_meta: send.is_meta,
                 },
             );
-            self.send_community(CommunityCommand::Publish {
-                tag,
-                relay: send.relay,
-                community_id: send.community_id,
-                payload,
-            });
+            // COM-205: the genesis roster takes the proof of work of the
+            // challenge of that relay, and the metadata takes none.
+            if send.is_meta {
+                let mut payload = send.record;
+                payload.extend_from_slice(&admission_of(None, now));
+                self.send_community(CommunityCommand::Publish {
+                    tag,
+                    relay: send.relay,
+                    community_id: send.community_id,
+                    payload,
+                });
+            } else {
+                let fetched = self.challenges.get(&send.relay, now).map(|challenge| {
+                    umbra_core::abuse::pow::Fetched {
+                        challenge: challenge.clone(),
+                        fetched_at: self.challenges_at,
+                    }
+                });
+                to_solve.push((tag, send, fetched));
+            }
         }
+        // ABU-008: a solve takes seconds on a slow phone, thus it runs on a
+        // thread of its own and holds no lock of the client.
+        if to_solve.is_empty() {
+            return;
+        }
+        let Some(spawner) = self.spawner.clone() else {
+            return;
+        };
+        let me = self.me.clone();
+        spawner.spawn_blocking(move || {
+            let now = unix_now();
+            let solved: Vec<(u64, GenesisSend, Vec<u8>)> = to_solve
+                .into_iter()
+                .map(|(tag, send, fetched)| (tag, send, admission_of(fetched, now)))
+                .collect();
+            if let Some(handle) = me.upgrade() {
+                let mut inner = locked(&handle.inner);
+                for (tag, send, admission) in solved {
+                    // A run that ended in the meantime dropped the tag.
+                    if !inner.community_tags.contains_key(&tag) {
+                        continue;
+                    }
+                    let mut payload = send.record;
+                    payload.extend_from_slice(&admission);
+                    inner.send_community(CommunityCommand::Publish {
+                        tag,
+                        relay: send.relay,
+                        community_id: send.community_id,
+                        payload,
+                    });
+                }
+            }
+        });
     }
 
     /// Sends each post and checkpoint of this device that a relay has not
@@ -2959,6 +3077,7 @@ fn handle_of(database_path: String, client: Client<SqliteBackend, ForeignElement
             report_pending: BTreeMap::new(),
             next_report_tag: 0,
             genesis_backoff: BTreeMap::new(),
+            genesis_faults: BTreeMap::new(),
             post_backoff: BTreeMap::new(),
             group_reading: BTreeSet::new(),
             group_lost: BTreeSet::new(),
@@ -2976,6 +3095,7 @@ fn handle_of(database_path: String, client: Client<SqliteBackend, ForeignElement
             run: 0,
             challenges: umbra_core::abuse::pow::ChallengeBook::default(),
             challenges_at: 0,
+            challenges_asked_at: 0,
         }),
         changed: Condvar::new(),
         runtime: Mutex::new(None),
@@ -3615,46 +3735,7 @@ impl Handle {
     /// carrier of the manifest, on the path of the manifest fetch and on no
     /// session (`ABU-065`, `ABU-066`, `ABU-105`).
     fn fetch_challenges(self: &Arc<Self>) {
-        let (spawner, dial, tls) = {
-            let inner = locked(&self.inner);
-            let Some(spawner) = inner.spawner.clone() else {
-                return;
-            };
-            let Some(guard) = inner.guard.and_then(|guard| {
-                inner
-                    .relays
-                    .iter()
-                    .find(|relay| relay.relay_id.as_slice() == guard.as_slice())
-                    .cloned()
-            }) else {
-                return;
-            };
-            let Ok(address) = <[u8; 4]>::try_from(guard.ipv4.as_slice()) else {
-                return;
-            };
-            let dial = Dial {
-                host: guard.host.clone(),
-                addr_v4: Some(address),
-                addr_v6: None,
-                port: guard.port,
-            };
-            let tls = match &inner.root_ca_path {
-                Some(path) => native::tls_config_with_root_file(path),
-                None => native::tls_config(),
-            };
-            let Ok(tls) = tls else {
-                return;
-            };
-            (spawner, dial, tls)
-        };
-        let me = Arc::downgrade(self);
-        spawner.spawn(async move {
-            if let Ok(bundle) = native::fetch_challenges(&dial, tls).await {
-                if let Some(handle) = me.upgrade() {
-                    handle.take_challenges(&bundle);
-                }
-            }
-        });
+        locked(&self.inner).fetch_challenges();
     }
 
     /// Takes each challenge of a bundle under the identity key of its relay
@@ -3678,6 +3759,8 @@ impl Handle {
             }
         }
         inner.challenges_at = now;
+        // A genesis that waited for a challenge goes now.
+        inner.pump_forming();
     }
 
     /// The count of the relays whose challenge this device holds.
@@ -4399,6 +4482,25 @@ impl Handle {
         drop(inner);
         self.changed.notify_all();
         Ok(community_id.to_vec())
+    }
+
+    /// The communities in their creation.
+    pub fn forming_communities(&self) -> Result<Vec<FfiFormingCommunity>, FfiError> {
+        let inner = locked(&self.inner);
+        Ok(inner
+            .client
+            .forming_communities()?
+            .into_iter()
+            .map(|forming| FfiFormingCommunity {
+                last_fault: inner.genesis_faults.get(&forming.community_id).cloned(),
+                community_id: forming.community_id.to_vec(),
+                name: forming.name,
+                contact: forming.contact.0.to_vec(),
+                is_creator: forming.is_creator,
+                phase: forming.phase,
+                relays_done: forming.relays_done,
+            })
+            .collect())
     }
 
     /// The offers of the co-ownership of a community that wait for the

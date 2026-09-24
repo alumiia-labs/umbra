@@ -29,6 +29,10 @@
 //! keyset=/etc/umbra/keyset.bin
 //! ```
 //!
+//! A test network on one machine can list a relay at an address that names
+//! this machine from an emulator, as `10.0.2.2` does. The line
+//! `host_alias=10.0.2.2` makes this relay dial `127.0.0.1` in its place.
+//!
 //! The identity seed gives the ML-DSA-65 key that signs the descriptor, and
 //! `relay_id` is the hash of its public half. The manifest gives the layer
 //! of this relay and each relay of the next layer.
@@ -250,6 +254,16 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
     // WIR-526: a deposit goes on the same one-shot connection as a copy.
     for (relay_id, (dial, _)) in &queue_relays {
         replicas.entry(*relay_id).or_insert_with(|| dial.clone());
+    }
+    // A relay that the manifest lists at the alias of this machine is on
+    // this machine.
+    if let Some(alias) = values.get("host_alias") {
+        let alias: std::net::Ipv4Addr = alias.parse().ok()?;
+        for dial in replicas.values_mut() {
+            if dial.addr_v4 == Some(alias.octets()) {
+                dial.addr_v4 = Some([127, 0, 0, 1]);
+            }
+        }
     }
     let queue_keys = queue_relays
         .into_iter()

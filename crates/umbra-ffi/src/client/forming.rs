@@ -198,6 +198,25 @@ pub struct CommunityOffer {
     pub from: ConversationId,
 }
 
+/// One community in its creation, as the platform lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FormingInfo {
+    /// The community.
+    pub community_id: [u8; 32],
+    /// The name of its first metadata.
+    pub name: String,
+    /// The contact of the exchange.
+    pub contact: ConversationId,
+    /// Whether this device made the community.
+    pub is_creator: bool,
+    /// 0: the report queue is on its way; 1: the offer waits for the
+    /// other party; 2: the accept waits for the formed step; 3: the relays
+    /// take the genesis.
+    pub phase: u8,
+    /// The count of the relays that took both genesis records.
+    pub relays_done: u8,
+}
+
 /// One genesis record for one relay, which the caller sends with its
 /// `Admission`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -307,6 +326,29 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         };
         self.put_forming(Some(&row), &community, rng)?;
         Ok(community)
+    }
+
+    /// Each community in its creation, but an offer that waits for the
+    /// user, which [`Client::community_offers`] gives.
+    pub fn forming_communities(&self) -> Result<Vec<FormingInfo>, Error> {
+        Ok(self
+            .forming_rows()?
+            .into_iter()
+            .filter(|row| !(row.side == SECOND && row.phase == OFFERED))
+            .map(|row| {
+                let done = (0..row.relays.len())
+                    .filter(|index| (row.acked >> (index * 2)) & 0b11 == 0b11)
+                    .count();
+                FormingInfo {
+                    community_id: row.community_id,
+                    name: row.name,
+                    contact: row.contact,
+                    is_creator: row.side == CREATOR,
+                    phase: row.phase,
+                    relays_done: u8::try_from(done).unwrap_or(u8::MAX),
+                }
+            })
+            .collect())
     }
 
     /// Each community whose role waits for its report queue.
