@@ -2874,6 +2874,26 @@ fn an_app_creates_a_community_with_a_contact_and_a_third_app_joins_it() {
         std::thread::sleep(Duration::from_millis(100));
     }
     assert!(!carol.communities().unwrap()[0].is_owner);
+    // COM-247: the name comes from the metadata that verified under the
+    // roster, opened with the key of the link. The checkpoint settles the
+    // five posts, and each one renders into a sink.
+    assert_eq!(carol.communities().unwrap()[0].name, "Trail club");
+    let posts = carol.community_posts(community.clone()).unwrap();
+    assert_eq!(posts.len(), 5);
+    assert!(posts.iter().all(|post| post.is_settled && !post.is_own));
+    let view = Arc::new(View::default());
+    carol
+        .render_community_post(community.clone(), posts[0].key.clone(), view.clone())
+        .unwrap();
+    assert_eq!(
+        String::from_utf16(&view.0.lock().unwrap()).unwrap(),
+        "post 0"
+    );
+    let own = alice.community_posts(community.clone()).unwrap();
+    assert_eq!(own.len(), 5);
+    assert!(own
+        .iter()
+        .all(|post| post.is_own && post.author == posts[0].author));
 
     // A declined offer ends at both sides.
     let second = alice

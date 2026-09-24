@@ -25,6 +25,7 @@ pub mod record;
 pub mod relay;
 pub mod report;
 pub mod social;
+pub mod view;
 
 /// The version byte of each community object.
 pub const VERSION: u8 = 0x01;

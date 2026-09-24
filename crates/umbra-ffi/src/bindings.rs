@@ -245,6 +245,24 @@ pub struct FfiCommunity {
     pub pending: u32,
 }
 
+/// One post of a community, as the timeline lists it. The text is not
+/// here: [`Handle::render_community_post`] writes it into a sink.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiCommunityPost {
+    /// The hash of the post, which names it.
+    pub key: Vec<u8>,
+    /// The authoring pseudonym.
+    pub author: Vec<u8>,
+    /// The position in the chain of that pseudonym.
+    pub index: u32,
+    /// The time the post reached this device, in Unix seconds.
+    pub at: u64,
+    /// Whether a verified checkpoint covers the post (§12.4.1).
+    pub is_settled: bool,
+    /// Whether this device wrote the post.
+    pub is_own: bool,
+}
+
 /// An offer of the co-ownership of a community (Part 12 §12.5.5).
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct FfiCommunityOffer {
@@ -4456,6 +4474,45 @@ impl Handle {
         drop(inner);
         self.changed.notify_all();
         Ok(())
+    }
+
+    /// The posts of a community, oldest first.
+    pub fn community_posts(
+        &self,
+        community_id: Vec<u8>,
+    ) -> Result<Vec<FfiCommunityPost>, FfiError> {
+        let community_id =
+            <[u8; 32]>::try_from(community_id.as_slice()).map_err(|_| FfiError::Malformed)?;
+        Ok(locked(&self.inner)
+            .client
+            .community_posts(&community_id, unix_now())?
+            .into_iter()
+            .map(|post| FfiCommunityPost {
+                key: post.key.to_vec(),
+                author: post.author.to_vec(),
+                index: post.index,
+                at: post.at,
+                is_settled: post.is_settled,
+                is_own: post.is_own,
+            })
+            .collect())
+    }
+
+    /// Writes the text of one post into the sink of the platform, which
+    /// holds it for one frame (`IMP-037`).
+    pub fn render_community_post(
+        &self,
+        community_id: Vec<u8>,
+        key: Vec<u8>,
+        sink: Arc<dyn TextSink>,
+    ) -> Result<(), FfiError> {
+        let community_id =
+            <[u8; 32]>::try_from(community_id.as_slice()).map_err(|_| FfiError::Malformed)?;
+        let key = <[u8; 32]>::try_from(key.as_slice()).map_err(|_| FfiError::Malformed)?;
+        let mut sink = ForeignSink(sink);
+        Ok(locked(&self.inner)
+            .client
+            .render_community_post(&community_id, &key, &mut sink)?)
     }
 
     /// Each community of this device.

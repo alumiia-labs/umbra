@@ -184,6 +184,31 @@ pub struct CommunityInfo {
     pub pending: usize,
 }
 
+/// One post of a community as the platform lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommunityPostInfo {
+    /// The hash of the post, which names it.
+    pub key: [u8; 32],
+    /// The authoring pseudonym.
+    pub author: [u8; 32],
+    /// The position in the chain of that pseudonym.
+    pub index: u32,
+    /// The time the post reached this device, in Unix seconds.
+    pub at: u64,
+    /// Whether a verified checkpoint covers the post (§12.4.1).
+    pub is_settled: bool,
+    /// Whether this device wrote the post.
+    pub is_own: bool,
+}
+
+/// A community row, the view of its records, and those records with the
+/// time each one arrived.
+type HeldView = (
+    CommunityRow,
+    umbra_core::community::view::CommunityView,
+    Vec<(u64, Vec<u8>)>,
+);
+
 /// One pull that is due.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommunityPull {
@@ -464,6 +489,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 fresh.push((record_id, entry.record));
             }
         }
+        let fresh_count = fresh.len();
         let mut batch = open.store.begin();
         batch.put(COMMUNITY_CURSOR, key, Some(owner), &cursor.encode(), rng)?;
         for (record_id, record) in fresh {
@@ -473,6 +499,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             batch.put(COMMUNITY_RECORD, record_id, Some(owner), &value, rng)?;
         }
         batch.commit()?;
+        if fresh_count > 0 {
+            self.name_from_view(&pull.community_id, now, rng)?;
+        }
         if !again {
             return Ok(None);
         }
@@ -483,6 +512,108 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             request: request.to_vec(),
             backfill_from: None,
         }))
+    }
+
+    /// What a reader shows of a community from the records that this device
+    /// holds (`umbra_core::community::view`).
+    fn community_view(&self, community_id: &[u8; 32], now: u64) -> Result<HeldView, Error> {
+        let (_, row) = self.community_row(community_id)?.ok_or(Error::NotFound)?;
+        let records = self.community_records(community_id)?;
+        let link = CommunityLink {
+            community_id: *community_id,
+            hints: Vec::new(),
+            fragment: row.fragment,
+        };
+        let slices: Vec<&[u8]> = records
+            .iter()
+            .map(|(_, record)| record.as_slice())
+            .collect();
+        let view = umbra_core::community::view::view(community_id, &link.meta_key(), &slices, now);
+        Ok((row, view, records))
+    }
+
+    /// Each post of a community that the view admits, oldest first. A post
+    /// that a moderation epoch removes, or that its author withdrew, is
+    /// not here.
+    pub fn community_posts(
+        &self,
+        community_id: &[u8; 32],
+        now: u64,
+    ) -> Result<Vec<CommunityPostInfo>, Error> {
+        let (row, view, records) = self.community_view(community_id, now)?;
+        let own = umbra_core::community::identity::AuthorIdentity::from_seed(&row.author_seed)
+            .pseudonym();
+        let arrived: std::collections::BTreeMap<[u8; 32], u64> = records
+            .iter()
+            .map(|(at, record)| (sha3_256(&[record]), *at))
+            .collect();
+        let mut out: Vec<CommunityPostInfo> = view
+            .posts
+            .into_iter()
+            .filter(|post| !post.is_removed && !post.is_withdrawn)
+            .map(|post| CommunityPostInfo {
+                key: post.hash,
+                author: post.pseudonym,
+                index: post.index,
+                at: arrived.get(&post.hash).copied().unwrap_or(0),
+                is_settled: post.is_settled,
+                is_own: post.pseudonym == own,
+            })
+            .collect();
+        out.sort_by_key(|post| (post.at, post.author, post.index));
+        Ok(out)
+    }
+
+    /// Writes the text of one post into `sink`. A post of another kind than
+    /// a text shows no text.
+    pub fn render_community_post(
+        &self,
+        community_id: &[u8; 32],
+        key: &[u8; 32],
+        sink: &mut dyn crate::Sink,
+    ) -> Result<(), Error> {
+        let store = &self.open_ref()?.store;
+        let mut natural = [0u8; 64];
+        natural[..32].copy_from_slice(community_id);
+        natural[32..].copy_from_slice(key);
+        let row_id = store.row_id(COMMUNITY_RECORD, &natural);
+        let plain = Zeroizing::new(
+            store
+                .get(COMMUNITY_RECORD, &row_id)?
+                .ok_or(Error::NotFound)?,
+        );
+        let record = plain.get(8..).ok_or(Error::Integrity)?;
+        let post = umbra_core::community::record::CommunityPost::parse(record)?;
+        let rich = umbra_wire::app::rich::RichRecord::parse(
+            post.body,
+            umbra_wire::app::Channel::Community,
+        )?;
+        let text = match rich.inner_kind {
+            umbra_wire::app::AppKind::Text => {
+                core::str::from_utf8(rich.inner_body).map_err(|_| Error::Integrity)?
+            }
+            _ => "",
+        };
+        let mut units = Zeroizing::new(Vec::with_capacity(text.len()));
+        units.extend(text.encode_utf16());
+        sink.put(&units);
+        Ok(())
+    }
+
+    /// The name of a community from its verified metadata, for a device
+    /// that joined by a link and holds none yet (`COM-247`).
+    fn name_from_view<R: CryptoRng + ?Sized>(
+        &mut self,
+        community_id: &[u8; 32],
+        now: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let (mut row, view, _) = self.community_view(community_id, now)?;
+        let Some(name) = view.name.filter(|name| *name != row.name) else {
+            return Ok(());
+        };
+        row.name = name;
+        self.put_community(&row, rng)
     }
 
     /// Each record of a community that this device holds, with the time it
