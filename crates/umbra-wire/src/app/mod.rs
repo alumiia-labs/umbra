@@ -99,6 +99,9 @@ pub enum AppKind {
     VerifyCommit = 0x36,
     /// A `VerifyReveal`, 32 bytes.
     VerifyReveal = 0x37,
+    /// A `CommunityOwnerExchange` of Part 12 §12.5.5, on a pairwise
+    /// channel only (`WIR-530`).
+    CommunityOwner = 0x38,
 }
 
 impl AppKind {
@@ -130,6 +133,7 @@ impl AppKind {
             0x35 => AppKind::KeySupply,
             0x36 => AppKind::VerifyCommit,
             0x37 => AppKind::VerifyReveal,
+            0x38 => AppKind::CommunityOwner,
             _ => return Err(Error::Malformed),
         })
     }
@@ -158,7 +162,8 @@ impl AppKind {
             | AppKind::ConversationTimer
             | AppKind::QueueAddress
             | AppKind::KeyRequest
-            | AppKind::KeySupply => Class::Control,
+            | AppKind::KeySupply
+            | AppKind::CommunityOwner => Class::Control,
         }
     }
 
@@ -249,6 +254,10 @@ impl<'a> AppMessage<'a> {
             AppKind::QueueAddress
                 if body.len() != crate::address::LEN || channel != Channel::Pairwise =>
             {
+                return Err(Error::Malformed);
+            }
+            // WIR-530: Part 12 reads the body.
+            AppKind::CommunityOwner if channel != Channel::Pairwise => {
                 return Err(Error::Malformed);
             }
             _ => {}

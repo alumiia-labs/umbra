@@ -2758,3 +2758,109 @@ fn an_app_joins_a_community_by_its_link_and_pulls_its_records() {
     bob.disconnect();
     drop(commands);
 }
+
+#[test]
+fn an_app_creates_a_community_with_a_contact_and_a_third_app_joins_it() {
+    let relays = tokio::runtime::Runtime::new().unwrap();
+    let network = start_signed_network(&relays);
+    // ABU-057: each relay signs its first challenge at its start, and the
+    // connect fetches them (ABU-105).
+    std::thread::sleep(Duration::from_secs(3));
+    let directory = std::env::temp_dir().join(format!("umbra-create-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let alice = launch(&directory, "alice.db", 1);
+    let bob = launch(&directory, "bob.db", 2);
+    let carol = launch(&directory, "carol.db", 3);
+    for handle in [&alice, &bob, &carol] {
+        let verified = handle
+            .network_of_manifest(
+                network.manifest.clone(),
+                network.keyset.clone(),
+                0,
+                HOST.into(),
+                Some(CA.into()),
+            )
+            .unwrap();
+        handle.clone().connect(verified.network).unwrap();
+    }
+    alice.invite().unwrap();
+    let link = wait_for(&alice, |event| match event {
+        FfiEvent::Invitation { link } => Some(link),
+        _ => None,
+    });
+    bob.accept(link).unwrap();
+    let alice_conversation = wait_for_contact(&alice);
+    wait_for_contact(&bob);
+
+    // COM-401, COM-402: the offer reaches Bob after the report queue of
+    // the role of Alice.
+    assert_eq!(
+        alice.create_community("  ".into(), alice_conversation.clone()),
+        Err(FfiError::Malformed)
+    );
+    let community = alice
+        .create_community("Trail club".into(), alice_conversation.clone())
+        .unwrap();
+    wait_for(&bob, |event| match event {
+        FfiEvent::CommunityOffer => Some(()),
+        _ => None,
+    });
+    let offers = bob.community_offers().unwrap();
+    assert_eq!(offers.len(), 1);
+    assert_eq!(offers[0].community_id, community);
+    assert_eq!(offers[0].name, "Trail club");
+
+    // COM-404, COM-403, COM-407: the accept, the genesis at each relay, and
+    // the formed step. Each of the two then holds an owner role.
+    bob.accept_community_offer(community.clone()).unwrap();
+    assert!(bob.community_offers().unwrap().is_empty());
+    let start = Instant::now();
+    loop {
+        let formed = [&alice, &bob].iter().all(|handle| {
+            let held = handle.communities().unwrap();
+            held.len() == 1 && held[0].is_owner && held[0].community_id == community
+        });
+        if formed {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(90),
+            "alice {:?}, bob {:?}",
+            alice.communities().unwrap(),
+            bob.communities().unwrap()
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let held = alice.communities().unwrap();
+    assert_eq!(held[0].name, "Trail club");
+    assert_eq!(held[0].relays, 3);
+    let shared = alice.community_link(community.clone()).unwrap();
+    assert_eq!(bob.community_link(community.clone()).unwrap(), shared);
+
+    // COM-246: a third app joins by the link, and pulls the genesis roster
+    // and the first metadata.
+    assert_eq!(carol.join_community(shared).unwrap(), community);
+    let start = Instant::now();
+    while carol.communities().unwrap()[0].records < 2 {
+        assert!(start.elapsed() < Duration::from_secs(60));
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(!carol.communities().unwrap()[0].is_owner);
+
+    // A declined offer ends at both sides.
+    let second = alice
+        .create_community("Night hikes".into(), alice_conversation)
+        .unwrap();
+    wait_for(&bob, |event| match event {
+        FfiEvent::CommunityOffer => Some(()),
+        _ => None,
+    });
+    bob.decline_community_offer(second.clone()).unwrap();
+    assert!(bob.community_offers().unwrap().is_empty());
+    assert_eq!(bob.accept_community_offer(second), Err(FfiError::NotFound));
+    for handle in [&alice, &bob, &carol] {
+        handle.disconnect();
+    }
+    let _ = std::fs::remove_dir_all(&directory);
+}

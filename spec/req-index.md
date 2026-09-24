@@ -70,18 +70,18 @@ each column when a crate implements the requirement and a test covers it.
 | `NET` | 236 | 84 | 1 | 0 | 8 | **329** |
 | `IDN` | 127 | 44 | 1 | 0 | 5 | **177** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
-| `WIR` | 397 | 87 | 0 | 0 | 6 | **490** |
+| `WIR` | 397 | 88 | 0 | 0 | 6 | **491** |
 | `DEV` | 179 | 87 | 2 | 0 | 7 | **275** |
 | `NTF` | 77 | 31 | 0 | 0 | 3 | **111** |
 | `DIS` | 123 | 37 | 0 | 0 | 1 | **161** |
 | `REL` | 124 | 32 | 1 | 0 | 2 | **159** |
 | `GRP` | 220 | 62 | 0 | 0 | 6 | **288** |
-| `COM` | 299 | 96 | 0 | 0 | 5 | **400** |
+| `COM` | 306 | 98 | 0 | 0 | 5 | **409** |
 | `ATT` | 140 | 46 | 1 | 0 | 2 | **189** |
 | `ABU` | 68 | 31 | 0 | 0 | 0 | **99** |
 | `IMP` | 112 | 41 | 0 | 0 | 2 | **155** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2257 | 719 | 7 | 0 | 54 | **3037** |
+| **All** | 2264 | 722 | 7 | 0 | 54 | **3047** |
 
 ## SCP — Scope and Conventions
 
@@ -1303,6 +1303,7 @@ Source: `spec/06-wire-format.md`
 | `WIR-527` | §6.4 | MUST | A relay | A relay MUST hold the `corr_id` of each of the last 4 096 deposits that it took, and it MUST drop a deposit that repeats one. |  |  |
 | `WIR-528` | §6.4.2 | MUST | A receiver | A receiver MUST take the content of a renewal record as a bundle in the layout of Part 5 §5.4.1, and it MUST read it on the queue of a contact whose handshake is complete. |  |  |
 | `WIR-529` | §6.4 | MUST | (unstated) | A relay that sends its proof-of-work challenge to a carrier of the manifest (Part 14 `ABU-102`) MUST send it as the value of one `UMBRA_CHALLENGE` capsule, on a connection of §6.2.1 that it opens for that challenge. |  |  |
+| `WIR-530` | §6.6 | MUST NOT | (unstated) | A parser MUST reject a body of kind `0x38` that is not a `CommunityOwnerExchange` of Part 12 §12.5.5, and MUST NOT accept kind `0x38` on a channel other than a pairwise one. |  |  |
 
 ## DEV — Device Sets
 
@@ -2739,6 +2740,15 @@ Source: `spec/12-communities.md`
 | `COM-398` | §12.4.5 | MUST | (unstated) | The history of a post ends below its own `index`, thus a party MUST reject a `CommunityPost` whose `amends` is not the sentinel and is at or above its `index`. |  |  |
 | `COM-399` | §12.3.3 | MUST | (unstated) | Under selector `0x02`, the records of one `index` are one unit: each body or stub at that index, the `OperatorRemoval` of a stub, and the `Checkpoint` whose `end_index` is that index. |  |  |
 | `COM-400` | §12.3.3 | MUST | (unstated) | A `PUB` payload holds one record and then the `Admission`. |  |  |
+| `COM-401` | §12.5.5 | MUST | A creator | A creator MUST make the genesis role seed of `COM-005` and a report queue of its own before it sends an offer. |  |  |
+| `COM-402` | §12.5.5 | MUST | A creator | A creator MUST send the offer to one contact, on the pairwise channel of that contact. |  |  |
+| `COM-403` | §12.5.5 | MUST NOT | A creator | A creator MUST NOT publish a `CommunityRoster` with `epoch_index` 0 before it holds an accept of that offer. |  |  |
+| `COM-404` | §12.5.5 | MUST | A party that accepts an offer | A party that accepts an offer MUST make a role seed from the device CSPRNG, in the manner of `COM-005`, and a report queue of its own, before it sends the accept. |  |  |
+| `COM-405` | §12.5.5 | MUST NOT | A party | A party MUST NOT send an accept for an offer that it did not receive, and it MUST NOT send two accepts for one offer. |  |  |
+| `COM-406` | §12.5.5 | MUST | A creator | A creator MUST drop an accept whose `community_id` names no offer that it holds for the sending contact, a second accept of one offer, and an entry whose role is not 1 or whose pseudonym is the pseudonym of the creator. |  |  |
+| `COM-407` | §12.5.5 | MUST | (unstated) | When the relays of the first `CommunityMeta` have each answered the genesis roster and that meta with a `PUBACK`, the creator MUST send a formed step to the second owner. |  |  |
+| `COM-408` | §12.5.5 | MUST | A party | A party MUST take a formed step only for an accept that it sent to that contact. |  |  |
+| `COM-409` | §12.5.5 | MUST | A party | A party MUST drop an exchange whose `step` is not one of the four values, or whose `rest` does not have the length of its step. |  |  |
 
 ## ATT — Attachments and Large Objects
 

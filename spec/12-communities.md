@@ -1751,6 +1751,67 @@ this section gives the community its own rule.
 > leaves the device. Part 7 §7.5.3 carries the list to the other devices of
 > the user inside the device set.
 
+### 12.5.5 The creation and the second owner
+
+`COM-130` gives a community two or more owners from its first roster, and
+§12.5.2 rule 5 checks that roster at each relay. A `RosterEntry` names the
+role pseudonym, the report key, and the report queue of one owner, and only
+the device of that owner holds them. Thus the creator asks one contact for
+its entry, on their pairwise channel, before the genesis. The exchange
+travels in an `AppMessage` of kind `0x38` of Part 6 §6.6.1.
+
+```
+CommunityOwnerExchange {
+    step           u8        // 0x01 offer, 0x02 accept, 0x03 decline, 0x04 formed
+    community_id   [32]u8
+    rest           [n]u8     // by step, below
+}
+
+offer     name_len u8, name [name_len]u8           // the name of the first metadata
+accept    entry RosterEntry                        // 1 378 bytes, §12.5.2
+decline   (empty)
+formed    fragment [16]u8, relay_count u8,
+          relays [relay_count][32]u8               // the relay_id of each relay of the metadata
+```
+
+An accept is 1 411 bytes, and the `AppMessage` header adds 30. That total
+fits the `B1` L6 record of Part 6 §6.9. A formed step names each relay by its
+full `relay_id`: the channel is private, and a `RelayRef` of §12.7 would cost
+the second owner a resolution for no gain.
+
+- **[COM-401]** A creator MUST make the genesis role seed of `COM-005` and a
+  report queue of its own before it sends an offer. The `community_id` of the
+  offer comes from that seed, and it does not change.
+- **[COM-402]** A creator MUST send the offer to one contact, on the pairwise
+  channel of that contact. **[COM-403]** A creator MUST NOT publish a
+  `CommunityRoster` with `epoch_index` 0 before it holds an accept of that
+  offer. The roster then names the owner entry of the creator and the entry
+  of the accept.
+- **[COM-404]** A party that accepts an offer MUST make a role seed from the
+  device CSPRNG, in the manner of `COM-005`, and a report queue of its own,
+  before it sends the accept. The entry of the accept names role 1.
+  **[COM-405]** A party MUST NOT send an accept for an offer that it did not
+  receive, and it MUST NOT send two accepts for one offer.
+- **[COM-406]** A creator MUST drop an accept whose `community_id` names no
+  offer that it holds for the sending contact, a second accept of one offer,
+  and an entry whose role is not 1 or whose pseudonym is the pseudonym of the
+  creator. A decline of a held offer ends that offer.
+- **[COM-407]** When the relays of the first `CommunityMeta` have each
+  answered the genesis roster and that meta with a `PUBACK`, the creator MUST
+  send a formed step to the second owner. **[COM-408]** A party MUST take a
+  formed step only for an accept that it sent to that contact. It then holds
+  the community with its role seed, and it pulls it under `COM-196`.
+- **[COM-409]** A party MUST drop an exchange whose `step` is not one of the
+  four values, or whose `rest` does not have the length of its step.
+
+> *Cause.* An earlier draft required two independent owners at the genesis,
+> and a relay rejected a genesis roster with one owner. No section said how
+> the entry of the second owner reached the creator. A creator that made both
+> entries on one device held both role keys, and `COM-130` then protected
+> nothing. The pairwise channel carries the exchange, thus no relay and no
+> other member sees who owns the community before the roster names the two
+> pseudonyms.
+
 ## 12.6 Notifications
 
 A community defaults to `mentions` under Part 7 rule `DEV-222`, and the

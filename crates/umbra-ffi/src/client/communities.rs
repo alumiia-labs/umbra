@@ -37,17 +37,17 @@ const ROW_VERSION: u8 = 0x01;
 const CURSOR_ROW_LEN: usize = 32 + CURSOR_LEN + 8 + 8;
 
 /// One community of this device.
-struct CommunityRow {
-    community_id: [u8; 32],
-    fragment: [u8; 16],
-    joined_at: u64,
+pub(super) struct CommunityRow {
+    pub(super) community_id: [u8; 32],
+    pub(super) fragment: [u8; 16],
+    pub(super) joined_at: u64,
     /// The seed of the authoring identity of this device in the community.
-    author_seed: Secret<32>,
+    pub(super) author_seed: Secret<32>,
     /// The seed of the owner role identity, on a device that owns the
     /// community.
-    role_seed: Option<Secret<32>>,
-    relays: Vec<[u8; 32]>,
-    name: String,
+    pub(super) role_seed: Option<Secret<32>>,
+    pub(super) relays: Vec<[u8; 32]>,
+    pub(super) name: String,
 }
 
 impl CommunityRow {
@@ -259,7 +259,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(link.community_id)
     }
 
-    fn put_community<R: CryptoRng + ?Sized>(
+    pub(super) fn put_community<R: CryptoRng + ?Sized>(
         &mut self,
         row: &CommunityRow,
         rng: &mut R,

@@ -1533,10 +1533,13 @@ client MUST NOT copy that raw value into a different row.
 | `0x35` | Key supply (§6.6.11) | Control |
 | `0x36` | Verification commit (Part 4 §4.5.2) | Ephemeral |
 | `0x37` | Verification reveal (Part 4 §4.5.2) | Ephemeral |
+| `0x38` | Community owner exchange (Part 12 §12.5.5) | Control |
 
 **[WIR-362]** A parser MUST reject a body of kind `0x36` whose length is
 not 64, and a body of kind `0x37` whose length is not 32. Part 4 §4.5.2 gives
-the two layouts.
+the two layouts. **[WIR-530]** A parser MUST reject a body of kind `0x38`
+that is not a `CommunityOwnerExchange` of Part 12 §12.5.5, and MUST NOT
+accept kind `0x38` on a channel other than a pairwise one.
 
 For kind `0x01` the body is UTF-8 text with no further structure.
 **[WIR-259]** A parser MUST reject a body of kind `0x01` that is not valid

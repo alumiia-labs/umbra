@@ -15,6 +15,7 @@ use crate::Error;
 pub mod authority;
 pub mod chain;
 pub mod control;
+pub mod exchange;
 pub mod identity;
 pub mod link;
 pub mod meta;

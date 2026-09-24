@@ -258,6 +258,13 @@ pub enum Event {
         /// The pairwise conversation that carried it.
         from: ConversationId,
     },
+    /// A contact offered the co-ownership of a community of Part 12. The
+    /// user sees the offers of [`client::Client::community_offers`] and
+    /// answers one of them (§12.5.5).
+    CommunityOffer {
+        /// The pairwise conversation that carried it.
+        from: ConversationId,
+    },
     /// An admin admitted this device to a group. The client fetches the
     /// snapshot that the admit names and then calls
     /// [`client::Client::accept_group_admit`] (`GRP-313`).

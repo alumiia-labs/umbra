@@ -89,6 +89,22 @@ impl RosterEntry {
         })
     }
 
+    /// The entry as a roster holds it, for the exchange of §12.5.5.
+    pub fn to_bytes(&self) -> Result<[u8; ROSTER_ENTRY_LEN], Error> {
+        let mut out = [0u8; ROSTER_ENTRY_LEN];
+        let mut w = Writer::new(&mut out);
+        self.write(&mut w)?;
+        Ok(out)
+    }
+
+    /// Reads one entry, and nothing after it.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
+        let mut r = Reader::new(bytes);
+        let entry = Self::read(&mut r)?;
+        r.finish()?;
+        Ok(entry)
+    }
+
     /// The report queue.
     pub fn queue(&self) -> Result<QueueAddress, Error> {
         Ok(QueueAddress::parse(&self.report_queue)?)
