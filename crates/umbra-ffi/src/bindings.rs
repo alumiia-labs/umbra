@@ -3237,13 +3237,16 @@ impl Handle {
                 }
             }
             // Each notify queue of a group takes its digests again, and one
-            // that no group names ends (`NTF-133`).
+            // that no group names ends (`NTF-133`). A report queue of a
+            // community role is no notify queue, and this rule keeps it.
             let named = client.group_notify_queues()?;
             for state in &stored.notify_queues {
                 let id = node
                     .restore_notify_queue(state)
                     .map_err(|_| FfiError::Integrity)?;
-                if !named.contains(&id) {
+                let is_report =
+                    state.first() == Some(&umbra_core::session::node::REPORT_STORED_VERSION);
+                if !is_report && !named.contains(&id) {
                     let _ = node.end_notify_queue(&id, &mut OsRng);
                     let _ = client.unbind_queue(&id, &mut OsRng);
                 }

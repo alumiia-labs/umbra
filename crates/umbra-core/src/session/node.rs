@@ -938,7 +938,7 @@ fn rotate_age(salt: &[u8; 16], queue: &[u8; 32]) -> u64 {
 /// and the queue end.
 const NOTIFY_STORED_VERSION: u8 = 0x01;
 /// The version of the stored form of a report queue, in the same layout.
-const REPORT_STORED_VERSION: u8 = 0x02;
+pub const REPORT_STORED_VERSION: u8 = 0x02;
 
 fn notify_state(held: &NotifyQueue) -> Result<Zeroizing<Vec<u8>>, Error> {
     let mut writer = Writer::new();

@@ -80,6 +80,11 @@ impl Bridge {
         self.command(Command::MakeNotifyQueue(tag))
     }
 
+    /// Makes a report queue of Part 12 §12.5.3 under a tag of the caller.
+    pub fn make_report_queue(&self, tag: u64) -> Result<(), Error> {
+        self.command(Command::MakeReportQueue(tag))
+    }
+
     /// Makes a new queue for a dead channel (`NET-182`).
     pub fn rotate_now(&self, contact: ContactId) -> Result<(), Error> {
         self.command(Command::RotateNow(contact))
@@ -200,6 +205,8 @@ impl Bridge {
             | Update::Tick
             | Update::NotifyKey { .. }
             | Update::NotifyQueue { .. }
+            | Update::ReportQueue { .. }
+            | Update::Report { .. }
             | Update::Digest { .. } => None,
             Update::Online => Some(NetEvent::Online),
             Update::Offline(ended) => Some(NetEvent::Offline(ended)),
