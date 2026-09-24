@@ -305,6 +305,9 @@ pub enum ChunkJob {
 /// One group-queue command of Part 6 §6.4.5 for one relay. Each command
 /// carries the credential that authorizes it (`NET-229`).
 pub enum GroupJob {
+    /// A command of a community of Part 12, on a node of the community
+    /// range ([`ClientNode::community`]).
+    Community(CommunityJob),
     /// `GNEW`. The creator signs it under the `own_sk` of its own payload
     /// (`WIR-517`), and the relay draws the `GroupQueueId`.
     Create {
@@ -373,12 +376,40 @@ pub enum GroupOutcome {
     /// The relay holds the record under this `seq`. The same bytes again
     /// give the `seq` that it holds (`NET-239`).
     Posted(u32),
+    /// The `PAGE` that answers a community `PULL`, as a `PullResponse`.
+    Page(Vec<u8>),
+    /// The relay holds a community record under this `seq` (`PUBACK`).
+    Published(u64),
     /// The relay refused the command. `WIR-317` gives one reason for an
     /// unknown group queue and for a wrong credential.
     Refused(Reject),
     /// No circuit reached the relay of the command within
     /// `CIRCUIT_BUILD_TIMEOUT`. The command did not leave this device.
     Unreachable,
+}
+
+/// One command of a community of Part 12 §12.3.3. Each one is signed
+/// under `pull_sk` of its community (`COM-175`), and one circuit serves one
+/// community (`COM-173`).
+pub enum CommunityJob {
+    /// `PULL` with an encoded `PullRequest`. A `PAGE` answers it.
+    Pull {
+        /// The request.
+        request: Vec<u8>,
+    },
+    /// `PUB` of one record with its `Admission` trailer. A `PUBACK`
+    /// answers it.
+    Publish {
+        /// The record and the encoded `Admission` after it.
+        payload: Vec<u8>,
+    },
+    /// `NREG` or `NUNREG` of a `NotifyRegistration`. It has no answer.
+    Notify {
+        /// The encoded registration.
+        registration: Vec<u8>,
+        /// An `NREG`, or an `NUNREG`.
+        on: bool,
+    },
 }
 
 /// What a relay did with a chunk command.
@@ -1823,7 +1854,7 @@ impl ClientNode {
         let mut has_aged = false;
         let mut unreachable = Vec::new();
         let mut destroys = Vec::new();
-        let is_group = self.range == Range::Group;
+        let is_group = matches!(self.range, Range::Group | Range::Community);
         let old = CIRCUIT_MAX_AGE.saturating_sub(CIRCUIT_AGE_MARGIN);
         for slot in &mut self.slots {
             if matches!(slot.circuit, Circuit::None) {
@@ -2398,6 +2429,31 @@ impl ClientNode {
         node
     }
 
+    /// A node that carries community commands alone (`WIR-309`). One
+    /// circuit of it serves one community (`COM-173`).
+    pub fn for_communities(ingress: RelayInfo, relays: Vec<RelayInfo>, root: RootIdentity) -> Self {
+        let mut node = Self::with_relays(ingress, relays, root);
+        node.range = Range::Community;
+        node
+    }
+
+    /// Sends one community command to `relay` on a circuit that serves this
+    /// community and no other (`COM-173`). With no such circuit the command
+    /// waits, and a circuit starts. A [`ClientEvent::Group`] with the handle
+    /// follows a `PAGE`, a `PUBACK`, or a refusal; an `NREG` gives none.
+    pub fn community<R: CryptoRng + ?Sized>(
+        &mut self,
+        relay: [u8; 32],
+        community_id: [u8; 32],
+        job: CommunityJob,
+        rng: &mut R,
+    ) -> Result<u64, Error> {
+        if self.range != Range::Community {
+            return Err(Error::Malformed);
+        }
+        self.bound_command(relay, community_id, GroupJob::Community(job), rng)
+    }
+
     /// Sends one group-queue command to `relay` on a circuit that serves
     /// this group queue and no other. With no such circuit the command
     /// waits, and a circuit starts. A [`ClientEvent::Group`] with the
@@ -2412,9 +2468,21 @@ impl ClientNode {
         job: GroupJob,
         rng: &mut R,
     ) -> Result<u64, Error> {
-        if self.range != Range::Group {
+        if self.range != Range::Group || matches!(job, GroupJob::Community(_)) {
             return Err(Error::Malformed);
         }
+        self.bound_command(relay, group_queue_id, job, rng)
+    }
+
+    /// Sends a command of a range where one circuit serves one queue: a
+    /// group queue, or a community.
+    fn bound_command<R: CryptoRng + ?Sized>(
+        &mut self,
+        relay: [u8; 32],
+        group_queue_id: [u8; 32],
+        job: GroupJob,
+        rng: &mut R,
+    ) -> Result<u64, Error> {
         let handle = self.handle();
         let held = HeldGroup {
             relay,
@@ -2497,7 +2565,12 @@ impl ClientNode {
             .group_slot(&held.relay, &held.group_queue_id)
             .ok_or(Error::NoPath)?;
         let session_pk = self.session_pk()?;
+        if let GroupJob::Community(job) = held.job {
+            return self.start_community(held.group_queue_id, held.handle, job, &session_pk, rng);
+        }
         let (cmd, signer, payload) = match held.job {
+            // The community path returned above.
+            GroupJob::Community(_) => return Err(Error::Malformed),
             GroupJob::Create {
                 read_pk,
                 write_pk,
@@ -2585,6 +2658,52 @@ impl ClientNode {
             Waiting::Group(Box::new(GroupWait {
                 handle: held.handle,
                 creates,
+            }))
+        } else {
+            Waiting::Other
+        };
+        self.queue_command(encoded, waiting)?;
+        self.pump()
+    }
+
+    /// Signs a community command under `pull_sk` of its community and
+    /// queues it on the current circuit, which serves that community from
+    /// here on (`COM-173`, `COM-175`, `COM-176`).
+    fn start_community<R: CryptoRng + ?Sized>(
+        &mut self,
+        community_id: [u8; 32],
+        handle: u64,
+        job: CommunityJob,
+        session_pk: &[u8; 32],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        use crate::community::pull::{CMD_NREG, CMD_NUNREG, CMD_PUB, CMD_PULL};
+        let (byte, payload, is_answered) = match job {
+            CommunityJob::Pull { request } => (CMD_PULL, request, true),
+            CommunityJob::Publish { payload } => (CMD_PUB, payload, true),
+            CommunityJob::Notify { registration, on } => {
+                (if on { CMD_NREG } else { CMD_NUNREG }, registration, false)
+            }
+        };
+        if let Some(slot) = self.slots.get_mut(self.current) {
+            slot.queues.insert(community_id);
+        }
+        let mut command = Command {
+            cmd: Cmd::Community(byte),
+            corr_id: random(rng),
+            queue_id: community_id,
+            auth: [0; 32],
+            payload: &payload,
+        };
+        let signer = StaticSecret::from(*crate::community::pull_secret(&community_id).expose());
+        let key = CommandAuthKey::derive(&signer, session_pk).map_err(|_| Error::Unverified)?;
+        command.sign(&key, &[])?;
+        let mut encoded = alloc::vec![0u8; command.len()];
+        command.encode(&mut encoded)?;
+        let waiting = if is_answered {
+            Waiting::Group(Box::new(GroupWait {
+                handle,
+                creates: false,
             }))
         } else {
             Waiting::Other
@@ -3421,6 +3540,22 @@ impl ClientNode {
                     }
                     (Some(Waiting::Group(wait)), Cmd::Group(byte)) => {
                         out.extend(self.on_group_answer(*wait, byte, &payload)?);
+                    }
+                    (Some(Waiting::Group(wait)), Cmd::Community(byte)) => {
+                        use crate::community::pull::{CMD_PAGE, CMD_PUBACK};
+                        let outcome = match byte {
+                            CMD_PAGE => Some(GroupOutcome::Page(payload)),
+                            CMD_PUBACK => <[u8; 8]>::try_from(payload.as_slice())
+                                .ok()
+                                .map(|seq| GroupOutcome::Published(u64::from_be_bytes(seq))),
+                            // WIR-494: an answer of another kind belongs to
+                            // no command.
+                            _ => None,
+                        };
+                        out.extend(outcome.map(|outcome| ClientEvent::Group {
+                            handle: wait.handle,
+                            outcome,
+                        }));
                     }
                     _ => {}
                 },
