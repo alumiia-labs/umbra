@@ -2838,12 +2838,39 @@ fn an_app_creates_a_community_with_a_contact_and_a_third_app_joins_it() {
     let shared = alice.community_link(community.clone()).unwrap();
     assert_eq!(bob.community_link(community.clone()).unwrap(), shared);
 
-    // COM-246: a third app joins by the link, and pulls the genesis roster
-    // and the first metadata.
+    // COM-200: five posts of Alice go to each relay, and the fifth makes a
+    // checkpoint due (COM-045). Each post shows at once.
+    for number in 0..5 {
+        let draft = alice.new_community_draft();
+        draft.set_text(units(&format!("post {number}"))).unwrap();
+        alice.post_to_community(community.clone(), draft).unwrap();
+    }
+    assert_eq!(alice.communities().unwrap()[0].records, 2 + 5 + 1);
+    let empty = alice.new_community_draft();
+    assert_eq!(
+        alice.post_to_community(community.clone(), empty),
+        Err(FfiError::Malformed)
+    );
+    let start = Instant::now();
+    while alice.communities().unwrap()[0].pending > 0 {
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "{} pending",
+            alice.communities().unwrap()[0].pending
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    // COM-246: a third app joins by the link, and pulls the genesis roster,
+    // the first metadata, the posts, and the checkpoint.
     assert_eq!(carol.join_community(shared).unwrap(), community);
     let start = Instant::now();
-    while carol.communities().unwrap()[0].records < 2 {
-        assert!(start.elapsed() < Duration::from_secs(60));
+    while carol.communities().unwrap()[0].records < 2 + 5 + 1 {
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "{} records",
+            carol.communities().unwrap()[0].records
+        );
         std::thread::sleep(Duration::from_millis(100));
     }
     assert!(!carol.communities().unwrap()[0].is_owner);

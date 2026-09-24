@@ -31,7 +31,7 @@ pub(super) const COMMUNITY: TableId = TableId(0x21);
 const COMMUNITY_CURSOR: TableId = TableId(0x22);
 /// Each record that a pull brought, by its hash, owned by its community
 /// row. Two relays serve one record, and it is here one time (§12.2.1).
-const COMMUNITY_RECORD: TableId = TableId(0x23);
+pub(super) const COMMUNITY_RECORD: TableId = TableId(0x23);
 
 const ROW_VERSION: u8 = 0x01;
 const CURSOR_ROW_LEN: usize = 32 + CURSOR_LEN + 8 + 8;
@@ -83,7 +83,7 @@ impl CommunityRow {
         Ok(out)
     }
 
-    fn parse(bytes: &[u8]) -> Result<Self, Error> {
+    pub(super) fn parse(bytes: &[u8]) -> Result<Self, Error> {
         let mut at = 0usize;
         let mut take = |len: usize| -> Result<&[u8], Error> {
             let part = bytes.get(at..at + len).ok_or(Error::Integrity)?;
@@ -180,6 +180,8 @@ pub struct CommunityInfo {
     pub records: usize,
     /// Whether this device holds an owner role of it.
     pub is_owner: bool,
+    /// The count of the records of this device that a relay has not taken.
+    pub pending: usize,
 }
 
 /// One pull that is due.
@@ -286,6 +288,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 joined_at: row.joined_at,
                 records,
                 is_owner: row.role_seed.is_some(),
+                pending: self.community_pending(&row_id)?,
             });
         }
         out.sort_by_key(|info| (info.joined_at, info.community_id));
@@ -312,21 +315,26 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             return Ok(());
         };
         let open = self.open_mut()?;
-        let owned: Vec<(TableId, RowId)> = [COMMUNITY_CURSOR, COMMUNITY_RECORD]
-            .into_iter()
-            .map(|table| {
-                Ok::<_, Error>(
-                    open.store
-                        .list(table, Some(&row_id))?
-                        .into_iter()
-                        .map(move |(id, _)| (table, id))
-                        .collect::<Vec<_>>(),
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .flatten()
-            .collect();
+        let owned: Vec<(TableId, RowId)> = [
+            COMMUNITY_CURSOR,
+            COMMUNITY_RECORD,
+            super::posting::COMMUNITY_AUTHOR,
+            super::posting::COMMUNITY_OUTBOX,
+        ]
+        .into_iter()
+        .map(|table| {
+            Ok::<_, Error>(
+                open.store
+                    .list(table, Some(&row_id))?
+                    .into_iter()
+                    .map(move |(id, _)| (table, id))
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect();
         let mut batch = open.store.begin();
         for (table, id) in owned {
             batch.delete(table, id);

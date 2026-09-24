@@ -16,6 +16,7 @@ mod files;
 mod forming;
 mod groups;
 mod notify;
+mod posting;
 
 pub use backup::{BackupUpload, PendingBackup, RestoredBackup, RootWrite};
 pub use communities::{CommunityInfo, CommunityPull};
@@ -28,6 +29,7 @@ pub use groups::{
     GroupSubscription, Silence, GROUP_NAME_MAX,
 };
 pub use notify::NdrCall;
+pub use posting::PostSend;
 use umbra_core::{
     directory::path::IngressPins,
     identity::address::safety_number,

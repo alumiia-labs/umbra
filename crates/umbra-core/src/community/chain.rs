@@ -17,6 +17,9 @@ use super::{
 };
 use crate::Error;
 
+/// The version of the stored form of an [`AuthorChain`].
+const STORED_VERSION: u8 = 0x01;
+
 /// The free space of a `B2` cell beside a checkpoint (§12.4.1 rule 4).
 pub const CHECKPOINT_FREE_SPACE: usize = 2_569;
 
@@ -63,6 +66,87 @@ impl AuthorChain {
     /// The index of the next post.
     pub fn next_index(&self) -> u32 {
         self.next_index
+    }
+
+    /// The community of the chain.
+    pub fn community_id(&self) -> &[u8; 32] {
+        &self.community_id
+    }
+
+    /// The stored form of the chain, which the device of its owner keeps
+    /// between two runs: a version, the community, the next index, the two
+    /// heads, the posts with no checkpoint, the time of the last
+    /// checkpoint, and the queued withdrawals.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
+        let mut out = Vec::new();
+        out.push(STORED_VERSION);
+        out.extend_from_slice(&self.community_id);
+        out.extend_from_slice(&self.next_index.to_be_bytes());
+        out.extend_from_slice(&self.signed_head);
+        out.extend_from_slice(&self.head);
+        let count = u16::try_from(self.unsigned.len()).map_err(|_| Error::Malformed)?;
+        out.extend_from_slice(&count.to_be_bytes());
+        for (link, at) in &self.unsigned {
+            out.extend_from_slice(link);
+            out.extend_from_slice(&at.to_be_bytes());
+        }
+        match self.last_checkpoint_at {
+            Some(at) => {
+                out.push(1);
+                out.extend_from_slice(&at.to_be_bytes());
+            }
+            None => {
+                out.push(0);
+                out.extend_from_slice(&[0; 8]);
+            }
+        }
+        let count = u16::try_from(self.withdrawals.len()).map_err(|_| Error::Malformed)?;
+        out.extend_from_slice(&count.to_be_bytes());
+        for index in &self.withdrawals {
+            out.extend_from_slice(&index.to_be_bytes());
+        }
+        Ok(out)
+    }
+
+    /// Reads the stored form of [`AuthorChain::to_bytes`].
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
+        let mut r = umbra_wire::codec::Reader::new(bytes);
+        if r.u8()? != STORED_VERSION {
+            return Err(Error::Malformed);
+        }
+        let community_id = r.array()?;
+        let next_index = r.u32()?;
+        let signed_head = r.array()?;
+        let head = r.array()?;
+        let count = usize::from(r.u16()?);
+        let mut unsigned = VecDeque::with_capacity(count);
+        for _ in 0..count {
+            let link = r.array()?;
+            let at = u64::from_be_bytes(r.array()?);
+            unsigned.push_back((link, at));
+        }
+        let has_last = r.u8()?;
+        let last = u64::from_be_bytes(r.array()?);
+        let last_checkpoint_at = match has_last {
+            0 => None,
+            1 => Some(last),
+            _ => return Err(Error::Malformed),
+        };
+        let count = usize::from(r.u16()?);
+        let mut withdrawals = BTreeSet::new();
+        for _ in 0..count {
+            withdrawals.insert(r.u32()?);
+        }
+        r.finish()?;
+        Ok(AuthorChain {
+            community_id,
+            next_index,
+            signed_head,
+            head,
+            unsigned,
+            last_checkpoint_at,
+            withdrawals,
+        })
     }
 
     /// Appends a post and returns its encoding.
@@ -350,6 +434,31 @@ mod tests {
 
     fn hashes_of(posts: &[Vec<u8>]) -> Vec<Vec<[u8; 32]>> {
         posts.iter().map(|p| alloc::vec![post_hash(p)]).collect()
+    }
+
+    #[test]
+    fn an_author_chain_comes_back_from_its_stored_form() {
+        let identity = author(2);
+        let mut chain = AuthorChain::new([8; 32], &identity.pseudonym());
+        assert_eq!(
+            AuthorChain::from_bytes(&chain.to_bytes().unwrap()).unwrap(),
+            chain
+        );
+        for at in 0..3 {
+            chain.append(&identity, NO_INDEX, b"body", at).unwrap();
+        }
+        chain.withdraw(1).unwrap();
+        chain
+            .checkpoint(&identity, SIG_MAX_AGE + 2, &mut Rng(4))
+            .unwrap();
+        chain
+            .append(&identity, NO_INDEX, b"later", SIG_MAX_AGE + 3)
+            .unwrap();
+        let back = AuthorChain::from_bytes(&chain.to_bytes().unwrap()).unwrap();
+        assert_eq!(back, chain);
+        let mut bytes = chain.to_bytes().unwrap();
+        bytes.push(0);
+        assert!(AuthorChain::from_bytes(&bytes).is_err());
     }
 
     #[test]

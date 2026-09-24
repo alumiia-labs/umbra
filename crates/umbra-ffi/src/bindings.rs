@@ -240,6 +240,9 @@ pub struct FfiCommunity {
     pub is_owner: bool,
     /// The time of the join, in Unix seconds.
     pub joined_at: u64,
+    /// The count of the posts and checkpoints of this device that a relay
+    /// has not taken.
+    pub pending: u32,
 }
 
 /// An offer of the co-ownership of a community (Part 12 §12.5.5).
@@ -984,6 +987,9 @@ struct Inner {
     /// The time before which a genesis record that a relay refused does
     /// not go again, by the community, the relay, and the record.
     genesis_backoff: BTreeMap<([u8; 32], [u8; 32], bool), u64>,
+    /// The same for a post or a checkpoint of this device, by the hash of
+    /// the record.
+    post_backoff: BTreeMap<PostKey, u64>,
     /// The groups that the run of the group queues reads. A subscription
     /// lives with its session, thus this set empties when the run ends.
     group_reading: BTreeSet<crate::ConversationId>,
@@ -1171,7 +1177,17 @@ enum CommunityWork {
         relay: [u8; 32],
         is_meta: bool,
     },
+    /// A `PUB` of one post or checkpoint of this device at one relay.
+    Post {
+        community_id: [u8; 32],
+        relay: [u8; 32],
+        key: [u8; 32],
+    },
 }
+
+/// A post or a checkpoint of this device at one relay: the community, the
+/// relay, and the hash of the record.
+type PostKey = ([u8; 32], [u8; 32], [u8; 32]);
 
 /// How long a genesis record that a relay refused waits before it goes
 /// again: a refused proof of work waits for the next challenge.
@@ -1694,11 +1710,26 @@ impl Inner {
                 }
             }
             CommunityUpdate::Published { tag, .. } => {
+                let work = self.community_tags.remove(&tag);
+                if let Some(CommunityWork::Post {
+                    community_id,
+                    relay,
+                    key,
+                }) = &work
+                {
+                    let _ = self.client.community_published(
+                        community_id,
+                        key,
+                        relay,
+                        false,
+                        &mut OsRng,
+                    );
+                }
                 if let Some(CommunityWork::Genesis {
                     community_id,
                     relay,
                     is_meta,
-                }) = self.community_tags.remove(&tag)
+                }) = work
                 {
                     // COM-407: each relay holds both, thus the second owner
                     // learns of the community, and the pulls start.
@@ -1718,22 +1749,56 @@ impl Inner {
             // A pull that failed or did not leave goes again at its next
             // interval. A refused genesis record waits, and one that did
             // not leave goes again at once (`COM-201`).
-            CommunityUpdate::Failed { tag, .. } => {
-                if let Some(CommunityWork::Genesis {
+            CommunityUpdate::Failed { tag, reason } => match self.community_tags.remove(&tag) {
+                Some(CommunityWork::Genesis {
                     community_id,
                     relay,
                     is_meta,
-                }) = self.community_tags.remove(&tag)
-                {
+                }) => {
                     self.genesis_backoff.insert(
                         (community_id, relay, is_meta),
                         unix_now().saturating_add(GENESIS_RETRY),
                     );
                 }
-            }
+                // COM-201: a `NACK` ends the resends at that relay, but for
+                // a bound that a later retry can pass. A relay that no
+                // circuit reached waits too.
+                Some(CommunityWork::Post {
+                    community_id,
+                    relay,
+                    key,
+                }) => {
+                    let is_final = matches!(
+                        reason,
+                        Some(
+                            umbra_queue::Reject::Rejected
+                                | umbra_queue::Reject::Admission
+                                | umbra_queue::Reject::Version
+                        )
+                    );
+                    if is_final {
+                        let _ = self.client.community_published(
+                            &community_id,
+                            &key,
+                            &relay,
+                            true,
+                            &mut OsRng,
+                        );
+                    } else {
+                        self.post_backoff.insert(
+                            (community_id, relay, key),
+                            unix_now().saturating_add(GENESIS_RETRY),
+                        );
+                    }
+                }
+                _ => {}
+            },
             CommunityUpdate::Unsent { tag } => {
-                if let Some(CommunityWork::Genesis { .. }) = self.community_tags.remove(&tag) {
+                if let Some(CommunityWork::Genesis { .. } | CommunityWork::Post { .. }) =
+                    self.community_tags.remove(&tag)
+                {
                     self.pump_forming();
+                    self.pump_posts();
                 }
             }
             CommunityUpdate::Reset => {}
@@ -1806,6 +1871,52 @@ impl Inner {
                     community_id: send.community_id,
                     relay: send.relay,
                     is_meta: send.is_meta,
+                },
+            );
+            self.send_community(CommunityCommand::Publish {
+                tag,
+                relay: send.relay,
+                community_id: send.community_id,
+                payload,
+            });
+        }
+    }
+
+    /// Sends each post and checkpoint of this device that a relay has not
+    /// taken, with no admission (Part 14 `ABU-049`).
+    fn pump_posts(&mut self) {
+        if self.bridge.is_none() {
+            return;
+        }
+        let Ok(sends) = self.client.community_publish_sends() else {
+            return;
+        };
+        let now = unix_now();
+        self.post_backoff.retain(|_, until| *until > now);
+        for send in sends {
+            let key = (send.community_id, send.relay, send.key);
+            let in_flight = self.community_tags.values().any(|work| {
+                matches!(work, CommunityWork::Post { community_id, relay, key: held }
+                    if (*community_id, *relay, *held) == key)
+            });
+            if in_flight || self.post_backoff.contains_key(&key) {
+                continue;
+            }
+            let mut none = vec![0u8; 3];
+            let used = umbra_wire::admission::Admission::NONE
+                .encode(&mut none)
+                .unwrap_or(0);
+            none.truncate(used);
+            let mut payload = send.record;
+            payload.extend_from_slice(&none);
+            self.next_community_tag = self.next_community_tag.wrapping_add(1);
+            let tag = self.next_community_tag;
+            self.community_tags.insert(
+                tag,
+                CommunityWork::Post {
+                    community_id: send.community_id,
+                    relay: send.relay,
+                    key: send.key,
                 },
             );
             self.send_community(CommunityCommand::Publish {
@@ -2830,6 +2941,7 @@ fn handle_of(database_path: String, client: Client<SqliteBackend, ForeignElement
             report_pending: BTreeMap::new(),
             next_report_tag: 0,
             genesis_backoff: BTreeMap::new(),
+            post_backoff: BTreeMap::new(),
             group_reading: BTreeSet::new(),
             group_lost: BTreeSet::new(),
             group_refusals: BTreeSet::new(),
@@ -3126,7 +3238,12 @@ impl Handle {
             inner.pump_dead_channels();
             inner.pump_backup();
             inner.pump_communities();
+            // COM-046: a post with no checkpoint for `SIG_MAX_AGE` gets one.
+            let _ = inner
+                .client
+                .community_checkpoints_due(unix_now(), &mut OsRng);
         }
+        inner.pump_posts();
         let work = core::mem::take(&mut inner.dead_work);
         for step in work {
             inner.send_dead_work(step);
@@ -4309,6 +4426,38 @@ impl Handle {
         Ok(())
     }
 
+    /// An empty draft for a post in a community. It names no conversation.
+    pub fn new_community_draft(&self) -> Arc<DraftHandle> {
+        Arc::new(DraftHandle(Mutex::new(Some(Draft::new(
+            crate::ConversationId([0; 16]),
+        )))))
+    }
+
+    /// Posts the text of a draft in a community (§12.4.1). The post shows
+    /// at once, and it goes to each relay of the community. The handle of
+    /// the draft is empty after this call.
+    pub fn post_to_community(
+        &self,
+        community_id: Vec<u8>,
+        draft: Arc<DraftHandle>,
+    ) -> Result<(), FfiError> {
+        let community_id =
+            <[u8; 32]>::try_from(community_id.as_slice()).map_err(|_| FfiError::Malformed)?;
+        let draft = locked(&draft.0).take().ok_or(FfiError::NotFound)?;
+        if draft.has_file() {
+            return Err(FfiError::Malformed);
+        }
+        let mut inner = locked(&self.inner);
+        inner
+            .client
+            .post_to_community(&community_id, draft.text(), unix_now(), &mut OsRng)?;
+        drop(draft);
+        inner.pump_posts();
+        drop(inner);
+        self.changed.notify_all();
+        Ok(())
+    }
+
     /// Each community of this device.
     pub fn communities(&self) -> Result<Vec<FfiCommunity>, FfiError> {
         Ok(locked(&self.inner)
@@ -4322,6 +4471,7 @@ impl Handle {
                 records: u32::try_from(info.records).unwrap_or(u32::MAX),
                 is_owner: info.is_owner,
                 joined_at: info.joined_at,
+                pending: u32::try_from(info.pending).unwrap_or(u32::MAX),
             })
             .collect())
     }

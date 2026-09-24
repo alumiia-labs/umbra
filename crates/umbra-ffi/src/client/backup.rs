@@ -107,7 +107,7 @@ const INDEX_VALUE_LEN: usize = 1 + 16 + 32;
 /// registrations, the dead-channel state, the files, the cursors and the
 /// records of a community, and the state of the backup itself stay on the
 /// device (`IDN-180`).
-const BACKED_UP: [TableId; 21] = [
+const BACKED_UP: [TableId; 23] = [
     TableId::MESSAGE,
     TableId::TOMBSTONE,
     TableId::CONTACT,
@@ -129,6 +129,8 @@ const BACKED_UP: [TableId; 21] = [
     super::groups::GROUP_OWNERS,
     super::groups::GROUP_GRANTS,
     super::communities::COMMUNITY,
+    super::posting::COMMUNITY_AUTHOR,
+    super::posting::COMMUNITY_OUTBOX,
 ];
 
 /// A backup object that is due: its bytes, which go up as a file of the
