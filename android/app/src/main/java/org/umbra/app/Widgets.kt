@@ -719,17 +719,19 @@ fun ToggleRow(title: String, isOn: Boolean, onChange: (Boolean) -> Unit) {
  */
 @Composable
 fun SwitchMark(isOn: Boolean, enabled: Boolean = true) {
-    val offset by animateDpAsState(if (isOn) 16.dp else 0.dp, label = "switch")
+    // The size of a switch of the platform, with the thin line of the
+    // outlines of the app in the place of a solid track.
+    val offset by animateDpAsState(if (isOn) 20.dp else 0.dp, label = "switch")
     val tint = if (isOn) Palette.Action else Palette.Outline
     Box(
         Modifier
             .alpha(if (enabled) 1f else 0.4f)
-            .size(width = 36.dp, height = 20.dp)
+            .size(width = 48.dp, height = 28.dp)
             .background(if (isOn) Palette.Container else Color.Transparent, CircleShape)
-            .border(2.dp, tint, CircleShape)
-            .padding(4.dp),
+            .border(1.5.dp, tint, CircleShape)
+            .padding(5.dp),
     ) {
-        Box(Modifier.offset(x = offset).size(12.dp).background(tint, CircleShape))
+        Box(Modifier.offset(x = offset).size(18.dp).background(tint, CircleShape))
     }
 }
 
