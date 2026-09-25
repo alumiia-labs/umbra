@@ -67,7 +67,7 @@ each column when a crate implements the requirement and a test covers it.
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
 | `NET` | 235 | 84 | 1 | 0 | 8 | **328** |
-| `IDN` | 127 | 44 | 1 | 0 | 5 | **177** |
+| `IDN` | 128 | 44 | 1 | 0 | 5 | **178** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
 | `WIR` | 391 | 85 | 0 | 0 | 6 | **482** |
 | `DEV` | 176 | 86 | 0 | 0 | 7 | **269** |
@@ -79,7 +79,7 @@ each column when a crate implements the requirement and a test covers it.
 | `ABU` | 64 | 30 | 0 | 0 | 0 | **94** |
 | `IMP` | 112 | 41 | 0 | 0 | 2 | **155** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 1926 | 612 | 5 | 0 | 49 | **2592** |
+| **All** | 1927 | 612 | 5 | 0 | 49 | **2593** |
 
 ## SCP — Scope and Conventions
 
@@ -649,6 +649,7 @@ Source: `spec/04-identity.md`
 | `IDN-182` | §4.7.2 | MUST | A restore | A restore MUST apply the full object and then each delta in the order of the root, each row in object order: a put replaces the row, and a delete removes it. |  |  |
 | `IDN-183` | §4.7.2 | MUST | A restore | A restore MUST mark the channel of each restored contact stale under Part 3 rule `NET-325`, and the renewal of Part 3 §3.2.6 gives each one a new session. |  |  |
 | `IDN-184` | §4.7.2 | MUST | A client | A client MUST write a delta object at its time when no row changed since the object before it. |  |  |
+| `IDN-185` | §4.7.2 | MUST | (unstated) | For `BACKUP_EARLY_WINDOW` after its first backup write, a client MUST use `BACKUP_EARLY_INTERVAL` in the place of `BACKUP_INTERVAL`. |  |  |
 
 ## CRY — Cryptographic Core
 

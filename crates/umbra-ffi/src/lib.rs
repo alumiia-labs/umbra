@@ -1679,6 +1679,10 @@ mod tests {
 
         // IDN-081: no write is due right after one.
         assert!(client.backup_due(now + 60, true).unwrap().is_none());
+        // IDN-185: a new install writes its next delta inside 1.5 times
+        // BACKUP_EARLY_INTERVAL, not a day later.
+        let early = client.backup_due(now + 45 * 60 + 1, true).unwrap().unwrap();
+        assert!(!early.pending.is_full());
 
         // A new contact and a message: the delta holds them and nothing
         // that did not change (IDN-179).
@@ -1710,6 +1714,11 @@ mod tests {
                 .collect::<Vec<_>>(),
             [0x01, 0x02]
         );
+        // After BACKUP_EARLY_WINDOW the delta clock is BACKUP_INTERVAL again.
+        assert!(client
+            .backup_due(later + 11 * 3_600, true)
+            .unwrap()
+            .is_none());
 
         // IDN-078, IDN-099: after BACKUP_FULL_INTERVAL a full object replaces
         // each entry, and the chunks of the two old objects go after the

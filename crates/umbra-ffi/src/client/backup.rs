@@ -18,7 +18,8 @@ use umbra_core::{
             to_digits, BackupEntry, BackupRoot, BackupRootKey, DigitsType, EpochCredentials,
             RecoveryCode,
         },
-        BACKUP_FULL_INTERVAL, BACKUP_HISTORY_DAYS, BACKUP_INTERVAL, BACKUP_ROOT_ENTRIES,
+        BACKUP_EARLY_INTERVAL, BACKUP_EARLY_WINDOW, BACKUP_FULL_INTERVAL, BACKUP_HISTORY_DAYS,
+        BACKUP_INTERVAL, BACKUP_ROOT_ENTRIES,
     },
     session::dead::week_of,
     store::{
@@ -180,6 +181,9 @@ struct BackupState {
     next_delta_at: u64,
     last_written_at: u64,
     entries: Vec<StoredEntry>,
+    /// The time of the first backup write of this install, or zero for a
+    /// state that an earlier version wrote.
+    first_written_at: u64,
 }
 
 impl BackupState {
@@ -202,6 +206,7 @@ impl BackupState {
                 }
             }
         }
+        writer.u64(self.first_written_at);
         Ok(writer.finish())
     }
 
@@ -235,12 +240,19 @@ impl BackupState {
                 credentials,
             });
         }
+        // A state of an earlier version ends after the entries.
+        let first_written_at = if reader.end().is_ok() {
+            0
+        } else {
+            reader.u64()?
+        };
         reader.end()?;
         Ok(BackupState {
             next_full_at,
             next_delta_at,
             last_written_at,
             entries,
+            first_written_at,
         })
     }
 }
@@ -454,7 +466,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         consensus_epoch: u64,
         rng: &mut R,
     ) -> Result<RootWrite, Error> {
-        let mut state = self.backup_state()?.unwrap_or_default();
+        let held = self.backup_state()?;
+        let is_first = held.is_none();
+        let mut state = held.unwrap_or_default();
         let mut descriptor = alloc_vec(uploaded.descriptor.len());
         uploaded.descriptor.encode(&mut descriptor)?;
         let entry = StoredEntry {
@@ -479,7 +493,19 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             state.next_full_at = next_write(now, BACKUP_FULL_INTERVAL, rng);
         }
         state.entries.push(entry);
-        state.next_delta_at = next_write(now, BACKUP_INTERVAL, rng);
+        if is_first {
+            state.first_written_at = now;
+        }
+        // IDN-185: a new install writes more often, on a clock that follows
+        // the age of the install and no act of the user.
+        let is_early = state.first_written_at != 0
+            && now < state.first_written_at.saturating_add(BACKUP_EARLY_WINDOW);
+        let interval = if is_early {
+            BACKUP_EARLY_INTERVAL
+        } else {
+            BACKUP_INTERVAL
+        };
+        state.next_delta_at = next_write(now, interval, rng);
         state.last_written_at = now;
 
         let credentials = self.backup_credentials(week_of(consensus_epoch), rng)?;

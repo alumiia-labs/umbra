@@ -19,6 +19,11 @@ pub const PALETTE_SIZE: u8 = 12;
 pub const HANDLE_KEY_LOOKAHEAD: u32 = 64;
 /// `BACKUP_INTERVAL`, in seconds.
 pub const BACKUP_INTERVAL: u64 = 86_400;
+/// `BACKUP_EARLY_INTERVAL`, in seconds: the delta write of a new install
+/// (Part 4 §4.7.2, `IDN-185`).
+pub const BACKUP_EARLY_INTERVAL: u64 = 30 * 60;
+/// `BACKUP_EARLY_WINDOW`, in seconds after the first backup write.
+pub const BACKUP_EARLY_WINDOW: u64 = 48 * 3_600;
 /// `BACKUP_FULL_INTERVAL`, in seconds.
 pub const BACKUP_FULL_INTERVAL: u64 = 30 * 86_400;
 /// `BACKUP_REPLICAS`.

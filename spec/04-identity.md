@@ -1070,6 +1070,16 @@ that table.
   **[IDN-081]** A client MUST draw an independent delay for each backup write,
   from a uniform distribution over the write interval. Thus U4 does not measure
   a backup write, and the write time carries no user action.
+- **[IDN-185]** For `BACKUP_EARLY_WINDOW` after its first backup write, a
+  client MUST use `BACKUP_EARLY_INTERVAL` in the place of `BACKUP_INTERVAL`.
+  That clock follows the age of the install, and not the acts of the user.
+
+  > *Cause.* A new install writes its first full object at the first connect,
+  > before the user adds a contact. With a delta each 24 h, a device that is
+  > lost on its first day restores no contact. The first write already shows
+  > the relay a new install, thus the early clock shows nothing more. Each
+  > write is about 9 `B3` cells, thus the early clock costs about 1 MB for
+  > each hour in the foreground, for two days.
 - **[IDN-082]** A client MUST hold a full backup object no longer than
   `BACKUP_HISTORY_DAYS` of history. §4.8 sets that value to 45 days, which is
   the `MSG_TTL` of Part 3 §3.2.4 and the U10 target of §4.7.4.
@@ -1218,6 +1228,8 @@ decodes `type`, and knows the width.
 | `SOCIAL_RECOVERY_K_OF_N` | 3 of 5 by default (§4.7.3) |
 | `BACKUP_INTERVAL` | 24 h, the delta write (§4.7.2) |
 | `BACKUP_FULL_INTERVAL` | 30 days, the full write (§4.7.2) |
+| `BACKUP_EARLY_INTERVAL` | 30 min, the delta write of a new install (§4.7.2) |
+| `BACKUP_EARLY_WINDOW` | 48 h after the first backup write (§4.7.2) |
 | `BACKUP_REPLICAS` | 2, on different operators (§4.7.2) |
 | `BACKUP_HISTORY_DAYS` | 45 days, which equals `MSG_TTL` |
 | `BACKUP_TTL` | 180 days, the relay retention of a backup object |
