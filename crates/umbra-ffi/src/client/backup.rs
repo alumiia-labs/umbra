@@ -341,6 +341,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 super::notify::CONTACT_SET_SETTING,
                 super::INGRESS_PINS_SETTING,
                 super::AUTO_DOWNLOAD_SETTING,
+                super::UNMETERED_ONLY_SETTING,
             ];
             return Ok(local
                 .iter()

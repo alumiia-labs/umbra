@@ -2927,8 +2927,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         rng: &mut R,
     ) -> Result<Option<MsgRef>, Error> {
         let parsed = umbra_wire::app::AppMessage::parse(app, umbra_wire::app::Channel::Group)?;
-        // IMP-167: a file above this size waits for a tap.
-        let limit = self.auto_download_limit()?;
+        // IMP-167, IMP-168: a file above this size waits for a tap.
+        let limit = self.download_limit_now()?;
         let open = self.open_mut()?;
         let reference = super::msg_ref(&open.device_set_key, &parsed.msg_id);
         let natural = [conversation.0.as_slice(), &reference].concat();

@@ -167,6 +167,9 @@ pub(crate) const NOTIFY_STATE: TableId = TableId(0x1D);
 const AUTO_LOCK_SETTING: &[u8] = b"auto-lock";
 /// The automatic download limit of this device, in bytes (`IMP-167`).
 pub(crate) const AUTO_DOWNLOAD_SETTING: &[u8] = b"auto-download";
+/// Whether the automatic download waits for a network with no cost by the
+/// byte (`IMP-168`).
+pub(crate) const UNMETERED_ONLY_SETTING: &[u8] = b"auto-download-unmetered";
 /// `AUTO_DOWNLOAD_DEFAULT` of Part 12 §12.7, which equals
 /// `LARGE_FILE_WARN`.
 pub const AUTO_DOWNLOAD_DEFAULT: u64 = umbra_core::attach::LARGE_FILE_WARN;
@@ -625,8 +628,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 sends_delivery.push(conversation);
             }
         }
-        // IMP-167: a file above this size waits for a tap.
-        let limit = self.auto_download_limit()?;
+        // IMP-167, IMP-168: a file above this size waits for a tap.
+        let limit = self.download_limit_now()?;
         let open = self.open_mut()?;
         // The batch borrows the store, thus each row identifier and each
         // duplicate check comes first.
@@ -1101,6 +1104,30 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         };
         let bytes: [u8; 8] = plain.as_slice().try_into().map_err(|_| Error::Integrity)?;
         Ok(u64::from_be_bytes(bytes))
+    }
+
+    /// Whether the automatic download waits for a network with no cost by
+    /// the byte (`IMP-168`). Off with no stored value.
+    pub fn unmetered_only(&self) -> Result<bool, Error> {
+        let store = &self.open_ref()?.store;
+        let row = store.row_id(SETTINGS, UNMETERED_ONLY_SETTING);
+        Ok(store
+            .get(SETTINGS, &row)?
+            .is_some_and(|plain| plain.first() == Some(&1)))
+    }
+
+    /// Limits the automatic download to a network with no cost by the
+    /// byte, or takes that limit away.
+    pub fn set_unmetered_only<R: CryptoRng + ?Sized>(
+        &mut self,
+        is_on: bool,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let open = self.open_mut()?;
+        let row = open.store.row_id(SETTINGS, UNMETERED_ONLY_SETTING);
+        let mut batch = open.store.begin();
+        batch.put(SETTINGS, row, None, &[u8::from(is_on)], rng)?;
+        Ok(batch.commit()?)
     }
 
     /// Sets the automatic download limit of this device. It acts on each

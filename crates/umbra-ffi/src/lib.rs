@@ -2663,6 +2663,60 @@ mod tests {
     }
 
     #[test]
+    fn a_file_waits_on_a_metered_network_and_starts_on_one_with_no_cost() {
+        use client::FileState;
+        use umbra_core::attach::transfer::Shape;
+        use umbra_wire::descriptor::class;
+
+        let mut rng = Rng(51);
+        let (mut alice, _, conversation) = client_with_contact(52);
+        let (mut bob, bob_contact, _) = client_with_contact(53);
+        let mut draft = alice.new_draft(conversation);
+        draft
+            .attach(
+                zeroize::Zeroizing::new(vec![0x21; 40_000]),
+                Shape {
+                    mime_class: class::IMAGE,
+                    pixel_w: 300,
+                    pixel_h: 200,
+                    media_seconds: 0,
+                },
+            )
+            .unwrap();
+        let sent = alice.send_draft(draft, 1_000_000, &mut rng).unwrap();
+        alice
+            .upload_done(&sent, &uploaded_file(0x44), &mut rng)
+            .unwrap();
+        let outgoing = alice.take_outgoing().unwrap();
+
+        // IMP-168: on a metered network a photo below the limit waits.
+        bob.set_unmetered_only(true, &mut rng).unwrap();
+        assert_eq!(bob.set_metered(true, &mut rng).unwrap(), 0);
+        bob.commit_network(
+            &[],
+            &[(bob_contact, outgoing.app.clone())],
+            2_000_000,
+            &mut rng,
+        )
+        .unwrap();
+        let Some(Event::Message { message: got, .. }) = bob.next_event() else {
+            panic!("no message");
+        };
+        assert_eq!(bob.info(&got).unwrap().file.unwrap().state, FileState::Held);
+        assert!(bob.take_download().is_none());
+
+        // A network with no cost by the byte brings it with no tap.
+        assert_eq!(bob.set_metered(false, &mut rng).unwrap(), 1);
+        assert_eq!(bob.take_download().unwrap().message, got);
+        assert_eq!(
+            bob.info(&got).unwrap().file.unwrap().state,
+            FileState::Wanted
+        );
+        // A second report of the same network starts nothing again.
+        assert_eq!(bob.set_metered(false, &mut rng).unwrap(), 0);
+    }
+
+    #[test]
     fn a_file_above_the_limit_waits_for_a_tap_with_its_preview() {
         use client::FileState;
         use umbra_core::attach::transfer::Shape;

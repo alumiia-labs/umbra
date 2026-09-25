@@ -219,6 +219,11 @@ object Core {
         val stored = summaries(opened)
         val idleSeconds = opened.autoLockSeconds().toLong()
         val downloadLimit = opened.autoDownloadLimit()
+        val downloadWifiOnly = opened.autoDownloadUnmeteredOnly()
+        // IMP-168: the core knows the cost of the network before a record
+        // arrives.
+        watchNetwork(app)
+        opened.setMetered(isMetered(app))
         val backupAt = opened.lastBackupAt()?.toLong()
         BuildNetwork.network(app, opened)?.let(opened::connect)
         drain(opened, app)
@@ -227,6 +232,7 @@ object Core {
             chats.addAll(stored)
             autoLockSeconds = idleSeconds
             autoDownloadLimit = downloadLimit
+            autoDownloadWifiOnly = downloadWifiOnly
             lastBackupAt = backupAt
             restoreNote = null
             phase = Phase.Open
@@ -579,9 +585,44 @@ object Core {
     var autoDownloadLimit by mutableStateOf(25uL * 1_024uL * 1_024uL)
         private set
 
-    fun setAutoDownload(bytes: ULong) = call { client ->
+    /** Whether the automatic download waits for a network with no cost by the byte (`IMP-168`). */
+    var autoDownloadWifiOnly by mutableStateOf(false)
+        private set
+
+    fun setAutoDownload(bytes: ULong, wifiOnly: Boolean) = call { client ->
         client.setAutoDownloadLimit(bytes)
-        main.post { autoDownloadLimit = bytes }
+        client.setAutoDownloadUnmeteredOnly(wifiOnly)
+        main.post {
+            autoDownloadLimit = bytes
+            autoDownloadWifiOnly = wifiOnly
+        }
+    }
+
+    /** Whether the network of the device costs by the byte, as the platform marks it. */
+    private fun isMetered(context: Context): Boolean =
+        context.getSystemService(android.net.ConnectivityManager::class.java)?.isActiveNetworkMetered ?: true
+
+    private var isWatchingNetwork = false
+
+    /**
+     * Tells the core each change of the cost of the network. A move to a
+     * network with no cost by the byte starts the files that waited for it.
+     */
+    private fun watchNetwork(context: Context) {
+        if (isWatchingNetwork) return
+        val manager = context.getSystemService(android.net.ConnectivityManager::class.java) ?: return
+        isWatchingNetwork = true
+        manager.registerDefaultNetworkCallback(
+            object : android.net.ConnectivityManager.NetworkCallback() {
+                override fun onCapabilitiesChanged(
+                    network: android.net.Network,
+                    capabilities: android.net.NetworkCapabilities,
+                ) {
+                    val metered = !capabilities.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
+                    call { client -> client.setMetered(metered) }
+                }
+            },
+        )
     }
 
     fun setAutoLock(seconds: Long) = call { client ->

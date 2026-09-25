@@ -520,7 +520,7 @@ private fun SettingsTab(push: (Screen) -> Unit) {
         // Mockup 105: this row leads to the settings of the lock. The lock
         // itself is the icon of the bar.
         SettingRow("lock", "App lock", "Passphrase and auto-lock") { push(Screen.AppLock) }
-        SettingRow("download", "Automatic download", autoDownloadLabel(Core.autoDownloadLimit)) {
+        SettingRow("download", "Automatic download", autoDownloadLabel(Core.autoDownloadLimit, Core.autoDownloadWifiOnly)) {
             push(Screen.AutoDownload)
         }
         val context = LocalContext.current

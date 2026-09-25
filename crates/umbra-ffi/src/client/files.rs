@@ -117,6 +117,8 @@ pub(super) struct FileQueues {
     pub uploads: VecDeque<UploadJob>,
     pub downloads: VecDeque<DownloadJob>,
     pub erasures: VecDeque<ErasureJob>,
+    /// Whether the platform said that the network costs by the byte.
+    pub is_metered: bool,
 }
 
 /// The name and the preview that the body of a file carries (`WIR-531`,
@@ -567,6 +569,64 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             descriptor: Box::new(descriptor),
         });
         Ok(())
+    }
+
+    /// The platform says whether the network costs by the byte. On a
+    /// network with no such cost, each file that waits at or below the
+    /// limit starts its download, when the user limits the automatic
+    /// download to that network (`IMP-168`). The result counts them.
+    pub fn set_metered<R: CryptoRng + ?Sized>(
+        &mut self,
+        is_metered: bool,
+        rng: &mut R,
+    ) -> Result<usize, Error> {
+        self.files.is_metered = is_metered;
+        if is_metered || !self.unmetered_only()? {
+            return Ok(0);
+        }
+        let limit = self.auto_download_limit()?;
+        let store = &self.open_ref()?.store;
+        let mut waiting = Vec::new();
+        for (row, state) in store.list(FILE_STATE, None)? {
+            let info = read_state_row(&state)?;
+            if info.state != FileState::Held || info.size > limit {
+                continue;
+            }
+            let Some(plain) = store.get(TableId::MESSAGE, &row)? else {
+                continue;
+            };
+            let plain = Zeroizing::new(plain);
+            let app = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
+            let parsed = AppMessage::parse(app, Channel::Pairwise)?;
+            if let Some(descriptor) = fetchable(parsed.body) {
+                waiting.push((MsgRef(row), descriptor));
+            }
+        }
+        let count = waiting.len();
+        for (message, descriptor) in waiting {
+            self.set_file_state(&message, FileState::Wanted, rng)?;
+            self.files.downloads.push_back(DownloadJob {
+                message,
+                descriptor: Box::new(descriptor),
+            });
+            self.events.push_back(Event::File { message });
+        }
+        Ok(count)
+    }
+
+    /// Whether the platform said that the network costs by the byte.
+    pub fn is_metered(&self) -> bool {
+        self.files.is_metered
+    }
+
+    /// The limit that applies now: the limit of the user, or none on a
+    /// metered network when the user limits the automatic download to a
+    /// network with no such cost (`IMP-168`).
+    pub(super) fn download_limit_now(&self) -> Result<u64, Error> {
+        if self.files.is_metered && self.unmetered_only()? {
+            return Ok(0);
+        }
+        self.auto_download_limit()
     }
 
     /// Puts each transfer that an earlier run left open into its queue

@@ -77,9 +77,9 @@ each column when a crate implements the requirement and a test covers it.
 | `GRP` | 220 | 62 | 0 | 0 | 6 | **288** |
 | `ATT` | 140 | 47 | 2 | 0 | 2 | **191** |
 | `ABU` | 64 | 30 | 0 | 0 | 0 | **94** |
-| `IMP` | 113 | 41 | 0 | 0 | 2 | **156** |
+| `IMP` | 114 | 41 | 0 | 0 | 2 | **157** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 1931 | 613 | 6 | 0 | 50 | **2600** |
+| **All** | 1932 | 613 | 6 | 0 | 50 | **2601** |
 
 ## SCP — Scope and Conventions
 
@@ -2757,6 +2757,7 @@ Source: `spec/14-implementation.md`
 | `IMP-165` | §14.6.1 | MUST | The file of a draft | The file of a draft MUST cross the surface as a path that the core reads, and not as its bytes. |  |  |
 | `IMP-166` | §14.6.1 | MAY | The bytes of a file that the store holds | The bytes of a file that the store holds MAY cross the surface one time for each decode, into a sink of the platform. |  |  |
 | `IMP-167` | §14.6.4 | MUST | A client | A client MUST let the user set an automatic download limit for the device: off, or a size. |  |  |
+| `IMP-168` | §14.6.4 | MUST | A client | A client MUST let the user limit the automatic download to a network that the platform does not mark as metered. |  |  |
 
 ## SEC — Security Considerations
 

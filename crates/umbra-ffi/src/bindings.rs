@@ -3866,6 +3866,39 @@ impl Handle {
             .set_auto_download_limit(bytes, &mut OsRng)?)
     }
 
+    /// Whether the automatic download waits for a network with no cost by
+    /// the byte (`IMP-168`).
+    pub fn auto_download_unmetered_only(&self) -> Result<bool, FfiError> {
+        Ok(locked(&self.inner).client.unmetered_only()?)
+    }
+
+    /// Limits the automatic download to a network with no cost by the
+    /// byte, or takes that limit away.
+    pub fn set_auto_download_unmetered_only(&self, is_on: bool) -> Result<(), FfiError> {
+        let mut inner = locked(&self.inner);
+        inner.client.set_unmetered_only(is_on, &mut OsRng)?;
+        // A file that waited for this network may start now.
+        let is_metered = inner.client.is_metered();
+        inner.client.set_metered(is_metered, &mut OsRng)?;
+        inner.pump_transfers();
+        drop(inner);
+        self.changed.notify_all();
+        Ok(())
+    }
+
+    /// The platform says whether the network of the device costs by the
+    /// byte. On a network with no such cost the files that waited for it
+    /// start (`IMP-168`).
+    pub fn set_metered(&self, is_metered: bool) -> Result<(), FfiError> {
+        let mut inner = locked(&self.inner);
+        if inner.client.set_metered(is_metered, &mut OsRng)? > 0 {
+            inner.pump_transfers();
+            drop(inner);
+            self.changed.notify_all();
+        }
+        Ok(())
+    }
+
     /// Writes the file of a message to a place that the user named, as
     /// the save of one file (`IMP-045`). On Android `path` names an open
     /// descriptor of this process, `/proc/self/fd/<n>`, that the platform

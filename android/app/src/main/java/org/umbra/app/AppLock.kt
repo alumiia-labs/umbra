@@ -122,8 +122,10 @@ private val AutoDownloadChoices = listOf(
 )
 
 /** The words of the limit in the row of the settings. */
-fun autoDownloadLabel(bytes: ULong): String =
-    AutoDownloadChoices.firstOrNull { it.first == bytes }?.second ?: "Up to ${bytes / MIB} MB"
+fun autoDownloadLabel(bytes: ULong, wifiOnly: Boolean): String {
+    val limit = AutoDownloadChoices.firstOrNull { it.first == bytes }?.second ?: "Up to ${bytes / MIB} MB"
+    return if (wifiOnly && bytes != 0uL) "$limit · Wi-Fi only" else limit
+}
 
 /**
  * The automatic download limit of this device (`IMP-167`). A photo, a
@@ -133,6 +135,7 @@ fun autoDownloadLabel(bytes: ULong): String =
 @Composable
 fun AutoDownloadScreen(onBack: () -> Unit) {
     var chosen by remember { mutableStateOf(Core.autoDownloadLimit) }
+    var wifiOnly by remember { mutableStateOf(Core.autoDownloadWifiOnly) }
     Column(Modifier.fillMaxSize()) {
         BackBar("Automatic download", onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
@@ -152,9 +155,27 @@ fun AutoDownloadScreen(onBack: () -> Unit) {
                 }
                 HorizontalDivider(color = Palette.Divider)
             }
+            // IMP-168: on mobile data each file waits for a tap, and the
+            // files below the limit come when Wi-Fi comes.
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .pressShadeInColumn()
+                    .press(role = Role.Switch) { wifiOnly = !wifiOnly }
+                    .padding(horizontal = PressInset, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("Only on Wi-Fi", modifier = Modifier.weight(1f))
+                androidx.compose.material3.Switch(
+                    checked = wifiOnly,
+                    onCheckedChange = null,
+                    enabled = chosen != 0uL,
+                )
+            }
+            HorizontalDivider(color = Palette.Divider)
             Spacer(Modifier.height(14.dp))
             PrimaryButton("Save") {
-                Core.setAutoDownload(chosen)
+                Core.setAutoDownload(chosen, wifiOnly)
                 onBack()
             }
             Spacer(Modifier.height(14.dp))

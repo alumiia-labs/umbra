@@ -943,6 +943,13 @@ version byte, and a client MUST reject a row whose version it does not read.
   > conversation. A download at arrival shows them the arrival alone. The
   > default keeps each photo and each document at arrival, and a large video
   > waits.
+- **[IMP-168]** A client MUST let the user limit the automatic download to a
+  network that the platform does not mark as metered. With that limit on, a
+  file that arrives on a metered network MUST wait as a file above the limit
+  of `IMP-167` does. When the device moves to a network with no such mark,
+  the client MUST start the download of each file that waits and whose
+  `padded_size` is at most the limit. That choice is a setting of the
+  device, as the limit is.
 - **[IMP-164]** A deletion of a message MUST erase its rows in the tables
   `0x0F`, `0x10` and `0x11` in the batch that takes the message, and for a
   file that this device uploaded it MUST then send the `CDEL` of `ATT-161`
