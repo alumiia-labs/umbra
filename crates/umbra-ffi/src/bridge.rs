@@ -277,6 +277,9 @@ impl Bridge {
                     client.mark_device_peer(conversation, rng)?;
                     Some(NetEvent::DeviceLinked(conversation))
                 } else {
+                    // DEV-294: each device of the set holds the conversation.
+                    client.publish_identity_entry(conversation, rng)?;
+                    self.flush(client, rng)?;
                     Some(NetEvent::Contact(conversation))
                 }
             }

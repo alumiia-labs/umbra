@@ -830,6 +830,8 @@ pub enum FfiEvent {
     /// The sync channel of another device of the set opened (Part 7
     /// `DEV-286`).
     DeviceLinked,
+    /// Another device of the set added a conversation or named one.
+    Conversations,
     /// The client refused an invitation command, such as a bundle that does
     /// not parse.
     Refused,
@@ -2434,6 +2436,7 @@ impl Inner {
                 Event::Deleted { conversation, .. } => FfiEvent::Deleted {
                     conversation: conversation.0.to_vec(),
                 },
+                Event::Conversations => FfiEvent::Conversations,
                 Event::File { message } => FfiEvent::File {
                     // A message that a deletion took since has no
                     // conversation, and the view of none changes.
@@ -3775,9 +3778,15 @@ impl Handle {
     pub fn set_contact_name(&self, conversation: Vec<u8>, name: String) -> Result<(), FfiError> {
         let conversation = conversation_of(&conversation)?;
         let mut inner = locked(&self.inner);
-        Ok(inner
+        inner
             .client
-            .set_contact_name(conversation, &name, &mut OsRng)?)
+            .set_contact_name(conversation, &name, &mut OsRng)?;
+        // DEV-197: the name goes to each device of the set.
+        let Inner { client, bridge, .. } = &mut *inner;
+        if let Some(running) = bridge.as_mut() {
+            running.flush(client, &mut OsRng)?;
+        }
+        Ok(())
     }
 
     /// The user saw each message of the conversation that the store holds.

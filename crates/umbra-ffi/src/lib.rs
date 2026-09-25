@@ -244,6 +244,8 @@ pub enum Event {
         /// The message.
         message: MsgRef,
     },
+    /// Another device of the set added a conversation or named one.
+    Conversations,
     /// A contact offered a group of Part 11. The user sees the offers of
     /// [`client::Client::group_offers`] and answers one of them
     /// (`GRP-170`).

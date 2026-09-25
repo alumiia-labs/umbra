@@ -667,6 +667,8 @@ object Core {
                 if (!isVisible) Notifier.locked(app)
             }
             is FfiEvent.IntegrityFault -> fault = "The local store does not verify."
+            // Another device of the set added a conversation or named one.
+            is FfiEvent.Conversations -> refreshChats()
             // The sync channel of a device opened.
             is FfiEvent.DeviceLinked -> {
                 readDevices()

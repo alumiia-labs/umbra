@@ -845,9 +845,16 @@ class in Part 6 §6.6. **[DEV-022]** A client MUST NOT process a kind that decla
   | The archive flag, the pin flag, and the folder label | Each conversation |
   | The unread marker that a user sets by hand | Each conversation |
   | The draft text | Each conversation |
+  | An entry of the local identity table of Part 4 §4.7.2 | Each pairwise identity |
 
   **[DEV-197]** A client MUST converge each item of that table across the device
-  set. **[DEV-198]** A revision that adds a chat-list item MUST add a row.
+  set. **[DEV-294]** The item of an entry of the local identity table takes
+  the subject of `DEV-226` as its key. Its value for a pairwise identity is
+  49 bytes: `0x01`, the salt of Part 4 §4.2.2, and the 32-byte key of the
+  conversation in the stores of the set. A device MUST publish that item
+  when it makes a contact. A receiver MUST reject an item whose subject the
+  salt does not give, and it MUST otherwise hold the conversation from
+  then on, whether or not it owns the channel. **[DEV-198]** A revision that adds a chat-list item MUST add a row.
 
   **One item of group state does not converge.** Each device reads a group
   queue on its own circuit, and it holds its own cursor for each replica of

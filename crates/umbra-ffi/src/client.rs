@@ -1583,6 +1583,22 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             return Err(Error::TooLong);
         }
         let (read_up_to, _) = self.conversation_meta(conversation)?;
+        self.put_conversation_meta(conversation, read_up_to, name, rng)?;
+        // DEV-197: the name is mutable state of the set.
+        self.publish_contact_name(conversation, name, rng)
+    }
+
+    /// The name of a contact that another device of the set gave.
+    pub(super) fn apply_contact_name<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        name: &str,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        if name.len() > CONTACT_NAME_MAX {
+            return Err(Error::TooLong);
+        }
+        let (read_up_to, _) = self.conversation_meta(conversation)?;
         self.put_conversation_meta(conversation, read_up_to, name, rng)
     }
 

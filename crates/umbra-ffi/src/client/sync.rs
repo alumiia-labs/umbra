@@ -18,7 +18,10 @@ use umbra_core::{
     devset::{
         engine::{SyncEngine, Taken},
         roster::{ClaimScope, OwnerClaim, Roster},
-        sync::{Origin, AUTHOR_PEER, AUTHOR_USER, SCOPE_PAIRWISE},
+        sync::{
+            IdentityEntry, Origin, AUTHOR_PEER, AUTHOR_USER, ITEM_CONTACT_NAME,
+            ITEM_IDENTITY_ENTRY, SCOPE_PAIRWISE,
+        },
         DeviceId,
     },
     store::{
@@ -32,7 +35,13 @@ use umbra_wire::app::{AppKind, AppMessage};
 use zeroize::Zeroizing;
 
 use super::{devices::DEVICE_PEERS, Client};
-use crate::{ConversationId, Error, MsgRef};
+use crate::{ConversationId, Error, Event, MsgRef};
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
 
 /// The stored form of the sync engine.
 pub(super) const SYNC_STATE: TableId = TableId(0x24);
@@ -243,6 +252,125 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(())
     }
 
+    /// Publishes one item of mutable state to each device of the set
+    /// (`DEV-197`).
+    fn publish_mutable<R: CryptoRng + ?Sized>(
+        &mut self,
+        item: u8,
+        key: &[u8],
+        value: &[u8],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let Some(mut engine) = self.sync_engine()? else {
+            return Ok(());
+        };
+        let counter = engine.counter().saturating_add(1);
+        let published =
+            engine.publish_mutable(item, key, value, counter_ref(counter), unix_now())?;
+        self.put_engine(&engine, Some((published.counter, &published.body)), rng)?;
+        let channels = self.peer_channels()?;
+        for peer in engine.peers() {
+            if let Some(channel) = channels.get(peer) {
+                self.queue_sync(*channel, &published.body, None, rng)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Publishes the entry of the local identity table of a new contact, thus
+    /// each device of the set holds its conversation (`DEV-011`, `DEV-294`).
+    pub fn publish_identity_entry<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        if self.is_device_peer(conversation)? {
+            return Ok(());
+        }
+        let Some(subject) = self.subject_of(conversation)? else {
+            return Ok(());
+        };
+        let row = Zeroizing::new(
+            self.open_ref()?
+                .store
+                .get(TableId::CONTACT, &conversation.0)?
+                .ok_or(Error::NotFound)?,
+        );
+        let entry = IdentityEntry {
+            salt: umbra_core::session::node::stored_contact_salt(
+                row.get(32..).ok_or(Error::Integrity)?,
+            )?,
+            conversation: row
+                .get(..32)
+                .and_then(|key| key.try_into().ok())
+                .ok_or(Error::Integrity)?,
+        };
+        self.publish_mutable(ITEM_IDENTITY_ENTRY, &subject, &entry.encode(), rng)
+    }
+
+    /// Publishes the name that the user gave a contact.
+    pub(super) fn publish_contact_name<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        name: &str,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let Some(subject) = self.subject_of(conversation)? else {
+            return Ok(());
+        };
+        self.publish_mutable(ITEM_CONTACT_NAME, &subject, name.as_bytes(), rng)
+    }
+
+    /// Applies one item of mutable state that won (`DEV-270`). An entry of
+    /// the local identity table makes the conversation of a contact whose
+    /// channel another device owns (`DEV-294`).
+    fn apply_mutable<R: CryptoRng + ?Sized>(
+        &mut self,
+        item: u8,
+        key: &[u8],
+        value: &[u8],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let subject: [u8; 32] = key.try_into().map_err(|_| Error::Malformed)?;
+        match item {
+            ITEM_IDENTITY_ENTRY => {
+                let entry = IdentityEntry::parse(value)?;
+                // The subject must name the salt, thus a peer names no
+                // conversation of another identity.
+                let pairwise = self.root_identity()?.pairwise_identity(&entry.salt);
+                let open = self.open_mut()?;
+                let named = OwnerClaim::subject(
+                    &open.device_set_key,
+                    ClaimScope::Pairwise,
+                    &pairwise.public().to_bytes(),
+                );
+                if named != subject {
+                    return Err(Error::Integrity);
+                }
+                let row = open.store.row_id(TableId::CONTACT, &entry.conversation);
+                if open.store.get(TableId::CONTACT, &row)?.is_none() {
+                    let state = umbra_core::session::node::shadow_contact_state(&entry.salt);
+                    let plain = Zeroizing::new([entry.conversation.as_slice(), &state].concat());
+                    let mut batch = open.store.begin();
+                    batch.put(TableId::CONTACT, row, None, &plain, rng)?;
+                    batch.commit()?;
+                    self.subjects.insert(ConversationId(row), subject);
+                    self.events.push_back(Event::Conversations);
+                }
+            }
+            ITEM_CONTACT_NAME => {
+                let name = core::str::from_utf8(value).map_err(|_| Error::Malformed)?;
+                if let Some(conversation) = self.conversation_of_subject(&subject)? {
+                    self.apply_contact_name(conversation, name, rng)?;
+                    self.events.push_back(Event::Conversations);
+                }
+            }
+            // An item that this build does not apply changes nothing.
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn queue_sync<R: CryptoRng + ?Sized>(
         &mut self,
         peer: ConversationId,
@@ -383,6 +511,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     }
                 }
                 Ok(Taken::Acknowledged) => acked = true,
+                Ok(Taken::Mutable { item, key, value }) => {
+                    // An item that does not apply ends no batch.
+                    let _ = self.apply_mutable(item, &key, &value, rng);
+                }
                 _ => {}
             }
         }

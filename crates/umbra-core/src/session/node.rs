@@ -790,9 +790,22 @@ pub fn stored_dead_channel(
 /// `DEV-292`).
 pub fn stored_contact_salt(state: &[u8]) -> Result<[u8; 16], Error> {
     let mut reader = Reader::new(state);
-    contact_version(&mut reader)?;
+    if state.first() == Some(&SHADOW_VERSION) {
+        reader.u8()?;
+    } else {
+        contact_version(&mut reader)?;
+    }
     Ok(reader.array()?)
 }
+
+/// The stored form of a contact whose channel another device of the set
+/// owns (Part 7 `DEV-294`): the salt alone. No node restores it.
+pub fn shadow_contact_state(salt: &[u8; 16]) -> Vec<u8> {
+    [&[SHADOW_VERSION][..], salt].concat()
+}
+
+/// The version of [`shadow_contact_state`].
+const SHADOW_VERSION: u8 = 0x10;
 
 fn contact_version(reader: &mut Reader<'_>) -> Result<u8, Error> {
     match reader.u8()? {

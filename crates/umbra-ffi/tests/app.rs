@@ -2695,6 +2695,52 @@ fn a_new_device_links_from_the_code_of_the_existing_one() {
         );
         std::thread::sleep(Duration::from_millis(200));
     }
+    // DEV-294: a contact that the phone makes after the link, and its
+    // name, reach the tablet, and so does the first record of that contact.
+    let carol = launch(&directory, "carol.db", 4);
+    carol.clone().connect(network_for(&carol)).unwrap();
+    alice.invite().unwrap();
+    let link = wait_for(&alice, |event| match event {
+        FfiEvent::Invitation { link } => Some(link),
+        _ => None,
+    });
+    carol.accept(link).unwrap();
+    let alice_carol = wait_for_contact(&alice);
+    let carol_conversation = wait_for_contact(&carol);
+    alice
+        .set_contact_name(alice_carol.clone(), "Carol".into())
+        .unwrap();
+    let start = Instant::now();
+    loop {
+        let named = tablet
+            .summaries()
+            .unwrap()
+            .into_iter()
+            .any(|summary| summary.conversation == alice_carol && summary.name == "Carol");
+        if named {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "no new contact on the tablet"
+        );
+        tablet.clone().tick();
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let draft = carol.new_draft(carol_conversation).unwrap();
+    draft.set_text(units("hello from carol")).unwrap();
+    carol.send_draft(draft).unwrap();
+    let (conversation, message) = wait_for(&tablet, |event| match event {
+        FfiEvent::Message {
+            conversation,
+            message,
+        } if conversation == alice_carol => Some((conversation, message)),
+        _ => None,
+    });
+    assert_eq!(conversation, alice_carol);
+    assert_eq!(rendered(&tablet, message), "hello from carol");
+    carol.disconnect();
+
     // One copy on each device, and the tablet holds its own one time.
     assert_eq!(
         texts_of(&alice)

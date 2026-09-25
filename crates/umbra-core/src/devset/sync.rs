@@ -99,6 +99,48 @@ pub const AUTHOR_USER: u8 = 0x00;
 /// The author of a synced record: the other party of the conversation.
 pub const AUTHOR_PEER: u8 = 0x01;
 
+/// The item of the contact name in the mutable-state table (§7.5.3).
+pub const ITEM_CONTACT_NAME: u8 = 3;
+/// The item of an entry of the local identity table (`DEV-011`, `DEV-294`).
+pub const ITEM_IDENTITY_ENTRY: u8 = 13;
+
+/// An entry of the local identity table for a pairwise identity, the value
+/// of [`ITEM_IDENTITY_ENTRY`] under the subject of that identity
+/// (`DEV-294`): the salt of §4.2.2 and the key of the conversation in the
+/// stores of the set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdentityEntry {
+    /// The pairwise salt.
+    pub salt: [u8; 16],
+    /// The key of the conversation.
+    pub conversation: [u8; 32],
+}
+
+impl IdentityEntry {
+    /// The 49 bytes: kind `0x01`, the salt, and the key.
+    pub fn encode(&self) -> [u8; 49] {
+        let mut out = [0u8; 49];
+        out[0] = 0x01;
+        out[1..17].copy_from_slice(&self.salt);
+        out[17..].copy_from_slice(&self.conversation);
+        out
+    }
+
+    /// Reads an entry.
+    pub fn parse(bytes: &[u8]) -> Result<Self, Error> {
+        let mut r = Reader::new(bytes);
+        if r.u8()? != 0x01 {
+            return Err(Error::Malformed);
+        }
+        let entry = IdentityEntry {
+            salt: r.array()?,
+            conversation: r.array()?,
+        };
+        r.finish()?;
+        Ok(entry)
+    }
+}
+
 /// Where a synced record belongs (`DEV-292`): the scope, the subject that
 /// names the conversation, and the author of the record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -539,6 +581,12 @@ mod tests {
         let mut out = [0u8; 200];
         let n = rec.encode(&mut out).unwrap();
         assert_eq!(SyncedRecord::parse(&out[..n]).unwrap(), rec);
+        let entry = IdentityEntry {
+            salt: [5; 16],
+            conversation: [6; 32],
+        };
+        assert_eq!(IdentityEntry::parse(&entry.encode()).unwrap(), entry);
+        assert!(IdentityEntry::parse(&entry.encode()[..48]).is_err());
         // DEV-292: a scope or an author that the layout does not name.
         let other_scope = SyncedRecord {
             origin: Origin {
