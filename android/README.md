@@ -41,8 +41,9 @@ takes `shield-halved`.
 ## Run against a local network
 
 ```sh
-scripts/devnet.sh               # three relays on the ports 7441 to 7443,
-                                # with their queues in target/devnet
+scripts/devnet.sh               # seven relays on the ports 7441 to 7447 and
+                                # the NDR on 7450, with their state in
+                                # target/devnet
 adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
@@ -55,6 +56,21 @@ Part 10.
 Two emulators make one conversation: the first one invites and copies the
 link, and the second one pastes it and accepts. The clipboard of an
 emulator is the clipboard of the machine.
+
+### A phone on the local network
+
+A phone reaches the relays at the address of the machine on the local
+network. The relays list that address, and the build dials it:
+
+```sh
+UMBRA_DEVNET_HOST=192.168.1.254 scripts/devnet.sh
+./gradlew :app:assembleDebug -Pumbra.devnetHost=192.168.1.254   # in android/
+```
+
+An emulator reaches that address too, thus one build serves both. The
+firewall of the machine must let the phone in on the ports 7441 and 7446,
+the two ingress relays. The other relays take connections from the relays
+alone.
 
 ## Open items of the shell
 

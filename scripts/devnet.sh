@@ -7,6 +7,15 @@
 # relays. A client pins the two ingress relays, and with one of them down it
 # dials the other one. An Android emulator reaches them at 10.0.2.2.
 #
+# A phone on the local network reaches them at the address of this machine
+# on that network. UMBRA_DEVNET_HOST names it, and the two ingress relays
+# then list it in their descriptors in the place of 10.0.2.2:
+#
+#   UMBRA_DEVNET_HOST=192.168.1.254 scripts/devnet.sh
+#
+# An emulator reaches that address too. The debug app takes the same
+# address at its build (android/README.md).
+#
 # Each relay signs its descriptor, and the seven test authorities sign a
 # manifest of the seven (Part 10 §10.5.5). A relay reads its layer from that
 # manifest. The seeds of the relays and of the authorities are in the
@@ -20,11 +29,19 @@ cd "$(dirname "$0")/.."
 cargo build -p umbra-relay --features native
 # Each relay keeps its queues in a file here, thus a restart of this script
 # ends no contact. Delete the directory for an empty network.
-mkdir -p target/devnet
+mkdir -p target/devnet/conf
+
+# The configuration of each relay, with the address of the host.
+host="${UMBRA_DEVNET_HOST:-10.0.2.2}"
+for relay in 1 2 3 4 5 6 7; do
+    sed "s/10\.0\.2\.2/$host/g" "tests/fixtures/devnet/relay$relay.conf" \
+        > "target/devnet/conf/relay$relay.conf"
+done
+echo "the ingress relays listen for clients at $host, ports 7441 and 7446"
 
 for relay in 1 2 3 4 5 6 7; do
     target/debug/umbra-relay sign-descriptor \
-        "tests/fixtures/devnet/relay$relay.conf" "target/devnet/relay$relay.desc"
+        "target/devnet/conf/relay$relay.conf" "target/devnet/relay$relay.desc"
 done
 # The manifest holds the present epoch, thus each start signs a new one.
 target/debug/umbra-test-authority tests/fixtures/devnet/authority.conf target/devnet
@@ -49,7 +66,7 @@ trap 'kill "${pids[@]}" 2>/dev/null || true' EXIT INT TERM
 target/debug/umbra-ndr tests/fixtures/devnet/ndr.conf &
 pids+=($!)
 for relay in 3 5 7 2 4 1 6; do
-    target/debug/umbra-relay "tests/fixtures/devnet/relay$relay.conf" &
+    target/debug/umbra-relay "target/devnet/conf/relay$relay.conf" &
     pids+=($!)
 done
 wait

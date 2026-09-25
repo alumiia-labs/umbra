@@ -33,8 +33,10 @@ import uniffi.umbra_ffi.parseNetwork
  * authorities of that script sign a relay manifest at each start, and the
  * ingress relay gives it over HTTPS. The client verifies it under the key
  * set of those authorities, which this build ships. With no answer the
- * client takes the manifest of the last run. An emulator reaches the
- * ingress relay at 10.0.2.2, under the test authority of the repository. The seeds of those relays and authorities are
+ * client takes the manifest of the last run. The client dials the ingress
+ * relay at `BuildConfig.DEVNET_HOST`, under the test authority of the
+ * repository: 10.0.2.2 for an emulator, or the address of the machine on
+ * the local network for a phone. The seeds of those relays and authorities are
  * in the repository, thus that network protects nothing.
  *
  * A tester pastes the descriptor of a deployed test network, and the build
@@ -56,7 +58,8 @@ object BuildNetwork {
 
     // The carrier of the manifest: the ingress relay of the devnet.
     private const val CARRIER_HOST = "localhost"
-    private val CARRIER_ADDRESS = byteArrayOf(10, 0, 2, 2)
+    private val CARRIER_ADDRESS =
+        BuildConfig.DEVNET_HOST.split('.').map { it.toInt().toByte() }.toByteArray()
     private const val CARRIER_PORT: UShort = 7441u
 
     /** Whether the time of the last manifest differs from the device clock. */

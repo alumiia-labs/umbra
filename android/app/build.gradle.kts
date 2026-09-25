@@ -31,6 +31,14 @@ android {
         // host of the devnet, which no party serves.
         manifestPlaceholders["invitationHost"] =
             (project.findProperty("umbra.invitationHost") as String?) ?: "invite.umbra.test"
+        // The IPv4 address of the machine of scripts/devnet.sh, which the
+        // debug build dials. The default serves an emulator. A phone on the
+        // local network takes -Pumbra.devnetHost=<address of that machine>.
+        val devnetHost = (project.findProperty("umbra.devnetHost") as String?) ?: "10.0.2.2"
+        require(devnetHost.split('.').let { parts -> parts.size == 4 && parts.all { it.toIntOrNull() in 0..255 } }) {
+            "umbra.devnetHost takes an IPv4 address"
+        }
+        buildConfigField("String", "DEVNET_HOST", "\"$devnetHost\"")
     }
 
     buildTypes {
@@ -41,6 +49,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     compileOptions {
