@@ -66,7 +66,7 @@ each column when a crate implements the requirement and a test covers it.
 | --- | --- | --- | --- | --- | --- | --- |
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
-| `NET` | 235 | 84 | 1 | 0 | 8 | **328** |
+| `NET` | 239 | 85 | 1 | 0 | 8 | **333** |
 | `IDN` | 128 | 44 | 1 | 0 | 5 | **178** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
 | `WIR` | 393 | 85 | 0 | 0 | 7 | **485** |
@@ -79,7 +79,7 @@ each column when a crate implements the requirement and a test covers it.
 | `ABU` | 66 | 30 | 1 | 0 | 0 | **97** |
 | `IMP` | 114 | 41 | 0 | 0 | 2 | **157** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 1936 | 611 | 7 | 0 | 50 | **2604** |
+| **All** | 1940 | 612 | 7 | 0 | 50 | **2609** |
 
 ## SCP — Scope and Conventions
 
@@ -465,6 +465,11 @@ Source: `spec/03-network-architecture.md`
 | `NET-328` | §3.2.6 | MUST | (unstated) | If the channels of both parties are stale, the party whose pairwise X25519 key is the lower as a big-endian integer MUST answer the bundle of the other, and the other MUST drop the bundle that it gets. |  |  |
 | `NET-329` | §3.2.6 | MUST | A handshake of a renewal | A handshake of a renewal MUST replace the channel of the contact only if the static key of the peer in it equals the pairwise key of the peer that the contact holds. |  |  |
 | `NET-330` | §3.2.6 | MUST | (unstated) | A client with a stale channel that takes a new address of the peer under rule 9 MUST send its bundle again to that address. |  |  |
+| `NET-331` | §3.4.3 | MUST NOT | An ingress relay | An ingress relay MUST NOT hold more than `LINK_CIRCUITS_MAX` circuits on one client link. |  |  |
+| `NET-332` | §3.4.3 | MUST | An ingress relay | An ingress relay MUST give a build cell on one client link no answer when that link spent `LINK_BUILD_BURST` builds and got none back at `LINK_BUILD_RATE`. |  |  |
+| `NET-333` | §3.4.3 | MUST | A relay | A relay MUST close a new connection at once when it holds `RELAY_CONN_MAX` connections. |  |  |
+| `NET-334` | §3.4.3 | MUST | An ingress relay | An ingress relay MUST close a new connection at once when its address holds `RELAY_CONN_PER_IP` connections. |  |  |
+| `NET-335` | §3.4.3 | MUST | A relay | A relay MUST run at most `RELAY_HANDSHAKES_MAX` TLS handshakes at once, and it MUST close a connection that holds no upgrade request of Part 6 §6.2.1 at `RELAY_HANDSHAKE_TIMEOUT` from its accept. |  |  |
 
 ## IDN — Identity
 

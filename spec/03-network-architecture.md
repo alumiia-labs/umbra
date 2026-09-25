@@ -1064,6 +1064,47 @@ causes does not occur.
 > once, and each unsent record goes again from its store. A preemptive build
 > with a spare circuit would avoid the gap of one build.
 
+#### Limits of an ingress relay
+
+A build cell costs a relay a key agreement, and a connection costs it a TLS
+handshake. Neither needs a credential, thus a relay bounds both. The limits
+below are relay-local, and a client of ordinary use stays far under each one.
+
+| Parameter | Value |
+| --- | --- |
+| `LINK_CIRCUITS_MAX` | 256 circuits on one client link at an ingress relay |
+| `LINK_BUILD_BURST` | 64 build cells on one client link at once |
+| `LINK_BUILD_RATE` | 1 build cell each second on one client link after its burst |
+| `RELAY_CONN_MAX` | 20 000 connections at once, and an operator can set another value |
+| `RELAY_CONN_PER_IP` | 32 connections of one address at once at an ingress relay, and an operator can set another value |
+| `RELAY_HANDSHAKES_MAX` | 512 TLS handshakes at once |
+| `RELAY_HANDSHAKE_TIMEOUT` | 10 s from the accept to the WebSocket upgrade |
+
+- **[NET-331]** An ingress relay MUST NOT hold more than `LINK_CIRCUITS_MAX`
+  circuits on one client link. It MUST give a build cell above that count no
+  answer.
+- **[NET-332]** An ingress relay MUST give a build cell on one client link no
+  answer when that link spent `LINK_BUILD_BURST` builds and got none back at
+  `LINK_BUILD_RATE`. The relay MUST check this before the key agreement of
+  the build. A relay of layer 2 or 3 applies neither limit, because one link
+  of a relay carries the circuits of many clients.
+- **[NET-333]** A relay MUST close a new connection at once when it holds
+  `RELAY_CONN_MAX` connections.
+- **[NET-334]** An ingress relay MUST close a new connection at once when its
+  address holds `RELAY_CONN_PER_IP` connections. A loopback address is
+  exempt, because a test network on one machine shares it.
+- **[NET-335]** A relay MUST run at most `RELAY_HANDSHAKES_MAX` TLS
+  handshakes at once, and it MUST close a connection that holds no upgrade
+  request of Part 6 §6.2.1 at `RELAY_HANDSHAKE_TIMEOUT` from its accept.
+
+> *Cause.* An earlier draft gated the creation of queues and storage (Part 13
+> §13.2) and bounded nothing below it. Each accepted connection took a task
+> and a TLS handshake, and each build cell took a key agreement, with no
+> bound on either. One host could hold an ingress relay with connections or
+> with builds and stop each client of it. The client of Part 3 opens one
+> circuit for each relay that it reaches, thus 256 circuits cover a device
+> with contacts at that many queue relays.
+
 **[NET-028]** A client MUST NOT use one circuit for more than one privacy mode. **[NET-029]** A client MUST
 NOT carry interactive traffic and bulk traffic on the same circuit (§3.8).
 

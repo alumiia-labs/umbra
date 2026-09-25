@@ -27,6 +27,50 @@ use umbra_wire::{
 /// A connection of the relay, to a client or to another relay.
 pub type LinkId = u64;
 
+/// `LINK_CIRCUITS_MAX`: the circuits that one client link holds at an
+/// ingress relay (Part 3 `NET-331`).
+pub const LINK_CIRCUITS_MAX: u32 = 256;
+/// `LINK_BUILD_BURST`: the builds that one client link may send at once
+/// (`NET-332`).
+pub const LINK_BUILD_BURST: u32 = 64;
+/// `LINK_BUILD_RATE`: the builds that one client link gets back each
+/// second after its burst (`NET-332`).
+pub const LINK_BUILD_RATE: u32 = 1;
+
+/// What one client link spent of its circuits and its builds.
+#[derive(Debug, Clone, Copy)]
+struct LinkBudget {
+    circuits: u32,
+    builds: u32,
+    refilled_at: u64,
+}
+
+impl LinkBudget {
+    const fn new(now: u64) -> Self {
+        LinkBudget {
+            circuits: 0,
+            builds: LINK_BUILD_BURST,
+            refilled_at: now,
+        }
+    }
+
+    /// Takes one build at `now`, or refuses it.
+    fn take(&mut self, now: u64) -> bool {
+        let seconds = now.saturating_sub(self.refilled_at);
+        let refill = u32::try_from(seconds)
+            .unwrap_or(u32::MAX)
+            .saturating_mul(LINK_BUILD_RATE);
+        self.builds = self.builds.saturating_add(refill).min(LINK_BUILD_BURST);
+        self.refilled_at = now;
+        if self.circuits >= LINK_CIRCUITS_MAX || self.builds == 0 {
+            return false;
+        }
+        self.builds -= 1;
+        self.circuits += 1;
+        true
+    }
+}
+
 /// One circuit on one link.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CircuitKey {
@@ -127,6 +171,10 @@ pub struct CircuitTable {
     /// The held circuit behind each circuit that this relay opened to a
     /// next hop.
     back: BTreeMap<CircuitKey, CircuitKey>,
+    /// The budget of each client link at an ingress relay (`NET-331`,
+    /// `NET-332`). A link of a relay of another layer carries the circuits
+    /// of many clients, thus it has none.
+    budgets: BTreeMap<LinkId, LinkBudget>,
 }
 
 impl CircuitTable {
@@ -138,6 +186,7 @@ impl CircuitTable {
             layer,
             held: BTreeMap::new(),
             back: BTreeMap::new(),
+            budgets: BTreeMap::new(),
         }
     }
 
@@ -202,6 +251,18 @@ impl CircuitTable {
         let Ok((CellCommand::Extend, hello)) = read_cell_body(body) else {
             return Vec::new();
         };
+        // NET-331, NET-332: a client link above its circuits or its rate of
+        // builds gets no answer, before the handshake costs this relay a
+        // key agreement.
+        if self.layer == 1 {
+            let budget = self
+                .budgets
+                .entry(key.link)
+                .or_insert_with(|| LinkBudget::new(now));
+            if !budget.take(now) {
+                return Vec::new();
+            }
+        }
         let mut reply = [0u8; REPLY_LEN];
         let answered: Result<(Secret<32>, Option<StaticSecret>), _> = if self.layer == 3 {
             answer_at_queue_relay(&self.relay, &self.static_secret, hello, rng, &mut reply)
@@ -211,6 +272,7 @@ impl CircuitTable {
         };
         // NET-153: a hello for another relay gets no answer.
         let Ok((ss_hop, session_secret)) = answered else {
+            self.release(key.link);
             return Vec::new();
         };
         let position = if self.layer == 3 {
@@ -384,6 +446,7 @@ impl CircuitTable {
         let Some(held) = self.held.remove(&key) else {
             return Vec::new();
         };
+        self.release(key.link);
         let mut actions = Vec::new();
         if let Some(next) = held.next {
             self.back.remove(&next);
@@ -417,6 +480,13 @@ impl CircuitTable {
         }
     }
 
+    /// Gives one circuit of a client link back to its budget.
+    fn release(&mut self, link: LinkId) {
+        if let Some(budget) = self.budgets.get_mut(&link) {
+            budget.circuits = budget.circuits.saturating_sub(1);
+        }
+    }
+
     /// A link closed: each circuit on it ends.
     pub fn link_closed(&mut self, link: LinkId) -> Vec<Action> {
         let on_link: Vec<CircuitKey> = self
@@ -431,11 +501,13 @@ impl CircuitTable {
             .filter(|(next, _)| next.link == link)
             .map(|(_, client_side)| *client_side)
             .collect();
-        on_link
+        let actions = on_link
             .into_iter()
             .chain(behind)
             .flat_map(|key| self.end(key, Some(link)))
-            .collect()
+            .collect();
+        self.budgets.remove(&link);
+        actions
     }
 
     /// Ends each circuit past `CIRCUIT_MAX_AGE` or past `CIRCUIT_MAX_CELLS`
@@ -452,5 +524,41 @@ impl CircuitTable {
             .map(|(key, _)| *key)
             .collect();
         aged.into_iter().flat_map(|key| self.close(key)).collect()
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_client_link_builds_its_burst_then_one_each_second() {
+        let mut budget = LinkBudget::new(100);
+        // NET-332: the burst passes, and the build after it does not.
+        for _ in 0..LINK_BUILD_BURST {
+            assert!(budget.take(100));
+        }
+        assert!(!budget.take(100));
+        // Five seconds give five builds back.
+        for _ in 0..5 {
+            assert!(budget.take(105));
+        }
+        assert!(!budget.take(105));
+    }
+
+    #[test]
+    fn a_client_link_holds_at_most_its_circuits() {
+        let mut budget = LinkBudget::new(0);
+        let mut now = 0;
+        while budget.circuits < LINK_CIRCUITS_MAX {
+            now += 1;
+            assert!(budget.take(now));
+        }
+        // NET-331: the next build fails even with builds in hand.
+        now += 1_000;
+        assert!(!budget.take(now));
+        budget.circuits -= 1;
+        assert!(budget.take(now));
     }
 }

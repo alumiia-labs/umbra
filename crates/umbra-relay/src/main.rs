@@ -28,6 +28,10 @@
 //! keyset=/etc/umbra/keyset.bin
 //! ```
 //!
+//! The lines `max_connections=` and `max_conns_per_ip=` change the limits of
+//! Part 3 `NET-333` and `NET-334`. An ingress relay applies the second one,
+//! and a value of 0 turns it off.
+//!
 //! A test network on one machine can list a relay at an address that names
 //! this machine from an emulator, as `10.0.2.2` does. The line
 //! `host_alias=10.0.2.2` makes this relay dial `127.0.0.1` in its place.
@@ -89,7 +93,9 @@ use umbra_crypto::{
 use umbra_relay::{
     node::{Config, RelayNode},
     placement::placement,
-    server::{run_relay, tls_acceptor, Carried, OhttpForward, OsRng, PACING_MEAN_MS},
+    server::{
+        run_relay, tls_acceptor, Carried, ConnectionLimits, OhttpForward, OsRng, PACING_MEAN_MS,
+    },
     sqlite_store::SqliteStore,
     store::{MemoryStore, RelayStore},
 };
@@ -144,6 +150,8 @@ struct Settings {
     /// What this relay declares of itself for a network descriptor: the
     /// operator, the country, the autonomous system, and the IPv4 /16.
     facts: BTreeMap<String, String>,
+    /// The limits of the connections (Part 3 `NET-333` to `NET-335`).
+    limits: ConnectionLimits,
 }
 
 /// Reads the settings file. With `takes_place` the relay reads its layer
@@ -293,6 +301,20 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
         identities,
         identity,
         manifest,
+        // NET-334: the clients arrive at an ingress relay alone, thus the
+        // cap of one address applies there.
+        limits: ConnectionLimits {
+            max_connections: match values.get("max_connections") {
+                Some(count) => count.parse().ok()?,
+                None => ConnectionLimits::CONN_MAX,
+            },
+            per_ip_max: match (layer, values.get("max_conns_per_ip")) {
+                (_, Some(count)) => count.parse().ok()?,
+                (1, None) => ConnectionLimits::CONN_PER_IP,
+                _ => 0,
+            },
+            ..ConnectionLimits::default()
+        },
         ohttp_gateway: match values.get("ohttp_gateway") {
             Some(url) => Some(https::Url::parse(url)?),
             None => None,
@@ -562,6 +584,7 @@ async fn run() -> ExitCode {
             }),
             // NTF-127: the route of the pushes of this queue relay.
             ndr: settings.ndr_route.map(|route| (route, client_tls.clone())),
+            limits: settings.limits,
             ..Carried::default()
         },
     )

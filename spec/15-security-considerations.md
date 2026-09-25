@@ -302,6 +302,8 @@ commit. §15.8 makes this table a published promise.
 | Deanonymization of a sealed sender through delivery receipts | Part 3 §3.5.4 — a receipt is an ordinary padded message, and it is off by default. A receipt rides a cover slot, and it replaces the cover cell of that slot |
 | Bandwidth inflation (177×, 420×, 28×) | Part 10 §10.2 — discrete classes limit it to 4× in one 7-day epoch and to 64× over the ladder |
 | Sybil flooding (KAX17) | Part 10 §10.7 — staging with an automated sybilhunter |
+| A flood of connections, TLS handshakes, or circuit builds at an ingress relay | Part 3 §3.4.3 — `NET-331` to `NET-335` cap the circuits and the builds of one link, the connections of one address, and the handshakes that run at once. An attacker with many addresses still costs the relay the work of those caps, and §15.3 records it |
+| A flood of attachment storage | Part 13 §13.8.1 — a solution admits `POW_CHUNK_ALLOWANCE` registrations and no more, thus a flood pays a puzzle for each 2 MiB |
 | Directory equivocation (IEEE S&P 2024) | Part 10 §10.5 — a 5-of-7 Byzantine broadcast with in-band gossip |
 | Performance-adaptive selection as an oracle (PETS 2011) | Part 10 §10.6.2 — **[SEC-004]** local performance MUST NOT replace a relay |
 | A group-membership beacon (the "flurry" attack) | Part 11 §11.3.4 — a member posts one record for each message, thus no burst exists to observe. The timeline of the group-queue relay is the observable that remains, and §15.3 records it |

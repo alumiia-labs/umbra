@@ -5,7 +5,11 @@
 
 use std::{
     collections::BTreeMap,
-    sync::Arc,
+    net::IpAddr,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -288,6 +292,68 @@ pub struct OhttpForward {
 }
 
 /// What a relay carries over HTTPS beside the upgrade: the manifest of
+/// The limits of the connections of one relay (Part 3 `NET-333` to
+/// `NET-335`).
+#[derive(Debug, Clone, Copy)]
+pub struct ConnectionLimits {
+    /// `RELAY_CONN_MAX`: the connections that the relay holds at once.
+    pub max_connections: usize,
+    /// `RELAY_CONN_PER_IP`: the connections of one address at once, or 0
+    /// for none. An ingress relay sets it; a loopback address is exempt.
+    pub per_ip_max: usize,
+    /// `RELAY_HANDSHAKES_MAX`: the TLS handshakes that run at once.
+    pub handshakes_max: usize,
+    /// `RELAY_HANDSHAKE_TIMEOUT`: the time from the accept to the upgrade.
+    pub handshake_timeout: Duration,
+}
+
+impl ConnectionLimits {
+    /// `RELAY_CONN_MAX` of Part 3 §3.13.
+    pub const CONN_MAX: usize = 20_000;
+    /// `RELAY_CONN_PER_IP` of Part 3 §3.13.
+    pub const CONN_PER_IP: usize = 32;
+    /// `RELAY_HANDSHAKES_MAX` of Part 3 §3.13.
+    pub const HANDSHAKES_MAX: usize = 512;
+    /// `RELAY_HANDSHAKE_TIMEOUT` of Part 3 §3.13.
+    pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+}
+
+impl Default for ConnectionLimits {
+    fn default() -> Self {
+        ConnectionLimits {
+            max_connections: Self::CONN_MAX,
+            per_ip_max: 0,
+            handshakes_max: Self::HANDSHAKES_MAX,
+            handshake_timeout: Self::HANDSHAKE_TIMEOUT,
+        }
+    }
+}
+
+/// The connections of each address that the per-address cap counts.
+type PerIp = Arc<Mutex<BTreeMap<IpAddr, usize>>>;
+
+/// One held connection: it counts against the limits until it drops.
+struct Held {
+    open: Arc<AtomicUsize>,
+    per_ip: Option<(PerIp, IpAddr)>,
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.open.fetch_sub(1, Ordering::Relaxed);
+        if let Some((per_ip, ip)) = &self.per_ip {
+            if let Ok(mut held) = per_ip.lock() {
+                if let Some(count) = held.get_mut(ip) {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        held.remove(ip);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Part 3 §3.10, the OHTTP relay role of Part 8 §8.2, and the route of the
 /// pushes of its own queues.
 #[derive(Default)]
@@ -303,6 +369,8 @@ pub struct Carried {
     /// The newest challenge of each relay, which a carrier of the manifest
     /// serves beside it (`ABU-104`). The node moves it.
     pub challenges: std::sync::Mutex<Vec<u8>>,
+    /// The limits of the connections (`NET-333` to `NET-335`).
+    pub limits: ConnectionLimits,
 }
 
 /// Forwards one encapsulated request to the gateway and gives its answer
@@ -355,6 +423,8 @@ pub async fn serve_connection<S>(
 {
     let mut inbound: Vec<u8> = Vec::with_capacity(4_096);
     let mut chunk = vec![0u8; 16_384];
+    // NET-335: a peer that sends no complete request in time is closed.
+    let deadline = tokio::time::Instant::now() + carried.limits.handshake_timeout;
     let request = loop {
         if inbound.starts_with(format!("POST {OHTTP_PATH} ").as_bytes()) {
             relay_ohttp(&mut stream, &mut inbound, carried.ohttp.as_ref()).await;
@@ -396,8 +466,8 @@ pub async fn serve_connection<S>(
             Ok(None) if inbound.len() <= 8_192 => {}
             _ => return,
         }
-        match stream.read(&mut chunk).await {
-            Ok(n) if n > 0 => inbound.extend_from_slice(chunk.get(..n).unwrap_or(&[])),
+        match tokio::time::timeout_at(deadline, stream.read(&mut chunk)).await {
+            Ok(Ok(n)) if n > 0 => inbound.extend_from_slice(chunk.get(..n).unwrap_or(&[])),
             _ => return,
         }
     };
@@ -475,9 +545,40 @@ pub async fn accept_loop(
     carried: Arc<Carried>,
 ) {
     let mut link: LinkId = 2;
+    let limits = carried.limits;
+    let open = Arc::new(AtomicUsize::new(0));
+    let per_ip: PerIp = Arc::new(Mutex::new(BTreeMap::new()));
+    let handshakes = Arc::new(tokio::sync::Semaphore::new(limits.handshakes_max));
     loop {
-        let Ok((tcp, _)) = listener.accept().await else {
+        let Ok((tcp, address)) = listener.accept().await else {
             return;
+        };
+        // NET-333: a relay at its cap closes a new connection at once.
+        if open.load(Ordering::Relaxed) >= limits.max_connections {
+            continue;
+        }
+        // NET-334: one address holds at most its share at an ingress relay.
+        let ip = address.ip();
+        let counted = limits.per_ip_max > 0 && !ip.is_loopback();
+        if counted {
+            let Ok(mut held) = per_ip.lock() else {
+                continue;
+            };
+            let count = held.entry(ip).or_insert(0);
+            if *count >= limits.per_ip_max {
+                continue;
+            }
+            *count += 1;
+        }
+        open.fetch_add(1, Ordering::Relaxed);
+        let held = Held {
+            open: open.clone(),
+            per_ip: counted.then(|| (per_ip.clone(), ip)),
+        };
+        // NET-335: the TLS handshakes that run at once are bounded, thus a
+        // flood of them costs the relay a fixed amount of work.
+        let Ok(permit) = handshakes.clone().try_acquire_owned() else {
+            continue;
         };
         let _ = tcp.set_nodelay(true);
         let tls = tls.clone();
@@ -486,7 +587,10 @@ pub async fn accept_loop(
         let this_link = link;
         link = link.saturating_add(2);
         tokio::spawn(async move {
-            if let Ok(stream) = tls.accept(tcp).await {
+            let _held = held;
+            let accepted = tokio::time::timeout(limits.handshake_timeout, tls.accept(tcp)).await;
+            drop(permit);
+            if let Ok(Ok(stream)) = accepted {
                 serve_connection(stream, this_link, node, carried).await;
             }
         });
