@@ -109,6 +109,61 @@ fun AutoLockScreen(onBack: () -> Unit) {
     }
 }
 
+private val MIB = 1_024uL * 1_024uL
+
+/** The choices of the automatic download limit (`IMP-167`). */
+private val AutoDownloadChoices = listOf(
+    0uL to "Off",
+    1uL * MIB to "Up to 1 MB",
+    5uL * MIB to "Up to 5 MB",
+    25uL * MIB to "Up to 25 MB",
+    100uL * MIB to "Up to 100 MB",
+    ULong.MAX_VALUE to "Any size",
+)
+
+/** The words of the limit in the row of the settings. */
+fun autoDownloadLabel(bytes: ULong): String =
+    AutoDownloadChoices.firstOrNull { it.first == bytes }?.second ?: "Up to ${bytes / MIB} MB"
+
+/**
+ * The automatic download limit of this device (`IMP-167`). A photo, a
+ * video, or a file above it shows its preview and its size, and it comes at
+ * a tap.
+ */
+@Composable
+fun AutoDownloadScreen(onBack: () -> Unit) {
+    var chosen by remember { mutableStateOf(Core.autoDownloadLimit) }
+    Column(Modifier.fillMaxSize()) {
+        BackBar("Automatic download", onBack = onBack)
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
+            Spacer(Modifier.height(8.dp))
+            for ((bytes, title) in AutoDownloadChoices) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .pressShadeInColumn()
+                        .press(role = Role.RadioButton) { chosen = bytes }
+                        .padding(horizontal = PressInset, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    RadioMark(isChosen = chosen == bytes)
+                    Spacer(Modifier.width(14.dp))
+                    Text(title)
+                }
+                HorizontalDivider(color = Palette.Divider)
+            }
+            Spacer(Modifier.height(14.dp))
+            PrimaryButton("Save") {
+                Core.setAutoDownload(chosen)
+                onBack()
+            }
+            Spacer(Modifier.height(14.dp))
+            // A fact that a user cannot know, and that decides the choice above.
+            Note("A download at a tap shows the relays of the file when you opened the chat.")
+        }
+    }
+}
+
 /** The mark of one choice of a list, as the mockups draw it. */
 @Composable
 fun RadioMark(isChosen: Boolean) {

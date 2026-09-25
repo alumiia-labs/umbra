@@ -331,7 +331,10 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                     // the message that it answers.
                     onQuote = when {
                         line.info.deleted -> null
-                        line.info.file?.state?.toInt() == FILE_FAILED -> ({ Core.fetchFile(line.handle) })
+                        // IMP-167: a tap fetches a file that waits above the
+                        // limit, and a file that failed.
+                        line.info.file?.state?.toInt() == FILE_FAILED ||
+                            line.info.file?.state?.toInt() == FILE_HELD -> ({ Core.fetchFile(line.handle) })
                         line.info.file?.state?.toInt() == FILE_READY -> when (line.info.file?.mimeClass) {
                             CLASS_IMAGE -> ({ push(Screen.Photo(conversation, line)) })
                             CLASS_VIDEO -> ({ push(Screen.Video(conversation, line)) })

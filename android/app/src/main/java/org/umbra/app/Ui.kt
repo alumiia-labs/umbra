@@ -56,6 +56,7 @@ sealed interface Screen {
     data object AppLock : Screen
     data object Connection : Screen
     data object AutoLock : Screen
+    data object AutoDownload : Screen
     data object ChangePassphrase : Screen
     data object RecoveryCode : Screen
     data class Chat(val conversation: Conversation) : Screen
@@ -176,6 +177,7 @@ private fun OpenApp() {
             Screen.AppLock -> AppLockScreen(pop, push)
             Screen.Connection -> ConnectionScreen(pop)
             Screen.AutoLock -> AutoLockScreen(pop)
+            Screen.AutoDownload -> AutoDownloadScreen(pop)
             Screen.ChangePassphrase -> ChangePassphraseScreen(pop)
             Screen.RecoveryCode -> RecoveryCodeScreen(pop)
             else -> {
@@ -518,6 +520,9 @@ private fun SettingsTab(push: (Screen) -> Unit) {
         // Mockup 105: this row leads to the settings of the lock. The lock
         // itself is the icon of the bar.
         SettingRow("lock", "App lock", "Passphrase and auto-lock") { push(Screen.AppLock) }
+        SettingRow("download", "Automatic download", autoDownloadLabel(Core.autoDownloadLimit)) {
+            push(Screen.AutoDownload)
+        }
         val context = LocalContext.current
         LaunchedEffect(Unit) { Core.readBackup() }
         val backupAt = Core.lastBackupAt

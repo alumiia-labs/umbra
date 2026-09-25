@@ -218,6 +218,7 @@ object Core {
         // The store holds each contact, thus the list needs no network.
         val stored = summaries(opened)
         val idleSeconds = opened.autoLockSeconds().toLong()
+        val downloadLimit = opened.autoDownloadLimit()
         val backupAt = opened.lastBackupAt()?.toLong()
         BuildNetwork.network(app, opened)?.let(opened::connect)
         drain(opened, app)
@@ -225,6 +226,7 @@ object Core {
             chats.clear()
             chats.addAll(stored)
             autoLockSeconds = idleSeconds
+            autoDownloadLimit = downloadLimit
             lastBackupAt = backupAt
             restoreNote = null
             phase = Phase.Open
@@ -479,6 +481,7 @@ object Core {
                 groupJoiners.clear()
                 images.clear()
                 decoding.clear()
+                previews.clear()
                 // IMP-161: a draft that waits holds its file in the clear.
                 cancelSend()
                 online = false
@@ -567,6 +570,18 @@ object Core {
     fun wake(context: Context) {
         val app = context.applicationContext
         main.post { if (isOpen() && !online) connect(app) }
+    }
+
+    /**
+     * The largest file that arrives by itself, in bytes (`IMP-167`). Zero
+     * is off, and `ULong.MAX_VALUE` is each file.
+     */
+    var autoDownloadLimit by mutableStateOf(25uL * 1_024uL * 1_024uL)
+        private set
+
+    fun setAutoDownload(bytes: ULong) = call { client ->
+        client.setAutoDownloadLimit(bytes)
+        main.post { autoDownloadLimit = bytes }
     }
 
     fun setAutoLock(seconds: Long) = call { client ->
@@ -1003,6 +1018,28 @@ object Core {
     }
 
     private val images = androidx.compose.runtime.mutableStateMapOf<List<Byte>, androidx.compose.ui.graphics.ImageBitmap>()
+
+    /**
+     * The thumbnail that the sender put in the record of a photo or a video
+     * (`WIR-533`), or null while a worker decodes it. A lock drops it.
+     */
+    fun preview(line: Line): androidx.compose.ui.graphics.ImageBitmap? {
+        previews[line.key]?.let { return it }
+        if (decoding.add(listOf<Byte>(0x70) + line.key)) {
+            call { client ->
+                val decoder = Photos.Decoder()
+                try {
+                    client.msgPreview(line.handle, decoder)
+                } catch (absent: FfiException) {
+                    // The record carries no preview.
+                }
+                main.post { decoder.image?.let { previews[line.key] = it } }
+            }
+        }
+        return null
+    }
+
+    private val previews = androidx.compose.runtime.mutableStateMapOf<List<Byte>, androidx.compose.ui.graphics.ImageBitmap>()
     private val decoding = mutableSetOf<List<Byte>>()
 
     /** Adds a reaction of this device to a message, or takes it away. */

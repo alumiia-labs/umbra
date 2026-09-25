@@ -90,6 +90,10 @@ const val MAX_FILE_SIZE = 250L * 1_024 * 1_024
  */
 private const val UPLINK_FACTOR = 1.04
 
+/** `PREVIEW_SIDE` and `PREVIEW_MAX` of Part 12 §12.7. */
+private const val PREVIEW_SIDE = 128
+private const val PREVIEW_MAX = 6_144
+
 /** The longest side of the frame of a video in a bubble. */
 private const val FRAME_SIDE_MAX = 720
 
@@ -165,7 +169,7 @@ object Files {
             null
         } ?: return false
         return throughPipe(input) { path ->
-            draft.attachFile(path, classOf(picked.mime), 0u, 0u, 0u, picked.name)
+            draft.attachFile(path, classOf(picked.mime), 0u, 0u, 0u, picked.name, null)
         }
     }
 
@@ -275,6 +279,7 @@ object Files {
                 if (bytes > MAX_FILE_SIZE) return -1
                 val (shownW, shownH) = if (rotation % 180 == 0) width to height else height to width
                 val seconds = (micros / 1_000_000).coerceIn(0, 65_535)
+                val preview = videoThumbnail(context, source)
                 Os.lseek(memory, 0, android.system.OsConstants.SEEK_SET)
                 val isGiven = throughPipe(java.io.FileInputStream(memory)) { path ->
                     draft.attachFile(
@@ -284,6 +289,7 @@ object Files {
                         shownH.coerceIn(0, 65_535).toUShort(),
                         seconds.toInt().toUShort(),
                         null,
+                        preview,
                     )
                 }
                 return if (isGiven) bytes else -1
@@ -349,6 +355,50 @@ object Files {
             return i
         }
         return -1
+    }
+
+    /**
+     * The thumbnail of a photo or of the first frame of a video that the
+     * record carries (`ATT-194`): a new JPEG of low quality, at most
+     * `PREVIEW_SIDE` on its longest side and `PREVIEW_MAX` in bytes. A new
+     * JPEG holds no metadata field.
+     */
+    fun thumbnail(picture: Bitmap): ByteArray? {
+        val longest = maxOf(picture.width, picture.height).coerceAtLeast(1)
+        val scale = minOf(1f, PREVIEW_SIDE.toFloat() / longest)
+        val small = Bitmap.createScaledBitmap(
+            picture,
+            (picture.width * scale).toInt().coerceAtLeast(1),
+            (picture.height * scale).toInt().coerceAtLeast(1),
+            true,
+        )
+        try {
+            for (quality in intArrayOf(60, 45, 30, 20)) {
+                val out = java.io.ByteArrayOutputStream()
+                small.compress(Bitmap.CompressFormat.JPEG, quality, out)
+                val bytes = out.toByteArray()
+                if (bytes.size <= PREVIEW_MAX) return bytes
+                bytes.fill(0)
+            }
+            return null
+        } finally {
+            if (small !== picture) small.recycle()
+        }
+    }
+
+    /** The first frame of a picked video, as a thumbnail. */
+    private fun videoThumbnail(context: Context, source: Uri): ByteArray? {
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(context, source)
+            retriever.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)?.let { frame ->
+                thumbnail(frame).also { frame.recycle() }
+            }
+        } catch (unreadable: Exception) {
+            null
+        } finally {
+            retriever.release()
+        }
     }
 
     /** The data that an upload of `bytes` spends (`ATT-083`). */
@@ -437,7 +487,8 @@ fun VideoTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
     val height = file.pixelH.toInt().coerceAtLeast(1)
     val ratio = (width.toFloat() / height).coerceIn(0.5f, 2f)
     val isHeld = state == FILE_READY || line.info.outgoing
-    val frame = if (isHeld) Core.frame(line) else null
+    // A video that did not come yet shows the thumbnail of its record.
+    val frame = if (isHeld) Core.frame(line) else if (file.hasPreview) Core.preview(line) else null
     Box(
         modifier
             .width(if (ratio >= 1f) 240.dp else 200.dp)
@@ -454,16 +505,20 @@ fun VideoTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
                 modifier = Modifier.fillMaxSize().alpha(if (state == FILE_READY) 1f else 0.55f),
             )
         }
-        Box(
-            Modifier.size(48.dp).background(Color.Black.copy(alpha = 0.5f), CircleShape),
-            contentAlignment = Alignment.Center,
-        ) {
-            val icon = when (state) {
-                FILE_FAILED -> "rotate"
-                FILE_READY -> "play"
-                else -> "film"
+        if (isHeld) {
+            Box(
+                Modifier.size(48.dp).background(Color.Black.copy(alpha = 0.5f), CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                val icon = when (state) {
+                    FILE_FAILED -> "rotate"
+                    FILE_READY -> "play"
+                    else -> "film"
+                }
+                FaIcon(icon, size = 18.dp, tint = Color.White)
             }
-            FaIcon(icon, size = 18.dp, tint = Color.White)
+        } else {
+            TransferMark(file)
         }
         Text(
             buildString {
@@ -479,6 +534,42 @@ fun VideoTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
                 .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(6.dp))
                 .padding(horizontal = 6.dp, vertical = 2.dp),
         )
+    }
+}
+
+/**
+ * The mark over a received photo or video that the store does not hold: a
+ * download and the size while it waits for a tap (`IMP-167`), the share of
+ * a download that runs, and a new attempt after a failure.
+ */
+@Composable
+fun TransferMark(file: MsgFile) {
+    val context = LocalContext.current
+    val state = file.state.toInt()
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Box(
+            Modifier.size(48.dp).background(Color.Black.copy(alpha = 0.55f), CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            val share = progressOf(file)
+            when {
+                state == FILE_FAILED -> FaIcon("rotate", label = "Download again", size = 18.dp, tint = Color.White)
+                state == FILE_WANTED && share != null ->
+                    Text("$share %", style = MaterialTheme.typography.labelSmall, color = Color.White)
+                else -> FaIcon("download", label = "Download", size = 18.dp, tint = Color.White)
+            }
+        }
+        if (state == FILE_HELD) {
+            Spacer(Modifier.height(6.dp))
+            Text(
+                Files.size(context, file.size.toLong()),
+                style = MaterialTheme.typography.labelSmall,
+                color = Color.White,
+                modifier = Modifier
+                    .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(6.dp))
+                    .padding(horizontal = 6.dp, vertical = 2.dp),
+            )
+        }
     }
 }
 
@@ -505,7 +596,7 @@ fun FileTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
         ) {
             val icon = when {
                 state == FILE_FAILED -> "rotate"
-                state == FILE_WANTED -> "download"
+                state == FILE_WANTED || state == FILE_HELD -> "download"
                 file.mimeClass == CLASS_DOC -> "file-lines"
                 else -> "file"
             }
@@ -524,7 +615,7 @@ fun FileTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
                 buildString {
                     // A size before the download is the padded size, thus
                     // it says "about".
-                    if (state == FILE_WANTED) append("About ")
+                    if (state == FILE_WANTED || state == FILE_HELD) append("About ")
                     append(Files.size(context, file.size.toLong()))
                     when {
                         // The time line of a sent file holds its progress.
@@ -791,7 +882,8 @@ fun MediaScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                         MediaCell(line, Modifier.weight(1f)) {
                             val file = line.info.file ?: return@MediaCell
                             when {
-                                file.state.toInt() == FILE_FAILED -> Core.fetchFile(line.handle)
+                                file.state.toInt() == FILE_FAILED || file.state.toInt() == FILE_HELD ->
+                                    Core.fetchFile(line.handle)
                                 file.state.toInt() != FILE_READY && !line.info.outgoing -> Unit
                                 file.mimeClass == CLASS_VIDEO -> push(Screen.Video(chat.conversation, line))
                                 else -> push(Screen.Photo(chat.conversation, line))
@@ -821,7 +913,7 @@ fun MediaScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                         .fillMaxWidth()
                         .press(role = Role.Button, label = file.name ?: "File") {
                             when (file.state.toInt()) {
-                                FILE_FAILED -> Core.fetchFile(line.handle)
+                                FILE_FAILED, FILE_HELD -> Core.fetchFile(line.handle)
                                 FILE_READY -> save(line)
                                 else -> if (line.info.outgoing) save(line)
                             }
@@ -840,7 +932,7 @@ private fun MediaCell(line: Line, modifier: Modifier, onOpen: () -> Unit) {
     val isHeld = file.state.toInt() == FILE_READY || line.info.outgoing
     val isVideo = file.mimeClass == CLASS_VIDEO
     val image = when {
-        !isHeld -> null
+        !isHeld -> if (file.hasPreview) Core.preview(line) else null
         isVideo -> Core.frame(line)
         else -> Core.image(line)
     }

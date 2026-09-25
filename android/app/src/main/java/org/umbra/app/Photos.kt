@@ -52,6 +52,9 @@ const val FILE_WANTED = 2
 const val FILE_READY = 3
 const val FILE_FAILED = 4
 
+/** A received file above the automatic download limit, which waits for a tap (`IMP-167`). */
+const val FILE_HELD = 5
+
 /** The longest side of a photo after the re-encode. */
 private const val PHOTO_SIDE_MAX = 2_048
 
@@ -94,6 +97,8 @@ object Photos {
             if (encoded.size <= PHOTO_BYTES_MAX) break
         }
         val (width, height) = bitmap.width to bitmap.height
+        // ATT-194: the record carries a thumbnail of the re-encoded photo.
+        val preview = Files.thumbnail(bitmap)
         bitmap.recycle()
         if (encoded.size > PHOTO_BYTES_MAX) {
             encoded.fill(0)
@@ -119,6 +124,7 @@ object Photos {
                 0u,
                 // ATT-192: a photo carries no name.
                 null,
+                preview,
             )
             true
         } catch (refused: Exception) {
@@ -168,6 +174,8 @@ fun PhotoTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
     // starts a failed transfer again, and it opens a photo that is there.
     val isHeld = state == FILE_READY || line.info.outgoing
     val image = if (isHeld) Core.image(line) else null
+    // A photo that did not come yet shows the thumbnail of its record.
+    val preview = if (image == null && file.hasPreview) Core.preview(line) else null
     val canRetry = state == FILE_FAILED
     Box(
         modifier
@@ -186,6 +194,16 @@ fun PhotoTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
                 modifier = Modifier.matchParentSize().alpha(if (state == FILE_READY) 1f else 0.55f),
             )
             if (canRetry) FaIcon("rotate", label = "Send the photo again", size = 22.dp, tint = Palette.Text)
+        } else if (preview != null) {
+            Image(
+                preview,
+                contentDescription = "Photo preview",
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.matchParentSize(),
+            )
+            TransferMark(file)
+        } else if (state == FILE_HELD) {
+            TransferMark(file)
         } else {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 FaIcon(if (canRetry) "rotate" else "image", size = 22.dp, tint = Palette.TextSecondary)
