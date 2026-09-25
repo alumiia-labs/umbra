@@ -63,18 +63,10 @@ fun AddContactScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
             Spacer(Modifier.height(24.dp))
             Headline("A private way to say hello.")
             Spacer(Modifier.height(20.dp))
-            Column(
-                Modifier
-                    .fillMaxWidth()
-                    .background(Palette.Raised, RoundedCornerShape(16.dp))
-                    .border(1.dp, Palette.Divider, RoundedCornerShape(16.dp))
-                    .padding(16.dp),
-            ) {
-                PrimaryButton("Create invitation", enabled = Core.online) {
-                    Core.invitation = null
-                    Core.invite()
-                    push(Screen.YourInvitation)
-                }
+            PrimaryButton("Create invitation", enabled = Core.online) {
+                Core.invitation = null
+                Core.invite()
+                push(Screen.YourInvitation)
             }
             if (!Core.online) {
                 Spacer(Modifier.height(10.dp))

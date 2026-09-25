@@ -1,7 +1,8 @@
 package org.umbra.app
 
-import androidx.compose.foundation.border
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -10,6 +11,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -26,6 +28,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 
@@ -166,11 +170,7 @@ fun AutoDownloadScreen(onBack: () -> Unit) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text("Only on Wi-Fi", modifier = Modifier.weight(1f))
-                androidx.compose.material3.Switch(
-                    checked = wifiOnly,
-                    onCheckedChange = null,
-                    enabled = chosen != 0uL,
-                )
+                SwitchMark(isOn = wifiOnly, enabled = chosen != 0uL)
             }
             HorizontalDivider(color = Palette.Divider)
             Spacer(Modifier.height(14.dp))
@@ -182,6 +182,26 @@ fun AutoDownloadScreen(onBack: () -> Unit) {
             // A fact that a user cannot know, and that decides the choice above.
             Note("A download at a tap shows the relays of the file when you opened the chat.")
         }
+    }
+}
+
+/**
+ * The mark of a switch in the weight of [RadioMark]: a ring track and a
+ * dot. The row around it takes the tap.
+ */
+@Composable
+fun SwitchMark(isOn: Boolean, enabled: Boolean = true) {
+    val offset by animateDpAsState(if (isOn) 16.dp else 0.dp, label = "switch")
+    val tint = if (isOn) Palette.Action else Palette.Outline
+    Box(
+        Modifier
+            .alpha(if (enabled) 1f else 0.4f)
+            .size(width = 36.dp, height = 20.dp)
+            .background(if (isOn) Palette.Container else Color.Transparent, CircleShape)
+            .border(2.dp, tint, CircleShape)
+            .padding(4.dp),
+    ) {
+        Box(Modifier.offset(x = offset).size(12.dp).background(tint, CircleShape))
     }
 }
 

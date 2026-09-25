@@ -7,8 +7,10 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -339,17 +341,17 @@ private fun TabsScreen(tab: Tab, onTab: (Tab) -> Unit, push: (Screen) -> Unit) {
                 ) { FaIcon("user-plus", label = "Add a contact", tint = Palette.Action) }
             }
         }
-        Row(Modifier.fillMaxWidth().background(Palette.Incoming).padding(vertical = 6.dp)) {
+        Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min).background(Palette.Incoming)) {
             for (entry in Tab.entries) {
                 val isSelected = entry == tab
-                // The press shade takes the shape of the item with room
-                // around it, and not the whole third of the bar.
-                Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                // The press shade fills the third of the bar that the item
+                // holds, square and against its neighbours.
                 Column(
                     Modifier
-                        .clip(RoundedCornerShape(20.dp))
+                        .weight(1f)
+                        .fillMaxHeight()
                         .press(role = Role.Tab) { onTab(entry) }
-                        .padding(horizontal = 22.dp, vertical = 6.dp),
+                        .padding(vertical = 12.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     Box(
@@ -364,7 +366,6 @@ private fun TabsScreen(tab: Tab, onTab: (Tab) -> Unit, push: (Screen) -> Unit) {
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
                     )
-                }
                 }
             }
         }
