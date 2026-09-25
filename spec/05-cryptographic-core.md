@@ -1511,6 +1511,11 @@ names the object type and its lifetime:
 "umbra/v1/at-rest-wrap"
 "umbra/v1/table-mac"
 "umbra/v1/sync-seed"
+"umbra/v1/link-offer"
+"umbra/v1/link-hello"
+"umbra/v1/link-transcript"
+"umbra/v1/link-code"
+"umbra/v1/link-provision"
 "umbra/v1/handle-write"
 "umbra/v1/address-index"
 "umbra/v1/hello"
@@ -1525,6 +1530,11 @@ names the object type and its lifetime:
 list does not hold. **[CRY-029]** A revision that needs a new label MUST add that label to
 this list. **[CRY-030]** That revision MUST give the cause. §5.1 closes the
 primitive register in the same manner.
+
+> *The cause of the five link labels.* Part 7 §7.4 links a device over
+> handle-addressed chunks. The offer and the hello each need a slot of their
+> own, the transcript and the code each need a hash of their own, and the
+> provision needs a slot and a seal key that only the two devices derive.
 
 > *The cause of the two blob labels.* Part 4 §4.3.1 derives the key of the
 > invitation blob from a link fragment. Part 9 §9.3.1 derives the key of the

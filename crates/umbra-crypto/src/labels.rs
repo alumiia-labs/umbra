@@ -80,6 +80,11 @@ labels! {
     AT_REST_WRAP = "umbra/v1/at-rest-wrap";
     RECORD_KEY = "umbra/v1/record-key";
     SYNC_SEED = "umbra/v1/sync-seed";
+    LINK_OFFER = "umbra/v1/link-offer";
+    LINK_HELLO = "umbra/v1/link-hello";
+    LINK_TRANSCRIPT = "umbra/v1/link-transcript";
+    LINK_CODE = "umbra/v1/link-code";
+    LINK_PROVISION = "umbra/v1/link-provision";
     ADDRESS_INDEX = "umbra/v1/address-index";
     HANDLE_WRITE = "umbra/v1/handle-write";
     HELLO_SEED = "umbra/v1/hello-seed";

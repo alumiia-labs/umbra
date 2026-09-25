@@ -473,6 +473,9 @@ side channel that the user selects, such as a QR code scan.
 | `EpochKeyBody`, `KemSlot`, `SlotPayload` | Part 6 §6.4.6 | `GroupQueueRecord`, kind `0x02`, or the chunk path of Part 12 §12.3.3 | Client |
 | `NotifyRegistration` for a group | Part 6 §6.4.5 | `GNREG` and `GNUNREG`, Part 6 §6.4.5 | Client |
 | `NotifyDigest` | Part 8 §8.5.1 | `SEND`, as the L6 record of kind `0x04` | Group-queue relay |
+| `LinkTicket` | Part 7 §7.4 | The QR code of the existing device | Client |
+| `LinkOffer`, `LinkHello` | Part 7 §7.4 | A handle-addressed chunk of Part 12 §12.4.2 | Client |
+| `Provision` | Part 7 §7.4 | A handle-addressed chunk of Part 12 §12.4.2, sealed | Client |
 | `JoinRecord` | Part 6 §6.6.3 | `GroupControl`, type `0x02`, on the pairwise channel of the invitee to the inviter | Client |
 | `GroupInvitation` | Part 6 §6.6.3 | `GroupControl`, type `0x07`, on the pairwise channel of the inviter to the invitee | Client |
 | `SnapshotNotice` | Part 6 §6.6.3 | `GroupQueueRecord`, as `GroupControl` type `0x08` | Client |
@@ -491,7 +494,7 @@ side channel that the user selects, such as a QR code scan.
 | `PowSolution` | Part 13 §13.8 | `Admission` | Client |
 | Cross-relay token, first-party token | The RFC of each type, Part 13 §13.3 | none | Issuer, Part 13 §13.9 |
 
-The table has 94 rows, and 21 of them hold at least one `none` cell.
+The table has 97 rows, and 21 of them hold at least one `none` cell.
 `Cell` has two definitions, and the two agree field for field.
 
 - **[SCP-011]** A revision MUST NOT add a requirement that names an artifact

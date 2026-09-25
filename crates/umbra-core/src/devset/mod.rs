@@ -5,6 +5,7 @@
 pub mod claim;
 pub mod edits;
 pub mod engine;
+pub mod link;
 pub mod revocation;
 pub mod roster;
 pub mod seed;

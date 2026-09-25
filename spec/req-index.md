@@ -70,7 +70,7 @@ each column when a crate implements the requirement and a test covers it.
 | `IDN` | 128 | 44 | 1 | 0 | 5 | **178** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
 | `WIR` | 393 | 85 | 0 | 0 | 7 | **485** |
-| `DEV` | 176 | 86 | 0 | 0 | 7 | **269** |
+| `DEV` | 183 | 87 | 0 | 0 | 7 | **277** |
 | `NTF` | 74 | 28 | 0 | 0 | 3 | **105** |
 | `DIS` | 109 | 33 | 0 | 0 | 1 | **143** |
 | `REL` | 124 | 32 | 1 | 0 | 2 | **159** |
@@ -79,7 +79,7 @@ each column when a crate implements the requirement and a test covers it.
 | `ABU` | 66 | 30 | 1 | 0 | 0 | **97** |
 | `IMP` | 114 | 41 | 0 | 0 | 2 | **157** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 1940 | 612 | 7 | 0 | 50 | **2609** |
+| **All** | 1947 | 613 | 7 | 0 | 50 | **2617** |
 
 ## SCP — Scope and Conventions
 
@@ -1309,9 +1309,9 @@ Source: `spec/07-device-sets.md`
 | ID | Section | Key word | Binds | Requirement | Module | Test |
 | --- | --- | --- | --- | --- | --- | --- |
 | `DEV-001` | §7.3.1 | MUST NOT | A device | A device MUST NOT give the roster to a relay in plaintext. |  |  |
-| `DEV-002` | §7.4 | MUST | The device | The device MUST send the provisioning payload over a fresh ephemeral queue. |  |  |
-| `DEV-003` | §7.4 | MUST | The device | The device MUST delete that queue directly after the use. |  |  |
-| `DEV-004` | §7.4 | MUST | The provisioning payload | The provisioning payload MUST carry the **local identity table** of Part 4 §4.7.2. |  |  |
+| `DEV-002` | §7.4 | MUST | The existing device | The existing device MUST write the provision under the provision slot and under no other handle. |  |  |
+| `DEV-003` | §7.4 | MUST | The existing device | The existing device MUST erase the offer and the provision after the new device took it, or at `LINK_QR_TTL` after the offer, whichever comes first. |  |  |
+| `DEV-004` | §7.4 | MUST | The snapshot | The snapshot MUST be a full backup object of Part 4 §4.7.2 under a fresh file key. |  |  |
 | `DEV-005` | §7.4 | MUST | The link QR code | The link QR code MUST expire after 120 seconds. |  |  |
 | `DEV-006` | §7.4 | MUST | The link QR code | The link QR code MUST operate one time only. |  |  |
 | `DEV-007` | §7.4 | MUST | A device that has a provision | A device that has a provision MUST refuse a link into a second device set. |  |  |
@@ -1465,10 +1465,10 @@ Source: `spec/07-device-sets.md`
 | `DEV-162` | §7.3.1 | MUST NOT | A device | A device MUST NOT name a subject two times in one epoch. |  |  |
 | `DEV-163` | §7.3.1 | MUST | (unstated) | The provisioning payload of §7.4 MUST carry the current ownership table. |  |  |
 | `DEV-164` | §7.3.1 | MUST | A revision | A revision MUST derive this total again if it adds a field to `DeviceEntry` or raises `MAX_DEVICES`. |  |  |
-| `DEV-165` | §7.4 | MUST | The new device | The new device MUST make its own `DeviceKey` and its own `DeviceRosterKey` before step 5. |  |  |
-| `DEV-166` | §7.4 | MUST | The existing device | The existing device MUST put those public halves in the `DeviceEntry` of epoch *n+1. |  |  |
-| `DEV-167` | §7.4 | MUST NOT | The provisioning payload | The provisioning payload MUST NOT carry a `DeviceRosterKey` private half. |  |  |
-| `DEV-168` | §7.4 | MUST | The new device | The new device MUST send the public half of the two keypairs to the existing device over the channel of step 2. |  |  |
+| `DEV-165` | §7.4 | MUST | The new device | The new device MUST make its own `DeviceKey` and its own `DeviceRosterKey` before step 2. |  |  |
+| `DEV-166` | §7.4 | MUST | The existing device | The existing device MUST put those public halves in the `DeviceEntry` of epoch *n+1*. |  |  |
+| `DEV-167` | §7.4 | MUST NOT | The provision | The provision MUST NOT carry a `DeviceRosterKey` private half. |  |  |
+| `DEV-168` | §7.4 | MUST | The new device | The new device MUST send the public half of the two keypairs in its hello. |  |  |
 | `DEV-169` | §7.5.4 | MUST NOT | A device | A device MUST NOT claim the ownership of a subject before `OWNER_TIMEOUT` passes. |  |  |
 | `DEV-170` | §7.7 | MUST | (unstated) | A device that sees two verified epochs at one index from **one** `signer_id` MUST show the fork and MUST name that device. |  |  |
 | `DEV-171` | §7.7 | MUST NOT | That device | That device MUST NOT select one of the two silently. |  |  |
@@ -1577,6 +1577,14 @@ Source: `spec/07-device-sets.md`
 | `DEV-275` | §7.5.3 | MUST | A device | A device MUST add one to its `lamport` before each send of a counted record. |  |  |
 | `DEV-276` | §7.5.3 | MUST | A device | A device MUST reject a `SyncAck` whose `counter` is above its own causal counter, because no record holds that counter. |  |  |
 | `DEV-277` | §7.5.3 | MUST | A device | A device MUST retain a `MutableItem` for the resend of §7.5.5 under a reference to its row and its key, and not under its bytes. |  |  |
+| `DEV-280` | §7.4 | MUST | The existing device | The existing device MUST write the offer under the offer slot before it shows the ticket, and the ticket MUST carry the hash of that offer. |  |  |
+| `DEV-281` | §7.4 | MUST | The new device | The new device MUST reject an offer whose hash differs from the ticket, and it MUST write its hello under the hello slot. |  |  |
+| `DEV-282` | §7.4 | MUST | Each device | Each device MUST derive the transcript, the code, the provision slot, and the seal key as above. |  |  |
+| `DEV-283` | §7.4 | MUST NOT | (unstated) | The two devices MUST show the code of step 3, and the existing device MUST NOT write the provision before the user confirms on it that the two codes match. |  |  |
+| `DEV-284` | §7.4 | MUST | The new device | The new device MUST make its store from the root seed of the snapshot and take each row of it, as a restore does, and it MUST keep its own `DeviceKey`, `DeviceRosterKey`, and `device_id`. |  |  |
+| `DEV-285` | §7.4 | MUST | A device that holds no roster | A device that holds no roster MUST sign epoch 0 with itself alone before it offers its first link. |  |  |
+| `DEV-286` | §7.4 | MUST | The existing device | The existing device MUST put the bundle of a new invitation in the provision, and the new device MUST accept it at once. |  |  |
+| `DEV-287` | §7.4 | MUST | (unstated) | The existing device keeps the ownership of each pairwise ratchet and of each group sender at the link. |  |  |
 
 ## NTF — Notifications
 
