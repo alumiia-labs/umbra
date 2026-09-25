@@ -1070,7 +1070,14 @@ struct Inner {
     /// Whether this device owns the channels of the set. A linked device
     /// runs no contact, no group, and no backup (`DEV-287`).
     owns_channels: bool,
+    /// The time of the next record of a sync resend.
+    next_sync_resend: u64,
 }
+
+/// The time between two records of a sync resend, in seconds: the mean of
+/// the foreground cover clock of Part 3 §3.6.2, which is the ordinary send
+/// rate of a sync channel, thus a resend is no burst (`DEV-073`).
+const SYNC_RESEND_GAP: u64 = 20;
 
 /// A restore of Part 4 §4.7.2 while it runs: the root key of the entered
 /// code, the week whose root it reads, and the objects that it holds.
@@ -1810,6 +1817,21 @@ impl Inner {
     /// The dead-channel work of Part 3 §3.2.6 that is due: the silent
     /// channels once each hour, and the blobs of this device and of each
     /// peer.
+    /// One record of a sync resend at each `SYNC_RESEND_GAP` (`DEV-073`).
+    fn pump_sync_resend(&mut self, now: u64) {
+        if now < self.next_sync_resend {
+            return;
+        }
+        self.next_sync_resend = now.saturating_add(SYNC_RESEND_GAP);
+        let Inner { client, bridge, .. } = self;
+        let Some(running) = bridge.as_mut() else {
+            return;
+        };
+        if client.resend_one(&mut OsRng).unwrap_or(false) {
+            let _ = running.flush(client, &mut OsRng);
+        }
+    }
+
     /// The events of the network that belong to the link of a device.
     fn take_link_events(&mut self) {
         let mut kept = VecDeque::with_capacity(self.net_events.len());
@@ -2678,6 +2700,7 @@ fn handle_of(database_path: String, client: Client<SqliteBackend, ForeignElement
             link: None,
             link_serial: 0,
             owns_channels,
+            next_sync_resend: 0,
         }),
         changed: Condvar::new(),
         runtime: Mutex::new(None),
@@ -2717,6 +2740,12 @@ impl Persist for HandleStore {
             .client
             .commit_network(&changes, received, unix_now_ms(), &mut OsRng)
             .is_ok();
+        // A record of a contact goes to the devices of the set, and one
+        // that a peer handed to this device goes to its contact.
+        let Inner { client, bridge, .. } = &mut *inner;
+        if let Some(running) = bridge.as_mut() {
+            let _ = running.flush(client, &mut OsRng);
+        }
         // The join flow of Part 11 moves with a record of a contact: an
         // admit asks for its snapshot, and the work of a group goes out.
         // Neither waits for a view to read an event.
@@ -2933,6 +2962,13 @@ impl Handle {
         if is_tick {
             inner.pump_dead_channels();
             inner.pump_backup();
+            // DEV-057: an acknowledgment that its period made due.
+            let Inner { client, bridge, .. } = &mut *inner;
+            if client.queue_sync_acks(unix_now(), &mut OsRng).is_ok() {
+                if let Some(running) = bridge.as_mut() {
+                    let _ = running.flush(client, &mut OsRng);
+                }
+            }
         }
         let work = core::mem::take(&mut inner.dead_work);
         for step in work {
@@ -3255,6 +3291,9 @@ impl Handle {
             // A group record takes a fresh nonce, thus the group work comes
             // back at the start of a run and not at the unlock.
             client.resume_group_work(&mut OsRng)?;
+            // DEV-072: each record that a peer did not acknowledge goes
+            // again on the channel of the new run, paced by the clock.
+            client.start_sync_resend(&mut OsRng)?;
             running.flush(client, &mut OsRng)?;
             // DEV-286: the first run of a linked device opens the sync
             // channel of its provision. The bundle stays until the channel
@@ -4178,6 +4217,7 @@ impl Handle {
         inner.client.tick(now);
         inner.stop_network_if_locked();
         inner.pump_link(now);
+        inner.pump_sync_resend(now);
         let is_due = inner.bridge.is_some()
             && now.saturating_sub(inner.challenges_at) >= umbra_core::abuse::POW_CHALLENGE_PERIOD;
         drop(inner);

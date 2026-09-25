@@ -2643,12 +2643,73 @@ fn a_new_device_links_from_the_code_of_the_existing_one() {
     assert_eq!(alice.summaries().unwrap().len(), 1);
     assert_eq!(tablet.summaries().unwrap().len(), 1);
 
-    // DEV-287: the existing device still owns the channel of Bob.
-    let draft = bob.new_draft(bob_conversation).unwrap();
+    // DEV-287: the existing device still owns the channel of Bob, and
+    // DEV-268: the record of Bob reaches the tablet on the sync channel.
+    let draft = bob.new_draft(bob_conversation.clone()).unwrap();
     draft.set_text(units("after the tablet")).unwrap();
     bob.send_draft(draft).unwrap();
     let (_, message) = wait_for_message(&alice);
     assert_eq!(rendered(&alice, message), "after the tablet");
+    let (conversation, message) = wait_for_message(&tablet);
+    assert_eq!(conversation, alice_conversation);
+    assert_eq!(rendered(&tablet, message), "after the tablet");
+
+    // A record that the phone sends reaches the tablet as one of the user.
+    let draft = alice.new_draft(alice_conversation.clone()).unwrap();
+    draft.set_text(units("from the phone")).unwrap();
+    alice.send_draft(draft).unwrap();
+    let (_, message) = wait_for_message(&bob);
+    assert_eq!(rendered(&bob, message), "from the phone");
+    let texts_of = |handle: &Handle| -> Vec<(String, bool)> {
+        handle
+            .messages(alice_conversation.clone())
+            .unwrap()
+            .into_iter()
+            .map(|message| {
+                let outgoing = handle.msg_info(message.clone()).unwrap().outgoing;
+                (rendered(handle, message), outgoing)
+            })
+            .collect()
+    };
+    let start = Instant::now();
+    while !texts_of(&tablet).contains(&("from the phone".into(), true)) {
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "no copy of the send"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    // DEV-047: a record that the tablet composes goes to Bob through the
+    // phone, under the msg_id of the tablet.
+    let draft = tablet.new_draft(alice_conversation.clone()).unwrap();
+    draft.set_text(units("from the tablet")).unwrap();
+    tablet.send_draft(draft).unwrap();
+    let (_, message) = wait_for_message(&bob);
+    assert_eq!(rendered(&bob, message), "from the tablet");
+    let start = Instant::now();
+    while !texts_of(&alice).contains(&("from the tablet".into(), true)) {
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "no copy at the phone"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    // One copy on each device, and the tablet holds its own one time.
+    assert_eq!(
+        texts_of(&alice)
+            .iter()
+            .filter(|(text, _)| text == "from the tablet")
+            .count(),
+        1
+    );
+    assert_eq!(
+        texts_of(&tablet)
+            .iter()
+            .filter(|(text, _)| text == "from the tablet")
+            .count(),
+        1
+    );
     for handle in [&alice, &bob, &tablet] {
         handle.disconnect();
     }

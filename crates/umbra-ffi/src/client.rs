@@ -7,7 +7,7 @@
 //! [`Client::take_outgoing`] and gives each received record to
 //! [`Client::receive`], and the platform sees handles and events only.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 mod backup;
 mod dead;
@@ -15,6 +15,7 @@ mod devices;
 mod files;
 mod groups;
 mod notify;
+mod sync;
 
 pub use backup::{BackupUpload, PendingBackup, RestoredBackup, RootWrite};
 pub use dead::DeadWork;
@@ -26,6 +27,7 @@ pub use groups::{
     GroupSubscription, Silence, GROUP_NAME_MAX,
 };
 pub use notify::NdrCall;
+pub use sync::SyncSend;
 use umbra_core::{
     directory::path::IngressPins,
     identity::address::safety_number,
@@ -232,6 +234,23 @@ pub struct Client<B: Backend, E: SecureElement> {
     files: FileQueues,
     groups: groups::GroupQueues,
     auto_lock: AutoLock,
+    /// The records for the sync channels (Part 7 §7.5).
+    sync_out: VecDeque<sync::SyncSend>,
+    /// The records that a peer handed to this device, which the peer
+    /// publishes, thus their send publishes nothing.
+    synced_out: BTreeSet<MsgRef>,
+    /// The blinded subject of each contact conversation (`DEV-292`).
+    subjects: BTreeMap<ConversationId, [u8; 32]>,
+}
+
+/// One record for the commit path: of a contact, or of the sync channel.
+struct Record {
+    conversation: ConversationId,
+    app: Vec<u8>,
+    /// Whether the user wrote the record, on another device of the set.
+    from_user: bool,
+    /// Whether the record came on a sync channel (`DEV-268`).
+    synced: bool,
 }
 
 fn passphrase_bytes(code_units: &[u16]) -> Result<Zeroizing<Vec<u8>>, Error> {
@@ -493,6 +512,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             })),
             events: VecDeque::new(),
             outgoing: VecDeque::new(),
+            sync_out: VecDeque::new(),
+            synced_out: BTreeSet::new(),
+            subjects: BTreeMap::new(),
             files: FileQueues::default(),
             groups: groups::GroupQueues::default(),
             auto_lock: AutoLock::new(now),
@@ -510,6 +532,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             state: State::Locked(backend),
             events: VecDeque::new(),
             outgoing: VecDeque::new(),
+            sync_out: VecDeque::new(),
+            synced_out: BTreeSet::new(),
+            subjects: BTreeMap::new(),
             files: FileQueues::default(),
             groups: groups::GroupQueues::default(),
             auto_lock: AutoLock::new(now),
@@ -623,13 +648,41 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
+        let mut records = Vec::with_capacity(received.len());
+        for (contact, app) in received {
+            records.push(Record {
+                conversation: self.conversation_for(&contact.0)?,
+                app: app.clone(),
+                from_user: false,
+                synced: false,
+            });
+        }
+        self.commit_records(changes, &records, now_ms, rng)
+    }
+
+    /// The commit of [`Client::commit_network`], for the records of a
+    /// contact and for the records that a sync channel gave (Part 7 §7.5).
+    /// A synced record of the user takes the direction of this device, and
+    /// the owner of the channels sends one that a peer handed to it
+    /// (`DEV-047`, `DEV-048`).
+    fn commit_records<R: CryptoRng + ?Sized>(
+        &mut self,
+        changes: &[StateChange],
+        records: &[Record],
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let owns = self.owns_channels()?;
+        let device_peers = self.device_peers()?;
         let mut sends_delivery = Vec::new();
-        for (contact, _) in received {
-            let conversation = self.conversation_for(&contact.0)?;
-            if self.receipt_settings(conversation)?.delivery {
-                sends_delivery.push(conversation);
+        for record in records.iter().filter(|record| !record.synced) {
+            if self.receipt_settings(record.conversation)?.delivery {
+                sends_delivery.push(record.conversation);
             }
         }
+        let mut sync_bodies: Vec<(ConversationId, Vec<u8>)> = Vec::new();
+        let mut to_publish: Vec<(ConversationId, Vec<u8>)> = Vec::new();
+        let mut handoffs: Vec<Outgoing> = Vec::new();
         // IMP-167, IMP-168: a file above this size waits for a tap.
         let limit = self.download_limit_now()?;
         let open = self.open_mut()?;
@@ -673,9 +726,62 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             });
         }
         let mut events = Vec::new();
-        for (contact, app) in received {
+        for record in records {
+            let app = &record.app;
+            let conversation = record.conversation;
+            let from_user = record.from_user;
             let parsed = AppMessage::parse(app, Channel::Pairwise)?;
-            let conversation = ConversationId(open.store.row_id(TableId::CONTACT, &contact.0));
+            // DEV-052: a sync channel carries kind 0x20 alone, and no view
+            // shows its records.
+            if device_peers.contains(&conversation) {
+                if parsed.kind == AppKind::DeviceSet {
+                    sync_bodies.push((conversation, parsed.body.to_vec()));
+                }
+                continue;
+            }
+            // DEV-050: kind 0x20 on a pairwise channel changes nothing.
+            if parsed.kind == AppKind::DeviceSet {
+                continue;
+            }
+            if !record.synced && owns {
+                to_publish.push((conversation, app.clone()));
+            }
+            // The owner of the channels sends each record that a peer
+            // handed to it. The record of an edit, a deletion, or a reaction
+            // waits in a request row, as one of this device does.
+            let handoff = record.synced && from_user && owns;
+            if handoff
+                && matches!(
+                    parsed.kind,
+                    AppKind::Reaction | AppKind::Edit | AppKind::Delete
+                )
+            {
+                let reference = msg_ref(&open.device_set_key, &parsed.msg_id);
+                let natural = [conversation.0.as_slice(), &reference].concat();
+                let row = open.store.row_id(TableId::MESSAGE, &natural);
+                let queued = handoffs.iter().any(|held| held.message.0 == row);
+                if queued || open.store.get(TableId::MESSAGE, &row)?.is_some() {
+                    continue;
+                }
+                planned.push(Planned::Put(
+                    TableId::MESSAGE,
+                    row,
+                    Some(conversation.0),
+                    stored_message(OUTGOING, Delivery::Queued, conversation, now_ms, app),
+                ));
+                planned.push(Planned::Put(
+                    OUTBOX,
+                    row,
+                    None,
+                    Zeroizing::new(outbox_row()),
+                ));
+                handoffs.push(Outgoing {
+                    message: MsgRef(row),
+                    conversation,
+                    app: app.clone(),
+                });
+            }
+            let direction = if from_user { OUTGOING } else { INCOMING };
             if let Some(reported) = Delivery::of_receipt(parsed.kind) {
                 // A receipt is no message. A body that does not parse
                 // changes nothing, and it ends no batch.
@@ -735,12 +841,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
             if parsed.kind == AppKind::GroupControl {
                 // The join flow of Part 11 §11.9.1 runs after this loop,
-                // because it reads and writes groups of its own.
-                control.push((conversation, parsed.body.to_vec()));
+                // because it reads and writes groups of its own. The device
+                // that owns the channels runs it.
+                if !record.synced {
+                    control.push((conversation, parsed.body.to_vec()));
+                }
                 continue;
             }
             if parsed.kind == AppKind::KeyRequest {
-                key_requests.push((conversation, parsed.body.to_vec()));
+                if !record.synced {
+                    key_requests.push((conversation, parsed.body.to_vec()));
+                }
                 continue;
             }
             if parsed.kind == AppKind::Reaction {
@@ -762,7 +873,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 if info_of(&held)?.deleted || is_request(&held)? {
                     continue;
                 }
-                let plain = reaction_row(conversation, &reference, INCOMING, reaction.emoji);
+                let plain = reaction_row(conversation, &reference, direction, reaction.emoji);
                 let row = open.store.row_id(REACTION, &plain);
                 let exists = open.store.get(REACTION, &row)?.is_some();
                 match reaction.action {
@@ -770,7 +881,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         let mut of_contact = 0usize;
                         for (_, other) in open.store.list(REACTION, Some(&conversation.0))? {
                             let same = other.get(16..REACTION_PREFIX)
-                                == Some([reference.as_slice(), &[INCOMING]].concat().as_slice());
+                                == Some([reference.as_slice(), &[direction]].concat().as_slice());
                             of_contact = of_contact.saturating_add(usize::from(same));
                         }
                         if of_contact >= REACTIONS_MAX {
@@ -816,7 +927,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         // inside the window from the store time of this
                         // device. DEV-088: below the limit.
                         let in_window = now_ms.saturating_sub(info.stored_at_ms) < EDIT_WINDOW_MS;
-                        if info.outgoing || info.deleted || !in_window || count >= EDIT_MAX {
+                        if info.outgoing != from_user
+                            || info.deleted
+                            || !in_window
+                            || count >= EDIT_MAX
+                        {
                             continue;
                         }
                         // WIR-260: a target with no text takes no edit.
@@ -887,7 +1002,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                             let plain = Zeroizing::new(plain);
                             // DEV-081, DEV-085: the contact names a message
                             // that the contact sent, and no other one.
-                            if info_of(&plain)?.outgoing || info_of(&plain)?.deleted {
+                            if info_of(&plain)?.outgoing != from_user || info_of(&plain)?.deleted {
                                 continue;
                             }
                             planned.push(Planned::Put(
@@ -961,10 +1076,45 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     edited_text = Some(Zeroizing::new(text.to_vec()));
                 }
             }
-            let in_batch = events
-                .iter()
-                .any(|event| matches!(event, Event::Message { message: m, .. } if *m == message));
+            let in_batch = events.iter().any(|event| {
+                matches!(event, Event::Message { message: m, .. } | Event::Delivery { message: m, .. } if *m == message)
+            });
             if in_batch || open.store.get(TableId::MESSAGE, &row)?.is_some() {
+                continue;
+            }
+            if handoff {
+                // The record goes as the peer wrote it: its reply target
+                // becomes a reference at the send (`WIR-071`).
+                planned.push(Planned::Put(
+                    TableId::MESSAGE,
+                    row,
+                    Some(conversation.0),
+                    stored_message(OUTGOING, Delivery::Queued, conversation, now_ms, app),
+                ));
+                planned.push(Planned::Put(
+                    OUTBOX,
+                    row,
+                    None,
+                    Zeroizing::new(outbox_row()),
+                ));
+                if parsed.kind == AppKind::Attachment {
+                    let (state, _) = files::incoming_state_row(parsed.body, 0);
+                    planned.push(Planned::Put(
+                        FILE_STATE,
+                        row,
+                        Some(conversation.0),
+                        Zeroizing::new(state),
+                    ));
+                }
+                handoffs.push(Outgoing {
+                    message,
+                    conversation,
+                    app: app.clone(),
+                });
+                events.push(Event::Delivery {
+                    message,
+                    delivery: Delivery::Queued,
+                });
                 continue;
             }
             let mut kept = Zeroizing::new(app.clone());
@@ -977,11 +1127,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
             }
             keep_reply_as_reference(&mut kept, &open.device_set_key)?;
+            // A record of the user from another device left the owner of
+            // the channels, or waits there.
+            let delivery = if from_user {
+                Delivery::Accepted
+            } else {
+                Delivery::Delivered
+            };
             planned.push(Planned::Put(
                 TableId::MESSAGE,
                 row,
                 Some(conversation.0),
-                stored_message(INCOMING, Delivery::Delivered, conversation, now_ms, &kept),
+                stored_message(direction, delivery, conversation, now_ms, &kept),
             ));
             if parsed.kind == AppKind::Attachment {
                 let (state, descriptor) = files::incoming_state_row(parsed.body, limit);
@@ -998,12 +1155,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     });
                 }
             }
-            events.push(Event::Message {
-                conversation,
-                message,
+            // A record of the user raises no alert.
+            events.push(if from_user {
+                Event::Delivery { message, delivery }
+            } else {
+                Event::Message {
+                    conversation,
+                    message,
+                }
             });
             // NET-041: this device holds the message now.
-            if sends_delivery.contains(&conversation) {
+            if !record.synced && sends_delivery.contains(&conversation) {
                 let key = held_receipt_key(conversation, AppKind::DeliveryReceipt, &parsed.msg_id);
                 planned.push(Planned::Put(
                     RECEIPT,
@@ -1030,11 +1192,34 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         batch.commit()?;
         self.events.extend(events);
         self.files.downloads.extend(wanted);
+        for outgoing in handoffs {
+            self.synced_out.insert(outgoing.message);
+            self.outgoing.push_back(outgoing);
+        }
         for (conversation, body) in control {
             self.on_pairwise_control(conversation, &body, rng)?;
         }
         for (_, body) in key_requests {
             self.on_pairwise_key_request(&body, now_ms, rng)?;
+        }
+        // DEV-268: each record of a contact goes to each device of the set.
+        for (conversation, app) in to_publish {
+            self.publish_sync(conversation, &app, false, None, now_ms / 1_000, rng)?;
+        }
+        if !sync_bodies.is_empty() {
+            let synced = self.take_sync_bodies(sync_bodies, now_ms / 1_000, rng)?;
+            let records: Vec<Record> = synced
+                .into_iter()
+                .map(|synced| Record {
+                    conversation: synced.conversation,
+                    app: synced.app,
+                    from_user: synced.from_user,
+                    synced: true,
+                })
+                .collect();
+            if !records.is_empty() {
+                self.commit_records(&[], &records, now_ms, rng)?;
+            }
         }
         Ok(())
     }

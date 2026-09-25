@@ -706,6 +706,9 @@ VectorEntry {                 // 24 bytes
 SyncedRecord {                // the body of kind 0x20 at sub-kind 0x03
     sub_kind      u8          // 0x03
     context       CausalContext
+    scope         u8          // 0x01 a pairwise conversation
+    subject       [32]u8      // the blinded subject of DEV-226 that names it
+    author        u8          // 0x00 the user, 0x01 the other party
     inner_len     u32
     inner         [inner_len]u8   // one AppMessage of Part 6 §6.6
 }
@@ -726,13 +729,28 @@ MutableItem {                 // the body of kind 0x20 at sub-kind 0x01
   as a `SyncedRecord`, and it MUST take the class of that record from the
   kind of `inner`. **[DEV-269]** A parser MUST reject a `vector` that is not
   in strictly increasing `device_id` order, or that holds more than
-  `MAX_DEVICES` entries. **[DEV-270]** A device MUST apply a `MutableItem`
+  `MAX_DEVICES` entries. **[DEV-292]** A device MUST name the conversation
+  of a `SyncedRecord` by `scope` and `subject`. For scope `0x01` the subject
+  is the one of `DEV-226` for the pairwise identity of that conversation,
+  thus each device of the set derives it and no party outside the set can.
+  A device MUST set `author` to `0x00` for a record that the user wrote on a
+  device of the set, and to `0x01` for a record of the other party. A parser
+  MUST reject another scope or another author. A receiver MUST apply the
+  record in the conversation that the subject names, in the direction that
+  `author` gives. **[DEV-293]** The device that owns a pairwise ratchet MUST
+  publish each record that it takes from the contact, and each record of
+  the user that it sends but one that a peer handed to it. A device that
+  does not own the ratchet MUST publish each record that the user composes
+  on it, and the owner then sends that record under `DEV-047` and
+  `DEV-048`. **[DEV-270]** A device MUST apply a `MutableItem`
   when its `lamport` is above the value held, or equal with a lower
   `device_id` of the writer, and it MUST discard it otherwise.
 
 > *Cause.* An earlier draft named the context and the sub-kinds and gave
 > them no layout, thus two implementations could not exchange one sync
-> record. The three layouts above are the one carrier of each.
+> record. The three layouts above are the one carrier of each. A later draft
+> gave the synced record no conversation and no author, thus a receiver
+> could not tell where a record went, or whether the user wrote it.
 
 **The counters of a context.**
 

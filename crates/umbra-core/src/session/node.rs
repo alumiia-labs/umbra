@@ -785,6 +785,15 @@ pub fn stored_dead_channel(
 
 /// Reads the version byte of a stored contact: `0x01`, `0x02`, or
 /// [`CONTACT_STORED_VERSION`].
+/// The salt of the pairwise identity of a stored contact, for a device
+/// that names the conversation and does not run its channel (Part 7
+/// `DEV-292`).
+pub fn stored_contact_salt(state: &[u8]) -> Result<[u8; 16], Error> {
+    let mut reader = Reader::new(state);
+    contact_version(&mut reader)?;
+    Ok(reader.array()?)
+}
+
 fn contact_version(reader: &mut Reader<'_>) -> Result<u8, Error> {
     match reader.u8()? {
         version @ (0x01 | STORED_VERSION | CONTACT_ROTATION_VERSION | CONTACT_STORED_VERSION) => {

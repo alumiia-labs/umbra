@@ -9,6 +9,7 @@
 
 use alloc::{collections::BTreeMap, vec::Vec};
 
+use umbra_crypto::stored;
 use umbra_wire::codec::{Reader, Writer};
 
 use super::{
@@ -91,12 +92,34 @@ impl CausalContext {
     }
 }
 
-/// A synced conversation record: the causal context and the inner
-/// `AppMessage` bytes, the payload of kind `0x20` sub-kind `0x03`.
+/// The scope of a synced record of a pairwise conversation (`DEV-292`).
+pub const SCOPE_PAIRWISE: u8 = 0x01;
+/// The author of a synced record: the user, on a device of the set.
+pub const AUTHOR_USER: u8 = 0x00;
+/// The author of a synced record: the other party of the conversation.
+pub const AUTHOR_PEER: u8 = 0x01;
+
+/// Where a synced record belongs (`DEV-292`): the scope, the subject that
+/// names the conversation, and the author of the record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Origin {
+    /// [`SCOPE_PAIRWISE`].
+    pub scope: u8,
+    /// For a pairwise conversation, the SHA3-256 of the public key of its
+    /// pairwise identity: the subject of a claim of scope `0x01`.
+    pub subject: [u8; 32],
+    /// [`AUTHOR_USER`] or [`AUTHOR_PEER`].
+    pub author: u8,
+}
+
+/// A synced conversation record: the causal context, the origin, and the
+/// inner `AppMessage` bytes, the payload of kind `0x20` sub-kind `0x03`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncedRecord<'a> {
     /// The causal context.
     pub context: CausalContext,
+    /// The conversation and the author.
+    pub origin: Origin,
     /// The `AppMessage` of Part 6 §6.6 that the peer synced.
     pub inner: &'a [u8],
 }
@@ -109,6 +132,9 @@ impl<'a> SyncedRecord<'a> {
         let n = self.context.encode(w.tail())?;
         let at = w.position().saturating_add(n);
         let mut w = Writer::new(out.get_mut(at..).ok_or(Error::Malformed)?);
+        w.u8(self.origin.scope)?;
+        w.put(&self.origin.subject)?;
+        w.u8(self.origin.author)?;
         w.u32(u32::try_from(self.inner.len()).map_err(|_| Error::Malformed)?)?;
         w.put(self.inner)?;
         Ok(at.saturating_add(w.position()))
@@ -123,10 +149,23 @@ impl<'a> SyncedRecord<'a> {
         let context_len = context_len_at(r.rest())?;
         let mut r = Reader::new(bytes.get(1..).ok_or(Error::Malformed)?);
         let context = CausalContext::parse(r.take(context_len)?)?;
+        let origin = Origin {
+            scope: r.u8()?,
+            subject: r.array()?,
+            author: r.u8()?,
+        };
+        // DEV-292: one scope and two authors.
+        if origin.scope != SCOPE_PAIRWISE || origin.author > AUTHOR_PEER {
+            return Err(Error::Malformed);
+        }
         let inner_len = usize::try_from(r.u32()?).map_err(|_| Error::Malformed)?;
         let inner = r.take(inner_len)?;
         r.finish()?;
-        Ok(SyncedRecord { context, inner })
+        Ok(SyncedRecord {
+            context,
+            origin,
+            inner,
+        })
     }
 }
 
@@ -239,6 +278,33 @@ impl Watermarks {
     pub fn accepts(&self, source: &DeviceId, counter: u64) -> bool {
         counter > self.get(source)
     }
+
+    pub(super) fn export(&self, w: &mut stored::Writer) {
+        w.u32(u32::try_from(self.marks.len()).unwrap_or(0));
+        for (source, counter) in &self.marks {
+            w.bytes(source);
+            w.u64(*counter);
+        }
+    }
+
+    pub(super) fn restore(r: &mut stored::Reader<'_>) -> Result<Self, Error> {
+        let mut marks = BTreeMap::new();
+        for _ in 0..bounded(r.u32()?)? {
+            let source: DeviceId = r.array()?;
+            marks.insert(source, r.u64()?);
+        }
+        Ok(Watermarks { marks })
+    }
+}
+
+/// A count of a stored form, bounded so that a damaged row allocates
+/// nothing large.
+pub(super) fn bounded(count: u32) -> Result<usize, Error> {
+    let count = usize::try_from(count).map_err(|_| Error::Malformed)?;
+    if count > 1 << 20 {
+        return Err(Error::Malformed);
+    }
+    Ok(count)
 }
 
 /// One retained record, keyed by `msg_ref` and the causal counter
@@ -300,6 +366,29 @@ impl RetainedLog {
     pub fn needs_catch_up(&self, own_counter: u64) -> bool {
         own_counter.saturating_sub(self.acked) > SYNC_CATCHUP_LAG
     }
+
+    pub(super) fn export(&self, w: &mut stored::Writer) {
+        w.u64(self.acked);
+        w.u32(u32::try_from(self.records.len()).unwrap_or(0));
+        for record in &self.records {
+            w.bytes(&record.msg_ref);
+            w.u64(record.counter);
+            w.u64(record.sent_at);
+        }
+    }
+
+    pub(super) fn restore(r: &mut stored::Reader<'_>) -> Result<Self, Error> {
+        let acked = r.u64()?;
+        let mut records = Vec::new();
+        for _ in 0..bounded(r.u32()?)? {
+            records.push(Retained {
+                msg_ref: r.array()?,
+                counter: r.u64()?,
+                sent_at: r.u64()?,
+            });
+        }
+        Ok(RetainedLog { records, acked })
+    }
 }
 
 /// The acknowledgment batch state for one peer (§7.5.5).
@@ -340,6 +429,22 @@ impl AckBatch {
     pub fn sent(&mut self) {
         self.pending = 0;
         self.period_start = None;
+    }
+
+    pub(super) fn export(&self, w: &mut stored::Writer) {
+        w.u32(self.pending);
+        w.u64(self.period_start.unwrap_or(u64::MAX));
+        w.u64(self.highest);
+    }
+
+    pub(super) fn restore(r: &mut stored::Reader<'_>) -> Result<Self, Error> {
+        let pending = r.u32()?;
+        let start = r.u64()?;
+        Ok(AckBatch {
+            pending,
+            period_start: (start != u64::MAX).then_some(start),
+            highest: r.u64()?,
+        })
     }
 }
 
@@ -424,11 +529,26 @@ mod tests {
         };
         let rec = SyncedRecord {
             context: ctx.clone(),
+            origin: Origin {
+                scope: SCOPE_PAIRWISE,
+                subject: [4; 32],
+                author: AUTHOR_PEER,
+            },
             inner: b"app message bytes",
         };
         let mut out = [0u8; 200];
         let n = rec.encode(&mut out).unwrap();
         assert_eq!(SyncedRecord::parse(&out[..n]).unwrap(), rec);
+        // DEV-292: a scope or an author that the layout does not name.
+        let other_scope = SyncedRecord {
+            origin: Origin {
+                scope: 0x02,
+                ..rec.origin
+            },
+            ..rec.clone()
+        };
+        let n = other_scope.encode(&mut out).unwrap();
+        assert!(SyncedRecord::parse(&out[..n]).is_err());
         let item = MutableItem {
             context: ctx.clone(),
             item: 1,

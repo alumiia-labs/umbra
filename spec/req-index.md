@@ -70,7 +70,7 @@ each column when a crate implements the requirement and a test covers it.
 | `IDN` | 129 | 44 | 1 | 0 | 5 | **179** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
 | `WIR` | 393 | 85 | 0 | 0 | 7 | **485** |
-| `DEV` | 186 | 88 | 0 | 0 | 7 | **281** |
+| `DEV` | 188 | 88 | 0 | 0 | 7 | **283** |
 | `NTF` | 74 | 28 | 0 | 0 | 3 | **105** |
 | `DIS` | 109 | 33 | 0 | 0 | 1 | **143** |
 | `REL` | 124 | 32 | 1 | 0 | 2 | **159** |
@@ -79,7 +79,7 @@ each column when a crate implements the requirement and a test covers it.
 | `ABU` | 66 | 30 | 1 | 0 | 0 | **97** |
 | `IMP` | 114 | 41 | 0 | 0 | 2 | **157** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 1951 | 614 | 7 | 0 | 50 | **2622** |
+| **All** | 1953 | 614 | 7 | 0 | 50 | **2624** |
 
 ## SCP — Scope and Conventions
 
@@ -1590,6 +1590,8 @@ Source: `spec/07-device-sets.md`
 | `DEV-289` | §7.4 | MUST | The snapshot | The snapshot MUST also carry the roster of epoch *n+1*, the bundle of the sync invitation, and the `device_id` and the label of the existing device as the peer of that channel. |  |  |
 | `DEV-290` | §7.4 | MUST | The existing device | The existing device MUST keep the roster of epoch *n+1* only when the sync channel of the new device opens. |  |  |
 | `DEV-291` | §7.4 | MUST NOT | A backup of Part 4 §4.7.2 | A backup of Part 4 §4.7.2 MUST NOT carry a row of the device set or a row of a sync channel. |  |  |
+| `DEV-292` | §7.5.3 | MUST | A device | A device MUST name the conversation of a `SyncedRecord` by `scope` and `subject`. |  |  |
+| `DEV-293` | §7.5.3 | MUST | The device that owns a pairwise ratchet | The device that owns a pairwise ratchet MUST publish each record that it takes from the contact, and each record of the user that it sends but one that a peer handed to it. |  |  |
 
 ## NTF — Notifications
 

@@ -174,6 +174,9 @@ impl Bridge {
         client: &mut Client<B, E>,
         rng: &mut R,
     ) -> Result<(), Error> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_secs());
         while let Some(outgoing) = client.take_outgoing() {
             let tag = self.next_tag;
             self.next_tag = self.next_tag.wrapping_add(1);
@@ -190,8 +193,48 @@ impl Bridge {
                 });
             if taken {
                 self.sent.insert(tag, outgoing.message);
+                // DEV-268: each record of the user goes to each device of
+                // the set, but one that a peer handed to this device.
+                if !client.was_handed(&outgoing.message) {
+                    client.publish_sync(
+                        outgoing.conversation,
+                        &outgoing.app,
+                        true,
+                        None,
+                        now,
+                        rng,
+                    )?;
+                }
+            } else if client.hands_off(outgoing.conversation)? {
+                // DEV-047: this device owns no channel, and the owner sends
+                // the record. Its state follows the record to the owner.
+                client.publish_sync(
+                    outgoing.conversation,
+                    &outgoing.app,
+                    true,
+                    Some(outgoing.message),
+                    now,
+                    rng,
+                )?;
             } else {
                 client.set_delivery(&outgoing.message, Delivery::Failed, rng)?;
+            }
+        }
+        while let Some(send) = client.take_sync_send() {
+            let Some(contact) = self.contacts.get(&send.peer).copied() else {
+                continue;
+            };
+            let tag = self.next_tag;
+            self.next_tag = self.next_tag.wrapping_add(1);
+            let command = Command::Send {
+                contact,
+                app: send.app,
+                tag,
+            };
+            if self.commands.send(command).is_ok() {
+                if let Some(message) = send.message {
+                    self.sent.insert(tag, message);
+                }
             }
         }
         Ok(())

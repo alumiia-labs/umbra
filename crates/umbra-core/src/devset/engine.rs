@@ -20,10 +20,12 @@ use umbra_wire::app::{
     AppKind, AppMessage, Channel, Class,
 };
 
+use umbra_crypto::stored;
+
 use super::{
     sync::{
-        AckBatch, CausalContext, InteractiveBucket, MutableItem, RetainedLog, SyncedRecord,
-        Watermarks,
+        bounded, AckBatch, CausalContext, InteractiveBucket, MutableItem, Origin, RetainedLog,
+        SyncedRecord, Watermarks,
     },
     DeviceId, MAX_DEVICES,
 };
@@ -62,6 +64,8 @@ pub enum Taken {
     /// A conversation record to apply, with the remaining period of its
     /// timer.
     Record {
+        /// The conversation and the author.
+        origin: Origin,
         /// The `AppMessage` bytes of the peer.
         inner: Vec<u8>,
         /// The `expires_in` of the context, or zero.
@@ -194,6 +198,7 @@ impl SyncEngine {
     pub fn publish(
         &mut self,
         inner: &[u8],
+        origin: Origin,
         msg_ref: [u8; 16],
         expires_in: u32,
         now: u64,
@@ -203,6 +208,7 @@ impl SyncEngine {
         }
         let record = SyncedRecord {
             context: self.context(expires_in),
+            origin,
             inner,
         };
         let mut body = alloc::vec![0u8; inner.len().saturating_add(256)];
@@ -292,6 +298,7 @@ impl SyncEngine {
                     return Ok(Taken::Declined);
                 }
                 Ok(Taken::Record {
+                    origin: record.origin,
                     inner: record.inner.to_vec(),
                     expires_in: record.context.expires_in,
                 })
@@ -429,6 +436,111 @@ impl SyncEngine {
             peer.log.expire(now);
         }
     }
+
+    /// The peers of the engine.
+    pub fn peers(&self) -> impl Iterator<Item = &DeviceId> {
+        self.peers.keys()
+    }
+
+    /// The counter at or below which each peer acknowledged each record,
+    /// thus no record there waits for a resend.
+    pub fn acked_by_all(&self) -> u64 {
+        self.peers
+            .values()
+            .map(|peer| peer.log.acked())
+            .min()
+            .unwrap_or(self.counter)
+    }
+
+    /// The stored form of the engine, which the device keeps across runs
+    /// (`DEV-013`). The token bucket starts full at a restore.
+    pub fn export(&self) -> Result<Vec<u8>, Error> {
+        let mut w = stored::Writer::new();
+        w.u8(0x01);
+        w.bytes(&self.own);
+        w.u64(self.lamport);
+        w.u64(self.counter);
+        w.u8(u8::try_from(self.peers.len()).map_err(|_| Error::Malformed)?);
+        for (device, peer) in &self.peers {
+            w.bytes(device);
+            peer.log.export(&mut w);
+            peer.acks.export(&mut w);
+            w.u64(peer.contiguous);
+            w.u32(u32::try_from(peer.ahead.len()).map_err(|_| Error::Malformed)?);
+            for counter in &peer.ahead {
+                w.u64(*counter);
+            }
+            w.u64(peer.resent_to);
+            w.u8(u8::from(peer.resending));
+        }
+        self.watermarks.export(&mut w);
+        w.u32(u32::try_from(self.mutable.len()).map_err(|_| Error::Malformed)?);
+        for ((item, key), (lamport, writer)) in &self.mutable {
+            w.u8(*item);
+            w.var(key)?;
+            w.u64(*lamport);
+            w.bytes(writer);
+        }
+        Ok(w.finish().to_vec())
+    }
+
+    /// An engine from its stored form.
+    pub fn restore(bytes: &[u8]) -> Result<Self, Error> {
+        let mut r = stored::Reader::new(bytes);
+        if r.u8()? != 0x01 {
+            return Err(Error::Malformed);
+        }
+        let own: DeviceId = r.array()?;
+        let lamport = r.u64()?;
+        let counter = r.u64()?;
+        let count = usize::from(r.u8()?);
+        if count >= MAX_DEVICES {
+            return Err(Error::Malformed);
+        }
+        let mut peers = BTreeMap::new();
+        for _ in 0..count {
+            let device: DeviceId = r.array()?;
+            let log = RetainedLog::restore(&mut r)?;
+            let acks = AckBatch::restore(&mut r)?;
+            let contiguous = r.u64()?;
+            let mut ahead = BTreeSet::new();
+            for _ in 0..bounded(r.u32()?)? {
+                ahead.insert(r.u64()?);
+            }
+            let resent_to = r.u64()?;
+            let resending = r.u8()? == 1;
+            peers.insert(
+                device,
+                Peer {
+                    log,
+                    acks,
+                    bucket: InteractiveBucket::default(),
+                    contiguous,
+                    ahead,
+                    resent_to,
+                    resending,
+                },
+            );
+        }
+        let watermarks = Watermarks::restore(&mut r)?;
+        let mut mutable = BTreeMap::new();
+        for _ in 0..bounded(r.u32()?)? {
+            let item = r.u8()?;
+            let key = r.var()?.to_vec();
+            let lamport = r.u64()?;
+            let writer: DeviceId = r.array()?;
+            mutable.insert((item, key), (lamport, writer));
+        }
+        r.end()?;
+        Ok(SyncEngine {
+            own,
+            lamport,
+            counter,
+            peers,
+            watermarks,
+            mutable,
+        })
+    }
 }
 
 /// Rejects an application kind that a sync channel does not carry, for a
@@ -446,6 +558,11 @@ mod tests {
     const PHONE: DeviceId = [1; 16];
     const LAPTOP: DeviceId = [2; 16];
     const TABLET: DeviceId = [3; 16];
+    const ORIGIN: Origin = Origin {
+        scope: crate::devset::sync::SCOPE_PAIRWISE,
+        subject: [7; 32],
+        author: crate::devset::sync::AUTHOR_PEER,
+    };
 
     fn message(kind: AppKind, tag: u8) -> Vec<u8> {
         let body: &[u8] = match kind {
@@ -471,14 +588,42 @@ mod tests {
     }
 
     #[test]
+    fn the_stored_form_holds_the_counters_the_log_and_the_items() {
+        let (mut phone, mut laptop) = pair();
+        let first = phone
+            .publish(&message(AppKind::Text, 1), ORIGIN, [1; 16], 0, 5)
+            .unwrap();
+        phone
+            .publish(&message(AppKind::Text, 2), ORIGIN, [2; 16], 0, 6)
+            .unwrap();
+        phone
+            .publish_mutable(1, &[3; 32], &[1], [3; 16], 7)
+            .unwrap();
+        laptop.receive(&PHONE, &first.body, 8).unwrap();
+        for engine in [&phone, &laptop] {
+            let back = SyncEngine::restore(&engine.export().unwrap()).unwrap();
+            assert_eq!(&back, engine);
+        }
+        // The laptop holds counter 1 after a restart, thus the record is a
+        // duplicate there.
+        let mut back = SyncEngine::restore(&laptop.export().unwrap()).unwrap();
+        assert_eq!(
+            back.receive(&PHONE, &first.body, 9).unwrap(),
+            Taken::Duplicate
+        );
+        assert!(SyncEngine::restore(&[0x02]).is_err());
+    }
+
+    #[test]
     fn a_record_reaches_the_peer_one_time_and_the_acknowledgment_ends_the_resend() {
         let (mut phone, mut laptop) = pair();
         let text = message(AppKind::Text, 1);
-        let published = phone.publish(&text, [1; 16], 0, 100).unwrap();
+        let published = phone.publish(&text, ORIGIN, [1; 16], 0, 100).unwrap();
         assert_eq!(published.counter, 1);
         assert_eq!(
             laptop.receive(&PHONE, &published.body, 110).unwrap(),
             Taken::Record {
+                origin: ORIGIN,
                 inner: text.clone(),
                 expires_in: 0
             }
@@ -526,7 +671,12 @@ mod tests {
         let mut bodies = Vec::new();
         for n in 0..SYNC_ACK_BATCH + 1 {
             let text = message(AppKind::Text, n as u8);
-            bodies.push(phone.publish(&text, [n as u8; 16], 0, 100).unwrap().body);
+            bodies.push(
+                phone
+                    .publish(&text, ORIGIN, [n as u8; 16], 0, 100)
+                    .unwrap()
+                    .body,
+            );
         }
         // The second record is late.
         for (position, body) in bodies.iter().enumerate() {
@@ -594,10 +744,10 @@ mod tests {
     fn a_watermark_declines_history_and_still_acknowledges_it() {
         let (mut phone, mut laptop) = pair();
         let old = phone
-            .publish(&message(AppKind::Text, 1), [1; 16], 0, 10)
+            .publish(&message(AppKind::Text, 1), ORIGIN, [1; 16], 0, 10)
             .unwrap();
         let new = phone
-            .publish(&message(AppKind::Text, 2), [2; 16], 0, 20)
+            .publish(&message(AppKind::Text, 2), ORIGIN, [2; 16], 0, 20)
             .unwrap();
         // The laptop linked with the live scope after the first record.
         laptop.watermarks_mut().set_live(&[(PHONE, 1)]);
@@ -620,10 +770,10 @@ mod tests {
     fn a_sync_channel_carries_no_peer_signal_and_no_ephemeral_record() {
         let (mut phone, _) = pair();
         assert!(phone
-            .publish(&message(AppKind::ReadReceipt, 1), [1; 16], 0, 0)
+            .publish(&message(AppKind::ReadReceipt, 1), ORIGIN, [1; 16], 0, 0)
             .is_err());
         assert!(phone
-            .publish(&message(AppKind::Typing, 1), [1; 16], 0, 0)
+            .publish(&message(AppKind::Typing, 1), ORIGIN, [1; 16], 0, 0)
             .is_err());
         assert_eq!(phone.counter(), 0, "a rejected record takes no counter");
         assert!(carried_on_sync(AppKind::Delete) && !carried_on_sync(AppKind::Typing));
@@ -634,7 +784,13 @@ mod tests {
         let (mut phone, _) = pair();
         for n in 0..=SYNC_CATCHUP_LAG {
             phone
-                .publish(&message(AppKind::Text, 1), [(n % 251) as u8; 16], 0, 50)
+                .publish(
+                    &message(AppKind::Text, 1),
+                    ORIGIN,
+                    [(n % 251) as u8; 16],
+                    0,
+                    50,
+                )
                 .unwrap();
         }
         assert!(phone.needs_catch_up(&LAPTOP));
