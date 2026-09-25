@@ -17,6 +17,9 @@ pub const MAX_DEVICES: usize = 8;
 pub const OWNER_TIMEOUT: u64 = 90;
 /// `LINK_QR_TTL`, in seconds.
 pub const LINK_QR_TTL: u64 = 120;
+/// `LINK_PROVISION_TTL`, in seconds: the life of a provision and of its
+/// snapshot on the chunk path when the sync channel does not open.
+pub const LINK_PROVISION_TTL: u64 = 600;
 /// `SYNC_MAX_AGE` by default, in seconds.
 pub const SYNC_MAX_AGE: u64 = 365 * 86_400;
 /// `SYNC_MAX_BYTES` by default.

@@ -340,6 +340,7 @@ fn contact_of(events: &[ClientEvent]) -> (ContactId, [u8; 32]) {
             ClientEvent::ContactReady {
                 contact,
                 peer_static,
+                ..
             } => Some((*contact, *peer_static)),
             _ => None,
         })

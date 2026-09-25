@@ -326,8 +326,8 @@ private fun share(context: Context, link: String) {
 }
 
 /** IMP-056: the clipboard preview of the platform hides a sensitive clip. */
-private fun copySensitive(context: Context, text: String) {
-    val clip = ClipData.newPlainText("UMBRA invitation", text)
+fun copySensitive(context: Context, text: String, label: String = "UMBRA invitation") {
+    val clip = ClipData.newPlainText(label, text)
     clip.description.extras = PersistableBundle().apply {
         putBoolean("android.content.extra.IS_SENSITIVE", true)
     }

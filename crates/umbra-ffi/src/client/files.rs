@@ -235,6 +235,18 @@ pub(super) fn fetchable(body: &[u8]) -> Option<FileDescriptor> {
 /// The state row of a file that a contact sent, and its descriptor when
 /// its download starts at once: at most `limit` bytes of padded size
 /// (`IMP-163`). A larger file waits for a tap (`IMP-167`).
+/// The state of a file as a backup or a link snapshot carries it
+/// (`IDN-186`): the bytes stay on this device, thus a file that another
+/// device can fetch waits for a tap there, and each other file failed.
+pub(super) fn carried_state(row: &mut [u8]) {
+    if let Some(state) = row.first_mut() {
+        *state = match FileState::from_byte(*state) {
+            Some(FileState::Wanted | FileState::Ready | FileState::Held) => FileState::Held,
+            _ => FileState::Failed,
+        } as u8;
+    }
+}
+
 pub(super) fn incoming_state_row(body: &[u8], limit: u64) -> (Vec<u8>, Option<FileDescriptor>) {
     let extras = FileExtras::of_body(body);
     match fetchable(body) {
@@ -547,10 +559,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !matches!(info.state, FileState::Failed | FileState::Held) {
             return Err(Error::Malformed);
         }
-        if info_of(&plain)?.outgoing {
+        // A restored or linked store holds no file of the send, and the
+        // file of the record comes down as the file of a contact does.
+        let held = if info_of(&plain)?.outgoing {
+            self.file_bytes(message).ok()
+        } else {
+            None
+        };
+        if let Some(file) = held {
             // The store holds the file of this device from the send, thus a
             // second upload needs no second read of its source (`IMP-160`).
-            let file = self.file_bytes(message)?;
             self.set_file_state(message, FileState::Uploading, rng)?;
             self.set_delivery(message, Delivery::Queued, rng)?;
             self.files.uploads.push_back(UploadJob {
@@ -689,4 +707,30 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 /// The state row of a file that this device sends.
 pub(super) fn outgoing_state_row(shape: &Shape, size: u64, extras: &FileExtras) -> Vec<u8> {
     state_row(FileState::Uploading, shape, size, extras)
+}
+
+#[cfg(test)]
+#[allow(clippy::indexing_slicing)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_carried_file_waits_for_a_tap_or_failed() {
+        let shape = Shape::default();
+        let extras = FileExtras::default();
+        for (from, to) in [
+            (FileState::Ready, FileState::Held),
+            (FileState::Wanted, FileState::Held),
+            (FileState::Held, FileState::Held),
+            (FileState::Uploading, FileState::Failed),
+            (FileState::Failed, FileState::Failed),
+        ] {
+            let mut row = state_row(from, &shape, 7, &extras);
+            let rest = row[1..].to_vec();
+            carried_state(&mut row);
+            assert_eq!(row[0], to as u8);
+            // IDN-186: the shape, the size, and the extras stay.
+            assert_eq!(row[1..], rest[..]);
+        }
+    }
 }

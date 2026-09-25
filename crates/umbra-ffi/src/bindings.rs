@@ -45,6 +45,10 @@ use umbra_transport::{
 use umbra_wire::ndr::{NdrResponse, TokenCarrier};
 use zeroize::Zeroizing;
 
+mod link;
+
+pub use link::{init_linked, Device, LinkStatus, Linked};
+
 use crate::{
     bridge::{Bridge, NetEvent},
     client::Client,
@@ -823,6 +827,9 @@ pub enum FfiEvent {
         /// The conversation.
         conversation: Vec<u8>,
     },
+    /// The sync channel of another device of the set opened (Part 7
+    /// `DEV-286`).
+    DeviceLinked,
     /// The client refused an invitation command, such as a bundle that does
     /// not parse.
     Refused,
@@ -1056,6 +1063,13 @@ struct Inner {
     /// (Part 13 `ABU-065`, `ABU-105`), and the time of the fetch.
     challenges: umbra_core::abuse::pow::ChallengeBook,
     challenges_at: u64,
+    /// The link of a device that runs (Part 7 §7.4), and the number of the
+    /// last one.
+    link: Option<link::LinkState>,
+    link_serial: u64,
+    /// Whether this device owns the channels of the set. A linked device
+    /// runs no contact, no group, and no backup (`DEV-287`).
+    owns_channels: bool,
 }
 
 /// A restore of Part 4 §4.7.2 while it runs: the root key of the entered
@@ -1130,6 +1144,13 @@ enum RestoreStep {
 
 /// What one command of the transfer task belongs to.
 enum TransferWork {
+    /// One step of the link of a device, by the number of its link.
+    Link {
+        /// The link.
+        serial: u64,
+        /// The step.
+        step: link::LinkStep,
+    },
     /// The backup root of one week, which a restore reads (`IDN-101`).
     RestoreRoot {
         /// The week.
@@ -1264,7 +1285,7 @@ impl Inner {
     /// Gives each group job of the store to the group task (Part 11
     /// §11.2). With no run of the network the jobs wait in the store.
     fn pump_groups(&mut self) {
-        if self.bridge.is_none() {
+        if self.bridge.is_none() || !self.owns_channels {
             return;
         }
         let mut commands = Vec::new();
@@ -1789,8 +1810,24 @@ impl Inner {
     /// The dead-channel work of Part 3 §3.2.6 that is due: the silent
     /// channels once each hour, and the blobs of this device and of each
     /// peer.
+    /// The events of the network that belong to the link of a device.
+    fn take_link_events(&mut self) {
+        let mut kept = VecDeque::with_capacity(self.net_events.len());
+        while let Some(event) = self.net_events.pop_front() {
+            match event {
+                NetEvent::DeviceInvitation(bundle) => self.link_bundle(&bundle),
+                NetEvent::DeviceLinked(conversation) => {
+                    self.link_opened();
+                    kept.push_back(NetEvent::DeviceLinked(conversation));
+                }
+                other => kept.push_back(other),
+            }
+        }
+        self.net_events = kept;
+    }
+
     fn pump_dead_channels(&mut self) {
-        if self.bridge.is_none() {
+        if self.bridge.is_none() || !self.owns_channels {
             return;
         }
         let now = unix_now();
@@ -1816,7 +1853,9 @@ impl Inner {
     /// The backup object that is due goes up (Part 4 §4.7.2). One write
     /// runs at a time: the object, then its root.
     fn pump_backup(&mut self) {
-        if self.bridge.is_none() {
+        // A linked device writes no backup: the backup of the set is the
+        // one of the device that owns the channels.
+        if self.bridge.is_none() || !self.owns_channels {
             return;
         }
         let is_running = self
@@ -1933,7 +1972,9 @@ impl Inner {
             | TransferCommand::Download { tag, .. }
             | TransferCommand::FetchChunk { tag, .. }
             | TransferCommand::WriteHandle { tag, .. }
-            | TransferCommand::ReadHandle { tag, .. },
+            | TransferCommand::ReadHandle { tag, .. }
+            | TransferCommand::UploadBackup { tag, .. }
+            | TransferCommand::DownloadBackup { tag, .. },
         ) = refused
         {
             self.end_transfer(TransferUpdate::Failed { tag });
@@ -1999,6 +2040,9 @@ impl Inner {
     /// Takes the end of one transfer into the store. A message that a
     /// deletion took since has no row, and its result goes nowhere.
     fn end_transfer(&mut self, update: TransferUpdate) {
+        let Some(update) = self.link_update(update) else {
+            return;
+        };
         let mut moved = false;
         let Inner {
             client,
@@ -2417,6 +2461,9 @@ impl Inner {
             NetEvent::Contact(conversation) => FfiEvent::Contact {
                 conversation: conversation.0.to_vec(),
             },
+            // The link takes the bundle before the queue of events.
+            NetEvent::DeviceInvitation(_) => return self.next_event(),
+            NetEvent::DeviceLinked(_) => FfiEvent::DeviceLinked,
             NetEvent::Refused => FfiEvent::Refused,
         })
     }
@@ -2525,8 +2572,22 @@ pub fn init_restored(
     passphrase: Vec<u16>,
     restored: Arc<Restored>,
 ) -> Result<Arc<Handle>, FfiError> {
-    let passphrase = Zeroizing::new(passphrase);
     let restored = locked(&restored.0).take().ok_or(FfiError::NotFound)?;
+    init_store_from(config, element, passphrase, &restored, |client| {
+        Ok(client.apply_restore(&restored, &mut OsRng)?)
+    })
+}
+
+/// Makes a new store under the root seed of `restored`, in the place of
+/// the files of the database, and runs `fill` on it before the handle.
+fn init_store_from(
+    config: Config,
+    element: Arc<dyn SecureElementCallback>,
+    passphrase: Vec<u16>,
+    restored: &crate::client::RestoredBackup,
+    fill: impl FnOnce(&mut Client<SqliteBackend, ForeignElement>) -> Result<(), FfiError>,
+) -> Result<Arc<Handle>, FfiError> {
+    let passphrase = Zeroizing::new(passphrase);
     for suffix in ["", "-wal", "-shm", "-journal"] {
         let path = format!("{}{suffix}", config.database_path);
         if std::path::Path::new(&path).exists() {
@@ -2548,7 +2609,7 @@ pub fn init_restored(
     headers
         .set_header(client.header())
         .map_err(|_| FfiError::Storage)?;
-    client.apply_restore(&restored, &mut OsRng)?;
+    fill(&mut client)?;
     Ok(handle_of(config.database_path, client))
 }
 
@@ -2573,6 +2634,7 @@ pub fn recovery_digits_kind(digits: Vec<u16>) -> u8 {
 
 /// The handle of an open client.
 fn handle_of(database_path: String, client: Client<SqliteBackend, ForeignElement>) -> Arc<Handle> {
+    let owns_channels = client.owns_channels().unwrap_or(true);
     Arc::new(Handle {
         database_path,
         inner: Mutex::new(Inner {
@@ -2613,6 +2675,9 @@ fn handle_of(database_path: String, client: Client<SqliteBackend, ForeignElement
             run: 0,
             challenges: umbra_core::abuse::pow::ChallengeBook::default(),
             challenges_at: 0,
+            link: None,
+            link_serial: 0,
+            owns_channels,
         }),
         changed: Condvar::new(),
         runtime: Mutex::new(None),
@@ -2861,6 +2926,7 @@ impl Handle {
             inner.group_reading.clear();
         }
         // A record with a descriptor asks for its file.
+        inner.take_link_events();
         inner.pump_transfers();
         inner.pump_groups();
         inner.pump_ndr();
@@ -3129,18 +3195,25 @@ impl Handle {
             inner.transfers = None;
             inner.groups = None;
             inner.group_reading.clear();
+            inner.owns_channels = inner.client.owns_channels()?;
             let Inner {
                 client,
                 bridge,
                 net_events,
+                owns_channels,
                 ..
             } = &mut *inner;
             // The node continues each contact and each invitation of the
-            // earlier runs.
+            // earlier runs. A linked device runs its sync channels alone:
+            // the device that owns a channel reads its queue (`DEV-287`).
             let mut node = ClientNode::with_relays(ingress, candidates, client.root_identity()?);
             let stored = client.stored_network()?;
+            let device_peers = client.device_peers()?;
             let mut contacts = BTreeMap::new();
             for (conversation, state) in &stored.contacts {
+                if !*owns_channels && !device_peers.contains(conversation) {
+                    continue;
+                }
                 let contact = node
                     .restore_contact(state)
                     .map_err(|_| FfiError::Integrity)?;
@@ -3151,6 +3224,7 @@ impl Handle {
             for id in client.restored_stale()? {
                 let _ = node.mark_stale(&umbra_core::session::node::ContactId(id));
             }
+            let holds_half = !stored.invitations.is_empty();
             for state in &stored.invitations {
                 let bundle = node
                     .restore_invitation(state)
@@ -3182,6 +3256,15 @@ impl Handle {
             // back at the start of a run and not at the unlock.
             client.resume_group_work(&mut OsRng)?;
             running.flush(client, &mut OsRng)?;
+            // DEV-286: the first run of a linked device opens the sync
+            // channel of its provision. The bundle stays until the channel
+            // opens, since a run can end before its accept goes out, and a
+            // run that holds the half of that accept makes no second one.
+            if let Some(bundle) = client.pending_sync_bundle()? {
+                if !*owns_channels && !holds_half {
+                    running.accept_device(bundle)?;
+                }
+            }
             *bridge = Some(running);
             runtime.spawn(run_client(
                 node,
@@ -4094,6 +4177,7 @@ impl Handle {
         let now = unix_now();
         inner.client.tick(now);
         inner.stop_network_if_locked();
+        inner.pump_link(now);
         let is_due = inner.bridge.is_some()
             && now.saturating_sub(inner.challenges_at) >= umbra_core::abuse::POW_CHALLENGE_PERIOD;
         drop(inner);

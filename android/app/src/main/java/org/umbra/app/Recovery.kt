@@ -78,7 +78,9 @@ object RecoveryPrompt {
 @Composable
 fun RecoveryPromptLine(push: (Screen) -> Unit) {
     val context = LocalContext.current
-    if (!RecoveryPrompt.isDue(context)) return
+    // The code of a linked device is the code of the device that owns the
+    // backup, and the prompt shows there.
+    if (!RecoveryPrompt.isDue(context) || !Core.ownsChannels) return
     Row(
         Modifier
             .fillMaxWidth()

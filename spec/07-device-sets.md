@@ -390,9 +390,10 @@ derive, and the placement list of the relay set names its relays.
         │                                       │
         │                2. reads the offer, checks it against
         │                   the ticket, and writes the hello:
+        │                   an encapsulation to link_pk, and
+        │                   under a key of its secret the
         │                   device_id, DeviceKey_pk,
-        │                   DeviceRosterKey_pk, label, and an
-        │                   encapsulation to link_pk
+        │                   DeviceRosterKey_pk, and label
         │◀── reads the hello ───────────────────│
         │                                       │
         │  3. both devices show a 6-digit code  │
@@ -400,11 +401,12 @@ derive, and the placement list of the relay set names its relays.
         │     transcript — the user confirms    │
         │     that the two codes match ─────────│
         │                                       │
-        │  4. signs roster epoch n+1, uploads   │
-        │     a snapshot of the store, and      │
+        │  4. signs roster epoch n+1, makes a   │
+        │     sync invitation, uploads a        │
+        │     snapshot of the store with the    │
+        │     roster and the invitation, and    │
         │     writes the sealed provision:      │
-        │     the roster, the descriptor of     │
-        │     the snapshot, a sync invitation ─▶│
+        │     the descriptor of the snapshot ──▶│
         │                                       │
         │◀── 5. the sync channel opens ─────────│
 ```
@@ -423,19 +425,23 @@ LinkOffer {                      // 1 217 B, under the offer slot
     link_pk     [1216]u8         // UMBRA-KEM, for this link alone
 }
 
-LinkHello {                      // 4 337 B, under the hello slot
+LinkHello {                      // 4 377 B, under the hello slot
     version     u8               // 0x01
-    device_id   [16]u8
-    device_pk   [1216]u8         // DeviceKey
-    roster_pk   [1952]u8         // DeviceRosterKey
-    label       [32]u8           // UTF-8, padded with zeros
-    ct          [1120]u8         // UMBRA-KEM.Encap(link_pk)
+    ct          [1120]u8         // UMBRA-KEM.Encap(link_pk), which gives ss
+    nonce       [24]u8
+    tag         [16]u8
+    body        [3216]u8         // sealed under the hello key, XChaCha20-Poly1305:
+                                 //   device_id [16]u8
+                                 //   device_pk [1216]u8   DeviceKey
+                                 //   roster_pk [1952]u8   DeviceRosterKey
+                                 //   label     [32]u8     UTF-8, padded with zeros
 }
 
 slot(label, secret)  = handle, cred_sk, read_sk
                      = SHA3-256(label || secret || "handle"), and "cred", and "read"
 offer slot           = slot("umbra/v1/link-offer", nonce)
 hello slot           = slot("umbra/v1/link-hello", nonce)
+hello key            = SHA3-256("umbra/v1/link-hello" || ss || nonce || "seal")
 transcript           = SHA3-256("umbra/v1/link-transcript" || nonce || LinkOffer || LinkHello)
 code                 = BE32(SHA3-256("umbra/v1/link-code" || ss || transcript)[0..4]) mod 1 000 000
 provision slot       = slot("umbra/v1/link-provision", ss || transcript)
@@ -444,9 +450,7 @@ seal key             = SHA3-256("umbra/v1/link-provision" || ss || transcript ||
 Provision {                      // sealed under the seal key, XChaCha20-Poly1305
     version     u8               // 0x01
     from_device [16]u8           // the device_id of the existing device
-    roster      u32 length, bytes      // epoch n+1, signed
     snapshot    u32 length, bytes      // a FileDescriptor of Part 12 §12.3
-    sync_bundle u32 length, bytes      // an invitation bundle of Part 4 §4.3.1
 }
 ```
 
@@ -458,30 +462,49 @@ Provision {                      // sealed under the seal key, XChaCha20-Poly130
   slot before it shows the ticket, and the ticket MUST carry the hash of that
   offer. **[DEV-281]** The new device MUST reject an offer whose hash differs
   from the ticket, and it MUST write its hello under the hello slot.
-- **[DEV-282]** Each device MUST derive the transcript, the code, the
-  provision slot, and the seal key as above. **[DEV-283]** The two devices
+- **[DEV-282]** Each device MUST derive the hello key, the transcript, the
+  code, the provision slot, and the seal key as above. **[DEV-288]** The new
+  device MUST seal the four fields of the body of its hello under the hello
+  key, and the existing device MUST reject a hello whose body does not open.
+  A relay that holds the hello thus reads no key and no label. **[DEV-283]** The two devices
   MUST show the code of step 3, and the existing device MUST NOT write the
   provision before the user confirms on it that the two codes match.
 - **[DEV-002]** The existing device MUST write the provision under the
   provision slot and under no other handle. **[DEV-003]** The existing device
-  MUST erase the offer and the provision after the new device took it, or at
-  `LINK_QR_TTL` after the offer, whichever comes first.
+  MUST erase the offer when it reads the hello, or at `LINK_QR_TTL` after the
+  offer, whichever comes first. It MUST erase the provision and the chunks of
+  the snapshot when the sync channel opens, or at `LINK_PROVISION_TTL` after
+  the provision, whichever comes first. The new device MUST erase its hello
+  when it reads the provision.
 - **[DEV-004]** The snapshot MUST be a full backup object of Part 4 §4.7.2
   under a fresh file key. Thus it carries the **local identity table** of
   Part 4 §4.7.2, and without that table the new device cannot sign a granting
-  epoch (Part 11 §11.9.1).
+  epoch (Part 11 §11.9.1). **[DEV-289]** The snapshot MUST also carry the
+  roster of epoch *n+1*, the bundle of the sync invitation, and the
+  `device_id` and the label of the existing device as the peer of that
+  channel. It MUST NOT carry a record that waits to go, since the sender of
+  that record is the existing device. The provision thus stays one chunk at
+  `MAX_DEVICES`.
 - **[DEV-284]** The new device MUST make its store from the root seed of the
   snapshot and take each row of it, as a restore does, and it MUST keep its
   own `DeviceKey`, `DeviceRosterKey`, and `device_id`.
 - **[DEV-285]** A device that holds no roster MUST sign epoch 0 with itself
   alone before it offers its first link. Epoch *n+1* then adds the new device.
 - **[DEV-286]** The existing device MUST put the bundle of a new invitation
-  in the provision, and the new device MUST accept it at once. The channel of
+  in the snapshot, and the new device MUST accept it at its first run. The channel of
   that invitation is the sync channel of the two devices (§7.5). Neither
   device shows it as a contact.
 - **[DEV-287]** The existing device keeps the ownership of each pairwise
   ratchet and of each group sender at the link. The new device owns nothing
-  until a claim of §7.3.1 or §7.5.4.
+  until a claim of §7.3.1 or §7.5.4. Until then it MUST NOT read the queue of
+  a contact, send a group record, or write a backup of Part 4 §4.7.2: each
+  queue has one reader, and the backup root of a week has one writer.
+- **[DEV-290]** The existing device MUST keep the roster of epoch *n+1* only
+  when the sync channel of the new device opens. A link that ends before
+  that leaves epoch *n* in force.
+- **[DEV-291]** A backup of Part 4 §4.7.2 MUST NOT carry a row of the device
+  set or a row of a sync channel. A restored device is a new device, and it
+  links again.
 - **[DEV-165]** The new device MUST make its own `DeviceKey` and its own `DeviceRosterKey`
   before step 2. **[DEV-168]** The new device MUST send the public half of the two keypairs
   in its hello. **[DEV-166]** The existing device MUST
@@ -497,11 +520,18 @@ Provision {                      // sealed under the seal key, XChaCha20-Poly130
   **[DEV-265]** When a web client returns to this flow after it lost its
   store, the existing device MUST revoke the old entry under §7.7 before step
   5. **[DEV-266]** The new device MAY show the QR code of step 1 in the place
-  of the existing device. Its offer then also carries the fields of the hello
-  but `ct`, and the hello of the existing device carries `ct` alone. The code
-  of step 3 shows on both devices as before. **[DEV-267]** In that
+  of the existing device. The two devices then swap the offer and the `ct`
+  of the hello, and the new device writes the body of its hello, sealed as
+  above, under a slot of the secret. The code of step 3 shows on both
+  devices as before. **[DEV-267]** In that
   direction the existing device MUST show the label of the new device, and it
   MUST get an explicit confirmation from the user, before step 4.
+
+> *Cause of the sealed hello and of the rows of the snapshot.* A first
+> layout put the fields of the hello in the clear, and a relay that held it
+> read the label of the device. The same layout put the roster and the sync
+> bundle in the provision: at eight devices the roster alone is near 29 KB,
+> and the provision then did not fit one chunk.
 
 > *Cause of the handle-addressed chunks.* An earlier draft ran the link as a
 > handshake over an ephemeral queue. The new device holds no root identity
@@ -1629,6 +1659,7 @@ the group re-key of Part 11 §11.12 in each group of the user.
 | `MAX_DEVICES` | 8 |
 | `OWNER_TIMEOUT` | 90 s |
 | `LINK_QR_TTL` | 120 s |
+| `LINK_PROVISION_TTL` | 600 s |
 | `SYNC_MAX_AGE` | 365 days (configurable, 1 day or more) |
 | `SYNC_MAX_BYTES` | 2 GiB (configurable) |
 | `SYNC_ACK_BATCH` | 32 records |

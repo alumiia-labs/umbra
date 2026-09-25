@@ -1020,8 +1020,13 @@ that table.
   that left since the object before it. **[IDN-180]** A client MUST NOT put
   in a backup object a row that holds a state of this device alone: a push
   registration of Part 8, a push token, the ingress pin of Part 10, the
-  dead-channel state of Part 3 §3.2.6, or the wrap of the store. A restored
-  device makes each of them again. **[IDN-181]** A reader MUST reject an
+  dead-channel state of Part 3 §3.2.6, the device set and the sync channels
+  of Part 7 (`DEV-291`), or the wrap of the store. A restored device makes
+  each of them again. **[IDN-186]** A file stays on the device, and a backup
+  object MUST carry the state of each file as one that waits for a tap
+  (Part 14 `IMP-167`), or as one that failed when no descriptor names it. A
+  restored device then fetches the file of a record, sent or received, from
+  its descriptor while the chunks live. **[IDN-181]** A reader MUST reject an
   object with a `version` other than `0x01`, a `kind` other than the two
   values, a full object with a delete or a `base_at` other than 0, or bytes
   after the last row. **[IDN-182]** A restore MUST apply the full object

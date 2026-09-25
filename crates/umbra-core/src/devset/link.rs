@@ -165,8 +165,9 @@ pub fn commit(offer: &[u8]) -> [u8; 32] {
     sha3_256(&[labels::LINK_OFFER, offer])
 }
 
-/// The hello of the new device: its identity in the set, and one
-/// encapsulation to `link_pk` (`DEV-168`, `DEV-224`).
+/// The hello of the new device: one encapsulation to `link_pk`, and its
+/// identity in the set under a key of that secret (`DEV-168`, `DEV-224`).
+/// A relay that holds the chunk reads no key and no label.
 pub struct LinkHello {
     /// The random `device_id` of the new device.
     pub device_id: DeviceId,
@@ -180,38 +181,85 @@ pub struct LinkHello {
     pub ct: Ciphertext,
 }
 
+/// The length of the sealed body of a hello.
+const HELLO_BODY_LEN: usize = 16 + PUBLIC_KEY_LEN + VERIFYING_KEY_LEN + LABEL_LEN;
+/// The length of an encoded hello.
+pub const HELLO_LEN: usize = 1 + CIPHERTEXT_LEN + aead::NONCE_LEN + aead::TAG_LEN + HELLO_BODY_LEN;
+
+fn hello_key(ss: &Secret<32>, nonce: &[u8; 16]) -> Secret<32> {
+    Secret::new(sha3_256(&[labels::LINK_HELLO, ss.expose(), nonce, b"seal"]))
+}
+
 impl LinkHello {
-    /// Version `0x01` and the five fields.
-    pub fn encode(&self) -> Result<Vec<u8>, Error> {
-        let mut out = alloc::vec![0u8; 1 + 16 + PUBLIC_KEY_LEN + VERIFYING_KEY_LEN + LABEL_LEN + CIPHERTEXT_LEN];
-        let mut w = Writer::new(&mut out);
-        w.u8(0x01)?;
-        w.put(&self.device_id)?;
-        w.put(&self.device_pk.to_bytes())?;
+    /// Version `0x01`, `ct`, and the four other fields sealed under the key
+    /// of `ss` and the nonce of the ticket.
+    pub fn seal<R: CryptoRng + ?Sized>(
+        &self,
+        ss: &Secret<32>,
+        nonce: &[u8; 16],
+        rng: &mut R,
+    ) -> Result<Vec<u8>, Error> {
         if self.roster_pk.len() != VERIFYING_KEY_LEN {
             return Err(Error::Malformed);
         }
+        let mut body = Zeroizing::new(alloc::vec![0u8; HELLO_BODY_LEN]);
+        let mut w = Writer::new(&mut body);
+        w.put(&self.device_id)?;
+        w.put(&self.device_pk.to_bytes())?;
         w.put(&self.roster_pk)?;
         w.put(&self.label)?;
-        w.put(self.ct.as_bytes())?;
+        let mut seal_nonce = [0u8; aead::NONCE_LEN];
+        rng.fill_bytes(&mut seal_nonce);
+        let tag = aead::seal(
+            &hello_key(ss, nonce),
+            &seal_nonce,
+            labels::LINK_HELLO,
+            &mut body,
+        )?;
+        let mut out = Vec::with_capacity(HELLO_LEN);
+        out.push(0x01);
+        out.extend_from_slice(self.ct.as_bytes());
+        out.extend_from_slice(&seal_nonce);
+        out.extend_from_slice(&tag);
+        out.extend_from_slice(&body);
         Ok(out)
     }
 
-    /// Reads a hello.
-    pub fn parse(bytes: &[u8]) -> Result<Self, Error> {
+    /// Reads a hello with the key of the offer: the decapsulation of `ct`
+    /// gives the key of the body.
+    fn open(
+        link_key: &KeyPair,
+        nonce: &[u8; 16],
+        bytes: &[u8],
+    ) -> Result<(Self, Secret<32>), Error> {
         let mut r = Reader::new(bytes);
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+        let ct = Ciphertext::from_bytes(r.take(CIPHERTEXT_LEN)?)?;
+        let seal_nonce: [u8; aead::NONCE_LEN] = r.array()?;
+        let tag = r.take(aead::TAG_LEN)?;
+        let mut body = Zeroizing::new(r.take(HELLO_BODY_LEN)?.to_vec());
+        r.finish()?;
+        let ss = Secret::new(*link_key.decapsulate(&ct)?.expose());
+        aead::open(
+            &hello_key(&ss, nonce),
+            &seal_nonce,
+            labels::LINK_HELLO,
+            &mut body,
+            tag,
+        )
+        .map_err(|_| Error::Unverified)?;
+        let mut r = Reader::new(&body);
         let hello = LinkHello {
             device_id: r.array()?,
             device_pk: PublicKey::from_bytes(r.take(PUBLIC_KEY_LEN)?)?,
             roster_pk: r.take(VERIFYING_KEY_LEN)?.to_vec(),
             label: r.array()?,
-            ct: Ciphertext::from_bytes(r.take(CIPHERTEXT_LEN)?)?,
+            ct,
         };
         r.finish()?;
-        Ok(hello)
+        Ok((hello, ss))
     }
 }
 
@@ -241,21 +289,16 @@ impl LinkSecret {
         }
     }
 
-    /// The side of the existing device: the decapsulation of the hello.
+    /// The side of the existing device: the hello opens under the key of
+    /// the offer, and the secret follows.
     pub fn decapsulate(
         link_key: &KeyPair,
         nonce: &[u8; 16],
         offer: &[u8],
         hello_bytes: &[u8],
-        hello: &LinkHello,
-    ) -> Result<Self, Error> {
-        let ss = link_key.decapsulate(&hello.ct)?;
-        Ok(Self::new(
-            Secret::new(*ss.expose()),
-            nonce,
-            offer,
-            hello_bytes,
-        ))
+    ) -> Result<(LinkHello, Self), Error> {
+        let (hello, ss) = LinkHello::open(link_key, nonce, hello_bytes)?;
+        Ok((hello, Self::new(ss, nonce, offer, hello_bytes)))
     }
 
     /// The six-digit code that the user compares on the two screens
@@ -329,32 +372,27 @@ impl LinkSecret {
     }
 }
 
-/// What the existing device gives the new one (`DEV-004`, `DEV-286`): the
-/// roster that adds it, the descriptor of the snapshot of the store on the
-/// chunk path, and the bundle that opens the sync channel of the two.
+/// What the existing device gives the new one (`DEV-004`): the descriptor
+/// of the snapshot of the store on the chunk path. The snapshot holds the
+/// roster that adds the new device and the bundle that opens the sync
+/// channel of the two (`DEV-286`), thus the provision stays one chunk at
+/// `MAX_DEVICES`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Provision {
     /// The `device_id` of the existing device.
     pub from_device: DeviceId,
-    /// The roster epoch that adds the new device, signed.
-    pub roster: Vec<u8>,
     /// The encoded `FileDescriptor` of the snapshot.
     pub snapshot: Vec<u8>,
-    /// The invitation bundle of the sync channel (Part 4 §4.3.1).
-    pub sync_bundle: Vec<u8>,
 }
 
 impl Provision {
     fn encode(&self) -> Result<Vec<u8>, Error> {
-        let len = 1 + 16 + 12 + self.roster.len() + self.snapshot.len() + self.sync_bundle.len();
-        let mut out = alloc::vec![0u8; len];
+        let mut out = alloc::vec![0u8; 1 + 16 + 4 + self.snapshot.len()];
         let mut w = Writer::new(&mut out);
         w.u8(0x01)?;
         w.put(&self.from_device)?;
-        for part in [&self.roster, &self.snapshot, &self.sync_bundle] {
-            w.u32(u32::try_from(part.len()).map_err(|_| Error::Malformed)?)?;
-            w.put(part)?;
-        }
+        w.u32(u32::try_from(self.snapshot.len()).map_err(|_| Error::Malformed)?)?;
+        w.put(&self.snapshot)?;
         Ok(out)
     }
 
@@ -364,19 +402,12 @@ impl Provision {
             return Err(Error::Malformed);
         }
         let from_device = r.array()?;
-        let mut part = || -> Result<Vec<u8>, Error> {
-            let len = usize::try_from(r.u32()?).map_err(|_| Error::Malformed)?;
-            Ok(r.take(len)?.to_vec())
-        };
-        let roster = part()?;
-        let snapshot = part()?;
-        let sync_bundle = part()?;
+        let len = usize::try_from(r.u32()?).map_err(|_| Error::Malformed)?;
+        let snapshot = r.take(len)?.to_vec();
         r.finish()?;
         Ok(Provision {
             from_device,
-            roster,
             snapshot,
-            sync_bundle,
         })
     }
 }
@@ -634,15 +665,19 @@ mod tests {
             label: identity.label,
             ct,
         };
-        let hello_bytes = hello.encode().unwrap();
+        let hello_bytes = hello.seal(&ss, &scanned.nonce, &mut rng).unwrap();
+        assert_eq!(hello_bytes.len(), HELLO_LEN);
+        // The label is not in the clear.
+        assert!(!hello_bytes.windows(6).any(|w| w == b"Tablet"));
         let joined = LinkSecret::new(ss, &scanned.nonce, &offer_bytes, &hello_bytes);
 
-        // The existing device reads the hello: the same code.
-        let read = LinkHello::parse(&hello_bytes).unwrap();
+        // The existing device reads the hello: the same code. A hello under
+        // another nonce does not open.
+        assert!(LinkSecret::decapsulate(&link_key, &[8; 16], &offer_bytes, &hello_bytes).is_err());
+        let (read, offered) =
+            LinkSecret::decapsulate(&link_key, &ticket.nonce, &offer_bytes, &hello_bytes).unwrap();
         assert_eq!(label_text(&read.label), "Tablet");
-        let offered =
-            LinkSecret::decapsulate(&link_key, &ticket.nonce, &offer_bytes, &hello_bytes, &read)
-                .unwrap();
+        assert_eq!(read.device_id, identity.device_id);
         assert_eq!(offered.code(), joined.code());
         assert!(offered.code() < 1_000_000);
         assert_eq!(
@@ -653,9 +688,7 @@ mod tests {
         // The provision opens at the new device alone.
         let provision = Provision {
             from_device: [1; 16],
-            roster: alloc::vec![2; 40],
             snapshot: alloc::vec![3; 200],
-            sync_bundle: alloc::vec![4; 60],
         };
         let sealed = offered.seal(&provision, &mut rng).unwrap();
         assert_eq!(joined.open(&sealed).unwrap(), provision);

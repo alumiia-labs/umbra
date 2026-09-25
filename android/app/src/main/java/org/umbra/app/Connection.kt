@@ -143,7 +143,7 @@ fun ConnectionScreen(onBack: () -> Unit) {
             )
             HorizontalDivider(color = Palette.Divider)
             Spacer(Modifier.height(16.dp))
-            SecondaryButton("Reconnect") { Core.connect(context) }
+            SecondaryButton("Reconnect") { Core.connect(context, force = true) }
             Spacer(Modifier.height(24.dp))
         }
     }

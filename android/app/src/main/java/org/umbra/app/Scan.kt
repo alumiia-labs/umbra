@@ -126,7 +126,7 @@ fun ScanSafetyNumberScreen(chat: Chat, onBack: () -> Unit) {
  * time. A frame stays on the device, and no part of the app stores it.
  */
 @Composable
-private fun Scanner(onText: (String) -> Unit) {
+fun Scanner(onText: (String) -> Unit) {
     val context = LocalContext.current
     var isAllowed by remember {
         val state = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA)

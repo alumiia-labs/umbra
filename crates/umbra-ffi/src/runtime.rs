@@ -4,7 +4,7 @@
 //! random source, and the socket, and no protocol rule.
 
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -60,6 +60,12 @@ pub enum Command {
     /// Accept an invitation: the 68 bytes of a fragment, or a bundle that
     /// came by another path.
     Accept(Vec<u8>),
+    /// Make the invitation of the sync channel of a device (Part 7
+    /// `DEV-286`). An [`Update::DeviceInvitation`] follows with its bundle.
+    InviteDevice,
+    /// Accept the bundle of the sync channel that a device gave in its
+    /// provision.
+    AcceptDevice(Vec<u8>),
     /// Send one application record. An [`Update::Sent`] with the same tag
     /// follows the acknowledgment of the relay.
     Send {
@@ -188,6 +194,8 @@ pub enum Update {
     /// The fragment of an invitation link, which the user gives out of
     /// band.
     Invitation(Vec<u8>),
+    /// The bundle of the sync channel of a device, for its provision.
+    DeviceInvitation(Vec<u8>),
     /// The relay holds no blob for a link that the user accepted: a second
     /// party fetched it first, or it passed its lifetime (`IDN-023`).
     InvitationGone,
@@ -197,6 +205,8 @@ pub enum Update {
         contact: ContactId,
         /// The static key of the peer.
         peer_static: [u8; 32],
+        /// Whether the channel is the sync channel of a device.
+        is_device: bool,
     },
     /// An application record arrived.
     Message {
@@ -336,6 +346,7 @@ pub async fn run_client(
     let mut shown_queues: Vec<([u8; 32], [u8; 32])> = Vec::new();
     let mut notify_tags: BTreeMap<u64, u64> = BTreeMap::new();
     let mut tags: BTreeMap<u64, u64> = BTreeMap::new();
+    let mut device_invites: BTreeSet<u64> = BTreeSet::new();
     let mut is_foreground = true;
     let mut next_slot = tokio::time::Instant::now() + cover_delay(&mut rng);
     // The tick of `CIRCUIT_BUILD_TIMEOUT`. It sends nothing unless a build
@@ -402,15 +413,23 @@ pub async fn run_client(
         for event in events {
             let update = match event {
                 ClientEvent::CircuitReady => Update::Online,
-                ClientEvent::Invitation { bundle, .. } => Update::Invitation(bundle),
+                ClientEvent::Invitation { handle, bundle } => {
+                    if device_invites.remove(&handle) {
+                        Update::DeviceInvitation(bundle)
+                    } else {
+                        Update::Invitation(bundle)
+                    }
+                }
                 ClientEvent::InvitationLink { fragment, .. } => Update::Invitation(fragment),
                 ClientEvent::InvitationGone { .. } => Update::InvitationGone,
                 ClientEvent::ContactReady {
                     contact,
                     peer_static,
+                    is_device,
                 } => Update::Contact {
                     contact,
                     peer_static,
+                    is_device,
                 },
                 ClientEvent::Message { contact, app } => Update::Message { contact, app },
                 ClientEvent::VerificationCode { contact, code } => {
@@ -487,6 +506,19 @@ pub async fn run_client(
                 Command::Foreground(_) => {}
                 Command::Invite => {
                     if node.invite_link(&mut rng).is_err() {
+                        let _ = updates.send(Update::Refused);
+                    }
+                }
+                Command::InviteDevice => match node.invite_device(&mut rng) {
+                    Ok(handle) => {
+                        device_invites.insert(handle);
+                    }
+                    Err(_) => {
+                        let _ = updates.send(Update::Refused);
+                    }
+                },
+                Command::AcceptDevice(bundle) => {
+                    if node.accept_device(bundle, &mut rng).is_err() {
                         let _ = updates.send(Update::Refused);
                     }
                 }

@@ -106,8 +106,10 @@ const INDEX_VALUE_LEN: usize = 1 + 16 + 32;
 
 /// The tables that a backup carries (`IDN-179`). Invitations, push
 /// registrations, the dead-channel state, the files, and the state of the
-/// backup itself stay on the device (`IDN-180`).
-const BACKED_UP: [TableId; 20] = [
+/// backup itself stay on the device (`IDN-180`). The state of each file goes
+/// as one that waits for a tap (`IDN-186`).
+const BACKED_UP: [TableId; 21] = [
+    super::files::FILE_STATE,
     TableId::MESSAGE,
     TableId::TOMBSTONE,
     TableId::CONTACT,
@@ -333,8 +335,20 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// Whether a row of a carried table stays on the device: a setting of
     /// this device alone (`IDN-180`), or a message older than
     /// `BACKUP_HISTORY_DAYS` (`IDN-082`).
-    fn stays(&self, table: TableId, row: &RowId, plain: &[u8], now: u64) -> Result<bool, Error> {
+    fn stays(
+        &self,
+        table: TableId,
+        row: &RowId,
+        owner: Option<&RowId>,
+        plain: &[u8],
+        now: u64,
+        device_peers: &BTreeSet<RowId>,
+    ) -> Result<bool, Error> {
         let store = &self.open_ref()?.store;
+        // DEV-286: a sync channel belongs to this device alone.
+        if device_peers.contains(row) || owner.is_some_and(|owner| device_peers.contains(owner)) {
+            return Ok(true);
+        }
         if table == super::SETTINGS {
             let local = [
                 super::notify::PUSH_TOKEN_SETTING,
@@ -342,6 +356,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 super::INGRESS_PINS_SETTING,
                 super::AUTO_DOWNLOAD_SETTING,
                 super::UNMETERED_ONLY_SETTING,
+                super::devices::PENDING_PEER_SETTING,
+                super::devices::SYNC_BUNDLE_SETTING,
+                RESTORE_STALE_SETTING,
             ];
             return Ok(local
                 .iter()
@@ -354,6 +371,59 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
         }
         Ok(false)
+    }
+
+    /// Each row of `tables` that a backup carries at `now`.
+    fn carried_rows(&self, now: u64, tables: &[TableId]) -> Result<Vec<BackupRow>, Error> {
+        let device_peers: BTreeSet<RowId> = self
+            .device_peers()?
+            .into_iter()
+            .map(|conversation| conversation.0)
+            .collect();
+        let mut current: Vec<BackupRow> = Vec::new();
+        for &table in tables {
+            let rows = self.open_ref()?.store.list_owned(table)?;
+            for (row, owner, plain) in rows {
+                let mut plain = Zeroizing::new(plain);
+                if table == super::files::FILE_STATE {
+                    super::files::carried_state(&mut plain);
+                }
+                if !self.stays(table, &row, owner.as_ref(), &plain, now, &device_peers)? {
+                    current.push(BackupRow::Put {
+                        table,
+                        row,
+                        owner,
+                        plain,
+                    });
+                }
+            }
+        }
+        Ok(current)
+    }
+
+    /// The snapshot of a link (Part 7 `DEV-004`): one full backup object,
+    /// which touches neither the index nor the schedule of the backup, with
+    /// the rows of the link. A record that waits to go stays here, since its
+    /// sender is this device (`DEV-287`).
+    pub fn link_snapshot(
+        &self,
+        now: u64,
+        roster: &[u8],
+        sync_bundle: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, Error> {
+        let tables: Vec<TableId> = BACKED_UP
+            .into_iter()
+            .filter(|table| *table != super::OUTBOX)
+            .collect();
+        let mut rows = self.carried_rows(now, &tables)?;
+        rows.extend(self.link_rows(roster, sync_bundle)?);
+        let object = BackupObject {
+            kind: KIND_FULL,
+            written_at: now,
+            base_at: 0,
+            rows,
+        };
+        Ok(object.encode()?)
     }
 
     /// The backup object that is due at `now`, in the foreground only
@@ -376,21 +446,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             Some(state) if now >= state.next_delta_at && !state.entries.is_empty() => KIND_DELTA,
             Some(_) => return Ok(None),
         };
-        let mut current: Vec<BackupRow> = Vec::new();
-        for table in BACKED_UP {
-            let rows = self.open_ref()?.store.list_owned(table)?;
-            for (row, owner, plain) in rows {
-                let plain = Zeroizing::new(plain);
-                if !self.stays(table, &row, &plain, now)? {
-                    current.push(BackupRow::Put {
-                        table,
-                        row,
-                        owner,
-                        plain,
-                    });
-                }
-            }
-        }
+        let current = self.carried_rows(now, &BACKED_UP)?;
         let store = &self.open_ref()?.store;
         let mut indexed: BTreeMap<RowId, Vec<u8>> = BTreeMap::new();
         for (key, value) in store.list(BACKUP_INDEX, None)? {
@@ -556,7 +612,7 @@ fn alloc_vec(len: usize) -> Vec<u8> {
 /// The setting that lists each contact of a restore whose channel waits
 /// for its renewal. Each run marks them stale again, until the renewal of
 /// each one ends (`IDN-183`).
-const RESTORE_STALE_SETTING: &[u8] = b"restore-stale";
+pub(super) const RESTORE_STALE_SETTING: &[u8] = b"restore-stale";
 
 /// The rows of a restore: the full object and each delta after it, in the
 /// order of the root (`IDN-182`), with the root seed that they hold.

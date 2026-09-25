@@ -131,6 +131,9 @@ pub enum ClientEvent {
         /// The static X25519 key of the peer, for the verification of
         /// Part 4 §4.5.
         peer_static: [u8; 32],
+        /// Whether the channel is the sync channel of another device of
+        /// this set (Part 7 `DEV-286`), which no view shows as a contact.
+        is_device: bool,
     },
     /// An application record arrived. The runtime commits it and then
     /// calls [`ClientNode::acknowledge`] (`WIR-115`).
@@ -543,6 +546,9 @@ struct LinkFetch {
 enum Purpose {
     /// The bundle goes to the caller.
     Invite,
+    /// The bundle goes to the caller, for the sync channel of a device of
+    /// this set (Part 7 `DEV-286`).
+    DeviceInvite,
     /// The bundle goes to the relay as a blob, and a link goes to the
     /// caller.
     InviteLink,
@@ -551,6 +557,8 @@ enum Purpose {
         /// The lock key of the first fetch, which writes to the queue of
         /// the inviter in the place of the `QS_auth` of the bundle.
         lock: Option<[u8; 32]>,
+        /// Whether the bundle opens the sync channel of a device.
+        device: bool,
     },
     /// The notify queue of a group (Part 8 §8.5.2).
     Notify,
@@ -710,6 +718,8 @@ struct Half {
     /// The contact that this handshake renews (Part 3 §3.2.6), or none for
     /// a new contact.
     renews: Option<[u8; 32]>,
+    /// Whether the handshake opens the sync channel of a device.
+    device: bool,
 }
 
 struct Contact {
@@ -858,6 +868,9 @@ const CONTACT_STORED_VERSION: u8 = 0x04;
 /// The version byte of a stored invitation that renews a contact: version
 /// `0x02` and then the contact.
 const RENEWAL_STORED_VERSION: u8 = 0x03;
+/// The stored form of an invitation of a sync channel (Part 7 `DEV-286`):
+/// the form of `STORED_VERSION`.
+const DEVICE_STORED_VERSION: u8 = 0x04;
 
 /// `ROTATE_AFTER` of Part 3 §3.2.4: the age of a queue, in seconds.
 pub const ROTATE_AFTER: u64 = 90 * 86_400;
@@ -1678,7 +1691,7 @@ impl ClientNode {
         let version = reader.u8()?;
         let names_relay = match version {
             0x01 => false,
-            STORED_VERSION | RENEWAL_STORED_VERSION => true,
+            STORED_VERSION | RENEWAL_STORED_VERSION | DEVICE_STORED_VERSION => true,
             _ => return Err(Error::Malformed),
         };
         let salt = reader.array()?;
@@ -1717,6 +1730,7 @@ impl ClientNode {
                 link: None,
                 inbound_relay,
                 renews,
+                device: version == DEVICE_STORED_VERSION,
             },
         );
         // A renewal is no invitation of the user, and no view shows it.
@@ -1738,6 +1752,7 @@ impl ClientNode {
         let mut writer = Writer::new();
         writer.u8(match half.renews {
             Some(_) => RENEWAL_STORED_VERSION,
+            None if half.device => DEVICE_STORED_VERSION,
             None => STORED_VERSION,
         });
         writer.bytes(&half.salt);
@@ -2326,6 +2341,32 @@ impl ClientNode {
         self.make_queue(Purpose::Invite, rng)
     }
 
+    /// Starts the invitation of the sync channel of a device of this set
+    /// (Part 7 `DEV-286`). A [`ClientEvent::Invitation`] with the same
+    /// handle carries the bundle, and the channel ends in a
+    /// [`ClientEvent::ContactReady`] that names a device.
+    pub fn invite_device<R: CryptoRng + ?Sized>(&mut self, rng: &mut R) -> Result<u64, Error> {
+        self.make_queue(Purpose::DeviceInvite, rng)
+    }
+
+    /// Accepts the bundle of the sync channel that a device of this set
+    /// gave in its provision (`DEV-286`).
+    pub fn accept_device<R: CryptoRng + ?Sized>(
+        &mut self,
+        bundle: Vec<u8>,
+        rng: &mut R,
+    ) -> Result<u64, Error> {
+        Invitee::check(&bundle)?;
+        self.make_queue(
+            Purpose::Accept {
+                bundle,
+                lock: None,
+                device: true,
+            },
+            rng,
+        )
+    }
+
     /// Starts one invitation with a link (Part 4 §4.3.1). The relay holds
     /// the sealed bundle, and a [`ClientEvent::InvitationLink`] with the
     /// same handle carries the fragment of the link.
@@ -2341,7 +2382,14 @@ impl ClientNode {
         rng: &mut R,
     ) -> Result<u64, Error> {
         Invitee::check(&bundle)?;
-        self.make_queue(Purpose::Accept { bundle, lock: None }, rng)
+        self.make_queue(
+            Purpose::Accept {
+                bundle,
+                lock: None,
+                device: false,
+            },
+            rng,
+        )
     }
 
     /// Accepts the link of an inviter, by the 68 bytes of its fragment. The
@@ -2857,7 +2905,14 @@ impl ClientNode {
             return Ok(gone);
         }
         let lock = Some(wait.lock);
-        self.make_queue(Purpose::Accept { bundle, lock }, rng)?;
+        self.make_queue(
+            Purpose::Accept {
+                bundle,
+                lock,
+                device: false,
+            },
+            rng,
+        )?;
         Ok(Vec::new())
     }
 
@@ -3673,6 +3728,10 @@ impl ClientNode {
         let mut out = Vec::new();
         let mut opening = Vec::new();
         let mut link = None;
+        let device = matches!(
+            keys.purpose,
+            Purpose::DeviceInvite | Purpose::Accept { device: true, .. }
+        );
         let (setup, outbound, peer_static, issued) = match keys.purpose {
             Purpose::InviteLink => {
                 let (inviter, bundle) = Inviter::issue(&identity, own_address(), rng)?;
@@ -3684,7 +3743,7 @@ impl ClientNode {
                 });
                 (Setup::Inviting(Box::new(inviter)), None, [0u8; 32], bundle)
             }
-            Purpose::Invite => {
+            Purpose::Invite | Purpose::DeviceInvite => {
                 let (inviter, bundle) = Inviter::issue(&identity, own_address(), rng)?;
                 out.push(ClientEvent::Invitation {
                     handle: keys.handle,
@@ -3714,7 +3773,7 @@ impl ClientNode {
                     Vec::new(),
                 )
             }
-            Purpose::Accept { bundle, lock } => {
+            Purpose::Accept { bundle, lock, .. } => {
                 opening = alloc::vec![0u8; QUEUE_ADDRESS_LEN];
                 own_address().encode(&mut opening)?;
                 let peer_static = Bundle::parse(&bundle)?.responder_static_x25519;
@@ -3745,6 +3804,7 @@ impl ClientNode {
             link,
             inbound_relay: queue_relay,
             renews,
+            device,
         };
         // An invitation with a link waits for the store of its blob.
         if half.link.is_none() {
@@ -3998,6 +4058,7 @@ impl ClientNode {
         Ok(alloc::vec![ClientEvent::ContactReady {
             contact: ContactId(queue_id),
             peer_static,
+            is_device: half.device,
         }])
     }
 

@@ -26,7 +26,10 @@ import uniffi.umbra_ffi.Receipts
 import uniffi.umbra_ffi.RestoreStatus
 import uniffi.umbra_ffi.TextSink
 import uniffi.umbra_ffi.init
+import uniffi.umbra_ffi.initLinked
 import uniffi.umbra_ffi.initRestored
+import uniffi.umbra_ffi.Device
+import uniffi.umbra_ffi.LinkStatus
 import uniffi.umbra_ffi.recoveryDigitsKind
 import uniffi.umbra_ffi.measureArgon2FloorMs
 import uniffi.umbra_ffi.MsgHandle
@@ -173,6 +176,9 @@ object Core {
     private var handle: Handle? = null
     private var draining = false
 
+    /** Whether a run started and did not report its first state yet. */
+    private var isStarting = false
+
     /** Whether a view of the app is on the screen. */
     private var isVisible = false
 
@@ -225,7 +231,11 @@ object Core {
         watchNetwork(app)
         opened.setMetered(isMetered(app))
         val backupAt = opened.lastBackupAt()?.toLong()
-        BuildNetwork.network(app, opened)?.let(opened::connect)
+        val owns = opened.ownsChannels()
+        BuildNetwork.network(app, opened)?.let { network ->
+            main.post { isStarting = true }
+            opened.connect(network)
+        }
         drain(opened, app)
         main.post {
             chats.clear()
@@ -234,6 +244,7 @@ object Core {
             autoDownloadLimit = downloadLimit
             autoDownloadWifiOnly = downloadWifiOnly
             lastBackupAt = backupAt
+            ownsChannels = owns
             restoreNote = null
             phase = Phase.Open
             // The user opened the client, thus a view is on the
@@ -244,6 +255,156 @@ object Core {
             Poll.schedule(app)
         }
     }
+
+    /** The devices of the set (Part 7). */
+    val devices = mutableStateListOf<Device>()
+
+    /** Whether this device owns the channels, thus it can link another. */
+    var ownsChannels by mutableStateOf(true)
+        private set
+
+    fun readDevices() = call { client ->
+        val list = client.devices()
+        val owns = client.ownsChannels()
+        main.post {
+            devices.clear()
+            devices.addAll(list)
+            ownsChannels = owns
+        }
+    }
+
+    /** Where the link of a device stands, for the view of the link. */
+    var linkStatus by mutableStateOf<LinkStatus>(LinkStatus.Idle)
+        private set
+
+    fun startLink(context: Context) {
+        fault = null
+        linkStatus = LinkStatus.Preparing
+        val label = deviceLabel(context)
+        call { client -> client.startLink(label) }
+    }
+
+    /** The name of this device that the user set, or its model. */
+    private fun deviceLabel(context: Context): String =
+        android.provider.Settings.Global.getString(
+            context.contentResolver,
+            android.provider.Settings.Global.DEVICE_NAME,
+        )?.takeIf { it.isNotBlank() } ?: Build.MODEL
+
+    fun readLink() = call { client ->
+        val status = client.linkStatus()
+        main.post { linkStatus = status }
+    }
+
+    fun confirmLink() = call { client ->
+        client.confirmLink()
+        val status = client.linkStatus()
+        main.post { linkStatus = status }
+    }
+
+    fun cancelLink() {
+        linkStatus = LinkStatus.Idle
+        call { client -> client.cancelLink() }
+    }
+
+    /** The code of a first launch that links, or null. */
+    var joinCode by mutableStateOf<String?>(null)
+        private set
+
+    /** What the link of a first launch shows while it runs, or null. */
+    var joinNote by mutableStateOf<String?>(null)
+        private set
+
+    /**
+     * Links this device from the scanned code of another (Part 7 §7.4): a
+     * first store under the new passphrase with the network, the link, and
+     * then the store of the snapshot in its place. This call overwrites
+     * `passphrase`.
+     */
+    fun join(context: Context, passphrase: CharArray, ticket: String) {
+        val app = context.applicationContext
+        fault = null
+        joinNote = "Connecting…"
+        worker.execute {
+            val units = passphrase.map { it.code.toUShort() }
+            passphrase.fill('\u0000')
+            var opened: Handle? = null
+            try {
+                val first = launch(app, units)
+                opened = first
+                first.unlock(units)
+                val network = BuildNetwork.network(app, first)
+                if (network == null) {
+                    dropStore(app, first)
+                    joinFailed("No network.")
+                    return@execute
+                }
+                first.connect(network)
+                first.joinLink(ticket, deviceLabel(app))
+                val deadline = System.currentTimeMillis() + JOIN_WAIT_MS
+                var failure: String? = null
+                var isReady = false
+                while (!isReady && failure == null) {
+                    // No thread drains this handle, thus the clock of the
+                    // link comes from here.
+                    first.tick()
+                    when (val status = first.linkStatus()) {
+                        is LinkStatus.Ready -> isReady = true
+                        is LinkStatus.Code -> main.post {
+                            joinNote = null
+                            joinCode = status.code
+                        }
+                        is LinkStatus.Fetching -> main.post {
+                            joinCode = null
+                            joinNote = "Copying from the other device…"
+                        }
+                        is LinkStatus.Expired -> failure = "The code ran out."
+                        is LinkStatus.Failed -> failure = "The link failed."
+                        else -> Unit
+                    }
+                    if (!isReady && failure == null) {
+                        if (System.currentTimeMillis() > deadline) failure = "The link failed."
+                        Thread.sleep(500)
+                    }
+                }
+                if (failure != null) {
+                    dropStore(app, first)
+                    joinFailed(failure)
+                    return@execute
+                }
+                val linked = first.takeLinked()
+                first.disconnect()
+                first.close()
+                opened = null
+                val database = File(app.filesDir, "umbra.db")
+                val back = initLinked(
+                    Config(database.absolutePath, measureArgon2FloorMs()),
+                    KeystoreElement(app),
+                    units,
+                    linked,
+                )
+                main.post {
+                    joinNote = null
+                    joinCode = null
+                }
+                begin(app, back)
+            } catch (malformed: FfiException.Malformed) {
+                opened?.let { dropStore(app, it) }
+                joinFailed("This is not the code of a link.")
+            } catch (other: FfiException) {
+                opened?.let { dropStore(app, it) }
+                joinFailed("The link failed: ${other.javaClass.simpleName}.")
+            }
+        }
+    }
+
+    private fun joinFailed(message: String) = main.post {
+        joinNote = null
+        joinCode = null
+        fault = message
+    }
+
+    private const val JOIN_WAIT_MS = 15 * 60_000L
 
     /** What the restore of a first launch shows while it runs, or null. */
     var restoreNote by mutableStateOf<String?>(null)
@@ -396,6 +557,7 @@ object Core {
     private fun apply(event: FfiEvent, app: Context) {
         when (event) {
             is FfiEvent.Online -> {
+                isStarting = false
                 online = true
                 fault = null
                 degraded = null
@@ -405,6 +567,7 @@ object Core {
             }
             is FfiEvent.Circuits -> readConnection()
             is FfiEvent.Offline -> {
+                isStarting = false
                 online = false
                 readConnection()
                 if (event.cause.toInt() == AGED) {
@@ -483,6 +646,7 @@ object Core {
                 refreshChats()
             }
             is FfiEvent.Locked -> {
+                isStarting = false
                 groupOffers.clear()
                 groupJoiners.clear()
                 images.clear()
@@ -503,6 +667,11 @@ object Core {
                 if (!isVisible) Notifier.locked(app)
             }
             is FfiEvent.IntegrityFault -> fault = "The local store does not verify."
+            // The sync channel of a device opened.
+            is FfiEvent.DeviceLinked -> {
+                readDevices()
+                readLink()
+            }
         }
         // An event can hold a handle of a message, and this frees it.
         event.destroy()
@@ -654,8 +823,13 @@ object Core {
     }
 
     /** Starts the network again after it ended. */
-    fun connect(context: Context) {
+    fun connect(context: Context, force: Boolean = false) {
         val app = context.applicationContext
+        // The open, the carrier, and the screen each ask for a run in the
+        // first second. A second run replaces the first, and the handshake
+        // that the first one started ends with it.
+        if (isStarting && !force) return
+        isStarting = true
         call { client ->
             val network = BuildNetwork.network(app, client)
             if (network == null) {
@@ -663,12 +837,18 @@ object Core {
                 // and no run ends to call for a retry. The backoff of a run
                 // that ended tries again.
                 main.post {
+                    isStarting = false
                     degraded = "The relays do not answer. Messages wait."
                     retryLater(app)
                 }
                 return@call
             }
-            client.connect(network)
+            try {
+                client.connect(network)
+            } catch (failure: FfiException) {
+                main.post { isStarting = false }
+                throw failure
+            }
             // A run starts in the foreground tier, thus it takes the state
             // of this moment.
             client.setForeground(isVisible)

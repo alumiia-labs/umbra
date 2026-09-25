@@ -67,10 +67,10 @@ each column when a crate implements the requirement and a test covers it.
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
 | `NET` | 239 | 85 | 1 | 0 | 8 | **333** |
-| `IDN` | 128 | 44 | 1 | 0 | 5 | **178** |
+| `IDN` | 129 | 44 | 1 | 0 | 5 | **179** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
 | `WIR` | 393 | 85 | 0 | 0 | 7 | **485** |
-| `DEV` | 183 | 87 | 0 | 0 | 7 | **277** |
+| `DEV` | 186 | 88 | 0 | 0 | 7 | **281** |
 | `NTF` | 74 | 28 | 0 | 0 | 3 | **105** |
 | `DIS` | 109 | 33 | 0 | 0 | 1 | **143** |
 | `REL` | 124 | 32 | 1 | 0 | 2 | **159** |
@@ -79,7 +79,7 @@ each column when a crate implements the requirement and a test covers it.
 | `ABU` | 66 | 30 | 1 | 0 | 0 | **97** |
 | `IMP` | 114 | 41 | 0 | 0 | 2 | **157** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 1947 | 613 | 7 | 0 | 50 | **2617** |
+| **All** | 1951 | 614 | 7 | 0 | 50 | **2622** |
 
 ## SCP — Scope and Conventions
 
@@ -649,12 +649,13 @@ Source: `spec/04-identity.md`
 | `IDN-177` | §4.7.1 | MUST | A client | A client MUST derive `BackupRootKey` with `salt` of the 20 bytes `"umbra/v1/backup-salt"`, with `m` of exactly 64 MiB, with `t` of exactly 3, and with a parallelism of 1. |  |  |
 | `IDN-178` | §4.7.2 | MUST | A client | A client MUST write each backup object in the layout above. |  |  |
 | `IDN-179` | §4.7.2 | MUST | A full object | A full object MUST hold each row that the restore needs and no delete. |  |  |
-| `IDN-180` | §4.7.2 | MUST NOT | A client | A client MUST NOT put in a backup object a row that holds a state of this device alone: a push registration of Part 8, a push token, the ingress pin of Part 10, the dead-channel state of Part 3 §3.2.6, or the wrap of the store. |  |  |
+| `IDN-180` | §4.7.2 | MUST NOT | A client | A client MUST NOT put in a backup object a row that holds a state of this device alone: a push registration of Part 8, a push token, the ingress pin of Part 10, the dead-channel state of Part 3 §3.2.6, the device set and the sync channels of Part 7 (`DEV-291`), or the wrap of the store. |  |  |
 | `IDN-181` | §4.7.2 | MUST | A reader | A reader MUST reject an object with a `version` other than `0x01`, a `kind` other than the two values, a full object with a delete or a `base_at` other than 0, or bytes after the last row. |  |  |
 | `IDN-182` | §4.7.2 | MUST | A restore | A restore MUST apply the full object and then each delta in the order of the root, each row in object order: a put replaces the row, and a delete removes it. |  |  |
 | `IDN-183` | §4.7.2 | MUST | A restore | A restore MUST mark the channel of each restored contact stale under Part 3 rule `NET-325`, and the renewal of Part 3 §3.2.6 gives each one a new session. |  |  |
 | `IDN-184` | §4.7.2 | MUST | A client | A client MUST write a delta object at its time when no row changed since the object before it. |  |  |
 | `IDN-185` | §4.7.2 | MUST | (unstated) | For `BACKUP_EARLY_WINDOW` after its first backup write, a client MUST use `BACKUP_EARLY_INTERVAL` in the place of `BACKUP_INTERVAL`. |  |  |
+| `IDN-186` | §4.7.2 | MUST | A file stays on the device, and a backup object | A file stays on the device, and a backup object MUST carry the state of each file as one that waits for a tap (Part 14 `IMP-167`), or as one that failed when no descriptor names it. |  |  |
 
 ## CRY — Cryptographic Core
 
@@ -1310,7 +1311,7 @@ Source: `spec/07-device-sets.md`
 | --- | --- | --- | --- | --- | --- | --- |
 | `DEV-001` | §7.3.1 | MUST NOT | A device | A device MUST NOT give the roster to a relay in plaintext. |  |  |
 | `DEV-002` | §7.4 | MUST | The existing device | The existing device MUST write the provision under the provision slot and under no other handle. |  |  |
-| `DEV-003` | §7.4 | MUST | The existing device | The existing device MUST erase the offer and the provision after the new device took it, or at `LINK_QR_TTL` after the offer, whichever comes first. |  |  |
+| `DEV-003` | §7.4 | MUST | The existing device | The existing device MUST erase the offer when it reads the hello, or at `LINK_QR_TTL` after the offer, whichever comes first. |  |  |
 | `DEV-004` | §7.4 | MUST | The snapshot | The snapshot MUST be a full backup object of Part 4 §4.7.2 under a fresh file key. |  |  |
 | `DEV-005` | §7.4 | MUST | The link QR code | The link QR code MUST expire after 120 seconds. |  |  |
 | `DEV-006` | §7.4 | MUST | The link QR code | The link QR code MUST operate one time only. |  |  |
@@ -1579,12 +1580,16 @@ Source: `spec/07-device-sets.md`
 | `DEV-277` | §7.5.3 | MUST | A device | A device MUST retain a `MutableItem` for the resend of §7.5.5 under a reference to its row and its key, and not under its bytes. |  |  |
 | `DEV-280` | §7.4 | MUST | The existing device | The existing device MUST write the offer under the offer slot before it shows the ticket, and the ticket MUST carry the hash of that offer. |  |  |
 | `DEV-281` | §7.4 | MUST | The new device | The new device MUST reject an offer whose hash differs from the ticket, and it MUST write its hello under the hello slot. |  |  |
-| `DEV-282` | §7.4 | MUST | Each device | Each device MUST derive the transcript, the code, the provision slot, and the seal key as above. |  |  |
+| `DEV-282` | §7.4 | MUST | Each device | Each device MUST derive the hello key, the transcript, the code, the provision slot, and the seal key as above. |  |  |
 | `DEV-283` | §7.4 | MUST NOT | (unstated) | The two devices MUST show the code of step 3, and the existing device MUST NOT write the provision before the user confirms on it that the two codes match. |  |  |
 | `DEV-284` | §7.4 | MUST | The new device | The new device MUST make its store from the root seed of the snapshot and take each row of it, as a restore does, and it MUST keep its own `DeviceKey`, `DeviceRosterKey`, and `device_id`. |  |  |
 | `DEV-285` | §7.4 | MUST | A device that holds no roster | A device that holds no roster MUST sign epoch 0 with itself alone before it offers its first link. |  |  |
-| `DEV-286` | §7.4 | MUST | The existing device | The existing device MUST put the bundle of a new invitation in the provision, and the new device MUST accept it at once. |  |  |
+| `DEV-286` | §7.4 | MUST | The existing device | The existing device MUST put the bundle of a new invitation in the snapshot, and the new device MUST accept it at its first run. |  |  |
 | `DEV-287` | §7.4 | MUST | (unstated) | The existing device keeps the ownership of each pairwise ratchet and of each group sender at the link. |  |  |
+| `DEV-288` | §7.4 | MUST | The new device | The new device MUST seal the four fields of the body of its hello under the hello key, and the existing device MUST reject a hello whose body does not open. |  |  |
+| `DEV-289` | §7.4 | MUST | The snapshot | The snapshot MUST also carry the roster of epoch *n+1*, the bundle of the sync invitation, and the `device_id` and the label of the existing device as the peer of that channel. |  |  |
+| `DEV-290` | §7.4 | MUST | The existing device | The existing device MUST keep the roster of epoch *n+1* only when the sync channel of the new device opens. |  |  |
+| `DEV-291` | §7.4 | MUST NOT | A backup of Part 4 §4.7.2 | A backup of Part 4 §4.7.2 MUST NOT carry a row of the device set or a row of a sync channel. |  |  |
 
 ## NTF — Notifications
 

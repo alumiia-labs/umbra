@@ -43,6 +43,12 @@ pub enum NetEvent {
     VerificationRefused(ConversationId),
     /// A contact is ready, and its conversation takes drafts.
     Contact(ConversationId),
+    /// The bundle of the sync channel of a device (Part 7 `DEV-286`), for
+    /// the provision of a link.
+    DeviceInvitation(Vec<u8>),
+    /// The sync channel of another device of this set opened. No view
+    /// shows it as a contact.
+    DeviceLinked(ConversationId),
     /// The client refused an invitation command, such as a bundle that does
     /// not parse.
     Refused,
@@ -111,6 +117,18 @@ impl Bridge {
     /// Asks for one invitation. A [`NetEvent::Invitation`] follows.
     pub fn invite(&self) -> Result<(), Error> {
         self.command(Command::Invite)
+    }
+
+    /// Asks for the invitation of the sync channel of a device. A
+    /// [`NetEvent::DeviceInvitation`] follows.
+    pub fn invite_device(&self) -> Result<(), Error> {
+        self.command(Command::InviteDevice)
+    }
+
+    /// Accepts the sync bundle of a provision. A [`NetEvent::DeviceLinked`]
+    /// follows.
+    pub fn accept_device(&self, bundle: Vec<u8>) -> Result<(), Error> {
+        self.command(Command::AcceptDevice(bundle))
     }
 
     /// Accepts the fragment of a link. A [`NetEvent::Contact`] follows, or
@@ -204,12 +222,20 @@ impl Bridge {
             Update::Online => Some(NetEvent::Online),
             Update::Offline(ended) => Some(NetEvent::Offline(ended)),
             Update::Invitation(bundle) => Some(NetEvent::Invitation(bundle)),
+            Update::DeviceInvitation(bundle) => Some(NetEvent::DeviceInvitation(bundle)),
             Update::Refused => Some(NetEvent::Refused),
             Update::InvitationGone => Some(NetEvent::InvitationGone),
-            Update::Contact { contact, .. } => {
+            Update::Contact {
+                contact, is_device, ..
+            } => {
                 let conversation = client.conversation_for(&contact.0)?;
                 self.contacts.insert(conversation, contact);
-                Some(NetEvent::Contact(conversation))
+                if is_device {
+                    client.mark_device_peer(conversation, rng)?;
+                    Some(NetEvent::DeviceLinked(conversation))
+                } else {
+                    Some(NetEvent::Contact(conversation))
+                }
             }
             // The store took the record in the batch of its ratchet state.
             Update::Message { .. } => None,

@@ -59,6 +59,8 @@ sealed interface Screen {
     data object AutoDownload : Screen
     data object ChangePassphrase : Screen
     data object RecoveryCode : Screen
+    data object Devices : Screen
+    data object LinkDevice : Screen
     data class Chat(val conversation: Conversation) : Screen
     data class ContactDetails(val conversation: Conversation) : Screen
     data class EditName(val conversation: Conversation) : Screen
@@ -180,6 +182,8 @@ private fun OpenApp() {
             Screen.AutoDownload -> AutoDownloadScreen(pop)
             Screen.ChangePassphrase -> ChangePassphraseScreen(pop)
             Screen.RecoveryCode -> RecoveryCodeScreen(pop)
+            Screen.Devices -> DevicesScreen(pop, push)
+            Screen.LinkDevice -> LinkDeviceScreen(pop)
             else -> {
                 val chat = Core.chats.firstOrNull { it.conversation == top.contact }
                 // The list loads again after a lock or a new run.
@@ -238,7 +242,7 @@ private fun ContactView(
 
 /** Closes the keyboard of the platform when `key` changes. */
 @Composable
-private fun HideKeyboardOn(key: Any?) {
+fun HideKeyboardOn(key: Any?) {
     val view = LocalView.current
     LaunchedEffect(key) {
         val keyboard = view.context.getSystemService(InputMethodManager::class.java)
@@ -252,6 +256,7 @@ private fun UnlockScreen() {
     val field = rememberPlatformField()
     val isFirst = remember { !Core.hasStore(context) }
     var isRestoring by remember { mutableStateOf(false) }
+    var isJoining by remember { mutableStateOf(false) }
     val isOpening = Core.phase == Core.Phase.Opening
     // The field is gone while the store opens, and its keyboard goes too.
     HideKeyboardOn(isOpening)
@@ -264,6 +269,7 @@ private fun UnlockScreen() {
         when {
             isOpening -> Headline("Opening UMBRA")
             isFirst && isRestoring -> Headline("Restore")
+            isFirst && isJoining -> Headline("Link this device")
             // The one fact that a user cannot know: no party resets it.
             isFirst -> Headline("Choose a passphrase.", "Nobody can reset it for you.")
             else -> Headline("Welcome back.")
@@ -271,6 +277,8 @@ private fun UnlockScreen() {
         Spacer(Modifier.height(20.dp))
         if (isFirst && isRestoring && !isOpening) {
             RestoreForm(onCancel = { isRestoring = false })
+        } else if (isFirst && isJoining && !isOpening) {
+            JoinForm(onCancel = { isJoining = false })
         } else if (isOpening) {
             Text(
                 if (isFirst) "Protecting this device…" else "Unlocking this device…",
@@ -294,6 +302,8 @@ private fun UnlockScreen() {
             if (isFirst) {
                 Spacer(Modifier.height(8.dp))
                 SecondaryButton("Restore from a recovery code") { isRestoring = true }
+                Spacer(Modifier.height(8.dp))
+                SecondaryButton("Link to another device") { isJoining = true }
             }
         }
         Core.fault?.let {
@@ -528,7 +538,16 @@ private fun SettingsTab(push: (Screen) -> Unit) {
         val backupAt = Core.lastBackupAt
         val backup = if (backupAt == null) "No backup yet" else "Last backup ${timeLabel(context, backupAt * 1_000)}"
         SettingRow("key", "Recovery code", backup) { push(Screen.RecoveryCode) }
+        SettingRow("laptop", "Linked devices", devicesLabel(Core.devices.size)) { push(Screen.Devices) }
+        LaunchedEffect(Unit) { Core.readDevices() }
     }
+}
+
+/** The line of the devices row: the count of the other devices. */
+private fun devicesLabel(count: Int): String = when (count) {
+    0, 1 -> "No other device"
+    2 -> "1 other device"
+    else -> "${count - 1} other devices"
 }
 
 @Composable

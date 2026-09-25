@@ -11,12 +11,14 @@ use std::collections::VecDeque;
 
 mod backup;
 mod dead;
+mod devices;
 mod files;
 mod groups;
 mod notify;
 
 pub use backup::{BackupUpload, PendingBackup, RestoredBackup, RootWrite};
 pub use dead::DeadWork;
+pub use devices::DeviceInfo;
 pub use files::{DownloadJob, ErasureJob, FileExtras, FileInfo, FileState, UploadJob};
 use files::{FileQueues, CHUNK_CRED, FILE_DATA, FILE_STATE};
 pub use groups::{
@@ -1065,8 +1067,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     }
 
     /// The conversations of the device: one for each contact, and one for
-    /// each group of Part 11. The list needs no network.
+    /// each group of Part 11. The list needs no network. A sync channel of
+    /// Part 7 `DEV-286` is no conversation.
     pub fn conversations(&self) -> Result<Vec<ConversationId>, Error> {
+        let device_peers = self.device_peers()?;
         let store = &self.open_ref()?.store;
         let rows = store.list(TableId::CONTACT, None)?;
         let mut out: Vec<ConversationId> = rows
@@ -1075,6 +1079,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 drop(Zeroizing::new(plain));
                 ConversationId(row)
             })
+            .filter(|conversation| !device_peers.contains(conversation))
             .collect();
         out.extend(self.group_conversations()?);
         Ok(out)
