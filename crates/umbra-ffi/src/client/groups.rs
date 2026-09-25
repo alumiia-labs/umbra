@@ -2927,6 +2927,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         rng: &mut R,
     ) -> Result<Option<MsgRef>, Error> {
         let parsed = umbra_wire::app::AppMessage::parse(app, umbra_wire::app::Channel::Group)?;
+        // IMP-167: a file above this size waits for a tap.
+        let limit = self.auto_download_limit()?;
         let open = self.open_mut()?;
         let reference = super::msg_ref(&open.device_set_key, &parsed.msg_id);
         let natural = [conversation.0.as_slice(), &reference].concat();
@@ -2959,7 +2961,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // pairwise channel.
         let mut wanted = None;
         if parsed.kind == umbra_wire::app::AppKind::Attachment {
-            let (state, descriptor) = super::files::incoming_state_row(parsed.body);
+            let (state, descriptor) = super::files::incoming_state_row(parsed.body, limit);
             batch.put(
                 super::files::FILE_STATE,
                 row,

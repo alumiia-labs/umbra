@@ -1525,13 +1525,29 @@ fn one_app_sends_a_file_and_the_other_app_gets_it() {
     std::fs::write(&path, &plain).unwrap();
     let draft = alice.new_draft(alice_conversation.clone()).unwrap();
     draft
-        .attach_file(path.to_str().unwrap().to_owned(), 1, 800, 600, 0, None)
+        .attach_file(
+            path.to_str().unwrap().to_owned(),
+            1,
+            800,
+            600,
+            0,
+            None,
+            None,
+        )
         .unwrap();
     // The record of a file holds no text.
     let both = alice.new_draft(alice_conversation.clone()).unwrap();
     both.set_text(units("a caption")).unwrap();
-    both.attach_file(path.to_str().unwrap().to_owned(), 1, 800, 600, 0, None)
-        .unwrap();
+    both.attach_file(
+        path.to_str().unwrap().to_owned(),
+        1,
+        800,
+        600,
+        0,
+        None,
+        None,
+    )
+    .unwrap();
     assert_eq!(alice.send_draft(both).err(), Some(FfiError::Malformed));
 
     let sent = alice.send_draft(draft).unwrap();
@@ -1703,6 +1719,7 @@ fn one_app_offers_a_group_and_the_other_app_joins_it() {
             0,
             0,
             Some("route.gpx".into()),
+            None,
         )
         .unwrap();
     let sent = alice.send_draft(draft).unwrap();

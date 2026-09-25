@@ -2663,6 +2663,88 @@ mod tests {
     }
 
     #[test]
+    fn a_file_above_the_limit_waits_for_a_tap_with_its_preview() {
+        use client::FileState;
+        use umbra_core::attach::transfer::Shape;
+        use umbra_wire::descriptor::class;
+
+        let mut rng = Rng(41);
+        let (mut alice, _, conversation) = client_with_contact(42);
+        let (mut bob, bob_contact, _) = client_with_contact(43);
+        let photo = zeroize::Zeroizing::new(vec![0x3C; 90_000]);
+        let hash = &[0xFF, 0xD8, 0xFF, 0xE0, 0x10, 0x20, 0xFF, 0xD9];
+
+        // WIR-533: an image takes a small JPEG, and nothing else is one.
+        let mut draft = alice.new_draft(conversation);
+        draft
+            .attach(
+                photo.clone(),
+                Shape {
+                    mime_class: class::IMAGE,
+                    pixel_w: 400,
+                    pixel_h: 300,
+                    media_seconds: 0,
+                },
+            )
+            .unwrap();
+        assert_eq!(draft.set_file_preview(b"not a hash"), Err(Error::Malformed));
+        draft.set_file_preview(hash).unwrap();
+        let sent = alice.send_draft(draft, 1_000_000, &mut rng).unwrap();
+        alice
+            .upload_done(&sent, &uploaded_file(0x43), &mut rng)
+            .unwrap();
+        let outgoing = alice.take_outgoing().unwrap();
+
+        // IMP-167: the default limit holds a photo, thus it comes at once.
+        assert_eq!(
+            bob.auto_download_limit().unwrap(),
+            client::AUTO_DOWNLOAD_DEFAULT
+        );
+        bob.commit_network(
+            &[],
+            &[(bob_contact, outgoing.app.clone())],
+            2_000_000,
+            &mut rng,
+        )
+        .unwrap();
+        while bob.next_event().is_some() {}
+        assert!(bob.take_download().is_some());
+
+        // With the automatic download off the same record waits, and its
+        // preview and its size are there before any chunk.
+        bob.set_auto_download_limit(0, &mut rng).unwrap();
+        // A second record of its own, under a new msg_id.
+        let body =
+            umbra_wire::app::AppMessage::parse(&outgoing.app, umbra_wire::app::Channel::Pairwise)
+                .unwrap()
+                .body
+                .to_vec();
+        let again = record(umbra_wire::app::AppKind::Attachment, [0x55; 16], &body);
+        bob.commit_network(&[], &[(bob_contact, again)], 2_100_000, &mut rng)
+            .unwrap();
+        let Some(Event::Message { message: held, .. }) = bob.next_event() else {
+            panic!("no message");
+        };
+        let info = bob.info(&held).unwrap().file.unwrap();
+        assert_eq!(info.state, FileState::Held);
+        // The padded size of the descriptor, before any chunk.
+        assert!(info.size > 0);
+        assert!(bob.take_download().is_none());
+        assert_eq!(
+            bob.file_extras(&held).unwrap().preview.as_deref(),
+            Some(&hash[..])
+        );
+
+        // A tap asks for it.
+        bob.fetch_file(&held, &mut rng).unwrap();
+        assert_eq!(bob.take_download().unwrap().message, held);
+        assert_eq!(
+            bob.info(&held).unwrap().file.unwrap().state,
+            FileState::Wanted
+        );
+    }
+
+    #[test]
     fn a_file_waits_in_the_store_goes_out_after_its_upload_and_leaves_with_its_message() {
         use client::FileState;
         use umbra_core::attach::transfer::Shape;

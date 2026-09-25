@@ -1528,26 +1528,37 @@ For kind `0x02` the body is an `AttachmentBody`:
 
 ```
 AttachmentBody {
-    descriptor     [desc_len]u8  // a FileDescriptor of Part 12 §12.3; its
-                                 // ref_count gives desc_len
-    name_len       u8            // absent when the body ends after the descriptor
-    name           [name_len]u8  // UTF-8, the name of the file with no path
+    descriptor     [desc_len]u8     // a FileDescriptor of Part 12 §12.3; its
+                                    // ref_count gives desc_len
+    name_len       u8               // the trailer: absent when the body ends
+    name           [name_len]u8     //   after the descriptor; UTF-8, the name
+    preview_len    u16              //   of the file with no path; a JPEG
+    preview        [preview_len]u8  //   thumbnail of an image or a video
 }
 ```
 
-**[WIR-531]** A sender MAY put the name of the file after the descriptor, as
-`name_len` and `name`. A body that ends after the descriptor carries no name.
+**[WIR-531]** A sender MAY put the trailer after the descriptor. A `name_len`
+of zero carries no name, and a `preview_len` of zero carries no preview. A
+body that ends after the descriptor carries neither.
 **[WIR-532]** A parser MUST reject a body of kind `0x02` whose bytes after the
-descriptor are not one `name_len` and exactly `name_len` bytes of `name`. It
-MUST also reject a `name` that is not valid UTF-8, a `name_len` of zero or
-above `FILE_NAME_MAX`, a `name` that holds a control character, `/`, or `\`,
-and a `name` of `.` or `..`. Part 12 §12.7 gives `FILE_NAME_MAX`.
+descriptor are not one complete trailer. It MUST also reject a `name` that is
+not valid UTF-8, a `name_len` above `FILE_NAME_MAX`, a `name` that holds a
+control character, `/`, or `\`, and a `name` of `.` or `..`.
+**[WIR-533]** A `preview` MUST be a JPEG of at most `PREVIEW_MAX` bytes that
+starts with `FF D8 FF` and ends with `FF D9`. A parser MUST reject a body with
+another `preview`, and a body whose `mime_class` is not `0x01` or `0x02` and
+that carries a preview. Part 12 §12.7 gives `FILE_NAME_MAX` and
+`PREVIEW_MAX`.
 
-> *Cause.* The descriptor omits the name, because each party that sees a
-> descriptor sees it (Part 12 §12.3). The body is inside the ratchet, thus the
-> name reaches the recipient and no relay. A name with a path, or with a
-> control character, would let a sender choose where a save writes or what a
-> view shows. For kind `0x03`, for kind `0x06`, for kind `0x07`, and for kind `0x08`,
+> *Cause.* The descriptor omits the name and the preview, because each party
+> that sees a descriptor sees it (Part 12 §12.3). The body is inside the
+> ratchet, thus both reach the recipient and no relay. A name with a path, or
+> with a control character, would let a sender choose where a save writes or
+> what a view shows. A preview is a small picture that a view shows in
+> place of a picture that waits for a tap (Part 14 `IMP-167`), thus the user
+> knows what the download brings.
+
+For kind `0x03`, for kind `0x06`, for kind `0x07`, and for kind `0x08`,
 §6.6.9 gives the body. Part 3 §3.5.4 sets `RECEIPT_BATCH_MAX` and gives the
 emission rules of a receipt.
 

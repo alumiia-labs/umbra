@@ -221,6 +221,11 @@ detail is a fingerprint.
 - **[ATT-193]** A receiver MUST show a `mime_class` that it does not know as a
   file of class `0x06`. A later version can add a class, and a file of that
   class still arrives.
+- **[ATT-194]** A sender SHOULD put a preview of Part 6 rule `WIR-533` in the
+  body of an image and of a video: a thumbnail of low quality, at most
+  `PREVIEW_SIDE` on its longest side. It MUST make the preview from the object
+  after the re-encode of `ATT-155`, as a new JPEG, thus the preview carries no
+  metadata field.
 
 ### 12.3.1 Key-committing AEAD is mandatory
 
@@ -550,8 +555,10 @@ The client segments the manifest under §12.2.3, and it seals each segment under
 each manifest chunk.
 
 - **[ATT-072]** A client MUST use level `0x00` when the data chunk count is at
-  or below the ref count that the descriptor bucket holds. **[ATT-073]** A
-  client MUST use level `0x01` above that count. **[ATT-074]** A parser MUST
+  or below the ref count that the descriptor bucket holds. For an attachment
+  that count is `MESSAGE_DESCRIPTOR_REFS`, which leaves room in the record
+  for the largest name and preview of Part 6 rule `WIR-531`.
+  **[ATT-073]** A client MUST use level `0x01` above that count. **[ATT-074]** A parser MUST
   reject a `level` above `0x01`.
 - **[ATT-075]** A client MUST derive `K_manifest` with the label above, and Part
   5 §5.11 holds that label. **[ATT-076]** A client MUST NOT encrypt a manifest
@@ -862,6 +869,10 @@ three properties hold:
 | `PLACE_PROBE` | 4 relays for one handle (§12.4.2) |
 | `IMAGE_REENCODE_BYTES` | 2 MiB (§12.3) |
 | `FILE_NAME_MAX` | 255 bytes of UTF-8, the name of Part 6 rule `WIR-531` |
+| `PREVIEW_MAX` | 6 144 bytes, the JPEG thumbnail of Part 6 rule `WIR-533` |
+| `PREVIEW_SIDE` | 128 pixels, the longest side of that thumbnail (`ATT-194`) |
+| `MESSAGE_DESCRIPTOR_REFS` | 215, which is `MAX_DESCRIPTOR_REFS` less the 54 refs of the largest trailer of Part 6 rule `WIR-531` (`ATT-072`) |
+| `AUTO_DOWNLOAD_DEFAULT` | 25 MiB, which equals `LARGE_FILE_WARN` (Part 14 rule `IMP-167`) |
 | `CHUNK_EGRESS_BUDGET_DAY` | 4 × `CHUNK_STORE_TARGET` of egress in one day, measured by the relay from midnight UTC (§12.11) |
 | `CHUNK_FETCH_RATE` | 60 `CGET` for one chunk in one hour, measured by the relay from the first fetch of the hour (§12.11) |
 | `HOT_REPLICAS` | 6 replicas of one chunk at the most. It bounds the targets of a `CREP` (§12.4.1) |

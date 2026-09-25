@@ -18,8 +18,7 @@ use super::{
     place::{fetch_order, resolve_hint, AttachmentRelay, HoldOffs},
     seal::{manifest_key, open_chunk, read_secret, seal_file, Assembler, SealedFile},
     upload::{sample_positions, ChunkUpload},
-    verify_sample, MAX_CONCURRENT_DOWN, MAX_CONCURRENT_UP, MAX_DATA_CHUNKS, MAX_DESCRIPTOR_REFS,
-    REPLICAS,
+    verify_sample, MAX_CONCURRENT_DOWN, MAX_CONCURRENT_UP, MAX_DATA_CHUNKS, REPLICAS,
 };
 use crate::{
     session::node::{ChunkJob, ChunkOutcome, ClientNode},
@@ -120,11 +119,11 @@ pub struct Class {
 
 impl Class {
     /// An attachment: `REPLICAS` relays, `CNEW`, and the manifest level
-    /// above `MAX_DESCRIPTOR_REFS` (`ATT-073`).
+    /// above `MESSAGE_DESCRIPTOR_REFS` (`ATT-073`).
     pub const ATTACHMENT: Class = Class {
         replicas: REPLICAS,
         is_backup: false,
-        descriptor_refs: MAX_DESCRIPTOR_REFS,
+        descriptor_refs: super::MESSAGE_DESCRIPTOR_REFS,
     };
     /// A backup object: `BACKUP_REPLICAS` relays (`IDN-076`), `BNEW`
     /// (`IDN-117`), and the manifest level above `BACKUP_DESC_REFS`

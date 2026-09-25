@@ -313,7 +313,8 @@ examples. Without the table below a maintainer finds the dependents by hand.
 | `CHUNK_SIZE`, `REPLICAS`, `CHUNK_TTL`, `CHUNK_LIFE_MAX` | Part 12 §12.7 | Part 3 §3.12, Part 4 §4.7.2 |
 | `MAX_FILE_SIZE`, `UPLOAD_QUOTA_DAY`, `CHUNK_STORE_MIN`, `CHUNK_STORE_TARGET` | Part 12 §12.7 | Part 12 §12.7.2, Part 12 §12.10, Part 2 §2.4, Part 10 §10.5.3 |
 | `SEGMENT_SIZE`, `MAX_CONCURRENT_CHUNKS`, `IMAGE_REENCODE_BYTES` | Part 12 §12.7 | Part 12 §12.2.3, Part 12 §12.3, Part 12 §12.7.2 |
-| `FILE_NAME_MAX` | Part 12 §12.7 | Part 6 §6.6 |
+| `FILE_NAME_MAX`, `PREVIEW_MAX`, `PREVIEW_SIDE`, `MESSAGE_DESCRIPTOR_REFS` | Part 12 §12.7 | Part 6 §6.6 |
+| `AUTO_DOWNLOAD_DEFAULT` | Part 12 §12.7 | Part 14 §14.6.4 |
 | `CHUNK_EGRESS_BUDGET_DAY`, `CHUNK_FETCH_RATE`, `HOT_REPLICAS` | Part 12 §12.7 | Part 12 §12.11, Part 2 §2.4 |
 | `MENTION_MAX`, `POLL_OPTION_MAX`, `POLL_GROUP_MAX` | Part 11 §11.10 | Part 6 §6.6.5, Part 6 §6.6.6, Part 11 §11.11 |
 | `TIMER_VALUES`, `FORWARD_MAX_DEPTH` | Part 7 §7.8 | Part 6 §6.6.5, Part 6 §6.6.8, Part 7 §7.5.8 |

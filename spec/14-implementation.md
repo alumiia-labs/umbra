@@ -480,7 +480,9 @@ hand over pixels, which are the same plaintext. The core MUST overwrite its
 copy after the call. A media player reads a video in ranges, thus the core
 MAY hold one copy of the file in its memory for the time that the player is
 open, and give each range that the player asks for. The core MUST overwrite
-that copy when the player closes, and MUST refuse each range after a lock. The platform MUST overwrite the array when the decode
+that copy when the player closes, and MUST refuse each range after a lock.
+The preview of Part 6 rule `WIR-533` MAY cross the surface as bytes in both
+directions, under the same terms: it is a picture, as the file is. The platform MUST overwrite the array when the decode
 ends, MUST NOT write the bytes to a file or to a platform cache, and MUST drop
 each decoded image at a lock. The exception covers a file alone: a text, a
 passphrase and key material stay under `IMP-037`.
@@ -921,10 +923,26 @@ version byte, and a client MUST reject a row whose version it does not read.
   row and queue the record when the upload ends. An upload that fails MUST
   give the message the delivery state `failed`.
 - **[IMP-163]** A client MUST start a download for each received record of
-  kind `0x02` whose descriptor it can read. A descriptor that does not parse,
-  or that has a level that the client does not build, MUST show as a file
-  whose transfer failed, and the message MUST stay. A client MUST let the
-  user start a failed download again.
+  kind `0x02` whose descriptor it can read and whose `padded_size` is at most
+  the automatic download limit of `IMP-167`. A descriptor that does not
+  parse, or that has a level that the client does not build, MUST show as a
+  file whose transfer failed, and the message MUST stay. A client MUST let
+  the user start a failed download again.
+- **[IMP-167]** A client MUST let the user set an automatic download limit
+  for the device: off, or a size. With no choice of the user the limit is
+  `AUTO_DOWNLOAD_DEFAULT` of Part 12 §12.7. The limit applies to each class
+  of file. A file above it MUST show its class, its size, its name, and its
+  preview of Part 6 rule `WIR-533` with no chunk fetched, and its download
+  MUST start at a tap of the user. The limit is a setting of the device, and
+  the backup of Part 4 §4.7.2 does not carry it.
+
+  > *Cause.* A user on a metered plan or a slow link cannot stop a download
+  > that starts at arrival, and a video of `MAX_FILE_SIZE` costs about
+  > 253 MiB at one replica (Part 12 §12.7.2). A download at a tap has a
+  > cost too: it shows the chunk relays of the file when the user opened the
+  > conversation. A download at arrival shows them the arrival alone. The
+  > default keeps each photo and each document at arrival, and a large video
+  > waits.
 - **[IMP-164]** A deletion of a message MUST erase its rows in the tables
   `0x0F`, `0x10` and `0x11` in the batch that takes the message, and for a
   file that this device uploaded it MUST then send the `CDEL` of `ATT-161`

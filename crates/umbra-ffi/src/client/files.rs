@@ -52,6 +52,9 @@ pub enum FileState {
     Ready = 3,
     /// The transfer ended with no result. A new attempt can follow.
     Failed = 4,
+    /// A contact sent the file, and it is above the automatic download
+    /// limit of this device. It waits for a tap (`IMP-167`).
+    Held = 5,
 }
 
 impl FileState {
@@ -61,6 +64,7 @@ impl FileState {
             2 => FileState::Wanted,
             3 => FileState::Ready,
             4 => FileState::Failed,
+            5 => FileState::Held,
             _ => return None,
         })
     }
@@ -115,29 +119,78 @@ pub(super) struct FileQueues {
     pub erasures: VecDeque<ErasureJob>,
 }
 
-fn state_row(state: FileState, shape: &Shape, size: u64, name: Option<&str>) -> Vec<u8> {
-    let mut row = Vec::with_capacity(STATE_ROW_LEN + 9 + name.map_or(0, str::len));
+/// The name and the preview that the body of a file carries (`WIR-531`,
+/// `WIR-533`). The state row keeps them, thus a view reads no record.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FileExtras {
+    /// The name of the file.
+    pub name: Option<String>,
+    /// A JPEG thumbnail of an image or of the first frame of a video.
+    pub preview: Option<Vec<u8>>,
+}
+
+impl FileExtras {
+    fn of_body(body: &[u8]) -> Self {
+        AttachmentBody::parse(body).map_or_else(
+            |_| FileExtras::default(),
+            |parsed| FileExtras {
+                name: parsed.name.map(str::to_owned),
+                preview: parsed.preview.map(<[u8]>::to_vec),
+            },
+        )
+    }
+}
+
+fn state_row(state: FileState, shape: &Shape, size: u64, extras: &FileExtras) -> Vec<u8> {
+    let name = extras.name.as_deref().map_or(&[][..], str::as_bytes);
+    let preview = extras.preview.as_deref().unwrap_or(&[]);
+    let mut row = Vec::with_capacity(STATE_ROW_LEN + 10 + name.len() + preview.len());
     row.push(state as u8);
     row.push(shape.mime_class);
     row.extend_from_slice(&shape.pixel_w.to_be_bytes());
     row.extend_from_slice(&shape.pixel_h.to_be_bytes());
     row.extend_from_slice(&shape.media_seconds.to_be_bytes());
     row.extend_from_slice(&size.to_be_bytes());
-    // A name longer than a byte count holds does not pass `is_file_name`.
-    let name = name.filter(|name| name.len() <= usize::from(u8::MAX));
-    row.push(name.map_or(0, |name| u8::try_from(name.len()).unwrap_or(0)));
-    row.extend_from_slice(name.map_or(&[][..], str::as_bytes));
+    // The name takes one length byte and the preview two, as the body of
+    // `WIR-531` does. A value too long for its field passes neither
+    // `WIR-532` nor `WIR-533`, thus it never reaches this row.
+    let name = if name.len() <= usize::from(u8::MAX) {
+        name
+    } else {
+        &[]
+    };
+    row.push(u8::try_from(name.len()).unwrap_or(0));
+    row.extend_from_slice(name);
+    let preview = if preview.len() <= usize::from(u16::MAX) {
+        preview
+    } else {
+        &[]
+    };
+    row.extend_from_slice(&u16::try_from(preview.len()).unwrap_or(0).to_be_bytes());
+    row.extend_from_slice(preview);
     row
 }
 
-/// The name of the file in a state row, when the row holds one.
-fn name_of_state_row(row: &[u8]) -> Option<String> {
-    let rest = row.get(STATE_ROW_LEN + 8..)?;
-    let (&len, name) = rest.split_first()?;
-    let name = name.get(..usize::from(len))?;
-    (len > 0)
-        .then(|| String::from_utf8(name.to_vec()).ok())
-        .flatten()
+/// The name and the preview in a state row. A row of an earlier version
+/// holds neither, or the name alone.
+fn extras_of_state_row(row: &[u8]) -> FileExtras {
+    let rest = row.get(STATE_ROW_LEN + 8..).unwrap_or(&[]);
+    let Some((&name_len, rest)) = rest.split_first() else {
+        return FileExtras::default();
+    };
+    let name = rest
+        .get(..usize::from(name_len))
+        .filter(|name| !name.is_empty())
+        .and_then(|name| String::from_utf8(name.to_vec()).ok());
+    let rest = rest.get(usize::from(name_len)..).unwrap_or(&[]);
+    let preview = rest
+        .get(..2)
+        .and_then(|len| <[u8; 2]>::try_from(len).ok())
+        .map(|len| usize::from(u16::from_be_bytes(len)))
+        .and_then(|len| rest.get(2..2 + len))
+        .filter(|preview| !preview.is_empty())
+        .map(<[u8]>::to_vec);
+    FileExtras { name, preview }
 }
 
 fn read_state_row(row: &[u8]) -> Result<FileInfo, Error> {
@@ -177,25 +230,33 @@ pub(super) fn fetchable(body: &[u8]) -> Option<FileDescriptor> {
     is_in_reach.then_some(descriptor)
 }
 
-/// The state row of a file that a contact sent.
-pub(super) fn incoming_state_row(body: &[u8]) -> (Vec<u8>, Option<FileDescriptor>) {
-    let name = AttachmentBody::parse(body)
-        .ok()
-        .and_then(|parsed| parsed.name.map(str::to_owned));
+/// The state row of a file that a contact sent, and its descriptor when
+/// its download starts at once: at most `limit` bytes of padded size
+/// (`IMP-163`). A larger file waits for a tap (`IMP-167`).
+pub(super) fn incoming_state_row(body: &[u8], limit: u64) -> (Vec<u8>, Option<FileDescriptor>) {
+    let extras = FileExtras::of_body(body);
     match fetchable(body) {
-        Some(descriptor) => (
-            state_row(
-                FileState::Wanted,
-                &shape_of(&descriptor),
-                u64::from(descriptor.padded_size),
-                name.as_deref(),
-            ),
-            Some(descriptor),
-        ),
+        Some(descriptor) => {
+            let size = u64::from(descriptor.padded_size);
+            let state = if size <= limit {
+                FileState::Wanted
+            } else {
+                FileState::Held
+            };
+            (
+                state_row(state, &shape_of(&descriptor), size, &extras),
+                (state == FileState::Wanted).then_some(descriptor),
+            )
+        }
         // A descriptor that this device cannot read shows as a file that
         // did not arrive, and the message stays.
         None => (
-            state_row(FileState::Failed, &Shape::default(), 0, None),
+            state_row(
+                FileState::Failed,
+                &Shape::default(),
+                0,
+                &FileExtras::default(),
+            ),
             None,
         ),
     }
@@ -271,13 +332,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
     }
 
-    /// The name of the file of a message, when its sender gave one
-    /// (`WIR-531`).
-    pub fn file_name(&self, message: &MsgRef) -> Result<Option<String>, Error> {
+    /// The name and the preview of the file of a message, when its sender
+    /// gave them (`WIR-531`, `WIR-533`).
+    pub fn file_extras(&self, message: &MsgRef) -> Result<FileExtras, Error> {
         let store = &self.open_ref()?.store;
         Ok(store
             .get(FILE_STATE, &message.0)?
-            .and_then(|row| name_of_state_row(&row)))
+            .map_or_else(FileExtras::default, |row| extras_of_state_row(&row)))
+    }
+
+    /// The name of the file of a message, when its sender gave one.
+    pub fn file_name(&self, message: &MsgRef) -> Result<Option<String>, Error> {
+        Ok(self.file_extras(message)?.name)
     }
 
     /// The file of a message, in the clear. The caller overwrites it after
@@ -310,7 +376,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         rng: &mut R,
     ) -> Result<RowId, Error> {
         let info = self.file_info(message)?.ok_or(Error::NotFound)?;
-        let name = self.file_name(message)?;
+        let extras = self.file_extras(message)?;
         let open = self.open_mut()?;
         let plain = open
             .store
@@ -322,7 +388,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             FILE_STATE,
             message.0,
             Some(conversation.0),
-            &state_row(state, &info.shape, size, name.as_deref()),
+            &state_row(state, &info.shape, size, &extras),
             rng,
         )?;
         batch.commit()?;
@@ -339,7 +405,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         rng: &mut R,
     ) -> Result<(), Error> {
         let info = self.file_info(message)?.ok_or(Error::NotFound)?;
-        let name = self.file_name(message)?;
+        let extras = self.file_extras(message)?;
         let open = self.open_mut()?;
         let mut plain = Zeroizing::new(
             open.store
@@ -355,7 +421,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         })?;
         let attachment = AttachmentBody {
             descriptor,
-            name: name.as_deref(),
+            name: extras.name.as_deref(),
+            preview: extras.preview.as_deref(),
         };
         let mut body = Zeroizing::new(vec![0u8; attachment.len()]);
         attachment.encode(&mut body)?;
@@ -394,7 +461,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             FILE_STATE,
             message.0,
             Some(conversation.0),
-            &state_row(FileState::Ready, &info.shape, info.size, name.as_deref()),
+            &state_row(FileState::Ready, &info.shape, info.size, &extras),
             rng,
         )?;
         batch.commit()?;
@@ -473,7 +540,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .get(TableId::MESSAGE, &message.0)?
                 .ok_or(Error::NotFound)?,
         );
-        if info.state != FileState::Failed {
+        // A tap fetches a file that failed, and a file that waits for it
+        // (`IMP-167`).
+        if !matches!(info.state, FileState::Failed | FileState::Held) {
             return Err(Error::Malformed);
         }
         if info_of(&plain)?.outgoing {
@@ -536,7 +605,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         });
                     }
                 }
-                FileState::Ready | FileState::Failed => {}
+                // A held file waits for a tap and not for a new start.
+                FileState::Ready | FileState::Failed | FileState::Held => {}
             }
         }
         self.files.uploads.extend(uploads);
@@ -557,6 +627,6 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 }
 
 /// The state row of a file that this device sends.
-pub(super) fn outgoing_state_row(shape: &Shape, size: u64, name: Option<&str>) -> Vec<u8> {
-    state_row(FileState::Uploading, shape, size, name)
+pub(super) fn outgoing_state_row(shape: &Shape, size: u64, extras: &FileExtras) -> Vec<u8> {
+    state_row(FileState::Uploading, shape, size, extras)
 }

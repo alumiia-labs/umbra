@@ -44,6 +44,11 @@ pub const MAX_CONCURRENT_UP: usize = 8;
 pub const MAX_CONCURRENT_DOWN: usize = 32;
 /// `MAX_DESCRIPTOR_REFS`, one `B3` cell.
 pub const MAX_DESCRIPTOR_REFS: usize = 269;
+/// `MESSAGE_DESCRIPTOR_REFS`: the refs of a descriptor at level `0x00` in
+/// a record of kind `0x02`, which leaves room in one `B3` cell for the
+/// largest name and preview of Part 6 rule `WIR-531` (`ATT-072`).
+pub const MESSAGE_DESCRIPTOR_REFS: usize = MAX_DESCRIPTOR_REFS
+    - umbra_wire::descriptor::TRAILER_MAX.div_ceil(umbra_wire::descriptor::CHUNK_REF_LEN);
 /// `MANIFEST_REFS_PER_CHUNK`.
 pub const MANIFEST_REFS_PER_CHUNK: usize = 271;
 /// `MAX_DATA_CHUNKS`.

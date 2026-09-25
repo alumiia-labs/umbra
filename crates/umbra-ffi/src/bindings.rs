@@ -714,8 +714,9 @@ pub struct MsgInfo {
 /// The file of a message, with no byte of it.
 #[derive(uniffi::Record)]
 pub struct MsgFile {
-    /// 1 while this device uploads it, 2 while this device did not fetch it
-    /// yet, 3 when the store holds it, and 4 after a transfer that failed.
+    /// 1 while this device uploads it, 2 while this device fetches it, 3
+    /// when the store holds it, 4 after a transfer that failed, and 5 while
+    /// it waits for a tap above the automatic download limit (`IMP-167`).
     pub state: u8,
     /// The media class of the descriptor.
     pub mime_class: u8,
@@ -734,6 +735,9 @@ pub struct MsgFile {
     pub done: u32,
     /// The chunks of a transfer that runs, else 0.
     pub total: u32,
+    /// Whether the sender gave a preview, which [`Handle::msg_preview`]
+    /// gives (`WIR-533`).
+    pub has_preview: bool,
 }
 
 /// One reaction to a message. The emoji holds emoji code points and no
@@ -936,6 +940,10 @@ impl DraftHandle {
     ///
     /// `name` is the name of a document or of another file, with no path.
     /// An image, a video, and a voice recording take none (`ATT-192`).
+    /// `preview` is a JPEG thumbnail of an image or of the first frame of a
+    /// video (`WIR-533`). It is a picture as the file is, thus it crosses
+    /// as bytes under the exception of `IMP-166`.
+    #[allow(clippy::too_many_arguments)]
     pub fn attach_file(
         &self,
         path: String,
@@ -944,6 +952,7 @@ impl DraftHandle {
         pixel_h: u16,
         media_seconds: u16,
         name: Option<String>,
+        preview: Option<Vec<u8>>,
     ) -> Result<(), FfiError> {
         let plain = Zeroizing::new(std::fs::read(&path).map_err(|_| FfiError::NotFound)?);
         let shape = Shape {
@@ -957,6 +966,9 @@ impl DraftHandle {
         draft.attach(plain, shape)?;
         if let Some(name) = name {
             draft.set_file_name(&name)?;
+        }
+        if let Some(preview) = preview {
+            draft.set_file_preview(&preview)?;
         }
         Ok(())
     }
@@ -3824,6 +3836,36 @@ impl Handle {
         }))
     }
 
+    /// Gives the preview of the file of a message to a decoder of the
+    /// platform (`WIR-533`, `IMP-166`). A file with no preview is
+    /// `NotFound`.
+    pub fn msg_preview(
+        &self,
+        message: Arc<MsgHandle>,
+        sink: Arc<dyn FileSink>,
+    ) -> Result<(), FfiError> {
+        let preview = locked(&self.inner)
+            .client
+            .file_extras(&message.0)?
+            .preview
+            .ok_or(FfiError::NotFound)?;
+        sink.put(preview);
+        Ok(())
+    }
+
+    /// The largest size of a received file whose download starts at once,
+    /// in bytes (`IMP-167`). Zero means off, and `u64::MAX` means each file.
+    pub fn auto_download_limit(&self) -> Result<u64, FfiError> {
+        Ok(locked(&self.inner).client.auto_download_limit()?)
+    }
+
+    /// Sets the automatic download limit of this device.
+    pub fn set_auto_download_limit(&self, bytes: u64) -> Result<(), FfiError> {
+        Ok(locked(&self.inner)
+            .client
+            .set_auto_download_limit(bytes, &mut OsRng)?)
+    }
+
     /// Writes the file of a message to a place that the user named, as
     /// the save of one file (`IMP-045`). On Android `path` names an open
     /// descriptor of this process, `/proc/self/fd/<n>`, that the platform
@@ -3837,9 +3879,9 @@ impl Handle {
     pub fn msg_info(&self, message: Arc<MsgHandle>) -> Result<MsgInfo, FfiError> {
         let inner = locked(&self.inner);
         let info = inner.client.info(&message.0)?;
-        let name = match info.file {
-            Some(_) => inner.client.file_name(&message.0)?,
-            None => None,
+        let extras = match info.file {
+            Some(_) => inner.client.file_extras(&message.0)?,
+            None => crate::client::FileExtras::default(),
         };
         let (done, total) = inner
             .file_progress
@@ -3870,15 +3912,17 @@ impl Handle {
                 pixel_w: file.shape.pixel_w,
                 pixel_h: file.shape.pixel_h,
                 media_seconds: file.shape.media_seconds,
-                name,
+                name: extras.name,
                 size: file.size,
                 done,
                 total,
+                has_preview: extras.preview.is_some(),
             }),
         })
     }
 
-    /// Asks again for the file of a received message whose download failed.
+    /// Asks for the file of a received message whose download failed, or
+    /// that waits for a tap above the automatic download limit (`IMP-167`).
     /// A [`FfiEvent::File`] follows its end.
     pub fn fetch_file(&self, message: Arc<MsgHandle>) -> Result<(), FfiError> {
         let mut inner = locked(&self.inner);

@@ -17,7 +17,7 @@ mod notify;
 
 pub use backup::{BackupUpload, PendingBackup, RestoredBackup, RootWrite};
 pub use dead::DeadWork;
-pub use files::{DownloadJob, ErasureJob, FileInfo, FileState, UploadJob};
+pub use files::{DownloadJob, ErasureJob, FileExtras, FileInfo, FileState, UploadJob};
 use files::{FileQueues, CHUNK_CRED, FILE_DATA, FILE_STATE};
 pub use groups::{
     EpochUpload, GroupAdmitWaiting, GroupInfo, GroupJoiner, GroupOffer, GroupPost, GroupQueueJob,
@@ -165,6 +165,11 @@ const SETTINGS: TableId = TableId(0x0A);
 /// `RecipientId`.
 pub(crate) const NOTIFY_STATE: TableId = TableId(0x1D);
 const AUTO_LOCK_SETTING: &[u8] = b"auto-lock";
+/// The automatic download limit of this device, in bytes (`IMP-167`).
+pub(crate) const AUTO_DOWNLOAD_SETTING: &[u8] = b"auto-download";
+/// `AUTO_DOWNLOAD_DEFAULT` of Part 12 §12.7, which equals
+/// `LARGE_FILE_WARN`.
+pub const AUTO_DOWNLOAD_DEFAULT: u64 = umbra_core::attach::LARGE_FILE_WARN;
 /// The highest epoch of a directory root that this device verified
 /// (Part 10 rule `REL-034`).
 const DIRECTORY_EPOCH_SETTING: &[u8] = b"directory-epoch";
@@ -620,6 +625,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 sends_delivery.push(conversation);
             }
         }
+        // IMP-167: a file above this size waits for a tap.
+        let limit = self.auto_download_limit()?;
         let open = self.open_mut()?;
         // The batch borrows the store, thus each row identifier and each
         // duplicate check comes first.
@@ -972,7 +979,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 stored_message(INCOMING, Delivery::Delivered, conversation, now_ms, &kept),
             ));
             if parsed.kind == AppKind::Attachment {
-                let (state, descriptor) = files::incoming_state_row(parsed.body);
+                let (state, descriptor) = files::incoming_state_row(parsed.body, limit);
                 planned.push(Planned::Put(
                     FILE_STATE,
                     row,
@@ -1081,6 +1088,33 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         };
         let seconds: [u8; 8] = plain.as_slice().try_into().map_err(|_| Error::Integrity)?;
         Ok(u64::from_be_bytes(seconds))
+    }
+
+    /// The largest padded size of a received file whose download starts at
+    /// once (`IMP-167`). Zero turns the automatic download off, and
+    /// `u64::MAX` downloads each file.
+    pub fn auto_download_limit(&self) -> Result<u64, Error> {
+        let store = &self.open_ref()?.store;
+        let row = store.row_id(SETTINGS, AUTO_DOWNLOAD_SETTING);
+        let Some(plain) = store.get(SETTINGS, &row)? else {
+            return Ok(AUTO_DOWNLOAD_DEFAULT);
+        };
+        let bytes: [u8; 8] = plain.as_slice().try_into().map_err(|_| Error::Integrity)?;
+        Ok(u64::from_be_bytes(bytes))
+    }
+
+    /// Sets the automatic download limit of this device. It acts on each
+    /// file that arrives after it, and on none that arrived before.
+    pub fn set_auto_download_limit<R: CryptoRng + ?Sized>(
+        &mut self,
+        bytes: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let open = self.open_mut()?;
+        let row = open.store.row_id(SETTINGS, AUTO_DOWNLOAD_SETTING);
+        let mut batch = open.store.begin();
+        batch.put(SETTINGS, row, None, &bytes.to_be_bytes(), rng)?;
+        Ok(batch.commit()?)
     }
 
     /// The highest epoch of a directory root that this device verified, or
@@ -2173,7 +2207,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             &files::outgoing_state_row(
                 &file.shape,
                 u64::try_from(file.plain.len()).unwrap_or(u64::MAX),
-                file.name.as_deref(),
+                &FileExtras {
+                    name: file.name.clone(),
+                    preview: file.preview.clone(),
+                },
             ),
             rng,
         )?;

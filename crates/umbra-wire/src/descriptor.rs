@@ -18,6 +18,11 @@ pub const CHUNK_REF_LEN: usize = 120;
 pub const CHUNK_SIZE: u32 = 32_650;
 /// `FILE_NAME_MAX`, in bytes of UTF-8 (Part 6 §6.6, `WIR-531`).
 pub const FILE_NAME_MAX: usize = 255;
+/// `PREVIEW_MAX`, in bytes: a JPEG thumbnail of low quality (`WIR-533`).
+pub const PREVIEW_MAX: usize = 6_144;
+/// The largest trailer of an `AttachmentBody`: two length fields, the
+/// longest name, and the largest preview.
+pub const TRAILER_MAX: usize = 1 + FILE_NAME_MAX + 2 + PREVIEW_MAX;
 /// The offset of `ref_count` in the fixed part.
 const REF_COUNT_AT: usize = 124;
 
@@ -183,17 +188,21 @@ impl FileDescriptor {
 }
 
 /// The body of an `AppMessage` of kind `0x02` (Part 6 §6.6): the
-/// descriptor, and an optional file name after it (`WIR-531`).
+/// descriptor, then an optional name and an optional preview
+/// (`WIR-531`, `WIR-533`).
 pub struct AttachmentBody<'a> {
     /// The descriptor.
     pub descriptor: FileDescriptor,
     /// The name of the file, with no path.
     pub name: Option<&'a str>,
+    /// A JPEG thumbnail of an image or of the first frame of a video.
+    pub preview: Option<&'a [u8]>,
 }
 
 impl<'a> AttachmentBody<'a> {
-    /// Reads a body. Bytes after the descriptor that are not one valid
-    /// name make the whole body malformed (`WIR-532`).
+    /// Reads a body. A body ends after the descriptor, or after one
+    /// `name_len`, its name, one `preview_len`, and its preview. Each other
+    /// form is malformed (`WIR-532`).
     pub fn parse(body: &'a [u8]) -> Result<Self, Error> {
         let count = body
             .get(REF_COUNT_AT..REF_COUNT_AT + 4)
@@ -207,27 +216,52 @@ impl<'a> AttachmentBody<'a> {
             .ok_or(Error::Malformed)?;
         let (head, rest) = body.split_at_checked(end).ok_or(Error::Malformed)?;
         let descriptor = FileDescriptor::parse(head)?;
-        let name = match rest.split_first() {
-            None => None,
-            Some((&len, name)) => {
-                if usize::from(len) != name.len() {
-                    return Err(Error::Malformed);
-                }
-                let name = core::str::from_utf8(name).map_err(|_| Error::Malformed)?;
-                if !is_file_name(name) {
-                    return Err(Error::Malformed);
-                }
-                Some(name)
+        if rest.is_empty() {
+            return Ok(AttachmentBody {
+                descriptor,
+                name: None,
+                preview: None,
+            });
+        }
+        let mut r = Reader::new(rest);
+        let name_len = usize::from(r.u8()?);
+        let name = r.take(name_len)?;
+        let preview_len = usize::from(r.u16()?);
+        let preview = r.take(preview_len)?;
+        r.finish()?;
+        let name = if name.is_empty() {
+            None
+        } else {
+            let name = core::str::from_utf8(name).map_err(|_| Error::Malformed)?;
+            if !is_file_name(name) {
+                return Err(Error::Malformed);
             }
+            Some(name)
         };
-        Ok(AttachmentBody { descriptor, name })
+        let preview = if preview.is_empty() {
+            None
+        } else {
+            // WIR-533: a preview is a small JPEG, and only of a picture.
+            let is_picture = matches!(descriptor.mime_class, class::IMAGE | class::VIDEO);
+            if !is_picture || !is_preview(preview) {
+                return Err(Error::Malformed);
+            }
+            Some(preview)
+        };
+        Ok(AttachmentBody {
+            descriptor,
+            name,
+            preview,
+        })
     }
 
     /// The encoded length.
     pub fn len(&self) -> usize {
-        self.descriptor
-            .len()
-            .saturating_add(self.name.map_or(0, |name| 1 + name.len()))
+        let trailer = match (self.name, self.preview) {
+            (None, None) => 0,
+            (name, preview) => 3 + name.map_or(0, str::len) + preview.map_or(0, <[u8]>::len),
+        };
+        self.descriptor.len().saturating_add(trailer)
     }
 
     /// Whether the body names no chunk. Clippy asks for this beside `len`.
@@ -238,21 +272,38 @@ impl<'a> AttachmentBody<'a> {
     /// Writes the body.
     pub fn encode(&self, out: &mut [u8]) -> Result<usize, Error> {
         let at = self.descriptor.encode(out)?;
-        let Some(name) = self.name else {
+        if self.name.is_none() && self.preview.is_none() {
             return Ok(at);
-        };
-        if !is_file_name(name) {
+        }
+        if self.name.is_some_and(|name| !is_file_name(name)) {
             return Err(Error::Malformed);
         }
-        let len = u8::try_from(name.len()).map_err(|_| Error::Malformed)?;
-        let tail = out
-            .get_mut(at..at + 1 + name.len())
-            .ok_or(Error::Malformed)?;
-        let (first, rest) = tail.split_first_mut().ok_or(Error::Malformed)?;
-        *first = len;
-        rest.copy_from_slice(name.as_bytes());
-        Ok(at + 1 + name.len())
+        let is_picture = matches!(self.descriptor.mime_class, class::IMAGE | class::VIDEO);
+        if self
+            .preview
+            .is_some_and(|preview| !is_picture || !is_preview(preview))
+        {
+            return Err(Error::Malformed);
+        }
+        let name = self.name.map_or(&[][..], str::as_bytes);
+        let preview = self.preview.unwrap_or(&[]);
+        let tail = out.get_mut(at..).ok_or(Error::Malformed)?;
+        let mut w = Writer::new(tail);
+        w.u8(u8::try_from(name.len()).map_err(|_| Error::Malformed)?)?;
+        w.put(name)?;
+        w.u16(u16::try_from(preview.len()).map_err(|_| Error::Malformed)?)?;
+        w.put(preview)?;
+        Ok(at + w.position())
     }
+}
+
+/// Whether bytes are a preview that `WIR-533` takes: a JPEG of at most
+/// `PREVIEW_MAX` bytes, with its start and its end marker. The decoder of
+/// the platform reads the rest, as it reads each photo.
+pub fn is_preview(bytes: &[u8]) -> bool {
+    bytes.len() <= PREVIEW_MAX
+        && bytes.starts_with(&[0xFF, 0xD8, 0xFF])
+        && bytes.ends_with(&[0xFF, 0xD9])
 }
 
 /// Whether a text is a valid file name (`WIR-532`): 1 to `FILE_NAME_MAX`
@@ -330,26 +381,65 @@ mod tests {
     }
 
     #[test]
-    fn a_body_carries_a_name_after_the_descriptor_or_none() {
+    fn a_body_carries_a_name_and_a_preview_after_the_descriptor_or_none() {
         let named = AttachmentBody {
             descriptor: one_ref_descriptor(),
             name: Some("Report 2026.pdf"),
+            preview: None,
         };
         let mut out = vec![0u8; named.len()];
-        assert_eq!(named.encode(&mut out).unwrap(), 257 + 16);
+        assert_eq!(named.encode(&mut out).unwrap(), 257 + 3 + 15);
         let back = AttachmentBody::parse(&out).unwrap();
         assert_eq!(back.name, Some("Report 2026.pdf"));
+        assert_eq!(back.preview, None);
         assert_eq!(back.descriptor.mime_class, class::DOC);
 
-        // A body of an earlier version holds the descriptor alone.
+        // A body that holds the descriptor alone carries neither.
         let bare = &out[..257];
         assert_eq!(AttachmentBody::parse(bare).unwrap().name, None);
 
         // WIR-532: a length that the rest does not fill, and a stray byte.
         assert!(AttachmentBody::parse(&out[..out.len() - 1]).is_err());
-        let mut stray = out[..257].to_vec();
+        let mut stray = out.clone();
         stray.push(0);
         assert!(AttachmentBody::parse(&stray).is_err());
+
+        // WIR-533: a photo takes a thumbnail and no name, and a document
+        // takes no preview.
+        let mut photo = one_ref_descriptor();
+        photo.mime_class = class::IMAGE;
+        let hash = &[0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3, 0xFF, 0xD9];
+        let shown = AttachmentBody {
+            descriptor: photo,
+            name: None,
+            preview: Some(hash),
+        };
+        let mut out = vec![0u8; shown.len()];
+        shown.encode(&mut out).unwrap();
+        assert_eq!(
+            AttachmentBody::parse(&out).unwrap().preview,
+            Some(&hash[..])
+        );
+        let wrong = AttachmentBody {
+            descriptor: one_ref_descriptor(),
+            name: None,
+            preview: Some(hash),
+        };
+        let mut out = vec![0u8; wrong.len()];
+        assert!(wrong.encode(&mut out).is_err());
+    }
+
+    #[test]
+    fn a_preview_is_a_small_jpeg() {
+        assert!(is_preview(&[0xFF, 0xD8, 0xFF, 0xE0, 0xFF, 0xD9]));
+        // No end marker, no start marker, and a thumbnail that is too large.
+        assert!(!is_preview(&[0xFF, 0xD8, 0xFF, 0xE0]));
+        assert!(!is_preview(b"GIF89a"));
+        let mut large = vec![0u8; PREVIEW_MAX + 1];
+        large[..3].copy_from_slice(&[0xFF, 0xD8, 0xFF]);
+        let end = large.len();
+        large[end - 2..].copy_from_slice(&[0xFF, 0xD9]);
+        assert!(!is_preview(&large));
     }
 
     #[test]
@@ -359,6 +449,7 @@ mod tests {
             let body = AttachmentBody {
                 descriptor: one_ref_descriptor(),
                 name: Some(bad),
+                preview: None,
             };
             let mut out = vec![0u8; body.len()];
             assert!(body.encode(&mut out).is_err(), "{bad:?}");

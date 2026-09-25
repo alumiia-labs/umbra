@@ -22,6 +22,9 @@ pub struct DraftFile {
     pub shape: Shape,
     /// The name of the file, with no path (`WIR-531`).
     pub name: Option<String>,
+    /// A JPEG thumbnail of an image or of the first frame of a video
+    /// (`WIR-533`).
+    pub preview: Option<Vec<u8>>,
 }
 
 /// The longest text of one draft, in bytes of UTF-8.
@@ -93,7 +96,21 @@ impl Draft {
             plain,
             shape,
             name: None,
+            preview: None,
         });
+        Ok(())
+    }
+
+    /// Gives the image or the video of the draft its preview: a JPEG
+    /// thumbnail of at most `PREVIEW_MAX` bytes (`WIR-533`).
+    pub fn set_file_preview(&mut self, preview: &[u8]) -> Result<(), Error> {
+        let file = self.file.as_mut().ok_or(Error::NotFound)?;
+        if !matches!(file.shape.mime_class, class::IMAGE | class::VIDEO)
+            || !umbra_wire::descriptor::is_preview(preview)
+        {
+            return Err(Error::Malformed);
+        }
+        file.preview = Some(preview.to_vec());
         Ok(())
     }
 
