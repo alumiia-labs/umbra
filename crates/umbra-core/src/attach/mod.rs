@@ -26,10 +26,12 @@ pub const MAX_FILE_SIZE: u64 = 250 * 1_024 * 1_024;
 pub const LARGE_FILE_WARN: u64 = 25 * 1_024 * 1_024;
 /// `IMAGE_REENCODE_BYTES`.
 pub const IMAGE_REENCODE_BYTES: u64 = 2 * 1_024 * 1_024;
-/// `CHUNK_TTL`, in seconds; it equals `MSG_TTL`.
-pub const CHUNK_TTL: u64 = 45 * 86_400;
-/// `CHUNK_LIFE_MAX`, in seconds.
-pub const CHUNK_LIFE_MAX: u64 = 90 * 86_400;
+/// `CHUNK_TTL`, in seconds: one week, below `MSG_TTL` by the choice of
+/// `ATT-050`.
+pub const CHUNK_TTL: u64 = 7 * 86_400;
+/// `CHUNK_LIFE_MAX`, in seconds: a renewal keeps a chunk that a party
+/// still reads one week more at the most.
+pub const CHUNK_LIFE_MAX: u64 = 14 * 86_400;
 /// `BACKUP_TTL` of Part 4 §4.8, in seconds.
 pub const BACKUP_TTL: u64 = 180 * 86_400;
 /// `REPLICAS`.

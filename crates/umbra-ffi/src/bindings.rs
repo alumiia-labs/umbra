@@ -1221,34 +1221,6 @@ enum GroupWork {
 }
 
 impl Inner {
-    /// The `Admission` of a command that creates state at `relay_id`: the
-    /// solution of its challenge when this device holds one from a fetch
-    /// inside `POW_CHALLENGE_PERIOD` (`ABU-014`, `ABU-069`), and none else.
-    #[allow(dead_code)]
-    fn admission_for(&self, relay_id: &[u8; 32]) -> Vec<u8> {
-        use umbra_wire::admission::{Admission, AdmissionKind};
-        let now = unix_now();
-        let solved = self.challenges.get(relay_id, now).and_then(|challenge| {
-            let fetched = umbra_core::abuse::pow::Fetched {
-                challenge: challenge.clone(),
-                fetched_at: self.challenges_at,
-            };
-            fetched.solve(now, &mut OsRng).ok()
-        });
-        let mut body = [0u8; umbra_core::abuse::pow::SOLUTION_LEN];
-        let admission = match solved.and_then(|solution| solution.encode(&mut body).ok()) {
-            Some(used) => Admission {
-                kind: AdmissionKind::Pow,
-                body: body.get(..used).unwrap_or_default(),
-            },
-            None => Admission::NONE,
-        };
-        let mut out = vec![0u8; 3 + body.len()];
-        let used = admission.encode(&mut out).unwrap_or(0);
-        out.truncate(used);
-        out
-    }
-
     /// Gives each file job of the store to the transfer task (Part 12
     /// §12.8). With no run of the network the jobs wait in the store.
     fn pump_transfers(&mut self) {
@@ -1943,6 +1915,14 @@ impl Inner {
             None => command,
         };
         self.transfers = self.start_transfers();
+        // ABU-106: a new transfer task takes the challenges first, thus its
+        // first registration carries a solution.
+        if let Some(sender) = &self.transfers {
+            let _ = sender.send(TransferCommand::Challenges {
+                book: self.challenges.clone(),
+                now: unix_now(),
+            });
+        }
         let refused = match &self.transfers {
             Some(sender) => sender.send(command).err().map(|refused| refused.0),
             None => Some(command),
@@ -3301,6 +3281,13 @@ impl Handle {
             }
         }
         inner.challenges_at = now;
+        // A transfer task that runs takes the new challenges at once.
+        if let Some(sender) = &inner.transfers {
+            let _ = sender.send(TransferCommand::Challenges {
+                book: inner.challenges.clone(),
+                now,
+            });
+        }
     }
 
     /// The count of the relays whose challenge this device holds.
@@ -4099,12 +4086,20 @@ impl Handle {
         locked(&self.inner).client.touch(unix_now());
     }
 
-    /// The clock of the platform, for the auto-lock.
-    pub fn tick(&self) {
+    /// The clock of the platform, for the auto-lock, and for the fetch of
+    /// the challenges of the relays at each `POW_CHALLENGE_PERIOD`
+    /// (`ABU-057`, `ABU-106`).
+    pub fn tick(self: Arc<Self>) {
         let mut inner = locked(&self.inner);
-        inner.client.tick(unix_now());
+        let now = unix_now();
+        inner.client.tick(now);
         inner.stop_network_if_locked();
+        let is_due = inner.bridge.is_some()
+            && now.saturating_sub(inner.challenges_at) >= umbra_core::abuse::POW_CHALLENGE_PERIOD;
         drop(inner);
+        if is_due {
+            self.fetch_challenges();
+        }
         self.changed.notify_all();
     }
 }

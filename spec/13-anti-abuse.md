@@ -27,7 +27,7 @@ client that holds no credential. The carrier is where the credential travels.
 | --- | --- | --- | --- | --- | --- |
 | A queue creation, `NEW` of Part 6 §6.4 | Any relay | A token of §13.3, of the type that the relay advertises | The issuer of §13.9 | The proof of work of §13.8 | The `Admission` at the end of the payload |
 | A group-queue creation, `GNEW` of Part 6 §6.4.5 | Any relay | A token of §13.3, of the type that the relay advertises | The issuer of §13.9 | The proof of work of §13.8 | The `Admission` at the end of the payload |
-| An allocation of attachment storage, `CNEW` and `BNEW` of Part 12 §12.3.3 | An attachment relay | A token of §13.3 | The issuer of §13.9 | The proof of work of §13.8 | The `Admission` at the end of the payload |
+| An allocation of attachment storage, `CNEW` and `BNEW` of Part 12 §12.3.3 | An attachment relay | A token of §13.3 | The issuer of §13.9 | The proof of work of §13.8, at `POW_CHUNK_FLOOR` or above, and one solution for `POW_CHUNK_ALLOWANCE` registrations | The `Admission` at the end of the payload |
 | A contact request at a Public Address or at a handle, by the hello of Part 9 §9.6 | The addressee client | A cross-relay token of §13.3.1 | The issuer of §13.9 | The proof of work of §13.8, at `HELLO_POW_EFFORT` | The `Admission` at the end of the hello, inside its AEAD |
 | A handle registration, Part 9 §9.9 | The handle directory | One first-party token of §13.3.2 | The issuer of §13.9 | None | The registration request of Part 9 §9.9 |
 | An OPRF evaluation of a lookup, Part 9 §9.4.1 | The handle directory | One first-party token of §13.3.2 | The issuer of §13.9 | The proof of work of §13.8, at `POW_LOOKUP_FLOOR` or above | The lookup request of Part 9 §9.4 |
@@ -74,7 +74,7 @@ costs 3 bytes in the steady state.
   that differs from the body length of its `kind`. **[ABU-089]** A parser MUST
   reject kind `0x02`, which an earlier draft gave to an ARC presentation.
 - **[ABU-047]** A relay whose newest `PowChallenge` holds `effort` 0 MUST
-  accept an `Admission` of kind `0x00` on `NEW`, `GNEW`, `CNEW`, and `BNEW`.
+  accept an `Admission` of kind `0x00` on `NEW` and `GNEW`.
   **[ABU-048]** If that `effort` is above 0, the relay MUST answer such a
   command with a `NACK` of reason `ADMISSION`. Part 6 §6.4.4 gives the reason.
   The client then fetches the challenge and sends the command again, thus a
@@ -517,6 +517,30 @@ the third constraint above. Part 5 §5.11 holds the label `"umbra/v1/pow"`.
 > one relay cannot give one client a private effort without the directory as a
 > witness.
 
+### 13.8.1 The allocation of attachment storage
+
+An allocation of attachment storage holds bytes at a relay for a week (Part 12
+§12.7.1), thus a flood of it lasts longer than a flood of any other gated path.
+It carries a solution even when the effort is 0.
+
+- **[ABU-106]** A relay MUST reject a `CNEW` and a `BNEW` whose `Admission` is
+  of kind `0x00`. It MUST reject a solution on those commands whose `effort` is
+  below `POW_CHUNK_FLOOR` or below the effort of its challenge.
+- **[ABU-107]** One solution MUST admit at most `POW_CHUNK_ALLOWANCE` `CNEW`
+  and `BNEW` commands at its relay, while its challenge is live under
+  `ABU-058`. Only its first use MUST count in the backlog of `ABU-060`, thus
+  one large upload does not raise the effort for each other party.
+- **[ABU-108]** A client SHOULD use one solution for each registration at one
+  relay until its allowance ends or its challenge is no longer the newest.
+
+> *Cause.* At an effort of 0 an allocation cost nothing, and the relay held one
+> quota counter for each upload that carried no token (Part 12 `ATT-092`). One
+> party spent that counter in minutes and stopped each attachment and each
+> backup at the relay for the rest of the day. A floor of 8 costs a slow phone
+> about 0.1 s for each 2 MiB of chunks, thus a photo costs about 0.3 s at its
+> three replicas. A flood of 100 GiB costs about 51 200 solutions, and the
+> effort of `ABU-060` rises under it.
+
 ## 13.9 Funding infrastructure without identifying users
 
 UMBRA funds the relays by a **sale or a grant of blind-signed token batches**. A
@@ -662,5 +686,7 @@ tag check of Part 11 §11.3.5, and no relay learns the block.
 | `HELLO_INBOUND_LIMIT` | 64 hellos for one published entry in each epoch (§13.4) |
 | `POW_CHALLENGE_PERIOD` | 10 min, measured by the verifier from the issue of the last challenge (§13.8) |
 | `POW_EFFORT_MAX` | 150 expected Equi-X solves (§13.8) |
+| `POW_CHUNK_FLOOR` | 8, the lowest effort of a solution that admits a `CNEW` or a `BNEW` (`ABU-106`) |
+| `POW_CHUNK_ALLOWANCE` | 64 registrations, about 2 MiB of chunks, for one solution at one relay (`ABU-107`) |
 | `POW_LOOKUP_FLOOR` | 20 expected Equi-X solves (§13.8) |
 | `POW_BACKLOG_UNIT` | 64 pending admissions in one `POW_CHALLENGE_PERIOD` raise the effort by one (§13.8) |

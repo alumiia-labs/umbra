@@ -337,8 +337,8 @@ relay that wants the traffic of another relay has to find that preimage first.
 MUST derive `R` again from Part 6 §6.9.
 
 **A rotation of the directory epoch does not break a stored descriptor.** Part
-10 §10.11 gives the consensus epoch as 1 hour, and §12.7 gives `CHUNK_TTL` as 45
-days. Thus a stored descriptor outlives 1 080 consensus epochs. `RelayRef` names
+10 §10.11 gives the consensus epoch as 1 hour, and §12.7 gives `CHUNK_LIFE_MAX`
+as 14 days. Thus a stored descriptor outlives 336 consensus epochs. `RelayRef` names
 the identity of a relay, and it does not name a position in a consensus. Thus a
 rotation of the epoch changes no byte of a stored descriptor. A reference that
 named a directory index would break at the first rotation.
@@ -359,10 +359,10 @@ The four rules below hold at a retrieval.
    client MUST report that failure to the user, and **[ATT-015]** the client
    MUST NOT show a partial file.
 
-**The residual.** A chunk lives for `CHUNK_TTL`, which is 45 days. A relay that
+**The residual.** A chunk lives for `CHUNK_TTL`, which is 7 days. A relay that
 leaves the directory inside that window removes one replica. §12.4 gives three
 replicas under three operators, thus two replicas remain. **[ATT-016]** A
-revision MUST measure the relay churn rate over 45 days before it lowers
+revision MUST measure the relay churn rate over 14 days before it lowers
 `REPLICAS`.
 
 **The null reference.** A `RelayRef` of 12 zero bytes names no relay. A backup
@@ -478,7 +478,7 @@ read_sk    := HKDF-SHA3-256("umbra/v1/chunk-read", file_key, chunk_index_be32)
    **[ATT-126]** A relay MUST NOT answer a `CRNW`. A client that needs the chunk
    fetches it, and the fetch shows the state.
 
-   > *Cause.* A chunk lives 45 days. A `CRNW` at a fetch keeps a chunk that a
+   > *Cause.* A chunk lives 7 days. A `CRNW` at a fetch keeps a chunk that a
    > party still reads. `CHUNK_LIFE_MAX` bounds each renewal, thus a renewal
    > cannot keep a chunk for ever. An uploader that wants a chunk gone sends
    > `CDEL`, and a renewal does not override that command.
@@ -502,7 +502,7 @@ read_sk    := HKDF-SHA3-256("umbra/v1/chunk-read", file_key, chunk_index_be32)
 
     > *Cause.* Part 4 rule `IDN-073` held a backup object for `BACKUP_TTL`, and
     > rule `IDN-075` sent it under the commands of this section. Those commands
-    > erased it at `CHUNK_TTL`, which is 45 days. No relay could tell the two
+    > erased it at `CHUNK_TTL`, which is 7 days. No relay could tell the two
     > retentions apart, because no command carried the class. One extra
     > registration command carries it, and a relay that holds no `BNEW` for a
     > `chunk_id` applies `CHUNK_TTL`. No `BGET` exists, because a `CGET` against
@@ -852,8 +852,8 @@ three properties hold:
 | `CHUNK_SIZE` | 32 650 B |
 | `SEGMENT_SIZE` | 32 634 B, which is `CHUNK_SIZE` less the 16-byte tag (§12.2.3) |
 | `MAX_FILE_SIZE` | **250 MiB** (§12.7.2) |
-| `CHUNK_TTL` | 45 days, which equals `MSG_TTL` |
-| `CHUNK_LIFE_MAX` | 90 days. §12.3.3 rule 8 bounds a renewed chunk |
+| `CHUNK_TTL` | 7 days, below `MSG_TTL` (§12.7.1) |
+| `CHUNK_LIFE_MAX` | 14 days. §12.3.3 rule 8 bounds a renewed chunk |
 | `REPLICAS` | 3, on different operators |
 | `MAX_CONCURRENT_CHUNKS` | 8 up, 32 down, and §12.7.2 derives both from the bandwidth-delay product |
 | `RELAYREF_WIDTH` | 12 B (§12.3.2) |
@@ -861,7 +861,7 @@ three properties hold:
 | `MANIFEST_REFS_PER_CHUNK` | 271, which is `SEGMENT_SIZE` divided by 120 |
 | `MAX_DATA_CHUNKS` | 72 899, which is about 2.22 GiB (§12.3.4) |
 | `VOICE_MAX_SECONDS` | 900, which is 15 minutes |
-| `UPLOAD_QUOTA_DAY` | 512 MiB for each credential holder each day, before the replicas |
+| `UPLOAD_QUOTA_DAY` | 512 MiB for each token or proof-of-work solution each day, before the replicas |
 | `CHUNK_STORE_MIN` | 100 GiB for a relay that declares the attachment role (§12.10) |
 | `CHUNK_STORE_TARGET` | 200 GiB (§12.10) |
 | `LARGE_FILE_WARN` | 25 MiB (§12.7.2) |
@@ -899,22 +899,28 @@ three properties hold:
 > client MUST NOT send an attachment above `MAX_FILE_SIZE`. **[ATT-023]** A
 > revision MUST derive §12.7.2 again before it raises that value.
 
-### 12.7.1 `CHUNK_TTL` equals `MSG_TTL`
+### 12.7.1 `CHUNK_TTL` is one week
 
-**[ATT-050]** `CHUNK_TTL` MUST NOT be below the `MSG_TTL` of Part 3 §3.2.4. Part
-3 §3.2.4 sets `MSG_TTL` to 45 days, thus `CHUNK_TTL` is 45 days.
+`CHUNK_TTL` is 7 days, and the `MSG_TTL` of Part 3 §3.2.4 is 45 days. A relay
+holds an undelivered message for `MSG_TTL`, and a descriptor is the body of such
+a message. Thus a recipient that returns on day 10 gets the descriptor and finds
+each chunk gone.
 
-A relay holds an undelivered message for `MSG_TTL`. A descriptor is the body of
-such a message. Thus a recipient that returns on day 40 gets the descriptor on
-day 40. **[ATT-051]** A revision MUST hold the two values equal, and a revision
-MUST NOT raise `MSG_TTL` alone.
+- **[ATT-050]** A client MUST show a file whose download finds no chunk, and
+  whose record is older than `CHUNK_TTL`, as expired. It MUST NOT offer a new
+  attempt for that file, because no party re-uploads the chunks.
+- **[ATT-051]** A revision that changes `CHUNK_TTL` MUST state the loss above
+  again against `MSG_TTL`.
 
-> *Cause.* An earlier draft set `CHUNK_TTL` to 14 days against a `MSG_TTL` of 45
-> days. A recipient that returned between day 15 and day 45 then took the
-> descriptor and found each chunk gone. §12.1 requirement 1 says that the sender
-> does not stay online, thus no party re-uploads the chunks. That failure is a
-> U6 reliability failure, and it happens on the ordinary path and not on an edge
-> case.
+> *Cause.* The owner chose a week. A chunk store holds each chunk for
+> `CHUNK_TTL`, thus the store of a relay and the time that a flood holds it both
+> fall to about a sixth of the figures at 45 days (§12.10). The cost is a U6
+> reliability failure on the path of a recipient that stays away more than a
+> week: the message arrives, and its file does not. A group whose epoch keys
+> travel on the chunk path (Part 11 `GRP-284`) sees the same loss for a member
+> that stays away that long, and the key supply of Part 11 §11.4.3 repairs it.
+> SimpleX holds a file for 48 hours, thus this value sits between that design
+> and the one of an earlier revision.
 
 **[ATT-162]** A revision MUST hold `BACKUP_TTL` of Part 4 §4.8 at or above
 `BACKUP_LOOKBACK` weekly epochs less one epoch. **[ATT-163]** A revision MUST
@@ -927,9 +933,8 @@ together.
 The cost of the change is relay storage and nothing else. A chunk is 32 650
 bytes of ciphertext under a key that no relay holds. Part 3 §3.2.4 states the
 same trade for `MSG_TTL`, which is that stored ciphertext is a storage cost and
-not an exposure. The `CHUNK_TTL` of 45 days is much longer than the 48 hours of
-SimpleX. The message "the file expired" is a worse user experience than a
-storage bill that is a little larger.
+not an exposure. The `CHUNK_TTL` of 7 days is longer than the 48 hours of
+SimpleX.
 
 Three rules bound the failure that stays.
 
@@ -1085,14 +1090,14 @@ Part 3 §3.12 models a moderate user at 2 files each day. The media mix of those
 files is 80 percent images at about 400 KB after the re-encode of `ATT-156`. The
 rest is 15 percent voice notes at about 200 KB and 5 percent documents at about
 2 MB. The mean is about 452 KB, thus the day is about 904 KB. That user costs
-904 KB × 3 × 45 = **122 MB** of network storage at the steady state. A `CRNW` of
+904 KB × 3 × 7 = **19 MB** of network storage at the steady state. A `CRNW` of
 §12.3.3 extends a chunk to `CHUNK_LIFE_MAX` at the most, thus a chunk that a
 party renews costs two times that figure.
 
 | Store | Moderate users that it holds |
 | --- | --- |
-| `CHUNK_STORE_MIN`, 100 GiB | about 880 |
-| `CHUNK_STORE_TARGET`, 200 GiB | about 1 760 |
+| `CHUNK_STORE_MIN`, 100 GiB | about 5 650 |
+| `CHUNK_STORE_TARGET`, 200 GiB | about 11 300 |
 
 - **[ATT-086]** A relay that declares the attachment role MUST hold
   `CHUNK_STORE_MIN` of free storage. **[ATT-087]** A relay MUST publish the
@@ -1119,15 +1124,25 @@ party renews costs two times that figure.
   > replica is gone.
 
 **One uploader must not fill a relay.** Part 13 §13.2 gates the allocation of
-attachment storage with a token, and this section gives that gate a number.
+attachment storage with a token or a proof of work, and this section gives that
+gate a number.
 
-- **[ATT-092]** A relay MUST apply `UPLOAD_QUOTA_DAY` for each credential that
-  presents a token. **[ATT-093]** A relay MUST reject a `CNEW` above that quota.
+- **[ATT-092]** A relay MUST apply `UPLOAD_QUOTA_DAY` for each token and for
+  each proof-of-work solution that admits a registration (Part 13 `ABU-107`).
+  **[ATT-093]** A relay MUST reject a `CNEW` above that quota.
   **[ATT-094]** A relay MUST NOT hold a quota counter after 24 hours.
 
-At `UPLOAD_QUOTA_DAY` of 512 MiB, one holder costs 512 MiB × 3 × 45 = **67.5
+At `UPLOAD_QUOTA_DAY` of 512 MiB, one holder costs 512 MiB × 3 × 7 = **10.5
 GiB** of network storage at the steady state, spread across the attachment relay
-population. **[ATT-095]** A revision that raises `MAX_FILE_SIZE`,
+population. A solution admits `POW_CHUNK_ALLOWANCE` registrations of Part 13
+§13.13, which is far below that quota, thus the allowance binds first.
+
+> *Cause.* An earlier revision held one quota counter for each upload that
+> carried no token. No token issuer runs yet, thus that counter held each
+> upload of the relay: one party that spent 512 MiB in a day stopped each
+> attachment and each backup at that relay until the next day. A counter for
+> each solution makes a flood cost a puzzle for each 2 MiB, and it takes no
+> allowance from any other party. **[ATT-095]** A revision that raises `MAX_FILE_SIZE`,
 `UPLOAD_QUOTA_DAY`, `REPLICAS`, `CHUNK_TTL`, or `CHUNK_LIFE_MAX` MUST derive
 this section again.
 

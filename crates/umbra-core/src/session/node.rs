@@ -914,6 +914,8 @@ pub struct ClientNode {
     held_fetches: Vec<LinkFetch>,
     /// The chunk commands that wait for a circuit to their relay.
     held_chunks: Vec<HeldChunk>,
+    /// The solutions of the registrations of this node (`ABU-106`).
+    chunk_admissions: crate::abuse::pow::ChunkAdmissions,
     /// The group-queue commands that wait for a circuit to their relay.
     held_groups: Vec<HeldGroup>,
     /// The range of each circuit of this node (`WIR-309`). A node for
@@ -1036,6 +1038,7 @@ impl ClientNode {
             held_records: Vec::new(),
             held_fetches: Vec::new(),
             held_chunks: Vec::new(),
+            chunk_admissions: crate::abuse::pow::ChunkAdmissions::default(),
             held_groups: Vec::new(),
             range: Range::Queue,
             capsules: VecDeque::new(),
@@ -2642,6 +2645,18 @@ impl ClientNode {
         Ok(handle)
     }
 
+    /// Takes the challenges of a fetch, for the registrations of this node
+    /// (`ABU-106`). The caller gives the time, because the node reads no
+    /// clock.
+    pub fn set_challenges(&mut self, book: crate::abuse::pow::ChallengeBook, now: u64) {
+        self.chunk_admissions.set_book(book, now);
+    }
+
+    /// Moves the clock that decides whether a challenge is still live.
+    pub fn set_challenge_clock(&mut self, now: u64) {
+        self.chunk_admissions.set_now(now);
+    }
+
     /// Signs a chunk command for the session of a circuit to its relay, and
     /// queues it.
     fn start_chunk<R: CryptoRng + ?Sized>(
@@ -2659,12 +2674,26 @@ impl ClientNode {
                 read_pk,
                 is_backup,
             } => {
+                // ABU-106: a registration with no token carries a solution,
+                // and one solution serves ABU-107 registrations.
+                let mut body = [0u8; crate::abuse::pow::SOLUTION_LEN];
+                let solved = self
+                    .chunk_admissions
+                    .next(&held.relay, rng)
+                    .and_then(|solution| solution.encode(&mut body).ok());
+                let admission = match solved {
+                    Some(used) => Admission {
+                        kind: umbra_wire::admission::AdmissionKind::Pow,
+                        body: body.get(..used).ok_or(Error::Malformed)?,
+                    },
+                    None => Admission::NONE,
+                };
                 let register = RegisterPayload {
                     cred_pk: *umbra_crypto::x25519::PublicKey::from(&cred).as_bytes(),
                     read_pk,
-                    admission: Admission::NONE,
+                    admission,
                 };
-                let mut payload = alloc::vec![0u8; 64usize.saturating_add(Admission::NONE.len())];
+                let mut payload = alloc::vec![0u8; 64usize.saturating_add(admission.len())];
                 let used = register.encode(&mut payload)?;
                 payload.truncate(used);
                 let cmd = if is_backup {

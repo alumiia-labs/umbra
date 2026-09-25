@@ -201,9 +201,9 @@ fun PhotoTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.matchParentSize(),
             )
-            TransferMark(file)
+            TransferMark(file, isExpired(line))
         } else if (state == FILE_HELD) {
-            TransferMark(file)
+            TransferMark(file, isExpired(line))
         } else {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 FaIcon(if (canRetry) "rotate" else "image", size = 22.dp, tint = Palette.TextSecondary)
@@ -211,7 +211,7 @@ fun PhotoTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
                 Text(
                     when (state) {
                         FILE_WANTED -> "Receiving"
-                        FILE_FAILED -> "Not received"
+                        FILE_FAILED -> if (isExpired(line)) "Expired" else "Not received"
                         else -> "Photo"
                     },
                     style = MaterialTheme.typography.labelSmall,

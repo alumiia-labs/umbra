@@ -139,7 +139,10 @@ impl ChunkService {
                     RegisterPayload::parse(command.payload).map_err(|_| Reject::Rejected)?;
                 // ATT-180: the key of the payload authorizes its own command.
                 session.accept(command, &register.cred_pk)?;
-                gate.admit(&register.admission, accepts, now)?;
+                // ABU-106, ABU-107: a token, or a solution that admits up to
+                // POW_CHUNK_ALLOWANCE registrations. It names the holder of
+                // the upload quota (ATT-092).
+                let holder = gate.admit_chunk(&register.admission, accepts, now)?;
                 let mut storage_token = [0u8; 32];
                 rng.fill_bytes(&mut storage_token);
                 let class = if cmd == ChunkCmd::Bnew {
@@ -147,8 +150,6 @@ impl ChunkService {
                 } else {
                     Class::Attachment
                 };
-                // An admission holds no credential that this relay can name,
-                // thus one counter holds the quota of each free upload.
                 self.store.register(
                     chunk_id,
                     class,
@@ -156,7 +157,7 @@ impl ChunkService {
                         cred_pk: register.cred_pk,
                         read_pk: register.read_pk,
                     },
-                    [0; 32],
+                    holder,
                     storage_token,
                     now,
                 )?;
@@ -373,16 +374,63 @@ mod tests {
         command.payload.to_vec()
     }
 
-    fn register_payload(cred: &StaticSecret, read: &StaticSecret) -> Vec<u8> {
-        let payload = RegisterPayload {
-            cred_pk: *XPublic::from(cred).as_bytes(),
-            read_pk: *XPublic::from(read).as_bytes(),
+    impl Bench {
+        /// A `CNEW` payload with a solution to the challenge of this relay
+        /// at `POW_CHUNK_FLOOR` (`ABU-106`).
+        fn register_payload(&mut self, cred: &StaticSecret, read: &StaticSecret) -> Vec<u8> {
+            let challenge = self.gate.pow.issue(0, 1_000, &mut self.rng).unwrap();
+            let solution = umbra_core::abuse::pow::PowSolution::solve(
+                &[1; 32],
+                &challenge.seed,
+                umbra_core::abuse::POW_CHUNK_FLOOR,
+                &mut self.rng,
+            )
+            .unwrap();
+            let mut body = [0u8; umbra_core::abuse::pow::SOLUTION_LEN];
+            let used = solution.encode(&mut body).unwrap();
+            let admission = Admission {
+                kind: umbra_wire::admission::AdmissionKind::Pow,
+                body: &body[..used],
+            };
+            let payload = RegisterPayload {
+                cred_pk: *XPublic::from(cred).as_bytes(),
+                read_pk: *XPublic::from(read).as_bytes(),
+                admission,
+            };
+            let mut out = vec![0u8; 64 + admission.len()];
+            let used = payload.encode(&mut out).unwrap();
+            out.truncate(used);
+            out
+        }
+    }
+
+    #[test]
+    fn a_registration_with_no_solution_fails_and_one_solution_serves_its_allowance() {
+        let mut bench = Bench::new();
+        let cred = StaticSecret::from([3; 32]);
+        let read = StaticSecret::from([4; 32]);
+        // ABU-106: a registration with no token and no solution fails, even
+        // at an effort of 0.
+        let bare = RegisterPayload {
+            cred_pk: *XPublic::from(&cred).as_bytes(),
+            read_pk: *XPublic::from(&read).as_bytes(),
             admission: Admission::NONE,
         };
         let mut out = vec![0u8; 64 + Admission::NONE.len()];
-        let used = payload.encode(&mut out).unwrap();
-        out.truncate(used);
-        out
+        let used = bare.encode(&mut out).unwrap();
+        let (refused, _) = bench.send(ChunkCmd::Cnew, [0xE0; 32], &out[..used], &cred, b"");
+        assert_eq!(refused.err(), Some(Reject::Admission));
+        // ABU-107: one solution admits POW_CHUNK_ALLOWANCE registrations, and
+        // not one more.
+        let register = bench.register_payload(&cred, &read);
+        for i in 0..umbra_core::abuse::POW_CHUNK_ALLOWANCE {
+            let mut id = [0xE1; 32];
+            id[..2].copy_from_slice(&i.to_be_bytes());
+            let (answer, _) = bench.send(ChunkCmd::Cnew, id, &register, &cred, b"");
+            assert!(answer.is_ok(), "registration {i}");
+        }
+        let (over, _) = bench.send(ChunkCmd::Cnew, [0xE2; 32], &register, &cred, b"");
+        assert_eq!(over.err(), Some(Reject::Admission));
     }
 
     #[test]
@@ -393,7 +441,7 @@ mod tests {
         let cred = StaticSecret::from([3; 32]);
         let read = StaticSecret::from([4; 32]);
         let chunk = vec![0x5A; CHUNK_SIZE];
-        let register = register_payload(&cred, &read);
+        let register = bench.register_payload(&cred, &read);
         let (cid, _) = bench.send(ChunkCmd::Cnew, [0xC1; 32], &register, &cred, b"");
         let token = payload_of(cid, ChunkCmd::Cid);
         // A registration with no bytes stays in RAM.
@@ -433,7 +481,7 @@ mod tests {
         let read = StaticSecret::from([4; 32]);
         let chunk_id = [0xC1; 32];
         let chunk = vec![0x5A; CHUNK_SIZE];
-        let register = register_payload(&cred, &read);
+        let register = bench.register_payload(&cred, &read);
 
         let (cid, _) = bench.send(ChunkCmd::Cnew, chunk_id, &register, &cred, b"");
         let token = payload_of(cid, ChunkCmd::Cid);
@@ -519,7 +567,7 @@ mod tests {
         let read = StaticSecret::from([4; 32]);
         let chunk_id = [0xD1; 32];
         let chunk = vec![0x77; CHUNK_SIZE];
-        let register = register_payload(&cred, &read);
+        let register = bench.register_payload(&cred, &read);
         let (cid, _) = bench.send(ChunkCmd::Cnew, chunk_id, &register, &cred, b"");
         let token: [u8; 32] = payload_of(cid, ChunkCmd::Cid).try_into().unwrap();
 

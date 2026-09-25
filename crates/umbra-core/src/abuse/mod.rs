@@ -22,6 +22,12 @@ pub const POW_CHALLENGE_PERIOD: u64 = 600;
 pub const POW_EFFORT_MAX: u32 = 150;
 /// `POW_LOOKUP_FLOOR`.
 pub const POW_LOOKUP_FLOOR: u32 = 20;
+/// `POW_CHUNK_FLOOR`: the lowest effort of a solution that admits a
+/// `CNEW` or a `BNEW` with no token (`ABU-106`).
+pub const POW_CHUNK_FLOOR: u32 = 8;
+/// `POW_CHUNK_ALLOWANCE`: the `CNEW` and `BNEW` commands that one solution
+/// admits at one relay (`ABU-107`), which is about 2 MiB of chunks.
+pub const POW_CHUNK_ALLOWANCE: u16 = 64;
 /// `HELLO_POW_EFFORT`.
 pub const HELLO_POW_EFFORT: u32 = 50;
 /// The admissions pending in one `POW_CHALLENGE_PERIOD` that raise the

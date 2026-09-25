@@ -37,6 +37,14 @@ const TICK: Duration = Duration::from_secs(1);
 
 /// What the caller asks of the task.
 pub enum TransferCommand {
+    /// The challenges of a fetch, for the registrations of the chunk path
+    /// (Part 13 `ABU-106`). No update follows.
+    Challenges {
+        /// The challenges, each verified under the key of its relay.
+        book: umbra_core::abuse::pow::ChallengeBook,
+        /// The time of the fetch.
+        now: u64,
+    },
     /// Upload one file. The plaintext leaves the memory with the command.
     Upload {
         /// A value of the caller, which comes back in each update.
@@ -246,6 +254,7 @@ pub async fn run_transfers(
                 None => break 'run,
             },
             _ = tick.tick() => {
+                node.set_challenge_clock(crate::runtime::unix_now());
                 if active.is_empty() && early.is_empty() {
                     if idle_since.elapsed() >= IDLE_END {
                         break 'run;
@@ -411,6 +420,9 @@ pub async fn run_transfers(
                             let _ = updates.send(TransferUpdate::Failed { tag });
                         }
                     }
+                }
+                TransferCommand::Challenges { book, now } => {
+                    node.set_challenges(book, now);
                 }
                 TransferCommand::Erase {
                     chunk_id,

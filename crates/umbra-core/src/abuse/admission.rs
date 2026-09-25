@@ -4,11 +4,14 @@
 use umbra_queue::Reject;
 use umbra_wire::admission::{Admission, AdmissionKind};
 
+use alloc::collections::BTreeMap;
+
 use super::{
     epoch_number,
     pow::{self, PowSolution, Verifier},
     spend::SpendSet,
     token::{self, FirstPartyIssuer, Token, TokenChallenge, TYPE_CROSS_RELAY, TYPE_FIRST_PARTY},
+    POW_CHUNK_ALLOWANCE, POW_CHUNK_FLOOR,
 };
 use crate::Error;
 
@@ -60,7 +63,13 @@ pub struct RelayGate {
     pub spent: SpendSet,
     /// The admissions of the period that runs, the backlog of `ABU-060`.
     admissions: u32,
+    /// The registrations that each accepted chunk solution may still admit,
+    /// by its seed and its nonce, with its Equi-X bytes (`ABU-107`).
+    chunk_uses: BTreeMap<SolutionKey, ([u8; 16], u16)>,
 }
+
+/// A solution by the seed of its challenge and its nonce.
+type SolutionKey = ([u8; 32], [u8; 16]);
 
 impl RelayGate {
     /// A gate for `relay_id` with an effort floor of 0.
@@ -70,6 +79,7 @@ impl RelayGate {
             pow: Verifier::new(relay_id, 0),
             spent: SpendSet::default(),
             admissions: 0,
+            chunk_uses: BTreeMap::new(),
         }
     }
 
@@ -132,6 +142,62 @@ impl RelayGate {
             }
         }
     }
+}
+
+impl RelayGate {
+    /// Admits a `CNEW` or a `BNEW` (`ABU-106`, `ABU-107`): a token as
+    /// [`RelayGate::admit`] takes it, or a solution at `POW_CHUNK_FLOOR` or
+    /// above. One solution admits `POW_CHUNK_ALLOWANCE` registrations while
+    /// its challenge is live, and only its first use counts in the backlog.
+    /// No admission of kind `0x00` passes. The result names the holder of
+    /// the upload quota: the token nonce or the solution.
+    pub fn admit_chunk(
+        &mut self,
+        admission: &Admission<'_>,
+        accepts: &Accepts<'_>,
+        now: u64,
+    ) -> Result<[u8; 32], Reject> {
+        match admission.kind {
+            AdmissionKind::None => Err(Reject::Admission),
+            AdmissionKind::Token => {
+                self.admit(admission, accepts, now)?;
+                let token = Token::parse(admission.body).map_err(|_| Reject::Admission)?;
+                Ok(holder(b"token", &token.nonce))
+            }
+            AdmissionKind::Pow => {
+                let solution = PowSolution::parse(admission.body).map_err(|_| Reject::Admission)?;
+                let key = (solution.seed, solution.nonce);
+                let holder = holder(b"pow", &[&solution.seed[..], &solution.nonce].concat());
+                // A solution to a challenge that went out of use admits
+                // nothing more.
+                let pow = &self.pow;
+                self.chunk_uses
+                    .retain(|(seed, _), _| pow.is_live_seed(seed));
+                if let Some((bytes, left)) = self.chunk_uses.get_mut(&key) {
+                    if *bytes != solution.solution || *left == 0 {
+                        return Err(Reject::Admission);
+                    }
+                    *left -= 1;
+                    return Ok(holder);
+                }
+                if solution.effort < POW_CHUNK_FLOOR {
+                    return Err(Reject::Admission);
+                }
+                self.admissions = self.admissions.saturating_add(1);
+                self.pow.accept(&solution).map_err(|_| Reject::Admission)?;
+                self.chunk_uses.insert(
+                    key,
+                    (solution.solution, POW_CHUNK_ALLOWANCE.saturating_sub(1)),
+                );
+                Ok(holder)
+            }
+        }
+    }
+}
+
+/// The holder of an upload quota, from what admitted the upload.
+fn holder(kind: &[u8], value: &[u8]) -> [u8; 32] {
+    umbra_crypto::hash::sha3_256(&[b"umbra/v1/quota-holder", kind, value])
 }
 
 /// Admits a hello at the addressee (`ABU-012`, `ABU-078` to `ABU-085`):

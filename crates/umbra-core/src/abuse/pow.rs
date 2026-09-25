@@ -16,7 +16,10 @@ use umbra_crypto::{
 };
 use umbra_wire::codec::{Reader, Writer};
 
-use super::{HELLO_POW_EFFORT, POW_BACKLOG_UNIT, POW_CHALLENGE_PERIOD, POW_EFFORT_MAX};
+use super::{
+    HELLO_POW_EFFORT, POW_BACKLOG_UNIT, POW_CHALLENGE_PERIOD, POW_CHUNK_ALLOWANCE, POW_CHUNK_FLOOR,
+    POW_EFFORT_MAX,
+};
 use crate::{discovery::hello::HelloPow, Error};
 
 /// The length of a `PowChallenge`.
@@ -247,6 +250,15 @@ impl Verifier {
         &self.verifier_id
     }
 
+    /// Whether `seed` is the seed of the newest or of the previous
+    /// challenge, thus a solution to it may still pass (`ABU-058`).
+    pub fn is_live_seed(&self, seed: &[u8; 32]) -> bool {
+        [self.newest, self.previous]
+            .into_iter()
+            .flatten()
+            .any(|live| live.seed == *seed)
+    }
+
     /// Whether a new challenge is due at `now` (`ABU-057`).
     pub fn due(&self, now: u64) -> bool {
         self.newest
@@ -391,6 +403,59 @@ impl ChallengeBook {
 fn is_live(issued_at: u64, now: u64) -> bool {
     now.saturating_sub(issued_at) < 2 * POW_CHALLENGE_PERIOD
         && issued_at <= now.saturating_add(POW_CHALLENGE_PERIOD)
+}
+
+/// The solutions of a client for the chunk commands of each relay
+/// (`ABU-106`, `ABU-107`): one solution at `POW_CHUNK_FLOOR` or above
+/// admits `POW_CHUNK_ALLOWANCE` registrations at its relay, thus an upload
+/// solves one puzzle for about each 2 MiB. The caller gives the time,
+/// because the node that holds this reads no clock.
+#[derive(Debug, Clone, Default)]
+pub struct ChunkAdmissions {
+    book: ChallengeBook,
+    now: u64,
+    held: BTreeMap<[u8; 32], (PowSolution, u16)>,
+}
+
+impl ChunkAdmissions {
+    /// Takes the challenges of a new fetch.
+    pub fn set_book(&mut self, book: ChallengeBook, now: u64) {
+        self.book = book;
+        self.now = now;
+    }
+
+    /// Moves the clock of the liveness of the challenges.
+    pub fn set_now(&mut self, now: u64) {
+        self.now = now;
+    }
+
+    /// The solution for the next registration at `relay`: the held one
+    /// while its allowance lasts and its challenge is the newest, or a new
+    /// solve. None when this device holds no live challenge of the relay.
+    pub fn next<R: TryCryptoRng + ?Sized>(
+        &mut self,
+        relay: &[u8; 32],
+        rng: &mut R,
+    ) -> Option<PowSolution> {
+        let challenge = self.book.get(relay, self.now)?;
+        if let Some((solution, left)) = self.held.get_mut(relay) {
+            if *left > 0 && solution.seed == challenge.seed {
+                *left -= 1;
+                return Some(*solution);
+            }
+        }
+        let effort = challenge.effort.clamp(POW_CHUNK_FLOOR, POW_EFFORT_MAX);
+        let solution = PowSolution::solve(relay, &challenge.seed, effort, rng).ok()?;
+        self.held
+            .insert(*relay, (solution, POW_CHUNK_ALLOWANCE.saturating_sub(1)));
+        Some(solution)
+    }
+
+    /// Drops the solution of a relay that refused it, thus the next
+    /// registration solves again.
+    pub fn forget(&mut self, relay: &[u8; 32]) {
+        self.held.remove(relay);
+    }
 }
 
 /// A challenge a client fetched, usable inside `POW_CHALLENGE_PERIOD` of

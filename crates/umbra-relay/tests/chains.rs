@@ -142,6 +142,9 @@ struct Mesh {
     pushes: LinkId,
     /// A relay that gets no copy: each push to it is lost on its way.
     loses_pushes_to: Option<[u8; 32]>,
+    /// The signed challenge of each relay, as a client fetches them for
+    /// its registrations (Part 13 `ABU-106`).
+    challenges: umbra_core::abuse::pow::ChallengeBook,
 }
 
 impl Mesh {
@@ -173,7 +176,15 @@ impl Mesh {
             seeds: seeds.to_vec(),
             pushes: 0,
             loses_pushes_to: None,
+            challenges: umbra_core::abuse::pow::ChallengeBook::default(),
         };
+        // ABU-057: each relay signs a challenge at its start. It carries its
+        // own, and the book of a client takes each one under its key.
+        for index in 0..LAYERS.len() {
+            let relay_id = relay_static(index).0.relay_id;
+            mesh.relays[index].set_challenge_signer(challenge_key(index), vec![relay_id]);
+        }
+        mesh.issue_challenges();
         for from in 0..LAYERS.len() {
             for to in (0..LAYERS.len()).filter(|to| LAYERS[*to] == LAYERS[from] + 1) {
                 let (out_link, in_link) = (900 + to as LinkId, 800 + from as LinkId);
@@ -193,6 +204,7 @@ impl Mesh {
         for (index, seed) in seeds.iter().enumerate() {
             let mut node = client(*seed);
             node.connected(&mut Rng(100 + u64::from(*seed))).unwrap();
+            node.set_challenges(mesh.challenges.clone(), mesh.now);
             mesh.clients.push(node);
             mesh.links.push(index as LinkId + 1);
             mesh.stored.push(BTreeMap::new());
@@ -201,6 +213,25 @@ impl Mesh {
             mesh.peers[0].push((index as LinkId + 1, Peer::Client(index)));
         }
         mesh
+    }
+
+    /// Each relay issues the challenge of the period at `now`, as its
+    /// runtime does at each `POW_CHALLENGE_PERIOD`, and each client takes
+    /// the new book.
+    fn issue_challenges(&mut self) {
+        for index in 0..LAYERS.len() {
+            let _ = self.relays[index].issue_challenge(self.now, &mut self.rng);
+            let bundle = self.relays[index].take_challenge_bundle(self.now).unwrap();
+            let identity = challenge_key(index).verifying_key();
+            for challenge in umbra_core::abuse::pow::ChallengeBook::parse_bundle(&bundle).unwrap() {
+                self.challenges
+                    .take(challenge, &identity, self.now)
+                    .unwrap();
+            }
+        }
+        for node in &mut self.clients {
+            node.set_challenges(self.challenges.clone(), self.now);
+        }
     }
 
     fn route(&mut self, relay: usize, outputs: Vec<Output>) {
@@ -546,6 +577,7 @@ fn a_chunk_goes_to_one_relay_and_that_relay_makes_the_two_copies() {
         RootIdentity::new(Secret::new([0x61; 32])),
     );
     node.connected(&mut Rng(61)).unwrap();
+    node.set_challenges(mesh.challenges.clone(), mesh.now);
     mesh.clients[CLIENT] = node;
     mesh.settle();
     mesh.take_events(CLIENT);
@@ -710,6 +742,7 @@ fn use_transfer_node(mesh: &mut Mesh, client: usize, seed: u8) {
         RootIdentity::new(Secret::new([seed; 32])),
     );
     node.connected(&mut Rng(u64::from(seed))).unwrap();
+    node.set_challenges(mesh.challenges.clone(), mesh.now);
     mesh.clients[client] = node;
 }
 
@@ -1032,6 +1065,7 @@ fn use_group_node(mesh: &mut Mesh, client: usize, seed: u8) {
         RootIdentity::new(Secret::new([seed; 32])),
     );
     node.connected(&mut Rng(u64::from(seed))).unwrap();
+    node.set_challenges(mesh.challenges.clone(), mesh.now);
     mesh.clients[client] = node;
 }
 
@@ -1358,12 +1392,19 @@ fn a_queue_rotates_to_another_operator_and_the_old_one_ends() {
     );
 }
 
+/// The key that signs the challenges of one relay of the mesh.
+fn challenge_key(index: usize) -> umbra_crypto::sign::SigningKey {
+    umbra_crypto::sign::SigningKey::from_seed(Secret::new([0x40 + index as u8; 32]))
+}
+
 /// Runs one handle write of one client to its end.
 fn write_handle(
     mesh: &mut Mesh,
     client: usize,
     mut write: umbra_core::attach::handle::HandleWrite,
 ) -> Vec<[u8; 32]> {
+    // The clock may have moved past the challenges of the start.
+    mesh.issue_challenges();
     let mut rng = Rng(61);
     for _ in 0..400 {
         write.tick(&mut mesh.clients[client], &mut rng).unwrap();

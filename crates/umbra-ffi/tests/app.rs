@@ -1382,6 +1382,22 @@ fn a_file_goes_through_the_relays_of_a_signed_network() {
     // Two devices, each with a transfer task on a connection of its own.
     let clients = tokio::runtime::Runtime::new().unwrap();
     let tls = native::tls_config_with_root_file(CA).unwrap();
+    // ABU-106: a registration carries a solution, thus each task takes the
+    // signed challenges of the relays first, as a connect fetches them.
+    std::thread::sleep(Duration::from_secs(3));
+    let bundle = clients
+        .block_on(native::fetch_challenges(&guard, tls.clone()))
+        .unwrap();
+    let mut book = umbra_core::abuse::pow::ChallengeBook::default();
+    for challenge in umbra_core::abuse::pow::ChallengeBook::parse_bundle(&bundle).unwrap() {
+        let listed = set
+            .relays
+            .iter()
+            .find(|relay| relay.candidate.relay_id == challenge.verifier_id)
+            .unwrap();
+        let identity = umbra_crypto::sign::VerifyingKey::from_bytes(&listed.identity_pk).unwrap();
+        book.take(challenge, &identity, now).unwrap();
+    }
     let start = |seed: u8| {
         let node = ClientNode::for_transfers(
             info_of(ingress),
@@ -1402,6 +1418,13 @@ fn a_file_goes_through_the_relays_of_a_signed_network() {
             task_commands,
             task_updates,
         ));
+        commands
+            .send(TransferCommand::Challenges {
+                book: book.clone(),
+                now,
+            })
+            .ok()
+            .unwrap();
         (commands, updates)
     };
     let (sender, mut sender_updates) = start(0x81);

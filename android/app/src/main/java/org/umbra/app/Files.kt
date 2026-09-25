@@ -518,7 +518,7 @@ fun VideoTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
                 FaIcon(icon, size = 18.dp, tint = Color.White)
             }
         } else {
-            TransferMark(file)
+            TransferMark(file, isExpired(line))
         }
         Text(
             buildString {
@@ -543,9 +543,20 @@ fun VideoTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
  * a download that runs, and a new attempt after a failure.
  */
 @Composable
-fun TransferMark(file: MsgFile) {
+fun TransferMark(file: MsgFile, isExpired: Boolean = false) {
     val context = LocalContext.current
     val state = file.state.toInt()
+    if (isExpired) {
+        Text(
+            "Expired",
+            style = MaterialTheme.typography.labelSmall,
+            color = Color.White,
+            modifier = Modifier
+                .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(6.dp))
+                .padding(horizontal = 8.dp, vertical = 3.dp),
+        )
+        return
+    }
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Box(
             Modifier.size(48.dp).background(Color.Black.copy(alpha = 0.55f), CircleShape),
@@ -571,6 +582,21 @@ fun TransferMark(file: MsgFile) {
             )
         }
     }
+}
+
+/** `CHUNK_TTL` of Part 12 §12.7, in milliseconds. */
+private const val CHUNK_TTL_MS = 7L * 86_400_000
+
+/**
+ * Whether the chunks of a received file are gone: its download failed or
+ * waits for a tap, and its record is older than `CHUNK_TTL`. No party
+ * uploads them again, thus the view offers no new attempt (`ATT-050`).
+ */
+fun isExpired(line: Line): Boolean {
+    val state = line.info.file?.state?.toInt() ?: return false
+    return !line.info.outgoing &&
+        (state == FILE_FAILED || state == FILE_HELD) &&
+        System.currentTimeMillis() - line.info.sentAtMs.toLong() > CHUNK_TTL_MS
 }
 
 /** The share of a transfer that runs, in percent, or null. */
@@ -621,6 +647,7 @@ fun FileTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
                         // The time line of a sent file holds its progress.
                         progress != null && !line.info.outgoing -> append(" · ").append(progress).append(" %")
                         state == FILE_WANTED -> append(" · Receiving")
+                        isExpired(line) -> append(" · Expired")
                         state == FILE_FAILED && !line.info.outgoing -> append(" · Not received")
                     }
                 },
@@ -882,6 +909,7 @@ fun MediaScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                         MediaCell(line, Modifier.weight(1f)) {
                             val file = line.info.file ?: return@MediaCell
                             when {
+                                isExpired(line) -> Unit
                                 file.state.toInt() == FILE_FAILED || file.state.toInt() == FILE_HELD ->
                                     Core.fetchFile(line.handle)
                                 file.state.toInt() != FILE_READY && !line.info.outgoing -> Unit
@@ -912,7 +940,7 @@ fun MediaScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                     Modifier
                         .fillMaxWidth()
                         .press(role = Role.Button, label = file.name ?: "File") {
-                            when (file.state.toInt()) {
+                            when (if (isExpired(line)) 0 else file.state.toInt()) {
                                 FILE_FAILED, FILE_HELD -> Core.fetchFile(line.handle)
                                 FILE_READY -> save(line)
                                 else -> if (line.info.outgoing) save(line)

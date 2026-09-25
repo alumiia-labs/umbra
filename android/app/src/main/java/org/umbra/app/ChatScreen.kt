@@ -333,6 +333,8 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                         line.info.deleted -> null
                         // IMP-167: a tap fetches a file that waits above the
                         // limit, and a file that failed.
+                        // ATT-050: an expired file has nothing to fetch.
+                        isExpired(line) -> null
                         line.info.file?.state?.toInt() == FILE_FAILED ||
                             line.info.file?.state?.toInt() == FILE_HELD -> ({ Core.fetchFile(line.handle) })
                         line.info.file?.state?.toInt() == FILE_READY -> when (line.info.file?.mimeClass) {

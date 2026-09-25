@@ -75,11 +75,11 @@ each column when a crate implements the requirement and a test covers it.
 | `DIS` | 109 | 33 | 0 | 0 | 1 | **143** |
 | `REL` | 124 | 32 | 1 | 0 | 2 | **159** |
 | `GRP` | 220 | 62 | 0 | 0 | 6 | **288** |
-| `ATT` | 140 | 47 | 2 | 0 | 2 | **191** |
-| `ABU` | 64 | 30 | 0 | 0 | 0 | **94** |
+| `ATT` | 142 | 45 | 2 | 0 | 2 | **191** |
+| `ABU` | 66 | 30 | 1 | 0 | 0 | **97** |
 | `IMP` | 114 | 41 | 0 | 0 | 2 | **157** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 1932 | 613 | 6 | 0 | 50 | **2601** |
+| **All** | 1936 | 611 | 7 | 0 | 50 | **2604** |
 
 ## SCP — Scope and Conventions
 
@@ -2317,7 +2317,7 @@ Source: `spec/12-attachments.md`
 | `ATT-013` | §12.3.2 | MUST | The client | The client MUST then try another replica under §12.4. |  |  |
 | `ATT-014` | §12.3.2 | MUST | The client | The client MUST report that failure to the user. |  |  |
 | `ATT-015` | §12.3.2 | MUST NOT | (unstated) | the client MUST NOT show a partial file. |  |  |
-| `ATT-016` | §12.3.2 | MUST | A revision | A revision MUST measure the relay churn rate over 45 days before it lowers `REPLICAS`. |  |  |
+| `ATT-016` | §12.3.2 | MUST | A revision | A revision MUST measure the relay churn rate over 14 days before it lowers `REPLICAS`. |  |  |
 | `ATT-017` | §12.4 | MUST | A client | A client MUST register each chunk at three or more relays under different `operator_id` values of Part 10 §10.5.3. |  |  |
 | `ATT-018` | §12.4 | MUST | The descriptor | The descriptor MUST carry the three references. |  |  |
 | `ATT-019` | §12.4 | MUST NOT | The client | The client MUST NOT use a fixed order. |  |  |
@@ -2351,8 +2351,8 @@ Source: `spec/12-attachments.md`
 | `ATT-047` | §12.3.3 | MUST NOT | A relay | A relay MUST NOT retain the identifier of an erased chunk. |  |  |
 | `ATT-048` | §12.3.3 | MUST | A client | A client MUST send an attachment command on the separate connection of §12.8. |  |  |
 | `ATT-049` | §12.3.2 | MUST | (unstated) | A revision that adds a field to `FileDescriptor` or to `ChunkRef` MUST derive `R` again from Part 6 §6.9. |  |  |
-| `ATT-050` | §12.7.1 | MUST NOT | `CHUNK_TTL` | `CHUNK_TTL` MUST NOT be below the `MSG_TTL` of Part 3 §3.2.4. |  |  |
-| `ATT-051` | §12.7.1 | MUST NOT | (unstated) | A revision MUST hold the two values equal, and a revision MUST NOT raise `MSG_TTL` alone. |  |  |
+| `ATT-050` | §12.7.1 | MUST | A client | A client MUST show a file whose download finds no chunk, and whose record is older than `CHUNK_TTL`, as expired. |  |  |
+| `ATT-051` | §12.7.1 | MUST | A revision that changes `CHUNK_TTL` | A revision that changes `CHUNK_TTL` MUST state the loss above again against `MSG_TTL`. |  |  |
 | `ATT-052` | §12.7.1 | MUST | (unstated) | If each replica of a chunk is gone, the client MUST report the failure to the user and MUST name the file. |  |  |
 | `ATT-053` | §12.7.1 | MUST NOT | The client | The client MUST NOT show a partial file. |  |  |
 | `ATT-054` | §12.7.1 | MUST | The client | The client MUST offer the sender a re-send of the file. |  |  |
@@ -2393,7 +2393,7 @@ Source: `spec/12-attachments.md`
 | `ATT-089` | §12.10 | MUST | A relay | A relay MUST reject a `CNEW` when its store holds less free space than `CHUNK_SIZE`. |  |  |
 | `ATT-090` | §12.10 | MUST NOT | A relay below `CHUNK_STORE_TARGET` of stored bytes | A relay below `CHUNK_STORE_TARGET` of stored bytes MUST NOT erase a chunk before `CHUNK_TTL` to make space. |  |  |
 | `ATT-091` | §12.10 | MUST | A relay | A relay MUST signal that condition to the directory as a capacity fault. |  |  |
-| `ATT-092` | §12.10 | MUST | A relay | A relay MUST apply `UPLOAD_QUOTA_DAY` for each credential that presents a token. |  |  |
+| `ATT-092` | §12.10 | MUST | A relay | A relay MUST apply `UPLOAD_QUOTA_DAY` for each token and for each proof-of-work solution that admits a registration (Part 13 `ABU-107`). |  |  |
 | `ATT-093` | §12.10 | MUST | A relay | A relay MUST reject a `CNEW` above that quota. |  |  |
 | `ATT-094` | §12.10 | MUST NOT | A relay | A relay MUST NOT hold a quota counter after 24 hours. |  |  |
 | `ATT-095` | §12.10 | MUST | A revision that raises `MAX_FILE_SIZE`, `UPLOAD_QUOTA_DAY`, `REPLICAS`, `CHUNK_TTL`, or `CHUNK_LIFE_MAX` | A revision that raises `MAX_FILE_SIZE`, `UPLOAD_QUOTA_DAY`, `REPLICAS`, `CHUNK_TTL`, or `CHUNK_LIFE_MAX` MUST derive this section again. |  |  |
@@ -2542,7 +2542,7 @@ Source: `spec/13-anti-abuse.md`
 | `ABU-044` | §13.2 | MUST | A client | A client MUST end the payload of a `NEW`, a `CNEW`, a `BNEW`, and a `PUB` with one `Admission`. |  |  |
 | `ABU-045` | §13.2 | MUST | A parser | A parser MUST reject a `kind` that the table above does not hold. |  |  |
 | `ABU-046` | §13.2 | MUST | A parser | A parser MUST reject a `len` that differs from the body length of its `kind`. |  |  |
-| `ABU-047` | §13.2 | MUST | A relay whose newest `PowChallenge` holds `effort` 0 | A relay whose newest `PowChallenge` holds `effort` 0 MUST accept an `Admission` of kind `0x00` on `NEW`, `CNEW`, and `BNEW`. |  |  |
+| `ABU-047` | §13.2 | MUST | A relay whose newest `PowChallenge` holds `effort` 0 | A relay whose newest `PowChallenge` holds `effort` 0 MUST accept an `Admission` of kind `0x00` on `NEW` and `GNEW`. |  |  |
 | `ABU-048` | §13.2 | MUST | (unstated) | If that `effort` is above 0, the relay MUST answer such a command with a `NACK` of reason `ADMISSION`. |  |  |
 | `ABU-056` | §13.4 | MUST | An addressee client | An addressee client MUST hold the spent-nonce set of an epoch until the end of the next epoch. |  |  |
 | `ABU-057` | §13.8 | MUST | A verifier | A verifier MUST make a new `PowChallenge` with a fresh `seed` at each `POW_CHALLENGE_PERIOD`. |  |  |
@@ -2594,6 +2594,9 @@ Source: `spec/13-anti-abuse.md`
 | `ABU-103` | §13.8 | MUST | A carrier | A carrier MUST take a challenge only when `sig` verifies under the `identity_pk` of the entry of `verifier_id` in the manifest that it holds, and only when `issued_at` is less than two `POW_CHALLENGE_PERIOD` before its clock and at most one period after it. |  |  |
 | `ABU-104` | §13.8 | MUST | A carrier | A carrier MUST serve the challenges that it keeps at the path `/.well-known/umbra/challenges`, on the transport of its manifest fetch. |  |  |
 | `ABU-105` | §13.8 | MUST | A client | A client MUST fetch the challenges from the carrier that it pinned for the manifest, and it MUST take each one under `ABU-068`, with the `identity_pk` of the entry of the verifier. |  |  |
+| `ABU-106` | §13.8.1 | MUST | A relay | A relay MUST reject a `CNEW` and a `BNEW` whose `Admission` is of kind `0x00`. |  |  |
+| `ABU-107` | §13.8.1 | MUST | One solution | One solution MUST admit at most `POW_CHUNK_ALLOWANCE` `CNEW` and `BNEW` commands at its relay, while its challenge is live under `ABU-058`. |  |  |
+| `ABU-108` | §13.8.1 | SHOULD | A client | A client SHOULD use one solution for each registration at one relay until its allowance ends or its challenge is no longer the newest. |  |  |
 
 ## IMP — Implementation
 
