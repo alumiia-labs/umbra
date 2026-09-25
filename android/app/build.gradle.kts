@@ -26,6 +26,11 @@ android {
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
         }
+        // IDN-123: the App Link of an invitation. A deployment names its
+        // invitation host with -Pumbra.invitationHost; the default is the
+        // host of the devnet, which no party serves.
+        manifestPlaceholders["invitationHost"] =
+            (project.findProperty("umbra.invitationHost") as String?) ?: "invite.umbra.test"
     }
 
     buildTypes {

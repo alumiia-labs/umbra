@@ -188,6 +188,11 @@ fun QrCode(link: String, description: String = "The invitation as a QR code") {
 fun UseInvitationScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
     var pasted by remember { mutableStateOf("") }
     var isWaiting by remember { mutableStateOf(false) }
+    // A tapped or shared link fills the field, and it waits for Continue.
+    LaunchedEffect(Core.linkedInvitation) {
+        Core.linkedInvitation?.let { pasted = it }
+        Core.linkedInvitation = null
+    }
     val open = { link: String ->
         Core.fault = null
         Core.accept(link)

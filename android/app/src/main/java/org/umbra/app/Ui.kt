@@ -137,6 +137,12 @@ private fun OpenApp() {
     BackHandler(enabled = stack.isNotEmpty(), onBack = pop)
     // The keyboard of one view has no field in the next one.
     HideKeyboardOn(stack.lastOrNull())
+    // A tapped or shared invitation link opens the view of the link.
+    LaunchedEffect(Core.linkedInvitation) {
+        if (Core.linkedInvitation != null && stack.lastOrNull() != Screen.UseInvitation) {
+            stack = listOf(Screen.UseInvitation)
+        }
+    }
 
     // A contact that is new takes its name before each other view.
     val unnamed = Core.toName

@@ -1,6 +1,7 @@
 package org.umbra.app
 
 import android.Manifest
+import android.content.Intent
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
@@ -45,6 +46,29 @@ class MainActivity : ComponentActivity() {
         root.addView(content, MATCH_PARENT, MATCH_PARENT)
         root.addView(cover, MATCH_PARENT, MATCH_PARENT)
         setContentView(root)
+        if (savedInstanceState == null) takeInvitation(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        takeInvitation(intent)
+    }
+
+    /**
+     * An invitation link from a tap or from a share goes to the view of the
+     * link. That view opens it only at a tap of the user.
+     */
+    private fun takeInvitation(intent: Intent?) {
+        val text = when (intent?.action) {
+            Intent.ACTION_VIEW -> intent.dataString
+            Intent.ACTION_SEND -> intent.getStringExtra(Intent.EXTRA_TEXT)
+            else -> null
+        } ?: return
+        INVITATION_LINK.find(text)?.let { Core.linkedInvitation = it.value }
+    }
+
+    private companion object {
+        val INVITATION_LINK = Regex("""https://[A-Za-z0-9.-]+/i#[A-Za-z0-9_-]+""")
     }
 
     override fun onUserInteraction() {

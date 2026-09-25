@@ -145,6 +145,9 @@ object Core {
     /** The text of a scanned invitation, which the view of the link takes. */
     var scannedInvitation by mutableStateOf<String?>(null)
 
+    /** A link that a tap or a share gave the app, which waits for a tap. */
+    var linkedInvitation by mutableStateOf<String?>(null)
+
     /** The short code of a ceremony that runs, and its conversation. */
     var verifyCode by mutableStateOf<Pair<Conversation, String>?>(null)
         private set
