@@ -2317,7 +2317,7 @@ Source: `spec/12-attachments.md`
 | `ATT-013` | §12.3.2 | MUST | The client | The client MUST then try another replica under §12.4. |  |  |
 | `ATT-014` | §12.3.2 | MUST | The client | The client MUST report that failure to the user. |  |  |
 | `ATT-015` | §12.3.2 | MUST NOT | (unstated) | the client MUST NOT show a partial file. |  |  |
-| `ATT-016` | §12.3.2 | MUST | A revision | A revision MUST measure the relay churn rate over 14 days before it lowers `REPLICAS`. |  |  |
+| `ATT-016` | §12.3.2 | MUST | A revision | A revision MUST measure the relay churn rate over 28 days before it lowers `REPLICAS`. |  |  |
 | `ATT-017` | §12.4 | MUST | A client | A client MUST register each chunk at three or more relays under different `operator_id` values of Part 10 §10.5.3. |  |  |
 | `ATT-018` | §12.4 | MUST | The descriptor | The descriptor MUST carry the three references. |  |  |
 | `ATT-019` | §12.4 | MUST NOT | The client | The client MUST NOT use a fixed order. |  |  |

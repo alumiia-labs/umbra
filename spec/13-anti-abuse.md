@@ -519,7 +519,7 @@ the third constraint above. Part 5 §5.11 holds the label `"umbra/v1/pow"`.
 
 ### 13.8.1 The allocation of attachment storage
 
-An allocation of attachment storage holds bytes at a relay for a week (Part 12
+An allocation of attachment storage holds bytes at a relay for two weeks (Part 12
 §12.7.1), thus a flood of it lasts longer than a flood of any other gated path.
 It carries a solution even when the effort is 0.
 

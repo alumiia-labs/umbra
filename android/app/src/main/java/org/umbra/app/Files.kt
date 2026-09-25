@@ -585,7 +585,7 @@ fun TransferMark(file: MsgFile, isExpired: Boolean = false) {
 }
 
 /** `CHUNK_TTL` of Part 12 §12.7, in milliseconds. */
-private const val CHUNK_TTL_MS = 7L * 86_400_000
+private const val CHUNK_TTL_MS = 14L * 86_400_000
 
 /**
  * Whether the chunks of a received file are gone: its download failed or
