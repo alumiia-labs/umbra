@@ -70,6 +70,12 @@ fun ContactDetailsScreen(chat: Chat, onBack: () -> Unit, onMessage: () -> Unit, 
             )
             HorizontalDivider(color = Palette.Divider)
             EntryRow(
+                RowEntry("photo-film", "Media and files") {
+                    push(Screen.Media(chat.conversation))
+                },
+            )
+            HorizontalDivider(color = Palette.Divider)
+            EntryRow(
                 RowEntry("gear", "Conversation settings") {
                     push(Screen.ConversationSettings(chat.conversation))
                 },

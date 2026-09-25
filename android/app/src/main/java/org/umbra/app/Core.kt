@@ -1,6 +1,7 @@
 package org.umbra.app
 
 import android.content.Context
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -478,6 +479,8 @@ object Core {
                 groupJoiners.clear()
                 images.clear()
                 decoding.clear()
+                // IMP-161: a draft that waits holds its file in the clear.
+                cancelSend()
                 online = false
                 invitation = null
                 toName = null
@@ -793,6 +796,182 @@ object Core {
         }
     }
 
+    /**
+     * A file or a video in a draft that waits for the user: it is above
+     * `LARGE_FILE_WARN` (`ATT-083`), or it is an original that keeps its
+     * metadata (`ATT-157`).
+     */
+    class PendingSend(
+        val conversation: Conversation,
+        val draft: uniffi.umbra_ffi.DraftHandle,
+        val bytes: Long,
+        val isOriginal: Boolean,
+    ) {
+        /** Whether a send took the draft, thus no drop may destroy it. */
+        var isTaken = false
+    }
+
+    var pendingSend by mutableStateOf<PendingSend?>(null)
+        private set
+
+    /** Sends a picked video after its remux (`ATT-155`). */
+    fun sendVideo(context: Context, conversation: Conversation, source: android.net.Uri) {
+        val app = context.applicationContext
+        call { client ->
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return@call
+            val draft = client.newDraft(conversation.id)
+            val bytes = Files.attachVideo(app, source, draft)
+            if (bytes < 0) {
+                draft.destroy()
+                main.post { fault = "That video did not open, or it is above 250 MB." }
+                return@call
+            }
+            offer(client, PendingSend(conversation, draft, bytes, isOriginal = false))
+        }
+    }
+
+    /** Sends a picked file as it is, with its name. */
+    fun sendDocument(context: Context, conversation: Conversation, source: android.net.Uri) {
+        val app = context.applicationContext
+        call { client ->
+            val picked = Files.describe(app, source)
+            if (picked.size > MAX_FILE_SIZE) {
+                main.post { fault = "A file can be 250 MB at most." }
+                return@call
+            }
+            val draft = client.newDraft(conversation.id)
+            if (!Files.attachDocument(app, source, picked, draft)) {
+                draft.destroy()
+                main.post { fault = "That file did not open." }
+                return@call
+            }
+            offer(client, PendingSend(conversation, draft, picked.size, Files.isMediaOriginal(picked.mime)))
+        }
+    }
+
+    /** Sends a draft at once, or holds it for the view to ask. */
+    private fun offer(client: uniffi.umbra_ffi.Handle, pending: PendingSend) {
+        if (pending.bytes > LARGE_FILE_WARN || pending.isOriginal) {
+            main.post {
+                pendingSend?.draft?.destroy()
+                pendingSend = pending
+            }
+            return
+        }
+        client.sendDraft(pending.draft).destroy()
+        pending.draft.destroy()
+        main.post { revision++ }
+        refreshChats()
+    }
+
+    /** The user took the draft that waits. */
+    fun confirmSend(pending: PendingSend) {
+        if (pending.isTaken) return
+        pending.isTaken = true
+        if (pendingSend === pending) pendingSend = null
+        call { client ->
+            try {
+                client.sendDraft(pending.draft).destroy()
+            } finally {
+                pending.draft.destroy()
+            }
+            main.post { revision++ }
+            refreshChats()
+        }
+    }
+
+    /**
+     * The user dropped the draft that waits (`ATT-084`). A sheet runs its
+     * dismissal before the action of a row, thus the draft goes after the
+     * event, when no send took it.
+     */
+    fun cancelSend() {
+        val pending = pendingSend ?: return
+        pendingSend = null
+        main.post { if (!pending.isTaken) pending.draft.destroy() }
+    }
+
+    /**
+     * Writes the file of a message to a document that the user created, as
+     * the save of one file (`IMP-045`).
+     */
+    fun saveFile(context: Context, line: Line, target: android.net.Uri, onSaved: () -> Unit) {
+        val app = context.applicationContext
+        call { client ->
+            val output = try {
+                app.contentResolver.openOutputStream(target, "wt")
+            } catch (unwritable: Exception) {
+                null
+            }
+            if (output == null) {
+                main.post { fault = "That place does not take a file." }
+                return@call
+            }
+            // The core cannot open the descriptor of a document provider a
+            // second time, thus its bytes go through a pipe, in pieces.
+            val (read, write) = android.os.ParcelFileDescriptor.createPipe()
+            var copied = true
+            val copier = kotlin.concurrent.thread {
+                val chunk = ByteArray(64 * 1_024)
+                try {
+                    android.os.ParcelFileDescriptor.AutoCloseInputStream(read).use { from ->
+                        output.use { to ->
+                            while (true) {
+                                val count = from.read(chunk)
+                                if (count < 0) break
+                                to.write(chunk, 0, count)
+                            }
+                        }
+                    }
+                } catch (failed: java.io.IOException) {
+                    copied = false
+                } finally {
+                    chunk.fill(0)
+                }
+            }
+            try {
+                client.saveFile(line.handle, "/proc/self/fd/${write.fd}")
+            } finally {
+                write.close()
+                copier.join()
+            }
+            main.post { if (copied) onSaved() else fault = "The file did not save." }
+        }
+    }
+
+    /** Opens the file of a message for a player, and gives the source on the main thread. */
+    fun openMedia(line: Line, onOpened: (uniffi.umbra_ffi.MediaSource?) -> Unit) = call { client ->
+        val source = try {
+            client.openMedia(line.handle)
+        } catch (absent: FfiException) {
+            null
+        }
+        main.post { onOpened(source) }
+    }
+
+    /**
+     * The first frame of the video of a message, or null while a worker
+     * reads it. The frames live in the memory alone, and a lock drops them.
+     */
+    fun frame(line: Line): androidx.compose.ui.graphics.ImageBitmap? {
+        images[line.key]?.let { return it }
+        if (decoding.add(line.key)) {
+            call { client ->
+                val frame = try {
+                    firstFrame(client.openMedia(line.handle))
+                } catch (absent: FfiException) {
+                    // The store holds no file yet. A later event asks again.
+                    null
+                }
+                main.post {
+                    decoding.remove(line.key)
+                    frame?.let { images[line.key] = it }
+                }
+            }
+        }
+        return null
+    }
+
     /** Asks again for the file of a message that did not arrive. */
     fun fetchFile(message: MsgHandle) = call { client ->
         client.fetchFile(message)
@@ -889,8 +1068,15 @@ object Core {
                     quoted.chars = CharArray(0)
                 }
                 val of = client.msgInfo(target)
-                // The quote of a photo is a word of the interface.
-                if (of.file != null && !of.deleted) quoted.chars = "Photo".toCharArray()
+                // The quote of a file is a word of the interface, or its name.
+                val quotedFile = of.file
+                if (quotedFile != null && !of.deleted) {
+                    quoted.chars = when (quotedFile.mimeClass) {
+                        CLASS_IMAGE -> "Photo"
+                        CLASS_VIDEO -> "Video"
+                        else -> quotedFile.name ?: "File"
+                    }.toCharArray()
+                }
                 Quoted(target.key().toList(), of.outgoing, quoted.chars)
             }
             Line(message, sink.chars, info, quote, client.reactions(message))
@@ -920,7 +1106,11 @@ object Core {
                 // The words of a placeholder are words of the interface.
                 when {
                     info.deleted -> sink.chars = "Message deleted".toCharArray()
-                    info.file != null -> sink.chars = "Photo".toCharArray()
+                    info.file != null -> sink.chars = when (info.file?.mimeClass) {
+                        CLASS_IMAGE -> "Photo"
+                        CLASS_VIDEO -> "Video"
+                        else -> info.file?.name ?: "File"
+                    }.toCharArray()
                     else -> client.msgRender(it, sink)
                 }
             } catch (noText: FfiException) {

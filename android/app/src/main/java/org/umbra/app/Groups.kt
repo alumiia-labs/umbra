@@ -115,6 +115,11 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                     push(Screen.GroupMembers(chat.conversation))
                 },
             )
+            EntryRow(
+                RowEntry("photo-film", "Media and files") {
+                    push(Screen.Media(chat.conversation))
+                },
+            )
             if (chat.isMember) {
                 if (isAdmin) {
                     EntryRow(

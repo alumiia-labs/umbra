@@ -117,6 +117,8 @@ object Photos {
                 width.toUShort(),
                 height.toUShort(),
                 0u,
+                // ATT-192: a photo carries no name.
+                null,
             )
             true
         } catch (refused: Exception) {

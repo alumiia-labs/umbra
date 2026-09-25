@@ -169,6 +169,16 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
     // deletes faster than the rate limit permits.
     var deleting by remember(conversation) { mutableStateOf<Line?>(null) }
     var notice by remember(conversation) { mutableStateOf<String?>(null) }
+    val save = rememberSave()
+    // The sheet of the plus: a photo, a video, or a file.
+    var isAttaching by remember(conversation) { mutableStateOf(false) }
+    // A send that did not start says why in this view.
+    LaunchedEffect(Core.fault) {
+        Core.fault?.let {
+            notice = it
+            Core.fault = null
+        }
+    }
     LaunchedEffect(notice) {
         if (notice != null) {
             delay(4_000)
@@ -198,8 +208,12 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                         },
                     )
                 }
-                if (line.info.file == null) {
+                val file = line.info.file
+                if (file == null) {
                     add(RowEntry("copy", "Copy text") { copyMessage(context, line.text) })
+                } else if (file.state.toInt() == FILE_READY || line.info.outgoing) {
+                    // IMP-045: the user saves one file.
+                    add(RowEntry("download", "Save to device") { save(line) })
                 }
                 add(RowEntry("trash-can", "Delete") { deleting = line })
             }
@@ -219,6 +233,22 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                 }
             },
             onDismiss = { chosen = null },
+        )
+    }
+    // ATT-083, ATT-084: a large file names its cost, and the user can drop
+    // it. ATT-157: an original says that it keeps its metadata.
+    Core.pendingSend?.takeIf { it.conversation == conversation }?.let { pending ->
+        val notes = buildList {
+            if (pending.bytes > LARGE_FILE_WARN) {
+                add("Sending uses about ${Files.uplink(context, pending.bytes)} of data.")
+            }
+            if (pending.isOriginal) add("The original keeps its metadata, such as a place and a time.")
+        }
+        ActionSheet(
+            if (pending.bytes > 0) "Send ${Files.size(context, pending.bytes)}?" else "Send this file?",
+            listOf(RowEntry("paper-plane", "Send") { Core.confirmSend(pending) }),
+            note = notes.joinToString(" "),
+            onDismiss = { Core.cancelSend() },
         )
     }
     deleting?.let { line ->
@@ -302,7 +332,11 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                     onQuote = when {
                         line.info.deleted -> null
                         line.info.file?.state?.toInt() == FILE_FAILED -> ({ Core.fetchFile(line.handle) })
-                        line.info.file?.state?.toInt() == FILE_READY -> ({ push(Screen.Photo(conversation, line)) })
+                        line.info.file?.state?.toInt() == FILE_READY -> when (line.info.file?.mimeClass) {
+                            CLASS_IMAGE -> ({ push(Screen.Photo(conversation, line)) })
+                            CLASS_VIDEO -> ({ push(Screen.Video(conversation, line)) })
+                            else -> ({ save(line) })
+                        }
                         else -> line.quote?.let { quote -> { jumpTo(quote.key) } }
                     },
                     onLongPress = { chosen = line },
@@ -325,6 +359,38 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                 Core.sendPhoto(context, conversation, picked)
                 jumpsAtNextLoad = true
             }
+        }
+        val videoPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { picked ->
+            if (picked != null) {
+                Core.sendVideo(context, conversation, picked)
+                jumpsAtNextLoad = true
+            }
+        }
+        val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { picked ->
+            if (picked != null) {
+                Core.sendDocument(context, conversation, picked)
+                jumpsAtNextLoad = true
+            }
+        }
+        if (isAttaching) {
+            // The pickers of the platform give this app the picked item alone,
+            // and no access to the gallery or to the files.
+            val entries = buildList {
+                add(
+                    RowEntry("image", "Photo") {
+                        picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                    },
+                )
+                if (Files.canSendVideo) {
+                    add(
+                        RowEntry("film", "Video") {
+                            videoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
+                        },
+                    )
+                }
+                add(RowEntry("file", "File") { filePicker.launch(arrayOf("*/*")) })
+            }
+            ActionSheet("Attach", entries, onDismiss = { isAttaching = false })
         }
         // GRP-210: a group whose two relays hold it no more takes no new
         // message, and the composer would promise one. A group that
@@ -369,19 +435,14 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                     }
                 }
                 Row(verticalAlignment = Alignment.Bottom) {
-                    // Mockup 041: the plus sits inside the box. It opens the
-                    // photo picker of the platform, which gives this app the
-                    // picked image alone and no access to the gallery.
+                    // Mockup 041: the plus sits inside the box, and it opens
+                    // the sheet of a photo, a video, and a file.
                     Box(
                         Modifier
                             .padding(start = 4.dp)
                             .size(48.dp)
                             .clip(CircleShape)
-                            .press(role = Role.Button, label = "Add a photo") {
-                                picker.launch(
-                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
-                                )
-                            },
+                            .press(role = Role.Button, label = "Attach") { isAttaching = true },
                         contentAlignment = Alignment.Center,
                     ) { FaIcon("plus", size = 18.dp, tint = Palette.TextSecondary) }
                     Box(
@@ -632,8 +693,10 @@ private const val SLIDE_POINT = 0.8f
 @Composable
 private fun BubbleContent(line: Line, chat: Chat) {
     val isOutgoing = line.info.outgoing
-    // A photo fills its bubble to a thin rim, as each messenger shows one.
-    val isPhoto = line.info.file != null && !line.info.deleted
+    // A photo and a video fill the bubble to a thin rim, as each messenger
+    // shows one. A file sits in a bubble as a text does.
+    val shownClass = line.info.file?.mimeClass
+    val isPhoto = !line.info.deleted && (shownClass == CLASS_IMAGE || shownClass == CLASS_VIDEO)
     Column(
         modifier = Modifier
             .background(if (isOutgoing) Palette.Container else Palette.Incoming)
@@ -667,7 +730,12 @@ private fun BubbleContent(line: Line, chat: Chat) {
         // The text starts at the left edge, and the time sits at the right.
         val file = line.info.file
         if (!line.info.deleted && file != null) {
-            PhotoTile(line, file, Modifier.align(Alignment.Start))
+            when (file.mimeClass) {
+                CLASS_IMAGE -> PhotoTile(line, file, Modifier.align(Alignment.Start))
+                CLASS_VIDEO -> VideoTile(line, file, Modifier.align(Alignment.Start))
+                // ATT-193: a class that this device does not know is a file.
+                else -> FileTile(line, file, Modifier.align(Alignment.Start))
+            }
             Spacer(Modifier.height(4.dp))
         } else if (!line.info.deleted) {
             PlatformText(line.text, Palette.Text, modifier = Modifier.align(Alignment.Start))
@@ -688,9 +756,16 @@ private fun BubbleContent(line: Line, chat: Chat) {
                 if (line.info.edited) append("Edited · ")
                 append(clock)
                 if (isOutgoing && state != READ && !line.info.deleted) {
-                    // A photo goes to the relays first, and its record follows.
+                    // A file goes to the relays first, and its record follows.
                     val isUploading = file?.state?.toInt() == FILE_UPLOADING
-                    append(" · ").append(if (isUploading) "Sending" else deliveryLabel(line.info.delivery))
+                    val share = file?.let(::progressOf)
+                    append(" · ").append(
+                        when {
+                            isUploading && share != null -> "Sending $share %"
+                            isUploading -> "Sending"
+                            else -> deliveryLabel(line.info.delivery)
+                        },
+                    )
                 }
             },
             style = MaterialTheme.typography.labelSmall,

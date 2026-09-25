@@ -67,6 +67,8 @@ sealed interface Screen {
     data class SafetyNumber(val conversation: Conversation) : Screen
     data class ScanSafetyNumber(val conversation: Conversation) : Screen
     data class Photo(val conversation: Conversation, val line: Line) : Screen
+    data class Video(val conversation: Conversation, val line: Line) : Screen
+    data class Media(val conversation: Conversation) : Screen
     data class GroupDetails(val conversation: Conversation) : Screen
     data class InviteToGroup(val conversation: Conversation) : Screen
     data class GroupMembers(val conversation: Conversation) : Screen
@@ -96,6 +98,8 @@ sealed interface Screen {
             is SafetyNumber -> conversation
             is ScanSafetyNumber -> conversation
             is Photo -> conversation
+            is Video -> conversation
+            is Media -> conversation
             is GroupDetails -> conversation
             is InviteToGroup -> conversation
             is GroupMembers -> conversation
@@ -212,6 +216,8 @@ private fun ContactView(
         is Screen.VerifyCode -> VerifyCodeScreen(chat, top.starts, pop)
         is Screen.SafetyNumber -> SafetyNumberScreen(chat, pop)
         is Screen.Photo -> PhotoScreen(top.line, chat, pop)
+        is Screen.Video -> VideoScreen(top.line, pop)
+        is Screen.Media -> MediaScreen(chat, pop, push)
         is Screen.GroupDetails -> GroupDetailsScreen(chat, pop, push)
         is Screen.InviteToGroup -> InviteToGroupScreen(chat, pop)
         is Screen.GroupMembers -> GroupMembersScreen(chat, pop, push)
