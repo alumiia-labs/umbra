@@ -1,6 +1,6 @@
 package org.umbra.app
 
-import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.text.InputType
 import android.text.TextUtils
 import android.util.TypedValue
@@ -141,6 +141,7 @@ fun PlatformInput(
                 this.hint = hint
                 background = null
                 setPadding(0, 0, 0, 0)
+                styleAsApp(this)
                 setTextColor(textColor)
                 setHintTextColor(hintColor)
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
@@ -158,6 +159,35 @@ fun PlatformInput(
             }
         },
     )
+}
+
+/**
+ * A view of the platform in the look of the app on each phone: the font of
+ * the app, and a cursor, handles, and a selection in its colours, in the
+ * place of those of the maker of the phone.
+ */
+fun styleAsApp(view: TextView, mono: Boolean = false) {
+    val context = view.context
+    view.typeface = context.resources.getFont(if (mono) R.font.roboto_mono else R.font.roboto)
+    val action = Palette.Action.toArgb()
+    view.highlightColor = Palette.Container.toArgb()
+    val density = context.resources.displayMetrics.density
+    view.textCursorDrawable = GradientDrawable().apply {
+        setColor(action)
+        setSize((2 * density).toInt(), 0)
+    }
+    view.textSelectHandle?.mutate()?.let {
+        it.setTint(action)
+        view.setTextSelectHandle(it)
+    }
+    view.textSelectHandleLeft?.mutate()?.let {
+        it.setTint(action)
+        view.setTextSelectHandleLeft(it)
+    }
+    view.textSelectHandleRight?.mutate()?.let {
+        it.setTint(action)
+        view.setTextSelectHandleRight(it)
+    }
 }
 
 /** A field of the platform inside the outlined frame of the mockups. */
@@ -189,7 +219,7 @@ fun PlatformText(
         modifier = modifier,
         factory = { context ->
             TextView(context).apply {
-                typeface = Typeface.DEFAULT
+                styleAsApp(this)
                 ellipsize = TextUtils.TruncateAt.END
             }
         },

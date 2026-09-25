@@ -43,7 +43,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
@@ -129,7 +128,7 @@ fun YourInvitationScreen(onBack: () -> Unit) {
                 link,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
-                fontFamily = FontFamily.Monospace,
+                fontFamily = Fonts.Mono,
                 style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier
                     .fillMaxWidth()

@@ -5,6 +5,8 @@
          with no change of colour. -->
     <style name="Theme.Umbra" parent="android:Theme.Material.Light.NoActionBar">
         <item name="android:windowBackground">@color/surface</item>
+        <!-- The app draws its own colours on each phone. -->
+        <item name="android:forceDarkAllowed">false</item>
         <item name="android:windowSplashScreenBackground">@color/surface</item>
         <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_splash</item>
     </style>

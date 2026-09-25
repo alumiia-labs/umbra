@@ -2,7 +2,6 @@ package org.umbra.app
 
 import android.app.Activity
 import android.content.Context
-import android.graphics.Typeface
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.WindowManager
@@ -162,7 +161,7 @@ private fun DigitRows(digits: CharArray) {
     AndroidView(
         factory = { context ->
             TextView(context).apply {
-                typeface = Typeface.MONOSPACE
+                styleAsApp(this, mono = true)
                 gravity = Gravity.CENTER
                 setLineSpacing(0f, 1.5f)
             }

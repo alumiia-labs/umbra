@@ -1,9 +1,14 @@
 package org.umbra.app
 
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Typography
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontVariation
+import androidx.compose.ui.text.font.FontWeight
 
 /** The colors of `design/mockups/light`: warm white, forest green, pale sage. */
 object Palette {
@@ -47,9 +52,58 @@ private val Colors = lightColorScheme(
     error = Palette.Error,
 )
 
+/**
+ * The fonts of the app, which it ships (SIL Open Font License 1.1, in
+ * `assets/licenses`). A maker of phones puts its own font in the place of
+ * the font of the platform, thus a font of the system would change the look
+ * of the app from one phone to the next. Each file holds each weight.
+ */
+object Fonts {
+    private val weights = listOf(
+        FontWeight.Light,
+        FontWeight.Normal,
+        FontWeight.Medium,
+        FontWeight.SemiBold,
+        FontWeight.Bold,
+    )
+
+    private fun family(resource: Int) = FontFamily(
+        weights.map { weight ->
+            Font(
+                resource,
+                weight,
+                variationSettings = FontVariation.Settings(FontVariation.weight(weight.weight)),
+            )
+        },
+    )
+
+    val Sans = family(R.font.roboto)
+    val Mono = family(R.font.roboto_mono)
+}
+
+// The type scale stays the scale of the platform, thus the font size of the
+// user applies, and each style takes the font of the app.
+private val Type = Typography().let { base ->
+    Typography(
+        displayLarge = base.displayLarge.copy(fontFamily = Fonts.Sans),
+        displayMedium = base.displayMedium.copy(fontFamily = Fonts.Sans),
+        displaySmall = base.displaySmall.copy(fontFamily = Fonts.Sans),
+        headlineLarge = base.headlineLarge.copy(fontFamily = Fonts.Sans),
+        headlineMedium = base.headlineMedium.copy(fontFamily = Fonts.Sans),
+        headlineSmall = base.headlineSmall.copy(fontFamily = Fonts.Sans),
+        titleLarge = base.titleLarge.copy(fontFamily = Fonts.Sans),
+        titleMedium = base.titleMedium.copy(fontFamily = Fonts.Sans),
+        titleSmall = base.titleSmall.copy(fontFamily = Fonts.Sans),
+        bodyLarge = base.bodyLarge.copy(fontFamily = Fonts.Sans),
+        bodyMedium = base.bodyMedium.copy(fontFamily = Fonts.Sans),
+        bodySmall = base.bodySmall.copy(fontFamily = Fonts.Sans),
+        labelLarge = base.labelLarge.copy(fontFamily = Fonts.Sans),
+        labelMedium = base.labelMedium.copy(fontFamily = Fonts.Sans),
+        labelSmall = base.labelSmall.copy(fontFamily = Fonts.Sans),
+    )
+}
+
 @Composable
 fun UmbraTheme(content: @Composable () -> Unit) {
-    // The type scale stays the scale of the platform, thus the font size of
-    // the user applies.
-    MaterialTheme(colorScheme = Colors, content = content)
+    MaterialTheme(colorScheme = Colors, typography = Type, content = content)
 }

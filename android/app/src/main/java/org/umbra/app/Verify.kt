@@ -35,7 +35,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -247,7 +246,7 @@ fun SafetyNumberScreen(chat: Chat, onBack: () -> Unit) {
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 groups.chunked(3).forEach { row ->
-                    Text(row.joinToString("  "), fontFamily = FontFamily.Monospace, fontSize = 17.sp)
+                    Text(row.joinToString("  "), fontFamily = Fonts.Mono, fontSize = 17.sp)
                 }
             }
             Spacer(Modifier.height(16.dp))
