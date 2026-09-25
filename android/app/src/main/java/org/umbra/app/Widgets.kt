@@ -9,6 +9,7 @@ import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import android.widget.TextView
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
@@ -27,6 +28,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -50,6 +52,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.Color
@@ -218,12 +221,12 @@ fun PlatformText(
 fun Modifier.subline(): Modifier = padding(horizontal = 3.dp)
 
 /**
- * The press shade of each row: round, with room around its content, as the
- * press shade of a tab is. The content of a row starts `PressInset` inside
- * the shade.
+ * The press shade of each row: square, and across the whole width that the
+ * row holds, thus it meets the shade of its neighbours as the shade of a tab
+ * does. The content of a row starts `PressInset` inside the shade, 20 dp
+ * from the edge of the screen.
  */
-val PressShape = RoundedCornerShape(16.dp)
-val PressInset = 12.dp
+val PressInset = 20.dp
 
 /**
  * The press of a row or a tab, with a shade that the app draws itself. The
@@ -272,10 +275,10 @@ private fun Modifier.pressShade(source: MutableInteractionSource): Modifier {
 }
 
 /**
- * The shade of a row in a column with side padding. The shade reaches past
- * the column by `PressInset` on each side, thus the text of the row stays in
- * line with the text above it. The caller adds [press] and then
- * `padding(horizontal = PressInset)`.
+ * The shade of a row in a column with side padding of `PressInset`. The
+ * shade reaches past the column to the edges of the screen, thus the text of
+ * the row stays in line with the text above it. The caller adds [press] and
+ * then `padding(horizontal = PressInset)`.
  */
 fun Modifier.pressShadeInColumn(): Modifier = layout { measurable, constraints ->
     val extra = PressInset.roundToPx() * 2
@@ -286,10 +289,13 @@ fun Modifier.pressShadeInColumn(): Modifier = layout { measurable, constraints -
         ),
     )
     layout(placeable.width - extra, placeable.height) { placeable.place(-PressInset.roundToPx(), 0) }
-}.clip(PressShape)
+}
 
 /** How far the shade of a bar title reaches into the side of the back button. */
 private val TitleOutset = 6.dp
+
+/** Where the title of a bar starts inside its shade. */
+private val TitleInset = 12.dp
 
 /** Places an element `by` to the left of its place, and makes it wider by the same. */
 private fun Modifier.outsetStart(by: Dp): Modifier = layout { measurable, constraints ->
@@ -304,11 +310,11 @@ private fun Modifier.outsetStart(by: Dp): Modifier = layout { measurable, constr
 }
 
 /**
- * The shade of a row that spans the screen. The caller adds [press] and
- * then `padding(horizontal = PressInset)`, which puts the content 20 dp from
- * the edge.
+ * The shade of a row that spans the screen: the whole row. The caller adds
+ * [press] and then `padding(horizontal = PressInset)`, which puts the content
+ * 20 dp from the edge.
  */
-fun Modifier.pressShadeInList(): Modifier = padding(horizontal = 8.dp).clip(PressShape)
+fun Modifier.pressShadeInList(): Modifier = this
 
 @Composable
 fun PrimaryButton(label: String, enabled: Boolean = true, onClick: () -> Unit) {
@@ -493,12 +499,13 @@ fun BackBar(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         IconAction("arrow-left", "Back", onBack)
-        // The shade of a title that leads somewhere has the room of each
-        // other press shade around the text. It starts a little inside the
-        // empty side of the back button, thus the title keeps its place.
-        val shade = Modifier.weight(1f).outsetStart(TitleOutset).clip(PressShape)
+        // The shade of a title that leads somewhere fills the bar between
+        // the back button and the actions, square as each other press shade.
+        // It starts a little inside the empty side of the back button, thus
+        // the title keeps its place.
+        val shade = Modifier.weight(1f).outsetStart(TitleOutset)
         val titleArea = if (onTitle == null) shade else shade.press(role = Role.Button, onClick = onTitle)
-        Column(titleArea.padding(horizontal = PressInset, vertical = 6.dp)) {
+        Column(titleArea.padding(horizontal = TitleInset, vertical = 6.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     title,
@@ -660,10 +667,7 @@ fun EntryRow(entry: RowEntry, afterClick: () -> Unit = {}) {
     }
 }
 
-/**
- * A row with a title and a switch, in the look of the mockups: an outlined
- * track, and a knob that moves to the right on a green track.
- */
+/** A row with a title and a switch. The row takes the tap. */
 @Composable
 fun ToggleRow(title: String, isOn: Boolean, onChange: (Boolean) -> Unit) {
     Row(
@@ -675,28 +679,39 @@ fun ToggleRow(title: String, isOn: Boolean, onChange: (Boolean) -> Unit) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(title, Modifier.weight(1f))
-        val track = if (isOn) Palette.Action else Palette.Incoming
-        Box(
-            Modifier
-                .size(width = 44.dp, height = 26.dp)
-                .background(track, CircleShape)
-                .border(1.dp, if (isOn) Palette.Action else Palette.Outline, CircleShape)
-                .padding(horizontal = 4.dp),
-            contentAlignment = if (isOn) Alignment.CenterEnd else Alignment.CenterStart,
-        ) {
-            Box(Modifier.size(17.dp).background(if (isOn) Color.White else Palette.TextSecondary, CircleShape))
-        }
+        SwitchMark(isOn)
     }
 }
+
+/**
+ * The mark of a switch in the weight of [RadioMark]: a ring track and a
+ * dot. The row around it takes the tap.
+ */
+@Composable
+fun SwitchMark(isOn: Boolean, enabled: Boolean = true) {
+    val offset by animateDpAsState(if (isOn) 16.dp else 0.dp, label = "switch")
+    val tint = if (isOn) Palette.Action else Palette.Outline
+    Box(
+        Modifier
+            .alpha(if (enabled) 1f else 0.4f)
+            .size(width = 36.dp, height = 20.dp)
+            .background(if (isOn) Palette.Container else Color.Transparent, CircleShape)
+            .border(2.dp, tint, CircleShape)
+            .padding(4.dp),
+    ) {
+        Box(Modifier.offset(x = offset).size(12.dp).background(tint, CircleShape))
+    }
+}
+
 
 /** An icon that acts. The touch target is 48 dp, and the label is for a screen reader. */
 @Composable
 fun IconAction(icon: String, label: String, onClick: () -> Unit) {
+    // The shade fills the square that the button holds, as a tab does.
     Box(
         Modifier
             .size(48.dp)
-            .clip(CircleShape)
-            .clickable(role = Role.Button, onClickLabel = label, onClick = onClick),
+            .press(role = Role.Button, label = label, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) { FaIcon(icon, label = label, size = 20.dp, tint = Palette.Text) }
 }

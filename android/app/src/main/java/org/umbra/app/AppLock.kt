@@ -185,26 +185,6 @@ fun AutoDownloadScreen(onBack: () -> Unit) {
     }
 }
 
-/**
- * The mark of a switch in the weight of [RadioMark]: a ring track and a
- * dot. The row around it takes the tap.
- */
-@Composable
-fun SwitchMark(isOn: Boolean, enabled: Boolean = true) {
-    val offset by animateDpAsState(if (isOn) 16.dp else 0.dp, label = "switch")
-    val tint = if (isOn) Palette.Action else Palette.Outline
-    Box(
-        Modifier
-            .alpha(if (enabled) 1f else 0.4f)
-            .size(width = 36.dp, height = 20.dp)
-            .background(if (isOn) Palette.Container else Color.Transparent, CircleShape)
-            .border(2.dp, tint, CircleShape)
-            .padding(4.dp),
-    ) {
-        Box(Modifier.offset(x = offset).size(12.dp).background(tint, CircleShape))
-    }
-}
-
 /** The mark of one choice of a list, as the mockups draw it. */
 @Composable
 fun RadioMark(isChosen: Boolean) {
