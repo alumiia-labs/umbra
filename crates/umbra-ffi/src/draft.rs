@@ -3,14 +3,16 @@
 //! and the buffer is zero bytes after the drop, whether the send succeeded
 //! or failed (`IMP-039`).
 
-use umbra_core::attach::{transfer::Shape, MAX_DESCRIPTOR_REFS, SEGMENT_SIZE};
+use umbra_core::attach::{transfer::Shape, MAX_FILE_SIZE};
+use umbra_wire::descriptor::class;
 use zeroize::Zeroizing;
 
 use crate::{ConversationId, Error, MsgRef};
 
-/// The largest file of a draft: what a descriptor of level `0x00` holds.
-/// The padding of the last segment takes one byte or more.
-pub const DRAFT_FILE_MAX: usize = MAX_DESCRIPTOR_REFS * SEGMENT_SIZE - 1;
+/// The largest file of a draft: `MAX_FILE_SIZE` (`ATT-022`). A file above
+/// one descriptor travels through its manifest (Part 12 §12.3.4).
+#[allow(clippy::cast_possible_truncation)]
+pub const DRAFT_FILE_MAX: usize = MAX_FILE_SIZE as usize;
 
 /// The file of a draft: its bytes, and what the descriptor says of it.
 pub struct DraftFile {
@@ -18,6 +20,8 @@ pub struct DraftFile {
     pub plain: Zeroizing<Vec<u8>>,
     /// The class and the size of the media.
     pub shape: Shape,
+    /// The name of the file, with no path (`WIR-531`).
+    pub name: Option<String>,
 }
 
 /// The longest text of one draft, in bytes of UTF-8.
@@ -85,7 +89,29 @@ impl Draft {
         if plain.len() > DRAFT_FILE_MAX {
             return Err(Error::TooLong);
         }
-        self.file = Some(DraftFile { plain, shape });
+        self.file = Some(DraftFile {
+            plain,
+            shape,
+            name: None,
+        });
+        Ok(())
+    }
+
+    /// Names the file of the draft. An image, a video, and a voice
+    /// recording carry no name, because the name of a camera file holds its
+    /// time (`ATT-192`).
+    pub fn set_file_name(&mut self, name: &str) -> Result<(), Error> {
+        let file = self.file.as_mut().ok_or(Error::NotFound)?;
+        if !umbra_wire::descriptor::is_file_name(name) {
+            return Err(Error::Malformed);
+        }
+        if matches!(
+            file.shape.mime_class,
+            class::IMAGE | class::VIDEO | class::VOICE
+        ) {
+            return Err(Error::Malformed);
+        }
+        file.name = Some(name.to_owned());
         Ok(())
     }
 

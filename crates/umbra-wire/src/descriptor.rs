@@ -16,6 +16,27 @@ pub const FIXED: usize = 137;
 pub const CHUNK_REF_LEN: usize = 120;
 /// `CHUNK_SIZE`, which `padded_size` must divide by (`ATT-068`).
 pub const CHUNK_SIZE: u32 = 32_650;
+/// `FILE_NAME_MAX`, in bytes of UTF-8 (Part 6 §6.6, `WIR-531`).
+pub const FILE_NAME_MAX: usize = 255;
+/// The offset of `ref_count` in the fixed part.
+const REF_COUNT_AT: usize = 124;
+
+/// The `mime_class` values of Part 12 §12.3. A receiver shows a value that
+/// it does not know as a file of class other (`ATT-193`).
+pub mod class {
+    /// An image.
+    pub const IMAGE: u8 = 0x01;
+    /// A video.
+    pub const VIDEO: u8 = 0x02;
+    /// An audio file that the user selected.
+    pub const AUDIO: u8 = 0x03;
+    /// A recording that the client made in the conversation.
+    pub const VOICE: u8 = 0x04;
+    /// A document.
+    pub const DOC: u8 = 0x05;
+    /// Each other file.
+    pub const OTHER: u8 = 0x06;
+}
 
 /// The level of the refs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,6 +182,90 @@ impl FileDescriptor {
     }
 }
 
+/// The body of an `AppMessage` of kind `0x02` (Part 6 §6.6): the
+/// descriptor, and an optional file name after it (`WIR-531`).
+pub struct AttachmentBody<'a> {
+    /// The descriptor.
+    pub descriptor: FileDescriptor,
+    /// The name of the file, with no path.
+    pub name: Option<&'a str>,
+}
+
+impl<'a> AttachmentBody<'a> {
+    /// Reads a body. Bytes after the descriptor that are not one valid
+    /// name make the whole body malformed (`WIR-532`).
+    pub fn parse(body: &'a [u8]) -> Result<Self, Error> {
+        let count = body
+            .get(REF_COUNT_AT..REF_COUNT_AT + 4)
+            .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
+            .map(u32::from_be_bytes)
+            .ok_or(Error::Malformed)?;
+        let refs = usize::try_from(count).map_err(|_| Error::Malformed)?;
+        let end = refs
+            .checked_mul(CHUNK_REF_LEN)
+            .and_then(|len| len.checked_add(FIXED))
+            .ok_or(Error::Malformed)?;
+        let (head, rest) = body.split_at_checked(end).ok_or(Error::Malformed)?;
+        let descriptor = FileDescriptor::parse(head)?;
+        let name = match rest.split_first() {
+            None => None,
+            Some((&len, name)) => {
+                if usize::from(len) != name.len() {
+                    return Err(Error::Malformed);
+                }
+                let name = core::str::from_utf8(name).map_err(|_| Error::Malformed)?;
+                if !is_file_name(name) {
+                    return Err(Error::Malformed);
+                }
+                Some(name)
+            }
+        };
+        Ok(AttachmentBody { descriptor, name })
+    }
+
+    /// The encoded length.
+    pub fn len(&self) -> usize {
+        self.descriptor
+            .len()
+            .saturating_add(self.name.map_or(0, |name| 1 + name.len()))
+    }
+
+    /// Whether the body names no chunk. Clippy asks for this beside `len`.
+    pub fn is_empty(&self) -> bool {
+        self.descriptor.is_empty()
+    }
+
+    /// Writes the body.
+    pub fn encode(&self, out: &mut [u8]) -> Result<usize, Error> {
+        let at = self.descriptor.encode(out)?;
+        let Some(name) = self.name else {
+            return Ok(at);
+        };
+        if !is_file_name(name) {
+            return Err(Error::Malformed);
+        }
+        let len = u8::try_from(name.len()).map_err(|_| Error::Malformed)?;
+        let tail = out
+            .get_mut(at..at + 1 + name.len())
+            .ok_or(Error::Malformed)?;
+        let (first, rest) = tail.split_first_mut().ok_or(Error::Malformed)?;
+        *first = len;
+        rest.copy_from_slice(name.as_bytes());
+        Ok(at + 1 + name.len())
+    }
+}
+
+/// Whether a text is a valid file name (`WIR-532`): 1 to `FILE_NAME_MAX`
+/// bytes, no control character, no path separator, and not `.` or `..`.
+pub fn is_file_name(name: &str) -> bool {
+    (1..=FILE_NAME_MAX).contains(&name.len())
+        && name != "."
+        && name != ".."
+        && !name
+            .chars()
+            .any(|c| c.is_control() || c == '/' || c == '\\')
+}
+
 #[cfg(test)]
 #[allow(
     clippy::expect_used,
@@ -201,5 +306,66 @@ mod tests {
         assert!(FileDescriptor::parse(&out[..256]).is_err());
         out[131] = 1;
         assert!(FileDescriptor::parse(&out).is_err());
+    }
+
+    fn one_ref_descriptor() -> FileDescriptor {
+        FileDescriptor {
+            level: Level::Data,
+            file_key: Secret::new([6; 32]),
+            file_nonce: [7; 24],
+            commit: [8; 32],
+            digest: [9; 32],
+            media_seconds: 0,
+            padded_size: CHUNK_SIZE,
+            mime_class: class::DOC,
+            pixel_w: 0,
+            pixel_h: 0,
+            refs: vec![ChunkRef {
+                relay_id: [1; 32],
+                chunk_id: [2; 32],
+                cred_pk: [3; 32],
+                replicas: [[4; 12], [5; 12]],
+            }],
+        }
+    }
+
+    #[test]
+    fn a_body_carries_a_name_after_the_descriptor_or_none() {
+        let named = AttachmentBody {
+            descriptor: one_ref_descriptor(),
+            name: Some("Report 2026.pdf"),
+        };
+        let mut out = vec![0u8; named.len()];
+        assert_eq!(named.encode(&mut out).unwrap(), 257 + 16);
+        let back = AttachmentBody::parse(&out).unwrap();
+        assert_eq!(back.name, Some("Report 2026.pdf"));
+        assert_eq!(back.descriptor.mime_class, class::DOC);
+
+        // A body of an earlier version holds the descriptor alone.
+        let bare = &out[..257];
+        assert_eq!(AttachmentBody::parse(bare).unwrap().name, None);
+
+        // WIR-532: a length that the rest does not fill, and a stray byte.
+        assert!(AttachmentBody::parse(&out[..out.len() - 1]).is_err());
+        let mut stray = out[..257].to_vec();
+        stray.push(0);
+        assert!(AttachmentBody::parse(&stray).is_err());
+    }
+
+    #[test]
+    fn a_name_with_a_path_or_a_control_character_is_rejected() {
+        for bad in ["", ".", "..", "a/b", "a\\b", "a\nb", "a\u{7f}"] {
+            assert!(!is_file_name(bad), "{bad:?}");
+            let body = AttachmentBody {
+                descriptor: one_ref_descriptor(),
+                name: Some(bad),
+            };
+            let mut out = vec![0u8; body.len()];
+            assert!(body.encode(&mut out).is_err(), "{bad:?}");
+        }
+        assert!(is_file_name("été – notes.txt"));
+        let long = "a".repeat(FILE_NAME_MAX + 1);
+        assert!(!is_file_name(&long));
+        assert!(is_file_name(&long[1..]));
     }
 }

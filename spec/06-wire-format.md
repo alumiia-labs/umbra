@@ -1522,7 +1522,32 @@ the two layouts.
 
 For kind `0x01` the body is UTF-8 text with no further structure.
 **[WIR-259]** A parser MUST reject a body of kind `0x01` that is not valid
-UTF-8. For kind `0x03`, for kind `0x06`, for kind `0x07`, and for kind `0x08`,
+UTF-8.
+
+For kind `0x02` the body is an `AttachmentBody`:
+
+```
+AttachmentBody {
+    descriptor     [desc_len]u8  // a FileDescriptor of Part 12 §12.3; its
+                                 // ref_count gives desc_len
+    name_len       u8            // absent when the body ends after the descriptor
+    name           [name_len]u8  // UTF-8, the name of the file with no path
+}
+```
+
+**[WIR-531]** A sender MAY put the name of the file after the descriptor, as
+`name_len` and `name`. A body that ends after the descriptor carries no name.
+**[WIR-532]** A parser MUST reject a body of kind `0x02` whose bytes after the
+descriptor are not one `name_len` and exactly `name_len` bytes of `name`. It
+MUST also reject a `name` that is not valid UTF-8, a `name_len` of zero or
+above `FILE_NAME_MAX`, a `name` that holds a control character, `/`, or `\`,
+and a `name` of `.` or `..`. Part 12 §12.7 gives `FILE_NAME_MAX`.
+
+> *Cause.* The descriptor omits the name, because each party that sees a
+> descriptor sees it (Part 12 §12.3). The body is inside the ratchet, thus the
+> name reaches the recipient and no relay. A name with a path, or with a
+> control character, would let a sender choose where a save writes or what a
+> view shows. For kind `0x03`, for kind `0x06`, for kind `0x07`, and for kind `0x08`,
 §6.6.9 gives the body. Part 3 §3.5.4 sets `RECEIPT_BATCH_MAX` and gives the
 emission rules of a receipt.
 

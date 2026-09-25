@@ -1525,12 +1525,12 @@ fn one_app_sends_a_file_and_the_other_app_gets_it() {
     std::fs::write(&path, &plain).unwrap();
     let draft = alice.new_draft(alice_conversation.clone()).unwrap();
     draft
-        .attach_file(path.to_str().unwrap().to_owned(), 1, 800, 600, 0)
+        .attach_file(path.to_str().unwrap().to_owned(), 1, 800, 600, 0, None)
         .unwrap();
     // The record of a file holds no text.
     let both = alice.new_draft(alice_conversation.clone()).unwrap();
     both.set_text(units("a caption")).unwrap();
-    both.attach_file(path.to_str().unwrap().to_owned(), 1, 800, 600, 0)
+    both.attach_file(path.to_str().unwrap().to_owned(), 1, 800, 600, 0, None)
         .unwrap();
     assert_eq!(alice.send_draft(both).err(), Some(FfiError::Malformed));
 
@@ -1688,6 +1688,32 @@ fn one_app_offers_a_group_and_the_other_app_joins_it() {
     let (conversation, message) = wait_for_message(&bob);
     assert_eq!(conversation, joined);
     assert_eq!(rendered(&bob, message), "we leave at six");
+
+    // A file of Alice goes to the group queue and reaches Bob with its name
+    // (Part 11 §11.2, IMP-163, WIR-531).
+    let plain: Vec<u8> = (0..70_000u32).map(|i| (i % 241) as u8).collect();
+    let path = directory.join("route.gpx");
+    std::fs::write(&path, &plain).unwrap();
+    let draft = alice.new_draft(group.clone()).unwrap();
+    draft
+        .attach_file(
+            path.to_str().unwrap().to_owned(),
+            umbra_wire::descriptor::class::OTHER,
+            0,
+            0,
+            0,
+            Some("route.gpx".into()),
+        )
+        .unwrap();
+    let sent = alice.send_draft(draft).unwrap();
+    let (conversation, received) = wait_for_message(&bob);
+    assert_eq!(conversation, joined);
+    wait_for_file(&alice, &sent, 3);
+    wait_for_file(&bob, &received, 3);
+    let file = bob.msg_info(received.clone()).unwrap().file.unwrap();
+    assert_eq!(file.name.as_deref(), Some("route.gpx"));
+    assert_eq!(file.size, 70_000);
+    assert_eq!(*bob.file_bytes(&received).unwrap(), plain);
 
     // The run of Alice ends and starts again, as at a change of the network
     // of the device. The group comes back with it, and no record of a

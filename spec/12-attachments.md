@@ -146,7 +146,8 @@ FileDescriptor {
     ref_count      u32         // the ChunkRef count in this descriptor
     padded_size    u32         // the data chunk count times CHUNK_SIZE. TRUE size
                                // not carried: the 12.2.3 padding gives the boundary
-    mime_class     u8          // image, video, audio, voice, doc, or other
+    mime_class     u8          // 0x01 image, 0x02 video, 0x03 audio,
+                               // 0x04 voice, 0x05 doc, 0x06 other
     pixel_w        u16         // the width of an image or a video, else 0
     pixel_h        u16         // the height of an image or a video, else 0
     refs           [ref_count]ChunkRef
@@ -159,7 +160,7 @@ ChunkRef {                     // 120 B
     replicas       [2]RelayRef  // MANDATORY redundancy, see 12.4
 }
 
-RelayRef {                     // 12 B, see 13.3.2
+RelayRef {                     // 12 B, see 12.3.2
     relay_hint     [12]u8
 }
 ```
@@ -210,8 +211,16 @@ those fields to each platform service.
 
 The descriptor deliberately **omits the original filename and the exact size**.
 The encrypted message body carries the filename, if the message carries the
-filename at all. No field that a relay sees carries the filename. The field
-`mime_class` is coarse, because a MIME type with full detail is a fingerprint.
+filename at all (Part 6 §6.6, `WIR-531`). No field that a relay sees carries
+the filename. The field `mime_class` is coarse, because a MIME type with full
+detail is a fingerprint.
+
+- **[ATT-192]** A sender MUST NOT put a name in the body of an image, a video,
+  or a voice object. The name of a camera file holds the time of the capture,
+  and `ATT-155` removes that time from the object itself.
+- **[ATT-193]** A receiver MUST show a `mime_class` that it does not know as a
+  file of class `0x06`. A later version can add a class, and a file of that
+  class still arrives.
 
 ### 12.3.1 Key-committing AEAD is mandatory
 
@@ -852,6 +861,7 @@ three properties hold:
 | `REPLICA_VERIFY_SAMPLE` | the greater of 4 and one 32nd of the chunks, at most 64 (§12.4.1) |
 | `PLACE_PROBE` | 4 relays for one handle (§12.4.2) |
 | `IMAGE_REENCODE_BYTES` | 2 MiB (§12.3) |
+| `FILE_NAME_MAX` | 255 bytes of UTF-8, the name of Part 6 rule `WIR-531` |
 | `CHUNK_EGRESS_BUDGET_DAY` | 4 × `CHUNK_STORE_TARGET` of egress in one day, measured by the relay from midnight UTC (§12.11) |
 | `CHUNK_FETCH_RATE` | 60 `CGET` for one chunk in one hour, measured by the relay from the first fetch of the hour (§12.11) |
 | `HOT_REPLICAS` | 6 replicas of one chunk at the most. It bounds the targets of a `CREP` (§12.4.1) |

@@ -22,7 +22,7 @@ use umbra_core::{
 use umbra_crypto::{rand_core::CryptoRng, secret::Secret};
 use umbra_wire::{
     app::{AppKind, AppMessage, Channel},
-    descriptor::{FileDescriptor, Level},
+    descriptor::{AttachmentBody, FileDescriptor},
 };
 use zeroize::Zeroizing;
 
@@ -36,6 +36,8 @@ pub(super) const FILE_DATA: TableId = TableId(0x10);
 /// The write credential of each chunk of a file that this device uploaded.
 pub(super) const CHUNK_CRED: TableId = TableId(0x11);
 
+/// The state, the class, and the three media fields. A row of this
+/// version adds the size and the name after them.
 const STATE_ROW_LEN: usize = 8;
 
 /// Where the file of a message is.
@@ -71,6 +73,10 @@ pub struct FileInfo {
     pub state: FileState,
     /// The class and the size of the media, from the descriptor.
     pub shape: Shape,
+    /// The size in bytes: exact when the store holds the file, and the
+    /// padded size of the descriptor while it does not. Zero in a row of an
+    /// earlier version.
+    pub size: u64,
 }
 
 /// A file that waits for the transfer task.
@@ -109,20 +115,41 @@ pub(super) struct FileQueues {
     pub erasures: VecDeque<ErasureJob>,
 }
 
-fn state_row(state: FileState, shape: &Shape) -> Vec<u8> {
-    let mut row = Vec::with_capacity(STATE_ROW_LEN);
+fn state_row(state: FileState, shape: &Shape, size: u64, name: Option<&str>) -> Vec<u8> {
+    let mut row = Vec::with_capacity(STATE_ROW_LEN + 9 + name.map_or(0, str::len));
     row.push(state as u8);
     row.push(shape.mime_class);
     row.extend_from_slice(&shape.pixel_w.to_be_bytes());
     row.extend_from_slice(&shape.pixel_h.to_be_bytes());
     row.extend_from_slice(&shape.media_seconds.to_be_bytes());
+    row.extend_from_slice(&size.to_be_bytes());
+    // A name longer than a byte count holds does not pass `is_file_name`.
+    let name = name.filter(|name| name.len() <= usize::from(u8::MAX));
+    row.push(name.map_or(0, |name| u8::try_from(name.len()).unwrap_or(0)));
+    row.extend_from_slice(name.map_or(&[][..], str::as_bytes));
     row
 }
 
+/// The name of the file in a state row, when the row holds one.
+fn name_of_state_row(row: &[u8]) -> Option<String> {
+    let rest = row.get(STATE_ROW_LEN + 8..)?;
+    let (&len, name) = rest.split_first()?;
+    let name = name.get(..usize::from(len))?;
+    (len > 0)
+        .then(|| String::from_utf8(name.to_vec()).ok())
+        .flatten()
+}
+
 fn read_state_row(row: &[u8]) -> Result<FileInfo, Error> {
-    let bytes: [u8; STATE_ROW_LEN] = row.try_into().map_err(|_| Error::Integrity)?;
+    let head = row.get(..STATE_ROW_LEN).ok_or(Error::Integrity)?;
+    let bytes: [u8; STATE_ROW_LEN] = head.try_into().map_err(|_| Error::Integrity)?;
     let [state, mime_class, w0, w1, h0, h1, s0, s1] = bytes;
+    let size = row
+        .get(STATE_ROW_LEN..STATE_ROW_LEN + 8)
+        .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
+        .map_or(0, u64::from_be_bytes);
     Ok(FileInfo {
+        size,
         state: FileState::from_byte(state).ok_or(Error::Integrity)?,
         shape: Shape {
             mime_class,
@@ -143,25 +170,34 @@ pub(super) fn shape_of(descriptor: &FileDescriptor) -> Shape {
 }
 
 /// The descriptor of an attachment record, when this device can fetch it:
-/// level `0x00` with at most the refs of one descriptor.
+/// either level, with at most the refs of one descriptor (`IMP-163`).
 pub(super) fn fetchable(body: &[u8]) -> Option<FileDescriptor> {
-    let descriptor = FileDescriptor::parse(body).ok()?;
-    let is_in_reach = descriptor.level == Level::Data
-        && !descriptor.refs.is_empty()
-        && descriptor.refs.len() <= MAX_DESCRIPTOR_REFS;
+    let descriptor = AttachmentBody::parse(body).ok()?.descriptor;
+    let is_in_reach = !descriptor.refs.is_empty() && descriptor.refs.len() <= MAX_DESCRIPTOR_REFS;
     is_in_reach.then_some(descriptor)
 }
 
 /// The state row of a file that a contact sent.
 pub(super) fn incoming_state_row(body: &[u8]) -> (Vec<u8>, Option<FileDescriptor>) {
+    let name = AttachmentBody::parse(body)
+        .ok()
+        .and_then(|parsed| parsed.name.map(str::to_owned));
     match fetchable(body) {
         Some(descriptor) => (
-            state_row(FileState::Wanted, &shape_of(&descriptor)),
+            state_row(
+                FileState::Wanted,
+                &shape_of(&descriptor),
+                u64::from(descriptor.padded_size),
+                name.as_deref(),
+            ),
             Some(descriptor),
         ),
         // A descriptor that this device cannot read shows as a file that
         // did not arrive, and the message stays.
-        None => (state_row(FileState::Failed, &Shape::default()), None),
+        None => (
+            state_row(FileState::Failed, &Shape::default(), 0, None),
+            None,
+        ),
     }
 }
 
@@ -235,6 +271,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
     }
 
+    /// The name of the file of a message, when its sender gave one
+    /// (`WIR-531`).
+    pub fn file_name(&self, message: &MsgRef) -> Result<Option<String>, Error> {
+        let store = &self.open_ref()?.store;
+        Ok(store
+            .get(FILE_STATE, &message.0)?
+            .and_then(|row| name_of_state_row(&row)))
+    }
+
     /// The file of a message, in the clear. The caller overwrites it after
     /// the use.
     pub fn file_bytes(&self, message: &MsgRef) -> Result<Zeroizing<Vec<u8>>, Error> {
@@ -252,6 +297,20 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         rng: &mut R,
     ) -> Result<RowId, Error> {
         let info = self.file_info(message)?.ok_or(Error::NotFound)?;
+        self.put_file_state(message, state, info.size, rng)
+    }
+
+    /// Writes the state row of a file with a new state and size, and keeps
+    /// its shape and its name.
+    fn put_file_state<R: CryptoRng + ?Sized>(
+        &mut self,
+        message: &MsgRef,
+        state: FileState,
+        size: u64,
+        rng: &mut R,
+    ) -> Result<RowId, Error> {
+        let info = self.file_info(message)?.ok_or(Error::NotFound)?;
+        let name = self.file_name(message)?;
         let open = self.open_mut()?;
         let plain = open
             .store
@@ -263,7 +322,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             FILE_STATE,
             message.0,
             Some(conversation.0),
-            &state_row(state, &info.shape),
+            &state_row(state, &info.shape, size, name.as_deref()),
             rng,
         )?;
         batch.commit()?;
@@ -280,6 +339,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         rng: &mut R,
     ) -> Result<(), Error> {
         let info = self.file_info(message)?.ok_or(Error::NotFound)?;
+        let name = self.file_name(message)?;
         let open = self.open_mut()?;
         let mut plain = Zeroizing::new(
             open.store
@@ -287,8 +347,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .ok_or(Error::NotFound)?,
         );
         let conversation = conversation_of(&plain)?;
-        let mut body = Zeroizing::new(vec![0u8; uploaded.descriptor.len()]);
-        uploaded.descriptor.encode(&mut body)?;
+        // WIR-531: the name travels after the descriptor, inside the record.
+        let descriptor = FileDescriptor::parse(&{
+            let mut bytes = Zeroizing::new(vec![0u8; uploaded.descriptor.len()]);
+            uploaded.descriptor.encode(&mut bytes)?;
+            bytes
+        })?;
+        let attachment = AttachmentBody {
+            descriptor,
+            name: name.as_deref(),
+        };
+        let mut body = Zeroizing::new(vec![0u8; attachment.len()]);
+        attachment.encode(&mut body)?;
         let app = {
             let held = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
             let parsed = AppMessage::parse(held, Channel::Pairwise)?;
@@ -324,15 +394,22 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             FILE_STATE,
             message.0,
             Some(conversation.0),
-            &state_row(FileState::Ready, &info.shape),
+            &state_row(FileState::Ready, &info.shape, info.size, name.as_deref()),
             rng,
         )?;
         batch.commit()?;
-        self.outgoing.push_back(Outgoing {
-            message: *message,
-            conversation,
-            app: app.to_vec(),
-        });
+        // A file of a group goes to the group queue, and on no pairwise
+        // channel (Part 11 §11.2).
+        if self.is_group(conversation)? {
+            let sent_at = AppMessage::parse(&app, Channel::Pairwise)?.sent_at;
+            self.queue_group_post(conversation, Some(*message), &app, sent_at, rng)?;
+        } else {
+            self.outgoing.push_back(Outgoing {
+                message: *message,
+                conversation,
+                app: app.to_vec(),
+            });
+        }
         self.events.push_back(Event::File { message: *message });
         Ok(())
     }
@@ -360,7 +437,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         file: &[u8],
         rng: &mut R,
     ) -> Result<(), Error> {
-        let conversation = self.set_file_state(message, FileState::Ready, rng)?;
+        let size = u64::try_from(file.len()).unwrap_or(u64::MAX);
+        let conversation = self.put_file_state(message, FileState::Ready, size, rng)?;
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         batch.put(FILE_DATA, message.0, Some(conversation), file, rng)?;
@@ -479,6 +557,6 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 }
 
 /// The state row of a file that this device sends.
-pub(super) fn outgoing_state_row(shape: &Shape) -> Vec<u8> {
-    state_row(FileState::Uploading, shape)
+pub(super) fn outgoing_state_row(shape: &Shape, size: u64, name: Option<&str>) -> Vec<u8> {
+    state_row(FileState::Uploading, shape, size, name)
 }

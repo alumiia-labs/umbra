@@ -477,7 +477,10 @@ one time for each decode, into a sink of the platform. This is an exception to
 `IMP-037`, and it has a cause: the image decoder and the media player of the
 platform read a byte array or a stream, and a decoder inside the core would
 hand over pixels, which are the same plaintext. The core MUST overwrite its
-copy after the call. The platform MUST overwrite the array when the decode
+copy after the call. A media player reads a video in ranges, thus the core
+MAY hold one copy of the file in its memory for the time that the player is
+open, and give each range that the player asks for. The core MUST overwrite
+that copy when the player closes, and MUST refuse each range after a lock. The platform MUST overwrite the array when the decode
 ends, MUST NOT write the bytes to a file or to a platform cache, and MUST drop
 each decoded image at a lock. The exception covers a file alone: a text, a
 passphrase and key material stay under `IMP-037`.

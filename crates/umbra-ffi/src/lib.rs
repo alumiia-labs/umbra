@@ -2587,6 +2587,82 @@ mod tests {
     }
 
     #[test]
+    fn a_document_carries_its_name_and_its_size_and_a_photo_carries_no_name() {
+        use umbra_core::attach::transfer::Shape;
+        use umbra_wire::{
+            app::{AppMessage, Channel},
+            descriptor::{class, AttachmentBody},
+        };
+
+        let mut rng = Rng(31);
+        let (mut alice, _, conversation) = client_with_contact(32);
+        let (mut bob, bob_contact, _) = client_with_contact(33);
+        let document = zeroize::Zeroizing::new(vec![0x25; 70_000]);
+        let doc_shape = Shape {
+            mime_class: class::DOC,
+            ..Shape::default()
+        };
+
+        // ATT-192: the name of a camera file holds its time, thus a photo
+        // takes none. WIR-532: a name holds no path.
+        let mut photo = alice.new_draft(conversation);
+        photo
+            .attach(
+                document.clone(),
+                Shape {
+                    mime_class: class::IMAGE,
+                    ..Shape::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(photo.set_file_name("IMG_0001.jpg"), Err(Error::Malformed));
+        let mut draft = alice.new_draft(conversation);
+        draft.attach(document.clone(), doc_shape).unwrap();
+        assert_eq!(draft.set_file_name("../etc/passwd"), Err(Error::Malformed));
+        draft.set_file_name("Minutes 2026-09.pdf").unwrap();
+        let sent = alice.send_draft(draft, 1_000_000, &mut rng).unwrap();
+        assert_eq!(alice.info(&sent).unwrap().file.unwrap().size, 70_000);
+        assert_eq!(
+            alice.file_name(&sent).unwrap().as_deref(),
+            Some("Minutes 2026-09.pdf")
+        );
+
+        // WIR-531: the name travels after the descriptor.
+        alice
+            .upload_done(&sent, &uploaded_file(0x42), &mut rng)
+            .unwrap();
+        let outgoing = alice.take_outgoing().unwrap();
+        let record = AppMessage::parse(&outgoing.app, Channel::Pairwise).unwrap();
+        let body = AttachmentBody::parse(record.body).unwrap();
+        assert_eq!(body.name, Some("Minutes 2026-09.pdf"));
+
+        // Bob sees the name and the padded size, and the exact size once
+        // the file is there.
+        bob.commit_network(
+            &[],
+            &[(bob_contact, outgoing.app.clone())],
+            2_000_000,
+            &mut rng,
+        )
+        .unwrap();
+        let Some(Event::Message { message: got, .. }) = bob.next_event() else {
+            panic!("no message");
+        };
+        assert_eq!(
+            bob.file_name(&got).unwrap().as_deref(),
+            Some("Minutes 2026-09.pdf")
+        );
+        let padded = u64::from(body.descriptor.padded_size);
+        assert_eq!(bob.info(&got).unwrap().file.unwrap().size, padded);
+        bob.download_done(&got, &document, &mut rng).unwrap();
+        assert_eq!(bob.info(&got).unwrap().file.unwrap().size, 70_000);
+        assert_eq!(
+            bob.file_name(&got).unwrap().as_deref(),
+            Some("Minutes 2026-09.pdf")
+        );
+    }
+
+    #[test]
     fn a_file_waits_in_the_store_goes_out_after_its_upload_and_leaves_with_its_message() {
         use client::FileState;
         use umbra_core::attach::transfer::Shape;

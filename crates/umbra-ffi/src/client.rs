@@ -2170,7 +2170,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             FILE_STATE,
             row,
             Some(conversation.0),
-            &files::outgoing_state_row(&file.shape),
+            &files::outgoing_state_row(
+                &file.shape,
+                u64::try_from(file.plain.len()).unwrap_or(u64::MAX),
+                file.name.as_deref(),
+            ),
             rng,
         )?;
         batch.put(FILE_DATA, row, Some(conversation.0), &file.plain, rng)?;

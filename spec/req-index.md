@@ -69,17 +69,17 @@ each column when a crate implements the requirement and a test covers it.
 | `NET` | 235 | 84 | 1 | 0 | 8 | **328** |
 | `IDN` | 128 | 44 | 1 | 0 | 5 | **178** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
-| `WIR` | 391 | 85 | 0 | 0 | 6 | **482** |
+| `WIR` | 392 | 85 | 0 | 0 | 7 | **484** |
 | `DEV` | 176 | 86 | 0 | 0 | 7 | **269** |
 | `NTF` | 74 | 28 | 0 | 0 | 3 | **105** |
 | `DIS` | 109 | 33 | 0 | 0 | 1 | **143** |
 | `REL` | 124 | 32 | 1 | 0 | 2 | **159** |
 | `GRP` | 220 | 62 | 0 | 0 | 6 | **288** |
-| `ATT` | 139 | 46 | 1 | 0 | 2 | **188** |
+| `ATT` | 140 | 47 | 1 | 0 | 2 | **190** |
 | `ABU` | 64 | 30 | 0 | 0 | 0 | **94** |
 | `IMP` | 112 | 41 | 0 | 0 | 2 | **155** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 1927 | 612 | 5 | 0 | 49 | **2593** |
+| **All** | 1929 | 613 | 5 | 0 | 50 | **2597** |
 
 ## SCP — Scope and Conventions
 
@@ -1293,6 +1293,8 @@ Source: `spec/06-wire-format.md`
 | `WIR-527` | §6.4 | MUST | A relay | A relay MUST hold the `corr_id` of each of the last 4 096 deposits that it took, and it MUST drop a deposit that repeats one. |  |  |
 | `WIR-528` | §6.4.2 | MUST | A receiver | A receiver MUST take the content of a renewal record as a bundle in the layout of Part 5 §5.4.1, and it MUST read it on the queue of a contact whose handshake is complete. |  |  |
 | `WIR-529` | §6.4 | MUST | (unstated) | A relay that sends its proof-of-work challenge to a carrier of the manifest (Part 13 `ABU-102`) MUST send it as the value of one `UMBRA_CHALLENGE` capsule, on a connection of §6.2.1 that it opens for that challenge. |  |  |
+| `WIR-531` | §6.6 | MAY | A sender | A sender MAY put the name of the file after the descriptor, as `name_len` and `name`. |  |  |
+| `WIR-532` | §6.6 | MUST | A parser | A parser MUST reject a body of kind `0x02` whose bytes after the descriptor are not one `name_len` and exactly `name_len` bytes of `name`. |  |  |
 
 ## DEV — Device Sets
 
@@ -2487,6 +2489,8 @@ Source: `spec/12-attachments.md`
 | `ATT-189` | §12.4.1 | MUST | (unstated) | A registration, a `CPUT` or a `CREP` that a relay refuses, or that gets no answer, fails the chunk before its copies exist. |  |  |
 | `ATT-190` | §12.4.1 | MUST | (unstated) | A `CVFY` can arrive before the copy that it asks for, because the copy travels on a connection of its own. |  |  |
 | `ATT-191` | §12.10 | MUST | An attachment relay | An attachment relay MUST commit each chunk that a `CPUT` or a `CRPUT` gave to durable storage before it sends the answer of that command, under Part 3 rules `NET-298` and `NET-299`. |  |  |
+| `ATT-192` | §12.3 | MUST NOT | A sender | A sender MUST NOT put a name in the body of an image, a video, or a voice object. |  |  |
+| `ATT-193` | §12.3 | MUST | A receiver | A receiver MUST show a `mime_class` that it does not know as a file of class `0x06`. |  |  |
 
 ## ABU — Anti-Abuse Without Identifiers
 

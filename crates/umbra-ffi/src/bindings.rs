@@ -160,6 +160,52 @@ pub trait FileSink: Send + Sync {
     fn put(&self, bytes: Vec<u8>);
 }
 
+/// The file of one message for a media player of the platform, which reads
+/// it in ranges (`IMP-166`). The copy sits in the memory of the core, and
+/// no byte of it goes to a file.
+#[derive(uniffi::Object)]
+pub struct MediaSource {
+    handle: Weak<Handle>,
+    bytes: Mutex<Option<Zeroizing<Vec<u8>>>>,
+}
+
+#[uniffi::export]
+impl MediaSource {
+    /// The size of the file in bytes, or 0 after a close.
+    pub fn size(&self) -> u64 {
+        locked(&self.bytes)
+            .as_ref()
+            .map_or(0, |bytes| u64::try_from(bytes.len()).unwrap_or(u64::MAX))
+    }
+
+    /// At most `len` bytes from `offset`. A read after the end gives none,
+    /// and a read after a lock closes the source and fails.
+    pub fn read_at(&self, offset: u64, len: u32) -> Result<Vec<u8>, FfiError> {
+        let is_open = self
+            .handle
+            .upgrade()
+            .is_some_and(|handle| locked(&handle.inner).client.is_unlocked());
+        if !is_open {
+            self.release();
+            return Err(FfiError::Locked);
+        }
+        let held = locked(&self.bytes);
+        let bytes = held.as_ref().ok_or(FfiError::NotFound)?;
+        let start = usize::try_from(offset)
+            .unwrap_or(usize::MAX)
+            .min(bytes.len());
+        let end = start
+            .saturating_add(usize::try_from(len).unwrap_or(usize::MAX))
+            .min(bytes.len());
+        Ok(bytes.get(start..end).map_or(Vec::new(), <[u8]>::to_vec))
+    }
+
+    /// Drops the copy of the file.
+    pub fn release(&self) {
+        locked(&self.bytes).take();
+    }
+}
+
 struct ForeignSink(Arc<dyn TextSink>);
 
 impl Sink for ForeignSink {
@@ -679,6 +725,15 @@ pub struct MsgFile {
     pub pixel_h: u16,
     /// The duration of an audio or a video object, else 0.
     pub media_seconds: u16,
+    /// The name that the sender gave the file, if any (`WIR-531`).
+    pub name: Option<String>,
+    /// The size in bytes: exact when the store holds the file, and the
+    /// padded size of the descriptor before that.
+    pub size: u64,
+    /// The chunks that moved in a transfer that runs, else 0.
+    pub done: u32,
+    /// The chunks of a transfer that runs, else 0.
+    pub total: u32,
 }
 
 /// One reaction to a message. The emoji holds emoji code points and no
@@ -878,6 +933,9 @@ impl DraftHandle {
     /// the bytes of the file cross no surface. The four values are the media
     /// fields of the descriptor of Part 12 §12.3, after the re-encode of
     /// `ATT-155`.
+    ///
+    /// `name` is the name of a document or of another file, with no path.
+    /// An image, a video, and a voice recording take none (`ATT-192`).
     pub fn attach_file(
         &self,
         path: String,
@@ -885,6 +943,7 @@ impl DraftHandle {
         pixel_w: u16,
         pixel_h: u16,
         media_seconds: u16,
+        name: Option<String>,
     ) -> Result<(), FfiError> {
         let plain = Zeroizing::new(std::fs::read(&path).map_err(|_| FfiError::NotFound)?);
         let shape = Shape {
@@ -893,10 +952,13 @@ impl DraftHandle {
             pixel_w,
             pixel_h,
         };
-        Ok(locked(&self.0)
-            .as_mut()
-            .ok_or(FfiError::NotFound)?
-            .attach(plain, shape)?)
+        let mut draft = locked(&self.0);
+        let draft = draft.as_mut().ok_or(FfiError::NotFound)?;
+        draft.attach(plain, shape)?;
+        if let Some(name) = name {
+            draft.set_file_name(&name)?;
+        }
+        Ok(())
     }
 }
 
@@ -929,6 +991,11 @@ struct Inner {
     transfers: Option<mpsc::UnboundedSender<TransferCommand>>,
     /// What each transfer that runs belongs to.
     transfer_tags: BTreeMap<u64, TransferWork>,
+    /// The chunks that moved and the chunks in all of each file transfer
+    /// that runs.
+    file_progress: BTreeMap<crate::MsgRef, (u32, u32)>,
+    /// The files whose progress moved by a step that a view shows.
+    progress_events: VecDeque<crate::MsgRef>,
     next_transfer_tag: u64,
     /// The commands of the group task, or none before the first group
     /// command of a run.
@@ -1945,14 +2012,37 @@ impl Inner {
             client,
             bridge,
             transfer_tags,
+            file_progress,
+            progress_events,
             ..
         } = self;
+        // A transfer that ends takes its progress with it.
+        if let TransferUpdate::Uploaded { tag, .. }
+        | TransferUpdate::Downloaded { tag, .. }
+        | TransferUpdate::Failed { tag } = &update
+        {
+            if let Some(TransferWork::File { message, .. }) = transfer_tags.get(tag) {
+                file_progress.remove(message);
+            }
+        }
         let mut dead_work = Vec::new();
         let mut restore_step = None;
         let mut backup_root = None;
         let mut backup_erase = Vec::new();
         match update {
-            TransferUpdate::Progress { .. } => {}
+            TransferUpdate::Progress { tag, done, total } => {
+                if let Some(TransferWork::File { message, .. }) = transfer_tags.get(&tag) {
+                    // A view moves in steps of 5 %, thus a large file makes
+                    // twenty events and not one for each chunk.
+                    let step = |done: u32, total: u32| {
+                        u64::from(done).saturating_mul(20) / u64::from(total.max(1))
+                    };
+                    let before = file_progress.insert(*message, (done, total));
+                    if before.is_none_or(|(was, _)| step(was, total) != step(done, total)) {
+                        progress_events.push_back(*message);
+                    }
+                }
+            }
             TransferUpdate::HandleWritten { tag, relays } => match transfer_tags.remove(&tag) {
                 // IDN-099: the new root is there, and the old objects go.
                 Some(TransferWork::BackupRoot(erase)) => backup_erase = erase,
@@ -2245,10 +2335,25 @@ impl Inner {
     }
 
     fn has_event(&self) -> bool {
-        self.client.has_event() || !self.net_events.is_empty() || self.circuits_changed
+        self.client.has_event()
+            || !self.net_events.is_empty()
+            || self.circuits_changed
+            || !self.progress_events.is_empty()
     }
 
     fn next_event(&mut self) -> Option<FfiEvent> {
+        if self.client.is_unlocked() {
+            if let Some(message) = self.progress_events.pop_front() {
+                let conversation = self
+                    .client
+                    .conversation_of_message(&message)
+                    .map_or(Vec::new(), |conversation| conversation.0.to_vec());
+                return Some(FfiEvent::File {
+                    conversation,
+                    message: Arc::new(MsgHandle(message)),
+                });
+            }
+        }
         if let Some(event) = self.client.next_event() {
             return Some(match event {
                 Event::Message {
@@ -2493,6 +2598,8 @@ fn handle_of(database_path: String, client: Client<SqliteBackend, ForeignElement
             root_ca_path: None,
             transfers: None,
             transfer_tags: BTreeMap::new(),
+            file_progress: BTreeMap::new(),
+            progress_events: VecDeque::new(),
             next_transfer_tag: 0,
             groups: None,
             group_tags: BTreeMap::new(),
@@ -2595,7 +2702,11 @@ impl Handle {
     }
 
     fn on_group_update(&self, update: GroupUpdate) {
-        locked(&self.inner).end_group(update);
+        let mut inner = locked(&self.inner);
+        inner.end_group(update);
+        // A record of a group with a descriptor asks for its file.
+        inner.pump_transfers();
+        drop(inner);
         self.changed.notify_all();
     }
 
@@ -3698,9 +3809,44 @@ impl Handle {
         Ok(())
     }
 
+    /// Opens the file of a message for a media player of the platform,
+    /// which reads it in ranges (`IMP-166`). The source reads nothing after
+    /// a lock, and its copy is zero bytes after [`MediaSource::release`] or
+    /// its drop.
+    pub fn open_media(
+        self: Arc<Self>,
+        message: Arc<MsgHandle>,
+    ) -> Result<Arc<MediaSource>, FfiError> {
+        let bytes = locked(&self.inner).client.file_bytes(&message.0)?;
+        Ok(Arc::new(MediaSource {
+            handle: Arc::downgrade(&self),
+            bytes: Mutex::new(Some(bytes)),
+        }))
+    }
+
+    /// Writes the file of a message to a place that the user named, as
+    /// the save of one file (`IMP-045`). On Android `path` names an open
+    /// descriptor of this process, `/proc/self/fd/<n>`, that the platform
+    /// got for a document that the user created.
+    pub fn save_file(&self, message: Arc<MsgHandle>, path: String) -> Result<(), FfiError> {
+        let bytes = locked(&self.inner).client.file_bytes(&message.0)?;
+        std::fs::write(&path, &*bytes).map_err(|_| FfiError::NotFound)
+    }
+
     /// The direction, the delivery state, and the send time of a message.
     pub fn msg_info(&self, message: Arc<MsgHandle>) -> Result<MsgInfo, FfiError> {
-        let info = locked(&self.inner).client.info(&message.0)?;
+        let inner = locked(&self.inner);
+        let info = inner.client.info(&message.0)?;
+        let name = match info.file {
+            Some(_) => inner.client.file_name(&message.0)?,
+            None => None,
+        };
+        let (done, total) = inner
+            .file_progress
+            .get(&message.0)
+            .copied()
+            .unwrap_or((0, 0));
+        drop(inner);
         Ok(MsgInfo {
             outgoing: info.outgoing,
             delivery: info.delivery as u8,
@@ -3724,6 +3870,10 @@ impl Handle {
                 pixel_w: file.shape.pixel_w,
                 pixel_h: file.shape.pixel_h,
                 media_seconds: file.shape.media_seconds,
+                name,
+                size: file.size,
+                done,
+                total,
             }),
         })
     }

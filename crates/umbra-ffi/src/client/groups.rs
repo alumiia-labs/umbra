@@ -1459,7 +1459,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
     /// Builds the record of one stored message and queues it, when the
     /// group holds both of its queues.
-    fn queue_group_post<R: CryptoRng + ?Sized>(
+    pub(super) fn queue_group_post<R: CryptoRng + ?Sized>(
         &mut self,
         conversation: ConversationId,
         message: Option<MsgRef>,
@@ -2955,8 +2955,28 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             &plain,
             rng,
         )?;
+        // IMP-163: a file of a group takes the same download as a file of a
+        // pairwise channel.
+        let mut wanted = None;
+        if parsed.kind == umbra_wire::app::AppKind::Attachment {
+            let (state, descriptor) = super::files::incoming_state_row(parsed.body);
+            batch.put(
+                super::files::FILE_STATE,
+                row,
+                Some(conversation.0),
+                &state,
+                rng,
+            )?;
+            wanted = descriptor;
+        }
         batch.commit()?;
         let message = MsgRef(row);
+        if let Some(descriptor) = wanted {
+            self.files.downloads.push_back(super::files::DownloadJob {
+                message,
+                descriptor: Box::new(descriptor),
+            });
+        }
         self.events.push_back(Event::Message {
             conversation,
             message,
