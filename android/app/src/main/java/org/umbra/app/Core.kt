@@ -273,6 +273,16 @@ object Core {
         }
     }
 
+    /** Removes a device from the set (Part 7 §7.7). */
+    fun removeDevice(deviceId: ByteArray) = call { client ->
+        client.removeDevice(deviceId)
+        val list = client.devices()
+        main.post {
+            devices.clear()
+            devices.addAll(list)
+        }
+    }
+
     /** Where the link of a device stands, for the view of the link. */
     var linkStatus by mutableStateOf<LinkStatus>(LinkStatus.Idle)
         private set
@@ -667,8 +677,12 @@ object Core {
                 if (!isVisible) Notifier.locked(app)
             }
             is FfiEvent.IntegrityFault -> fault = "The local store does not verify."
-            // Another device of the set added a conversation or named one.
-            is FfiEvent.Conversations -> refreshChats()
+            // Another device of the set added a conversation, named one, or
+            // changed the set.
+            is FfiEvent.Conversations -> {
+                refreshChats()
+                readDevices()
+            }
             // The sync channel of a device opened.
             is FfiEvent.DeviceLinked -> {
                 readDevices()

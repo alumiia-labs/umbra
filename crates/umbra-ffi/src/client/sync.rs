@@ -31,7 +31,10 @@ use umbra_core::{
     },
 };
 use umbra_crypto::rand_core::CryptoRng;
-use umbra_wire::app::{AppKind, AppMessage};
+use umbra_wire::app::{
+    devset::{ControlType, DeviceSetBody},
+    AppKind, AppMessage,
+};
 use zeroize::Zeroizing;
 
 use super::{devices::DEVICE_PEERS, Client};
@@ -121,6 +124,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             Some(bytes) => SyncEngine::restore(&Zeroizing::new(bytes))?,
             None => SyncEngine::new(identity.device_id, &[])?,
         };
+        // A device that left the roster leaves the engine, with its
+        // retained records (`DEV-257`).
+        let gone: Vec<DeviceId> = engine
+            .peers()
+            .filter(|peer| !others.contains(peer))
+            .copied()
+            .collect();
+        for device in gone {
+            engine.remove_peer(&device);
+        }
         for device in others {
             engine.add_peer(device)?;
         }
@@ -426,10 +439,33 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(())
     }
 
+    /// Sends the roster epoch that this device holds to each other device
+    /// of the set, as a control record (`DEV-176`). A peer takes an epoch
+    /// that follows its own and drops the others.
+    pub fn publish_roster<R: CryptoRng + ?Sized>(&mut self, rng: &mut R) -> Result<(), Error> {
+        let Some(roster) = self.roster_bytes()? else {
+            return Ok(());
+        };
+        let body = DeviceSetBody::Control {
+            control_type: ControlType::RosterEpoch,
+            payload: &roster,
+        };
+        let mut encoded = vec![0u8; roster.len().saturating_add(16)];
+        let used = body.encode(&mut encoded)?;
+        encoded.truncate(used);
+        let channels: Vec<ConversationId> = self.peer_channels()?.into_values().collect();
+        for channel in channels {
+            self.queue_sync(channel, &encoded, None, rng)?;
+        }
+        Ok(())
+    }
+
     /// Starts the resend of each record that a peer did not acknowledge, at
     /// the start of a run (`DEV-072`). [`Client::resend_one`] paces it. A
-    /// peer takes a record once (`DEV-025`).
+    /// peer takes a record once (`DEV-025`). The roster goes again too, since
+    /// a control record takes no resend of its own.
     pub fn start_sync_resend<R: CryptoRng + ?Sized>(&mut self, rng: &mut R) -> Result<(), Error> {
+        self.publish_roster(rng)?;
         let Some(mut engine) = self.sync_engine()? else {
             return Ok(());
         };
@@ -514,6 +550,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 Ok(Taken::Mutable { item, key, value }) => {
                     // An item that does not apply ends no batch.
                     let _ = self.apply_mutable(item, &key, &value, rng);
+                }
+                // An epoch that does not verify changes nothing.
+                Ok(Taken::Control {
+                    control_type: ControlType::RosterEpoch,
+                    payload,
+                }) if self.apply_roster(&payload, rng).unwrap_or(false) => {
+                    self.events.push_back(Event::Conversations);
                 }
                 _ => {}
             }

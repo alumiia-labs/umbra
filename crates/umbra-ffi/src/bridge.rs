@@ -143,6 +143,14 @@ impl Bridge {
         self.command(Command::Foreground(is_foreground))
     }
 
+    /// The contact of each conversation of the run.
+    pub fn contacts(&self) -> Vec<(ConversationId, ContactId)> {
+        self.contacts
+            .iter()
+            .map(|(conversation, contact)| (*conversation, *contact))
+            .collect()
+    }
+
     /// The contact of a conversation, for a record that the store made.
     pub fn contact_for(&self, conversation: &ConversationId) -> Option<ContactId> {
         self.contacts.get(conversation).copied()

@@ -31,6 +31,10 @@ pub(super) const DEVICE_SELF: TableId = TableId(0x21);
 pub(super) const DEVICE_ROSTER: TableId = TableId(0x22);
 /// The sync channel of each other device, by its conversation.
 pub(super) const DEVICE_PEERS: TableId = TableId(0x23);
+/// Each sync channel that a revocation ended, by its conversation. The node
+/// of the run that ended it still holds it, and the store takes no state of
+/// it again.
+pub(super) const ENDED_CHANNELS: TableId = TableId(0x26);
 
 const SELF_KEY: &[u8] = b"self";
 const ROSTER_KEY: &[u8] = b"roster";
@@ -182,6 +186,109 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
         }
         self.put_roster(bytes, rng)
+    }
+
+    /// Signs the roster epoch that revokes `device` and keeps it (Part 7
+    /// §7.7 step 1), and ends the sync channel of that device (step 2a).
+    /// The result is the epoch, for the other devices of the set.
+    pub fn revoke_device<R: CryptoRng + ?Sized>(
+        &mut self,
+        device: DeviceId,
+        rng: &mut R,
+    ) -> Result<Vec<u8>, Error> {
+        let identity = self.device_identity()?.ok_or(Error::NotFound)?;
+        if device == identity.device_id {
+            return Err(Error::Malformed);
+        }
+        let current = self.roster_bytes()?.ok_or(Error::NotFound)?;
+        let previous = Roster::parse(&current)?;
+        if previous.entry(&device).is_none() {
+            return Err(Error::NotFound);
+        }
+        let mut revoked = previous.revoked.clone();
+        revoked.push(device);
+        let next = Roster {
+            epoch: previous.epoch.saturating_add(1),
+            devices: previous
+                .devices
+                .iter()
+                .filter(|entry| entry.device_id != device)
+                .cloned()
+                .collect(),
+            revoked,
+            claims: Vec::new(),
+            prev_hash: Roster::hash(&current),
+            signer_id: identity.device_id,
+            sig: previous.sig,
+        };
+        let bytes = sign_roster(&next, &identity.roster_key(), rng)?;
+        self.put_roster(&bytes, rng)?;
+        self.end_sync_channel(device, rng)?;
+        Ok(bytes)
+    }
+
+    /// Takes a roster epoch that another device of the set signed, when it
+    /// follows the epoch held and verifies (`DEV-150` to `DEV-157`). The
+    /// sync channel of each device that it revokes ends (`DEV-257`). An
+    /// epoch that revokes this device changes nothing here (`DEV-180`). The
+    /// result is whether the store took it.
+    pub fn apply_roster<R: CryptoRng + ?Sized>(
+        &mut self,
+        bytes: &[u8],
+        rng: &mut R,
+    ) -> Result<bool, Error> {
+        let identity = self.device_identity()?.ok_or(Error::NotFound)?;
+        let current = self.roster_bytes()?.ok_or(Error::NotFound)?;
+        let previous = Roster::parse(&current)?;
+        let next = Roster::parse(bytes)?;
+        if next.epoch <= previous.epoch {
+            return Ok(false);
+        }
+        next.verify_successor(&previous, &Roster::hash(&current))?;
+        if next.revokes(&identity.device_id) {
+            return Ok(false);
+        }
+        let gone: Vec<DeviceId> = next
+            .revoked
+            .iter()
+            .filter(|device| !previous.revoked.contains(device))
+            .copied()
+            .collect();
+        self.put_roster(bytes, rng)?;
+        for device in gone {
+            self.end_sync_channel(device, rng)?;
+        }
+        Ok(true)
+    }
+
+    /// Ends the sync channel of a device: its row and its contact go, thus
+    /// no view shows it, no later run reads its queue, and a record on it
+    /// changes nothing (`DEV-255` to `DEV-257`). No `DEL` goes to its queue
+    /// (§7.7).
+    fn end_sync_channel<R: CryptoRng + ?Sized>(
+        &mut self,
+        device: DeviceId,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let channels = self.peer_channels()?;
+        let Some(channel) = channels.get(&device).copied() else {
+            return Ok(());
+        };
+        let open = self.open_mut()?;
+        let mut batch = open.store.begin();
+        batch.delete(DEVICE_PEERS, channel.0);
+        batch.delete(TableId::CONTACT, channel.0);
+        batch.put(ENDED_CHANNELS, channel.0, None, &[1], rng)?;
+        Ok(batch.commit()?)
+    }
+
+    /// Whether a revocation ended the channel of a conversation.
+    pub fn is_ended_channel(&self, conversation: ConversationId) -> Result<bool, Error> {
+        Ok(self
+            .open_ref()?
+            .store
+            .get(ENDED_CHANNELS, &conversation.0)?
+            .is_some())
     }
 
     /// The devices of the current roster.

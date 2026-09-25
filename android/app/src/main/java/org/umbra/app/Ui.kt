@@ -538,7 +538,11 @@ private fun SettingsTab(push: (Screen) -> Unit) {
         LaunchedEffect(Unit) { Core.readBackup() }
         val backupAt = Core.lastBackupAt
         val backup = if (backupAt == null) "No backup yet" else "Last backup ${timeLabel(context, backupAt * 1_000)}"
-        SettingRow("key", "Recovery code", backup) { push(Screen.RecoveryCode) }
+        // The recovery code and the backups belong to the device that owns
+        // the channels (Part 7 §7.7).
+        if (Core.ownsChannels) {
+            SettingRow("key", "Recovery code", backup) { push(Screen.RecoveryCode) }
+        }
         SettingRow("laptop", "Linked devices", devicesLabel(Core.devices.size)) { push(Screen.Devices) }
         LaunchedEffect(Unit) { Core.readDevices() }
     }

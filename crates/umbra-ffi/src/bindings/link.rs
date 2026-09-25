@@ -598,6 +598,13 @@ impl Inner {
             .roster
             .as_ref()
             .is_some_and(|roster| self.client.commit_roster(roster, &mut OsRng).is_ok());
+        // DEV-176: each other device of the set takes the new epoch.
+        if committed && self.client.publish_roster(&mut OsRng).is_ok() {
+            let Inner { client, bridge, .. } = &mut *self;
+            if let Some(running) = bridge.as_mut() {
+                let _ = running.flush(client, &mut OsRng);
+            }
+        }
         self.end_link(if committed {
             LinkStatus::Linked
         } else {
@@ -797,6 +804,34 @@ impl Handle {
         inner.link = None;
         let taken = taken.ok_or(FfiError::NotFound)?;
         Ok(Arc::new(Linked(Mutex::new(Some(taken)))))
+    }
+
+    /// Removes a device from the set (Part 7 §7.7): the epoch that revokes
+    /// it, the end of its sync channel, a new queue for each contact, since
+    /// the removed device knew each queue (step 2c), and the epoch to each
+    /// other device. The removed device keeps what it synced (`DEV-137`).
+    pub fn remove_device(&self, device_id: Vec<u8>) -> Result<(), FfiError> {
+        let device: umbra_core::devset::DeviceId = device_id
+            .as_slice()
+            .try_into()
+            .map_err(|_| FfiError::Malformed)?;
+        let mut inner = locked(&self.inner);
+        if !inner.client.owns_channels()? {
+            return Err(FfiError::NotFound);
+        }
+        inner.client.revoke_device(device, &mut OsRng)?;
+        inner.client.publish_roster(&mut OsRng)?;
+        let Inner { client, bridge, .. } = &mut *inner;
+        if let Some(running) = bridge.as_mut() {
+            let peers = client.device_peers()?;
+            for (conversation, contact) in running.contacts() {
+                if !peers.contains(&conversation) {
+                    running.rotate_now(contact)?;
+                }
+            }
+            running.flush(client, &mut OsRng)?;
+        }
+        Ok(())
     }
 
     /// Whether this device owns the channels of the set, thus whether it

@@ -416,6 +416,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .filter(|table| *table != super::OUTBOX)
             .collect();
         let mut rows = self.carried_rows(now, &tables)?;
+        // The recovery code opens each later backup, thus a device that the
+        // user removes later must not hold it (§7.7). The device that owns
+        // the channels writes the backups and keeps the code.
+        let code = self
+            .open_ref()?
+            .store
+            .row_id(TableId::LOCAL_IDENTITY, RECOVERY_CODE_KEY);
+        rows.retain(|row| {
+            !matches!(row, BackupRow::Put { table, row, .. } if *table == TableId::LOCAL_IDENTITY && *row == code)
+        });
         rows.extend(self.link_rows(roster, sync_bundle)?);
         let object = BackupObject {
             kind: KIND_FULL,

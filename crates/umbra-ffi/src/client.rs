@@ -650,6 +650,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     ) -> Result<(), Error> {
         let mut records = Vec::with_capacity(received.len());
         for (contact, app) in received {
+            // A channel that a revocation ended takes nothing (Part 7 §7.7).
+            if self.is_ended_channel(self.conversation_for(&contact.0)?)? {
+                continue;
+            }
             records.push(Record {
                 conversation: self.conversation_for(&contact.0)?,
                 app: app.clone(),
@@ -657,7 +661,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 synced: false,
             });
         }
-        self.commit_records(changes, &records, now_ms, rng)
+        let mut kept: Vec<&StateChange> = Vec::with_capacity(changes.len());
+        for change in changes {
+            if let StateChange::Contact { contact, .. } = change {
+                if self.is_ended_channel(self.conversation_for(&contact.0)?)? {
+                    continue;
+                }
+            }
+            kept.push(change);
+        }
+        self.commit_records(&kept, &records, now_ms, rng)
     }
 
     /// The commit of [`Client::commit_network`], for the records of a
@@ -667,7 +680,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// (`DEV-047`, `DEV-048`).
     fn commit_records<R: CryptoRng + ?Sized>(
         &mut self,
-        changes: &[StateChange],
+        changes: &[&StateChange],
         records: &[Record],
         now_ms: u64,
         rng: &mut R,

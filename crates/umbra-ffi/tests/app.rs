@@ -2756,6 +2756,63 @@ fn a_new_device_links_from_the_code_of_the_existing_one() {
             .count(),
         1
     );
+    // §7.7: the snapshot held no recovery code of the phone, thus a device
+    // that the user removes reads no later backup.
+    let code_of = |handle: &Handle| {
+        let view = Arc::new(View::default());
+        handle.recovery_code(view.clone()).unwrap();
+        let digits = view.0.lock().unwrap().clone();
+        digits
+    };
+    assert_ne!(code_of(&alice), code_of(&tablet));
+
+    // The phone removes the tablet: the set holds the phone alone, a record
+    // of Bob reaches the phone and not the tablet, and a record that the
+    // tablet hands over reaches nobody.
+    let tablet_id = tablet
+        .devices()
+        .unwrap()
+        .into_iter()
+        .find(|device| device.is_self)
+        .unwrap()
+        .device_id;
+    assert_eq!(
+        tablet.remove_device(tablet_id.clone()).err(),
+        Some(FfiError::NotFound)
+    );
+    alice.remove_device(tablet_id).unwrap();
+    assert_eq!(alice.devices().unwrap().len(), 1);
+    let draft = bob.new_draft(bob_conversation.clone()).unwrap();
+    draft.set_text(units("after the removal")).unwrap();
+    bob.send_draft(draft).unwrap();
+    // The phone holds an earlier record of Carol in its events too.
+    wait_for(&alice, |event| match event {
+        FfiEvent::Message { message, .. } => {
+            (rendered(&alice, message) == "after the removal").then_some(())
+        }
+        _ => None,
+    });
+    let draft = tablet.new_draft(alice_conversation.clone()).unwrap();
+    draft.set_text(units("from a removed tablet")).unwrap();
+    tablet.send_draft(draft).unwrap();
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(10) {
+        if let Some(FfiEvent::Message { message, .. }) = tablet.wait_event(200) {
+            assert_ne!(rendered(&tablet, message), "after the removal");
+        }
+        if let Some(FfiEvent::Message { message, .. }) = bob.wait_event(200) {
+            assert_ne!(rendered(&bob, message), "from a removed tablet");
+        }
+    }
+    // The channel of the removed tablet shows as no conversation, in this
+    // run and in the next one.
+    assert_eq!(alice.summaries().unwrap().len(), 2);
+    alice.clone().connect(network_for(&alice)).unwrap();
+    wait_for(&alice, |event| match event {
+        FfiEvent::Online => Some(()),
+        _ => None,
+    });
+    assert_eq!(alice.summaries().unwrap().len(), 2);
     for handle in [&alice, &bob, &tablet] {
         handle.disconnect();
     }

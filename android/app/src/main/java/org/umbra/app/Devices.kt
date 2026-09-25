@@ -31,24 +31,46 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
+import uniffi.umbra_ffi.Device
 import uniffi.umbra_ffi.LinkStatus
 
 /** The devices of the set (Part 7), and the start of a link. */
 @Composable
 fun DevicesScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
     LaunchedEffect(Unit) { Core.readDevices() }
+    var removing by remember { mutableStateOf<Device?>(null) }
+    removing?.let { device ->
+        // Part 7 DEV-137 and DEV-138: the two limits of a removal, in
+        // those words.
+        ActionSheet(
+            title = "Remove ${device.label.ifEmpty { "this device" }}?",
+            entries = listOf(
+                RowEntry("trash-can", "Remove") { Core.removeDevice(device.deviceId) },
+            ),
+            note = "Revocation acts on the future only. A revoked device keeps the data " +
+                "that it synced. For a device in hostile hands, reset the identity from " +
+                "the recovery phrase.",
+            onDismiss = { removing = null },
+        )
+    }
     Column(Modifier.fillMaxSize()) {
         BackBar("Linked devices", onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState())) {
             for (device in Core.devices) {
+                // The device that owns the channels removes another one.
+                val canRemove = Core.ownsChannels && !device.isSelf
                 Row(
-                    Modifier.fillMaxWidth().padding(horizontal = PressInset, vertical = 14.dp),
+                    Modifier
+                        .fillMaxWidth()
+                        .then(if (canRemove) Modifier.press(role = Role.Button) { removing = device } else Modifier)
+                        .padding(horizontal = PressInset, vertical = 14.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     FaIcon("mobile", size = 20.dp, tint = Palette.Text)
