@@ -18,6 +18,11 @@ by hand. `python scripts/logo.py --check` reports a file that is out of date.
 | `umbra-app-icon.svg` | Square tile on the 108-unit adaptive-icon canvas, inside the 66-unit safe zone |
 | `umbra-app-icon-rounded.svg`, `umbra-app-icon-dark.svg` | Tiles with round corners, green and charcoal |
 
+The script also writes the drawables of the Android app in
+`android/app/src/main/res`: the layers of the launcher icon and of its themed
+form, the splash icon, the notification icon (the small mark), the mark of
+the views, and the colour `brand_green`.
+
 Keep the rim. Without it the mark is a plain chat bubble. Below 32 px, use the
 favicon, whose rim stays visible.
 

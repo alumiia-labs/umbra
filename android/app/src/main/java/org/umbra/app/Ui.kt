@@ -264,7 +264,7 @@ private fun UnlockScreen() {
         // The block starts at one height in each state, thus nothing jumps
         // when the field gives way to the progress bar.
         Spacer(Modifier.height(132.dp))
-        HeroIcon("lock")
+        BrandHero()
         Spacer(Modifier.height(28.dp))
         when {
             isOpening -> Headline("Opening UMBRA")

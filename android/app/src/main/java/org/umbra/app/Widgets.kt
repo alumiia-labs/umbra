@@ -5,12 +5,20 @@ import android.text.InputType
 import android.text.TextUtils
 import android.util.TypedValue
 import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import android.widget.TextView
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,8 +35,11 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -40,37 +51,28 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.layout.layout
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.layout.layout
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.onLongClick
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.PlatformTextStyle
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.LineHeightStyle
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.LineHeightStyle
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.PlatformTextStyle
-import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.draw.drawWithContent
-import androidx.compose.foundation.interaction.collectIsPressedAsState
-import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.core.snap
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.ui.semantics.role
-import androidx.compose.ui.semantics.onLongClick
-import androidx.compose.ui.semantics.onClick
-import androidx.compose.ui.semantics.clearAndSetSemantics
-import androidx.compose.ui.semantics.semantics
-import android.view.inputmethod.InputMethodManager
 
 /**
  * The holder of a text field of the platform. A composable field holds its
@@ -391,6 +393,28 @@ fun HeroIcon(name: String) {
     }
 }
 
+/** The mark of the logo (brand/), in the action colour. */
+@Composable
+fun BrandMark(size: Dp) {
+    Icon(
+        painterResource(R.drawable.ic_umbra_mark),
+        contentDescription = null,
+        tint = Palette.Action,
+        modifier = Modifier.size(size),
+    )
+}
+
+/** The mark of the logo on the tile of [HeroIcon]. */
+@Composable
+fun BrandHero() {
+    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+        Box(
+            Modifier.size(84.dp).background(Palette.Container, RoundedCornerShape(24.dp)),
+            contentAlignment = Alignment.Center,
+        ) { BrandMark(size = 44.dp) }
+    }
+}
+
 /** A letter on a pastel ground. The ground comes from the conversation. */
 @Composable
 fun Avatar(chat: Chat, size: Int = 44) {
@@ -441,6 +465,8 @@ fun BrandBar(onConnection: () -> Unit) {
         Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, top = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        BrandMark(size = 22.dp)
+        Spacer(Modifier.width(10.dp))
         Text(
             "UMBRA",
             letterSpacing = 4.sp,

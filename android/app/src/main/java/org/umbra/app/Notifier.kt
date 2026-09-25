@@ -54,7 +54,7 @@ object Notifier {
     /** The notice of the foreground service, which the platform requires. */
     fun carrier(context: Context): Notification =
         Notification.Builder(context, CARRIER_CHANNEL)
-            .setSmallIcon(android.R.drawable.stat_notify_sync_noanim)
+            .setSmallIcon(R.drawable.ic_stat_umbra)
             .setContentTitle("UMBRA holds a connection")
             .setContentText("Messages arrive until the app locks.")
             .setContentIntent(openApp(context))
@@ -65,7 +65,7 @@ object Notifier {
     fun message(context: Context, conversation: Conversation) {
         if (!mayPost(context)) return
         val alert = Notification.Builder(context, MESSAGE_CHANNEL)
-            .setSmallIcon(android.R.drawable.stat_notify_chat)
+            .setSmallIcon(R.drawable.ic_stat_umbra)
             .setContentTitle("New message")
             .setGroup(conversation.label)
             .setAutoCancel(true)
@@ -83,7 +83,7 @@ object Notifier {
     fun pushed(context: Context) {
         if (!mayPost(context)) return
         val alert = Notification.Builder(context, MESSAGE_CHANNEL)
-            .setSmallIcon(android.R.drawable.stat_notify_chat)
+            .setSmallIcon(R.drawable.ic_stat_umbra)
             .setContentTitle("New message")
             .setAutoCancel(true)
             .setContentIntent(openApp(context))
@@ -99,7 +99,7 @@ object Notifier {
     fun locked(context: Context) {
         if (!mayPost(context)) return
         val notice = Notification.Builder(context, CARRIER_CHANNEL)
-            .setSmallIcon(android.R.drawable.ic_lock_lock)
+            .setSmallIcon(R.drawable.ic_stat_umbra)
             .setContentTitle("UMBRA is locked")
             .setContentText("Open the app to take messages.")
             .setAutoCancel(true)
