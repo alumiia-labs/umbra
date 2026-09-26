@@ -32,6 +32,11 @@ pub(crate) const RENDEZVOUS_STATE: TableId = TableId(0x27);
 pub(super) const PUBLISHED: TableId = TableId(0x28);
 /// Each contact request that waits for the user, under its identifier.
 pub(super) const REQUESTS: TableId = TableId(0x29);
+/// Each head of the log that this device accepted, under its `tree_size`
+/// (`DIS-063`): the size, the root, the timestamp, and the time of the
+/// acceptance.
+const DIRECTORY_HEADS: TableId = TableId(0x2D);
+const HEAD_ROW_LEN: usize = 8 + 32 + 8 + 8;
 
 /// The next Public Address index. Profile 0 has no entry (Part 4 §4.2.5),
 /// thus the first link takes index 1.
@@ -45,7 +50,10 @@ const PROFILE_NAME_SETTING: &[u8] = b"profile-name";
 /// The longest name of a Profile (Part 4 §4.2.5).
 pub const PROFILE_NAME_MAX: usize = 32;
 
-const PUBLISHED_VERSION: u8 = 0x01;
+/// The form of an entry with no rotation of its queue yet.
+const PUBLISHED_V1: u8 = 0x01;
+/// The form with the time of the queue and the queue before it.
+const PUBLISHED_VERSION: u8 = 0x02;
 const REQUEST_VERSION: u8 = 0x01;
 
 /// The kind of a published entry.
@@ -85,6 +93,15 @@ pub struct Published {
     pub expires_at: u64,
     /// The time of the last renewal of the lease.
     pub renewed_at: u64,
+    /// The time of the write of the current queue, from which its next
+    /// rotation counts (`DIS-133`).
+    pub queue_since: u64,
+    /// The queue that the last rotation replaced, and the end of its grace
+    /// (`DIS-134`).
+    pub previous: Option<([u8; 32], u64)>,
+    /// Whether the directory shows a version of the label that this device
+    /// did not write (`DIS-138`).
+    pub foreign: bool,
 }
 
 impl Published {
@@ -105,15 +122,26 @@ impl Published {
         out.extend_from_slice(&self.created_at.to_be_bytes());
         out.extend_from_slice(&self.expires_at.to_be_bytes());
         out.extend_from_slice(&self.renewed_at.to_be_bytes());
+        out.extend_from_slice(&self.queue_since.to_be_bytes());
+        match &self.previous {
+            Some((queue, until)) => {
+                out.push(1);
+                out.extend_from_slice(queue);
+                out.extend_from_slice(&until.to_be_bytes());
+            }
+            None => out.push(0),
+        }
+        out.push(u8::from(self.foreign));
         Ok(out)
     }
 
     fn parse(bytes: &[u8]) -> Result<Self, Error> {
         let mut r = Cursor(bytes);
-        if r.u8()? != PUBLISHED_VERSION {
+        let version = r.u8()?;
+        if version != PUBLISHED_VERSION && version != PUBLISHED_V1 {
             return Err(Error::Integrity);
         }
-        let out = Published {
+        let mut out = Published {
             id: r.array()?,
             kind: match r.u8()? {
                 1 => EntryKind::Address,
@@ -130,7 +158,19 @@ impl Published {
             created_at: u64::from_be_bytes(r.array()?),
             expires_at: u64::from_be_bytes(r.array()?),
             renewed_at: u64::from_be_bytes(r.array()?),
+            queue_since: 0,
+            previous: None,
+            foreign: false,
         };
+        if version == PUBLISHED_V1 {
+            out.queue_since = out.created_at;
+        } else {
+            out.queue_since = u64::from_be_bytes(r.array()?);
+            if r.u8()? == 1 {
+                out.previous = Some((r.array()?, u64::from_be_bytes(r.array()?)));
+            }
+            out.foreign = r.u8()? == 1;
+        }
         r.end()?;
         Ok(out)
     }
@@ -217,6 +257,66 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let store = &self.open_ref()?.store;
         let row = store.row_id(table, key);
         Ok(store.get(table, &row)?.map(Zeroizing::new))
+    }
+
+    /// The newest head of the log that this device accepted: its size, its
+    /// root, and its timestamp.
+    pub fn newest_head(&self) -> Result<Option<(u64, [u8; 32], u64)>, Error> {
+        let store = &self.open_ref()?.store;
+        let mut newest: Option<(u64, [u8; 32], u64)> = None;
+        for (_, plain) in store.list(DIRECTORY_HEADS, None)? {
+            let plain = Zeroizing::new(plain);
+            if plain.len() != HEAD_ROW_LEN {
+                return Err(Error::Integrity);
+            }
+            let mut r = Cursor(&plain);
+            let size = u64::from_be_bytes(r.array()?);
+            let root = r.array()?;
+            let timestamp = u64::from_be_bytes(r.array()?);
+            if newest.is_none_or(|(held, _, _)| size > held) {
+                newest = Some((size, root, timestamp));
+            }
+        }
+        Ok(newest)
+    }
+
+    /// Keeps a head that this device accepted, and drops each other head
+    /// after `TREE_HEAD_RETAIN` (`DIS-063`).
+    pub fn keep_head<R: CryptoRng + ?Sized>(
+        &mut self,
+        size: u64,
+        root: &[u8; 32],
+        timestamp: u64,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let open = self.open_mut()?;
+        let row = open.store.row_id(DIRECTORY_HEADS, &size.to_be_bytes());
+        let mut stale = Vec::new();
+        for (held_row, plain) in open.store.list(DIRECTORY_HEADS, None)? {
+            let accepted_at = plain
+                .get(48..56)
+                .and_then(|bytes| bytes.try_into().ok())
+                .map(u64::from_be_bytes)
+                .ok_or(Error::Integrity)?;
+            let retained = accepted_at.saturating_add(umbra_core::discovery::TREE_HEAD_RETAIN);
+            if held_row != row && now >= retained {
+                stale.push(held_row);
+            }
+        }
+        let value = [
+            size.to_be_bytes().as_slice(),
+            root,
+            &timestamp.to_be_bytes(),
+            &now.to_be_bytes(),
+        ]
+        .concat();
+        let mut batch = open.store.begin();
+        batch.put(DIRECTORY_HEADS, row, None, &value, rng)?;
+        for held in stale {
+            batch.delete(DIRECTORY_HEADS, held);
+        }
+        Ok(batch.commit()?)
     }
 
     /// Each entry that this device publishes, oldest first.
@@ -309,11 +409,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now: u64,
         rng: &mut R,
     ) -> Result<Option<[u8; 16]>, Error> {
-        let Some(entry) = self
-            .published()?
-            .into_iter()
-            .find(|entry| entry.queue == *queue)
-        else {
+        // DIS-135: the queue that a rotation replaced takes hellos in its
+        // grace too.
+        let Some(entry) = self.published()?.into_iter().find(|entry| {
+            entry.queue == *queue || entry.previous.is_some_and(|(held, _)| held == *queue)
+        }) else {
             return Ok(None);
         };
         let key = self.entry_key(entry.kind, entry.index, entry.rotation)?;

@@ -767,7 +767,7 @@ fn a_group_record_wakes_a_member_that_went_away_through_its_notify_queue() {
         None,
     ));
     let relays = tokio::runtime::Runtime::new().unwrap();
-    let network = start_signed_network_with(&relays, None, Some(&ndr));
+    let network = start_signed_network_with(&relays, None, Some(&ndr), None);
 
     let directory = std::env::temp_dir().join(format!("umbra-gpush-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&directory);
@@ -985,7 +985,64 @@ fn start_signed_network(relays: &tokio::runtime::Runtime) -> SignedNetwork {
 /// process and starts it again. The keys come from fixed seeds, thus a
 /// client of the first network knows each relay of the second.
 fn start_signed_network_at(relays: &tokio::runtime::Runtime, at: Option<&[u16]>) -> SignedNetwork {
-    start_signed_network_with(relays, at, None)
+    start_signed_network_with(relays, at, None, None)
+}
+
+/// A directory of Part 9 with its issuer, on loopback, with an epoch of one
+/// second: its gateway port and the pins of `DIS-163`.
+fn start_test_directory(relays: &tokio::runtime::Runtime) -> (u16, Vec<u8>) {
+    use umbra_core::discovery::{
+        dirclient::DirectoryPins,
+        handle::username_case_mapped,
+        head::{LogKeySet, KEYSET_LEN},
+        service::{Directory, DirectoryKeys},
+    };
+    let signers: Vec<SigningKey> = (0..3u8)
+        .map(|i| SigningKey::from_seed(Secret::new([0x70 + i; 32])))
+        .collect();
+    let public: Vec<_> = signers
+        .iter()
+        .map(|signer| signer.verifying_key().to_bytes())
+        .collect();
+    let mut keyset = vec![0u8; KEYSET_LEN];
+    let used = LogKeySet {
+        keyset_epoch: 1,
+        keys: public.iter().map(|key| &key[..]).collect(),
+    }
+    .encode(&mut keyset)
+    .unwrap();
+    keyset.truncate(used);
+    let directory = Directory::new(
+        DirectoryKeys {
+            voprf_seed: Secret::new([0x61; 32]),
+            vrf_seed: Secret::new([0x62; 32]),
+            issuer_seed: Secret::new([0x63; 32]),
+            signers,
+            keyset: keyset.clone(),
+        },
+        1,
+        username_case_mapped,
+    )
+    .unwrap();
+    let pair = umbra_crypto::kem::KeyPair::generate(&mut OsRng);
+    let pins = DirectoryPins {
+        key_config: umbra_crypto::ohttp::encode_key_config(1, pair.public()).to_vec(),
+        keyset,
+        vrf_public: *directory.vrf_public(),
+        voprf_public: *directory.voprf_public(),
+    }
+    .encode()
+    .unwrap();
+    let listener = relays.block_on(TcpListener::bind("127.0.0.1:0")).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    relays.spawn(umbra_relay::directory_server::run_directory(
+        listener,
+        tls_acceptor(LEAF, LEAF_KEY).unwrap(),
+        Gateway { key_id: 1, pair },
+        directory,
+        Box::new(umbra_relay::directory_server::MemoryDirectoryStore::default()),
+    ));
+    (port, pins)
 }
 
 /// The signed network with an NDR: the ingress relays carry its OHTTP
@@ -994,6 +1051,7 @@ fn start_signed_network_with(
     relays: &tokio::runtime::Runtime,
     at: Option<&[u16]>,
     ndr: Option<&TestNdr>,
+    directory: Option<u16>,
 ) -> SignedNetwork {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1126,8 +1184,15 @@ fn start_signed_network_with(
             // The first ingress relay has an address of its own here.
             route.0.relay.address = Some(std::net::IpAddr::from([127, 1, 0, 1]));
         }
-        // The ingress relay is the carrier of the manifest.
+        // The ingress relay is the carrier of the manifest, and of the
+        // requests to the directory (`DIS-162`).
         carried.manifest = (placed.layer == 1).then(|| manifest.clone());
+        if placed.layer == 1 {
+            carried.directory = directory.map(|port| OhttpForward {
+                gateway: Url::parse(&format!("https://localhost:{port}/gateway")).unwrap(),
+                tls: client_tls.clone(),
+            });
+        }
         relays.spawn(run_relay(
             node,
             listener,
@@ -3255,6 +3320,158 @@ fn a_group_made_after_the_link_reaches_each_linked_device() {
         "the laptop did not read the group after the re-key",
     );
     for handle in [&alice, &bob, &tablet, &laptop] {
+        handle.disconnect();
+    }
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// Sends a contact request to `target` until the log shows its entry: a
+/// registration or a write shows at the next epoch (`DIS-166`).
+fn request_until_listed(handle: &Handle, target: &str) {
+    let start = Instant::now();
+    loop {
+        match handle.send_contact_request(target.into()) {
+            Ok(()) => return,
+            Err(FfiError::NotFound | FfiError::Busy) => {
+                assert!(
+                    start.elapsed() < Duration::from_secs(40),
+                    "{target} never listed"
+                );
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            Err(other) => panic!("{other:?}"),
+        }
+    }
+}
+
+/// Part 9 end to end through the app: a reusable link and a handle take
+/// requests, the link moves to a new queue at its rotation (`DIS-133`), and
+/// a retired link takes none.
+#[test]
+fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
+    let _turn = DEVICE_TESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let relays = tokio::runtime::Runtime::new().unwrap();
+    let (directory_port, pins) = start_test_directory(&relays);
+    let network = start_signed_network_with(&relays, None, None, Some(directory_port));
+    let directory = std::env::temp_dir().join(format!("umbra-dir-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let ingress = network.ports[0];
+    let network_for = |handle: &Handle| Network {
+        directory_relay_url: Some(format!("https://localhost:{ingress}/directory")),
+        directory_pins: Some(pins.clone()),
+        directory_relay_ipv4: Some(vec![127, 1, 0, 1]),
+        ..handle
+            .network_of_manifest(
+                network.manifest.clone(),
+                network.keyset.clone(),
+                0,
+                HOST.into(),
+                Some(CA.into()),
+            )
+            .unwrap()
+            .network
+    };
+    let alice = launch(&directory, "alice.db", 1);
+    let bob = launch(&directory, "bob.db", 2);
+    let carol = launch(&directory, "carol.db", 3);
+    for handle in [&alice, &bob, &carol] {
+        handle.clone().connect(network_for(handle)).unwrap();
+        wait_for(handle, |event| match event {
+            FfiEvent::Online => Some(()),
+            _ => None,
+        });
+    }
+    assert!(alice.has_directory());
+
+    // A reusable link, and the request of Bob to it.
+    let link = alice.create_public_link(0).unwrap();
+    assert!(link.link.starts_with("umbra://p/"));
+    bob.set_profile_name("Bob".into()).unwrap();
+    request_until_listed(&bob, &link.link);
+    wait_for(&alice, |event| match event {
+        FfiEvent::ContactRequest => Some(()),
+        _ => None,
+    });
+    let request = alice.contact_requests().unwrap().remove(0);
+    assert_eq!(
+        (request.name.as_str(), request.via.as_str()),
+        ("Bob", link.link.as_str())
+    );
+    alice.accept_contact_request(request.id).unwrap();
+    wait_for_contact(&alice);
+    wait_for_contact(&bob);
+
+    // DIS-133: the link moves to a new queue, and the request of Carol
+    // reaches it.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let later = now + umbra_core::discovery::RENDEZVOUS_ROTATE + 60;
+    let (first, _) = alice.entry_queues(&link.id).unwrap();
+    alice.maintain_directory_at(later).unwrap();
+    let (second, previous) = alice.entry_queues(&link.id).unwrap();
+    assert_ne!(second, first);
+    assert_eq!(previous, Some(first));
+    std::thread::sleep(Duration::from_secs(6));
+    request_until_listed(&carol, &link.link);
+    wait_for(&alice, |event| match event {
+        FfiEvent::ContactRequest => Some(()),
+        _ => None,
+    });
+    let request = alice.contact_requests().unwrap().remove(0);
+    alice.decline_contact_request(request.id).unwrap();
+    assert!(alice.contact_requests().unwrap().is_empty());
+    // DIS-134: the grace of the old queue ends.
+    alice
+        .maintain_directory_at(later + umbra_core::discovery::ROTATE_GRACE + 60)
+        .unwrap();
+    assert_eq!(alice.entry_queues(&link.id).unwrap(), (second, None));
+    // DIS-137: the device reads its own entries, and each one is its own.
+    assert!(alice.directory_warnings().unwrap().is_empty());
+
+    // A handle, and the request of Carol to it.
+    let handle = alice.claim_handle("Alice".into()).unwrap();
+    assert!(handle.starts_with("@alice#"), "{handle}");
+    assert_eq!(alice.my_handle().unwrap(), Some(handle.clone()));
+    request_until_listed(&carol, &handle);
+    wait_for(&alice, |event| match event {
+        FfiEvent::ContactRequest => Some(()),
+        _ => None,
+    });
+    assert_eq!(alice.contact_requests().unwrap().len(), 1);
+
+    // DIS-171: a retired link takes no request.
+    let start = Instant::now();
+    loop {
+        match alice.retire_public_link(link.id.clone()) {
+            Ok(()) => break,
+            Err(FfiError::Busy) => {
+                assert!(start.elapsed() < Duration::from_secs(40), "no retirement");
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            Err(other) => panic!("{other:?}"),
+        }
+    }
+    assert!(alice.public_links().unwrap().is_empty());
+    let start = Instant::now();
+    loop {
+        match bob.send_contact_request(link.link.clone()) {
+            Err(FfiError::NotFound) => break,
+            Ok(()) | Err(FfiError::Busy) => {
+                assert!(
+                    start.elapsed() < Duration::from_secs(40),
+                    "the link still takes requests"
+                );
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            Err(other) => panic!("{other:?}"),
+        }
+    }
+    for handle in [&alice, &bob, &carol] {
         handle.disconnect();
     }
     let _ = std::fs::remove_dir_all(&directory);

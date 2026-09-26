@@ -10,6 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use umbra_core::discovery::{RENDEZVOUS_ROTATE, ROTATE_GRACE};
 use umbra_core::{
     abuse::{
         epoch_number,
@@ -49,7 +50,17 @@ pub struct DirectoryLink {
     route: DirectoryRoute,
     pins: Arc<DirectoryPins>,
     tls: Arc<native::ClientConfig>,
+    /// The newest head that this device accepted: its size, its root, and
+    /// its timestamp (`DIS-061`).
+    held: Arc<std::sync::Mutex<Option<HeldHead>>>,
 }
+
+/// A head that this device accepted: its size, its root, and its timestamp.
+type HeldHead = (u64, [u8; 32], u64);
+
+/// The tries of a lookup whose head and consistency proof name two epochs,
+/// since an epoch closed between the two requests.
+const HEAD_TRIES: usize = 3;
 
 impl From<DirError> for FfiError {
     fn from(error: DirError) -> Self {
@@ -95,7 +106,36 @@ impl DirectoryLink {
             },
             pins: Arc::new(pins),
             tls,
+            held: Arc::default(),
         })
+    }
+
+    /// The link for one call, from the head that the store holds.
+    fn with_held(&self, held: Option<HeldHead>) -> Self {
+        DirectoryLink {
+            held: Arc::new(std::sync::Mutex::new(held)),
+            ..self.clone()
+        }
+    }
+
+    fn held(&self) -> Option<HeldHead> {
+        *self
+            .held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Verifies a head under the pinned key set and the clock (`DIS-054` to
+    /// `DIS-062`).
+    fn verify_head<'a>(&self, bytes: &'a [u8], now: u64) -> Result<SignedTreeHead<'a>, FfiError> {
+        let head = SignedTreeHead::parse(bytes).map_err(|_| FfiError::Malformed)?;
+        let (keyset, _) = LogKeySet::parse(&self.pins.keyset).map_err(|_| FfiError::Malformed)?;
+        let mut heads = HeadState::new(keyset).map_err(|_| FfiError::Malformed)?;
+        heads.accept(&head, now).map_err(|error| match error {
+            umbra_core::Error::Stale => FfiError::Stale,
+            _ => FfiError::Unverified,
+        })?;
+        Ok(head)
     }
 
     /// Sends one request and returns the body of a done answer.
@@ -125,25 +165,68 @@ impl DirectoryLink {
     /// The lookup proof of a search key under the newest head, after the
     /// head verified under the pinned key set (`DIS-066`).
     fn lookup(&self, search_key: &[u8; 64]) -> Result<(LookupProof, AcceptedHead), FfiError> {
-        let looked = self.send(Kind::Lookup, search_key)?;
-        let (head, proof) = dirclient::parse_lookup(&looked).map_err(|_| FfiError::Malformed)?;
-        let head = SignedTreeHead::parse(&head).map_err(|_| FfiError::Malformed)?;
-        let (keyset, _) = LogKeySet::parse(&self.pins.keyset).map_err(|_| FfiError::Malformed)?;
-        let now = unix_now();
-        let mut heads = HeadState::new(keyset).map_err(|_| FfiError::Malformed)?;
-        heads.accept(&head, now).map_err(|error| match error {
-            umbra_core::Error::Stale => FfiError::Stale,
-            _ => FfiError::Unverified,
-        })?;
-        Ok((
-            proof,
-            AcceptedHead {
-                tree_size: head.tree_size,
-                root: head.root,
-                timestamp: head.timestamp,
-                accepted_at: now,
-            },
-        ))
+        for _ in 0..HEAD_TRIES {
+            let looked = self.send(Kind::Lookup, search_key)?;
+            let (bytes, proof) =
+                dirclient::parse_lookup(&looked).map_err(|_| FfiError::Malformed)?;
+            let now = unix_now();
+            let head = self.verify_head(&bytes, now)?;
+            if !self.extends_held(&head, now)? {
+                // An epoch closed between the lookup and the proof.
+                continue;
+            }
+            *self
+                .held
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some((head.tree_size, head.root, head.timestamp));
+            return Ok((
+                proof,
+                AcceptedHead {
+                    tree_size: head.tree_size,
+                    root: head.root,
+                    timestamp: head.timestamp,
+                    accepted_at: now,
+                },
+            ));
+        }
+        Err(FfiError::Busy)
+    }
+
+    /// Whether a head extends the newest held head: a smaller log is a
+    /// rollback (`DIS-061`), a second root at one size is a split view, and
+    /// a larger log proves that it holds the held one. `false` is a proof
+    /// that names another head, which a new lookup settles.
+    fn extends_held(&self, head: &SignedTreeHead<'_>, now: u64) -> Result<bool, FfiError> {
+        let Some((size, root, _)) = self.held() else {
+            return Ok(true);
+        };
+        if head.tree_size < size {
+            return Err(FfiError::Stale);
+        }
+        if head.tree_size == size {
+            return if head.root == root {
+                Ok(true)
+            } else {
+                Err(FfiError::Unverified)
+            };
+        }
+        let answer = self.send(Kind::Head, &size.to_be_bytes())?;
+        let (newest, consistency) =
+            dirclient::parse_head(&answer).map_err(|_| FfiError::Malformed)?;
+        let newest = self.verify_head(&newest, now)?;
+        if newest.tree_size != head.tree_size || newest.root != head.root {
+            return Ok(false);
+        }
+        umbra_core::discovery::logtree::verify_consistency(
+            size,
+            &root,
+            head.tree_size,
+            &head.root,
+            &consistency,
+        )
+        .map_err(|_| FfiError::Unverified)?;
+        Ok(true)
     }
 
     fn vrf_key(&self) -> Result<vrf::PublicKey, FfiError> {
@@ -288,15 +371,59 @@ fn via_text(entry: &Published) -> String {
     }
 }
 
+/// The link of one call, which keeps the newest head that the call
+/// accepted in the store when it ends (`DIS-063`).
+struct HeldLink<'a> {
+    handle: &'a Handle,
+    link: DirectoryLink,
+    before: Option<HeldHead>,
+}
+
+impl core::ops::Deref for HeldLink<'_> {
+    type Target = DirectoryLink;
+
+    fn deref(&self) -> &DirectoryLink {
+        &self.link
+    }
+}
+
+impl Drop for HeldLink<'_> {
+    fn drop(&mut self) {
+        let Some((size, root, timestamp)) = self.link.held() else {
+            return;
+        };
+        if self.before.is_some_and(|(held, _, _)| held >= size) {
+            return;
+        }
+        let _ = locked(&self.handle.inner).client.keep_head(
+            size,
+            &root,
+            timestamp,
+            unix_now(),
+            &mut OsRng,
+        );
+    }
+}
+
 impl Handle {
     /// The route to the directory, for a device that owns its channels.
-    fn directory_link(&self) -> Result<DirectoryLink, FfiError> {
+    fn directory_link(&self) -> Result<HeldLink<'_>, FfiError> {
         let inner = locked(&self.inner);
         // DEV-287: a linked device makes no contact of its own.
         if !inner.owns_channels {
             return Err(FfiError::NotFound);
         }
-        inner.directory.clone().ok_or(FfiError::Offline)
+        let before = inner.client.newest_head()?;
+        let link = inner
+            .directory
+            .as_ref()
+            .ok_or(FfiError::Offline)?
+            .with_held(before);
+        Ok(HeldLink {
+            handle: self,
+            link,
+            before,
+        })
     }
 
     /// Makes a rendezvous queue and waits for its address.
@@ -371,6 +498,9 @@ impl Handle {
             created_at: now,
             expires_at,
             renewed_at: now,
+            queue_since: now,
+            previous: None,
+            foreign: false,
         };
         locked(&self.inner)
             .client
@@ -417,11 +547,191 @@ impl Handle {
             Err(error) => return Err(error),
         }
         self.end_rendezvous(entry.queue);
+        if let Some((previous, _)) = entry.previous {
+            self.end_rendezvous(previous);
+        }
         let mut inner = locked(&self.inner);
         // NTF-043: the handle of the queue goes with it.
         let _ = inner.client.unbind_queue(&entry.queue, &mut OsRng);
+        if let Some((previous, _)) = entry.previous {
+            let _ = inner.client.unbind_queue(&previous, &mut OsRng);
+        }
         inner.client.drop_published(&entry.id)?;
         Ok(())
+    }
+
+    /// Moves an entry to a new rendezvous queue (`DIS-133`): the new entry
+    /// version goes to the directory under the key of the entry, and the
+    /// queue before it stays for `ROTATE_GRACE` (`DIS-134`).
+    fn rotate_queue(
+        &self,
+        link: &DirectoryLink,
+        entry: &Published,
+        now: u64,
+    ) -> Result<(), FfiError> {
+        let (queue, rendezvous) = self.new_rendezvous()?;
+        let written = (|| {
+            let key =
+                locked(&self.inner)
+                    .client
+                    .entry_key(entry.kind, entry.index, entry.rotation)?;
+            let address = QueueAddress::parse(&rendezvous).map_err(|_| FfiError::Malformed)?;
+            let version = entry.version.checked_add(1).ok_or(FfiError::TooLong)?;
+            let bytes = match entry.kind {
+                EntryKind::Address => {
+                    let mut out = vec![0u8; ADDRESS_ENTRY_LEN];
+                    AddressEntry {
+                        address: entry
+                            .name
+                            .as_slice()
+                            .try_into()
+                            .map_err(|_| FfiError::Integrity)?,
+                        address_pk: key.public().to_bytes(),
+                        rendezvous: Some(address),
+                        version,
+                    }
+                    .encode(&mut out)
+                    .map_err(|_| FfiError::Malformed)?;
+                    out
+                }
+                EntryKind::Handle => {
+                    let next = DirectoryEntry {
+                        handle: entry.name.clone(),
+                        hk_pub: key.public().to_bytes(),
+                        rendezvous: Some(address),
+                        version,
+                    };
+                    let mut out = vec![0u8; next.len()];
+                    let used = next.encode(&mut out).map_err(|_| FfiError::Malformed)?;
+                    out.truncate(used);
+                    out
+                }
+            };
+            link.write(&entry.label, &entry.name, &key, entry.version, &bytes)
+        })();
+        if let Err(error) = written {
+            self.end_rendezvous(queue);
+            return Err(error);
+        }
+        let rotated = Published {
+            version: entry.version.saturating_add(1),
+            queue,
+            rendezvous,
+            queue_since: now,
+            previous: Some((entry.queue, now.saturating_add(ROTATE_GRACE))),
+            ..entry.clone()
+        };
+        locked(&self.inner)
+            .client
+            .put_published(&rotated, &mut OsRng)?;
+        Ok(())
+    }
+
+    /// Whether the directory shows the entry as this device wrote it
+    /// (`DIS-137`): the newest version is its version, with its key and its
+    /// queue. A version below it is a write of this device that waits for
+    /// the next epoch.
+    fn is_own_entry(&self, link: &DirectoryLink, entry: &Published) -> Result<bool, FfiError> {
+        let found = link.find(&entry.label)?;
+        let (Some(bytes), Some(version)) = (found.entry, found.version) else {
+            return Ok(false);
+        };
+        if version < entry.version {
+            return Ok(true);
+        }
+        if version > entry.version {
+            return Ok(false);
+        }
+        let key = locked(&self.inner)
+            .client
+            .entry_key(entry.kind, entry.index, entry.rotation)?
+            .public()
+            .to_bytes();
+        let rendezvous = QueueAddress::parse(&entry.rendezvous).map_err(|_| FfiError::Integrity)?;
+        let (shown_key, shown_queue) = match entry.kind {
+            EntryKind::Address => {
+                let shown = AddressEntry::parse(&bytes).map_err(|_| FfiError::Unverified)?;
+                (shown.address_pk, shown.rendezvous)
+            }
+            EntryKind::Handle => {
+                let shown = DirectoryEntry::parse(&bytes).map_err(|_| FfiError::Unverified)?;
+                (shown.hk_pub, shown.rendezvous)
+            }
+        };
+        let same_queue = shown_queue.is_some_and(|queue| {
+            queue.relay_id == rendezvous.relay_id && queue.sender_id == rendezvous.sender_id
+        });
+        Ok(shown_key == key && same_queue)
+    }
+
+    /// The upkeep of the entries at `now`; [`Handle::maintain_directory`]
+    /// gives it the clock of the device. A test gives it a later time.
+    #[doc(hidden)]
+    pub fn maintain_directory_at(&self, now: u64) -> Result<(), FfiError> {
+        let link = self.directory_link()?;
+        let entries = locked(&self.inner).client.published()?;
+        for mut entry in entries {
+            if entry.expires_at != 0 && now >= entry.expires_at {
+                // A write in the same epoch waits for the next call.
+                let _ = self.retire(&link, &entry);
+                continue;
+            }
+            // DIS-137, DIS-138: the holder reads its own entry.
+            if let Ok(own) = self.is_own_entry(&link, &entry) {
+                if own == entry.foreign {
+                    entry.foreign = !own;
+                    locked(&self.inner)
+                        .client
+                        .put_published(&entry, &mut OsRng)?;
+                }
+            }
+            // DIS-139: over a version of another writer, only the user acts.
+            if entry.foreign {
+                continue;
+            }
+            // DIS-134: the grace of the queue before the last rotation ends.
+            if let Some((previous, until)) = entry.previous {
+                if now >= until {
+                    self.end_rendezvous(previous);
+                    let mut inner = locked(&self.inner);
+                    let _ = inner.client.unbind_queue(&previous, &mut OsRng);
+                    entry.previous = None;
+                    inner.client.put_published(&entry, &mut OsRng)?;
+                }
+            }
+            // DIS-133: a queue of `RENDEZVOUS_ROTATE` takes its successor. A
+            // queue in its grace waits for the end of that grace.
+            if entry.previous.is_none()
+                && now.saturating_sub(entry.queue_since) >= RENDEZVOUS_ROTATE
+            {
+                let _ = self.rotate_queue(&link, &entry, now);
+                continue;
+            }
+            if now.saturating_sub(entry.renewed_at) < RENEW_EVERY {
+                continue;
+            }
+            let key =
+                locked(&self.inner)
+                    .client
+                    .entry_key(entry.kind, entry.index, entry.rotation)?;
+            if link.renew(&entry.label, &entry.name, &key).is_ok() {
+                let renewed = Published {
+                    renewed_at: now,
+                    ..entry
+                };
+                locked(&self.inner)
+                    .client
+                    .put_published(&renewed, &mut OsRng)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The rendezvous queue of an entry and the one before it, for a test.
+    #[doc(hidden)]
+    pub fn entry_queues(&self, id: &[u8]) -> Result<([u8; 32], Option<[u8; 32]>), FfiError> {
+        let entry = self.find_published(id)?;
+        Ok((entry.queue, entry.previous.map(|(queue, _)| queue)))
     }
 
     fn find_published(&self, id: &[u8]) -> Result<Published, FfiError> {
@@ -442,6 +752,19 @@ impl Handle {
     pub fn has_directory(&self) -> bool {
         let inner = locked(&self.inner);
         inner.owns_channels && inner.directory.is_some()
+    }
+
+    /// The link or the handle of each entry whose newest version in the
+    /// directory this device did not write (`DIS-138`). The view warns of a
+    /// takeover.
+    pub fn directory_warnings(&self) -> Result<Vec<String>, FfiError> {
+        Ok(locked(&self.inner)
+            .client
+            .published()?
+            .into_iter()
+            .filter(|entry| entry.foreign)
+            .map(|entry| via_text(&entry))
+            .collect())
     }
 
     /// Each reusable link of this device, oldest first.
@@ -685,32 +1008,6 @@ impl Handle {
     /// (Part 9 §9.9.1). The call blocks for each write, thus the platform
     /// calls it from a worker thread after the client is online.
     pub fn maintain_directory(&self) -> Result<(), FfiError> {
-        let link = self.directory_link()?;
-        let now = unix_now();
-        let entries = locked(&self.inner).client.published()?;
-        for entry in entries {
-            if entry.expires_at != 0 && now >= entry.expires_at {
-                // A write in the same epoch waits for the next call.
-                let _ = self.retire(&link, &entry);
-                continue;
-            }
-            if now.saturating_sub(entry.renewed_at) < RENEW_EVERY {
-                continue;
-            }
-            let key =
-                locked(&self.inner)
-                    .client
-                    .entry_key(entry.kind, entry.index, entry.rotation)?;
-            if link.renew(&entry.label, &entry.name, &key).is_ok() {
-                let renewed = Published {
-                    renewed_at: now,
-                    ..entry
-                };
-                locked(&self.inner)
-                    .client
-                    .put_published(&renewed, &mut OsRng)?;
-            }
-        }
-        Ok(())
+        self.maintain_directory_at(unix_now())
     }
 }

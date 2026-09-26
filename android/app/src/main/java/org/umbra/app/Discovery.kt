@@ -90,6 +90,18 @@ private fun SectionLabel(text: String) {
     )
 }
 
+/** DIS-138: the directory shows a version that this device did not write. */
+@Composable
+private fun TakeoverWarning(label: String) {
+    if (label !in Core.directoryWarnings) return
+    Spacer(Modifier.height(12.dp))
+    Note(
+        "The directory shows a version of $label that this device did not write. " +
+            "Someone else may control it. Retire it, and make a new one.",
+        isError = true,
+    )
+}
+
 /** The line of a directory call that runs, or of its fault. */
 @Composable
 private fun DirectoryState(working: String) {
@@ -198,6 +210,7 @@ fun PublicLinkScreen(id: List<Byte>, onBack: () -> Unit) {
             }
             Spacer(Modifier.height(16.dp))
             MonoBox(link.link)
+            TakeoverWarning(link.link)
             Spacer(Modifier.height(12.dp))
             PrimaryButton("Share link") { shareText(context, link.link, "Share link") }
             Spacer(Modifier.height(8.dp))
@@ -262,6 +275,7 @@ fun HandleScreen(onBack: () -> Unit) {
                 )
             } else {
                 Headline(handle)
+                TakeoverWarning(handle)
                 Spacer(Modifier.height(16.dp))
                 PrimaryButton("Share handle") { shareText(context, handle, "Share handle") }
                 Spacer(Modifier.height(8.dp))

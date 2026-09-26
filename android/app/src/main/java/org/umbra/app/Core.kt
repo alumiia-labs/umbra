@@ -285,6 +285,9 @@ object Core {
     /** The contact requests that wait (Part 9 §9.6). */
     val contactRequests = mutableStateListOf<ContactRequestInfo>()
 
+    /** Each link or handle whose entry another party wrote (`DIS-138`). */
+    val directoryWarnings = mutableStateListOf<String>()
+
     /** Whether a call to the directory runs, and the words of its fault. */
     var directoryBusy by mutableStateOf(false)
         private set
@@ -308,7 +311,10 @@ object Core {
         val links = client.publicLinks()
         val handle = client.myHandle()
         val requests = client.contactRequests()
+        val warnings = client.directoryWarnings()
         main.post {
+            directoryWarnings.clear()
+            directoryWarnings.addAll(warnings)
             publicLinks.clear()
             publicLinks.addAll(links)
             myHandle = handle
