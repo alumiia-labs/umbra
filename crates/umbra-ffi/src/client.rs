@@ -10,6 +10,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 mod backup;
+mod block;
 mod dead;
 mod devices;
 mod discovery;
@@ -698,6 +699,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 sends_delivery.push(record.conversation);
             }
         }
+        let mut blocked = Vec::new();
+        for record in records {
+            if !blocked.contains(&record.conversation) && self.is_blocked(record.conversation)? {
+                blocked.push(record.conversation);
+            }
+        }
         let mut sync_bodies: Vec<(ConversationId, Vec<u8>)> = Vec::new();
         let mut to_publish: Vec<(ConversationId, Vec<u8>)> = Vec::new();
         let mut handoffs: Vec<Outgoing> = Vec::new();
@@ -770,6 +777,30 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
             // DEV-050: kind 0x20 on a pairwise channel changes nothing.
             if parsed.kind == AppKind::DeviceSet {
+                continue;
+            }
+            // ABU-027 to ABU-030: the record of a blocked contact goes, after
+            // its acknowledgment, with no view and no alert. A delivery
+            // receipt keeps the rate that held before the block.
+            if !from_user && blocked.contains(&conversation) {
+                if !record.synced
+                    && sends_delivery.contains(&conversation)
+                    && Delivery::of_receipt(parsed.kind).is_none()
+                {
+                    let key =
+                        held_receipt_key(conversation, AppKind::DeliveryReceipt, &parsed.msg_id);
+                    planned.push(Planned::Put(
+                        RECEIPT,
+                        open.store.row_id(RECEIPT, &key),
+                        Some(conversation.0),
+                        Zeroizing::new(held_receipt(
+                            conversation,
+                            AppKind::DeliveryReceipt,
+                            &parsed.msg_id,
+                            now_ms / 1_000,
+                        )),
+                    ));
+                }
                 continue;
             }
             if !record.synced && owns {
@@ -1660,8 +1691,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             return Ok(());
         }
         // NET-042: the user opened the conversation, and no other act gives
-        // a read receipt.
-        if self.receipt_settings(conversation)?.read {
+        // a read receipt. ABU-031: a blocked contact gets none.
+        if self.receipt_settings(conversation)?.read && !self.is_blocked(conversation)? {
             self.hold_read_receipts(conversation, read_up_to, now_ms / 1_000, rng)?;
         }
         self.put_conversation_meta(conversation, now_ms, &name, rng)?;

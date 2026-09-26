@@ -114,6 +114,10 @@ pub const ITEM_CONTACT_NAME: u8 = 3;
 /// (§7.5.3, `DEV-304`), under the row of the message in the stores of the
 /// set.
 pub const ITEM_DELIVERY: u8 = 6;
+/// The item of the block state of a contact, under its subject, or of a
+/// member of a group, under the group subject and the index (§7.5.3, Part
+/// 13 `ABU-021`).
+pub const ITEM_BLOCK: u8 = 9;
 /// The item of an entry of the local identity table (`DEV-011`, `DEV-294`).
 pub const ITEM_IDENTITY_ENTRY: u8 = 13;
 /// The item of the state of a group that the owner of the channels made or

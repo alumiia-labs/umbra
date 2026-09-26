@@ -428,6 +428,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
         let mut work = Vec::new();
         for conversation in conversations {
+            // NET-194, NET-197: a blocked contact has no blob of this device,
+            // and this device reads none of it.
+            if self.is_blocked(conversation)? {
+                if let Some(row) = self.dead_row(conversation)? {
+                    work.extend(self.erase_of(conversation, &row)?);
+                    self.put_dead_row(conversation, None, rng)?;
+                }
+                continue;
+            }
             let is_silent = silent.contains(&conversation);
             let mut row = self.dead_row(conversation)?.unwrap_or_else(DeadRow::empty);
             if !row.dead && !is_silent {

@@ -3165,6 +3165,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         }
                         continue;
                     }
+                    // ABU-036, ABU-038: a record of a blocked member goes,
+                    // and the view counts it.
+                    if self.is_member_blocked(conversation, sender)? {
+                        self.count_discarded(conversation, rng)?;
+                        continue;
+                    }
                     let stored = self.store_group_message(conversation, &app, now_ms, rng)?;
                     first = first.or(stored);
                 }
@@ -3336,6 +3342,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 now,
                 rng,
             ),
+            // A member that moved to new keys keeps its block.
+            Applied::Rekeyed { old, new, .. } => {
+                self.move_member_block(conversation, *old, *new, rng)
+            }
             Applied::Removed(trigger) => {
                 if let Some(index) = trigger.excluded {
                     self.groups.evictions.remove(&(conversation, index));

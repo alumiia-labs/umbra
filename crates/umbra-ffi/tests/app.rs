@@ -3515,6 +3515,77 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
     let _ = std::fs::remove_dir_all(&directory);
 }
 
+/// Part 13 §13.12: a block discards each record of the contact after its
+/// acknowledgment, and tells the contact nothing. An unblock gives the next
+/// record, and a discarded one stays gone (`ABU-035`).
+#[test]
+fn a_blocked_contact_sends_and_nothing_shows() {
+    let relays = tokio::runtime::Runtime::new().unwrap();
+    let network = start_signed_network(&relays);
+    let directory = std::env::temp_dir().join(format!("umbra-block-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let network_for = |handle: &Handle| {
+        handle
+            .network_of_manifest(
+                network.manifest.clone(),
+                network.keyset.clone(),
+                0,
+                HOST.into(),
+                Some(CA.into()),
+            )
+            .unwrap()
+            .network
+    };
+    let alice = launch(&directory, "alice.db", 1);
+    let bob = launch(&directory, "bob.db", 2);
+    for handle in [&alice, &bob] {
+        handle.clone().connect(network_for(handle)).unwrap();
+    }
+    alice.invite().unwrap();
+    let link = wait_for(&alice, |event| match event {
+        FfiEvent::Invitation { link } => Some(link),
+        _ => None,
+    });
+    bob.accept(link).unwrap();
+    let alice_bob = wait_for_contact(&alice);
+    let bob_alice = wait_for_contact(&bob);
+    let send = |text: &str| {
+        let draft = bob.new_draft(bob_alice.clone()).unwrap();
+        draft.set_text(units(text)).unwrap();
+        bob.send_draft(draft).unwrap();
+    };
+    send("before");
+    wait_for_text(&alice, &alice_bob, "before");
+
+    alice.set_blocked(alice_bob.clone(), true).unwrap();
+    assert!(alice.is_blocked(alice_bob.clone()).unwrap());
+    send("while blocked");
+    // The relay takes the record, and the device of Alice acknowledges it.
+    let sent = bob
+        .messages(bob_alice.clone())
+        .unwrap()
+        .into_iter()
+        .find(|message| rendered(&bob, message.clone()) == "while blocked")
+        .unwrap();
+    tick_until(
+        &[&bob, &alice],
+        || bob.msg_info(sent.clone()).unwrap().delivery == 1,
+        "the relay did not take the record",
+    );
+    std::thread::sleep(Duration::from_secs(5));
+    assert!(!holds_text(&alice, &alice_bob, "while blocked"));
+
+    alice.set_blocked(alice_bob.clone(), false).unwrap();
+    send("after");
+    wait_for_text(&alice, &alice_bob, "after");
+    assert!(!holds_text(&alice, &alice_bob, "while blocked"));
+    for handle in [&alice, &bob] {
+        handle.disconnect();
+    }
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
 #[test]
 fn a_connect_that_replaces_a_run_keeps_the_new_run() {
     let relays = tokio::runtime::Runtime::new().unwrap();

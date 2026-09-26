@@ -275,6 +275,32 @@ object Core {
         }
     }
 
+    /** Whether the contact of a conversation is blocked (Part 13 §13.12). */
+    fun isBlocked(conversation: Conversation, onResult: (Boolean) -> Unit) = call { client ->
+        val blocked = client.isBlocked(conversation.id)
+        main.post { onResult(blocked) }
+    }
+
+    fun setBlocked(conversation: Conversation, blocked: Boolean) = call { client ->
+        client.setBlocked(conversation.id, blocked)
+        main.post { revision++ }
+    }
+
+    fun blockedMembers(conversation: Conversation, onResult: (List<UShort>) -> Unit) = call { client ->
+        val members = client.blockedMembers(conversation.id)
+        main.post { onResult(members) }
+    }
+
+    fun setMemberBlocked(conversation: Conversation, index: UShort, blocked: Boolean) = call { client ->
+        client.setMemberBlocked(conversation.id, index, blocked)
+        main.post { revision++ }
+    }
+
+    fun discardedCount(conversation: Conversation, onResult: (ULong) -> Unit) = call { client ->
+        val count = client.discardedCount(conversation.id)
+        main.post { onResult(count) }
+    }
+
     /** The reusable links of this device (Part 4 §4.3.2). */
     val publicLinks = mutableStateListOf<PublicLink>()
 

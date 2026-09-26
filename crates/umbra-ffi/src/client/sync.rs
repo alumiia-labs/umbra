@@ -206,7 +206,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     }
 
     /// The contact conversation that `subject` names on this device.
-    fn conversation_of_subject(
+    pub(super) fn conversation_of_subject(
         &mut self,
         subject: &[u8; 32],
     ) -> Result<Option<ConversationId>, Error> {
@@ -442,6 +442,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     ) -> Result<(), Error> {
         if item == ITEM_DELIVERY {
             return self.apply_delivery_item(key, value, rng);
+        }
+        if item == umbra_core::devset::sync::ITEM_BLOCK {
+            return self.apply_block_item(key, value, rng);
         }
         let subject: [u8; 32] = key.try_into().map_err(|_| Error::Malformed)?;
         match item {

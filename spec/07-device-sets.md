@@ -857,7 +857,7 @@ class in Part 6 §6.6. **[DEV-022]** A client MUST NOT process a kind that decla
   | The delivery state and the read state | Each message |
   | The local insertion sequence of Part 11 §11.7 | Each conversation |
   | The group `counter` of the group sender owner, Part 11 §11.3.4 and §7.5.4 | Each group |
-  | The block state of Part 13 §13.12 | Each contact |
+  | The block state of Part 13 §13.12 | Each contact, and each member of a group under its index |
   | The archive flag, the pin flag, and the folder label | Each conversation |
   | The unread marker that a user sets by hand | Each conversation |
   | The draft text | Each conversation |

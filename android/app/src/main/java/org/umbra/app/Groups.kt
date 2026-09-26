@@ -230,15 +230,21 @@ fun GroupMembersScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
         LazyColumn {
             items(members, key = { it.index.toInt() }) { member ->
                 val editable = mayRemove && !member.isSelf && member.role <= own!!.role
-                MemberRow(member, editable) {
+                // Each other member opens its block (Part 13 §13.12), and an
+                // admin opens its role and its removal beside it (`ABU-039`).
+                MemberRow(member, !member.isSelf) {
                     push(
-                        Screen.MemberRole(
-                            chat.conversation,
-                            member.index,
-                            memberName(member),
-                            member.role,
-                            own!!.role,
-                        ),
+                        if (editable) {
+                            Screen.MemberRole(
+                                chat.conversation,
+                                member.index,
+                                memberName(member),
+                                member.role,
+                                own!!.role,
+                            )
+                        } else {
+                            Screen.BlockMember(chat.conversation, member.index, memberName(member))
+                        },
                     )
                 }
             }
@@ -358,6 +364,7 @@ fun MemberRoleScreen(
                     push(Screen.RemoveMember(chat.conversation, index, name))
                 }
             }
+            QuietButton("Block") { push(Screen.BlockMember(chat.conversation, index, name)) }
         }
     }
 }

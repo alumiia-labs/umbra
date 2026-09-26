@@ -79,6 +79,16 @@ fun ContactDetailsScreen(chat: Chat, onBack: () -> Unit, onMessage: () -> Unit, 
                     push(Screen.ConversationSettings(chat.conversation))
                 },
             )
+            HorizontalDivider(color = Palette.Divider)
+            var isBlocked by remember { mutableStateOf(false) }
+            LaunchedEffect(chat.conversation, Core.revision) {
+                Core.isBlocked(chat.conversation) { isBlocked = it }
+            }
+            EntryRow(
+                RowEntry("ban", if (isBlocked) "Unblock" else "Block") {
+                    push(Screen.BlockContact(chat.conversation))
+                },
+            )
         }
     }
 }

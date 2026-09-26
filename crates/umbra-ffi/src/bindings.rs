@@ -45,6 +45,7 @@ use umbra_transport::{
 use umbra_wire::ndr::{NdrResponse, TokenCarrier};
 use zeroize::Zeroizing;
 
+mod block;
 mod directory;
 mod link;
 
