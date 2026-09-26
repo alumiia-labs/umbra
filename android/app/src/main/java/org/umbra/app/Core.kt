@@ -288,6 +288,9 @@ object Core {
     /** Each link or handle whose entry another party wrote (`DIS-138`). */
     val directoryWarnings = mutableStateListOf<String>()
 
+    /** Each link or handle at its limit of requests this week (`ABU-087`). */
+    val entriesAtLimit = mutableStateListOf<String>()
+
     /** Whether a call to the directory runs, and the words of its fault. */
     var directoryBusy by mutableStateOf(false)
         private set
@@ -312,9 +315,12 @@ object Core {
         val handle = client.myHandle()
         val requests = client.contactRequests()
         val warnings = client.directoryWarnings()
+        val full = client.entriesAtLimit()
         main.post {
             directoryWarnings.clear()
             directoryWarnings.addAll(warnings)
+            entriesAtLimit.clear()
+            entriesAtLimit.addAll(full)
             publicLinks.clear()
             publicLinks.addAll(links)
             myHandle = handle
@@ -365,6 +371,9 @@ object Core {
     fun retirePublicLink(link: PublicLink) = directory { client -> client.retirePublicLink(link.id) }
 
     fun claimHandle(name: String) = directory { client -> client.claimHandle(name) }
+
+    /** A new rendezvous queue for a link or the handle, at once. */
+    fun rotateEntry(label: String) = directory { client -> client.rotateEntry(label) }
 
     fun releaseHandle() = directory { client -> client.releaseHandle() }
 
@@ -848,6 +857,7 @@ object Core {
             is FfiEvent.Conversations -> {
                 refreshChats()
                 readDevices()
+                readDirectory()
             }
             // The sync channel of a device opened.
             is FfiEvent.DeviceLinked -> {

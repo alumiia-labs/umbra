@@ -102,6 +102,18 @@ private fun TakeoverWarning(label: String) {
     )
 }
 
+/** ABU-087: an entry at its limit of requests offers a new queue. */
+@Composable
+private fun LimitOffer(label: String) {
+    if (label !in Core.entriesAtLimit) return
+    Spacer(Modifier.height(12.dp))
+    Note("This week's request limit is reached. New requests are dropped until you move to a new queue.")
+    Spacer(Modifier.height(8.dp))
+    SecondaryButton("Move to a new queue", enabled = Core.online && !Core.directoryBusy) {
+        Core.rotateEntry(label)
+    }
+}
+
 /** The line of a directory call that runs, or of its fault. */
 @Composable
 private fun DirectoryState(working: String) {
@@ -211,6 +223,7 @@ fun PublicLinkScreen(id: List<Byte>, onBack: () -> Unit) {
             Spacer(Modifier.height(16.dp))
             MonoBox(link.link)
             TakeoverWarning(link.link)
+            LimitOffer(link.link)
             Spacer(Modifier.height(12.dp))
             PrimaryButton("Share link") { shareText(context, link.link, "Share link") }
             Spacer(Modifier.height(8.dp))
@@ -276,6 +289,7 @@ fun HandleScreen(onBack: () -> Unit) {
             } else {
                 Headline(handle)
                 TakeoverWarning(handle)
+                LimitOffer(handle)
                 Spacer(Modifier.height(16.dp))
                 PrimaryButton("Share handle") { shareText(context, handle, "Share handle") }
                 Spacer(Modifier.height(8.dp))

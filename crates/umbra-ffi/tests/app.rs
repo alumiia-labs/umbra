@@ -3443,6 +3443,19 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
         _ => None,
     });
     assert_eq!(alice.contact_requests().unwrap().len(), 1);
+    assert!(alice.entries_at_limit().unwrap().is_empty());
+    // §9.9: one tap moves the handle to a new queue.
+    let start = Instant::now();
+    loop {
+        match alice.rotate_entry(handle.clone()) {
+            Ok(()) => break,
+            Err(FfiError::Busy) => {
+                assert!(start.elapsed() < Duration::from_secs(40), "no rotation");
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            Err(other) => panic!("{other:?}"),
+        }
+    }
 
     // DIS-171: a retired link takes no request.
     let start = Instant::now();

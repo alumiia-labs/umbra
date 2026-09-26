@@ -754,6 +754,40 @@ impl Handle {
         inner.owns_channels && inner.directory.is_some()
     }
 
+    /// The link or the handle of each entry that took the limit of hellos of
+    /// this week (`ABU-086`). The view offers a new queue (`ABU-087`).
+    pub fn entries_at_limit(&self) -> Result<Vec<String>, FfiError> {
+        let inner = locked(&self.inner);
+        let now = unix_now();
+        let mut out = Vec::new();
+        for entry in inner.client.published()? {
+            if inner.client.is_at_hello_limit(&entry.id, now)? {
+                out.push(via_text(&entry));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Moves a link or the handle to a new rendezvous queue at once, at a
+    /// tap of the user (§9.9, `ABU-087`). `label` is the link or the handle
+    /// as the views show it. A queue in its grace ends first.
+    pub fn rotate_entry(&self, label: String) -> Result<(), FfiError> {
+        let link = self.directory_link()?;
+        let mut entry = locked(&self.inner)
+            .client
+            .published()?
+            .into_iter()
+            .find(|entry| via_text(entry) == label)
+            .ok_or(FfiError::NotFound)?;
+        if let Some((previous, _)) = entry.previous.take() {
+            self.end_rendezvous(previous);
+            let _ = locked(&self.inner)
+                .client
+                .unbind_queue(&previous, &mut OsRng);
+        }
+        self.rotate_queue(&link, &entry, unix_now())
+    }
+
     /// The link or the handle of each entry whose newest version in the
     /// directory this device did not write (`DIS-138`). The view warns of a
     /// takeover.

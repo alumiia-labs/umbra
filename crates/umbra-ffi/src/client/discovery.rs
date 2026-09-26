@@ -453,6 +453,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             None => 0,
         };
         if count >= HELLO_INBOUND_LIMIT {
+            // ABU-087: the view offers the rotation of the queue.
+            self.events.push_back(super::Event::Conversations);
             return Ok(None);
         }
         let mut bundle = Zeroizing::new(vec![0u8; body.bundle.len()]);
@@ -513,6 +515,19 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
         out.sort_by_key(|(request, _)| request.received_at);
         Ok(out)
+    }
+
+    /// Whether an entry took `HELLO_INBOUND_LIMIT` hellos in the epoch of
+    /// `now` (`ABU-086`), thus the view offers its rotation (`ABU-087`).
+    pub fn is_at_hello_limit(&self, id: &[u8; 16], now: u64) -> Result<bool, Error> {
+        let key = [HELLO_COUNT_SETTING, id.as_slice()].concat();
+        let Some(bytes) = self.get_row(super::SETTINGS, &key)? else {
+            return Ok(false);
+        };
+        let mut r = Cursor(&bytes);
+        let epoch = u32::from_be_bytes(r.array()?);
+        let count = u32::from_be_bytes(r.array()?);
+        Ok(epoch == epoch_number(now) && count >= HELLO_INBOUND_LIMIT)
     }
 
     /// Each contact request that waits, oldest first.
