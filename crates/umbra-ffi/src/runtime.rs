@@ -427,6 +427,8 @@ pub async fn run_client(
             _ = tick.tick() => {
                 let now = unix_now();
                 let mut events = node.on_tick(now);
+                // DIS-015: the rendezvous circuits start on their own delay.
+                let _ = node.start_rendezvous_due(now, &mut rng);
                 // NET-176: a fault of one rotation ends no run, and the
                 // next check tries again.
                 if node.is_ready() && now >= next_rotation_check {

@@ -132,6 +132,7 @@ fn localhost(port: u16) -> Dial {
 }
 
 /// Waits for the first event that `pick` takes, and drops each other one.
+#[track_caller]
 fn wait_for<T>(handle: &Handle, mut pick: impl FnMut(FfiEvent) -> Option<T>) -> T {
     let start = Instant::now();
     while start.elapsed() < STEP {
@@ -150,6 +151,7 @@ fn wait_for<T>(handle: &Handle, mut pick: impl FnMut(FfiEvent) -> Option<T>) -> 
     panic!("no such event in time");
 }
 
+#[track_caller]
 fn wait_for_contact(handle: &Handle) -> Vec<u8> {
     wait_for(handle, |event| match event {
         FfiEvent::Contact { conversation } => Some(conversation),
@@ -157,6 +159,7 @@ fn wait_for_contact(handle: &Handle) -> Vec<u8> {
     })
 }
 
+#[track_caller]
 fn wait_for_message(handle: &Handle) -> (Vec<u8>, Arc<MsgHandle>) {
     wait_for(handle, |event| match event {
         FfiEvent::Message {
@@ -2880,6 +2883,7 @@ fn link_new_device(
 }
 
 /// A message of `handle` whose text is `text`, in `conversation`.
+#[track_caller]
 fn wait_for_text(handle: &Handle, conversation: &[u8], text: &str) {
     wait_for(handle, |event| match event {
         FfiEvent::Message {

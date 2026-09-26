@@ -457,6 +457,9 @@ struct Slot {
     /// The first tick that saw this circuit build or serve, from which its
     /// age counts.
     born: Option<u64>,
+    /// Whether the circuit serves rendezvous queues of Part 9 §9.6 and no
+    /// other queue or record (`DIS-014`).
+    rendezvous: bool,
 }
 
 /// The time before `CIRCUIT_MAX_AGE` at which a client ends a circuit
@@ -492,7 +495,22 @@ impl Slot {
             chain: None,
             building_since: None,
             born: None,
+            rendezvous: false,
         }
+    }
+
+    /// An empty circuit for rendezvous queues.
+    fn for_rendezvous(exit: Option<[u8; 32]>) -> Self {
+        Slot {
+            rendezvous: true,
+            ..Slot::empty(exit)
+        }
+    }
+
+    /// Whether this circuit carries the traffic of the contacts: each
+    /// circuit but a rendezvous one.
+    fn is_general(&self) -> bool {
+        !self.rendezvous
     }
 
     /// Whether this circuit can serve a queue at `relay`.
@@ -1023,6 +1041,10 @@ pub struct ClientNode {
     /// The rendezvous queues of Part 9 §9.6, by `RecipientId`. Each has
     /// the form of a notify queue: no contact writes to it.
     rendezvous: BTreeMap<[u8; 32], NotifyQueue>,
+    /// The delay of the first build of the rendezvous circuits in a run,
+    /// in seconds, and the time at which it ends (`DIS-015`).
+    rendezvous_wait: u64,
+    rendezvous_at: Option<u64>,
     /// The contacts whose new queue the relay makes now.
     rotating: BTreeSet<[u8; 32]>,
     /// The contacts with a renewal handshake that runs, in either role.
@@ -1145,6 +1167,8 @@ impl ClientNode {
             forced: BTreeSet::new(),
             notify: BTreeMap::new(),
             rendezvous: BTreeMap::new(),
+            rendezvous_wait: 0,
+            rendezvous_at: None,
             moved: BTreeSet::new(),
             changes: Vec::new(),
         }
@@ -1666,7 +1690,8 @@ impl ClientNode {
         };
         let ready = self.slots.iter().position(|slot| {
             let exit = slot.chain.and_then(|chain| chain.last().copied());
-            slot.is_ready()
+            slot.is_general()
+                && slot.is_ready()
                 && slot.has_room()
                 && exit.is_some_and(|exit| is_other(&exit, self.operator_of(&exit)))
         });
@@ -1793,7 +1818,7 @@ impl ClientNode {
         let inbound = Inbound::restore(&mut reader)?;
         reader.end()?;
         let id = *inbound.recipient_id();
-        self.assign(id, relay);
+        self.assign_to(id, relay, true);
         self.rendezvous.insert(id, NotifyQueue { inbound, relay });
         Ok(id)
     }
@@ -1951,11 +1976,23 @@ impl ClientNode {
     /// each one is full (`NET-022`). The division runs again at each run
     /// (`NET-024`), thus the store holds no circuit of a queue.
     fn assign(&mut self, queue: [u8; 32], relay: [u8; 32]) {
-        let serves = |slot: &&mut Slot| slot.has_room() && slot.ends_at(&relay);
+        self.assign_to(queue, relay, false);
+    }
+
+    /// As [`ClientNode::assign`], on a rendezvous circuit when
+    /// `rendezvous` holds, and on a general one otherwise (`DIS-014`).
+    fn assign_to(&mut self, queue: [u8; 32], relay: [u8; 32], rendezvous: bool) {
+        let serves = |slot: &&mut Slot| {
+            slot.rendezvous == rendezvous && slot.has_room() && slot.ends_at(&relay)
+        };
         let slot = match self.slots.iter_mut().find(serves) {
             Some(slot) => slot,
             None => {
-                self.slots.push(Slot::empty(None));
+                self.slots.push(if rendezvous {
+                    Slot::for_rendezvous(None)
+                } else {
+                    Slot::empty(None)
+                });
                 match self.slots.last_mut() {
                     Some(slot) => slot,
                     None => return,
@@ -2155,9 +2192,13 @@ impl ClientNode {
         capsule.truncate(used);
         self.capsules.push_back(capsule);
         self.link = Some(link);
-        if self.slots.is_empty() {
+        if !self.slots.iter().any(Slot::is_general) {
             self.slots.push(Slot::empty(None));
         }
+        // DIS-015: the rendezvous circuits build after a delay of their own,
+        // from 20 to 120 s.
+        self.rendezvous_wait = 20 + u64::from(u8::from_be_bytes(random(rng))) % 101;
+        self.rendezvous_at = None;
         // A new run builds each chain again (`NET-024`). The builds run side
         // by side, and the `circ_id` of a cell names its circuit.
         for slot in &mut self.slots {
@@ -2165,6 +2206,9 @@ impl ClientNode {
         }
         let mut built = 0usize;
         for slot in 0..self.slots.len() {
+            if self.slots.get(slot).is_some_and(|slot| slot.rendezvous) {
+                continue;
+            }
             self.current = slot;
             // A circuit to a relay that left the relay set, or to one that
             // no conformant chain reaches, builds nothing (`NET-033`). Its
@@ -2182,7 +2226,11 @@ impl ClientNode {
         // With no circuit the client cannot make a queue for a new contact,
         // thus it builds one that can end at each relay. A circuit of that
         // kind that found no chain above finds none now.
-        if self.slots.iter().any(|slot| slot.exit.is_none()) {
+        if self
+            .slots
+            .iter()
+            .any(|slot| slot.is_general() && slot.exit.is_none())
+        {
             return Err(Error::NoPath);
         }
         self.add_circuit(None, rng)?;
@@ -2202,6 +2250,48 @@ impl ClientNode {
         self.slots.push(Slot::empty(exit));
         self.current = self.slots.len().saturating_sub(1);
         self.build_current(rng)
+    }
+
+    /// Adds one rendezvous circuit, and starts its build.
+    fn add_rendezvous_circuit<R: CryptoRng + ?Sized>(&mut self, rng: &mut R) -> Result<(), Error> {
+        self.slots.push(Slot::for_rendezvous(None));
+        self.current = self.slots.len().saturating_sub(1);
+        self.build_current(rng)
+    }
+
+    /// Starts the rendezvous circuits of the run at the end of their own
+    /// random delay, thus their builds do not follow the builds of the
+    /// circuits of the contacts (`DIS-015`). The runtime calls it at each
+    /// tick.
+    pub fn start_rendezvous_due<R: CryptoRng + ?Sized>(
+        &mut self,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        if self.link.is_none() {
+            return Ok(());
+        }
+        let waiting = |slot: &Slot| {
+            slot.rendezvous && matches!(slot.circuit, Circuit::None) && slot.chain.is_none()
+        };
+        if !self.slots.iter().any(waiting) {
+            return Ok(());
+        }
+        let at = *self
+            .rendezvous_at
+            .get_or_insert(now.saturating_add(self.rendezvous_wait));
+        if now < at {
+            return Ok(());
+        }
+        let current = self.current;
+        for index in 0..self.slots.len() {
+            if self.slots.get(index).is_some_and(waiting) {
+                self.current = index;
+                self.build_current(rng)?;
+            }
+        }
+        self.current = current;
+        Ok(())
     }
 
     /// Chooses a chain for the current circuit and sends its first
@@ -2257,7 +2347,7 @@ impl ClientNode {
     fn ready_slot_to(&self, relay: &[u8; 32], avoid: Option<usize>) -> Option<usize> {
         let ends_here = |(index, slot): (usize, &Slot)| {
             let exit = slot.chain.and_then(|chain| chain.last().copied());
-            (slot.is_ready() && exit == Some(*relay)).then_some(index)
+            (slot.is_general() && slot.is_ready() && exit == Some(*relay)).then_some(index)
         };
         let mut found = self.slots.iter().enumerate().filter_map(ends_here);
         let other = found.clone().find(|index| Some(*index) != avoid);
@@ -2271,9 +2361,12 @@ impl ClientNode {
         relay: [u8; 32],
         rng: &mut R,
     ) -> Result<(), Error> {
-        let ends_there = |slot: &Slot| match slot.chain {
-            Some(chain) => chain.last() == Some(&relay),
-            None => slot.exit == Some(relay),
+        let ends_there = |slot: &Slot| {
+            slot.is_general()
+                && match slot.chain {
+                    Some(chain) => chain.last() == Some(&relay),
+                    None => slot.exit == Some(relay),
+                }
         };
         if self.slots.iter().any(ends_there) {
             return Ok(());
@@ -2395,12 +2488,21 @@ impl ClientNode {
         rng: &mut R,
     ) -> Result<u64, Error> {
         let user_handle = self.handle();
-        let with_room = |slot: &Slot| slot.is_ready() && slot.has_room();
+        // DIS-014: a rendezvous queue lives on a circuit of its own kind.
+        let rendezvous = matches!(purpose, Purpose::Rendezvous);
+        let with_room =
+            |slot: &Slot| slot.rendezvous == rendezvous && slot.is_ready() && slot.has_room();
         let Some(slot) = self.slots.iter().position(with_room) else {
             self.deferred.push_back((purpose, user_handle));
-            let is_building = |slot: &Slot| matches!(slot.circuit, Circuit::Building { .. });
+            let is_building = |slot: &Slot| {
+                slot.rendezvous == rendezvous && matches!(slot.circuit, Circuit::Building { .. })
+            };
             if !self.slots.iter().any(is_building) {
-                self.add_circuit(None, rng)?;
+                if rendezvous {
+                    self.add_rendezvous_circuit(rng)?;
+                } else {
+                    self.add_circuit(None, rng)?;
+                }
             }
             return Ok(user_handle);
         };
@@ -2684,7 +2786,8 @@ impl ClientNode {
             let exit = slot.chain.and_then(|chain| chain.last().copied());
             let free = slot.queues.is_empty() && slot.reserved == 0;
             let serves = free || slot.queues.contains(group_queue_id);
-            (slot.is_ready() && exit == Some(*relay) && serves).then_some(index)
+            (slot.is_general() && slot.is_ready() && exit == Some(*relay) && serves)
+                .then_some(index)
         })
     }
 
@@ -2701,7 +2804,11 @@ impl ClientNode {
                 None => slot.exit == Some(relay),
             };
             let is_live = !matches!(slot.circuit, Circuit::None);
-            ends_there && is_live && slot.queues.is_empty() && slot.reserved == 0
+            slot.is_general()
+                && ends_there
+                && is_live
+                && slot.queues.is_empty()
+                && slot.reserved == 0
         };
         if self.slots.iter().any(free_for_it) {
             return Ok(());
@@ -2709,7 +2816,9 @@ impl ClientNode {
         let current = self.current;
         // A circuit to this relay whose build ended builds again in its own
         // slot, thus the dead slot does not hold its commands for ever.
-        let dead = |slot: &Slot| slot.exit == Some(relay) && matches!(slot.circuit, Circuit::None);
+        let dead = |slot: &Slot| {
+            slot.is_general() && slot.exit == Some(relay) && matches!(slot.circuit, Circuit::None)
+        };
         let started = match self.slots.iter().position(dead) {
             Some(index) => {
                 self.current = index;
@@ -3626,15 +3735,28 @@ impl ClientNode {
         )));
         let ready = self.current;
         self.subscribe_stored(rng)?;
-        // Each queue that waited for room goes to this circuit.
+        // Each queue that waited for room goes to a circuit of its kind.
+        let rendezvous = self.slot()?.rendezvous;
+        let of_kind = |purpose: &Purpose| matches!(purpose, Purpose::Rendezvous) == rendezvous;
         while self.slot()?.has_room() {
-            let Some((purpose, user_handle)) = self.deferred.pop_front() else {
+            let Some(at) = self
+                .deferred
+                .iter()
+                .position(|(purpose, _)| of_kind(purpose))
+            else {
+                break;
+            };
+            let Some((purpose, user_handle)) = self.deferred.remove(at) else {
                 break;
             };
             self.make_queue_here(purpose, user_handle, rng)?;
         }
-        if !self.deferred.is_empty() {
-            self.add_circuit(None, rng)?;
+        if self.deferred.iter().any(|(purpose, _)| of_kind(purpose)) {
+            if rendezvous {
+                self.add_rendezvous_circuit(rng)?;
+            } else {
+                self.add_circuit(None, rng)?;
+            }
         }
         self.current = ready;
         self.flush_to_exit(now, rng)?;

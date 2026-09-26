@@ -224,6 +224,9 @@ impl Network {
         self.commit_relays();
         {
             for client in 0..self.clients.len() {
+                self.clients[client]
+                    .start_rendezvous_due(self.now, &mut self.rng)
+                    .unwrap();
                 // The store takes each change before a capsule leaves.
                 self.commit(client);
                 for capsule in self.clients[client].take_capsules() {
@@ -642,10 +645,13 @@ fn a_hello_on_a_rendezvous_queue_becomes_a_contact() {
     network.settle();
     network.take_events(ALICE);
     network.take_events(BOB);
+    let general = network.clients[ALICE].chains().len();
     network.clients[ALICE]
         .make_rendezvous_queue(&mut Rng(1))
         .unwrap();
     network.settle();
+    // DIS-014: the rendezvous queue has a circuit of its own.
+    assert_eq!(network.clients[ALICE].chains().len(), general + 1);
     let events = network.take_events(ALICE);
     let Some(ClientEvent::RendezvousQueue { address, .. }) = events.last() else {
         panic!("{events:?}");
@@ -653,8 +659,12 @@ fn a_hello_on_a_rendezvous_queue_becomes_a_contact() {
     let address = address.clone();
     assert_eq!(network.stored[ALICE].rendezvous.len(), 1);
     network.restart(ALICE, 0x40);
-    network.settle();
+    // DIS-015: the rendezvous circuit of a run starts after 20 to 120 s.
+    for _ in 0..11 {
+        network.settle();
+    }
     network.take_events(ALICE);
+    assert_eq!(network.clients[ALICE].chains().len(), 2);
 
     // Bob holds the key of the entry and the queue from a lookup.
     let key = RootIdentity::new(Secret::new([0x40; 32])).public_address_key(1);

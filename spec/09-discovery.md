@@ -694,6 +694,12 @@ schedule**. Thus a relay that sees the
 polling of a handle queue cannot correlate that polling with the conversation
 traffic of the same user.
 
+> *Implementation note.* The reference client reads its rendezvous queues on
+> circuits that carry no other queue, no handshake record, and no group
+> command. It builds them at a random delay of 20 s to 120 s after the start of
+> a run, and it builds the circuits of the contacts at once. Each rendezvous
+> queue has a notification handle of its own (Part 8 `NTF-043`).
+
 ## 9.7 A key change propagates in each pairwise session, and no root signs it
 
 This rule is the KISS answer and also the unlinkable answer, and it is easy to

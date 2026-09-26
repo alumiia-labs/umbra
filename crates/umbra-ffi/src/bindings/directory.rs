@@ -417,7 +417,10 @@ impl Handle {
             Err(error) => return Err(error),
         }
         self.end_rendezvous(entry.queue);
-        locked(&self.inner).client.drop_published(&entry.id)?;
+        let mut inner = locked(&self.inner);
+        // NTF-043: the handle of the queue goes with it.
+        let _ = inner.client.unbind_queue(&entry.queue, &mut OsRng);
+        inner.client.drop_published(&entry.id)?;
         Ok(())
     }
 

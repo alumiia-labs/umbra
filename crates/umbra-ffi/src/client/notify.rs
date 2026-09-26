@@ -41,6 +41,9 @@ const GROUP_LEN: usize = GROUP_LEN_V1 + 32 + 8;
 const PAIRWISE: u8 = 0;
 /// A group of notify queues, which holds no pairwise queue (`NTF-091`).
 const DIGEST: u8 = 1;
+/// A group of one rendezvous queue of Part 9 §9.6, which holds no other
+/// queue (`NTF-043`, `NTF-044`).
+const RENDEZVOUS: u8 = 2;
 const QUEUE_LEN: usize = 32 + 16 + 16 + 1;
 
 /// The NDR does not hold the group.
@@ -392,6 +395,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     }
 
     /// Whether a queue is a notify queue of Part 8 §8.5.2.
+    fn is_rendezvous_queue(&self, recipient_id: &[u8; 32]) -> Result<bool, Error> {
+        let store = &self.open_ref()?.store;
+        let row = store.row_id(super::discovery::RENDEZVOUS_STATE, recipient_id);
+        Ok(store
+            .get(super::discovery::RENDEZVOUS_STATE, &row)?
+            .is_some())
+    }
+
     fn is_notify_queue(&self, recipient_id: &[u8; 32]) -> Result<bool, Error> {
         let store = &self.open_ref()?.store;
         let row = store.row_id(super::NOTIFY_STATE, recipient_id);
@@ -473,16 +484,20 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             // NTF-031, NTF-032: a group holds at most eight queues of one
             // relay, and a notify queue shares a group with no pairwise
             // queue (`NTF-091`).
-            let class = if self.is_notify_queue(recipient_id)? {
-                DIGEST
+            let (class, room_of) = if self.is_notify_queue(recipient_id)? {
+                (DIGEST, MAX_QUEUES_PER_HANDLE)
+            } else if self.is_rendezvous_queue(recipient_id)? {
+                // NTF-043, NTF-044: a rendezvous queue has a handle of its
+                // own, which no pairwise queue shares.
+                (RENDEZVOUS, 1)
             } else {
-                PAIRWISE
+                (PAIRWISE, MAX_QUEUES_PER_HANDLE)
             };
             let room = groups.iter().position(|group| {
                 group.relay_id == *relay_id
                     && group.class == class
                     && group.state != RETIRED
-                    && usize::from(group.count) < MAX_QUEUES_PER_HANDLE
+                    && usize::from(group.count) < room_of
             });
             let at = match room {
                 Some(at) => at,
