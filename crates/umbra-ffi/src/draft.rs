@@ -3,7 +3,7 @@
 //! and the buffer is zero bytes after the drop, whether the send succeeded
 //! or failed (`IMP-039`).
 
-use umbra_core::attach::{transfer::Shape, MAX_FILE_SIZE};
+use umbra_core::attach::{transfer::Shape, MAX_FILE_SIZE, VOICE_MAX_SECONDS};
 use umbra_wire::descriptor::class;
 use zeroize::Zeroizing;
 
@@ -90,6 +90,15 @@ impl Draft {
             return Err(Error::Malformed);
         }
         if plain.len() > DRAFT_FILE_MAX {
+            return Err(Error::TooLong);
+        }
+        // ATT-069, ATT-070: a duration belongs to an audio, a voice, or a
+        // video object alone. ATT-071: a voice object has an upper bound.
+        let is_timed = matches!(shape.mime_class, class::AUDIO | class::VOICE | class::VIDEO);
+        if !is_timed && shape.media_seconds != 0 {
+            return Err(Error::Malformed);
+        }
+        if shape.mime_class == class::VOICE && shape.media_seconds > VOICE_MAX_SECONDS {
             return Err(Error::TooLong);
         }
         self.file = Some(DraftFile {
@@ -190,5 +199,37 @@ mod tests {
             .attach(Zeroizing::new(vec![7; 10]), Shape::default())
             .unwrap();
         assert!(with_file.has_file() && !with_file.is_empty());
+    }
+
+    #[test]
+    fn a_duration_belongs_to_timed_media_and_a_voice_object_has_a_bound() {
+        let mut draft = Draft::new(ConversationId([2; 16]));
+        let shape = |mime_class, media_seconds| Shape {
+            mime_class,
+            media_seconds,
+            ..Shape::default()
+        };
+        let bytes = || Zeroizing::new(vec![7u8; 10]);
+        assert_eq!(
+            draft.attach(bytes(), shape(class::DOC, 3)),
+            Err(Error::Malformed)
+        );
+        assert_eq!(
+            draft.attach(bytes(), shape(class::IMAGE, 1)),
+            Err(Error::Malformed)
+        );
+        assert_eq!(
+            draft.attach(bytes(), shape(class::VOICE, VOICE_MAX_SECONDS + 1)),
+            Err(Error::TooLong)
+        );
+        assert!(!draft.has_file());
+        draft
+            .attach(bytes(), shape(class::VOICE, VOICE_MAX_SECONDS))
+            .unwrap();
+        // An audio file that the user selected has no such bound.
+        draft
+            .attach(bytes(), shape(class::AUDIO, VOICE_MAX_SECONDS + 1))
+            .unwrap();
+        draft.attach(bytes(), shape(class::DOC, 0)).unwrap();
     }
 }

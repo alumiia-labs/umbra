@@ -11,6 +11,7 @@
     <!-- The scanner of an invitation and of a safety number. A device with
          no camera pastes a link and compares a short code. -->
     <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
 
     <!-- IMP-048: the platform backup carries no UMBRA data, and a library

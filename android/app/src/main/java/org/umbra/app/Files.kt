@@ -314,6 +314,31 @@ object Files {
     }
 
     /**
+     * Gives a recording to a draft as a voice object (`ATT-069`). The
+     * result is the size of the recording, or -1.
+     */
+    @RequiresApi(Build.VERSION_CODES.R)
+    fun attachVoice(recording: VoiceRecording, seconds: Int, draft: DraftHandle): Long {
+        try {
+            val bytes = Os.fstat(recording.memory).st_size
+            Os.lseek(recording.memory, 0, android.system.OsConstants.SEEK_SET)
+            val isGiven = throughPipe(java.io.FileInputStream(recording.memory)) { path ->
+                draft.attachFile(path, CLASS_VOICE, 0u, 0u, seconds.toUShort(), null, null)
+            }
+            return if (isGiven) bytes else -1
+        } catch (unreadable: android.system.ErrnoException) {
+            return -1
+        } finally {
+            // The stream of the pipe closed the memory file when it ended.
+            try {
+                Os.close(recording.memory)
+            } catch (closed: android.system.ErrnoException) {
+                // Nothing is left to close.
+            }
+        }
+    }
+
+    /**
      * The muxer of the platform writes the key `com.android.version` with
      * the version of the system into the file. That value names the device,
      * thus it becomes zeros of the same length, and the file keeps its
@@ -415,6 +440,7 @@ object Files {
     fun suggestedName(file: MsgFile): String = file.name ?: when (file.mimeClass) {
         CLASS_IMAGE -> "Photo.jpg"
         CLASS_VIDEO -> "Video.mp4"
+        CLASS_VOICE -> "Voice.ogg"
         else -> "File"
     }
 
@@ -422,6 +448,7 @@ object Files {
     fun typeOf(file: MsgFile): String = when (file.mimeClass) {
         CLASS_IMAGE -> "image/jpeg"
         CLASS_VIDEO -> "video/mp4"
+        CLASS_VOICE -> "audio/ogg"
         else -> file.name?.substringAfterLast('.', "")?.lowercase()
             ?.let { MimeTypeMap.getSingleton().getMimeTypeFromExtension(it) }
             ?: "application/octet-stream"

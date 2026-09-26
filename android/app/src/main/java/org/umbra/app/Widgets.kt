@@ -86,6 +86,10 @@ import androidx.compose.ui.viewinterop.AndroidView
 class PlatformFieldState {
     internal var view: EditText? = null
 
+    /** Whether the field holds no character. The view reads no text of it. */
+    var isEmpty by mutableStateOf(true)
+        internal set
+
     /**
      * Puts a text into the field, with the cursor at its end. The field
      * copies the characters into its own buffer.
@@ -155,6 +159,15 @@ fun PlatformInput(
                         InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
                 }
                 this.maxLines = maxLines
+                addTextChangedListener(object : android.text.TextWatcher {
+                    override fun beforeTextChanged(text: CharSequence?, start: Int, count: Int, after: Int) = Unit
+
+                    override fun onTextChanged(text: CharSequence?, start: Int, before: Int, count: Int) = Unit
+
+                    override fun afterTextChanged(text: android.text.Editable?) {
+                        state.isEmpty = text.isNullOrEmpty()
+                    }
+                })
                 state.view = this
             }
         },

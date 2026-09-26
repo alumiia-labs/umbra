@@ -29,6 +29,11 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.core.content.ContextCompat
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -172,6 +177,23 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
     val save = rememberSave()
     // The sheet of the plus: a photo, a video, or a file.
     var isAttaching by remember(conversation) { mutableStateOf(false) }
+    // A voice message under way. A recording that the view leaves goes.
+    var recording by remember(conversation) { mutableStateOf<VoiceRecording?>(null) }
+    DisposableEffect(conversation) {
+        onDispose {
+            recording?.discard()
+            VoicePlayer.stop()
+        }
+    }
+    val startRecording = {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val made = VoiceRecording(context)
+            if (made.start()) recording = made else notice = "The microphone did not start."
+        }
+    }
+    val askMicrophone = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { allowed ->
+        if (allowed) startRecording() else notice = "UMBRA has no access to the microphone."
+    }
     // A send that did not start says why in this view.
     LaunchedEffect(Core.fault) {
         Core.fault?.let {
@@ -341,6 +363,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                         line.info.file?.state?.toInt() == FILE_READY -> when (line.info.file?.mimeClass) {
                             CLASS_IMAGE -> ({ push(Screen.Photo(conversation, line)) })
                             CLASS_VIDEO -> ({ push(Screen.Video(conversation, line)) })
+                            CLASS_VOICE -> ({ VoicePlayer.toggle(line) })
                             else -> ({ save(line) })
                         }
                         else -> line.quote?.let { quote -> { jumpTo(quote.key) } }
@@ -440,7 +463,17 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                         edited = null
                     }
                 }
-                Row(verticalAlignment = Alignment.Bottom) {
+                val active = recording
+                if (active != null) {
+                    RecordingBar(
+                        active,
+                        onDiscard = {
+                            active.discard()
+                            recording = null
+                        },
+                        modifier = Modifier.heightIn(min = 48.dp),
+                    )
+                } else Row(verticalAlignment = Alignment.Bottom) {
                     // Mockup 041: the plus sits inside the box, and it opens
                     // the sheet of a photo, a video, and a file.
                     Box(
@@ -470,12 +503,32 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                 }
             }
             Spacer(Modifier.width(8.dp))
+            // An empty composer records a voice message in the place of a
+            // send. An answer and an edit take a text.
+            val offersVoice = recording == null && composer.isEmpty && answered == null && edited == null &&
+                Files.canSendVideo
             Box(
                 Modifier
                     .size(48.dp)
                     .clip(CircleShape)
                     .background(Palette.Action)
-                    .clickable(role = Role.Button, onClickLabel = "Send") {
+                    .clickable(role = Role.Button, onClickLabel = if (offersVoice) "Record a voice message" else "Send") {
+                        val active = recording
+                        if (active != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                            recording = null
+                            Core.sendVoice(conversation, active)
+                            jumpsAtNextLoad = true
+                            return@clickable
+                        }
+                        if (offersVoice) {
+                            val state = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
+                            if (state == PackageManager.PERMISSION_GRANTED) {
+                                startRecording()
+                            } else {
+                                askMicrophone.launch(Manifest.permission.RECORD_AUDIO)
+                            }
+                            return@clickable
+                        }
                         composer.take()?.let { text ->
                             val target = edited
                             if (target != null) {
@@ -491,8 +544,12 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                 contentAlignment = Alignment.Center,
             ) {
                 // An edit ends with a check, and a message with the plane.
-                val icon = if (edited != null) "check" else "paper-plane"
-                FaIcon(icon, label = "Send", size = 18.dp, tint = Color.White)
+                val icon = when {
+                    edited != null -> "check"
+                    offersVoice -> "microphone"
+                    else -> "paper-plane"
+                }
+                FaIcon(icon, label = if (offersVoice) "Record a voice message" else "Send", size = 18.dp, tint = Color.White)
             }
         }
     }
@@ -739,6 +796,7 @@ private fun BubbleContent(line: Line, chat: Chat) {
             when (file.mimeClass) {
                 CLASS_IMAGE -> PhotoTile(line, file, Modifier.align(Alignment.Start))
                 CLASS_VIDEO -> VideoTile(line, file, Modifier.align(Alignment.Start))
+                CLASS_VOICE -> VoiceTile(line, file, Modifier.align(Alignment.Start))
                 // ATT-193: a class that this device does not know is a file.
                 else -> FileTile(line, file, Modifier.align(Alignment.Start))
             }

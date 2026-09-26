@@ -77,9 +77,9 @@ each column when a crate implements the requirement and a test covers it.
 | `GRP` | 220 | 62 | 0 | 0 | 6 | **288** |
 | `ATT` | 142 | 45 | 2 | 0 | 2 | **191** |
 | `ABU` | 68 | 30 | 1 | 0 | 0 | **99** |
-| `IMP` | 116 | 41 | 0 | 0 | 2 | **159** |
+| `IMP` | 119 | 41 | 0 | 0 | 2 | **162** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 1976 | 616 | 7 | 0 | 51 | **2650** |
+| **All** | 1979 | 616 | 7 | 0 | 51 | **2653** |
 
 ## SCP — Scope and Conventions
 
@@ -2807,6 +2807,9 @@ Source: `spec/14-implementation.md`
 | `IMP-168` | §14.6.4 | MUST | A client | A client MUST let the user limit the automatic download to a network that the platform does not mark as metered. |  |  |
 | `IMP-169` | §14.6.4 | MUST | A client | A client MUST keep a handshake of Part 5 §5.4 that waits for its next flight in the store: the invitee from flight 1 to flight 2, with its flight 1, and the inviter from flight 2 to flight 3. |  |  |
 | `IMP-170` | §14.6.4 | MUST | The client | The client MUST erase that state when the handshake ends or fails. |  |  |
+| `IMP-171` | §14.6.4 | MUST | A client | A client MUST record a voice object of Part 12 into the memory alone. |  |  |
+| `IMP-172` | §14.6.4 | MUST | A client | A client MUST end a recording at `VOICE_MAX_SECONDS` (`ATT-071`), and it MUST drop a recording that the user leaves: a close of the conversation, or a lock. |  |  |
+| `IMP-173` | §14.6.4 | MUST | The encode of a recording | The encode of a recording MUST carry no comment field and no time of the capture (`ATT-155`). |  |  |
 
 ## SEC — Security Considerations
 

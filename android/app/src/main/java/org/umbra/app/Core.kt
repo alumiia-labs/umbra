@@ -2,6 +2,7 @@ package org.umbra.app
 
 import android.content.Context
 import android.os.Build
+import androidx.annotation.RequiresApi
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -861,6 +862,7 @@ object Core {
                 groupJoiners.clear()
                 images.clear()
                 decoding.clear()
+                VoicePlayer.stop()
                 previews.clear()
                 // IMP-161: a draft that waits holds its file in the clear.
                 cancelSend()
@@ -1291,6 +1293,26 @@ object Core {
         }
     }
 
+    /** Sends a voice message that the composer recorded. */
+    @RequiresApi(Build.VERSION_CODES.R)
+    fun sendVoice(conversation: Conversation, recording: VoiceRecording) {
+        val seconds = recording.finish()
+        if (seconds < 0) {
+            fault = "That recording is too short."
+            return
+        }
+        call { client ->
+            val draft = client.newDraft(conversation.id)
+            val bytes = Files.attachVoice(recording, seconds, draft)
+            if (bytes < 0) {
+                draft.destroy()
+                main.post { fault = "That recording did not open." }
+                return@call
+            }
+            offer(client, PendingSend(conversation, draft, bytes, isOriginal = false))
+        }
+    }
+
     /** Sends a picked file as it is, with its name. */
     fun sendDocument(context: Context, conversation: Conversation, source: android.net.Uri) {
         val app = context.applicationContext
@@ -1557,6 +1579,7 @@ object Core {
                     quoted.chars = when (quotedFile.mimeClass) {
                         CLASS_IMAGE -> "Photo"
                         CLASS_VIDEO -> "Video"
+                        CLASS_VOICE -> "Voice message"
                         else -> quotedFile.name ?: "File"
                     }.toCharArray()
                 }
@@ -1592,6 +1615,7 @@ object Core {
                     info.file != null -> sink.chars = when (info.file?.mimeClass) {
                         CLASS_IMAGE -> "Photo"
                         CLASS_VIDEO -> "Video"
+                        CLASS_VOICE -> "Voice message"
                         else -> info.file?.name ?: "File"
                     }.toCharArray()
                     else -> client.msgRender(it, sink)

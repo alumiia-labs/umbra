@@ -961,6 +961,18 @@ version byte, and a client MUST reject a row whose version it does not read.
   the client MUST start the download of each file that waits and whose
   `padded_size` is at most the limit. That choice is a setting of the
   device, as the limit is.
+- **[IMP-171]** A client MUST record a voice object of Part 12 into the
+  memory alone. The recording MUST NOT sit in a file, as `IMP-160` states
+  for each file. **[IMP-172]** A client MUST end a recording at
+  `VOICE_MAX_SECONDS` (`ATT-071`), and it MUST drop a recording that the
+  user leaves: a close of the conversation, or a lock. **[IMP-173]** The
+  encode of a recording MUST carry no comment field and no time of the
+  capture (`ATT-155`). An Opus stream in OGG holds its vendor string in its
+  comment header, and that string names the encoder library alone.
+
+  > *Cause.* A recorder of the platform writes to a file by default, and a
+  > file under the cache of the app outlives a crash. A recording that stays
+  > after a lock is a plaintext that the lock of `IMP-161` does not reach.
 - **[IMP-164]** A deletion of a message MUST erase its rows in the tables
   `0x0F`, `0x10` and `0x11` in the batch that takes the message, and for a
   file that this device uploaded it MUST then send the `CDEL` of `ATT-161`
