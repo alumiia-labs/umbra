@@ -612,6 +612,7 @@ impl QueueService {
                 Ok(vec![answer(circuit, command, Cmd::Ilink, &link_id)])
             }
             Cmd::Del => {
+                session.unbind_queue(&recipient_id);
                 self.end_invitations(recipient_id);
                 // WIR-039 to WIR-042: no identifier of the queue stays.
                 if let Some(queue) = self.queues.remove(&recipient_id) {

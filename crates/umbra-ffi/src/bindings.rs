@@ -1063,6 +1063,8 @@ struct Inner {
     /// The rendezvous queues that the runtime made, by the tag of their
     /// command, until a call takes each one.
     rendezvous_ready: BTreeMap<u64, ([u8; 32], Vec<u8>)>,
+    /// The tags of the rendezvous queues that no relay made.
+    rendezvous_refused: BTreeSet<u64>,
     next_rendezvous_tag: u64,
     /// The handle groups whose NDR call runs.
     ndr_in_flight: BTreeSet<[u8; 16]>,
@@ -2804,6 +2806,7 @@ fn handle_of(database_path: String, client: Client<SqliteBackend, ForeignElement
             directory: None,
             links_opened: BTreeSet::new(),
             rendezvous_ready: BTreeMap::new(),
+            rendezvous_refused: BTreeSet::new(),
             next_rendezvous_tag: 0,
             ndr_in_flight: BTreeSet::new(),
             notify_pending: BTreeMap::new(),
@@ -2936,6 +2939,7 @@ impl Handle {
             silent,
             dead_work,
             rendezvous_ready,
+            rendezvous_refused,
             ..
         } = &mut *inner;
         let ended = matches!(update, Update::Offline(_));
@@ -3003,6 +3007,9 @@ impl Handle {
                 address,
             } => {
                 rendezvous_ready.insert(*tag, (*recipient_id, address.clone()));
+            }
+            Update::RendezvousRefused(tag) => {
+                rendezvous_refused.insert(*tag);
             }
             // ABU-012: the request shows after its checks.
             Update::Hello { queue, envelope } => {
@@ -3422,9 +3429,22 @@ impl Handle {
             }
             // Each rendezvous queue of a published entry takes its hellos
             // again.
+            // A queue that no entry names is one whose publication the last
+            // run did not finish, and it ends.
+            let named: BTreeSet<[u8; 32]> = client
+                .published()?
+                .into_iter()
+                .flat_map(|entry| {
+                    core::iter::once(entry.queue).chain(entry.previous.map(|(queue, _)| queue))
+                })
+                .collect();
             for state in &stored.rendezvous_queues {
-                node.restore_rendezvous_queue(state)
+                let id = node
+                    .restore_rendezvous_queue(state)
                     .map_err(|_| FfiError::Integrity)?;
+                if !named.contains(&id) {
+                    let _ = node.end_rendezvous_queue(&id, &mut OsRng);
+                }
             }
             // Each notify queue of a group takes its digests again, and one
             // that no group names ends (`NTF-133`).

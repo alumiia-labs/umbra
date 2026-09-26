@@ -372,6 +372,9 @@ object Core {
 
     fun claimHandle(name: String) = directory { client -> client.claimHandle(name) }
 
+    /** The next key of the handle, at once (Part 9 §9.3). */
+    fun rotateHandleKey() = directory { client -> client.rotateHandleKey() }
+
     /** A new rendezvous queue for a link or the handle, at once. */
     fun rotateEntry(label: String) = directory { client -> client.rotateEntry(label) }
 

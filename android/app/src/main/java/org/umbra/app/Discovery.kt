@@ -295,6 +295,7 @@ fun HandleScreen(onBack: () -> Unit) {
                 Spacer(Modifier.height(8.dp))
                 SecondaryButton("Copy handle") { copySensitive(context, handle, "UMBRA handle") }
                 Spacer(Modifier.height(8.dp))
+                QuietButton("New key and queue") { Core.rotateHandleKey() }
                 QuietButton("Release handle") { Core.releaseHandle() }
                 DirectoryState("Writing the release.")
             }

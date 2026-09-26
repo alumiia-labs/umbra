@@ -441,9 +441,14 @@ impl Handle {
         };
         let start = Instant::now();
         loop {
-            if let Some(made) = locked(&self.inner).rendezvous_ready.remove(&tag) {
+            let mut inner = locked(&self.inner);
+            if let Some(made) = inner.rendezvous_ready.remove(&tag) {
                 return Ok(made);
             }
+            if inner.rendezvous_refused.remove(&tag) {
+                return Err(FfiError::Busy);
+            }
+            drop(inner);
             if start.elapsed() > QUEUE_WAIT {
                 return Err(FfiError::Offline);
             }
@@ -929,6 +934,74 @@ impl Handle {
             }
         }
         Err(FfiError::Stale)
+    }
+
+    /// Moves the handle to the next key `HandleKey_{0,r+1}` and to a new
+    /// rendezvous queue at one tap (Part 9 §9.3, §9.9): the old key answers
+    /// the write challenge of the new version (`DIS-093`). The old queue
+    /// takes hellos in its grace, and a hello sealed to the old key opens no
+    /// more.
+    pub fn rotate_handle_key(&self) -> Result<(), FfiError> {
+        let link = self.directory_link()?;
+        let entry = locked(&self.inner)
+            .client
+            .published()?
+            .into_iter()
+            .find(|entry| entry.kind == EntryKind::Handle)
+            .ok_or(FfiError::NotFound)?;
+        let rotation = entry.rotation.checked_add(1).ok_or(FfiError::TooLong)?;
+        let (old, new) = {
+            let inner = locked(&self.inner);
+            (
+                inner
+                    .client
+                    .entry_key(EntryKind::Handle, entry.index, entry.rotation)?,
+                inner
+                    .client
+                    .entry_key(EntryKind::Handle, entry.index, rotation)?,
+            )
+        };
+        let version = entry.version.checked_add(1).ok_or(FfiError::TooLong)?;
+        let (queue, rendezvous) = self.new_rendezvous()?;
+        let written = (|| {
+            let next = DirectoryEntry {
+                handle: entry.name.clone(),
+                hk_pub: new.public().to_bytes(),
+                rendezvous: Some(
+                    QueueAddress::parse(&rendezvous).map_err(|_| FfiError::Integrity)?,
+                ),
+                version,
+            };
+            let mut bytes = vec![0u8; next.len()];
+            let used = next.encode(&mut bytes).map_err(|_| FfiError::Malformed)?;
+            bytes.truncate(used);
+            link.write(&entry.label, &entry.name, &old, entry.version, &bytes)
+        })();
+        if let Err(error) = written {
+            self.end_rendezvous(queue);
+            return Err(error);
+        }
+        // A queue still in its grace ends now: one queue waits at a time.
+        if let Some((previous, _)) = entry.previous {
+            self.end_rendezvous(previous);
+            let _ = locked(&self.inner)
+                .client
+                .unbind_queue(&previous, &mut OsRng);
+        }
+        let now = unix_now();
+        let rotated = Published {
+            version,
+            rotation,
+            queue,
+            rendezvous,
+            queue_since: now,
+            previous: Some((entry.queue, now.saturating_add(ROTATE_GRACE))),
+            ..entry
+        };
+        locked(&self.inner)
+            .client
+            .put_published(&rotated, &mut OsRng)?;
+        Ok(())
     }
 
     /// Releases the handle of this device: the directory shows its

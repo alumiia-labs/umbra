@@ -296,6 +296,7 @@ impl Bridge {
             | Update::NotifyKey { .. }
             | Update::NotifyQueue { .. }
             | Update::RendezvousQueue { .. }
+            | Update::RendezvousRefused(_)
             | Update::Hello { .. }
             | Update::Digest { .. } => None,
             Update::Online => Some(NetEvent::Online),

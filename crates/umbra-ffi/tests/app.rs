@@ -3325,6 +3325,21 @@ fn a_group_made_after_the_link_reaches_each_linked_device() {
     let _ = std::fs::remove_dir_all(&directory);
 }
 
+/// Waits until `handle` holds `count` contact requests. A hello crosses
+/// two circuits, and a loaded machine slows each build.
+#[track_caller]
+fn wait_for_requests(handle: &Arc<Handle>, count: usize) {
+    let start = Instant::now();
+    while handle.contact_requests().unwrap().len() < count {
+        assert!(
+            start.elapsed() < Duration::from_secs(90),
+            "no contact request"
+        );
+        handle.clone().tick();
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 /// Sends a contact request to `target` until the log shows its entry: a
 /// registration or a write shows at the next epoch (`DIS-166`).
 fn request_until_listed(handle: &Handle, target: &str) {
@@ -3391,10 +3406,7 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
     assert!(link.link.starts_with("umbra://p/"));
     bob.set_profile_name("Bob".into()).unwrap();
     request_until_listed(&bob, &link.link);
-    wait_for(&alice, |event| match event {
-        FfiEvent::ContactRequest => Some(()),
-        _ => None,
-    });
+    wait_for_requests(&alice, 1);
     let request = alice.contact_requests().unwrap().remove(0);
     assert_eq!(
         (request.name.as_str(), request.via.as_str()),
@@ -3418,10 +3430,7 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
     assert_eq!(previous, Some(first));
     std::thread::sleep(Duration::from_secs(6));
     request_until_listed(&carol, &link.link);
-    wait_for(&alice, |event| match event {
-        FfiEvent::ContactRequest => Some(()),
-        _ => None,
-    });
+    wait_for_requests(&alice, 1);
     let request = alice.contact_requests().unwrap().remove(0);
     alice.decline_contact_request(request.id).unwrap();
     assert!(alice.contact_requests().unwrap().is_empty());
@@ -3438,10 +3447,7 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
     assert!(handle.starts_with("@alice#"), "{handle}");
     assert_eq!(alice.my_handle().unwrap(), Some(handle.clone()));
     request_until_listed(&carol, &handle);
-    wait_for(&alice, |event| match event {
-        FfiEvent::ContactRequest => Some(()),
-        _ => None,
-    });
+    wait_for_requests(&alice, 1);
     assert_eq!(alice.contact_requests().unwrap().len(), 1);
     assert!(alice.entries_at_limit().unwrap().is_empty());
     // §9.9: one tap moves the handle to a new queue.
@@ -3456,6 +3462,25 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
             Err(other) => panic!("{other:?}"),
         }
     }
+
+    // §9.3: one tap moves the handle to its next key, and a request reaches
+    // the new key.
+    let start = Instant::now();
+    loop {
+        match alice.rotate_handle_key() {
+            Ok(()) => break,
+            Err(FfiError::Busy) => {
+                assert!(start.elapsed() < Duration::from_secs(40), "no key rotation");
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            Err(other) => panic!("{other:?}"),
+        }
+    }
+    std::thread::sleep(Duration::from_secs(6));
+    request_until_listed(&bob, &handle);
+    wait_for_requests(&alice, 2);
+    assert_eq!(alice.contact_requests().unwrap().len(), 2);
+    assert!(alice.directory_warnings().unwrap().is_empty());
 
     // DIS-171: a retired link takes no request.
     let start = Instant::now();

@@ -184,6 +184,8 @@ pub enum Update {
         /// The encoded `QueueAddress` that a stranger writes to.
         address: Vec<u8>,
     },
+    /// No relay made the rendezvous queue of this tag.
+    RendezvousRefused(u64),
     /// A hello arrived on a rendezvous queue.
     Hello {
         /// The rendezvous queue.
@@ -375,6 +377,7 @@ pub async fn run_client(
     let mut shown_chains: Vec<[[u8; 32]; 3]> = Vec::new();
     let mut shown_queues: Vec<([u8; 32], [u8; 32])> = Vec::new();
     let mut notify_tags: BTreeMap<u64, u64> = BTreeMap::new();
+    let mut rendezvous_tags: BTreeMap<u64, u64> = BTreeMap::new();
     let mut tags: BTreeMap<u64, u64> = BTreeMap::new();
     let mut device_invites: BTreeSet<u64> = BTreeSet::new();
     let mut is_foreground = true;
@@ -473,7 +476,11 @@ pub async fn run_client(
                 },
                 ClientEvent::Rejected { handle, .. } => match tags.remove(&handle) {
                     Some(tag) => Update::Failed(tag),
-                    None => continue,
+                    // A relay refused the `NEW` of a rendezvous queue.
+                    None => match rendezvous_tags.remove(&handle) {
+                        Some(tag) => Update::RendezvousRefused(tag),
+                        None => continue,
+                    },
                 },
                 // The node of the queues sends no chunk command and no
                 // group-queue command, thus it gets no such answer. The
@@ -500,7 +507,7 @@ pub async fn run_client(
                     handle,
                     recipient_id,
                     address,
-                } => match notify_tags.remove(&handle) {
+                } => match rendezvous_tags.remove(&handle) {
                     Some(tag) => Update::RendezvousQueue {
                         tag,
                         recipient_id,
@@ -629,11 +636,14 @@ pub async fn run_client(
                 } => {
                     let _ = node.bind_queue(&recipient_id, &sealed, &mut rng);
                 }
-                Command::MakeRendezvousQueue(tag) => {
-                    if let Ok(handle) = node.make_rendezvous_queue(&mut rng) {
-                        notify_tags.insert(handle, tag);
+                Command::MakeRendezvousQueue(tag) => match node.make_rendezvous_queue(&mut rng) {
+                    Ok(handle) => {
+                        rendezvous_tags.insert(handle, tag);
                     }
-                }
+                    Err(_) => {
+                        let _ = updates.send(Update::RendezvousRefused(tag));
+                    }
+                },
                 Command::EndRendezvousQueue(recipient_id) => {
                     let _ = node.end_rendezvous_queue(&recipient_id, &mut rng);
                 }

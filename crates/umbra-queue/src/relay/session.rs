@@ -118,6 +118,12 @@ impl Session {
         Ok(())
     }
 
+    /// Ends the service of `queue_id`, which a `DEL` removed. Its place
+    /// serves the next queue (`NET-022`).
+    pub fn unbind_queue(&mut self, queue_id: &[u8; 32]) {
+        self.queues.retain(|held| held != queue_id);
+    }
+
     /// The queues this session serves.
     pub fn queues(&self) -> &[[u8; 32]] {
         &self.queues
@@ -167,6 +173,9 @@ mod tests {
         }
         assert_eq!(session.bind_queue([0xFF; 32]), Err(Reject::Limit));
         session.bind_queue([0; 32]).unwrap();
+        // A deleted queue frees its place.
+        session.unbind_queue(&[1; 32]);
+        session.bind_queue([0xFF; 32]).unwrap();
 
         let resume = SessionControl::resume(&Secret::new([3; 32]), [2; 8], 1);
         session.resume(&resume).unwrap();
