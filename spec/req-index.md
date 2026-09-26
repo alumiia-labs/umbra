@@ -70,7 +70,7 @@ each column when a crate implements the requirement and a test covers it.
 | `IDN` | 129 | 44 | 1 | 0 | 5 | **179** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
 | `WIR` | 394 | 85 | 0 | 0 | 7 | **486** |
-| `DEV` | 196 | 90 | 0 | 0 | 7 | **293** |
+| `DEV` | 197 | 90 | 0 | 0 | 7 | **294** |
 | `NTF` | 74 | 28 | 0 | 0 | 3 | **105** |
 | `DIS` | 118 | 33 | 0 | 0 | 2 | **153** |
 | `REL` | 124 | 32 | 1 | 0 | 2 | **159** |
@@ -79,7 +79,7 @@ each column when a crate implements the requirement and a test covers it.
 | `ABU` | 68 | 30 | 1 | 0 | 0 | **99** |
 | `IMP` | 116 | 41 | 0 | 0 | 2 | **159** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 1975 | 616 | 7 | 0 | 51 | **2649** |
+| **All** | 1976 | 616 | 7 | 0 | 51 | **2650** |
 
 ## SCP — Scope and Conventions
 
@@ -1603,6 +1603,7 @@ Source: `spec/07-device-sets.md`
 | `DEV-301` | §7.5.3 | MUST | Each other device | Each other device MUST apply that re-key to its own row of the group, and it MUST keep the seed before it for the grace of Part 11 `GRP-372`. |  |  |
 | `DEV-302` | §7.5.3 | MUST NOT | An existing device | An existing device MUST NOT start a second link while the sync channel of the last one has not opened, since the new device of that link takes its handshake then. |  |  |
 | `DEV-303` | §7.5.3 | MUST | A device that does not own the channels | A device that does not own the channels MUST keep an epoch-key record of the next epoch that does not install, and it MUST try it again after each roster object of the member that it applies. |  |  |
+| `DEV-304` | §7.5.3 | MUST | The device that owns the channels | The device that owns the channels MUST publish the delivery state of each message that it sent when that state becomes delivered, read, or failed. |  |  |
 
 ## NTF — Notifications
 

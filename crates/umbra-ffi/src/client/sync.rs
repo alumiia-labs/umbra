@@ -20,7 +20,8 @@ use umbra_core::{
         roster::{ClaimScope, OwnerClaim, Roster},
         sync::{
             group_subject, IdentityEntry, Origin, AUTHOR_PEER, AUTHOR_USER, ITEM_CONTACT_NAME,
-            ITEM_GROUP_REKEY, ITEM_GROUP_STATE, ITEM_IDENTITY_ENTRY, SCOPE_GROUP, SCOPE_PAIRWISE,
+            ITEM_DELIVERY, ITEM_GROUP_REKEY, ITEM_GROUP_STATE, ITEM_IDENTITY_ENTRY, SCOPE_GROUP,
+            SCOPE_PAIRWISE,
         },
         DeviceId,
     },
@@ -352,6 +353,70 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         self.publish_mutable(ITEM_IDENTITY_ENTRY, &subject, &entry.encode(), rng)
     }
 
+    /// Publishes the delivery state of a message that this device sent, to
+    /// each other device of the set (`DEV-304`): a message that another
+    /// device handed to it, and one of its own, whose copy the other devices
+    /// hold.
+    pub(super) fn publish_delivery<R: CryptoRng + ?Sized>(
+        &mut self,
+        message: &RowId,
+        delivery: crate::Delivery,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        if !self.owns_channels()? {
+            return Ok(());
+        }
+        self.publish_mutable(ITEM_DELIVERY, message, &[delivery as u8], rng)
+    }
+
+    /// Takes the delivery state of a message that the owner of the channels
+    /// sent. A state goes up only, and a failure ends a message that no
+    /// receipt reached.
+    fn apply_delivery_item<R: CryptoRng + ?Sized>(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        if self.owns_channels()? {
+            return Ok(());
+        }
+        let row: RowId = key.try_into().map_err(|_| Error::Malformed)?;
+        let reported = value
+            .first()
+            .copied()
+            .and_then(crate::Delivery::from_byte)
+            .ok_or(Error::Malformed)?;
+        let open = self.open_mut()?;
+        let Some(plain) = open.store.get(TableId::MESSAGE, &row)? else {
+            return Ok(());
+        };
+        let mut plain = Zeroizing::new(plain);
+        let info = super::info_of(&plain)?;
+        let moves = match reported {
+            crate::Delivery::Failed => {
+                matches!(
+                    info.delivery,
+                    crate::Delivery::Queued | crate::Delivery::Accepted
+                )
+            }
+            _ => info.delivery.is_below(reported),
+        };
+        if !info.outgoing || !moves {
+            return Ok(());
+        }
+        let conversation = super::conversation_of(&plain)?;
+        *plain.get_mut(1).ok_or(Error::Integrity)? = reported as u8;
+        let mut batch = open.store.begin();
+        batch.put(TableId::MESSAGE, row, Some(conversation.0), &plain, rng)?;
+        batch.commit()?;
+        self.events.push_back(Event::Delivery {
+            message: MsgRef(row),
+            delivery: reported,
+        });
+        Ok(())
+    }
+
     /// Publishes the name that the user gave a contact.
     pub(super) fn publish_contact_name<R: CryptoRng + ?Sized>(
         &mut self,
@@ -375,6 +440,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         value: &[u8],
         rng: &mut R,
     ) -> Result<(), Error> {
+        if item == ITEM_DELIVERY {
+            return self.apply_delivery_item(key, value, rng);
+        }
         let subject: [u8; 32] = key.try_into().map_err(|_| Error::Malformed)?;
         match item {
             ITEM_IDENTITY_ENTRY => {

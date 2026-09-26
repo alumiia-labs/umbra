@@ -413,8 +413,7 @@ pub(super) struct GroupQueues {
     /// The chunks of chunked epoch-key records that this device fetches
     /// (`GRP-284`).
     pub epoch_chunks: VecDeque<(ConversationId, WantedChunk)>,
-    /// The groups whose state goes to the other devices of the set
-    /// (`DEV-298`).
+    /// The groups whose state upload runs (`DEV-298`).
     pub state_out: std::collections::BTreeSet<ConversationId>,
     /// The group states that this device fetches, by the subject of each
     /// group.
@@ -886,7 +885,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // Each record that waited for the second queue goes now.
         self.requeue_group_posts(rng)?;
         // DEV-298: the group is whole, and it goes to the other devices.
-        self.group_state_due(conversation)?;
+        self.group_state_due(conversation, rng)?;
         Ok(true)
     }
 
@@ -1340,7 +1339,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         batch.delete(GROUP_JOIN, row);
         batch.commit()?;
         // DEV-298: the group goes to the other devices of the set.
-        self.group_state_due(conversation)?;
+        self.group_state_due(conversation, rng)?;
         Ok(conversation)
     }
 

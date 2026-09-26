@@ -874,6 +874,14 @@ class in Part 6 §6.6. **[DEV-022]** A client MUST NOT process a kind that decla
   salt does not give, and it MUST otherwise hold the conversation from
   then on, whether or not it owns the channel. **[DEV-198]** A revision that adds a chat-list item MUST add a row.
 
+  **[DEV-304]** The device that owns the channels MUST publish the delivery
+  state of each message that it sent when that state becomes delivered,
+  read, or failed. The item takes the row of the message in the stores of
+  the set as its key, and one byte of the state as its value. A receiver
+  MUST move the state of its copy up only, and it MUST take a failure for a
+  copy that no receipt reached. A message that another device handed to
+  the owner thus shows its receipts on the device that composed it.
+
   **[DEV-298]** The device that owns the channels MUST publish the state of
   each group that it makes or joins while the set holds another device, when
   the group holds its two replicas. The item takes the group subject of

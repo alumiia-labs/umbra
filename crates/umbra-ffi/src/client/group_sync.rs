@@ -36,6 +36,10 @@ pub(super) const EPOCH_HELD: TableId = TableId(0x2A);
 /// their order of arrival: the subject of the group, then the record
 /// (`DEV-299`).
 const GROUP_RECORDS_HELD: TableId = TableId(0x2B);
+/// The groups whose state waits to go to the other devices of the set, by
+/// their conversation. A row stays until the descriptor went out, thus an
+/// app that ends before the upload sends it at its next run.
+const GROUP_STATE_DUE: TableId = TableId(0x2C);
 
 /// The tables whose rows of one group go with its state. The owner column
 /// of each row names the group. The queue jobs of a group that a creator
@@ -46,20 +50,58 @@ const OWNED_BY_GROUP: [TableId; 4] = [GROUP_MEMBER, GROUP_PRESENCE, GROUP_OWNERS
 impl<B: Backend, E: SecureElement> Client<B, E> {
     /// Marks a group whose state goes to the other devices of the set, when
     /// this device owns the channels and has peers (`DEV-298`).
-    pub(super) fn group_state_due(&mut self, conversation: ConversationId) -> Result<(), Error> {
-        if self.owns_channels()? && self.sync_engine()?.is_some() {
-            self.groups.state_out.insert(conversation);
+    pub(super) fn group_state_due<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        if !self.owns_channels()? || self.sync_engine()?.is_none() {
+            return Ok(());
         }
-        Ok(())
+        let open = self.open_mut()?;
+        let row = open.store.row_id(GROUP_STATE_DUE, &conversation.0);
+        let mut batch = open.store.begin();
+        batch.put(GROUP_STATE_DUE, row, None, &conversation.0, rng)?;
+        Ok(batch.commit()?)
     }
 
-    /// The next group whose state goes up, with the backup object of it.
+    /// The next group whose state goes up, with the backup object of it. A
+    /// group whose upload runs is not taken again.
     pub fn take_group_state(&mut self, now: u64) -> Option<(ConversationId, Zeroizing<Vec<u8>>)> {
-        let conversation = self.groups.state_out.pop_first()?;
-        match self.group_state_object(conversation, now) {
-            Ok(object) => Some((conversation, object)),
-            Err(_) => None,
+        let due: Vec<ConversationId> = self
+            .open_ref()
+            .ok()?
+            .store
+            .list(GROUP_STATE_DUE, None)
+            .ok()?
+            .into_iter()
+            .filter_map(|(_, plain)| Some(ConversationId(plain.as_slice().try_into().ok()?)))
+            .collect();
+        for conversation in due {
+            if self.groups.state_out.contains(&conversation) {
+                continue;
+            }
+            match self.group_state_object(conversation, now) {
+                Ok(object) => {
+                    self.groups.state_out.insert(conversation);
+                    return Some((conversation, object));
+                }
+                // A group that left this device since sends nothing.
+                Err(_) => {
+                    let _ = self.end_group_state_due(conversation);
+                }
+            }
         }
+        None
+    }
+
+    fn end_group_state_due(&mut self, conversation: ConversationId) -> Result<(), Error> {
+        self.groups.state_out.remove(&conversation);
+        let open = self.open_mut()?;
+        let row = open.store.row_id(GROUP_STATE_DUE, &conversation.0);
+        let mut batch = open.store.begin();
+        batch.delete(GROUP_STATE_DUE, row);
+        Ok(batch.commit()?)
     }
 
     /// The state of one group as a backup object: its row, its seeds, its
@@ -130,12 +172,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     ) -> Result<(), Error> {
         let group_id = *self.group_of(conversation)?.group_id();
         let subject = group_subject(&self.open_ref()?.device_set_key, &group_id);
-        self.publish_mutable(ITEM_GROUP_STATE, &subject, descriptor, rng)
+        self.publish_mutable(ITEM_GROUP_STATE, &subject, descriptor, rng)?;
+        self.end_group_state_due(conversation)
     }
 
-    /// A group whose upload failed goes again at the next pump.
+    /// A group whose upload failed goes again at the next pump: its row
+    /// stays.
     pub fn group_state_failed(&mut self, conversation: ConversationId) {
-        self.groups.state_out.insert(conversation);
+        self.groups.state_out.remove(&conversation);
     }
 
     /// Takes the descriptor of the state of a group that the owner of the

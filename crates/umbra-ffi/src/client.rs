@@ -754,6 +754,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             });
         }
         let mut events = Vec::new();
+        let mut delivered: Vec<(RowId, Delivery)> = Vec::new();
         for record in records {
             let app = &record.app;
             let conversation = record.conversation;
@@ -860,6 +861,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         plain,
                     ));
                     planned.push(Planned::Delete(OUTBOX, row));
+                    delivered.push((row, reported));
                     events.push(Event::Delivery {
                         message: MsgRef(row),
                         delivery: reported,
@@ -1219,6 +1221,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
         batch.commit()?;
         self.events.extend(events);
+        // DEV-304: each other device of the set holds a copy of the message.
+        for (row, delivery) in delivered {
+            let _ = self.publish_delivery(&row, delivery, rng);
+        }
         self.files.downloads.extend(wanted);
         for outgoing in handoffs {
             self.synced_out.insert(outgoing.message);
@@ -2563,6 +2569,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             message: *message,
             delivery,
         });
+        // DEV-304: a message that no relay took ends on each device.
+        if delivery == Delivery::Failed {
+            self.publish_delivery(&message.0, delivery, rng)?;
+        }
         Ok(())
     }
 

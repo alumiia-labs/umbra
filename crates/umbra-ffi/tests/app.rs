@@ -48,8 +48,8 @@ use umbra_crypto::{
 };
 use umbra_ffi::bindings::{
     fetch_manifest, init, init_linked, init_restored, parse_network, recovery_digits_kind, Config,
-    FfiError, FfiEvent, Handle, LinkStatus, MsgHandle, Network, RelayEndpoint, RestoreStatus,
-    SecureElementCallback, TextSink,
+    FfiError, FfiEvent, Handle, LinkStatus, MsgHandle, Network, Receipts, RelayEndpoint,
+    RestoreStatus, SecureElementCallback, TextSink,
 };
 use umbra_ffi::groups::{run_groups, GroupCommand, GroupUpdate};
 use umbra_ffi::transfers::{run_transfers, TransferCommand, TransferUpdate};
@@ -2696,7 +2696,15 @@ fn a_new_device_links_from_the_code_of_the_existing_one() {
     }
 
     // DEV-047: a record that the tablet composes goes to Bob through the
-    // phone, under the msg_id of the tablet.
+    // phone, under the msg_id of the tablet. Bob sends delivery receipts.
+    bob.set_receipt_settings(
+        bob_conversation.clone(),
+        Receipts {
+            delivery: true,
+            read: false,
+        },
+    )
+    .unwrap();
     let draft = tablet.new_draft(alice_conversation.clone()).unwrap();
     draft.set_text(units("from the tablet")).unwrap();
     tablet.send_draft(draft).unwrap();
@@ -2708,6 +2716,35 @@ fn a_new_device_links_from_the_code_of_the_existing_one() {
             start.elapsed() < Duration::from_secs(60),
             "no copy at the phone"
         );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    // DEV-304: the receipt of Bob reaches the phone, and the state of the
+    // message reaches the tablet that composed it.
+    let on_tablet = tablet
+        .messages(alice_conversation.clone())
+        .unwrap()
+        .into_iter()
+        .find(|message| rendered(&tablet, message.clone()) == "from the tablet")
+        .unwrap();
+    let on_phone = alice
+        .messages(alice_conversation.clone())
+        .unwrap()
+        .into_iter()
+        .find(|message| rendered(&alice, message.clone()) == "from the tablet")
+        .unwrap();
+    // A receipt waits `RECEIPT_MIN_DELAY` and then a slot of the cover
+    // clock (Part 3 §3.5.4).
+    let start = Instant::now();
+    while tablet.msg_info(on_tablet.clone()).unwrap().delivery != 2 {
+        assert!(
+            start.elapsed() < Duration::from_secs(180),
+            "the tablet did not learn the delivery: phone {} tablet {}",
+            alice.msg_info(on_phone.clone()).unwrap().delivery,
+            tablet.msg_info(on_tablet.clone()).unwrap().delivery,
+        );
+        for handle in [&alice, &tablet, &bob] {
+            handle.clone().tick();
+        }
         std::thread::sleep(Duration::from_millis(200));
     }
     // DEV-294: a contact that the phone makes after the link, and its
