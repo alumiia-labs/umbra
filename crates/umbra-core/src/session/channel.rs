@@ -115,14 +115,14 @@ pub struct Outbound {
 }
 
 impl Outbound {
-    fn export(&self, writer: &mut Writer) {
+    pub(crate) fn export(&self, writer: &mut Writer) {
         writer.bytes(&self.sender_id);
         writer.bytes(self.auth_secret.as_bytes());
         self.queue_key.export(writer);
         writer.bytes(&self.relay_id);
     }
 
-    fn restore(reader: &mut Reader<'_>) -> Result<Self, Error> {
+    pub(crate) fn restore(reader: &mut Reader<'_>) -> Result<Self, Error> {
         Ok(Outbound {
             sender_id: reader.array()?,
             auth_secret: StaticSecret::from(reader.array::<32>()?),

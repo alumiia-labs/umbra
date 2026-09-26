@@ -778,6 +778,11 @@ struct Half {
     device: bool,
     /// Whether the invitation went in a hello of Part 9 §9.6.
     hello: bool,
+    /// The flight 1 of an invitee, which a restored half sends again at the
+    /// next connection: the last run can end before it leaves. An inviter
+    /// that read it already waits for flight 3 and drops the copy
+    /// (`WIR-503`).
+    resend: Vec<u8>,
 }
 
 struct Contact {
@@ -967,6 +972,13 @@ const DEVICE_STORED_VERSION: u8 = 0x04;
 /// The stored form of the invitation of a hello of Part 9 §9.6: the form of
 /// `STORED_VERSION`. No view shows it.
 const HELLO_STORED_VERSION: u8 = 0x05;
+/// The stored form of an invitee between flight 1 and flight 2: its queue,
+/// the queue of the inviter, and the initiator state, thus a run that ends
+/// in that window strands no handshake.
+const ACCEPTING_STORED_VERSION: u8 = 0x06;
+/// The stored form of an inviter between flight 2 and flight 3: its queue,
+/// the queue of the invitee, and the responder state.
+const RESPONDING_STORED_VERSION: u8 = 0x07;
 
 /// `ROTATE_AFTER` of Part 3 §3.2.4: the age of a queue, in seconds.
 pub const ROTATE_AFTER: u64 = 90 * 86_400;
@@ -1879,6 +1891,11 @@ impl ClientNode {
 
     /// Takes an invitation of an earlier run from its stored form.
     pub fn restore_invitation(&mut self, state: &[u8]) -> Result<Vec<u8>, Error> {
+        match state.first() {
+            Some(&ACCEPTING_STORED_VERSION) => return self.restore_accepting(state),
+            Some(&RESPONDING_STORED_VERSION) => return self.restore_responding(state),
+            _ => {}
+        }
         let mut reader = Reader::new(state);
         let version = reader.u8()?;
         let names_relay = match version {
@@ -1927,6 +1944,7 @@ impl ClientNode {
                 renews,
                 device: version == DEVICE_STORED_VERSION,
                 hello: version == HELLO_STORED_VERSION,
+                resend: Vec::new(),
             },
         );
         // The invitation of a hello went to its addressee, and no view
@@ -1942,12 +1960,138 @@ impl ClientNode {
         Ok(bundle)
     }
 
+    /// Takes an invitee of an earlier run between flight 1 and flight 2. No
+    /// view shows it.
+    fn restore_accepting(&mut self, state: &[u8]) -> Result<Vec<u8>, Error> {
+        let mut reader = Reader::new(state);
+        reader.u8()?;
+        let salt = reader.array()?;
+        let inbound_relay = reader.array()?;
+        let inbound = Inbound::restore(&mut reader)?;
+        let opening = reader.var()?.to_vec();
+        let peer_static = reader.array()?;
+        let outbound = Outbound::restore(&mut reader)?;
+        let device = reader.flag()?;
+        let renews = reader.option(|reader| reader.array())?;
+        let invitee = Invitee::restore(reader.var()?)?;
+        let resend = reader.var()?.to_vec();
+        reader.end()?;
+        if let Some(contact) = renews {
+            self.renewing.insert(contact);
+        }
+        self.assign(*inbound.recipient_id(), inbound_relay);
+        self.halves.insert(
+            *inbound.recipient_id(),
+            Half {
+                salt,
+                identity: self.root.pairwise_identity(&salt),
+                inbound,
+                setup: Setup::Accepting(Box::new(invitee)),
+                outbound: Some(outbound),
+                peer_static,
+                bundle: Vec::new(),
+                opening,
+                link: None,
+                inbound_relay,
+                renews,
+                device,
+                hello: false,
+                resend,
+            },
+        );
+        Ok(Vec::new())
+    }
+
+    /// Takes an inviter of an earlier run between flight 2 and flight 3. No
+    /// view shows it.
+    fn restore_responding(&mut self, state: &[u8]) -> Result<Vec<u8>, Error> {
+        let mut reader = Reader::new(state);
+        reader.u8()?;
+        let salt = reader.array()?;
+        let inbound_relay = reader.array()?;
+        let bundle = reader.var()?.to_vec();
+        let inbound = Inbound::restore(&mut reader)?;
+        let device = reader.flag()?;
+        let hello = reader.flag()?;
+        let renews = reader.option(|reader| reader.array())?;
+        let inviter = Inviter::restore_waiting(reader.var()?)?;
+        reader.end()?;
+        if let Some(contact) = renews {
+            self.renewing.insert(contact);
+        }
+        self.assign(*inbound.recipient_id(), inbound_relay);
+        self.halves.insert(
+            *inbound.recipient_id(),
+            Half {
+                salt,
+                identity: self.root.pairwise_identity(&salt),
+                inbound,
+                setup: Setup::Inviting(Box::new(inviter)),
+                outbound: None,
+                peer_static: [0; 32],
+                bundle,
+                opening: Vec::new(),
+                link: None,
+                inbound_relay,
+                renews,
+                device,
+                hello,
+                resend: Vec::new(),
+            },
+        );
+        Ok(Vec::new())
+    }
+
     /// Records the stored form of an invitation that waits for flight 1.
     fn invitation_changed(&mut self, queue: [u8; 32], half: &Half) -> Result<(), Error> {
-        let Setup::Inviting(inviter) = &half.setup else {
-            return Ok(());
+        let inviter = match &half.setup {
+            Setup::Inviting(inviter) => inviter,
+            Setup::Accepting(invitee) => {
+                let Some(outbound) = &half.outbound else {
+                    return Ok(());
+                };
+                let mut writer = Writer::new();
+                writer.u8(ACCEPTING_STORED_VERSION);
+                writer.bytes(&half.salt);
+                writer.bytes(&half.inbound_relay);
+                half.inbound.export(&mut writer)?;
+                writer.var(&half.opening)?;
+                writer.bytes(&half.peer_static);
+                outbound.export(&mut writer);
+                writer.flag(half.device);
+                writer.option(half.renews.as_ref(), |writer, contact| {
+                    writer.bytes(contact)
+                });
+                writer.var(&invitee.export())?;
+                writer.var(&half.resend)?;
+                self.changes.push(StateChange::Invitation {
+                    queue,
+                    state: writer.finish(),
+                });
+                return Ok(());
+            }
         };
         let Some(seed) = inviter.prekey_seed()? else {
+            // Between flight 2 and flight 3 the responder state waits.
+            let Some(waiting) = inviter.export_waiting()? else {
+                return Ok(());
+            };
+            let mut writer = Writer::new();
+            writer.u8(RESPONDING_STORED_VERSION);
+            writer.bytes(&half.salt);
+            writer.bytes(&half.inbound_relay);
+            writer.var(&half.bundle)?;
+            half.inbound.export(&mut writer)?;
+            writer.flag(half.device);
+            writer.flag(half.hello);
+            writer.option(half.renews.as_ref(), |writer, contact| {
+                writer.bytes(contact)
+            });
+            writer.var(&waiting)?;
+            self.changes.push(StateChange::Invitation {
+                queue,
+                state: writer.finish(),
+            });
             return Ok(());
         };
         let mut writer = Writer::new();
@@ -2199,6 +2343,27 @@ impl ClientNode {
         // from 20 to 120 s.
         self.rendezvous_wait = 20 + u64::from(u8::from_be_bytes(random(rng))) % 101;
         self.rendezvous_at = None;
+        // A restored invitee sends its flight 1 again. The record waits for
+        // a circuit to the relay of the inviter.
+        let resends: Vec<Sealed> = self
+            .halves
+            .values()
+            .filter(|half| matches!(half.setup, Setup::Accepting(_)) && !half.resend.is_empty())
+            .filter_map(|half| {
+                half.outbound
+                    .as_ref()?
+                    .seal_record(L6Kind::Handshake, &half.resend, random(rng))
+                    .ok()
+            })
+            .collect();
+        for sealed in resends {
+            let relay = *sealed.relay_id();
+            let ends_there = |slot: &Slot| slot.is_general() && slot.exit == Some(relay);
+            if !self.slots.iter().any(ends_there) {
+                self.slots.push(Slot::empty(Some(relay)));
+            }
+            self.held_records.push(sealed);
+        }
         // A new run builds each chain again (`NET-024`). The builds run side
         // by side, and the `circ_id` of a cell names its circuit.
         for slot in &mut self.slots {
@@ -4055,6 +4220,7 @@ impl ClientNode {
         let mut out = Vec::new();
         let mut opening = Vec::new();
         let mut link = None;
+        let mut resend = Vec::new();
         let device = matches!(
             keys.purpose,
             Purpose::DeviceInvite | Purpose::Accept { device: true, .. }
@@ -4124,6 +4290,7 @@ impl ClientNode {
                 own_address().encode(&mut opening)?;
                 let peer_static = Bundle::parse(&bundle)?.responder_static_x25519;
                 let (invitee, flight1, to) = Invitee::accept(&bundle, &own_address(), rng)?;
+                resend.clone_from(&flight1);
                 let outbound = Outbound::new(&to);
                 let sealed = outbound.seal_record(L6Kind::Handshake, &flight1, random(rng))?;
                 self.send_sealed(sealed, rng)?;
@@ -4139,6 +4306,7 @@ impl ClientNode {
                 own_address().encode(&mut opening)?;
                 let peer_static = Bundle::parse(&bundle)?.responder_static_x25519;
                 let (invitee, flight1, to) = Invitee::accept(&bundle, &own_address(), rng)?;
+                resend.clone_from(&flight1);
                 let outbound = match lock {
                     Some(lock) => Outbound::locked(&to, StaticSecret::from(lock)),
                     None => Outbound::new(&to),
@@ -4167,6 +4335,7 @@ impl ClientNode {
             renews,
             device,
             hello,
+            resend,
         };
         // An invitation with a link waits for the store of its blob.
         if half.link.is_none() {
@@ -4344,20 +4513,20 @@ impl ClientNode {
                         }
                         return Ok(Vec::new());
                     };
-                    // The prekey served, thus the stored invitation ends. A
-                    // handshake between its flight 1 and its flight 3 has
-                    // no stored form.
-                    self.changes
-                        .push(StateChange::InvitationEnded { queue: queue_id });
+                    // The prekey served, and the responder state takes the
+                    // place of the stored invitation until flight 3.
                     let outbound = Outbound::new(reply_to);
                     let sealed = outbound.seal_record(L6Kind::Handshake, &flight2, random(rng))?;
                     self.send_sealed(sealed, rng)?;
                     half.setup = Setup::Inviting(inviter);
+                    self.invitation_changed(queue_id, &half)?;
                     self.halves.insert(queue_id, half);
                     return Ok(Vec::new());
                 }
                 _ => {
                     let Ok((keys, peer_static, reply_to)) = inviter.on_flight3(&inner) else {
+                        self.changes
+                            .push(StateChange::InvitationEnded { queue: queue_id });
                         return Ok(Vec::new());
                     };
                     // NET-175: the queue of the invitee is the outbound
@@ -4367,6 +4536,8 @@ impl ClientNode {
             },
             Setup::Accepting(invitee) => {
                 let Ok((keys, flight3)) = invitee.on_flight2(&half.identity, &inner) else {
+                    self.changes
+                        .push(StateChange::InvitationEnded { queue: queue_id });
                     return Ok(Vec::new());
                 };
                 let outbound = half.outbound.take().ok_or(Error::NoPath)?;
@@ -4376,6 +4547,9 @@ impl ClientNode {
             }
         };
         let (keys, peer_static, outbound, role): (SessionKeys, [u8; 32], Outbound, Role) = finished;
+        // The handshake ended, and its stored form goes.
+        self.changes
+            .push(StateChange::InvitationEnded { queue: queue_id });
         // The address of the first queue of this device: the invitee gave it
         // in flight 1, and the bundle of the inviter holds it.
         let own_address = if half.opening.is_empty() {

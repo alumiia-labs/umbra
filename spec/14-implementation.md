@@ -874,6 +874,17 @@ cursor of the inbound queue, the Double Ratchet session with its skipped
 keys, and the braid. It also holds each invitation that waits for its
 flight 1, with its one-time prekey.
 
+**[IMP-169]** A client MUST keep a handshake of Part 5 §5.4 that waits for its
+next flight in the store: the invitee from flight 1 to flight 2, with its
+flight 1, and the inviter from flight 2 to flight 3. **[IMP-170]** The client
+MUST erase that state when the handshake ends or fails. An invitee that
+starts a run from that state sends its flight 1 again, and an inviter that
+read flight 1 already drops the copy (Part 6 `WIR-503`).
+
+> *Cause.* A platform ends a run with no notice, and an application can start
+> a second run while the first one runs. A handshake held in RAM alone then
+> ends with that run, and the invitation of the other party is spent.
+
 | `table_id` | Table | One row |
 | --- | --- | --- |
 | `0x01` | Messages | One message, under its conversation and its `msg_ref` |
@@ -883,7 +894,7 @@ flight 1, with its one-time prekey.
 | `0x05` | Verifications | One verification of Part 4 §4.5 |
 | `0x06` | Local identity | The root seed |
 | `0x07` | Send queue | One record that waits for the send path (`IMP-126`) |
-| `0x08` | Invitations | One invitation that waits: the `RecipientId` of its queue, the fragment of its link or its bundle, the queue end, and the prekey seed |
+| `0x08` | Invitations | One invitation that waits: the `RecipientId` of its queue, the fragment of its link or its bundle, the queue end, and the prekey seed. A handshake between two flights has its row here too, with its state (`IMP-169`) |
 | `0x09` | Conversations | What this device alone knows of one conversation: the time up to which the user saw its messages, and the name that the user gave the contact |
 | `0x0A` | Settings | One setting of this device under its name, such as the idle time of the auto-lock, the receipts of one conversation, the highest directory epoch (`IMP-159`), or the ingress pins (`REL-153`) |
 | `0x0B` | Held receipts | One receipt that waits for a slot: the conversation, the kind, the `msg_id` of its target, and the time that it reports (Part 3 §3.5.4) |

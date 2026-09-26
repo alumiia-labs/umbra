@@ -707,6 +707,52 @@ fn a_hello_on_a_rendezvous_queue_becomes_a_contact() {
     assert!(network.stored[BOB].invitations.is_empty());
 }
 
+/// A run that ends between two flights of a handshake strands nothing: the
+/// invitee waits for flight 2 in its stored form and sends flight 1 again,
+/// and the inviter waits for flight 3 in its stored form.
+#[test]
+fn a_handshake_continues_after_a_restart_in_each_window() {
+    const ALICE: usize = 0;
+    const BOB: usize = 1;
+    for restarted in [BOB, ALICE] {
+        let mut network = Network::new();
+        network.settle();
+        network.clients[ALICE].invite(&mut Rng(1)).unwrap();
+        network.settle();
+        let events = network.take_events(ALICE);
+        let Some(ClientEvent::Invitation { bundle, .. }) = events.last() else {
+            panic!("{events:?}");
+        };
+        network.take_events(BOB);
+        network.clients[BOB]
+            .accept(bundle.clone(), &mut Rng(2))
+            .unwrap();
+        // The invitee holds its half after the relay made its queue; the
+        // inviter holds the responder state after flight 1.
+        let waiting = |network: &Network| {
+            let form = if restarted == BOB { 0x06 } else { 0x07 };
+            network.stored[restarted]
+                .invitations
+                .values()
+                .any(|state| state.first() == Some(&form))
+        };
+        let mut steps = 0;
+        while !waiting(&network) {
+            network.step();
+            steps += 1;
+            assert!(steps < 60, "no stored half");
+        }
+        network.restart(restarted, 0x40 + restarted as u8);
+        for _ in 0..3 {
+            network.settle();
+        }
+        contact_of(&network.take_events(ALICE));
+        contact_of(&network.take_events(BOB));
+        assert!(network.stored[ALICE].invitations.is_empty());
+        assert!(network.stored[BOB].invitations.is_empty());
+    }
+}
+
 #[test]
 fn an_invitation_waits_across_a_restart() {
     const ALICE: usize = 0;

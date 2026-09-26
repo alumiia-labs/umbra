@@ -95,6 +95,74 @@ fn xk_round_trip_agrees_on_every_key() {
     assert_eq!(s_i, p.s_i.x25519_public());
 }
 
+/// A client whose run ends mid-handshake takes each side up again from
+/// its stored form, and the keys agree as in one run.
+#[test]
+fn xk_each_side_continues_from_its_stored_form() {
+    let mut p = parties(b"stored");
+    let prekey = OneTimePrekey::generate(&mut p.rng);
+    let s1 = *prekey.encapsulation_key();
+    let inv = Invitation {
+        s: p.s_r.x25519_public(),
+        s1: &s1,
+        range_r: VersionRange::V1,
+    };
+    let mut f1 = [0u8; 4096];
+    let (init, n1) = Initiator::flight1(
+        &inv,
+        VersionRange::V1,
+        AddressType::Pairwise,
+        b"app-1",
+        &mut p.rng,
+        &mut f1,
+        &mut NoTrace,
+    )
+    .unwrap();
+    let mut init = Initiator::restore(&init.export()).unwrap();
+    let (mut resp, _) = Responder::read_flight1(
+        &p.s_r,
+        prekey,
+        VersionRange::V1,
+        AddressType::Pairwise,
+        &f1[..n1],
+        &mut [0u8; 64],
+        &mut NoTrace,
+    )
+    .unwrap();
+    // A responder before its flight 2 has no stored form.
+    assert!(resp.export().is_err());
+    let mut f2 = [0u8; 4096];
+    let n2 = resp
+        .flight2(b"", &mut p.rng, &mut f2, &mut NoTrace)
+        .unwrap();
+    let resp = Responder::restore(&resp.export().unwrap()).unwrap();
+    init.read_flight2(&f2[..n2], &mut [], &mut NoTrace).unwrap();
+    let er = Responder::er_of(&f2[..n2]).unwrap();
+    let mut f3 = [0u8; 4096];
+    let (ki, n3) = init
+        .flight3(&p.s_i, &er, b"", &mut f3, &mut NoTrace)
+        .unwrap();
+    let (kr, s_i, _) = resp.read_flight3(&f3[..n3], &mut [], &mut NoTrace).unwrap();
+    assert_eq!(ki.rk.expose(), kr.rk.expose());
+    assert_eq!(ki.transcript, kr.transcript);
+    assert_eq!(s_i, p.s_i.x25519_public());
+    // A form that a byte of the version changes does not read.
+    let mut changed = Initiator::flight1(
+        &inv,
+        VersionRange::V1,
+        AddressType::Pairwise,
+        b"",
+        &mut p.rng,
+        &mut [0u8; 4096],
+        &mut NoTrace,
+    )
+    .unwrap()
+    .0
+    .export();
+    changed[0] ^= 0xff;
+    assert!(Initiator::restore(&changed).is_err());
+}
+
 #[test]
 fn xk_ranges_that_differ_still_agree_and_a_bad_pair_aborts() {
     let mut p = parties(b"ranges");

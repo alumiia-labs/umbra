@@ -5,11 +5,13 @@
 //! its static key in flight 3 only, under a key that absorbed `ee` and the
 //! ML-KEM secret of flight 2 (identity-hiding grade 8, §5.4.3).
 
+use alloc::vec::Vec;
 use kem::{Decapsulate, Encapsulate};
 use ml_kem::{array::Array, DecapsulationKey, EncapsulationKey, KeyExport, MlKem768, Seed};
 use rand_core::CryptoRng;
 use sha3::{Digest, Sha3_256};
-use x25519_dalek::{PublicKey as XPublic, ReusableSecret, StaticSecret};
+use x25519_dalek::{PublicKey as XPublic, StaticSecret};
+use zeroize::Zeroizing;
 
 use super::{contributory, suite, AddressType, State, Trace, VersionRange, TAG_LEN};
 use crate::{kem::KeyPair, labels, secret::Secret, Error};
@@ -198,10 +200,15 @@ fn split(st: &State, dh_initial: InitialDh) -> SessionKeys {
 /// The initiator between flight 1 and flight 3.
 pub struct Initiator {
     st: State,
-    e_sk: ReusableSecret,
+    e_sk: StaticSecret,
+    e1_seed: Secret<64>,
     e1_dk: DecapsulationKey<MlKem768>,
     n_hs: [u8; NONCE_LEN],
 }
+
+/// The version of the stored form of a handshake that waits for its next
+/// flight.
+const STORED_VERSION: u8 = 0x01;
 
 impl Initiator {
     /// Writes flight 1 into `out` and returns the initiator and the length.
@@ -242,7 +249,7 @@ impl Initiator {
         st.mix_hash(pid_out);
         st.trace(trace, "1.0 pid");
         // 1. e
-        let e_sk = ReusableSecret::random_from_rng(rng);
+        let e_sk = StaticSecret::random_from_rng(rng);
         let e = XPublic::from(&e_sk);
         let (e_out, rest) = rest.split_at_mut(32);
         e_out.copy_from_slice(e.as_bytes());
@@ -290,11 +297,47 @@ impl Initiator {
             Self {
                 st,
                 e_sk,
+                e1_seed: seed,
                 e1_dk,
                 n_hs,
             },
             total,
         ))
+    }
+
+    /// The stored form of the initiator between flight 1 and flight 2, for
+    /// a client whose run ends before flight 2 arrives. The store keeps it
+    /// under its key, as it keeps a one-time prekey, until the handshake
+    /// ends.
+    pub fn export(&self) -> Zeroizing<Vec<u8>> {
+        let mut writer = crate::stored::Writer::new();
+        writer.u8(STORED_VERSION);
+        self.st.export(&mut writer);
+        writer.bytes(self.e_sk.as_bytes());
+        writer.bytes(self.e1_seed.expose());
+        writer.bytes(&self.n_hs);
+        writer.finish()
+    }
+
+    /// Reads a form that [`Initiator::export`] wrote.
+    pub fn restore(bytes: &[u8]) -> Result<Self, Error> {
+        let mut reader = crate::stored::Reader::new(bytes);
+        if reader.u8()? != STORED_VERSION {
+            return Err(Error::Length);
+        }
+        let st = State::restore(&mut reader)?;
+        let e_sk = StaticSecret::from(reader.array::<32>()?);
+        let e1_seed = Secret::new(reader.array::<64>()?);
+        let n_hs = reader.array()?;
+        reader.end()?;
+        let e1_dk = DecapsulationKey::<MlKem768>::from_seed(Seed::from(*e1_seed.expose()));
+        Ok(Self {
+            st,
+            e_sk,
+            e1_seed,
+            e1_dk,
+            n_hs,
+        })
     }
 
     /// Reads flight 2 and writes `app_2` into `app_out`. Returns its length.
@@ -549,6 +592,42 @@ impl Responder {
         st.trace(trace, "2.5 payload2");
         self.er_sk = Some(er_sk);
         Ok(total)
+    }
+
+    /// The stored form of the responder between flight 2 and flight 3, for
+    /// a client whose run ends before flight 3 arrives. A responder before
+    /// its flight 2 has none.
+    pub fn export(&self) -> Result<Zeroizing<Vec<u8>>, Error> {
+        let er_sk = self.er_sk.as_ref().ok_or(Error::Handshake)?;
+        let mut writer = crate::stored::Writer::new();
+        writer.u8(STORED_VERSION);
+        self.st.export(&mut writer);
+        writer.bytes(&self.e);
+        writer.bytes(&self.e1);
+        writer.bytes(er_sk.as_bytes());
+        writer.bytes(&self.n_hs);
+        Ok(writer.finish())
+    }
+
+    /// Reads a form that [`Responder::export`] wrote.
+    pub fn restore(bytes: &[u8]) -> Result<Self, Error> {
+        let mut reader = crate::stored::Reader::new(bytes);
+        if reader.u8()? != STORED_VERSION {
+            return Err(Error::Length);
+        }
+        let st = State::restore(&mut reader)?;
+        let e = reader.array()?;
+        let e1 = reader.array()?;
+        let er_sk = StaticSecret::from(reader.array::<32>()?);
+        let n_hs = reader.array()?;
+        reader.end()?;
+        Ok(Self {
+            st,
+            e,
+            e1,
+            er_sk: Some(er_sk),
+            n_hs,
+        })
     }
 
     /// Reads flight 3, writes `app_3` into `app_out`, and returns the

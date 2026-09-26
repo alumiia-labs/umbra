@@ -77,9 +77,9 @@ each column when a crate implements the requirement and a test covers it.
 | `GRP` | 220 | 62 | 0 | 0 | 6 | **288** |
 | `ATT` | 142 | 45 | 2 | 0 | 2 | **191** |
 | `ABU` | 68 | 30 | 1 | 0 | 0 | **99** |
-| `IMP` | 114 | 41 | 0 | 0 | 2 | **157** |
+| `IMP` | 116 | 41 | 0 | 0 | 2 | **159** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 1968 | 615 | 7 | 0 | 51 | **2641** |
+| **All** | 1970 | 615 | 7 | 0 | 51 | **2643** |
 
 ## SCP — Scope and Conventions
 
@@ -2798,6 +2798,8 @@ Source: `spec/14-implementation.md`
 | `IMP-166` | §14.6.1 | MAY | The bytes of a file that the store holds | The bytes of a file that the store holds MAY cross the surface one time for each decode, into a sink of the platform. |  |  |
 | `IMP-167` | §14.6.4 | MUST | A client | A client MUST let the user set an automatic download limit for the device: off, or a size. |  |  |
 | `IMP-168` | §14.6.4 | MUST | A client | A client MUST let the user limit the automatic download to a network that the platform does not mark as metered. |  |  |
+| `IMP-169` | §14.6.4 | MUST | A client | A client MUST keep a handshake of Part 5 §5.4 that waits for its next flight in the store: the invitee from flight 1 to flight 2, with its flight 1, and the inviter from flight 2 to flight 3. |  |  |
+| `IMP-170` | §14.6.4 | MUST | The client | The client MUST erase that state when the handshake ends or fails. |  |  |
 
 ## SEC — Security Considerations
 

@@ -23,6 +23,7 @@ use umbra_crypto::{
     kem::KeyPair,
     rand_core::CryptoRng,
     secret::Secret,
+    zeroize::Zeroizing,
 };
 use umbra_wire::address::{QueueAddress, LEN as QUEUE_ADDRESS_LEN};
 
@@ -155,6 +156,31 @@ impl Inviter {
         Ok((numbered(FLIGHT_2, &flight2), self.reply_to.insert(reply_to)))
     }
 
+    /// The stored form of an inviter between flight 2 and flight 3: the
+    /// responder state and the queue of the invitee. An inviter at another
+    /// step has none.
+    pub fn export_waiting(&self) -> Result<Option<Zeroizing<Vec<u8>>>, Error> {
+        let (Some(responder), Some(reply_to)) = (&self.responder, &self.reply_to) else {
+            return Ok(None);
+        };
+        let state = responder.export()?;
+        let mut out = Zeroizing::new(alloc::vec![0u8; QUEUE_ADDRESS_LEN]);
+        reply_to.encode(&mut out)?;
+        out.extend_from_slice(&state);
+        Ok(Some(out))
+    }
+
+    /// Reads a form that [`Inviter::export_waiting`] wrote.
+    pub fn restore_waiting(bytes: &[u8]) -> Result<Self, Error> {
+        let address = bytes.get(..QUEUE_ADDRESS_LEN).ok_or(Error::Malformed)?;
+        let state = bytes.get(QUEUE_ADDRESS_LEN..).ok_or(Error::Malformed)?;
+        Ok(Inviter {
+            prekey: None,
+            responder: Some(Responder::restore(state)?),
+            reply_to: Some(QueueAddress::parse(address)?),
+        })
+    }
+
     /// Reads flight 3. The result is the keys of the session, the static
     /// key of the invitee, and the queue of the invitee, which is the
     /// outbound queue of the contact from now on.
@@ -225,6 +251,18 @@ impl Invitee {
             numbered(FLIGHT_1, &flight1),
             bundle.queue_address,
         ))
+    }
+
+    /// The stored form of the invitee between flight 1 and flight 2.
+    pub fn export(&self) -> Zeroizing<Vec<u8>> {
+        self.initiator.export()
+    }
+
+    /// Reads a form that [`Invitee::export`] wrote.
+    pub fn restore(bytes: &[u8]) -> Result<Self, Error> {
+        Ok(Invitee {
+            initiator: Initiator::restore(bytes)?,
+        })
     }
 
     /// Reads flight 2 and writes flight 3 under the pairwise identity of

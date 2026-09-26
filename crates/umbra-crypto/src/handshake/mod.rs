@@ -106,6 +106,24 @@ impl Drop for State {
 }
 
 impl State {
+    /// Writes the state for a handshake that waits across a run of the
+    /// client: `ck`, `h`, `k` when it is set, and `n`.
+    pub(crate) fn export(&self, writer: &mut crate::stored::Writer) {
+        writer.bytes(self.ck.expose());
+        writer.bytes(&self.h);
+        writer.option(self.k.as_ref(), |writer, k| writer.bytes(k.expose()));
+        writer.u64(self.n);
+    }
+
+    /// Reads a state that [`State::export`] wrote.
+    pub(crate) fn restore(reader: &mut crate::stored::Reader<'_>) -> Result<Self, Error> {
+        let ck = Secret::new(reader.array()?);
+        let h = reader.array()?;
+        let k = reader.option(|reader| Ok(Secret::new(reader.array()?)))?;
+        let n = reader.u64()?;
+        Ok(State { ck, h, k, n })
+    }
+
     /// The initialization: `ck = SHA3-256(label || name)`, `h = ck`.
     pub(crate) fn new(name: &[u8]) -> Self {
         let mut hasher = Sha3_256::new();
