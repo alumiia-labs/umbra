@@ -32,6 +32,9 @@ pub enum L6Kind {
     /// The bundle of a channel renewal of Part 3 §3.2.6: a party whose
     /// ratchet is stale offers a new handshake to its contact.
     Renewal = 0x06,
+    /// A hello of Part 9 §9.6 on a rendezvous queue: the sealed envelope of
+    /// `DIS-143`.
+    Hello = 0x07,
 }
 
 impl L6Kind {
@@ -41,6 +44,7 @@ impl L6Kind {
             0x04 => Ok(L6Kind::NotifyDigest),
             0x05 => Ok(L6Kind::Handshake),
             0x06 => Ok(L6Kind::Renewal),
+            0x07 => Ok(L6Kind::Hello),
             _ => Err(Error::Malformed),
         }
     }

@@ -43,6 +43,15 @@
                     android:host="${invitationHost}"
                     android:path="/i" />
             </intent-filter>
+            <!-- IDN-130: a reusable link of Part 4 §4.3.2 starts a request. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="umbra"
+                    android:host="p" />
+            </intent-filter>
             <!-- A link that another app shares as text. -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />

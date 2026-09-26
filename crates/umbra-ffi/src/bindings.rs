@@ -45,6 +45,7 @@ use umbra_transport::{
 use umbra_wire::ndr::{NdrResponse, TokenCarrier};
 use zeroize::Zeroizing;
 
+mod directory;
 mod link;
 
 pub use link::{init_linked, Device, LinkStatus, Linked};
@@ -364,6 +365,14 @@ pub struct Network {
     /// The IPv4 address to dial for the OHTTP relay, in the place of the
     /// host of its URL, as a relay entry names one.
     pub ndr_relay_ipv4: Option<Vec<u8>>,
+    /// The `POST /directory` URL of an ingress relay, which carries the
+    /// requests to the directory of Part 9 (`DIS-162`). With none the
+    /// device has no handle and no Public Address.
+    pub directory_relay_url: Option<String>,
+    /// The pins of the directory that the build ships (`DIS-163`).
+    pub directory_pins: Option<Vec<u8>>,
+    /// The IPv4 address to dial for that relay, as above.
+    pub directory_relay_ipv4: Option<Vec<u8>>,
 }
 
 /// Reads the relay manifest from an HTTPS carrier of Part 3 §3.10: the host
@@ -588,6 +597,9 @@ pub fn parse_network(text: String, root_ca_path: Option<String>) -> Result<Netwo
         ndr_relay_url: None,
         ndr_key_config: None,
         ndr_relay_ipv4: None,
+        directory_relay_url: None,
+        directory_pins: None,
+        directory_relay_ipv4: None,
     })
 }
 
@@ -832,6 +844,9 @@ pub enum FfiEvent {
     DeviceLinked,
     /// Another device of the set added a conversation or named one.
     Conversations,
+    /// A contact request arrived on a link or a handle of this device.
+    /// [`Handle::contact_requests`] gives it.
+    ContactRequest,
     /// The client refused an invitation command, such as a bundle that does
     /// not parse.
     Refused,
@@ -1041,6 +1056,12 @@ struct Inner {
     group_refusals: BTreeSet<(crate::ConversationId, [u8; 32])>,
     /// The pinned route to the NDR, with the TLS configuration of the run.
     ndr: Option<(NdrRoute, Arc<native::ClientConfig>)>,
+    /// The pinned route to the directory.
+    directory: Option<directory::DirectoryLink>,
+    /// The rendezvous queues that the runtime made, by the tag of their
+    /// command, until a call takes each one.
+    rendezvous_ready: BTreeMap<u64, ([u8; 32], Vec<u8>)>,
+    next_rendezvous_tag: u64,
     /// The handle groups whose NDR call runs.
     ndr_in_flight: BTreeSet<[u8; 16]>,
     /// The group of each notify queue that the run makes, by tag.
@@ -2530,6 +2551,7 @@ impl Inner {
             NetEvent::DeviceInvitation(_) => return self.next_event(),
             NetEvent::DeviceLinked(_) => FfiEvent::DeviceLinked,
             NetEvent::Refused => FfiEvent::Refused,
+            NetEvent::ContactRequest => FfiEvent::ContactRequest,
         })
     }
 
@@ -2728,6 +2750,9 @@ fn handle_of(database_path: String, client: Client<SqliteBackend, ForeignElement
             group_lost: BTreeSet::new(),
             group_refusals: BTreeSet::new(),
             ndr: None,
+            directory: None,
+            rendezvous_ready: BTreeMap::new(),
+            next_rendezvous_tag: 0,
             ndr_in_flight: BTreeSet::new(),
             notify_pending: BTreeMap::new(),
             next_notify_tag: 0,
@@ -2858,6 +2883,7 @@ impl Handle {
             rotated_in_run,
             silent,
             dead_work,
+            rendezvous_ready,
             ..
         } = &mut *inner;
         let ended = matches!(update, Update::Offline(_));
@@ -2917,6 +2943,19 @@ impl Handle {
                             let _ = running.flush(client, &mut OsRng);
                         }
                     }
+                }
+            }
+            Update::RendezvousQueue {
+                tag,
+                recipient_id,
+                address,
+            } => {
+                rendezvous_ready.insert(*tag, (*recipient_id, address.clone()));
+            }
+            // ABU-012: the request shows after its checks.
+            Update::Hello { queue, envelope } => {
+                if let Ok(Some(_)) = client.on_hello(queue, envelope, unix_now(), &mut OsRng) {
+                    net_events.push_back(NetEvent::ContactRequest);
                 }
             }
             Update::NotifyQueue {
@@ -3153,6 +3192,9 @@ impl Handle {
                 ndr_relay_url: None,
                 ndr_key_config: None,
                 ndr_relay_ipv4: None,
+                directory_relay_url: None,
+                directory_pins: None,
+                directory_relay_ipv4: None,
             },
             epoch: set.epoch,
             is_clock_corrected: consensus.clock_state() == ClockState::Corrected,
@@ -3271,6 +3313,18 @@ impl Handle {
             inner.spawner = Some(runtime.handle().clone());
             inner.root_ca_path.clone_from(&network.root_ca_path);
             inner.ndr = ndr_route(&network).map(|route| (route, tls.clone()));
+            inner.directory = network
+                .directory_relay_url
+                .as_deref()
+                .zip(network.directory_pins.as_deref())
+                .and_then(|(url, pins)| {
+                    directory::DirectoryLink::new(
+                        url,
+                        network.directory_relay_ipv4.as_deref(),
+                        pins,
+                        tls.clone(),
+                    )
+                });
             inner.transfers = None;
             inner.groups = None;
             inner.group_reading.clear();
@@ -3312,6 +3366,12 @@ impl Handle {
                 if !bundle.is_empty() {
                     net_events.push_back(NetEvent::Invitation(bundle));
                 }
+            }
+            // Each rendezvous queue of a published entry takes its hellos
+            // again.
+            for state in &stored.rendezvous_queues {
+                node.restore_rendezvous_queue(state)
+                    .map_err(|_| FfiError::Integrity)?;
             }
             // Each notify queue of a group takes its digests again, and one
             // that no group names ends (`NTF-133`).

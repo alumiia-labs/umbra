@@ -41,6 +41,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardCapitalization
@@ -96,6 +97,11 @@ fun AddContactScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                 FaIcon("user-group", size = 20.dp, tint = Palette.Text)
                 Spacer(Modifier.width(16.dp))
                 Text("New private group")
+            }
+            // Part 9: a link for many people, and a name to look up.
+            if (Core.ownsChannels) {
+                OpenRow("link", "Reusable link") { push(Screen.PublicLinks) }
+                OpenRow("globe", "Your handle", Core.myHandle) { push(Screen.Handle) }
             }
         }
     }
@@ -179,6 +185,16 @@ fun QrCode(link: String, description: String = "The invitation as a QR code") {
 fun UseInvitationScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
     var pasted by remember { mutableStateOf("") }
     var isWaiting by remember { mutableStateOf(false) }
+    var name by remember { mutableStateOf("") }
+    val focus = LocalFocusManager.current
+    LaunchedEffect(Unit) {
+        Core.requestSent = false
+        Core.directoryNote = null
+        Core.profileName { name = it }
+    }
+    // A reusable link, an `umbra:pub:` string, or a handle starts a request
+    // (Part 4 §4.3.3). An invitation link opens as before.
+    val isRequest = isRequestTarget(pasted)
     // A tapped or shared link fills the field, and it waits for Continue.
     LaunchedEffect(Core.linkedInvitation) {
         Core.linkedInvitation?.let { pasted = it }
@@ -186,8 +202,12 @@ fun UseInvitationScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
     }
     val open = { link: String ->
         Core.fault = null
-        Core.accept(link)
-        isWaiting = true
+        if (isRequestTarget(link)) {
+            pasted = link
+        } else {
+            Core.accept(link)
+            isWaiting = true
+        }
     }
     // The scanner gives the link of a code to this view.
     LaunchedEffect(Core.scannedInvitation) {
@@ -211,8 +231,8 @@ fun UseInvitationScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
             OutlinedTextField(
                 value = pasted,
                 onValueChange = { pasted = it },
-                label = { Text("Invitation link") },
-                placeholder = { Text("Paste a link") },
+                label = { Text("Link or handle") },
+                placeholder = { Text("Paste a link, or type @name#1234") },
                 // The input method changes no character of the pasted value.
                 keyboardOptions = KeyboardOptions(
                     keyboardType = KeyboardType.Password,
@@ -222,7 +242,36 @@ fun UseInvitationScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                 modifier = Modifier.fillMaxWidth(),
             )
             Spacer(Modifier.height(12.dp))
-            if (isWaiting) {
+            if (isRequest) {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it.take(32) },
+                    label = { Text("Your name in the request") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(12.dp))
+                if (Core.requestSent) {
+                    Note("Request sent. The contact opens when they accept.")
+                } else if (Core.directoryBusy) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 3.dp)
+                        Spacer(Modifier.width(12.dp))
+                        Text("Looking up the entry and sending the request.")
+                    }
+                } else {
+                    SecondaryButton("Send request", enabled = Core.online) {
+                        // The keyboard leaves, thus the result shows.
+                        focus.clearFocus()
+                        Core.sendRequest(pasted.trim(), name)
+                    }
+                }
+                Core.directoryNote?.let {
+                    Spacer(Modifier.height(12.dp))
+                    Note(it, isError = true)
+                }
+            } else if (isWaiting) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 3.dp)
                     Spacer(Modifier.width(12.dp))
@@ -242,9 +291,17 @@ fun UseInvitationScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
     }
 }
 
+/** Whether a text names a reusable link, a Public Address, or a handle. */
+fun isRequestTarget(text: String): Boolean {
+    val trimmed = text.trim()
+    return trimmed.startsWith("umbra://p/") || trimmed.startsWith("umbra:pub:") ||
+        (trimmed.startsWith("@") && trimmed.contains("#"))
+}
+
 @Composable
 fun NameContactScreen(conversation: Conversation, onDone: () -> Unit) {
-    var name by remember { mutableStateOf("") }
+    // A request gave a name, which the user keeps or changes.
+    var name by remember { mutableStateOf(Core.suggestedName.orEmpty().also { Core.suggestedName = null }) }
     Column(Modifier.fillMaxSize()) {
         BackBar("New contact", onBack = onDone)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {

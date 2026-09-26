@@ -110,6 +110,20 @@ pub enum Command {
         /// The sealed binding of 1 234 bytes.
         sealed: Vec<u8>,
     },
+    /// Make a rendezvous queue of Part 9 §9.6. An
+    /// [`Update::RendezvousQueue`] with the same tag follows.
+    MakeRendezvousQueue(u64),
+    /// End a rendezvous queue with a `DEL`.
+    EndRendezvousQueue([u8; 32]),
+    /// Send a hello of Part 9 §9.6 to the rendezvous queue of an entry.
+    Hello {
+        /// The key of the entry.
+        entry_pk: Vec<u8>,
+        /// The encoded rendezvous `QueueAddress`.
+        rendezvous: Vec<u8>,
+        /// The profile that the hello shows.
+        profile: Vec<u8>,
+    },
 }
 
 /// The store of the client, as the runtime sees it.
@@ -160,6 +174,22 @@ pub enum Update {
         recipient_id: [u8; 32],
         /// The encoded `QueueAddress` that a group relay writes to.
         address: Vec<u8>,
+    },
+    /// A rendezvous queue exists at its relay.
+    RendezvousQueue {
+        /// The tag of the command.
+        tag: u64,
+        /// The `RecipientId` of the queue.
+        recipient_id: [u8; 32],
+        /// The encoded `QueueAddress` that a stranger writes to.
+        address: Vec<u8>,
+    },
+    /// A hello arrived on a rendezvous queue.
+    Hello {
+        /// The rendezvous queue.
+        queue: [u8; 32],
+        /// The sealed envelope of `DIS-143`.
+        envelope: Vec<u8>,
     },
     /// A digest arrived on a notify queue (`NTF-107`).
     Digest {
@@ -464,6 +494,21 @@ pub async fn run_client(
                     None => continue,
                 },
                 ClientEvent::Digest { id, .. } => Update::Digest { group_queue_id: id },
+                ClientEvent::RendezvousQueue {
+                    handle,
+                    recipient_id,
+                    address,
+                } => match notify_tags.remove(&handle) {
+                    Some(tag) => Update::RendezvousQueue {
+                        tag,
+                        recipient_id,
+                        address,
+                    },
+                    None => continue,
+                },
+                ClientEvent::Hello { queue, envelope } => Update::Hello { queue, envelope },
+                // The contact follows flight 1 of the addressee.
+                ClientEvent::HelloSent { .. } => continue,
                 ClientEvent::NotifyKey {
                     recipient_id,
                     relay_ntf_pk,
@@ -581,6 +626,22 @@ pub async fn run_client(
                     sealed,
                 } => {
                     let _ = node.bind_queue(&recipient_id, &sealed, &mut rng);
+                }
+                Command::MakeRendezvousQueue(tag) => {
+                    if let Ok(handle) = node.make_rendezvous_queue(&mut rng) {
+                        notify_tags.insert(handle, tag);
+                    }
+                }
+                Command::EndRendezvousQueue(recipient_id) => {
+                    let _ = node.end_rendezvous_queue(&recipient_id, &mut rng);
+                }
+                Command::Hello {
+                    entry_pk,
+                    rendezvous,
+                    profile,
+                } => {
+                    let epoch = umbra_core::abuse::epoch_number(now);
+                    let _ = node.hello(&entry_pk, &rendezvous, &profile, epoch, &mut rng);
                 }
             }
             if let Err(ended) = settle(&mut node, persist.as_mut(), &[]) {

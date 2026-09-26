@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 mod backup;
 mod dead;
 mod devices;
+mod discovery;
 mod files;
 mod groups;
 mod notify;
@@ -20,6 +21,7 @@ mod sync;
 pub use backup::{BackupUpload, PendingBackup, RestoredBackup, RootWrite};
 pub use dead::DeadWork;
 pub use devices::DeviceInfo;
+pub use discovery::{ContactRequest, EntryKind, Published, PROFILE_NAME_MAX};
 pub use files::{DownloadJob, ErasureJob, FileExtras, FileInfo, FileState, UploadJob};
 use files::{FileQueues, CHUNK_CRED, FILE_DATA, FILE_STATE};
 pub use groups::{
@@ -199,6 +201,8 @@ pub struct StoredNetwork {
     pub invitations: Vec<Zeroizing<Vec<u8>>>,
     /// The stored form of each notify queue of Part 8 §8.5.2.
     pub notify_queues: Vec<Zeroizing<Vec<u8>>>,
+    /// The stored form of each rendezvous queue of Part 9 §9.6.
+    pub rendezvous_queues: Vec<Zeroizing<Vec<u8>>>,
 }
 
 /// A record that waits for the send path.
@@ -736,6 +740,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 StateChange::NotifyQueueEnded { queue } => {
                     Planned::Delete(NOTIFY_STATE, open.store.row_id(NOTIFY_STATE, queue))
                 }
+                StateChange::RendezvousQueue { queue, state } => Planned::Put(
+                    discovery::RENDEZVOUS_STATE,
+                    open.store.row_id(discovery::RENDEZVOUS_STATE, queue),
+                    None,
+                    Zeroizing::new([queue.as_slice(), state].concat()),
+                ),
+                StateChange::RendezvousQueueEnded { queue } => Planned::Delete(
+                    discovery::RENDEZVOUS_STATE,
+                    open.store.row_id(discovery::RENDEZVOUS_STATE, queue),
+                ),
             });
         }
         let mut events = Vec::new();
@@ -1263,10 +1277,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for (_, plain) in store.list(NOTIFY_STATE, None)? {
             notify_queues.push(state_of(plain)?);
         }
+        let mut rendezvous_queues = Vec::new();
+        for (_, plain) in store.list(discovery::RENDEZVOUS_STATE, None)? {
+            rendezvous_queues.push(state_of(plain)?);
+        }
         Ok(StoredNetwork {
             contacts,
             invitations,
             notify_queues,
+            rendezvous_queues,
         })
     }
 

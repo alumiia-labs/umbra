@@ -1,0 +1,447 @@
+//! The entries that this device publishes in the directory of Part 9, the
+//! rendezvous queue of each one, and the contact requests that arrive on
+//! those queues (§9.6).
+//!
+//! A reusable link is a Public Address of Part 4 §4.3.2 at its own index
+//! `j`, and a timed link is one whose device retires its entry at the end
+//! of its period (`DIS-171`). A handle is the `DirectoryEntry` of §9.3 under
+//! `HandleKey_{0,r}`. Each entry has its own rendezvous queue (`DIS-106`).
+
+use umbra_core::{
+    abuse::{epoch_number, pow::PowSolution},
+    discovery::{
+        hello::{self, HelloBody},
+        HELLO_INBOUND_LIMIT,
+    },
+    store::{
+        engine::Backend,
+        record::{RowId, TableId},
+        wrap::SecureElement,
+    },
+};
+use umbra_crypto::{kem::KeyPair, rand_core::CryptoRng};
+use umbra_wire::admission::AdmissionKind;
+use zeroize::Zeroizing;
+
+use super::Client;
+use crate::Error;
+
+/// The stored form of each rendezvous queue, under its `RecipientId`.
+pub(crate) const RENDEZVOUS_STATE: TableId = TableId(0x27);
+/// Each entry that this device publishes, under its identifier.
+pub(super) const PUBLISHED: TableId = TableId(0x28);
+/// Each contact request that waits for the user, under its identifier.
+pub(super) const REQUESTS: TableId = TableId(0x29);
+
+/// The next Public Address index. Profile 0 has no entry (Part 4 §4.2.5),
+/// thus the first link takes index 1.
+const NEXT_ADDRESS_SETTING: &[u8] = b"next-address-index";
+/// The hellos shown for one entry in one epoch of Part 13 §13.6, before
+/// the identifier of the entry.
+const HELLO_COUNT_SETTING: &[u8] = b"hello-count/";
+/// The name that a hello of this device shows.
+const PROFILE_NAME_SETTING: &[u8] = b"profile-name";
+
+/// The longest name of a Profile (Part 4 §4.2.5).
+pub const PROFILE_NAME_MAX: usize = 32;
+
+const PUBLISHED_VERSION: u8 = 0x01;
+const REQUEST_VERSION: u8 = 0x01;
+
+/// The kind of a published entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryKind {
+    /// An `AddressEntry` of Part 9 §9.3.3: a reusable link.
+    Address,
+    /// A `DirectoryEntry` of Part 9 §9.3: a handle.
+    Handle,
+}
+
+/// One entry that this device publishes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Published {
+    /// The identifier of the row.
+    pub id: [u8; 16],
+    /// The kind.
+    pub kind: EntryKind,
+    /// The index `j`.
+    pub index: u32,
+    /// The rotation `r` of a handle key, 0 for an address.
+    pub rotation: u32,
+    /// The label input of Part 9 §9.10.
+    pub label: Vec<u8>,
+    /// The name that a challenge binds: the 20 bytes of an address, or the
+    /// canonical handle (`DIS-108`).
+    pub name: Vec<u8>,
+    /// The `RecipientId` of the rendezvous queue.
+    pub queue: [u8; 32],
+    /// The encoded rendezvous `QueueAddress`.
+    pub rendezvous: Vec<u8>,
+    /// The newest version of the entry.
+    pub version: u32,
+    /// The time of the registration, in Unix seconds.
+    pub created_at: u64,
+    /// The end of a timed link, or 0 for none.
+    pub expires_at: u64,
+    /// The time of the last renewal of the lease.
+    pub renewed_at: u64,
+}
+
+impl Published {
+    fn encode(&self) -> Result<Zeroizing<Vec<u8>>, Error> {
+        let mut out = Zeroizing::new(vec![PUBLISHED_VERSION]);
+        out.extend_from_slice(&self.id);
+        out.push(match self.kind {
+            EntryKind::Address => 1,
+            EntryKind::Handle => 2,
+        });
+        out.extend_from_slice(&self.index.to_be_bytes());
+        out.extend_from_slice(&self.rotation.to_be_bytes());
+        put_var(&mut out, &self.label)?;
+        put_var(&mut out, &self.name)?;
+        out.extend_from_slice(&self.queue);
+        put_var(&mut out, &self.rendezvous)?;
+        out.extend_from_slice(&self.version.to_be_bytes());
+        out.extend_from_slice(&self.created_at.to_be_bytes());
+        out.extend_from_slice(&self.expires_at.to_be_bytes());
+        out.extend_from_slice(&self.renewed_at.to_be_bytes());
+        Ok(out)
+    }
+
+    fn parse(bytes: &[u8]) -> Result<Self, Error> {
+        let mut r = Cursor(bytes);
+        if r.u8()? != PUBLISHED_VERSION {
+            return Err(Error::Integrity);
+        }
+        let out = Published {
+            id: r.array()?,
+            kind: match r.u8()? {
+                1 => EntryKind::Address,
+                2 => EntryKind::Handle,
+                _ => return Err(Error::Integrity),
+            },
+            index: u32::from_be_bytes(r.array()?),
+            rotation: u32::from_be_bytes(r.array()?),
+            label: r.var()?,
+            name: r.var()?,
+            queue: r.array()?,
+            rendezvous: r.var()?,
+            version: u32::from_be_bytes(r.array()?),
+            created_at: u64::from_be_bytes(r.array()?),
+            expires_at: u64::from_be_bytes(r.array()?),
+            renewed_at: u64::from_be_bytes(r.array()?),
+        };
+        r.end()?;
+        Ok(out)
+    }
+}
+
+/// One contact request, as a view shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContactRequest {
+    /// The identifier of the row.
+    pub id: [u8; 16],
+    /// The entry that the hello reached.
+    pub via: [u8; 16],
+    /// The time of the arrival, in Unix seconds.
+    pub received_at: u64,
+    /// The name that the sender shows. No party checks it (Part 9 §9.8).
+    pub name: String,
+}
+
+fn put_var(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), Error> {
+    let len = u16::try_from(bytes.len()).map_err(|_| Error::TooLong)?;
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(bytes);
+    Ok(())
+}
+
+struct Cursor<'a>(&'a [u8]);
+
+impl Cursor<'_> {
+    fn take(&mut self, n: usize) -> Result<&[u8], Error> {
+        if self.0.len() < n {
+            return Err(Error::Integrity);
+        }
+        let (head, rest) = self.0.split_at(n);
+        self.0 = rest;
+        Ok(head)
+    }
+
+    fn u8(&mut self) -> Result<u8, Error> {
+        Ok(self.array::<1>()?[0])
+    }
+
+    fn array<const N: usize>(&mut self) -> Result<[u8; N], Error> {
+        self.take(N)?.try_into().map_err(|_| Error::Integrity)
+    }
+
+    fn var(&mut self) -> Result<Vec<u8>, Error> {
+        let len = usize::from(u16::from_be_bytes(self.array()?));
+        Ok(self.take(len)?.to_vec())
+    }
+
+    fn end(&self) -> Result<(), Error> {
+        if self.0.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::Integrity)
+        }
+    }
+}
+
+impl<B: Backend, E: SecureElement> Client<B, E> {
+    fn put_row<R: CryptoRng + ?Sized>(
+        &mut self,
+        table: TableId,
+        key: &[u8],
+        value: &[u8],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let open = self.open_mut()?;
+        let row = open.store.row_id(table, key);
+        let mut batch = open.store.begin();
+        batch.put(table, row, None, value, rng)?;
+        Ok(batch.commit()?)
+    }
+
+    fn delete_row(&mut self, table: TableId, key: &[u8]) -> Result<(), Error> {
+        let open = self.open_mut()?;
+        let row: RowId = open.store.row_id(table, key);
+        let mut batch = open.store.begin();
+        batch.delete(table, row);
+        Ok(batch.commit()?)
+    }
+
+    fn get_row(&self, table: TableId, key: &[u8]) -> Result<Option<Zeroizing<Vec<u8>>>, Error> {
+        let store = &self.open_ref()?.store;
+        let row = store.row_id(table, key);
+        Ok(store.get(table, &row)?.map(Zeroizing::new))
+    }
+
+    /// Each entry that this device publishes, oldest first.
+    pub fn published(&self) -> Result<Vec<Published>, Error> {
+        let store = &self.open_ref()?.store;
+        let mut out = Vec::new();
+        for (_, plain) in store.list(PUBLISHED, None)? {
+            out.push(Published::parse(&Zeroizing::new(plain))?);
+        }
+        out.sort_by_key(|entry| entry.created_at);
+        Ok(out)
+    }
+
+    /// Keeps an entry.
+    pub fn put_published<R: CryptoRng + ?Sized>(
+        &mut self,
+        entry: &Published,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let plain = entry.encode()?;
+        self.put_row(PUBLISHED, &entry.id, &plain, rng)
+    }
+
+    /// Drops an entry and each request that it brought.
+    pub fn drop_published(&mut self, id: &[u8; 16]) -> Result<(), Error> {
+        for request in self.contact_requests()? {
+            if request.via == *id {
+                self.delete_row(REQUESTS, &request.id)?;
+            }
+        }
+        self.delete_row(PUBLISHED, id)
+    }
+
+    /// Takes the next Public Address index (`IDN-006`).
+    pub fn take_address_index<R: CryptoRng + ?Sized>(&mut self, rng: &mut R) -> Result<u32, Error> {
+        let index = match self.get_row(super::SETTINGS, NEXT_ADDRESS_SETTING)? {
+            Some(bytes) => {
+                u32::from_be_bytes(bytes.as_slice().try_into().map_err(|_| Error::Integrity)?)
+            }
+            None => 1,
+        };
+        let next = index.checked_add(1).ok_or(Error::TooLong)?;
+        self.put_row(
+            super::SETTINGS,
+            NEXT_ADDRESS_SETTING,
+            &next.to_be_bytes(),
+            rng,
+        )?;
+        Ok(index)
+    }
+
+    /// The key of an entry: `PublicAddressKey_j` or `HandleKey_{j,r}`.
+    pub fn entry_key(&self, kind: EntryKind, index: u32, rotation: u32) -> Result<KeyPair, Error> {
+        let root = self.root_identity()?;
+        Ok(match kind {
+            EntryKind::Address => root.public_address_key(index),
+            EntryKind::Handle => root.handle_key(index, rotation),
+        })
+    }
+
+    /// The name that a hello of this device shows, or an empty one.
+    pub fn profile_name(&self) -> Result<String, Error> {
+        Ok(self
+            .get_row(super::SETTINGS, PROFILE_NAME_SETTING)?
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_default())
+    }
+
+    /// Sets that name, at most `PROFILE_NAME_MAX` bytes.
+    pub fn set_profile_name<R: CryptoRng + ?Sized>(
+        &mut self,
+        name: &str,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let name = name.trim();
+        if name.len() > PROFILE_NAME_MAX {
+            return Err(Error::TooLong);
+        }
+        self.put_row(super::SETTINGS, PROFILE_NAME_SETTING, name.as_bytes(), rng)
+    }
+
+    /// Takes a hello from a rendezvous queue. The request waits for the user
+    /// when the envelope opens under the key of its entry and its proof of
+    /// work holds (`ABU-012`), and `HELLO_INBOUND_LIMIT` of the epoch is not
+    /// reached. The result names the new request.
+    pub fn on_hello<R: CryptoRng + ?Sized>(
+        &mut self,
+        queue: &[u8; 32],
+        envelope: &[u8],
+        now: u64,
+        rng: &mut R,
+    ) -> Result<Option<[u8; 16]>, Error> {
+        let Some(entry) = self
+            .published()?
+            .into_iter()
+            .find(|entry| entry.queue == *queue)
+        else {
+            return Ok(None);
+        };
+        let key = self.entry_key(entry.kind, entry.index, entry.rotation)?;
+        let Ok(plain) = hello::open(&key, envelope) else {
+            return Ok(None);
+        };
+        let plain = Zeroizing::new(plain);
+        let Ok(body) = HelloBody::parse(&plain) else {
+            return Ok(None);
+        };
+        // ABU-079: a first-party token needs the secret of its issuer, and
+        // no cross-relay issuer runs yet, thus a proof of work alone admits.
+        if body.admission.kind != AdmissionKind::Pow {
+            return Ok(None);
+        }
+        let Ok(solution) = PowSolution::parse(body.admission.body) else {
+            return Ok(None);
+        };
+        let epoch = epoch_number(now);
+        let entry_pk = key.public().to_bytes();
+        if umbra_core::abuse::pow::verify_hello(&entry_pk, epoch, &solution).is_err() {
+            return Ok(None);
+        }
+        // ABU-086: HELLO_INBOUND_LIMIT hellos for one entry in one epoch.
+        let count_key = [HELLO_COUNT_SETTING, entry.id.as_slice()].concat();
+        let count = match self.get_row(super::SETTINGS, &count_key)? {
+            Some(bytes) => {
+                let mut r = Cursor(&bytes);
+                let held_epoch = u32::from_be_bytes(r.array()?);
+                let held = u32::from_be_bytes(r.array()?);
+                if held_epoch == epoch {
+                    held
+                } else {
+                    0
+                }
+            }
+            None => 0,
+        };
+        if count >= HELLO_INBOUND_LIMIT {
+            return Ok(None);
+        }
+        let mut bundle = Zeroizing::new(vec![0u8; body.bundle.len()]);
+        let used = body.bundle.encode(&mut bundle)?;
+        bundle.truncate(used);
+        // A second copy of one hello is no second request.
+        let requests = self.stored_requests()?;
+        if requests
+            .iter()
+            .any(|(_, held)| held.bundle.as_slice() == bundle.as_slice())
+        {
+            return Ok(None);
+        }
+        let name = core::str::from_utf8(body.profile)
+            .ok()
+            .filter(|name| name.len() <= PROFILE_NAME_MAX)
+            .unwrap_or_default()
+            .to_owned();
+        let mut id = [0u8; 16];
+        rng.fill_bytes(&mut id);
+        let mut value = Zeroizing::new(vec![REQUEST_VERSION]);
+        value.extend_from_slice(&id);
+        value.extend_from_slice(&entry.id);
+        value.extend_from_slice(&now.to_be_bytes());
+        put_var(&mut value, &bundle)?;
+        put_var(&mut value, name.as_bytes())?;
+        self.put_row(REQUESTS, &id, &value, rng)?;
+        let mut counted = epoch.to_be_bytes().to_vec();
+        counted.extend_from_slice(&(count + 1).to_be_bytes());
+        self.put_row(super::SETTINGS, &count_key, &counted, rng)?;
+        Ok(Some(id))
+    }
+
+    fn stored_requests(&self) -> Result<Vec<(ContactRequest, StoredRequest)>, Error> {
+        let store = &self.open_ref()?.store;
+        let mut out = Vec::new();
+        for (_, plain) in store.list(REQUESTS, None)? {
+            let plain = Zeroizing::new(plain);
+            let mut r = Cursor(&plain);
+            if r.u8()? != REQUEST_VERSION {
+                return Err(Error::Integrity);
+            }
+            let id = r.array()?;
+            let via = r.array()?;
+            let received_at = u64::from_be_bytes(r.array()?);
+            let bundle = Zeroizing::new(r.var()?);
+            let name = String::from_utf8_lossy(&r.var()?).into_owned();
+            r.end()?;
+            out.push((
+                ContactRequest {
+                    id,
+                    via,
+                    received_at,
+                    name,
+                },
+                StoredRequest { bundle },
+            ));
+        }
+        out.sort_by_key(|(request, _)| request.received_at);
+        Ok(out)
+    }
+
+    /// Each contact request that waits, oldest first.
+    pub fn contact_requests(&self) -> Result<Vec<ContactRequest>, Error> {
+        Ok(self
+            .stored_requests()?
+            .into_iter()
+            .map(|(request, _)| request)
+            .collect())
+    }
+
+    /// Takes a request from the store, and gives its bundle: the invitation
+    /// that the device accepts (`DIS-087`).
+    pub fn take_request(&mut self, id: &[u8; 16]) -> Result<Zeroizing<Vec<u8>>, Error> {
+        let (_, held) = self
+            .stored_requests()?
+            .into_iter()
+            .find(|(request, _)| request.id == *id)
+            .ok_or(Error::NotFound)?;
+        self.delete_row(REQUESTS, id)?;
+        Ok(held.bundle)
+    }
+
+    /// Drops a request.
+    pub fn decline_request(&mut self, id: &[u8; 16]) -> Result<(), Error> {
+        self.delete_row(REQUESTS, id)
+    }
+}
+
+struct StoredRequest {
+    bundle: Zeroizing<Vec<u8>>,
+}

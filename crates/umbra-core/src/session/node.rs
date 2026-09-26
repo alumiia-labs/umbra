@@ -250,6 +250,30 @@ pub enum ClientEvent {
         /// The `RecipientId` of the queue.
         queue: [u8; 32],
     },
+    /// A rendezvous queue of Part 9 §9.6 exists at its relay. The caller
+    /// publishes `address` in an entry of the directory.
+    RendezvousQueue {
+        /// The handle that [`ClientNode::make_rendezvous_queue`] gave.
+        handle: u64,
+        /// The `RecipientId` of the queue.
+        recipient_id: [u8; 32],
+        /// The encoded `QueueAddress` that a stranger writes to.
+        address: Vec<u8>,
+    },
+    /// A hello arrived on a rendezvous queue: the sealed envelope of
+    /// `DIS-143`, which the caller opens with the key of the entry.
+    Hello {
+        /// The rendezvous queue.
+        queue: [u8; 32],
+        /// The envelope.
+        envelope: Vec<u8>,
+    },
+    /// A hello went to a rendezvous queue, and its invitation waits for
+    /// flight 1 of the addressee (`DIS-087`).
+    HelloSent {
+        /// The handle that [`ClientNode::hello`] gave.
+        handle: u64,
+    },
 }
 
 /// One chunk command of Part 12 §12.3.3 for one relay.
@@ -562,6 +586,20 @@ enum Purpose {
     },
     /// The notify queue of a group (Part 8 §8.5.2).
     Notify,
+    /// A rendezvous queue of Part 9 §9.6.
+    Rendezvous,
+    /// The queue of a hello of Part 9 §9.6: its bundle goes in a hello to
+    /// the rendezvous queue of an entry.
+    Hello {
+        /// The key of the entry.
+        entry_pk: Vec<u8>,
+        /// The encoded rendezvous `QueueAddress` of the entry.
+        rendezvous: Vec<u8>,
+        /// The profile that the hello shows.
+        profile: Vec<u8>,
+        /// The epoch of Part 13 §13.6, for the proof of work.
+        epoch: u32,
+    },
     /// The queue and the bundle of a channel renewal that this device
     /// offers, as the responder (Part 3 §3.2.6).
     Renew {
@@ -720,6 +758,8 @@ struct Half {
     renews: Option<[u8; 32]>,
     /// Whether the handshake opens the sync channel of a device.
     device: bool,
+    /// Whether the invitation went in a hello of Part 9 §9.6.
+    hello: bool,
 }
 
 struct Contact {
@@ -853,6 +893,19 @@ pub enum StateChange {
         /// The `RecipientId` of the queue.
         queue: [u8; 32],
     },
+    /// A rendezvous queue is new, or its cursor moved. The stored form is
+    /// the one of a notify queue.
+    RendezvousQueue {
+        /// The `RecipientId` of the queue.
+        queue: [u8; 32],
+        /// The stored form, which holds the keys of the queue.
+        state: Zeroizing<Vec<u8>>,
+    },
+    /// A rendezvous queue ended.
+    RendezvousQueueEnded {
+        /// The `RecipientId` of the queue.
+        queue: [u8; 32],
+    },
 }
 
 /// What one slot of the cover clock carried.
@@ -893,6 +946,9 @@ const RENEWAL_STORED_VERSION: u8 = 0x03;
 /// The stored form of an invitation of a sync channel (Part 7 `DEV-286`):
 /// the form of `STORED_VERSION`.
 const DEVICE_STORED_VERSION: u8 = 0x04;
+/// The stored form of the invitation of a hello of Part 9 §9.6: the form of
+/// `STORED_VERSION`. No view shows it.
+const HELLO_STORED_VERSION: u8 = 0x05;
 
 /// `ROTATE_AFTER` of Part 3 §3.2.4: the age of a queue, in seconds.
 pub const ROTATE_AFTER: u64 = 90 * 86_400;
@@ -964,6 +1020,9 @@ pub struct ClientNode {
     contacts: BTreeMap<[u8; 32], Contact>,
     /// The notify queues of Part 8 §8.5.2, by `RecipientId`.
     notify: BTreeMap<[u8; 32], NotifyQueue>,
+    /// The rendezvous queues of Part 9 §9.6, by `RecipientId`. Each has
+    /// the form of a notify queue: no contact writes to it.
+    rendezvous: BTreeMap<[u8; 32], NotifyQueue>,
     /// The contacts whose new queue the relay makes now.
     rotating: BTreeSet<[u8; 32]>,
     /// The contacts with a renewal handshake that runs, in either role.
@@ -1085,6 +1144,7 @@ impl ClientNode {
             renewing: BTreeSet::new(),
             forced: BTreeSet::new(),
             notify: BTreeMap::new(),
+            rendezvous: BTreeMap::new(),
             moved: BTreeSet::new(),
             changes: Vec::new(),
         }
@@ -1096,6 +1156,13 @@ impl ClientNode {
         for id in core::mem::take(&mut self.moved) {
             if let Some(held) = self.notify.get(&id) {
                 changes.push(StateChange::NotifyQueue {
+                    queue: id,
+                    state: notify_state(held)?,
+                });
+                continue;
+            }
+            if let Some(held) = self.rendezvous.get(&id) {
+                changes.push(StateChange::RendezvousQueue {
                     queue: id,
                     state: notify_state(held)?,
                 });
@@ -1707,13 +1774,94 @@ impl ClientNode {
         self.make_queue(Purpose::Notify, rng)
     }
 
+    /// Makes a rendezvous queue of Part 9 §9.6. A
+    /// [`ClientEvent::RendezvousQueue`] with the same handle follows.
+    pub fn make_rendezvous_queue<R: CryptoRng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+    ) -> Result<u64, Error> {
+        self.make_queue(Purpose::Rendezvous, rng)
+    }
+
+    /// Takes a rendezvous queue of an earlier run from its stored form.
+    pub fn restore_rendezvous_queue(&mut self, state: &[u8]) -> Result<[u8; 32], Error> {
+        let mut reader = Reader::new(state);
+        if reader.u8()? != NOTIFY_STORED_VERSION {
+            return Err(Error::Malformed);
+        }
+        let relay = reader.array()?;
+        let inbound = Inbound::restore(&mut reader)?;
+        reader.end()?;
+        let id = *inbound.recipient_id();
+        self.assign(id, relay);
+        self.rendezvous.insert(id, NotifyQueue { inbound, relay });
+        Ok(id)
+    }
+
+    /// Ends a rendezvous queue: a `DEL` goes to its relay when a circuit
+    /// serves it, and the node holds it no more.
+    pub fn end_rendezvous_queue<R: CryptoRng + ?Sized>(
+        &mut self,
+        recipient_id: &[u8; 32],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let Some(held) = self.rendezvous.remove(recipient_id) else {
+            return Ok(());
+        };
+        self.changes.push(StateChange::RendezvousQueueEnded {
+            queue: *recipient_id,
+        });
+        self.moved.remove(recipient_id);
+        if let Some(slot) = self.slot_of(recipient_id) {
+            self.current = slot;
+            if let Ok(session_pk) = self.session_pk() {
+                let command = held.inbound.delete(&session_pk, random(rng))?;
+                self.queue_command(command, Waiting::Other)?;
+                self.pump()?;
+            }
+            if let Some(slot) = self.slots.get_mut(slot) {
+                slot.queues.remove(recipient_id);
+            }
+        }
+        Ok(())
+    }
+
+    /// Sends a hello of Part 9 §9.6 to the rendezvous queue of an entry:
+    /// a fresh invitation of this device, under a proof of work of Part 13
+    /// §13.4 (`DIS-086`, `DIS-131`). The addressee that accepts sends
+    /// flight 1 to the queue of that invitation, and a
+    /// [`ClientEvent::ContactReady`] follows. A [`ClientEvent::HelloSent`]
+    /// with the same handle follows the send.
+    pub fn hello<R: CryptoRng + ?Sized>(
+        &mut self,
+        entry_pk: &[u8],
+        rendezvous: &[u8],
+        profile: &[u8],
+        epoch: u32,
+        rng: &mut R,
+    ) -> Result<u64, Error> {
+        QueueAddress::parse(rendezvous)?;
+        self.make_queue(
+            Purpose::Hello {
+                entry_pk: entry_pk.to_vec(),
+                rendezvous: rendezvous.to_vec(),
+                profile: profile.to_vec(),
+                epoch,
+            },
+            rng,
+        )
+    }
+
     /// Takes an invitation of an earlier run from its stored form.
     pub fn restore_invitation(&mut self, state: &[u8]) -> Result<Vec<u8>, Error> {
         let mut reader = Reader::new(state);
         let version = reader.u8()?;
         let names_relay = match version {
             0x01 => false,
-            STORED_VERSION | RENEWAL_STORED_VERSION | DEVICE_STORED_VERSION => true,
+            STORED_VERSION
+            | RENEWAL_STORED_VERSION
+            | DEVICE_STORED_VERSION
+            | HELLO_STORED_VERSION => true,
             _ => return Err(Error::Malformed),
         };
         let salt = reader.array()?;
@@ -1753,8 +1901,14 @@ impl ClientNode {
                 inbound_relay,
                 renews,
                 device: version == DEVICE_STORED_VERSION,
+                hello: version == HELLO_STORED_VERSION,
             },
         );
+        // The invitation of a hello went to its addressee, and no view
+        // shows it.
+        if version == HELLO_STORED_VERSION {
+            return Ok(Vec::new());
+        }
         // A renewal is no invitation of the user, and no view shows it.
         if let Some(contact) = renews {
             self.renewing.insert(contact);
@@ -1775,6 +1929,7 @@ impl ClientNode {
         writer.u8(match half.renews {
             Some(_) => RENEWAL_STORED_VERSION,
             None if half.device => DEVICE_STORED_VERSION,
+            None if half.hello => HELLO_STORED_VERSION,
             None => STORED_VERSION,
         });
         writer.bytes(&half.salt);
@@ -1826,7 +1981,8 @@ impl ClientNode {
         });
         let stored = contacts
             .chain(self.halves.values().map(|half| &half.inbound))
-            .chain(self.notify.values().map(|held| &held.inbound));
+            .chain(self.notify.values().map(|held| &held.inbound))
+            .chain(self.rendezvous.values().map(|held| &held.inbound));
         for inbound in stored.filter(|inbound| queues.contains(inbound.recipient_id())) {
             let queue = *inbound.recipient_id();
             commands.push((
@@ -2307,6 +2463,7 @@ impl ClientNode {
             })
             .chain(self.halves.values().map(|half| &half.inbound))
             .chain(self.notify.values().map(|held| &held.inbound))
+            .chain(self.rendezvous.values().map(|held| &held.inbound))
             .find(|inbound| inbound.recipient_id() == recipient_id)
     }
 
@@ -3173,7 +3330,12 @@ impl ClientNode {
                 return Ok(CoverSlot::Acknowledgment);
             }
         }
-        let notify: Vec<[u8; 32]> = self.notify.keys().copied().collect();
+        let notify: Vec<[u8; 32]> = self
+            .notify
+            .keys()
+            .chain(self.rendezvous.keys())
+            .copied()
+            .collect();
         for queue in notify {
             if self.slot_of(&queue).is_some() && self.acknowledge_notify(&queue, now, rng)? {
                 return Ok(CoverSlot::Acknowledgment);
@@ -3262,7 +3424,10 @@ impl ClientNode {
     ) -> Result<bool, Error> {
         self.current = self.slot_of(queue).ok_or(Error::NoPath)?;
         let session_pk = self.session_pk()?;
-        let held = self.notify.get_mut(queue).ok_or(Error::NoPath)?;
+        let held = match self.notify.get_mut(queue) {
+            Some(held) => held,
+            None => self.rendezvous.get_mut(queue).ok_or(Error::NoPath)?,
+        };
         let Some((point, encoded)) = held.inbound.acknowledge(&session_pk, random(rng), now)?
         else {
             return Ok(false);
@@ -3724,6 +3889,24 @@ impl ClientNode {
                 address,
             }]);
         }
+        if matches!(keys.purpose, Purpose::Rendezvous) {
+            let mut address = alloc::vec![0u8; QUEUE_ADDRESS_LEN];
+            own_address().encode(&mut address)?;
+            let held = NotifyQueue {
+                inbound,
+                relay: queue_relay,
+            };
+            self.changes.push(StateChange::RendezvousQueue {
+                queue: ids.recipient_id,
+                state: notify_state(&held)?,
+            });
+            self.rendezvous.insert(ids.recipient_id, held);
+            return Ok(alloc::vec![ClientEvent::RendezvousQueue {
+                handle: keys.handle,
+                recipient_id: ids.recipient_id,
+                address,
+            }]);
+        }
         if let Purpose::Rotate { contact, now } = keys.purpose {
             self.rotating.remove(&contact);
             let mut address = alloc::vec![0u8; QUEUE_ADDRESS_LEN];
@@ -3754,6 +3937,7 @@ impl ClientNode {
             keys.purpose,
             Purpose::DeviceInvite | Purpose::Accept { device: true, .. }
         );
+        let hello = matches!(keys.purpose, Purpose::Hello { .. });
         let (setup, outbound, peer_static, issued) = match keys.purpose {
             Purpose::InviteLink => {
                 let (inviter, bundle) = Inviter::issue(&identity, own_address(), rng)?;
@@ -3773,8 +3957,41 @@ impl ClientNode {
                 });
                 (Setup::Inviting(Box::new(inviter)), None, [0u8; 32], bundle)
             }
-            // The notify queue and the rotation took their paths above.
-            Purpose::Notify | Purpose::Rotate { .. } => return Err(Error::Malformed),
+            // DIS-086: a fresh invitation in a hello, whose flight 1 comes
+            // from the addressee.
+            Purpose::Hello {
+                entry_pk,
+                rendezvous,
+                profile,
+                epoch,
+            } => {
+                let (inviter, bundle) = Inviter::issue(&identity, own_address(), rng)?;
+                let solution = crate::abuse::pow::solve_hello(&entry_pk, epoch, rng)?;
+                let mut encoded = [0u8; crate::abuse::pow::SOLUTION_LEN];
+                solution.encode(&mut encoded)?;
+                let body = crate::discovery::hello::HelloBody {
+                    bundle: Bundle::parse(&bundle)?,
+                    profile: &profile,
+                    admission: Admission {
+                        kind: umbra_wire::admission::AdmissionKind::Pow,
+                        body: &encoded,
+                    },
+                };
+                let envelope = crate::discovery::hello::seal(&entry_pk, &body, rng)?;
+                let to = QueueAddress::parse(&rendezvous)?;
+                let sealed =
+                    Outbound::new(&to).seal_record(L6Kind::Hello, &envelope, random(rng))?;
+                self.send_sealed(sealed, rng)?;
+                out.push(ClientEvent::HelloSent {
+                    handle: keys.handle,
+                });
+                (Setup::Inviting(Box::new(inviter)), None, [0u8; 32], bundle)
+            }
+            // The notify queue, the rendezvous queue, and the rotation took
+            // their paths above.
+            Purpose::Notify | Purpose::Rendezvous | Purpose::Rotate { .. } => {
+                return Err(Error::Malformed)
+            }
             // NET-326: the bundle goes to the queue of the peer.
             Purpose::Renew { .. } => {
                 let (inviter, bundle) = Inviter::issue(&identity, own_address(), rng)?;
@@ -3827,6 +4044,7 @@ impl ClientNode {
             inbound_relay: queue_relay,
             renews,
             device,
+            hello,
         };
         // An invitation with a link waits for the store of its blob.
         if half.link.is_none() {
@@ -3860,6 +4078,22 @@ impl ClientNode {
         now: u64,
         rng: &mut R,
     ) -> Result<Vec<ClientEvent>, Error> {
+        if let Some(held) = self.rendezvous.get_mut(&queue_id) {
+            self.moved.insert(queue_id);
+            // WIR-534: a rendezvous queue carries hellos alone.
+            if let Opened::Record {
+                kind: L6Kind::Hello,
+                inner,
+                ..
+            } = held.inbound.open(payload, bucket, now)?
+            {
+                return Ok(alloc::vec![ClientEvent::Hello {
+                    queue: queue_id,
+                    envelope: inner,
+                }]);
+            }
+            return Ok(Vec::new());
+        }
         if let Some(held) = self.notify.get_mut(&queue_id) {
             self.moved.insert(queue_id);
             // NTF-107: a digest names the group queue that holds records.

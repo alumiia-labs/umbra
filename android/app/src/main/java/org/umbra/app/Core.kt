@@ -15,8 +15,10 @@ import java.util.concurrent.Executors
 import kotlin.concurrent.thread
 import uniffi.umbra_ffi.Config
 import uniffi.umbra_ffi.Connection
+import uniffi.umbra_ffi.ContactRequestInfo
 import uniffi.umbra_ffi.FfiEvent
 import uniffi.umbra_ffi.FfiException
+import uniffi.umbra_ffi.PublicLink
 import uniffi.umbra_ffi.FfiGroupMember
 import uniffi.umbra_ffi.FfiGroupOffer
 import uniffi.umbra_ffi.FfiRole
@@ -271,6 +273,147 @@ object Core {
             devices.addAll(list)
             ownsChannels = owns
         }
+    }
+
+    /** The reusable links of this device (Part 4 §4.3.2). */
+    val publicLinks = mutableStateListOf<PublicLink>()
+
+    /** The handle of this device, or none (Part 9 §9.3). */
+    var myHandle by mutableStateOf<String?>(null)
+        private set
+
+    /** The contact requests that wait (Part 9 §9.6). */
+    val contactRequests = mutableStateListOf<ContactRequestInfo>()
+
+    /** Whether a call to the directory runs, and the words of its fault. */
+    var directoryBusy by mutableStateOf(false)
+        private set
+    var directoryNote by mutableStateOf<String?>(null)
+
+    /** The link that the last call made, for its view. */
+    var madeLink by mutableStateOf<List<Byte>?>(null)
+
+    /** Whether the last request left, for the view that sent it. */
+    var requestSent by mutableStateOf(false)
+
+    /** The name that an accepted request showed, for the naming view. */
+    var suggestedName: String? = null
+
+    /** The calls to the directory take seconds each, thus they have a thread of their own. */
+    private val directoryWorker = Executors.newSingleThreadExecutor { Thread(it, "umbra-directory") }
+    private const val MAINTAIN_MS = 5 * 60_000L
+    private var maintains = false
+
+    fun readDirectory() = call { client ->
+        val links = client.publicLinks()
+        val handle = client.myHandle()
+        val requests = client.contactRequests()
+        main.post {
+            publicLinks.clear()
+            publicLinks.addAll(links)
+            myHandle = handle
+            contactRequests.clear()
+            contactRequests.addAll(requests)
+        }
+    }
+
+    private fun directory(action: (Handle) -> Unit) {
+        val client = handle ?: return
+        directoryBusy = true
+        directoryNote = null
+        directoryWorker.execute {
+            try {
+                action(client)
+            } catch (locked: FfiException.Locked) {
+                // A call that the lock overtook is no fault of the user.
+            } catch (failure: FfiException) {
+                main.post { directoryNote = directoryFault(failure) }
+            } finally {
+                main.post { directoryBusy = false }
+                readDirectory()
+            }
+        }
+    }
+
+    private fun directoryFault(failure: FfiException): String = when (failure) {
+        is FfiException.Offline -> "The directory does not answer."
+        is FfiException.Busy -> "The directory takes this change at its next epoch. Try again in a few minutes."
+        is FfiException.Stale -> "That is taken, or it changed. Try again."
+        is FfiException.NotFound -> "The directory holds no such link or handle."
+        is FfiException.Unverified -> "The answer of the directory does not verify."
+        is FfiException.Malformed -> "That is no link or handle."
+        else -> "That did not work: ${failure.javaClass.simpleName}."
+    }
+
+    fun createPublicLink(validSeconds: ULong) = directory { client ->
+        val made = client.createPublicLink(validSeconds)
+        // The list holds the link before its view opens.
+        val links = client.publicLinks()
+        main.post {
+            publicLinks.clear()
+            publicLinks.addAll(links)
+            madeLink = made.id.toList()
+        }
+    }
+
+    fun retirePublicLink(link: PublicLink) = directory { client -> client.retirePublicLink(link.id) }
+
+    fun claimHandle(name: String) = directory { client -> client.claimHandle(name) }
+
+    fun releaseHandle() = directory { client -> client.releaseHandle() }
+
+    /** Sends a request to a reusable link or a handle, under the name of the user. */
+    fun sendRequest(target: String, name: String) {
+        requestSent = false
+        directory { client ->
+            client.setProfileName(name)
+            client.sendContactRequest(target)
+            main.post { requestSent = true }
+        }
+    }
+
+    fun profileName(onName: (String) -> Unit) = call { client ->
+        val name = client.profileName()
+        main.post { onName(name) }
+    }
+
+    fun acceptRequest(request: ContactRequestInfo) = call { client ->
+        client.acceptContactRequest(request.id)
+        suggestedName = request.name.ifBlank { null }
+        readDirectory()
+    }
+
+    fun declineRequest(request: ContactRequestInfo) = call { client ->
+        client.declineContactRequest(request.id)
+        readDirectory()
+    }
+
+    /** The upkeep of the entries: a timed link at its end, and each lease. */
+    private fun maintainDirectory() {
+        val client = handle ?: return
+        directoryWorker.execute {
+            try {
+                if (client.hasDirectory()) client.maintainDirectory()
+            } catch (failure: FfiException) {
+                // The next round tries again.
+            }
+            readDirectory()
+        }
+    }
+
+    private fun scheduleMaintenance() {
+        if (maintains) return
+        maintains = true
+        main.postDelayed(object : Runnable {
+            override fun run() {
+                if (!online) {
+                    maintains = false
+                    return
+                }
+                maintainDirectory()
+                main.postDelayed(this, MAINTAIN_MS)
+            }
+        }, MAINTAIN_MS)
     }
 
     /** Removes a device from the set (Part 7 §7.7). */
@@ -574,6 +717,9 @@ object Core {
                 linkFault = null
                 retryDelayMs = FIRST_RETRY_MS
                 readConnection()
+                readDirectory()
+                maintainDirectory()
+                scheduleMaintenance()
             }
             is FfiEvent.Circuits -> readConnection()
             is FfiEvent.Offline -> {
@@ -670,6 +816,10 @@ object Core {
                 verifyCode = null
                 verifiedNow = null
                 chats.clear()
+                publicLinks.clear()
+                contactRequests.clear()
+                myHandle = null
+                suggestedName = null
                 phase = Phase.Locked
                 // A locked client holds no key that reads a queue, thus the
                 // carrier ends, and the user learns it.
@@ -687,6 +837,10 @@ object Core {
             is FfiEvent.DeviceLinked -> {
                 readDevices()
                 readLink()
+            }
+            is FfiEvent.ContactRequest -> {
+                readDirectory()
+                if (!isVisible) Notifier.request(app)
             }
         }
         // An event can hold a handle of a message, and this frees it.

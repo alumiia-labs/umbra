@@ -323,6 +323,9 @@ fn network_of(ports: &[u16]) -> Network {
         ndr_relay_url: None,
         ndr_key_config: None,
         ndr_relay_ipv4: None,
+        directory_relay_url: None,
+        directory_pins: None,
+        directory_relay_ipv4: None,
     }
 }
 

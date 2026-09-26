@@ -19,6 +19,7 @@ object Notifier {
     const val CARRIER_ID = 1
     private const val LOCKED_ID = 2
     private const val PUSH_ID = 3
+    private const val REQUEST_ID = 4
     private const val CARRIER_CHANNEL = "carrier"
     private const val MESSAGE_CHANNEL = "messages"
     private const val MESSAGE_TAG = "message"
@@ -96,6 +97,19 @@ object Notifier {
      * A locked client takes no record. The user learns it one time for each
      * lock, and the notice makes no sound.
      */
+    /** A contact request arrived. The line names no sender. */
+    fun request(context: Context) {
+        if (!mayPost(context)) return
+        val alert = Notification.Builder(context, MESSAGE_CHANNEL)
+            .setSmallIcon(R.drawable.ic_stat_umbra)
+            .setContentTitle("New contact request")
+            .setAutoCancel(true)
+            .setContentIntent(openApp(context))
+            .setVisibility(Notification.VISIBILITY_SECRET)
+            .build()
+        manager(context).notify(MESSAGE_TAG, REQUEST_ID, alert)
+    }
+
     fun locked(context: Context) {
         if (!mayPost(context)) return
         val notice = Notification.Builder(context, CARRIER_CHANNEL)

@@ -52,6 +52,8 @@ pub enum NetEvent {
     /// The client refused an invitation command, such as a bundle that does
     /// not parse.
     Refused,
+    /// A contact request arrived on a rendezvous queue (Part 9 §9.6).
+    ContactRequest,
 }
 
 /// The state of the bridge for one run of the network runtime.
@@ -99,6 +101,30 @@ impl Bridge {
     /// Ends a notify queue with a `DEL`.
     pub fn end_notify_queue(&self, recipient_id: [u8; 32]) -> Result<(), Error> {
         self.command(Command::EndNotifyQueue(recipient_id))
+    }
+
+    /// Makes a rendezvous queue of Part 9 §9.6 under a tag of the caller.
+    pub fn make_rendezvous_queue(&self, tag: u64) -> Result<(), Error> {
+        self.command(Command::MakeRendezvousQueue(tag))
+    }
+
+    /// Ends a rendezvous queue with a `DEL`.
+    pub fn end_rendezvous_queue(&self, recipient_id: [u8; 32]) -> Result<(), Error> {
+        self.command(Command::EndRendezvousQueue(recipient_id))
+    }
+
+    /// Sends a hello of Part 9 §9.6 to the rendezvous queue of an entry.
+    pub fn hello(
+        &self,
+        entry_pk: Vec<u8>,
+        rendezvous: Vec<u8>,
+        profile: Vec<u8>,
+    ) -> Result<(), Error> {
+        self.command(Command::Hello {
+            entry_pk,
+            rendezvous,
+            profile,
+        })
     }
 
     /// Sends the `NKEY` of an inbound queue (Part 8 §8.2.3).
@@ -269,6 +295,8 @@ impl Bridge {
             | Update::Tick
             | Update::NotifyKey { .. }
             | Update::NotifyQueue { .. }
+            | Update::RendezvousQueue { .. }
+            | Update::Hello { .. }
             | Update::Digest { .. } => None,
             Update::Online => Some(NetEvent::Online),
             Update::Offline(ended) => Some(NetEvent::Offline(ended)),

@@ -64,11 +64,15 @@ class MainActivity : ComponentActivity() {
             Intent.ACTION_SEND -> intent.getStringExtra(Intent.EXTRA_TEXT)
             else -> null
         } ?: return
-        INVITATION_LINK.find(text)?.let { Core.linkedInvitation = it.value }
+        (INVITATION_LINK.find(text) ?: REUSABLE_LINK.find(text))
+            ?.let { Core.linkedInvitation = it.value }
     }
 
     private companion object {
         val INVITATION_LINK = Regex("""https://[A-Za-z0-9.-]+/i#[A-Za-z0-9_-]+""")
+
+        // Part 4 §4.3.2: the address in the Crockford alphabet.
+        val REUSABLE_LINK = Regex("""umbra://p/[0-9A-Za-z]{32}""")
     }
 
     override fun onUserInteraction() {

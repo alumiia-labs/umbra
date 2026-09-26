@@ -49,9 +49,13 @@ object BuildNetwork {
     private const val MANIFEST = "devnet-manifest.bin"
     private const val DESCRIPTOR = "network-descriptor.txt"
     private const val NDR_KEY = "devnet-ndr-key.bin"
+    private const val DIRECTORY_PINS = "devnet-directory-pins.bin"
 
     // The OHTTP relay of the NDR of the devnet: its ingress relay.
     private const val NDR_RELAY_URL = "https://localhost:7441/ohttp"
+
+    // The relay of the directory of the devnet: the same ingress relay.
+    private const val DIRECTORY_RELAY_URL = "https://localhost:7441/directory"
 
     // No party serves this host.
     private const val INVITATION_HOST = "invite.umbra.test"
@@ -121,10 +125,15 @@ object BuildNetwork {
             isClockCorrected = verified.isClockCorrected
             // NTF-127: the build pins the route to the NDR.
             val ndrKey = context.assets.open(NDR_KEY).use { it.readBytes() }
+            // DIS-163: the build pins the directory.
+            val directoryPins = context.assets.open(DIRECTORY_PINS).use { it.readBytes() }
             return verified.network.copy(
                 ndrRelayUrl = NDR_RELAY_URL,
                 ndrKeyConfig = ndrKey,
                 ndrRelayIpv4 = CARRIER_ADDRESS,
+                directoryRelayUrl = DIRECTORY_RELAY_URL,
+                directoryPins = directoryPins,
+                directoryRelayIpv4 = CARRIER_ADDRESS,
             )
         }
         return null

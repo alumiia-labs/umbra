@@ -69,7 +69,7 @@ each column when a crate implements the requirement and a test covers it.
 | `NET` | 239 | 85 | 1 | 0 | 8 | **333** |
 | `IDN` | 129 | 44 | 1 | 0 | 5 | **179** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
-| `WIR` | 393 | 85 | 0 | 0 | 7 | **485** |
+| `WIR` | 394 | 85 | 0 | 0 | 7 | **486** |
 | `DEV` | 191 | 89 | 0 | 0 | 7 | **287** |
 | `NTF` | 74 | 28 | 0 | 0 | 3 | **105** |
 | `DIS` | 118 | 33 | 0 | 0 | 2 | **153** |
@@ -79,7 +79,7 @@ each column when a crate implements the requirement and a test covers it.
 | `ABU` | 68 | 30 | 1 | 0 | 0 | **99** |
 | `IMP` | 114 | 41 | 0 | 0 | 2 | **157** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 1967 | 615 | 7 | 0 | 51 | **2640** |
+| **All** | 1968 | 615 | 7 | 0 | 51 | **2641** |
 
 ## SCP — Scope and Conventions
 
@@ -1302,6 +1302,7 @@ Source: `spec/06-wire-format.md`
 | `WIR-531` | §6.6 | MAY | A sender | A sender MAY put the trailer after the descriptor. |  |  |
 | `WIR-532` | §6.6 | MUST | A parser | A parser MUST reject a body of kind `0x02` whose bytes after the descriptor are not one complete trailer. |  |  |
 | `WIR-533` | §6.6 | MUST | A `preview` | A `preview` MUST be a JPEG of at most `PREVIEW_MAX` bytes that starts with `FF D8 FF` and ends with `FF D9`. |  |  |
+| `WIR-534` | §6.4.2 | MUST | A receiver | A receiver MUST read a hello record on a rendezvous queue of Part 9 §9.6 alone, and it MUST reject a hello record on each other queue. |  |  |
 
 ## DEV — Device Sets
 

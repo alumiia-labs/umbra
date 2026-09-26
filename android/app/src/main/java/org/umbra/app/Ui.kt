@@ -63,6 +63,10 @@ sealed interface Screen {
     data object RecoveryCode : Screen
     data object Devices : Screen
     data object LinkDevice : Screen
+    data object PublicLinks : Screen
+    data class PublicLinkView(val id: List<Byte>) : Screen
+    data object Handle : Screen
+    data object Requests : Screen
     data class Chat(val conversation: Conversation) : Screen
     data class ContactDetails(val conversation: Conversation) : Screen
     data class EditName(val conversation: Conversation) : Screen
@@ -186,6 +190,10 @@ private fun OpenApp() {
             Screen.RecoveryCode -> RecoveryCodeScreen(pop)
             Screen.Devices -> DevicesScreen(pop, push)
             Screen.LinkDevice -> LinkDeviceScreen(pop)
+            Screen.PublicLinks -> PublicLinksScreen(pop, push)
+            is Screen.PublicLinkView -> PublicLinkScreen(top.id, pop)
+            Screen.Handle -> HandleScreen(pop)
+            Screen.Requests -> RequestsScreen(pop)
             else -> {
                 val chat = Core.chats.firstOrNull { it.conversation == top.contact }
                 // The list loads again after a lock or a new run.
@@ -409,6 +417,7 @@ private fun ChatsTab(push: (Screen) -> Unit) {
         // Mockup 153: a degraded state has its one line above the title.
         ConnectionNote()
         GroupOfferPrompt()
+        RequestsPrompt(push)
         TabTitle("Chats")
         // A group with no message still shows: the user made it, and its
         // creation is the act that put it here.

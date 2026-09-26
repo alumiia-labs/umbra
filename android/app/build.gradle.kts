@@ -79,6 +79,10 @@ abstract class CopyTestAuthority : DefaultTask() {
     @get:InputFile
     abstract val ndrKey: RegularFileProperty
 
+    /** The pins of the directory of the devnet (Part 9 `DIS-163`). */
+    @get:InputFile
+    abstract val directoryPins: RegularFileProperty
+
     @get:OutputDirectory
     abstract val output: DirectoryProperty
 
@@ -90,6 +94,8 @@ abstract class CopyTestAuthority : DefaultTask() {
         keyset.get().asFile.copyTo(keys, overwrite = true)
         val ndr = output.get().file("devnet-ndr-key.bin").asFile
         ndrKey.get().asFile.copyTo(ndr, overwrite = true)
+        val directory = output.get().file("devnet-directory-pins.bin").asFile
+        directoryPins.get().asFile.copyTo(directory, overwrite = true)
     }
 }
 
@@ -97,6 +103,7 @@ val copyTestAuthority = tasks.register<CopyTestAuthority>("copyTestAuthority") {
     authority.set(rootProject.layout.projectDirectory.file("../tests/fixtures/tls/ca.pem"))
     keyset.set(rootProject.layout.projectDirectory.file("../tests/fixtures/devnet/keyset.bin"))
     ndrKey.set(rootProject.layout.projectDirectory.file("../tests/fixtures/devnet/ndr-key-config.bin"))
+    directoryPins.set(rootProject.layout.projectDirectory.file("../tests/fixtures/devnet/directory-pins.bin"))
 }
 
 androidComponents {

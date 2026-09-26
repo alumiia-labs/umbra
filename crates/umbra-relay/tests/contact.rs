@@ -66,6 +66,7 @@ enum Peer {
 struct Stored {
     contacts: BTreeMap<ContactId, Vec<u8>>,
     invitations: BTreeMap<[u8; 32], Vec<u8>>,
+    rendezvous: BTreeMap<[u8; 32], Vec<u8>>,
 }
 
 struct Network {
@@ -265,6 +266,12 @@ impl Network {
                 StateChange::InvitationEnded { queue } => {
                     stored.invitations.remove(&queue);
                 }
+                StateChange::RendezvousQueue { queue, state } => {
+                    stored.rendezvous.insert(queue, state.to_vec());
+                }
+                StateChange::RendezvousQueueEnded { queue } => {
+                    stored.rendezvous.remove(&queue);
+                }
                 // No test of this harness makes a notify queue.
                 StateChange::NotifyQueue { .. } | StateChange::NotifyQueueEnded { .. } => {}
             }
@@ -290,6 +297,9 @@ impl Network {
         }
         for state in self.stored[client].invitations.values() {
             node.restore_invitation(state).unwrap();
+        }
+        for state in self.stored[client].rendezvous.values() {
+            node.restore_rendezvous_queue(state).unwrap();
         }
         node.connected(&mut Rng(300 + u64::from(seed))).unwrap();
         self.clients[client] = node;
@@ -619,6 +629,72 @@ fn a_client_continues_each_contact_after_a_restart() {
         .unwrap();
     network.settle();
     assert_eq!(messages_of(network.take_events(BOB)), [b"back again"]);
+}
+
+/// Part 9 §9.6: a stranger sends a hello with a fresh invitation to the
+/// rendezvous queue of an entry, and the addressee accepts it as a bundle.
+/// The queue and the invitation of the hello wait across a restart.
+#[test]
+fn a_hello_on_a_rendezvous_queue_becomes_a_contact() {
+    const ALICE: usize = 0;
+    const BOB: usize = 1;
+    let mut network = Network::new();
+    network.settle();
+    network.take_events(ALICE);
+    network.take_events(BOB);
+    network.clients[ALICE]
+        .make_rendezvous_queue(&mut Rng(1))
+        .unwrap();
+    network.settle();
+    let events = network.take_events(ALICE);
+    let Some(ClientEvent::RendezvousQueue { address, .. }) = events.last() else {
+        panic!("{events:?}");
+    };
+    let address = address.clone();
+    assert_eq!(network.stored[ALICE].rendezvous.len(), 1);
+    network.restart(ALICE, 0x40);
+    network.settle();
+    network.take_events(ALICE);
+
+    // Bob holds the key of the entry and the queue from a lookup.
+    let key = RootIdentity::new(Secret::new([0x40; 32])).public_address_key(1);
+    let entry_pk = key.public().to_bytes();
+    let epoch = umbra_core::abuse::epoch_number(network.now);
+    network.clients[BOB]
+        .hello(&entry_pk, &address, b"Bob", epoch, &mut Rng(2))
+        .unwrap();
+    network.settle();
+    let sent = network.take_events(BOB);
+    assert!(sent
+        .iter()
+        .any(|event| matches!(event, ClientEvent::HelloSent { .. })));
+    // No view shows the invitation of a hello after a restart.
+    assert_eq!(network.stored[BOB].invitations.len(), 1);
+    network.restart(BOB, 0x41);
+    network.settle();
+    network.take_events(BOB);
+
+    let events = network.take_events(ALICE);
+    let Some(envelope) = events.iter().find_map(|event| match event {
+        ClientEvent::Hello { envelope, .. } => Some(envelope.clone()),
+        _ => None,
+    }) else {
+        panic!("{events:?}");
+    };
+    let plain = umbra_core::discovery::hello::open(&key, &envelope).unwrap();
+    let body = umbra_core::discovery::hello::HelloBody::parse(&plain).unwrap();
+    assert_eq!(body.profile, b"Bob");
+    let solution = umbra_core::abuse::pow::PowSolution::parse(body.admission.body).unwrap();
+    umbra_core::abuse::pow::verify_hello(&entry_pk, epoch, &solution).unwrap();
+    let mut bundle = vec![0u8; body.bundle.len()];
+    body.bundle.encode(&mut bundle).unwrap();
+
+    // DIS-087: flight 1 goes to the queue of the invitation of the hello.
+    network.clients[ALICE].accept(bundle, &mut Rng(3)).unwrap();
+    network.settle();
+    contact_of(&network.take_events(ALICE));
+    contact_of(&network.take_events(BOB));
+    assert!(network.stored[BOB].invitations.is_empty());
 }
 
 #[test]
