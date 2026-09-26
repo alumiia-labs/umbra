@@ -117,6 +117,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .map(|entry| entry.device_id)
             .filter(|device| *device != identity.device_id)
             .collect();
+        // A device whose link the user confirmed takes each record from
+        // then on, and its sync channel sends them when it opens. The
+        // snapshot holds the records before (`DEV-004`).
+        let mut others = others;
+        if let Some(pending) = self.pending_peer()? {
+            if pending != identity.device_id && !others.contains(&pending) {
+                others.push(pending);
+            }
+        }
         if others.is_empty() {
             return Ok(None);
         }

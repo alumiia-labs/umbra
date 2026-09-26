@@ -475,6 +475,12 @@ fn read_queue_row(row: &[u8]) -> Result<([u8; 32], u8, [u8; 32]), Error> {
     ))
 }
 
+/// The key of the row of the local identity table that holds the seed of
+/// a group before a re-key (Part 11 §11.12).
+fn previous_seed_key(group_id: &[u8; 32]) -> Vec<u8> {
+    [group_id.as_slice(), b"previous"].concat()
+}
+
 impl<B: Backend, E: SecureElement> Client<B, E> {
     /// The conversation of a group: the surrogate of its identifier under
     /// the store key, as a contact has one.
@@ -598,7 +604,79 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .ok_or(Error::Integrity)?,
         );
         let seed: [u8; 32] = seed.as_slice().try_into().map_err(|_| Error::Integrity)?;
-        Group::restore(stored, &Secret::new(seed)).map_err(|_| Error::Integrity)
+        // GRP-372: the seed before a re-key, while the group reads with it.
+        let previous_row = store.row_id(TableId::LOCAL_IDENTITY, &previous_seed_key(&group_id));
+        let previous = store
+            .get(TableId::LOCAL_IDENTITY, &previous_row)?
+            .map(Zeroizing::new)
+            .map(|bytes| -> Result<Secret<32>, Error> {
+                Ok(Secret::new(
+                    bytes.as_slice().try_into().map_err(|_| Error::Integrity)?,
+                ))
+            })
+            .transpose()?;
+        Group::restore_with_previous(stored, &Secret::new(seed), previous.as_ref())
+            .map_err(|_| Error::Integrity)
+    }
+
+    /// Moves the member to new keys in each group of the user, after a
+    /// device of the set was removed (Part 11 §11.12, `GRP-345`,
+    /// `GRP-365`). The record goes out under the index that stands, and the
+    /// member then takes its new index. A group that sends nothing takes no
+    /// re-key.
+    pub fn rekey_groups<R: CryptoRng + umbra_crypto::rand_core::TryCryptoRng + ?Sized>(
+        &mut self,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        for conversation in self.group_conversations()? {
+            if self.group_closed(conversation)? {
+                continue;
+            }
+            let group = self.group_of(conversation)?;
+            if !group
+                .roster()
+                .member(group.own_index())
+                .is_some_and(|member| member.active)
+            {
+                continue;
+            }
+            let fresh =
+                umbra_core::group::join::JoinKeys::make(rng).map_err(|_| Error::Malformed)?;
+            let object = group
+                .rekey_object(&fresh, rng)
+                .map_err(|_| Error::Malformed)?;
+            drop(group);
+            self.post_group_control(conversation, &object, now_ms, rng)?;
+            let mut group = self.group_of(conversation)?;
+            let group_id = *group.group_id();
+            group
+                .adopt_rekey(&object, &fresh.seed, now_ms / 1_000)
+                .map_err(|_| Error::Malformed)?;
+            let row = Self::group_row(&group, self.group_state(conversation)?)?;
+            let open = self.open_mut()?;
+            let seed_row = open.store.row_id(TableId::LOCAL_IDENTITY, &group_id);
+            let previous_row = open
+                .store
+                .row_id(TableId::LOCAL_IDENTITY, &previous_seed_key(&group_id));
+            let old = Zeroizing::new(
+                open.store
+                    .get(TableId::LOCAL_IDENTITY, &seed_row)?
+                    .ok_or(Error::Integrity)?,
+            );
+            let mut batch = open.store.begin();
+            batch.put(TableId::LOCAL_IDENTITY, previous_row, None, &old, rng)?;
+            batch.put(
+                TableId::LOCAL_IDENTITY,
+                seed_row,
+                None,
+                fresh.seed.expose(),
+                rng,
+            )?;
+            batch.put(GROUP, conversation.0, None, &row, rng)?;
+            batch.commit()?;
+        }
+        Ok(())
     }
 
     /// The row of a group: its identifier, thus the row names the seed
@@ -673,8 +751,21 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let state = self.group_state(conversation).unwrap_or(OPEN);
         let row = Self::group_row(group, state)?;
         let open = self.open_mut()?;
+        // GRP-372: a slot for the new index ends the seed before a re-key.
+        let previous_row = open.store.row_id(
+            TableId::LOCAL_IDENTITY,
+            &previous_seed_key(group.group_id()),
+        );
+        let ends_previous = !group.has_previous()
+            && open
+                .store
+                .get(TableId::LOCAL_IDENTITY, &previous_row)?
+                .is_some();
         let mut batch = open.store.begin();
         batch.put(GROUP, conversation.0, None, &row, rng)?;
+        if ends_previous {
+            batch.delete(TableId::LOCAL_IDENTITY, previous_row);
+        }
         Ok(batch.commit()?)
     }
 
@@ -1582,7 +1673,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             return Ok(());
         }
         if parsed.kind == AppKind::GroupControl {
-            self.apply_own_roster_object(conversation, parsed.body, now_ms, rng)?;
+            // A re-key of the member moves the device that made it alone,
+            // since only it holds the new seed.
+            let is_rekey = GroupControl::parse(parsed.body).is_ok_and(|control| {
+                control.control_type == umbra_wire::group::control::ControlType::Rekey
+            });
+            if !is_rekey {
+                self.apply_own_roster_object(conversation, parsed.body, now_ms, rng)?;
+            }
             return Ok(());
         }
         let limit = self.download_limit_now()?;

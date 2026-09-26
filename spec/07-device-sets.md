@@ -505,7 +505,11 @@ Provision {                      // sealed under the seal key, XChaCha20-Poly130
   queue has one reader, and the backup root of a week has one writer.
 - **[DEV-290]** The existing device MUST keep the roster of epoch *n+1* only
   when the sync channel of the new device opens. A link that ends before
-  that leaves epoch *n* in force.
+  that leaves epoch *n* in force. **[DEV-297]** From the confirmation of
+  `DEV-283`, the existing device MUST retain each record that it publishes
+  for the new device, and it MUST send each one when that sync channel
+  opens, under the pacing of §7.5.5. A record between the snapshot and the
+  channel is otherwise lost to the new device.
 - **[DEV-291]** A backup of Part 4 §4.7.2 MUST NOT carry a row of the device
   set or a row of a sync channel. A restored device is a new device, and it
   links again.

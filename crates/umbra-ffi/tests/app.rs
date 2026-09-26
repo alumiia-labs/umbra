@@ -3011,6 +3011,28 @@ fn a_linked_device_reads_and_writes_a_group() {
     }
     // GRP-338: the tablet makes no group of its own.
     assert!(tablet.create_group("Other".into()).is_err());
+
+    // GRP-345: the phone removes the tablet, and it moves to new keys in the
+    // group under a new index. Bob and the phone still talk.
+    let own_before = alice.group_info(group.clone()).unwrap().own_index;
+    let tablet_id = tablet
+        .devices()
+        .unwrap()
+        .into_iter()
+        .find(|device| device.is_self)
+        .unwrap()
+        .device_id;
+    alice.remove_device(tablet_id).unwrap();
+    let own_after = alice.group_info(group.clone()).unwrap().own_index;
+    assert_ne!(own_after, own_before);
+    let draft = alice.new_draft(group.clone()).unwrap();
+    draft.set_text(units("after the rekey")).unwrap();
+    alice.send_draft(draft).unwrap();
+    wait_for_text(&bob, &joined, "after the rekey");
+    let draft = bob.new_draft(joined.clone()).unwrap();
+    draft.set_text(units("bob after the rekey")).unwrap();
+    bob.send_draft(draft).unwrap();
+    wait_for_text(&alice, &group, "bob after the rekey");
     for handle in [&alice, &bob, &tablet] {
         handle.disconnect();
     }

@@ -322,6 +322,23 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         self.put_setting(PENDING_PEER_SETTING, &value, rng)
     }
 
+    /// The device whose sync channel waits for its handshake, when this
+    /// device owns the channels: a record from here on waits for it
+    /// (`DEV-013`).
+    pub(super) fn pending_peer(&self) -> Result<Option<DeviceId>, Error> {
+        if !self.owns_channels()? {
+            return Ok(None);
+        }
+        Ok(self
+            .setting(PENDING_PEER_SETTING)?
+            .and_then(|value| value.get(..16).and_then(|id| id.try_into().ok())))
+    }
+
+    /// The link of the pending device ended with no sync channel.
+    pub fn drop_pending_peer(&mut self) -> Result<(), Error> {
+        self.remove_setting(PENDING_PEER_SETTING)
+    }
+
     /// Marks the conversation of a sync channel that just opened as the
     /// channel of the pending device. No view shows it as a contact.
     pub fn mark_device_peer<R: CryptoRng + ?Sized>(

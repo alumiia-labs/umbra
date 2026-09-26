@@ -272,6 +272,16 @@ impl Inner {
 
     fn end_link(&mut self, status: LinkStatus) {
         self.erase_link_objects();
+        // A link that ends with no sync channel leaves no device that the
+        // records wait for.
+        if matches!(status, LinkStatus::Expired | LinkStatus::Failed)
+            && matches!(
+                self.link.as_ref().map(|link| &link.job),
+                Some(LinkJob::Offer(_))
+            )
+        {
+            let _ = self.client.drop_pending_peer();
+        }
         if let Some(link) = self.link.as_mut() {
             link.status = status;
             link.reading = false;
@@ -281,6 +291,13 @@ impl Inner {
     /// Ends the link that runs, and erases what it put on the chunk path.
     pub(super) fn cancel_link(&mut self) {
         self.erase_link_objects();
+        let was_offer = matches!(
+            self.link.as_ref().map(|link| (&link.job, &link.status)),
+            Some((LinkJob::Offer(_), status)) if !matches!(status, LinkStatus::Linked)
+        );
+        if was_offer {
+            let _ = self.client.drop_pending_peer();
+        }
         self.link = None;
     }
 
@@ -598,8 +615,12 @@ impl Inner {
             .roster
             .as_ref()
             .is_some_and(|roster| self.client.commit_roster(roster, &mut OsRng).is_ok());
-        // DEV-176: each other device of the set takes the new epoch.
-        if committed && self.client.publish_roster(&mut OsRng).is_ok() {
+        // DEV-176: each other device of the set takes the new epoch, and the
+        // new device takes each record since the confirmation (DEV-072).
+        if committed
+            && self.client.publish_roster(&mut OsRng).is_ok()
+            && self.client.start_sync_resend(&mut OsRng).is_ok()
+        {
             let Inner { client, bridge, .. } = &mut *self;
             if let Some(running) = bridge.as_mut() {
                 let _ = running.flush(client, &mut OsRng);
@@ -821,6 +842,11 @@ impl Handle {
         }
         inner.client.revoke_device(device, &mut OsRng)?;
         inner.client.publish_roster(&mut OsRng)?;
+        // Step 2e, GRP-345: the removed device holds the keys of each group
+        // of the member, thus the member moves to new ones.
+        inner
+            .client
+            .rekey_groups(super::unix_now_ms(), &mut OsRng)?;
         let Inner { client, bridge, .. } = &mut *inner;
         if let Some(running) = bridge.as_mut() {
             let peers = client.device_peers()?;
@@ -831,6 +857,7 @@ impl Handle {
             }
             running.flush(client, &mut OsRng)?;
         }
+        inner.pump_groups();
         Ok(())
     }
 

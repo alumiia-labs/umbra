@@ -125,9 +125,19 @@ pub struct Rotation {
     pub write: Secret<32>,
 }
 
+/// The index and the keys of this member before a re-key (§11.12). The
+/// member reads with them until an epoch-key record holds a slot for its new
+/// index, and then they go (`GRP-372`).
+struct Previous {
+    index: u16,
+    keys: Box<MemberKeys>,
+    pairs: PairCache,
+}
+
 /// One group at one device.
 pub struct Group {
     own_index: u16,
+    previous: Option<Previous>,
     /// The three keys of this member. They are boxed because an ML-DSA
     /// signing key is large, and a group moves by value.
     keys: Box<MemberKeys>,
@@ -182,6 +192,7 @@ impl Group {
         }
         Ok(Group {
             own_index: 0,
+            previous: None,
             roster: Roster::genesis(group_id, creator, now),
             keys: Box::new(keys),
             epochs,
@@ -201,6 +212,7 @@ impl Group {
         epochs.install(admitted.epoch)?;
         Ok(Group {
             own_index: admitted.index,
+            previous: None,
             keys: Box::new(keys),
             roster: admitted.roster,
             epochs,
@@ -233,6 +245,12 @@ impl Group {
         if let Some(replicas) = &self.replicas {
             replicas.export(&mut w);
         }
+        // The index before a re-key. Its seed is a row of the local identity
+        // table, as the seed of the member is.
+        w.flag(self.previous.is_some());
+        if let Some(previous) = &self.previous {
+            w.u16(previous.index);
+        }
         Ok(w.finish())
     }
 
@@ -240,6 +258,17 @@ impl Group {
     /// row in the local identity table. The pair keys are a cache, thus
     /// the restored group derives each one again at its first use.
     pub fn restore(bytes: &[u8], seed: &Secret<32>) -> Result<Self, Error> {
+        Self::restore_with_previous(bytes, seed, None)
+    }
+
+    /// As [`Group::restore`], with the seed of the member before a re-key
+    /// when the stored form names an index before it (§11.12). A form that
+    /// names one and no seed keeps no index before it.
+    pub fn restore_with_previous(
+        bytes: &[u8],
+        seed: &Secret<32>,
+        previous_seed: Option<&Secret<32>>,
+    ) -> Result<Self, Error> {
         let mut r = Reader::new(bytes);
         if r.u8()? != STORED_VERSION {
             return Err(Error::Stale);
@@ -259,9 +288,25 @@ impl Group {
         } else {
             None
         };
+        // A form of an earlier build ends here.
+        let previous_index = if r.end().is_ok() {
+            None
+        } else if r.flag()? {
+            Some(r.u16()?)
+        } else {
+            None
+        };
         r.end()?;
+        let previous = previous_index
+            .zip(previous_seed)
+            .map(|(index, seed)| Previous {
+                index,
+                keys: Box::new(MemberKeys::from_seed(seed)),
+                pairs: PairCache::default(),
+            });
         Ok(Group {
             own_index,
+            previous,
             keys: Box::new(MemberKeys::from_seed(seed)),
             roster,
             epochs,
@@ -398,7 +443,26 @@ impl Group {
             pairs: &mut self.pairs,
             own: &self.keys,
         };
-        self.receiver.receive(record, bucket, &mut ctx, now)
+        let first = self.receiver.receive(record, bucket, &mut ctx, now);
+        // GRP-372: a record that a member tagged for the index before the
+        // re-key opens with the keys of that index.
+        let Some(previous) = self.previous.as_mut() else {
+            return first;
+        };
+        if !matches!(first, Err(Error::Unverified)) {
+            return first;
+        }
+        let current = self.receiver.own_index();
+        self.receiver.set_own_index(previous.index);
+        let mut ctx = Context {
+            roster: &self.roster,
+            epochs: &mut self.epochs,
+            pairs: &mut previous.pairs,
+            own: &previous.keys,
+        };
+        let second = self.receiver.receive(record, bucket, &mut ctx, now);
+        self.receiver.set_own_index(current);
+        second
     }
 
     /// Tries each held record again, after a roster object or a clock
@@ -410,7 +474,65 @@ impl Group {
             pairs: &mut self.pairs,
             own: &self.keys,
         };
-        self.receiver.retry_held(&mut ctx, now)
+        let mut out = self.receiver.retry_held(&mut ctx, now);
+        if let Some(previous) = self.previous.as_mut() {
+            let current = self.receiver.own_index();
+            self.receiver.set_own_index(previous.index);
+            let mut ctx = Context {
+                roster: &self.roster,
+                epochs: &mut self.epochs,
+                pairs: &mut previous.pairs,
+                own: &previous.keys,
+            };
+            out.extend(self.receiver.retry_held(&mut ctx, now));
+            self.receiver.set_own_index(current);
+        }
+        out
+    }
+
+    /// The record of a re-key of this member to `fresh` (§11.12,
+    /// `GRP-365`). It goes out as a group record under the index that
+    /// stands, and [`Group::adopt_rekey`] follows its send.
+    pub fn rekey_object<R: TryCryptoRng + ?Sized>(
+        &self,
+        fresh: &super::join::JoinKeys,
+        rng: &mut R,
+    ) -> Result<Vec<u8>, Error> {
+        super::join::rekey_record(&self.keys, fresh, &self.roster, self.own_index, true, rng)
+    }
+
+    /// Moves this member to the index and the keys of its re-key, after the
+    /// record went out (`GRP-367`). The index and the keys before it stay
+    /// until an epoch-key record holds a slot for the new index
+    /// (`GRP-372`). The result is the new index.
+    pub fn adopt_rekey(
+        &mut self,
+        object: &[u8],
+        seed: &Secret<32>,
+        now: u64,
+    ) -> Result<u16, Error> {
+        let control = GroupControl::parse(object)?;
+        let Applied::Rekeyed { new, .. } = self.apply_control(&control, self.own_index, now)?
+        else {
+            return Err(Error::Malformed);
+        };
+        let keys = core::mem::replace(&mut self.keys, Box::new(MemberKeys::from_seed(seed)));
+        let pairs = core::mem::take(&mut self.pairs);
+        self.previous = Some(Previous {
+            index: self.own_index,
+            keys,
+            pairs,
+        });
+        self.own_index = new;
+        self.receiver.set_own_index(new);
+        // The counter of a sender runs for each index.
+        self.sender = Sender::default();
+        Ok(new)
+    }
+
+    /// Whether this member still reads with the keys before a re-key.
+    pub fn has_previous(&self) -> bool {
+        self.previous.is_some()
     }
 
     /// Whether a gap in the counter of one sender passed
@@ -700,9 +822,16 @@ impl Group {
         self.check_epoch_key(epoch, now)?;
         // The rotation served the active set of its roster epoch in index
         // order, thus the rank of this member there names its block.
+        // A rotation of a roster epoch before a re-key served the index
+        // before it (GRP-372).
         let rank = self
             .roster
             .rank_at(roster_epoch, self.own_index)
+            .or_else(|| {
+                self.previous
+                    .as_ref()
+                    .and_then(|previous| self.roster.rank_at(roster_epoch, previous.index))
+            })
             .ok_or(Error::NoPath)?;
         let chunk = rank / usize::from(slots_per_chunk);
         Ok(Some(WantedChunk {
@@ -737,14 +866,19 @@ impl Group {
                 continue;
             };
             match self.read_own_slot(wanted.roster_epoch, &slots, wanted.epoch, wanted.start_slot) {
-                Ok(payload) => {
-                    return self.finish_install(
+                Ok((payload, is_current)) => {
+                    self.finish_install(
                         wanted.epoch,
                         wanted.start_slot,
                         wanted.roster_epoch,
                         &payload,
                         now,
-                    );
+                    )?;
+                    // GRP-372: a slot for the new index ends the keys before it.
+                    if is_current {
+                        self.previous = None;
+                    }
+                    return Ok(());
                 }
                 Err(error) => refused = error,
             }
@@ -798,8 +932,13 @@ impl Group {
         now: u64,
     ) -> Result<(), Error> {
         self.check_epoch_key(epoch, now)?;
-        let (payload, roster_epoch) = self.open_epoch_slot(epoch, start_slot, body)?;
-        self.finish_install(epoch, start_slot, roster_epoch, &payload, now)
+        let (payload, roster_epoch, is_current) = self.open_epoch_slot(epoch, start_slot, body)?;
+        self.finish_install(epoch, start_slot, roster_epoch, &payload, now)?;
+        // GRP-372: a slot for the new index ends the keys before it.
+        if is_current {
+            self.previous = None;
+        }
+        Ok(())
     }
 
     /// Whether an epoch-key record of `epoch` may install at `now`
@@ -1055,7 +1194,7 @@ impl Group {
         epoch: u32,
         start_slot: u32,
         body: &[u8],
-    ) -> Result<(SlotPayload, u32), Error> {
+    ) -> Result<(SlotPayload, u32, bool), Error> {
         let mut refused = Error::Malformed;
         for admin_layout in [true, false] {
             let parsed = EpochKeyBody::parse(body, |index| {
@@ -1076,7 +1215,7 @@ impl Group {
                 return Err(Error::NoPath);
             };
             match self.read_own_slot(parsed.roster_epoch, slots, epoch, start_slot) {
-                Ok(payload) => return Ok((payload, parsed.roster_epoch)),
+                Ok((payload, is_current)) => return Ok((payload, parsed.roster_epoch, is_current)),
                 Err(error) => refused = error,
             }
         }
@@ -1086,24 +1225,64 @@ impl Group {
     /// Opens and verifies the slot of this member. `role_at` bars a
     /// rotator that the roster did not hold at `roster_epoch`, which is
     /// the index each trigger of that epoch excludes (`GRP-356`).
+    /// The result says whether the slot was one of the index that stands,
+    /// and not of the index before a re-key (`GRP-372`).
     fn read_own_slot(
         &self,
         roster_epoch: u32,
         slots: &[umbra_wire::group::record::KemSlot<'_>],
         epoch: u32,
         start_slot: u32,
-    ) -> Result<SlotPayload, Error> {
-        let (payload, _) = super::epoch::open_own_slot(
-            slots,
+    ) -> Result<(SlotPayload, bool), Error> {
+        match self.read_slot_as(
             self.own_index,
             &self.keys,
+            roster_epoch,
+            slots,
+            epoch,
+            start_slot,
+        ) {
+            Ok(payload) => Ok((payload, true)),
+            Err(error) => match &self.previous {
+                Some(previous) => self
+                    .read_slot_as(
+                        previous.index,
+                        &previous.keys,
+                        roster_epoch,
+                        slots,
+                        epoch,
+                        start_slot,
+                    )
+                    .map(|payload| (payload, false)),
+                None => Err(error),
+            },
+        }
+    }
+
+    fn read_slot_as(
+        &self,
+        own_index: u16,
+        keys: &MemberKeys,
+        roster_epoch: u32,
+        slots: &[umbra_wire::group::record::KemSlot<'_>],
+        epoch: u32,
+        start_slot: u32,
+    ) -> Result<SlotPayload, Error> {
+        let pair_with = |index: u16| {
+            let member = self.roster.member(index)?;
+            keys.pair_key(&member.pair_pk, self.roster.group_id()).ok()
+        };
+        let (payload, _) = super::epoch::open_own_slot(
+            slots,
+            own_index,
+            keys,
             self.roster.group_id(),
             epoch,
             roster_epoch,
             |index| self.role_at(index, roster_epoch),
-            |index| self.pair_key_with(index),
+            pair_with,
         )?;
-        let pair = self.pair_key_with(payload.rotator).ok_or(Error::NoPath)?;
+        let pair = pair_with(payload.rotator).ok_or(Error::NoPath)?;
         super::epoch::verify_slot_tag(
             &pair,
             self.roster.group_id(),
@@ -1125,13 +1304,6 @@ impl Group {
             .active_at(roster_epoch)
             .map_or(member.active, |set| set.contains(&index));
         active.then_some(member.role)
-    }
-
-    fn pair_key_with(&self, index: u16) -> Option<PairKey> {
-        let member = self.roster.member(index)?;
-        self.keys
-            .pair_key(&member.pair_pk, self.roster.group_id())
-            .ok()
     }
 
     /// Applies a roster object that a verified tag attributes to `sender`
@@ -1552,6 +1724,88 @@ mod tests {
             Outcome::Content { .. }
         ));
         assert_eq!(member.receiver.held_count(), 1);
+    }
+
+    #[test]
+    fn a_member_rekeys_and_reads_with_the_keys_before_until_its_new_slot() {
+        let now = 1_700_000_000;
+        let (mut creator, mut member, _) = pair(now);
+        let mut rng = Rng(31);
+        // A record of the creator before the re-key, which the member reads
+        // after it.
+        let before = creator
+            .post(&text("before the rekey"), now, &mut rng)
+            .unwrap();
+
+        let seed = Secret::new([0x44; 32]);
+        let fresh = JoinKeys {
+            seed: Secret::new(*seed.expose()),
+            keys: MemberKeys::from_seed(&seed),
+        };
+        let object = member.rekey_object(&fresh, &mut rng).unwrap();
+        // GRP-365: the record goes out under the index that stands.
+        let app = AppMessage {
+            kind: AppKind::GroupControl,
+            msg_id: [8; 16],
+            sent_at: 1_700_000_000_000,
+            body: &object,
+        };
+        let mut bytes = alloc::vec![0u8; app.len()];
+        let n = app.encode(&mut bytes).unwrap();
+        bytes.truncate(n);
+        let record = member.post(&bytes, now, &mut rng).unwrap();
+        let Outcome::Content { sender, app, .. } = creator.receive(&record, now).unwrap() else {
+            panic!("the creator read no re-key");
+        };
+        assert_eq!(sender, 1);
+        let control =
+            GroupControl::parse(AppMessage::parse(&app, Channel::Group).unwrap().body).unwrap();
+        assert!(matches!(
+            creator.apply_control(&control, 1, now).unwrap(),
+            Applied::Rekeyed { old: 1, new: 2, .. }
+        ));
+        assert_eq!(member.adopt_rekey(&object, &seed, now).unwrap(), 2);
+        assert!(member.has_previous());
+
+        // The stored form keeps the index before, with the seed of its row.
+        let back =
+            Group::restore_with_previous(&member.export().unwrap(), &seed, Some(&JOINER_SEED))
+                .unwrap();
+        assert_eq!(back.own_index(), 2);
+        assert!(back.has_previous());
+
+        // GRP-372: the record from before opens with the keys before, and a
+        // record after the re-key with the new ones.
+        assert!(matches!(
+            member.receive(&before, now).unwrap(),
+            Outcome::Content { sender: 0, .. }
+        ));
+        let after = creator
+            .post(&text("after the rekey"), now, &mut rng)
+            .unwrap();
+        assert!(matches!(
+            member.receive(&after, now).unwrap(),
+            Outcome::Content { sender: 0, .. }
+        ));
+        // The member posts under its new index, and the creator reads it.
+        let from_new = member
+            .post(&text("from the new index"), now, &mut rng)
+            .unwrap();
+        assert!(matches!(
+            creator.receive(&from_new, now).unwrap(),
+            Outcome::Content { sender: 2, .. }
+        ));
+
+        // GRP-368: the re-key excludes the index before. The rotation holds
+        // a slot for the new index, and the keys before it go.
+        assert_eq!(creator.owes_rotation(now).unwrap().excluded, Some(1));
+        let rotation = creator.rotate(now, &mut rng).unwrap();
+        let record = parse_record(inline(&rotation));
+        member
+            .install_epoch_key(record.epoch, record.slot, record.body, now)
+            .unwrap();
+        assert!(!member.has_previous());
+        assert_eq!(member.epoch(), creator.epoch());
     }
 
     #[test]

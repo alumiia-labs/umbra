@@ -125,6 +125,16 @@ pub struct Receiver {
 }
 
 impl Receiver {
+    /// The index whose tags this receiver checks.
+    pub const fn own_index(&self) -> u16 {
+        self.own_index
+    }
+
+    /// The member moved to a new index at a re-key (Part 11 §11.12).
+    pub fn set_own_index(&mut self, own_index: u16) {
+        self.own_index = own_index;
+    }
+
     /// A receiver at `own_index`.
     pub const fn new(own_index: u16) -> Self {
         Receiver {
