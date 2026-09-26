@@ -89,7 +89,7 @@ one time.
 | --- | --- | --- | --- |
 | AUX-1 | Blind RSA-2048 | in-workspace over `crypto-bigint`, which gives the modular arithmetic and nothing else; no `rsa` crate, and no key generation in the client | **1** |
 | AUX-2 | ristretto255 with SHA512 | `curve25519-dalek`, which R1 holds already, plus `sha2` | **1–3** |
-| AUX-3 | ECVRF-Edwards25519-SHA512-TAI | a vendored module, and no crate (Part 9 §9.11) | **0–1** |
+| AUX-3 | ECVRF-Edwards25519-SHA512-TAI | a vendored module, and no crate (Part 9 §9.12) | **0–1** |
 | AUX-4 | Argon2id | `argon2`, `blake2`, `base64ct` | **3–5** |
 | AUX-5 | A keyed function in the secure element | a platform adapter, and no crate. Android uses the HMAC-SHA256 key of StrongBox | **0** |
 | AUX-6 | HPKE under OHTTP | in-workspace, over `UMBRA-KEM` | **0–2** |
@@ -110,7 +110,7 @@ decision is already in another Part:
    `UMBRA-KEM` in HPKE, and the `hpke` crate does not hold `UMBRA-KEM`. The
    `hpke`, `ohttp`, and `bhttp` crates together cost an estimated 10 to 18
    crates.
-2. **Vendor the ECVRF module.** Part 9 §9.11 states this decision. The full
+2. **Vendor the ECVRF module.** Part 9 §9.12 states this decision. The full
    `akd` crate costs an estimated 10 crates or more.
 3. **Turn the JIT feature of `equix` off.** That feature carries `unsafe`, and
    §14.3 forbids `unsafe` outside `umbra-simd`.
@@ -199,7 +199,7 @@ its removal.
 | **AUX-1** blind RSA-2048 | 14–18 crates | This is the largest saving, and it is the most expensive one. Part 13 §13.3.1 gives a third-party relay offline verification with the public key of the nonprofit alone. Without AUX-1, that relay verifies the first-party token of §13.3.2. That token is privately verifiable, thus the relay needs a shared secret with the issuer. A self-hosted operator then has to trust the issuer, and the self-hosting position of Part 13 fails |
 | **AUX-8** Equi-X | 4–6 crates | Part 13 §13.8 loses the surge valve at a relay under queue pressure. Argon2id (AUX-4) holds the puzzle in place of Equi-X. But Argon2id gives no asymmetry against an ASIC and against a GPU. It also costs more RAM on the slowest supported phone |
 | **AUX-4** Argon2id | 3–5 crates | §14.6.4 loses the memory-hard step of the at-rest construction. The secure-element entanglement stays, thus a brute force attack still runs on the seized device. But the cost for each try falls from about 3 s to the cost of one secure-element operation. Of the three primitive removals with a real saving, this one costs the most protection |
-| **AUX-3** ECVRF | 0–1 crate | Part 9 §9.11 vendors the module already, thus the saving is close to zero. The removal costs the blind directory index of Part 9 §9.5. This candidate gives no saving that pays for its cost |
+| **AUX-3** ECVRF | 0–1 crate | Part 9 §9.12 vendors the module already, thus the saving is close to zero. The removal costs the blind directory index of Part 9 §9.5. This candidate gives no saving that pays for its cost |
 | Runtime SIMD detection | 2 crates | This is not a primitive. §14.3 gives the full analysis. The removal drops `cpufeatures` and `libc`. It gives a uniform R1 graph of 35 crates on the three target triples |
 
 An estimated **10 to 18 crates** come off R2 with no primitive removal. That
@@ -224,7 +224,7 @@ examine a primitive removal after them.
   Android NDK, above the C toolchain of `aws-lc-rs`.
 - **`openssl`** — it links a C library that UMBRA holds for no other function.
   §14.6.4 rejects the SQLCipher build on the same cause.
-- **`akd`** — Part 9 §9.11 takes the ECVRF module of that crate, and not the
+- **`akd`** — Part 9 §9.12 takes the ECVRF module of that crate, and not the
   crate. The crate carries SEEMless, Parakeet, and a MySQL shape that an opt-in
   directory does not need.
 - **`ohttp` and `bhttp`** — §14.2.2 decision 1 gives the cause.

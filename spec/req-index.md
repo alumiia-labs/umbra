@@ -72,14 +72,14 @@ each column when a crate implements the requirement and a test covers it.
 | `WIR` | 393 | 85 | 0 | 0 | 7 | **485** |
 | `DEV` | 191 | 89 | 0 | 0 | 7 | **287** |
 | `NTF` | 74 | 28 | 0 | 0 | 3 | **105** |
-| `DIS` | 109 | 33 | 0 | 0 | 1 | **143** |
+| `DIS` | 118 | 33 | 0 | 0 | 2 | **153** |
 | `REL` | 124 | 32 | 1 | 0 | 2 | **159** |
 | `GRP` | 220 | 62 | 0 | 0 | 6 | **288** |
 | `ATT` | 142 | 45 | 2 | 0 | 2 | **191** |
-| `ABU` | 66 | 30 | 1 | 0 | 0 | **97** |
+| `ABU` | 68 | 30 | 1 | 0 | 0 | **99** |
 | `IMP` | 114 | 41 | 0 | 0 | 2 | **157** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 1956 | 615 | 7 | 0 | 50 | **2628** |
+| **All** | 1967 | 615 | 7 | 0 | 51 | **2640** |
 
 ## SCP — Scope and Conventions
 
@@ -1789,7 +1789,7 @@ Source: `spec/09-discovery.md`
 | `DIS-072` | §9.5.3 | MUST | A client | A client MUST set `epoch` to the `tree_size` and `digest` to the `root` of the newest head that it accepted. |  |  |
 | `DIS-073` | §9.9.2 | MUST | A directory | A directory MUST publish a tombstone as a version of the label whose `HK_pub` and `rendezvous` fields hold zero bytes. |  |  |
 | `DIS-074` | §9.9.2 | MUST | A directory | A directory MUST hold the last `HK_pub` of a tombstoned label for `HANDLE_RESERVE` after the tombstone. |  |  |
-| `DIS-075` | §9.9.2 | MUST NOT | (unstated) | During `HANDLE_RESERVE`, a directory MUST NOT register a tombstoned label to a party that fails the challenge of §9.9.1. |  |  |
+| `DIS-075` | §9.9.2 | MUST NOT | During `HANDLE_RESERVE`, a directory | During `HANDLE_RESERVE`, a directory MUST NOT register a tombstoned label to a party that fails the challenge of §9.9.1, or the write challenge of §9.9.3 that binds the new entry. |  |  |
 | `DIS-076` | §9.9.2 | MUST | (unstated) | If the answer is correct, the directory MUST publish a new version of the label with the same `HK_pub`. |  |  |
 | `DIS-077` | §9.9.2 | MUST | (unstated) | After `HANDLE_RESERVE`, a directory MUST publish a registration of the label as the next version after the tombstone version. |  |  |
 | `DIS-078` | §9.9.2 | MUST | A client | A client MUST hold the `version` of the entry with each `HK_pub` that it holds for a handle. |  |  |
@@ -1858,6 +1858,16 @@ Source: `spec/09-discovery.md`
 | `DIS-159` | §9.5.1 | MUST | A client that retains an accepted head | A client that retains an accepted head MUST verify a consistency proof from that head before it accepts a head with a higher `tree_size`. |  |  |
 | `DIS-160` | §9.5.1 | MUST | A client | A client MUST reject a head whose `tree_size` equals the `tree_size` of a retained head and whose `root` differs. |  |  |
 | `DIS-161` | §9.5.1 | MUST | Before an auditor signs the head of an epoch, it | Before an auditor signs the head of an epoch, it MUST verify that the nonce of the epoch is new, that each new leaf sits at an index that held no leaf, and that the log tree is the tree it signed last with one leaf more. |  |  |
+| `DIS-162` | §9.10 | MUST | A client | A client MUST send each request of this section in OHTTP to the gateway of the directory, through the `POST /directory` path of an ingress relay. |  |  |
+| `DIS-163` | §9.10 | MUST | A client build | A client build MUST ship the key configuration of that gateway beside the genesis `LogKeySet` of `DIS-066` and the VRF key of `DIS-158`. |  |  |
+| `DIS-164` | §9.10 | MUST | A directory | A directory MUST evaluate a blinded element for a lookup only with an `Admission` of a first-party token of Part 13 §13.3.2 or of a `PowSolution` at `POW_LOOKUP_FLOOR` or above. |  |  |
+| `DIS-165` | §9.10 | MUST | The seed of that solution | The seed of that solution MUST be `SHA3-256("umbra/v1/lookup-pow" || BE32(epoch) || blinded)`, where `epoch` is the epoch of Part 13 §13.6 of the directory or the one before it, and its `verifier_id` MUST be `SHA3-256("umbra/v1/lookup-pow" pk)`, where `pk` is the VOPRF key of the directory. |  |  |
+| `DIS-166` | §9.10 | MUST | A directory | A directory MUST stage a registration, a write, and a renewal for the next epoch of the log, and a client MUST read its own version under `DIS-137` at the first head after it. |  |  |
+| `DIS-167` | §9.10 | MUST | A directory | A directory MUST close an epoch of the log at each `DIRECTORY_EPOCH`, and an epoch with no update closes too. |  |  |
+| `DIS-168` | §9.10 | MUST | A directory | A directory MUST hold an issued challenge for `CHALLENGE_TTL` at the most, and it MUST refuse an answer after that time. |  |  |
+| `DIS-169` | §9.10 | MUST | A directory | A directory MUST refuse a registration whose entry does not name the label input: the handle of a `DirectoryEntry`, or the `address` of an `AddressEntry` whose `check` passes. |  |  |
+| `DIS-170` | §9.10 | MUST | The version of a registered entry | The version of a registered entry MUST be 0, and the version of a written entry MUST be the version of the label plus one. |  |  |
+| `DIS-171` | §9.10 | MAY | A holder | A holder MAY write the tombstone form of §9.3 under the challenge of §9.9.3 to retire its entry before its lease ends. |  |  |
 
 ## REL — Relay Directory
 
@@ -2621,6 +2631,8 @@ Source: `spec/13-anti-abuse.md`
 | `ABU-106` | §13.8.1 | MUST | A relay | A relay MUST reject a `CNEW` and a `BNEW` whose `Admission` is of kind `0x00`. |  |  |
 | `ABU-107` | §13.8.1 | MUST | One solution | One solution MUST admit at most `POW_CHUNK_ALLOWANCE` `CNEW` and `BNEW` commands at its relay, while its challenge is live under `ABU-058`. |  |  |
 | `ABU-108` | §13.8.1 | SHOULD | A client | A client SHOULD use one solution for each registration at one relay until its allowance ends or its challenge is no longer the newest. |  |  |
+| `ABU-109` | §13.9 | MUST | The seed of each solution | The seed of each solution MUST be `SHA3-256("umbra/v1/issue-pow" BE32(epoch) || blinded)`, and its `verifier_id` MUST be `SHA3-256("umbra/v1/issue-pow" || pk)`, where `pk` is the issuer key of that epoch. |  |  |
+| `ABU-110` | §13.9 | MUST | An issuer | An issuer MUST answer the epoch of its clock and the next one only, and the next one only after its key is in the log under `ABU-098`. |  |  |
 
 ## IMP — Implementation
 

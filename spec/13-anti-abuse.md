@@ -556,6 +556,37 @@ admission gate, thus a user that takes no path still reaches U1.
   `POW_EFFORT_MAX` for each token of the batch. **[ABU-077]** The issuer MUST
   NOT issue a token on path 3 for a solution at a lower effort.
 
+**The issuance request.** A client asks for a batch of first-party tokens of
+§13.3.2 with a `DirRequest` of kind `0x10` of Part 9 §9.10.
+
+```
+IssueRequest {
+    token_type  u16               // 0x0005
+    epoch       u32               // §13.6
+    count       u8                // 1 to ISSUE_REQUEST_MAX
+    items       [count]{ blinded [32]u8, solution PowSolution }
+}
+
+IssueResponse {
+    count       u8
+    elements    [count][32]u8
+    proof       [64]u8            // one DLEQ proof over the batch, ABU-097
+}
+```
+
+- **[ABU-109]** The seed of each solution MUST be `SHA3-256("umbra/v1/issue-pow"
+  || BE32(epoch) || blinded)`, and its `verifier_id` MUST be
+  `SHA3-256("umbra/v1/issue-pow" || pk)`, where `pk` is the issuer key of
+  that epoch. **[ABU-110]** An issuer MUST answer the epoch of its clock and
+  the next one only, and the next one only after its key is in the log under
+  `ABU-098`. A solution thus serves one blinded element. A second request
+  with that element gets the same element back, and the token is the same
+  token, which a verifier spends once.
+
+> *Cause.* Part 1 §1.8 gave the issuance of a token no layout and no carrier.
+> Path 3 needs no interaction beyond one request: the blinded element fixes
+> the seed, thus the issuer holds no challenge state and no replay set.
+
 A batch of 256 tokens costs about 7 minutes of a phone under that rule. Thus a
 token that a user buys with time costs what the puzzle of one relay costs at
 its maximum. Path 3 does not undercut the valve of §13.8.
@@ -689,4 +720,5 @@ tag check of Part 11 §11.3.5, and no relay learns the block.
 | `POW_CHUNK_FLOOR` | 8, the lowest effort of a solution that admits a `CNEW` or a `BNEW` (`ABU-106`) |
 | `POW_CHUNK_ALLOWANCE` | 64 registrations, about 2 MiB of chunks, for one solution at one relay (`ABU-107`) |
 | `POW_LOOKUP_FLOOR` | 20 expected Equi-X solves (§13.8) |
+| `ISSUE_REQUEST_MAX` | 16 tokens in one issuance request (§13.9) |
 | `POW_BACKLOG_UNIT` | 64 pending admissions in one `POW_CHALLENGE_PERIOD` raise the effort by one (§13.8) |

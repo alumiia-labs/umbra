@@ -95,6 +95,8 @@ labels! {
     HELLO = "umbra/v1/hello";
     LOG_COMMIT = "umbra/v1/log-commit";
     ISSUER_KEY = "umbra/v1/issuer-key";
+    LOOKUP_POW = "umbra/v1/lookup-pow";
+    ISSUE_POW = "umbra/v1/issue-pow";
     ROW_ID = "umbra/v1/row-id";
     ROTATE_JITTER = "umbra/v1/rotate-jitter";
     BACKUP_SALT = "umbra/v1/backup-salt";

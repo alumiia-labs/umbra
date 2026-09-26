@@ -13,7 +13,7 @@ workspace = true
 [features]
 # The server binary over the native transport stack of Part 14 §14.2.8.
 # The node itself takes no socket and builds without it.
-native = ["umbra-transport/native", "dep:tokio", "dep:tokio-rustls", "dep:rustls", "dep:getrandom", "dep:rusqlite", "dep:aws-lc-rs"]
+native = ["umbra-core/precis", "umbra-transport/native", "dep:tokio", "dep:tokio-rustls", "dep:rustls", "dep:getrandom", "dep:rusqlite", "dep:aws-lc-rs"]
 
 [dependencies]
 umbra-crypto = { version = "0.1.0", path = "../umbra-crypto" }
@@ -42,6 +42,12 @@ required-features = ["native"]
 [[bin]]
 name = "umbra-ndr"
 path = "src/bin/ndr.rs"
+required-features = ["native"]
+
+# The directory of Part 9 and the issuer of Part 13 §13.9.
+[[bin]]
+name = "umbra-directory"
+path = "src/bin/directory.rs"
 required-features = ["native"]
 
 # The seven directory authorities of a test network, in one process.

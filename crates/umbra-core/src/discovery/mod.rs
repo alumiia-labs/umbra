@@ -10,6 +10,7 @@
 //! random values it needs as arguments.
 
 pub mod challenge;
+pub mod dirclient;
 pub mod entry;
 pub mod handle;
 pub mod head;
@@ -17,6 +18,7 @@ pub mod hello;
 pub mod lifecycle;
 pub mod logtree;
 pub mod prefix;
+pub mod service;
 pub mod translog;
 
 /// `GOSSIP_INTERVAL`, in seconds, for each digest source.

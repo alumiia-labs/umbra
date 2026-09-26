@@ -1521,6 +1521,8 @@ names the object type and its lifetime:
 "umbra/v1/hello"
 "umbra/v1/log-commit"
 "umbra/v1/issuer-key"
+"umbra/v1/lookup-pow"
+"umbra/v1/issue-pow"
 "umbra/v1/row-id"
 "umbra/v1/rotate-jitter"
 "umbra/v1/backup-salt"

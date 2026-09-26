@@ -129,6 +129,20 @@ impl Label {
         Ok(())
     }
 
+    /// Tombstones a live label at the request of its holder, after the
+    /// write challenge verified (`DIS-171`). The reservation of `DIS-074`
+    /// holds as for a lapsed lease.
+    pub fn retire(&mut self, version_new: u32, now: u64) -> Result<(), Error> {
+        if self.is_tombstoned() || version_new != self.version.saturating_add(1) {
+            return Err(Error::Stale);
+        }
+        self.version = version_new;
+        self.lease_until = None;
+        self.tombstoned_at = Some(now);
+        self.lease_epoch = 0;
+        Ok(())
+    }
+
     /// Tombstones a lapsed lease, and returns the tombstone version to
     /// publish (`DIS-073`, `DIS-102`).
     pub fn tombstone_if_lapsed(&mut self, now: u64) -> Option<u32> {

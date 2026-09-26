@@ -22,6 +22,7 @@ pub mod cell;
 pub mod codec;
 pub mod command;
 pub mod descriptor;
+pub mod directory;
 pub mod group;
 pub mod nack;
 pub mod ndr;

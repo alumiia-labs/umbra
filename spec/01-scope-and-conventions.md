@@ -309,7 +309,7 @@ examples. Without the table below a maintainer finds the dependents by hand.
 | `RECEIPT_WINDOW` | Part 10 §10.11 | Part 10 §10.9.1 |
 | `GROUP_MAX` | Part 11 §11.10 | Part 1 §1.5.4, Part 3 §3.12, Part 11 §11.3.3, Part 11 §11.9.1 |
 | `MOD_ACTION_MAX` | Part 11 §11.9.6 | Part 6 §6.6.3 |
-| `RENDEZVOUS_ROTATE` | Part 9 §9.10 | Part 15 §15.1, Part 15 §15.3 |
+| `RENDEZVOUS_ROTATE` | Part 9 §9.11 | Part 15 §15.1, Part 15 §15.3 |
 | `CHUNK_SIZE`, `REPLICAS`, `CHUNK_TTL`, `CHUNK_LIFE_MAX` | Part 12 §12.7 | Part 3 §3.12, Part 4 §4.7.2 |
 | `MAX_FILE_SIZE`, `UPLOAD_QUOTA_DAY`, `CHUNK_STORE_MIN`, `CHUNK_STORE_TARGET` | Part 12 §12.7 | Part 12 §12.7.2, Part 12 §12.10, Part 2 §2.4, Part 10 §10.5.3 |
 | `SEGMENT_SIZE`, `MAX_CONCURRENT_CHUNKS`, `IMAGE_REENCODE_BYTES` | Part 12 §12.7 | Part 12 §12.2.3, Part 12 §12.3, Part 12 §12.7.2 |
@@ -447,14 +447,14 @@ side channel that the user selects, such as a QR code scan.
 | Reusable contact link | Part 4 §4.3.2 | Out of band | Client |
 | Handle link | Part 9 §9.3.1 | Out of band | Client |
 | Profile blob (Part 9 §9.3.1) | none | none | Client |
-| Lookup request and response (Part 9 §9.4) | none | none | Client and directory |
+| Lookup request and response (Part 9 §9.4) | Part 9 §9.10 | OHTTP through an ingress relay, Part 9 §9.10 | Client and directory |
 | `LookupProof`, `LadderStep` | Part 9 §9.5.1 | The lookup response of Part 9 §9.4 step 4 | Directory |
 | `IssuerKeyEntry` | Part 13 §13.5 | A leaf of the log of Part 9 §9.5.1 | The issuer of Part 13 §13.9 |
 | `SignedTreeHead`, `SignerSig` | Part 9 §9.5.2 | The lookup response of Part 9 §9.4 step 4 | The signers of Part 9 §9.5.2 |
 | `LogKeySet`, `SignedLogKeySet` | Part 9 §9.5.2 | The client build, and the signers of Part 9 §9.5.2 | The signers of Part 9 §9.5.2 |
-| Rendezvous hello (Part 9 §9.6), which carries the fields of Part 5 §5.4.1 and ends with an `Admission` | none | The rendezvous queue, Part 9 §9.6 | Client |
-| Renewal challenge and answer | Part 9 §9.9.1 | none | Directory and client |
-| Registration request (Part 9 §9.9) | none | none | Client |
+| Rendezvous hello (Part 9 §9.6), which carries the fields of Part 5 §5.4.1 and ends with an `Admission` | Part 9 §9.6 `DIS-143` | The rendezvous queue, Part 9 §9.6 | Client |
+| Renewal challenge and answer | Part 9 §9.9.1 | OHTTP through an ingress relay, Part 9 §9.10 | Directory and client |
+| Registration request (Part 9 §9.9) | Part 9 §9.10 | OHTTP through an ingress relay, Part 9 §9.10 | Client |
 | `MeasurerCert` | Part 10 §10.3.1 | `MEAS_OPEN`, Part 6 §6.3 | Two or more directory authorities |
 | `LinkReceipt` | Part 10 §10.4.2 | none | Relay |
 | `LinkFaultReport` | Part 10 §10.4.2 | A cover slot or a push-wake session, Part 10 §10.4.2 | Client |
@@ -492,7 +492,7 @@ side channel that the user selects, such as a QR code scan.
 | `Admission` | Part 13 §13.2 | `NEW`, `CNEW`, and `BNEW` | Client |
 | `PowChallenge` | Part 13 §13.8 | The descriptor path of Part 10 §10.5.3, or a rejection of the verifier | The verifier of Part 13 §13.2 |
 | `PowSolution` | Part 13 §13.8 | `Admission` | Client |
-| Cross-relay token, first-party token | The RFC of each type, Part 13 §13.3 | none | Issuer, Part 13 §13.9 |
+| Cross-relay token, first-party token | The RFC of each type, Part 13 §13.3 | The issuance request of Part 13 §13.9, for a first-party token | Issuer, Part 13 §13.9 |
 
 The table has 97 rows, and 21 of them hold at least one `none` cell.
 `Cell` has two definitions, and the two agree field for field.

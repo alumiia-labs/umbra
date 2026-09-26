@@ -27,6 +27,9 @@ pub mod https;
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub mod ndr;
 
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+pub mod directory;
+
 /// Where a client connects: the co-tenant host name of a relay and one of
 /// its addresses, from the descriptor of Part 10 §10.5.3.
 #[derive(Debug, Clone, PartialEq, Eq)]

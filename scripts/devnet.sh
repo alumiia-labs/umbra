@@ -22,7 +22,10 @@
 # repository, thus this network protects nothing.
 #
 # The Notification Delivery Relay of Part 8 §8.2 listens on port 7450, and
-# the two ingress relays carry its OHTTP requests (`POST /ohttp`).
+# the two ingress relays carry its OHTTP requests (`POST /ohttp`). The
+# directory of Part 9 with the issuer of Part 13 §13.9 listens on port 7451,
+# and the two ingress relays carry its requests (`POST /directory`). Its
+# epoch is 60 seconds here, thus a new handle shows within a minute.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -59,11 +62,20 @@ target/debug/umbra-ndr key-config tests/fixtures/devnet/ndr.conf     | python -c
     exit 1
 }
 
+# The debug build pins the directory (`DIS-163`), and the seeds of
+# directory.conf give the same keys at each start.
+target/debug/umbra-directory pins tests/fixtures/devnet/directory.conf     | python -c "import sys; sys.stdout.buffer.write(bytes.fromhex(sys.stdin.read().strip()))"     | cmp -s - tests/fixtures/devnet/directory-pins.bin || {
+    echo "the directory keys differ from tests/fixtures/devnet/directory-pins.bin"
+    exit 1
+}
+
 pids=()
 trap 'kill "${pids[@]}" 2>/dev/null || true' EXIT INT TERM
 # The queue relays start first, thus each dial of a lower layer finds a port
 # that accepts.
 target/debug/umbra-ndr tests/fixtures/devnet/ndr.conf &
+pids+=($!)
+target/debug/umbra-directory tests/fixtures/devnet/directory.conf &
 pids+=($!)
 for relay in 3 5 7 2 4 1 6; do
     target/debug/umbra-relay "target/devnet/conf/relay$relay.conf" &

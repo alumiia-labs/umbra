@@ -275,6 +275,13 @@ async fn push_copy(target: Dial, tls: Arc<rustls::ClientConfig>, capsule: Vec<u8
 
 /// The path of the OHTTP relay of Part 8 §8.2 (`NTF-127`).
 pub const OHTTP_PATH: &str = "/ohttp";
+/// The path of the OHTTP relay of the directory and the issuer of Part 9
+/// §9.4 and Part 13 §13.9 (`DIS-162`).
+pub const DIRECTORY_PATH: &str = "/directory";
+/// The longest encapsulated request and response of the directory: the
+/// padded sizes of Part 9 §9.12, the header, the encapsulation, and the tag.
+const DIRECTORY_REQUEST_MAX: usize = 16_384;
+const DIRECTORY_RESPONSE_MAX: usize = 131_072;
 /// The longest encapsulated request: the header, the encapsulation, one
 /// NDR request, and the tag.
 const OHTTP_REQUEST_MAX: usize = 4_096;
@@ -362,6 +369,9 @@ pub struct Carried {
     pub manifest: Option<Vec<u8>>,
     /// The gateway, for a relay with the OHTTP relay role.
     pub ohttp: Option<OhttpForward>,
+    /// The gateway of the directory and the issuer, for a relay with that
+    /// OHTTP relay role.
+    pub directory: Option<OhttpForward>,
     /// The route to the NDR that a queue relay pins (`NTF-127`), and the
     /// configuration it trusts the OHTTP relay under. A relay with none
     /// sends no push.
@@ -376,13 +386,17 @@ pub struct Carried {
 /// Forwards one encapsulated request to the gateway and gives its answer
 /// back (`NTF-127`). The relay reads no byte of either, it keeps neither,
 /// and the gateway sees this relay alone.
-async fn relay_ohttp<S>(stream: &mut S, inbound: &mut Vec<u8>, forward: Option<&OhttpForward>)
-where
+async fn relay_ohttp<S>(
+    stream: &mut S,
+    inbound: &mut Vec<u8>,
+    forward: Option<&OhttpForward>,
+    (request_max, response_max): (usize, usize),
+) where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let answer = match (
         forward,
-        https::read_request(stream, inbound, OHTTP_REQUEST_MAX).await,
+        https::read_request(stream, inbound, request_max).await,
     ) {
         (Some(forward), Ok(request)) if request.method == "POST" => https::post(
             &forward.gateway,
@@ -390,7 +404,7 @@ where
             &[],
             &request.body,
             forward.tls.clone(),
-            OHTTP_RESPONSE_MAX,
+            response_max,
             OHTTP_WAIT,
         )
         .await
@@ -427,7 +441,19 @@ pub async fn serve_connection<S>(
     let deadline = tokio::time::Instant::now() + carried.limits.handshake_timeout;
     let request = loop {
         if inbound.starts_with(format!("POST {OHTTP_PATH} ").as_bytes()) {
-            relay_ohttp(&mut stream, &mut inbound, carried.ohttp.as_ref()).await;
+            let limits = (OHTTP_REQUEST_MAX, OHTTP_RESPONSE_MAX);
+            relay_ohttp(&mut stream, &mut inbound, carried.ohttp.as_ref(), limits).await;
+            return;
+        }
+        if inbound.starts_with(format!("POST {DIRECTORY_PATH} ").as_bytes()) {
+            let limits = (DIRECTORY_REQUEST_MAX, DIRECTORY_RESPONSE_MAX);
+            relay_ohttp(
+                &mut stream,
+                &mut inbound,
+                carried.directory.as_ref(),
+                limits,
+            )
+            .await;
             return;
         }
         if native::asks_challenges(&inbound) && inbound.windows(4).any(|w| w == b"\r\n\r\n") {

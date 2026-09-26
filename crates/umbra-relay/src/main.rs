@@ -61,7 +61,10 @@
 //!
 //! An `ohttp_gateway=https://ndr.example/gateway` line gives the relay the
 //! OHTTP relay role of Part 8 §8.2: it forwards each `POST /ohttp` to that
-//! gateway of the Notification Delivery Relay.
+//! gateway of the Notification Delivery Relay. A
+//! `directory_gateway=https://directory.example/gateway` line does the same
+//! for each `POST /directory`, to the gateway of the directory and the
+//! issuer of Part 9 §9.12.
 //!
 //! A queue relay pushes to the NDR through the OHTTP relay of an
 //! `ndr_route=https://relay1.example/ohttp` line, under the gateway key of
@@ -145,6 +148,8 @@ struct Settings {
     manifest: Option<Vec<u8>>,
     /// The gateway of the NDR, for a relay with the OHTTP relay role.
     ohttp_gateway: Option<https::Url>,
+    /// The gateway of the directory and the issuer.
+    directory_gateway: Option<https::Url>,
     /// The pinned route to the NDR, for the pushes of a queue relay.
     ndr_route: Option<NdrRoute>,
     /// What this relay declares of itself for a network descriptor: the
@@ -316,6 +321,10 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
             ..ConnectionLimits::default()
         },
         ohttp_gateway: match values.get("ohttp_gateway") {
+            Some(url) => Some(https::Url::parse(url)?),
+            None => None,
+        },
+        directory_gateway: match values.get("directory_gateway") {
             Some(url) => Some(https::Url::parse(url)?),
             None => None,
         },
@@ -579,6 +588,11 @@ async fn run() -> ExitCode {
             manifest: settings.manifest,
             // NTF-127: the OHTTP relay role posts to the gateway of the NDR.
             ohttp: settings.ohttp_gateway.map(|gateway| OhttpForward {
+                gateway,
+                tls: client_tls.clone(),
+            }),
+            // DIS-162: the directory and the issuer take the same role.
+            directory: settings.directory_gateway.map(|gateway| OhttpForward {
                 gateway,
                 tls: client_tls.clone(),
             }),

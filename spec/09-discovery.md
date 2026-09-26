@@ -502,7 +502,7 @@ bytes, thus each form fits one `B3` cell.
 11. **[DIS-011]** A client MUST reject a `SignedTreeHead` whose `timestamp` is
     more than `TREE_HEAD_FRESHNESS` plus `CLOCK_SKEW` before the device clock.
     **[DIS-062]** A client MUST reject a `SignedTreeHead` whose `timestamp` is
-    more than `CLOCK_SKEW` after the device clock. §9.10 gives
+    more than `CLOCK_SKEW` after the device clock. §9.11 gives
     `TREE_HEAD_FRESHNESS` as 7 days, and Part 10 §10.11 gives `CLOCK_SKEW` as 1
     hour. The device clock bounds these two tests only. `DIS-061` holds when
     the clock is wrong, thus a client with a bad clock loses freshness and does
@@ -591,7 +591,7 @@ Part 6 §6.6.4 gives the carrier, which is an `AppMessage` of kind `0x31` with a
   specification does not define. **[DIS-072]** A client MUST set `epoch` to the
   `tree_size` and `digest` to the `root` of the newest head that it accepted.
 - **[DIS-028]** A client MUST emit at most one digest for each `source` in each
-  `GOSSIP_INTERVAL`. §9.10 sets that value to 6 hours.
+  `GOSSIP_INTERVAL`. §9.11 sets that value to 6 hours.
 - **[DIS-029]** A client MUST emit a digest in a scheduled cover slot of Part 3
   §3.6.2 only. **[DIS-030]** A client MUST NOT open a session for the only
   purpose of a digest.
@@ -855,8 +855,9 @@ for that user.
   directory MUST hold the last `HK_pub` of a tombstoned label for
   `HANDLE_RESERVE` after the tombstone.
 - **[DIS-075]** During `HANDLE_RESERVE`, a directory MUST NOT register a
-  tombstoned label to a party that fails the challenge of §9.9.1. The
-  challenge uses the last `HK_pub` of the label. **[DIS-076]** If the answer is correct, the
+  tombstoned label to a party that fails the challenge of §9.9.1, or the
+  write challenge of §9.9.3 that binds the new entry. The challenge uses the
+  last `HK_pub` of the label. **[DIS-076]** If the answer is correct, the
   directory MUST publish a new version of the label with the same `HK_pub`.
 - **[DIS-077]** After `HANDLE_RESERVE`, a directory MUST publish a registration
   of the label as the next version after the tombstone version.
@@ -934,7 +935,89 @@ holder:      ss  <- UMBRA-KEM.Decap( HK_sk, HK_pub_current, ct )
 > challenge, because the directory writes the tombstone and no other party
 > does.
 
-## 9.10 Parameters
+## 9.10 The directory service
+
+The directory and the issuer of Part 13 §13.9 each answer one request shape
+in OHTTP (RFC 9458), through the OHTTP relay role of an ingress relay. Thus
+the directory learns the request and that relay alone, and the relay learns
+the sender and a length that each request shares.
+
+- **[DIS-162]** A client MUST send each request of this section in OHTTP to
+  the gateway of the directory, through the `POST /directory` path of an
+  ingress relay. **[DIS-163]** A client build MUST ship the key
+  configuration of that gateway beside the genesis `LogKeySet` of `DIS-066`
+  and the VRF key of `DIS-158`.
+
+```
+DirRequest {                      // padded to DIR_REQUEST_LEN
+    version     u8                // 0x01
+    kind        u8                // the table below
+    body_len    u16
+    body        [body_len]u8
+    padding     zero bytes
+}
+
+DirResponse {                     // padded to the smallest DIR_RESPONSE_SIZES value that holds it
+    version     u8                // 0x01
+    status      u8                // 0x00 done, 0x01 malformed, 0x02 refused,
+                                  // 0x03 not found, 0x04 stale, 0x05 busy:
+                                  // also a label with a version staged, DIS-010
+    body_len    u32
+    body        [body_len]u8
+    padding     zero bytes
+}
+```
+
+| Kind | Request body | Response body |
+| --- | --- | --- |
+| `0x01` Evaluate | `admission Admission`, `blinded [32]u8` | `element [32]u8`, `proof [64]u8` |
+| `0x02` Lookup | `search_key [64]u8` | `head_len u16`, the newest `SignedTreeHead`, the `LookupProof` |
+| `0x03` Head | `from_size u64`, 0 for none | `head_len u16`, the newest `SignedTreeHead`, `count u8`, `count` hashes of the consistency proof from `from_size` |
+| `0x04` Register | `token [162]u8`, `label_len u16`, the label input, `entry_len u16`, the entry | empty |
+| `0x05` Challenge | `purpose u8` (0x01 renew, 0x02 write), `label_len u16`, the label input | the 1 136 bytes of §9.9.1 or §9.9.3, then `lease_epoch u64` for a renewal |
+| `0x06` Write | `label_len u16`, the label input, `answer [32]u8`, `entry_len u16`, the entry | empty |
+| `0x07` Renew | `label_len u16`, the label input, `answer [32]u8` | empty |
+| `0x10` Issue | Part 13 §13.9 | Part 13 §13.9 |
+
+The label input is the canonical handle of §9.3.2 for a handle, the input of
+§9.3.3 for an address, and the input of Part 13 §13.5 for an issuer key. The
+directory computes the search key from it under its own key.
+
+- **[DIS-164]** A directory MUST evaluate a blinded element for a lookup only
+  with an `Admission` of a first-party token of Part 13 §13.3.2 or of a
+  `PowSolution` at `POW_LOOKUP_FLOOR` or above. **[DIS-165]** The seed of that
+  solution MUST be `SHA3-256("umbra/v1/lookup-pow" || BE32(epoch) ||
+  blinded)`, where `epoch` is the epoch of Part 13 §13.6 of the directory or
+  the one before it, and its `verifier_id` MUST be `SHA3-256("umbra/v1/lookup-pow"
+  || pk)`, where `pk` is the VOPRF key of the directory. A solution thus
+  serves one blinded element, and a second request with that element gains
+  nothing, because it gets the same element back.
+- **[DIS-166]** A directory MUST stage a registration, a write, and a renewal
+  for the next epoch of the log, and a client MUST read its own version under
+  `DIS-137` at the first head after it. **[DIS-167]** A directory MUST close an
+  epoch of the log at each `DIRECTORY_EPOCH`, and an epoch with no update
+  closes too.
+- **[DIS-168]** A directory MUST hold an issued challenge for
+  `CHALLENGE_TTL` at the most, and it MUST refuse an answer after that time.
+  A second challenge for one label ends the first.
+- **[DIS-169]** A directory MUST refuse a registration whose entry does not
+  name the label input: the handle of a `DirectoryEntry`, or the `address`
+  of an `AddressEntry` whose `check` passes. **[DIS-170]** The version of a
+  registered entry MUST be 0, and the version of a written entry MUST be the
+  version of the label plus one.
+- **[DIS-171]** A holder MAY write the tombstone form of §9.3 under the
+  challenge of §9.9.3 to retire its entry before its lease ends. A reusable
+  link of a limited period is an address that the holder retires so.
+  `HANDLE_RESERVE` holds for such a tombstone as for a lapsed lease.
+
+> *Cause.* Part 1 §1.8 listed the lookup request, the registration request,
+> and the carrier of the challenges as gaps. The shape follows the Notification
+> Delivery Relay of Part 8 §8.2, which already runs one request type through
+> an ingress relay in OHTTP. The padding hides the kind of a request from the
+> relay. A lookup shows no handle to the directory, and a write shows its label,
+> because the directory must bind the write to it.
+
+## 9.11 Parameters
 
 | Parameter | Value |
 | --- | --- |
@@ -946,8 +1029,12 @@ holder:      ss  <- UMBRA-KEM.Decap( HK_sk, HK_pub_current, ct )
 | `HANDLE_HISTORY_MAX` | 64 versions, the version scan bound of §9.9.2 |
 | `RENDEZVOUS_ROTATE` | 30 days, measured by the client from the write of the current rendezvous version (§9.9) |
 | Directory scale | 10⁵ to 10⁷ entries (§9.2) |
+| `DIR_REQUEST_LEN` | 8 192 bytes (§9.10) |
+| `DIR_RESPONSE_SIZES` | 4 096, 32 768, and 98 304 bytes (§9.10) |
+| `DIRECTORY_EPOCH` | 600 s, the interval of the epochs of the log (§9.10) |
+| `CHALLENGE_TTL` | 300 s, the life of an issued challenge (§9.10) |
 
-## 9.11 Implementation note
+## 9.12 Implementation note
 
 Vendor the ECVRF, and write the rest.
 

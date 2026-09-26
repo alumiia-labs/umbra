@@ -357,6 +357,12 @@ impl LogOperator {
         Some((self.log_leaves.len() as u64, log_root(&self.log_leaves)?))
     }
 
+    /// Whether a version of the label waits for the close of the open
+    /// epoch.
+    pub fn is_staged(&self, search_key: &[u8]) -> bool {
+        self.staged.contains_key(search_key)
+    }
+
     /// Stages the next version of a label for the open epoch, and returns
     /// its version. A label with a staged update is rejected (`DIS-010`).
     /// `opening` comes from the CSPRNG of the operator.
