@@ -739,14 +739,22 @@ MutableItem {                 // the body of kind 0x20 at sub-kind 0x01
   thus each device of the set derives it and no party outside the set can.
   A device MUST set `author` to `0x00` for a record that the user wrote on a
   device of the set, and to `0x01` for a record of the other party. A parser
-  MUST reject another scope or another author. A receiver MUST apply the
+  MUST reject a scope other than `0x01` and `0x02`, and another author. A receiver MUST apply the
   record in the conversation that the subject names, in the direction that
   `author` gives. **[DEV-293]** The device that owns a pairwise ratchet MUST
   publish each record that it takes from the contact, and each record of
   the user that it sends but one that a peer handed to it. A device that
   does not own the ratchet MUST publish each record that the user composes
   on it, and the owner then sends that record under `DEV-047` and
-  `DEV-048`. **[DEV-270]** A device MUST apply a `MutableItem`
+  `DEV-048`. **[DEV-296]** For scope `0x02` the conversation is a private
+  group of Part 11, and `subject = SHA3-256(K_set || 0x02 || group_id)`. A
+  group record carries no tag for the index of its sender, thus no other
+  device of the member reads that record on the group queue. The device that
+  posts a record of the member MUST publish it, a roster object included,
+  and a device that takes it MUST apply a roster object to its roster and
+  keep each other record as one of the user. Each device reads the records
+  of the other members on its own subscription (Part 11 `GRP-343`).
+  **[DEV-270]** A device MUST apply a `MutableItem`
   when its `lamport` is above the value held, or equal with a lower
   `device_id` of the writer, and it MUST discard it otherwise.
 

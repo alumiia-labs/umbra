@@ -326,7 +326,9 @@ private fun TabsScreen(tab: Tab, onTab: (Tab) -> Unit, push: (Screen) -> Unit) {
                 Tab.Contacts -> ContactsTab(push)
                 Tab.Settings -> SettingsTab(push)
             }
-            if (tab != Tab.Settings) {
+            // A contact or a group starts on the device that owns the
+            // channels (Part 7 DEV-287).
+            if (tab != Tab.Settings && Core.ownsChannels) {
                 Box(
                     Modifier
                         .align(Alignment.BottomEnd)

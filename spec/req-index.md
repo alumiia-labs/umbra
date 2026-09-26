@@ -70,7 +70,7 @@ each column when a crate implements the requirement and a test covers it.
 | `IDN` | 129 | 44 | 1 | 0 | 5 | **179** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
 | `WIR` | 393 | 85 | 0 | 0 | 7 | **485** |
-| `DEV` | 189 | 89 | 0 | 0 | 7 | **285** |
+| `DEV` | 190 | 89 | 0 | 0 | 7 | **286** |
 | `NTF` | 74 | 28 | 0 | 0 | 3 | **105** |
 | `DIS` | 109 | 33 | 0 | 0 | 1 | **143** |
 | `REL` | 124 | 32 | 1 | 0 | 2 | **159** |
@@ -79,7 +79,7 @@ each column when a crate implements the requirement and a test covers it.
 | `ABU` | 66 | 30 | 1 | 0 | 0 | **97** |
 | `IMP` | 114 | 41 | 0 | 0 | 2 | **157** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 1954 | 615 | 7 | 0 | 50 | **2626** |
+| **All** | 1955 | 615 | 7 | 0 | 50 | **2627** |
 
 ## SCP — Scope and Conventions
 
@@ -1594,6 +1594,7 @@ Source: `spec/07-device-sets.md`
 | `DEV-293` | §7.5.3 | MUST | The device that owns a pairwise ratchet | The device that owns a pairwise ratchet MUST publish each record that it takes from the contact, and each record of the user that it sends but one that a peer handed to it. |  |  |
 | `DEV-294` | §7.5.3 | MUST | (unstated) | The item of an entry of the local identity table takes the subject of `DEV-226` as its key. |  |  |
 | `DEV-295` | §7.4 | MUST NOT | It | It MUST NOT carry the recovery code of Part 4 §4.7.1. |  |  |
+| `DEV-296` | §7.5.3 | MUST | (unstated) | For scope `0x02` the conversation is a private group of Part 11, and `subject = SHA3-256(K_set || 0x02 || group_id)`. |  |  |
 
 ## NTF — Notifications
 

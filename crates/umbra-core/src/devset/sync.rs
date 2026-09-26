@@ -94,6 +94,15 @@ impl CausalContext {
 
 /// The scope of a synced record of a pairwise conversation (`DEV-292`).
 pub const SCOPE_PAIRWISE: u8 = 0x01;
+/// The scope of a synced record of a private group (`DEV-296`).
+pub const SCOPE_GROUP: u8 = 0x02;
+
+/// The subject of a group in a synced record (`DEV-296`):
+/// `SHA3-256(K_set || 0x02 || group_id)`. A party outside the set cannot
+/// test a group against it.
+pub fn group_subject(set_key: &umbra_crypto::secret::Secret<32>, group_id: &[u8; 32]) -> [u8; 32] {
+    umbra_crypto::hash::sha3_256(&[set_key.expose(), &[SCOPE_GROUP], group_id])
+}
 /// The author of a synced record: the user, on a device of the set.
 pub const AUTHOR_USER: u8 = 0x00;
 /// The author of a synced record: the other party of the conversation.
@@ -196,8 +205,8 @@ impl<'a> SyncedRecord<'a> {
             subject: r.array()?,
             author: r.u8()?,
         };
-        // DEV-292: one scope and two authors.
-        if origin.scope != SCOPE_PAIRWISE || origin.author > AUTHOR_PEER {
+        // DEV-292, DEV-296: two scopes and two authors.
+        if !matches!(origin.scope, SCOPE_PAIRWISE | SCOPE_GROUP) || origin.author > AUTHOR_PEER {
             return Err(Error::Malformed);
         }
         let inner_len = usize::try_from(r.u32()?).map_err(|_| Error::Malformed)?;
@@ -590,7 +599,7 @@ mod tests {
         // DEV-292: a scope or an author that the layout does not name.
         let other_scope = SyncedRecord {
             origin: Origin {
-                scope: 0x02,
+                scope: 0x03,
                 ..rec.origin
             },
             ..rec.clone()

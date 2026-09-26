@@ -512,6 +512,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now: u64,
         rng: &mut R,
     ) -> Result<ConversationId, Error> {
+        // GRP-338: the device that owns the channels acts for the member in
+        // each group.
+        if !self.owns_channels()? {
+            return Err(Error::NotFound);
+        }
         let name = name.trim();
         if name.len() > GROUP_NAME_MAX {
             return Err(Error::TooLong);
@@ -841,6 +846,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
+        // GRP-338: the device that owns the channels acts for the member in
+        // each group.
+        if !self.owns_channels()? {
+            return Err(Error::NotFound);
+        }
         let held = self.group_of(group)?;
         let own = held
             .roster()
@@ -885,6 +895,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
+        // GRP-338: the device that owns the channels acts for the member in
+        // each group.
+        if !self.owns_channels()? {
+            return Err(Error::NotFound);
+        }
         // GRP-153: an offer to a group that this device holds is refused.
         let conversation = self.conversation_of_group(&offer.group_id)?;
         if self.is_group(conversation)? {
@@ -1066,6 +1081,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<GroupAdmission, Error> {
+        // GRP-338: the device that owns the channels acts for the member in
+        // each group.
+        if !self.owns_channels()? {
+            return Err(Error::NotFound);
+        }
         let conversation = self.conversation_of_group(&joiner.group_id)?;
         let row = self.join_row(joiner.from, &joiner.group_id)?;
         let group = self.group_of(conversation)?;
@@ -1132,6 +1152,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
+        // GRP-338: the device that owns the channels acts for the member in
+        // each group.
+        if !self.owns_channels()? {
+            return Err(Error::NotFound);
+        }
         let conversation = self.conversation_of_group(&joiner.group_id)?;
         let group = self.group_of(conversation)?;
         let row = self.join_row(joiner.from, &joiner.group_id)?;
@@ -1467,6 +1492,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
+        // GRP-338, GRP-340: the device that owns the channels posts each
+        // record of the member. Another device hands a record of the user to
+        // it, and makes no record of the group itself.
+        if !self.owns_channels()? {
+            let kind = AppMessage::parse(app, umbra_wire::app::Channel::Group)?.kind;
+            if kind != AppKind::GroupControl {
+                self.publish_sync(conversation, app, true, message, now_ms / 1_000, rng)?;
+            }
+            return Ok(());
+        }
         // GRP-210: a group whose two queues are gone takes no record.
         if self.group_closed(conversation)? {
             return Ok(());
@@ -1508,7 +1543,90 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             record,
             is_rotation: false,
         });
-        self.put_clock(conversation, sent_key(conversation), now_ms / 1_000, rng)
+        self.put_clock(conversation, sent_key(conversation), now_ms / 1_000, rng)?;
+        // A record of the member carries no tag for its own index, thus
+        // another device of the set cannot read it on the group queue. It
+        // takes the record on the sync channel (DEV-296).
+        self.publish_sync(conversation, app, true, None, now_ms / 1_000, rng)
+    }
+
+    /// Takes a record of a group that another device of the set synced
+    /// (DEV-296). The device that owns the channels posts a record that a
+    /// peer handed to it (GRP-340). Another device applies a roster object
+    /// of the member, and keeps each other record as one of the user.
+    pub(super) fn apply_synced_group<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        app: &[u8],
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let parsed = AppMessage::parse(app, umbra_wire::app::Channel::Group)?;
+        let open = self.open_ref()?;
+        let reference = super::msg_ref(&open.device_set_key, &parsed.msg_id);
+        let natural = [conversation.0.as_slice(), &reference].concat();
+        let row = open
+            .store
+            .row_id(umbra_core::store::record::TableId::MESSAGE, &natural);
+        if open
+            .store
+            .get(umbra_core::store::record::TableId::MESSAGE, &row)?
+            .is_some()
+        {
+            return Ok(());
+        }
+        if self.owns_channels()? {
+            if parsed.kind != AppKind::GroupControl {
+                self.post_to_group(conversation, parsed.msg_id, app, now_ms, rng)?;
+            }
+            return Ok(());
+        }
+        if parsed.kind == AppKind::GroupControl {
+            self.apply_own_roster_object(conversation, parsed.body, now_ms, rng)?;
+            return Ok(());
+        }
+        let limit = self.download_limit_now()?;
+        let open = self.open_mut()?;
+        let plain = stored_message(
+            super::OUTGOING,
+            Delivery::Accepted,
+            conversation,
+            now_ms,
+            app,
+        );
+        let mut batch = open.store.begin();
+        batch.put(
+            umbra_core::store::record::TableId::MESSAGE,
+            row,
+            Some(conversation.0),
+            &plain,
+            rng,
+        )?;
+        let mut wanted = None;
+        if parsed.kind == AppKind::Attachment {
+            let (state, descriptor) = super::files::incoming_state_row(parsed.body, limit);
+            batch.put(
+                super::files::FILE_STATE,
+                row,
+                Some(conversation.0),
+                &state,
+                rng,
+            )?;
+            wanted = descriptor;
+        }
+        batch.commit()?;
+        let message = MsgRef(row);
+        if let Some(descriptor) = wanted {
+            self.files.downloads.push_back(super::files::DownloadJob {
+                message,
+                descriptor: Box::new(descriptor),
+            });
+        }
+        self.events.push_back(crate::Event::Delivery {
+            message,
+            delivery: Delivery::Accepted,
+        });
+        Ok(())
     }
 
     /// The two replicas of a group, or none before both `GNEW` answers.
@@ -1540,6 +1658,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
+        // GRP-338: the device that owns the channels acts for the member in
+        // each group.
+        if !self.owns_channels()? {
+            return Err(Error::NotFound);
+        }
         let object = self
             .group_of(conversation)?
             .remove_object(index)
@@ -1562,6 +1685,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
+        // GRP-338: the device that owns the channels acts for the member in
+        // each group.
+        if !self.owns_channels()? {
+            return Err(Error::NotFound);
+        }
         let group = self.group_of(conversation)?;
         let held = group
             .roster()
@@ -1633,6 +1761,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
+        // GRP-338: the device that owns the channels does the work of the
+        // member in each group.
+        if !self.owns_channels()? {
+            return Ok(());
+        }
         self.groups.owner_backoff.remove(&conversation);
         if self.group_closed(conversation)? {
             return Ok(());
@@ -1861,6 +1994,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
+        // GRP-338: the device that owns the channels acts for the member in
+        // each group.
+        if !self.owns_channels()? {
+            return Err(Error::NotFound);
+        }
         let object = self
             .group_of(conversation)?
             .leave_object()
@@ -1901,6 +2039,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
+        // GRP-338: the device that owns the channels does the work of the
+        // member in each group.
+        if !self.owns_channels()? {
+            return Ok(());
+        }
         self.groups.backoff.remove(&conversation);
         if self.group_closed(conversation)? {
             return Ok(());
@@ -2246,6 +2389,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
+        // GRP-338: the device that owns the channels does the work of the
+        // member in each group.
+        if !self.owns_channels()? {
+            return Ok(());
+        }
         let group = self.group_of(conversation)?;
         let request = KeyRequest {
             scope: KeyScope::GroupEpoch,
@@ -2345,6 +2493,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<usize, Error> {
+        // GRP-338: the device that owns the channels does the work of the
+        // member in each group.
+        if !self.owns_channels()? {
+            return Ok(0);
+        }
         let group = self.group_of(conversation)?;
         let request = KeyRequest {
             scope: KeyScope::GroupEpoch,
@@ -2435,6 +2588,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
+        // GRP-338: the device that owns the channels does the work of the
+        // member in each group.
+        if !self.owns_channels()? {
+            return Ok(());
+        }
         let group = self.group_of(conversation)?;
         let Ok(record) = group.key_supply(index, rng) else {
             return Ok(());
@@ -3106,6 +3264,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
+        // GRP-338: the device that owns the channels does the work of the
+        // member in each group.
+        if !self.owns_channels()? {
+            return Ok(());
+        }
         let mut group = self.group_of(conversation)?;
         let Some(replicas) = Self::group_replicas_of(&group)? else {
             return Ok(());

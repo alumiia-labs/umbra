@@ -19,8 +19,8 @@ use umbra_core::{
         engine::{SyncEngine, Taken},
         roster::{ClaimScope, OwnerClaim, Roster},
         sync::{
-            IdentityEntry, Origin, AUTHOR_PEER, AUTHOR_USER, ITEM_CONTACT_NAME,
-            ITEM_IDENTITY_ENTRY, SCOPE_PAIRWISE,
+            group_subject, IdentityEntry, Origin, AUTHOR_PEER, AUTHOR_USER, ITEM_CONTACT_NAME,
+            ITEM_IDENTITY_ENTRY, SCOPE_GROUP, SCOPE_PAIRWISE,
         },
         DeviceId,
     },
@@ -71,6 +71,8 @@ pub(super) struct Synced {
     pub conversation: ConversationId,
     pub app: Vec<u8>,
     pub from_user: bool,
+    /// Whether the conversation is a private group (`DEV-296`).
+    pub is_group: bool,
 }
 
 fn counter_key(counter: u64) -> [u8; 8] {
@@ -169,6 +171,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if let Some(subject) = self.subjects.get(&conversation) {
             return Ok(Some(*subject));
         }
+        if self.is_group(conversation)? {
+            let group = self.group_of(conversation)?;
+            let subject = group_subject(&self.open_ref()?.device_set_key, group.group_id());
+            self.subjects.insert(conversation, subject);
+            return Ok(Some(subject));
+        }
         let open = self.open_ref()?;
         let Some(row) = open.store.get(TableId::CONTACT, &conversation.0)? else {
             return Ok(None);
@@ -206,8 +214,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 row
             })
             .collect();
-        for row in rows {
-            let conversation = ConversationId(row);
+        let groups = self.group_conversations()?;
+        let candidates = rows.into_iter().map(ConversationId).chain(groups);
+        for conversation in candidates.collect::<Vec<_>>() {
             if peers.contains(&conversation) {
                 continue;
             }
@@ -243,12 +252,25 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(subject) = self.subject_of(conversation)? else {
             return Ok(());
         };
-        let parsed = AppMessage::parse(app, umbra_wire::app::Channel::Pairwise)?;
-        if !umbra_core::devset::engine::carried_on_sync(parsed.kind) {
+        let is_group = self.is_group(conversation)?;
+        let channel = if is_group {
+            umbra_wire::app::Channel::Group
+        } else {
+            umbra_wire::app::Channel::Pairwise
+        };
+        let parsed = AppMessage::parse(app, channel)?;
+        // A request for an epoch and its answer belong to the reader of the
+        // group, and each device reads the group itself (GRP-343).
+        let is_group_request = matches!(parsed.kind, AppKind::KeyRequest | AppKind::KeySupply);
+        if !umbra_core::devset::engine::carried_on_sync(parsed.kind) || is_group_request {
             return Ok(());
         }
         let origin = Origin {
-            scope: SCOPE_PAIRWISE,
+            scope: if is_group {
+                SCOPE_GROUP
+            } else {
+                SCOPE_PAIRWISE
+            },
             subject,
             author: if from_user { AUTHOR_USER } else { AUTHOR_PEER },
         };
@@ -543,6 +565,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                             conversation,
                             app: inner,
                             from_user: origin.author == AUTHOR_USER,
+                            is_group: origin.scope == SCOPE_GROUP,
                         });
                     }
                 }

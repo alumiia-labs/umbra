@@ -2819,6 +2819,204 @@ fn a_new_device_links_from_the_code_of_the_existing_one() {
     let _ = std::fs::remove_dir_all(&directory);
 }
 
+/// Links a new device to `owner` (Part 7 §7.4) and gives its handle, on
+/// its own first run.
+fn link_new_device(
+    owner: &Arc<Handle>,
+    directory: &std::path::Path,
+    name: &str,
+    key: u8,
+    network_for: &dyn Fn(&Handle) -> Network,
+) -> Arc<Handle> {
+    owner.start_link("Phone".into()).unwrap();
+    let mut ticket = String::new();
+    tick_until(
+        &[owner],
+        || match owner.link_status() {
+            LinkStatus::Ticket { text } => {
+                ticket = text;
+                true
+            }
+            _ => false,
+        },
+        "no ticket",
+    );
+    let fresh = launch(directory, name, key);
+    fresh.clone().connect(network_for(&fresh)).unwrap();
+    wait_for(&fresh, |event| match event {
+        FfiEvent::Online => Some(()),
+        _ => None,
+    });
+    fresh.join_link(ticket, "Tablet".into()).unwrap();
+    tick_until(
+        &[owner, &fresh],
+        || matches!(owner.link_status(), LinkStatus::Code { .. }),
+        "no code",
+    );
+    owner.confirm_link().unwrap();
+    tick_until(
+        &[owner, &fresh],
+        || fresh.link_status() == LinkStatus::Ready,
+        "no snapshot",
+    );
+    let linked = fresh.take_linked().unwrap();
+    fresh.disconnect();
+    drop(fresh);
+    let config = Config {
+        database_path: directory.join(name).to_str().unwrap().to_owned(),
+        argon2_floor_ms: 60_000,
+    };
+    let keystore = Arc::new(Keystore([key; 32])) as Arc<dyn SecureElementCallback>;
+    let device = init_linked(config, keystore, units("device phrase"), linked).unwrap();
+    device.clone().connect(network_for(&device)).unwrap();
+    wait_for(&device, |event| match event {
+        FfiEvent::DeviceLinked => Some(()),
+        _ => None,
+    });
+    device
+}
+
+/// A message of `handle` whose text is `text`, in `conversation`.
+fn wait_for_text(handle: &Handle, conversation: &[u8], text: &str) {
+    wait_for(handle, |event| match event {
+        FfiEvent::Message {
+            conversation: held,
+            message,
+        } if held == conversation => (rendered(handle, message) == text).then_some(()),
+        _ => None,
+    });
+}
+
+/// Whether the store of `handle` holds a message of the user with `text`.
+fn holds_own_text(handle: &Handle, conversation: &[u8], text: &str) -> bool {
+    handle
+        .messages(conversation.to_vec())
+        .unwrap()
+        .into_iter()
+        .any(|message| {
+            handle.msg_info(message.clone()).unwrap().outgoing && rendered(handle, message) == text
+        })
+}
+
+#[test]
+fn a_linked_device_reads_and_writes_a_group() {
+    let relays = tokio::runtime::Runtime::new().unwrap();
+    let network = start_signed_network(&relays);
+    let directory = std::env::temp_dir().join(format!("umbra-link-group-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let network_for = |handle: &Handle| {
+        handle
+            .network_of_manifest(
+                network.manifest.clone(),
+                network.keyset.clone(),
+                0,
+                HOST.into(),
+                Some(CA.into()),
+            )
+            .unwrap()
+            .network
+    };
+    let alice = launch(&directory, "alice.db", 1);
+    let bob = launch(&directory, "bob.db", 2);
+    for handle in [&alice, &bob] {
+        handle.clone().connect(network_for(handle)).unwrap();
+    }
+    alice.invite().unwrap();
+    let link = wait_for(&alice, |event| match event {
+        FfiEvent::Invitation { link } => Some(link),
+        _ => None,
+    });
+    bob.accept(link).unwrap();
+    let alice_conversation = wait_for_contact(&alice);
+    wait_for_contact(&bob);
+
+    // Alice makes a group, and Bob joins it.
+    let group = alice.create_group("Summit".into()).unwrap();
+    let start = Instant::now();
+    while !alice.group_info(group.clone()).unwrap().is_ready {
+        assert!(start.elapsed() < STEP, "the group took no queues");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    alice
+        .offer_group(group.clone(), alice_conversation)
+        .unwrap();
+    wait_for(&bob, |event| match event {
+        FfiEvent::GroupOffer => Some(()),
+        _ => None,
+    });
+    let offer = bob.group_offers().unwrap().remove(0);
+    bob.accept_group_offer(offer.from, offer.group_id).unwrap();
+    wait_for(&alice, |event| match event {
+        FfiEvent::GroupJoiner => Some(()),
+        _ => None,
+    });
+    let joiner = alice.group_joiners().unwrap().remove(0);
+    alice.admit_joiner(joiner.from, joiner.group_id).unwrap();
+    let start = Instant::now();
+    let joined = loop {
+        let found = bob
+            .summaries()
+            .unwrap()
+            .into_iter()
+            .find(|summary| bob.is_group(summary.conversation.clone()).unwrap_or(false));
+        if let Some(summary) = found {
+            break summary.conversation;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "Bob did not come in"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
+
+    // The tablet joins the set of Alice, and it holds the group.
+    let tablet = link_new_device(&alice, &directory, "tablet.db", 3, &network_for);
+    assert!(tablet.is_group(group.clone()).unwrap());
+
+    // GRP-343: a record of Bob reaches the tablet on its own subscription.
+    let draft = bob.new_draft(joined.clone()).unwrap();
+    draft.set_text(units("from bob")).unwrap();
+    bob.send_draft(draft).unwrap();
+    wait_for_text(&alice, &group, "from bob");
+    wait_for_text(&tablet, &group, "from bob");
+
+    // DEV-296: a record of Alice reaches the tablet on the sync channel.
+    let draft = alice.new_draft(group.clone()).unwrap();
+    draft.set_text(units("from the phone")).unwrap();
+    alice.send_draft(draft).unwrap();
+    wait_for_text(&bob, &joined, "from the phone");
+    let start = Instant::now();
+    while !holds_own_text(&tablet, &group, "from the phone") {
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "no copy on the tablet"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    // GRP-340: a record that the tablet composes goes to the group through
+    // the phone, and the phone holds it as its own.
+    let draft = tablet.new_draft(group.clone()).unwrap();
+    draft.set_text(units("from the tablet")).unwrap();
+    tablet.send_draft(draft).unwrap();
+    wait_for_text(&bob, &joined, "from the tablet");
+    let start = Instant::now();
+    while !holds_own_text(&alice, &group, "from the tablet") {
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "no copy on the phone"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    // GRP-338: the tablet makes no group of its own.
+    assert!(tablet.create_group("Other".into()).is_err());
+    for handle in [&alice, &bob, &tablet] {
+        handle.disconnect();
+    }
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
 #[test]
 fn a_connect_that_replaces_a_run_keeps_the_new_run() {
     let relays = tokio::runtime::Runtime::new().unwrap();

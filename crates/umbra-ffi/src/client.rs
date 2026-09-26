@@ -1221,6 +1221,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
         if !sync_bodies.is_empty() {
             let synced = self.take_sync_bodies(sync_bodies, now_ms / 1_000, rng)?;
+            let (groups, synced): (Vec<_>, Vec<_>) =
+                synced.into_iter().partition(|synced| synced.is_group);
+            for record in groups {
+                // A record that does not apply ends no batch.
+                let _ = self.apply_synced_group(record.conversation, &record.app, now_ms, rng);
+            }
             let records: Vec<Record> = synced
                 .into_iter()
                 .map(|synced| Record {

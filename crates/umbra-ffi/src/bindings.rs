@@ -1294,7 +1294,14 @@ impl Inner {
     /// Gives each group job of the store to the group task (Part 11
     /// §11.2). With no run of the network the jobs wait in the store.
     fn pump_groups(&mut self) {
-        if self.bridge.is_none() || !self.owns_channels {
+        if self.bridge.is_none() {
+            return;
+        }
+        // GRP-343: each device of a member reads each group on its own
+        // circuit with its own cursor. A device that does not own the
+        // channels writes nothing to a group queue (GRP-338).
+        if !self.owns_channels {
+            self.pump_group_reads();
             return;
         }
         let mut commands = Vec::new();
@@ -1496,6 +1503,39 @@ impl Inner {
             if let Some(tag) = command.tag() {
                 self.group_sent.insert(tag, command.copy());
             }
+            self.send_group(command);
+        }
+        // DEV-296: each record of the member goes to the other devices of
+        // the set on their sync channels too.
+        self.flush_outgoing();
+    }
+
+    /// The subscription of each group, and no write: the work that a
+    /// record of the group left for the member goes to the device that owns
+    /// the channels, and this device drops it.
+    fn pump_group_reads(&mut self) {
+        while self.client.take_group_creation().is_some() {}
+        while self.client.take_group_rekey().is_some() {}
+        while self.client.take_group_post().is_some() {}
+        let mut commands = Vec::new();
+        if let Ok(subscriptions) = self.client.group_subscriptions(&mut OsRng) {
+            for subscription in subscriptions {
+                if !self.group_reading.insert(subscription.conversation) {
+                    continue;
+                }
+                commands.push(GroupCommand::Subscribe {
+                    relay: subscription.relay,
+                    group_queue_id: subscription.group_queue_id,
+                    read: subscription.read,
+                    fallback: subscription.fallback,
+                    from_seq: subscription.from_seq,
+                });
+            }
+        }
+        // An epoch-key record on the chunk path opens here too (GRP-344).
+        while self.client.take_epoch_upload().is_some() {}
+        self.pump_epoch_transfers();
+        for command in commands {
             self.send_group(command);
         }
     }
@@ -3448,6 +3488,10 @@ impl Handle {
     /// Asks for one invitation. A [`FfiEvent::Invitation`] follows.
     pub fn invite(&self) -> Result<(), FfiError> {
         let inner = locked(&self.inner);
+        // DEV-287: a contact of a linked device has no owner in the set.
+        if !inner.owns_channels {
+            return Err(FfiError::NotFound);
+        }
         let bridge = inner.bridge.as_ref().ok_or(FfiError::Offline)?;
         Ok(bridge.invite()?)
     }
@@ -3458,6 +3502,9 @@ impl Handle {
     /// link that names another host or that does not parse is an error.
     pub fn accept(&self, link: String) -> Result<(), FfiError> {
         let inner = locked(&self.inner);
+        if !inner.owns_channels {
+            return Err(FfiError::NotFound);
+        }
         let bridge = inner.bridge.as_ref().ok_or(FfiError::Offline)?;
         let fragment = Fragment::parse(link.trim(), &inner.invitation_host)
             .map_err(|_| FfiError::Malformed)?;
