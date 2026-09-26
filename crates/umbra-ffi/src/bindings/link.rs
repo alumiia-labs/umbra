@@ -728,11 +728,24 @@ impl Handle {
     /// Starts a link as the existing device (Part 7 §7.4): the device set
     /// begins with this device when it has none (`DEV-285`), and the offer
     /// goes up. `link_status` gives the ticket when the offer is there
-    /// (`DEV-280`). A link that runs ends first.
+    /// (`DEV-280`). A link that runs ends first, except one whose snapshot
+    /// went and whose sync channel did not open yet: its new device is
+    /// taking the handshake, and the call gives `Busy`.
     pub fn start_link(&self, label: String) -> Result<(), FfiError> {
         let mut inner = locked(&self.inner);
         if inner.bridge.is_none() {
             return Err(FfiError::Offline);
+        }
+        let is_opening = matches!(
+            inner.link.as_ref(),
+            Some(LinkState {
+                job: LinkJob::Offer(_),
+                status: LinkStatus::Sending | LinkStatus::Waiting,
+                ..
+            })
+        );
+        if is_opening {
+            return Err(FfiError::Busy);
         }
         if !inner.client.owns_channels()? {
             return Err(FfiError::NotFound);

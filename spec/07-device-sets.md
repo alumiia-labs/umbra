@@ -862,6 +862,8 @@ class in Part 6 §6.6. **[DEV-022]** A client MUST NOT process a kind that decla
   | The unread marker that a user sets by hand | Each conversation |
   | The draft text | Each conversation |
   | An entry of the local identity table of Part 4 §4.7.2 | Each pairwise identity |
+  | The state of a group that the device that owns the channels made or joined after a link | Each group |
+  | The re-key of the member in a group after a removal | Each group |
 
   **[DEV-197]** A client MUST converge each item of that table across the device
   set. **[DEV-294]** The item of an entry of the local identity table takes
@@ -871,6 +873,32 @@ class in Part 6 §6.6. **[DEV-022]** A client MUST NOT process a kind that decla
   when it makes a contact. A receiver MUST reject an item whose subject the
   salt does not give, and it MUST otherwise hold the conversation from
   then on, whether or not it owns the channel. **[DEV-198]** A revision that adds a chat-list item MUST add a row.
+
+  **[DEV-298]** The device that owns the channels MUST publish the state of
+  each group that it makes or joins while the set holds another device, when
+  the group holds its two replicas. The item takes the group subject of
+  `DEV-296` as its key, and its value is the descriptor of one backup object
+  of Part 4 §4.7.2 on the chunk path. That object holds the row of the group,
+  its seeds, its conversation row, and each row that the group owns, and no
+  queue job of the creator. **[DEV-299]** A receiver MUST reject an object
+  with a row of another group, or a group whose subject is not the key of
+  the item. A receiver that holds the group MUST keep its own row, since its
+  cursors are its own (`DEV-261`). A receiver that lacks the group MUST keep
+  each synced record of it, and it MUST apply them in their order when the
+  state arrives.
+  **[DEV-300]** After the re-key of a removal (Part 11 `GRP-345`), the device
+  that owns the channels MUST publish, for each group, the new seed and the
+  re-key object under the group subject. **[DEV-301]** Each other device MUST
+  apply that re-key to its own row of the group, and it MUST keep the seed
+  before it for the grace of Part 11 `GRP-372`.
+  **[DEV-302]** An existing device MUST NOT start a second link while the
+  sync channel of the last one has not opened, since the new device of that
+  link takes its handshake then.
+  **[DEV-303]** A device that does not own the channels MUST keep an
+  epoch-key record of the next epoch that does not install, and it MUST try
+  it again after each roster object of the member that it applies. That roster
+  object comes on the sync channel, and the key comes on the group queue, and
+  either one can come first (Part 11 `GRP-357`).
 
   **One item of group state does not converge.** Each device reads a group
   queue on its own circuit, and it holds its own cursor for each replica of

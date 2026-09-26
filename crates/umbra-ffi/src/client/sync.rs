@@ -20,7 +20,7 @@ use umbra_core::{
         roster::{ClaimScope, OwnerClaim, Roster},
         sync::{
             group_subject, IdentityEntry, Origin, AUTHOR_PEER, AUTHOR_USER, ITEM_CONTACT_NAME,
-            ITEM_IDENTITY_ENTRY, SCOPE_GROUP, SCOPE_PAIRWISE,
+            ITEM_GROUP_REKEY, ITEM_GROUP_STATE, ITEM_IDENTITY_ENTRY, SCOPE_GROUP, SCOPE_PAIRWISE,
         },
         DeviceId,
     },
@@ -103,7 +103,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// The engine of this device, or none while the set holds this device
     /// alone. A device that joined the roster since the last store becomes
     /// a peer.
-    fn sync_engine(&self) -> Result<Option<SyncEngine>, Error> {
+    pub(super) fn sync_engine(&self) -> Result<Option<SyncEngine>, Error> {
         let Some(identity) = self.device_identity()? else {
             return Ok(None);
         };
@@ -298,7 +298,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
     /// Publishes one item of mutable state to each device of the set
     /// (`DEV-197`).
-    fn publish_mutable<R: CryptoRng + ?Sized>(
+    pub(super) fn publish_mutable<R: CryptoRng + ?Sized>(
         &mut self,
         item: u8,
         key: &[u8],
@@ -408,6 +408,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     self.apply_contact_name(conversation, name, rng)?;
                     self.events.push_back(Event::Conversations);
                 }
+            }
+            ITEM_GROUP_STATE => self.on_group_state_item(subject, value)?,
+            ITEM_GROUP_REKEY => {
+                self.on_group_rekey_item(subject, value, unix_now() * 1_000, rng)?
             }
             // An item that this build does not apply changes nothing.
             _ => {}
@@ -576,6 +580,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                             from_user: origin.author == AUTHOR_USER,
                             is_group: origin.scope == SCOPE_GROUP,
                         });
+                    } else if origin.scope == SCOPE_GROUP {
+                        // DEV-299: the state of the group is on its way on
+                        // the chunk path, and its records wait for it.
+                        self.hold_group_record(&origin.subject, &inner, rng)?;
                     }
                 }
                 Ok(Taken::Acknowledged) => acked = true,

@@ -1058,6 +1058,8 @@ struct Inner {
     ndr: Option<(NdrRoute, Arc<native::ClientConfig>)>,
     /// The pinned route to the directory.
     directory: Option<directory::DirectoryLink>,
+    /// The sync channels whose opening the link took (`DEV-003`).
+    links_opened: BTreeSet<crate::ConversationId>,
     /// The rendezvous queues that the runtime made, by the tag of their
     /// command, until a call takes each one.
     rendezvous_ready: BTreeMap<u64, ([u8; 32], Vec<u8>)>,
@@ -1174,6 +1176,12 @@ enum RestoreStep {
 
 /// What one command of the transfer task belongs to.
 enum TransferWork {
+    /// The state of a group that goes to the other devices of the set
+    /// (`DEV-298`).
+    GroupState(crate::ConversationId),
+    /// The state of a group that another device of the set published, by
+    /// the subject of the group.
+    GroupFetch([u8; 32]),
     /// One step of the link of a device, by the number of its link.
     Link {
         /// The link.
@@ -1902,7 +1910,11 @@ impl Inner {
             match event {
                 NetEvent::DeviceInvitation(bundle) => self.link_bundle(&bundle),
                 NetEvent::DeviceLinked(conversation) => {
-                    self.link_opened();
+                    // The event stays for the view, and each pump sees it
+                    // again, thus the link takes it once.
+                    if self.links_opened.insert(conversation) {
+                        self.link_opened();
+                    }
                     kept.push_back(NetEvent::DeviceLinked(conversation));
                 }
                 other => kept.push_back(other),
@@ -1932,6 +1944,23 @@ impl Inner {
         };
         for step in work {
             self.send_dead_work(step);
+        }
+    }
+
+    /// The state of each group that the other devices of the set lack goes
+    /// up, and the state of each group that another device published comes
+    /// down (`DEV-298`, `DEV-299`).
+    fn pump_group_state(&mut self) {
+        if self.bridge.is_none() {
+            return;
+        }
+        while let Some((conversation, plain)) = self.client.take_group_state(unix_now()) {
+            let tag = self.next_tag(TransferWork::GroupState(conversation));
+            self.send_transfer(TransferCommand::UploadBackup { tag, plain });
+        }
+        while let Some((subject, descriptor)) = self.client.take_group_fetch() {
+            let tag = self.next_tag(TransferWork::GroupFetch(subject));
+            self.send_transfer(TransferCommand::DownloadBackup { tag, descriptor });
         }
     }
 
@@ -2260,6 +2289,18 @@ impl Inner {
                         }
                     }
                 }
+                Some(TransferWork::GroupState(conversation)) => {
+                    let mut descriptor = vec![0u8; uploaded.descriptor.len()];
+                    if uploaded.descriptor.encode(&mut descriptor).is_ok()
+                        && client
+                            .group_state_uploaded(conversation, &descriptor, &mut OsRng)
+                            .is_ok()
+                    {
+                        if let Some(running) = bridge {
+                            let _ = running.flush(client, &mut OsRng);
+                        }
+                    }
+                }
                 Some(TransferWork::EpochSlots(upload)) => {
                     let mut descriptor = vec![0u8; uploaded.descriptor.len()];
                     if uploaded.descriptor.encode(&mut descriptor).is_ok() {
@@ -2276,6 +2317,13 @@ impl Inner {
                 }
                 Some(TransferWork::File { message, .. }) => {
                     let _ = client.download_done(&message, &plain, &mut OsRng);
+                }
+                // DEV-299: the group of another device is here, and this
+                // device reads it from now on.
+                Some(TransferWork::GroupFetch(subject)) => {
+                    moved = client
+                        .apply_group_state(&subject, &plain, &mut OsRng)
+                        .is_ok();
                 }
                 Some(TransferWork::Admit { from, group_id }) => {
                     // GRP-326: the snapshot verifies, and the joiner holds
@@ -2321,6 +2369,9 @@ impl Inner {
                 // was, and the view offers the press that sends it again.
                 Some(TransferWork::Snapshot { from, .. }) => client.snapshot_failed(from),
                 Some(TransferWork::EpochSlots(upload)) => client.epoch_upload_failed(*upload),
+                Some(TransferWork::GroupState(conversation)) => {
+                    client.group_state_failed(conversation);
+                }
                 // A chunk that did not move leaves the epoch missing, and
                 // the member asks for it (§11.4.3).
                 _ => {}
@@ -2751,6 +2802,7 @@ fn handle_of(database_path: String, client: Client<SqliteBackend, ForeignElement
             group_refusals: BTreeSet::new(),
             ndr: None,
             directory: None,
+            links_opened: BTreeSet::new(),
             rendezvous_ready: BTreeMap::new(),
             next_rendezvous_tag: 0,
             ndr_in_flight: BTreeSet::new(),
@@ -3039,6 +3091,7 @@ impl Handle {
         // A record with a descriptor asks for its file.
         inner.take_link_events();
         inner.pump_transfers();
+        inner.pump_group_state();
         inner.pump_groups();
         inner.pump_ndr();
         if is_tick {

@@ -14,6 +14,7 @@ mod dead;
 mod devices;
 mod discovery;
 mod files;
+mod group_sync;
 mod groups;
 mod notify;
 mod sync;

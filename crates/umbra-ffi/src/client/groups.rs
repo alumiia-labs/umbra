@@ -413,16 +413,22 @@ pub(super) struct GroupQueues {
     /// The chunks of chunked epoch-key records that this device fetches
     /// (`GRP-284`).
     pub epoch_chunks: VecDeque<(ConversationId, WantedChunk)>,
+    /// The groups whose state goes to the other devices of the set
+    /// (`DEV-298`).
+    pub state_out: std::collections::BTreeSet<ConversationId>,
+    /// The group states that this device fetches, by the subject of each
+    /// group.
+    pub state_in: VecDeque<([u8; 32], Box<umbra_wire::descriptor::FileDescriptor>)>,
 }
 
 /// The facts of a group before an arrival, which tell what it changed.
-struct Before {
+pub(super) struct Before {
     epoch: u32,
     owners: Option<[u8; 32]>,
 }
 
 impl Before {
-    fn of(group: &Group) -> Self {
+    pub(super) fn of(group: &Group) -> Self {
         Before {
             epoch: group.epoch(),
             owners: group.owner(0).map(|held| *held.expose()),
@@ -477,7 +483,7 @@ fn read_queue_row(row: &[u8]) -> Result<([u8; 32], u8, [u8; 32]), Error> {
 
 /// The key of the row of the local identity table that holds the seed of
 /// a group before a re-key (Part 11 §11.12).
-fn previous_seed_key(group_id: &[u8; 32]) -> Vec<u8> {
+pub(super) fn previous_seed_key(group_id: &[u8; 32]) -> Vec<u8> {
     [group_id.as_slice(), b"previous"].concat()
 }
 
@@ -653,30 +659,39 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             group
                 .adopt_rekey(&object, &fresh.seed, now_ms / 1_000)
                 .map_err(|_| Error::Malformed)?;
-            let row = Self::group_row(&group, self.group_state(conversation)?)?;
-            let open = self.open_mut()?;
-            let seed_row = open.store.row_id(TableId::LOCAL_IDENTITY, &group_id);
-            let previous_row = open
-                .store
-                .row_id(TableId::LOCAL_IDENTITY, &previous_seed_key(&group_id));
-            let old = Zeroizing::new(
-                open.store
-                    .get(TableId::LOCAL_IDENTITY, &seed_row)?
-                    .ok_or(Error::Integrity)?,
-            );
-            let mut batch = open.store.begin();
-            batch.put(TableId::LOCAL_IDENTITY, previous_row, None, &old, rng)?;
-            batch.put(
-                TableId::LOCAL_IDENTITY,
-                seed_row,
-                None,
-                fresh.seed.expose(),
-                rng,
-            )?;
-            batch.put(GROUP, conversation.0, None, &row, rng)?;
-            batch.commit()?;
+            self.store_rekeyed(conversation, &group, &fresh.seed, rng)?;
+            // DEV-300: each other device of the set moves with this one.
+            self.publish_group_rekey(&group_id, &fresh.seed, &object, rng)?;
         }
         Ok(())
+    }
+
+    /// Keeps a group after a re-key of the member: the new row, the new
+    /// seed, and the seed before it for the grace of `GRP-372`.
+    pub(super) fn store_rekeyed<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        group: &Group,
+        seed: &Secret<32>,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let group_id = *group.group_id();
+        let row = Self::group_row(group, self.group_state(conversation)?)?;
+        let open = self.open_mut()?;
+        let seed_row = open.store.row_id(TableId::LOCAL_IDENTITY, &group_id);
+        let previous_row = open
+            .store
+            .row_id(TableId::LOCAL_IDENTITY, &previous_seed_key(&group_id));
+        let old = Zeroizing::new(
+            open.store
+                .get(TableId::LOCAL_IDENTITY, &seed_row)?
+                .ok_or(Error::Integrity)?,
+        );
+        let mut batch = open.store.begin();
+        batch.put(TableId::LOCAL_IDENTITY, previous_row, None, &old, rng)?;
+        batch.put(TableId::LOCAL_IDENTITY, seed_row, None, seed.expose(), rng)?;
+        batch.put(GROUP, conversation.0, None, &row, rng)?;
+        Ok(batch.commit()?)
     }
 
     /// The row of a group: its identifier, thus the row names the seed
@@ -870,6 +885,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         batch.commit()?;
         // Each record that waited for the second queue goes now.
         self.requeue_group_posts(rng)?;
+        // DEV-298: the group is whole, and it goes to the other devices.
+        self.group_state_due(conversation)?;
         Ok(true)
     }
 
@@ -1322,6 +1339,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut batch = open.store.begin();
         batch.delete(GROUP_JOIN, row);
         batch.commit()?;
+        // DEV-298: the group goes to the other devices of the set.
+        self.group_state_due(conversation)?;
         Ok(conversation)
     }
 
@@ -2125,6 +2144,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             self.note_grant(conversation, object, rng)?;
         }
         self.roster_moved(conversation, &applied, now_ms / 1_000, rng)?;
+        // DEV-303: a key that waited for this roster object installs now.
+        self.retry_epoch_keys(conversation, now_ms, rng)?;
         Ok(applied)
     }
 
@@ -3061,7 +3082,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// Takes the outcomes of one arrival in their order, with each record
     /// that an epoch key or a roster object releases, and stores the group.
     #[allow(clippy::too_many_arguments)]
-    fn take_outcomes<R: CryptoRng + ?Sized>(
+    pub(super) fn take_outcomes<R: CryptoRng + ?Sized>(
         &mut self,
         conversation: ConversationId,
         mut group: Group,
@@ -3108,6 +3129,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         // GRP-252: a record of the new epoch that arrived
                         // before its key waited, and it opens now.
                         outcomes.extend(group.retry_held(now));
+                    } else if epoch == group.epoch().saturating_add(1) && !self.owns_channels()? {
+                        // DEV-303: the roster object that calls for this
+                        // epoch comes on the sync channel, and it can come
+                        // after the key.
+                        self.hold_epoch_key(conversation, epoch, start_slot, &body, rng)?;
                     }
                 }
                 Outcome::Presence { sender } => {

@@ -434,7 +434,17 @@ object Core {
         fault = null
         linkStatus = LinkStatus.Preparing
         val label = deviceLabel(context)
-        call { client -> client.startLink(label) }
+        call { client ->
+            try {
+                client.startLink(label)
+            } catch (busy: FfiException.Busy) {
+                // DEV-302: the last device still opens its sync channel.
+                main.post {
+                    linkStatus = LinkStatus.Idle
+                    fault = "The last device is still finishing its link. Try again in a moment."
+                }
+            }
+        }
     }
 
     /** The name of this device that the user set, or its model. */

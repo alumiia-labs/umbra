@@ -72,6 +72,9 @@ const PACING_MEAN_MS: u64 = 20;
 const HOST: &str = "invite.umbra.test";
 const STEP: Duration = Duration::from_secs(20);
 
+/// The turn of a test of several devices of one set.
+static DEVICE_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 const CA: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../tests/fixtures/tls/ca.pem"
@@ -2499,6 +2502,7 @@ fn a_lost_phone_comes_back_from_its_backup_and_its_contact_talks_again() {
 }
 
 /// Ticks each handle until `done` holds, and panics after a minute.
+#[track_caller]
 fn tick_until(handles: &[&Arc<Handle>], mut done: impl FnMut() -> bool, what: &str) {
     let start = Instant::now();
     while !done() {
@@ -2512,6 +2516,11 @@ fn tick_until(handles: &[&Arc<Handle>], mut done: impl FnMut() -> bool, what: &s
 
 #[test]
 fn a_new_device_links_from_the_code_of_the_existing_one() {
+    // The tests of several devices take turns, thus the suite keeps its
+    // waits on a loaded machine.
+    let _turn = DEVICE_TESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let relays = tokio::runtime::Runtime::new().unwrap();
     let network = start_signed_network(&relays);
     let directory = std::env::temp_dir().join(format!("umbra-link-{}", std::process::id()));
@@ -2827,6 +2836,7 @@ fn a_new_device_links_from_the_code_of_the_existing_one() {
 
 /// Links a new device to `owner` (Part 7 §7.4) and gives its handle, on
 /// its own first run.
+#[track_caller]
 fn link_new_device(
     owner: &Arc<Handle>,
     directory: &std::path::Path,
@@ -2879,6 +2889,13 @@ fn link_new_device(
         FfiEvent::DeviceLinked => Some(()),
         _ => None,
     });
+    // The owner reads flight 3 after the new device, thus its side of the
+    // link ends a moment later, and a second link waits for it.
+    tick_until(
+        &[owner, &device],
+        || owner.link_status() == LinkStatus::Linked,
+        "the owner did not end the link",
+    );
     device
 }
 
@@ -2894,6 +2911,15 @@ fn wait_for_text(handle: &Handle, conversation: &[u8], text: &str) {
     });
 }
 
+/// Whether the store of `handle` holds a message with `text`.
+fn holds_text(handle: &Handle, conversation: &[u8], text: &str) -> bool {
+    handle
+        .messages(conversation.to_vec())
+        .unwrap()
+        .into_iter()
+        .any(|message| rendered(handle, message) == text)
+}
+
 /// Whether the store of `handle` holds a message of the user with `text`.
 fn holds_own_text(handle: &Handle, conversation: &[u8], text: &str) -> bool {
     handle
@@ -2907,6 +2933,11 @@ fn holds_own_text(handle: &Handle, conversation: &[u8], text: &str) -> bool {
 
 #[test]
 fn a_linked_device_reads_and_writes_a_group() {
+    // The tests of several devices take turns, thus the suite keeps its
+    // waits on a loaded machine.
+    let _turn = DEVICE_TESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let relays = tokio::runtime::Runtime::new().unwrap();
     let network = start_signed_network(&relays);
     let directory = std::env::temp_dir().join(format!("umbra-link-group-{}", std::process::id()));
@@ -3041,6 +3072,152 @@ fn a_linked_device_reads_and_writes_a_group() {
     bob.send_draft(draft).unwrap();
     wait_for_text(&alice, &group, "bob after the rekey");
     for handle in [&alice, &bob, &tablet] {
+        handle.disconnect();
+    }
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// DEV-298 to DEV-301: a group that the phone makes after two links reaches
+/// each linked device, and the device that stays follows the re-key of a
+/// removal and reads the group on.
+#[test]
+fn a_group_made_after_the_link_reaches_each_linked_device() {
+    // The tests of several devices take turns, thus the suite keeps its
+    // waits on a loaded machine.
+    let _turn = DEVICE_TESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let relays = tokio::runtime::Runtime::new().unwrap();
+    let network = start_signed_network(&relays);
+    let directory = std::env::temp_dir().join(format!("umbra-late-group-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let network_for = |handle: &Handle| {
+        handle
+            .network_of_manifest(
+                network.manifest.clone(),
+                network.keyset.clone(),
+                0,
+                HOST.into(),
+                Some(CA.into()),
+            )
+            .unwrap()
+            .network
+    };
+    let alice = launch(&directory, "alice.db", 1);
+    let bob = launch(&directory, "bob.db", 2);
+    for handle in [&alice, &bob] {
+        handle.clone().connect(network_for(handle)).unwrap();
+    }
+    alice.invite().unwrap();
+    let link = wait_for(&alice, |event| match event {
+        FfiEvent::Invitation { link } => Some(link),
+        _ => None,
+    });
+    bob.accept(link).unwrap();
+    let alice_conversation = wait_for_contact(&alice);
+    wait_for_contact(&bob);
+
+    // The two devices link before the group exists.
+    let tablet = link_new_device(&alice, &directory, "tablet.db", 3, &network_for);
+    let laptop = link_new_device(&alice, &directory, "laptop.db", 4, &network_for);
+
+    let group = alice.create_group("Later".into()).unwrap();
+    let start = Instant::now();
+    while !alice.group_info(group.clone()).unwrap().is_ready {
+        assert!(start.elapsed() < STEP, "the group took no queues");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    alice
+        .offer_group(group.clone(), alice_conversation)
+        .unwrap();
+    wait_for(&bob, |event| match event {
+        FfiEvent::GroupOffer => Some(()),
+        _ => None,
+    });
+    let offer = bob.group_offers().unwrap().remove(0);
+    bob.accept_group_offer(offer.from, offer.group_id).unwrap();
+    wait_for(&alice, |event| match event {
+        FfiEvent::GroupJoiner => Some(()),
+        _ => None,
+    });
+    let joiner = alice.group_joiners().unwrap().remove(0);
+    alice.admit_joiner(joiner.from, joiner.group_id).unwrap();
+    let start = Instant::now();
+    let joined = loop {
+        let found = bob
+            .summaries()
+            .unwrap()
+            .into_iter()
+            .find(|summary| bob.is_group(summary.conversation.clone()).unwrap_or(false));
+        if let Some(summary) = found {
+            break summary.conversation;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "Bob did not come in"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
+
+    // DEV-298, DEV-299: each linked device holds the group.
+    tick_until(
+        &[&alice, &tablet, &laptop],
+        || tablet.is_group(group.clone()).unwrap() && laptop.is_group(group.clone()).unwrap(),
+        "the group did not reach the linked devices",
+    );
+    let draft = bob.new_draft(joined.clone()).unwrap();
+    draft.set_text(units("from bob")).unwrap();
+    bob.send_draft(draft).unwrap();
+    wait_for_text(&alice, &group, "from bob");
+    // A linked device builds its own circuits to the replicas first.
+    let start = Instant::now();
+    loop {
+        let (t, l) = (
+            holds_text(&tablet, &group, "from bob"),
+            holds_text(&laptop, &group, "from bob"),
+        );
+        if t && l {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "the linked devices did not read the group: tablet {t} laptop {l}, reading tablet {:?} laptop {:?}",
+            tablet.group_info(group.clone()).map(|info| info.is_ready),
+            laptop.group_info(group.clone()).map(|info| info.is_ready),
+        );
+        for handle in [&tablet, &laptop] {
+            handle.clone().tick();
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    // DEV-300, DEV-301: the phone removes the tablet and re-keys, and the
+    // laptop moves to the same index and reads the group on.
+    let tablet_id = tablet
+        .devices()
+        .unwrap()
+        .into_iter()
+        .find(|device| device.is_self)
+        .unwrap()
+        .device_id;
+    alice.remove_device(tablet_id).unwrap();
+    let own_after = alice.group_info(group.clone()).unwrap().own_index;
+    tick_until(
+        &[&alice, &laptop],
+        || laptop.group_info(group.clone()).unwrap().own_index == own_after,
+        "the laptop did not follow the re-key",
+    );
+    let draft = bob.new_draft(joined.clone()).unwrap();
+    draft.set_text(units("bob after the rekey")).unwrap();
+    bob.send_draft(draft).unwrap();
+    wait_for_text(&alice, &group, "bob after the rekey");
+    tick_until(
+        &[&laptop],
+        || holds_text(&laptop, &group, "bob after the rekey"),
+        "the laptop did not read the group after the re-key",
+    );
+    for handle in [&alice, &bob, &tablet, &laptop] {
         handle.disconnect();
     }
     let _ = std::fs::remove_dir_all(&directory);

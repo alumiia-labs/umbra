@@ -112,6 +112,13 @@ pub const AUTHOR_PEER: u8 = 0x01;
 pub const ITEM_CONTACT_NAME: u8 = 3;
 /// The item of an entry of the local identity table (`DEV-011`, `DEV-294`).
 pub const ITEM_IDENTITY_ENTRY: u8 = 13;
+/// The item of the state of a group that the owner of the channels made or
+/// joined: the descriptor of one backup object on the chunk path
+/// (`DEV-298`).
+pub const ITEM_GROUP_STATE: u8 = 14;
+/// The item of the re-key of the member in a group: the new seed and the
+/// re-key object (`DEV-300`).
+pub const ITEM_GROUP_REKEY: u8 = 15;
 
 /// An entry of the local identity table for a pairwise identity, the value
 /// of [`ITEM_IDENTITY_ENTRY`] under the subject of that identity
