@@ -72,14 +72,14 @@ each column when a crate implements the requirement and a test covers it.
 | `WIR` | 395 | 85 | 0 | 0 | 7 | **487** |
 | `DEV` | 197 | 90 | 0 | 0 | 7 | **294** |
 | `NTF` | 74 | 28 | 0 | 0 | 3 | **105** |
-| `DIS` | 124 | 34 | 0 | 0 | 3 | **161** |
+| `DIS` | 125 | 34 | 0 | 0 | 3 | **162** |
 | `REL` | 124 | 32 | 1 | 0 | 2 | **159** |
 | `GRP` | 230 | 65 | 0 | 0 | 6 | **301** |
 | `ATT` | 143 | 45 | 2 | 0 | 3 | **193** |
 | `ABU` | 68 | 30 | 1 | 0 | 0 | **99** |
 | `IMP` | 119 | 41 | 0 | 0 | 2 | **162** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 1997 | 620 | 7 | 0 | 53 | **2677** |
+| **All** | 1998 | 620 | 7 | 0 | 53 | **2678** |
 
 ## SCP — Scope and Conventions
 
@@ -1885,6 +1885,7 @@ Source: `spec/09-discovery.md`
 | `DIS-177` | §9.3.1 | MUST | A client | A client MUST reject each other form, and a blob that does not open under the fragment shows no profile. |  |  |
 | `DIS-178` | §9.3.1 | MUST | A tombstone | A tombstone MUST take the blob with it, whether the holder wrote it or the lease lapsed. |  |  |
 | `DIS-179` | §9.3.1 | MUST | The link | The link MUST be `umbra://h/<name>%23<discriminator>#<fragment>`, with the fragment in the base32 of Part 4 §4.2.3. |  |  |
+| `DIS-180` | §9.6 | MUST | The profile in a hello | The profile in a hello MUST be the plaintext of `DIS-176`: the name and the picture of the sender, and in the place of the welcome text the note that the sender wrote with the request. |  |  |
 
 ## REL — Relay Directory
 

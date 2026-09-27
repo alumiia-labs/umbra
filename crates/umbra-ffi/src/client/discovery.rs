@@ -11,6 +11,7 @@ use umbra_core::{
     abuse::{epoch_number, pow::PowSolution},
     discovery::{
         hello::{self, HelloBody},
+        profile::ProfilePlain,
         HELLO_INBOUND_LIMIT,
     },
     store::{
@@ -196,6 +197,10 @@ pub struct ContactRequest {
     pub received_at: u64,
     /// The name that the sender shows. No party checks it (Part 9 §9.8).
     pub name: String,
+    /// The note that the sender wrote with the request, or empty.
+    pub note: String,
+    /// The JPEG picture of the sender, or empty.
+    pub picture: Vec<u8>,
 }
 
 fn put_var(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), Error> {
@@ -576,11 +581,24 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         {
             return Ok(None);
         }
-        let name = core::str::from_utf8(body.profile)
-            .ok()
-            .filter(|name| name.len() <= PROFILE_NAME_MAX)
-            .unwrap_or_default()
-            .to_owned();
+        // DIS-180: the profile of the sender, or the bare name of a build
+        // before it.
+        let (name, note, picture) = match ProfilePlain::parse(body.profile) {
+            Ok(profile) => (
+                profile.name.to_owned(),
+                profile.welcome.to_owned(),
+                profile.picture.to_vec(),
+            ),
+            Err(_) => (
+                core::str::from_utf8(body.profile)
+                    .ok()
+                    .filter(|name| name.len() <= PROFILE_NAME_MAX)
+                    .unwrap_or_default()
+                    .to_owned(),
+                String::new(),
+                Vec::new(),
+            ),
+        };
         let mut id = [0u8; 16];
         rng.fill_bytes(&mut id);
         let mut value = Zeroizing::new(vec![REQUEST_VERSION]);
@@ -589,6 +607,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         value.extend_from_slice(&now.to_be_bytes());
         put_var(&mut value, &bundle)?;
         put_var(&mut value, name.as_bytes())?;
+        put_var(&mut value, note.as_bytes())?;
+        put_var(&mut value, &picture)?;
         self.put_row(REQUESTS, &id, &value, rng)?;
         let mut counted = epoch.to_be_bytes().to_vec();
         counted.extend_from_slice(&(count + 1).to_be_bytes());
@@ -610,6 +630,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let received_at = u64::from_be_bytes(r.array()?);
             let bundle = Zeroizing::new(r.var()?);
             let name = String::from_utf8_lossy(&r.var()?).into_owned();
+            // A row of an earlier build ends after the name.
+            let (note, picture) = if r.0.is_empty() {
+                (String::new(), Vec::new())
+            } else {
+                (
+                    String::from_utf8_lossy(&r.var()?).into_owned(),
+                    r.var()?.to_vec(),
+                )
+            };
             r.end()?;
             out.push((
                 ContactRequest {
@@ -617,6 +646,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     via,
                     received_at,
                     name,
+                    note,
+                    picture,
                 },
                 StoredRequest { bundle },
             ));

@@ -388,6 +388,10 @@ pub struct ContactRequestInfo {
     pub via: String,
     /// The time of the arrival, in Unix seconds.
     pub received_at: u64,
+    /// The note that the sender wrote with the request, or an empty one.
+    pub note: String,
+    /// The JPEG picture of the sender, or an empty one.
+    pub picture: Vec<u8>,
 }
 
 /// The wait for the relay to make a rendezvous queue.
@@ -1139,7 +1143,11 @@ impl Handle {
     /// or a handle (Part 4 §4.3.3). The call looks the entry up under the
     /// log, and the hello leaves when the runtime has made its queue. A
     /// [`FfiEvent::Contact`] follows when the addressee accepts.
-    pub fn send_contact_request(&self, target: String) -> Result<(), FfiError> {
+    pub fn send_contact_request(&self, target: String, note: String) -> Result<(), FfiError> {
+        let note = note.trim().to_owned();
+        if note.len() > umbra_core::discovery::profile::WELCOME_MAX {
+            return Err(FfiError::TooLong);
+        }
         let link = self.directory_link()?;
         let target = target.trim();
         let (entry_pk, rendezvous) = if target.starts_with("@")
@@ -1178,7 +1186,17 @@ impl Handle {
             .encode(&mut encoded)
             .map_err(|_| FfiError::Malformed)?;
         let inner = locked(&self.inner);
-        let profile = inner.client.profile_name()?.into_bytes();
+        // DIS-180: the hello carries the profile of the sender, with the
+        // note in the place of the welcome text.
+        let name = inner.client.profile_name()?;
+        let picture = inner.client.profile_picture()?;
+        let profile = ProfilePlain {
+            name: &name,
+            welcome: &note,
+            picture: &picture,
+        }
+        .encode()
+        .map_err(|_| FfiError::Malformed)?;
         let bridge = inner.bridge.as_ref().ok_or(FfiError::Offline)?;
         Ok(bridge.hello(entry_pk.to_vec(), encoded, profile)?)
     }
@@ -1290,6 +1308,8 @@ impl Handle {
                     .map(via_text)
                     .unwrap_or_default(),
                 received_at: request.received_at,
+                note: request.note,
+                picture: request.picture,
             })
             .collect())
     }

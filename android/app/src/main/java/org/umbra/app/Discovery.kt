@@ -420,16 +420,27 @@ fun RequestsScreen(onBack: () -> Unit) {
 @Composable
 private fun RequestRow(context: Context, request: ContactRequestInfo) {
     Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp)) {
-        Text(request.name.ifBlank { "No name" })
-        Text(
-            "${request.via.removePrefix("umbra://p/")} · " +
-                timeLabel(context, request.receivedAt.toLong() * 1_000),
-            style = MaterialTheme.typography.bodySmall,
-            color = Palette.TextSecondary,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.subline(),
-        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            // DIS-180: the picture and the note that the sender chose.
+            ProfilePicture(request.picture, request.name.ifBlank { "?" }, 44)
+            Spacer(Modifier.width(14.dp))
+            Column {
+                Text(request.name.ifBlank { "No name" })
+                Text(
+                    "${request.via.removePrefix("umbra://p/")} · " +
+                        timeLabel(context, request.receivedAt.toLong() * 1_000),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Palette.TextSecondary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.subline(),
+                )
+            }
+        }
+        if (request.note.isNotBlank()) {
+            Spacer(Modifier.height(8.dp))
+            Text(request.note, style = MaterialTheme.typography.bodyMedium)
+        }
         Spacer(Modifier.height(8.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             InlineButton("Accept", enabled = Core.online) { Core.acceptRequest(request) }

@@ -461,11 +461,11 @@ object Core {
     }
 
     /** Sends a request to a reusable link or a handle, under the name of the user. */
-    fun sendRequest(target: String, name: String) {
+    fun sendRequest(target: String, name: String, note: String) {
         requestSent = false
         directory { client ->
             client.setProfileName(name)
-            client.sendContactRequest(target)
+            client.sendContactRequest(target, note)
             main.post { requestSent = true }
         }
     }

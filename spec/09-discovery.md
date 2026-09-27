@@ -700,6 +700,12 @@ entry that the initiator resolved. The `body` is `BE16(len) || the five fields
 of Part 5 §5.4.1 || BE16(len) || the profile blob plaintext of §9.3.1 ||
 Admission`. Part 5 §5.11 holds the label.
 
+**[DIS-180]** The profile in a hello MUST be the plaintext of `DIS-176`: the
+name and the picture of the sender, and in the place of the welcome text the
+note that the sender wrote with the request. A receiver MUST show the name,
+the picture, and the note as claims of the sender (§9.8), and it MUST read a
+profile that does not parse as a bare name of at most 32 bytes.
+
 **Contact through a Public Address.** The initiator holds the 20-byte address
 from a pasted string or from a reusable link of Part 4 §4.3.2. Step 1 then
 looks up the `AddressEntry` of §9.3.3, and it gets `(address_pk, rendezvous)`.

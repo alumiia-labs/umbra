@@ -3351,9 +3351,15 @@ fn wait_for_requests(handle: &Arc<Handle>, count: usize) {
 /// Sends a contact request to `target` until the log shows its entry: a
 /// registration or a write shows at the next epoch (`DIS-166`).
 fn request_until_listed(handle: &Handle, target: &str) {
+    request_with_note(handle, target, "");
+}
+
+/// A request with a note, once the log lists its target.
+#[track_caller]
+fn request_with_note(handle: &Handle, target: &str, note: &str) {
     let start = Instant::now();
     loop {
-        match handle.send_contact_request(target.into()) {
+        match handle.send_contact_request(target.into(), note.into()) {
             Ok(()) => return,
             Err(FfiError::NotFound | FfiError::Busy) => {
                 assert!(
@@ -3439,13 +3445,16 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
     let link = alice.create_public_link(0).unwrap();
     assert!(link.link.starts_with("umbra://p/"));
     bob.set_profile_name("Bob".into()).unwrap();
-    request_until_listed(&bob, &link.link);
+    // DIS-180: the hello carries the profile of the sender and its note.
+    request_with_note(&bob, &link.link, "We met at the summit.");
     wait_for_requests(&alice, 1);
     let request = alice.contact_requests().unwrap().remove(0);
     assert_eq!(
         (request.name.as_str(), request.via.as_str()),
         ("Bob", link.link.as_str())
     );
+    assert_eq!(request.note, "We met at the summit.");
+    assert!(request.picture.is_empty());
     alice.accept_contact_request(request.id).unwrap();
     wait_for_contact(&alice);
     wait_for_contact(&bob);
@@ -3503,9 +3512,13 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
         (name.as_str(), welcome.as_str()),
         ("Alice", "Say where we met.")
     );
+    let carol_picture = vec![0xFF, 0xD8, 0xFF, 0xE0, 9, 9, 0xFF, 0xD9];
+    carol.set_profile_picture(carol_picture.clone()).unwrap();
     request_until_listed(&carol, &handle);
     wait_for_requests(&alice, 1);
-    assert_eq!(alice.contact_requests().unwrap().len(), 1);
+    let requests = alice.contact_requests().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].picture, carol_picture);
     assert!(alice.entries_at_limit().unwrap().is_empty());
     // §9.9: one tap moves the handle to a new queue.
     let start = Instant::now();
@@ -3557,7 +3570,7 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
     assert!(alice.public_links().unwrap().is_empty());
     let start = Instant::now();
     loop {
-        match bob.send_contact_request(link.link.clone()) {
+        match bob.send_contact_request(link.link.clone(), String::new()) {
             Err(FfiError::NotFound) => break,
             Ok(()) | Err(FfiError::Busy) => {
                 assert!(

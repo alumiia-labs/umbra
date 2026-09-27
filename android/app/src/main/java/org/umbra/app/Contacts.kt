@@ -187,6 +187,7 @@ fun UseInvitationScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
     var pasted by remember { mutableStateOf("") }
     var isWaiting by remember { mutableStateOf(false) }
     var name by remember { mutableStateOf("") }
+    var note by remember { mutableStateOf("") }
     val focus = LocalFocusManager.current
     LaunchedEffect(Unit) {
         Core.requestSent = false
@@ -265,6 +266,15 @@ fun UseInvitationScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                     keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words),
                     modifier = Modifier.fillMaxWidth(),
                 )
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = note,
+                    onValueChange = { note = it.take(280) },
+                    label = { Text("Note") },
+                    maxLines = 4,
+                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
+                    modifier = Modifier.fillMaxWidth(),
+                )
                 Spacer(Modifier.height(12.dp))
                 if (Core.requestSent) {
                     Note("Request sent. The contact opens when they accept.")
@@ -278,7 +288,7 @@ fun UseInvitationScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                     SecondaryButton("Send request", enabled = Core.online) {
                         // The keyboard leaves, thus the result shows.
                         focus.clearFocus()
-                        Core.sendRequest(pasted.trim(), name)
+                        Core.sendRequest(pasted.trim(), name, note)
                     }
                 }
                 Core.directoryNote?.let {
