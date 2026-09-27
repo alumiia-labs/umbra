@@ -18,7 +18,7 @@ use umbra_wire::{
 use super::{
     challenge::{Purpose, CHALLENGE_LEN},
     service::{issue_seed, issue_verifier, lookup_seed, lookup_verifier},
-    translog::LookupProof,
+    translog::{LookupProof, VersionProof},
 };
 use crate::{
     abuse::{
@@ -236,6 +236,19 @@ pub fn parse_lookup(body: &[u8]) -> Result<Looked, Error> {
     let blob = (!blob.is_empty()).then(|| blob.to_vec());
     let proof = LookupProof::parse(r.rest())?;
     Ok((head, blob, proof))
+}
+
+/// The body of a version request (`DIS-079`).
+pub fn version_body(search_key: &[u8; 64], version: u32) -> Vec<u8> {
+    [&search_key[..], &version.to_be_bytes()].concat()
+}
+
+/// A version response: the head bytes and the proof.
+pub fn parse_version(body: &[u8]) -> Result<(Vec<u8>, VersionProof), Error> {
+    let mut r = Reader::new(body);
+    let head = take_var16(&mut r)?.to_vec();
+    let proof = VersionProof::parse(r.rest())?;
+    Ok((head, proof))
 }
 
 /// The body of a blob challenge (`DIS-175`).

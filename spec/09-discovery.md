@@ -920,6 +920,39 @@ takeover is not a rotation.
   label version between the held and the resolved `version`.
   **[DIS-080]** If that count is above `HANDLE_HISTORY_MAX`, the client MUST
   show the takeover warning.
+
+A lookup opens the newest version alone. The `Version` request of §9.10
+opens one older version under the newest head:
+
+```
+VersionProof {                    // the answer of a Version request, §9.10
+    version        u8             // 0x01
+    tree_size      u64            // the head that the proof is under
+    nonce          [32]u8         // nonce_e of the newest epoch
+    prefix_root    [32]u8         // prefix_root_e of the newest epoch
+    path_len       u8             // 0 to 64
+    log_path       [path_len]{ side u8, sibling [32]u8 }
+    label_version  u32            // the version that the proof shows
+    step           LadderStep     // the step at label_version
+    opening        [32]u8
+    entry_len      u16
+    entry          [entry_len]u8
+}
+```
+
+- **[DIS-183]** A client MUST fetch each version of `DIS-079` with a
+  `Version` request under the search key of the label, and it MUST verify the
+  `VersionProof` as `DIS-149` to `DIS-151` and `DIS-153` give for a
+  `LookupProof`. **[DIS-184]** A client MUST reject a `VersionProof` whose
+  `label_version` differs from the version that it asked for, whose step shows
+  no leaf, or whose leaf differs from the commitment of `opening` and `entry`.
+- **[DIS-185]** A directory MUST answer a `Version` request with the proof of
+  that version under its newest head. It MUST answer with status 0x03 for a
+  version that the log does not hold.
+
+> *Cause.* An earlier draft named the fetch of `DIS-079` and gave no request
+> for it. A lookup opens the newest version alone, thus a client could not
+> read the versions between a held key and a resolved one.
 - **[DIS-081]** If a tombstone version lies between the two, the client MUST
   compare the `HK_pub` before it with the `HK_pub` after it.
   **[DIS-082]** If the two differ, the client MUST show the takeover warning.
@@ -1026,6 +1059,7 @@ DirResponse {                     // padded to the smallest DIR_RESPONSE_SIZES v
 | `0x06` Write | `label_len u16`, the label input, `answer [32]u8`, `entry_len u16`, the entry | empty |
 | `0x07` Renew | `label_len u16`, the label input, `answer [32]u8` | empty |
 | `0x08` Blob | `label_len u16`, the label input, `answer [32]u8`, `blob_len u16`, the sealed blob of §9.3.1 or nothing | empty |
+| `0x09` Version | `search_key [64]u8`, `label_version u32` | `head_len u16`, the newest `SignedTreeHead`, the `VersionProof` of §9.9.2 |
 | `0x10` Issue | Part 13 §13.9 | Part 13 §13.9 |
 
 The label input is the canonical handle of §9.3.2 for a handle, the input of

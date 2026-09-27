@@ -538,6 +538,7 @@ impl Directory {
             Kind::Write => self.write(body, now, rng),
             Kind::Renew => self.renew(body, now),
             Kind::Blob => self.put_blob(body, now),
+            Kind::Version => self.version(body),
             Kind::Issue => self.issue(body, now, rng),
         };
         match result {
@@ -638,6 +639,25 @@ impl Directory {
         let mut out = Vec::new();
         put_var16(&mut out, head).map_err(|_| Status::Busy)?;
         put_var16(&mut out, blob).map_err(|_| Status::Busy)?;
+        out.extend_from_slice(&proof);
+        Ok(out)
+    }
+
+    /// The proof of one version of a label under the newest head
+    /// (`DIS-079`). The request shows the search key, as a lookup does.
+    fn version(&self, body: &[u8]) -> Result<Vec<u8>, Status> {
+        let mut r = Reader::new(body);
+        let search_key = r.take(64).map_err(|_| Status::Malformed)?;
+        let version = r.u32().map_err(|_| Status::Malformed)?;
+        r.finish().map_err(|_| Status::Malformed)?;
+        let head = self.newest_head()?;
+        let proof = self
+            .operator
+            .version(search_key, version)
+            .and_then(|proof| proof.encode())
+            .map_err(|_| Status::NotFound)?;
+        let mut out = Vec::new();
+        put_var16(&mut out, head).map_err(|_| Status::Busy)?;
         out.extend_from_slice(&proof);
         Ok(out)
     }
@@ -1380,6 +1400,40 @@ mod tests {
         let search_key = again.voprf.evaluate_direct(input).to_vec();
         assert_eq!(again.labels.get(&search_key).unwrap().label.version, 1);
         assert!(again.take_events().is_empty());
+
+        // DIS-079: each version stays readable, the first one too.
+        let key: [u8; 64] = search_key.as_slice().try_into().unwrap();
+        let answer = call(
+            &mut again,
+            Kind::Version,
+            &dirclient::version_body(&key, 0),
+            now,
+            &mut rng,
+        )
+        .unwrap();
+        let (head, proof) = dirclient::parse_version(&answer).unwrap();
+        let head = SignedTreeHead::parse(&head).unwrap();
+        let accepted = AcceptedHead {
+            tree_size: head.tree_size,
+            root: head.root,
+            timestamp: head.timestamp,
+            accepted_at: now,
+        };
+        let vrf_key = vrf::PublicKey::from_bytes(again.vrf_public()).unwrap();
+        assert_eq!(
+            proof.verify(&key, 0, &vrf_key, &accepted).unwrap(),
+            handle_entry(input, &hk, 0).as_slice()
+        );
+        assert_eq!(
+            call(
+                &mut again,
+                Kind::Version,
+                &dirclient::version_body(&key, 2),
+                now,
+                &mut rng
+            ),
+            Err(DirError::Status(Status::NotFound))
+        );
     }
 
     #[test]

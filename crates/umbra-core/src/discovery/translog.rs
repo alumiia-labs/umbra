@@ -299,6 +299,139 @@ impl LookupProof {
     }
 }
 
+/// The proof of one version of a label under a head (§9.9.2): the VRF
+/// proof of that version, the inclusion of its commitment in the prefix
+/// tree, and its opening. A client reads each version between a held key
+/// and a resolved one with it (`DIS-079`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionProof {
+    /// The `tree_size` of the head that the proof is under.
+    pub tree_size: u64,
+    /// The tree-wide nonce of the newest epoch.
+    pub nonce: [u8; 32],
+    /// The root of the prefix tree at the newest epoch.
+    pub prefix_root: [u8; 32],
+    /// The inclusion of the newest log leaf under the root of the head.
+    pub log_path: Vec<Step>,
+    /// The version that the proof shows.
+    pub version: u32,
+    /// The VRF proof of the version and its inclusion.
+    pub step: LadderStep,
+    /// The opening of the commitment.
+    pub opening: [u8; 32],
+    /// The entry of the version.
+    pub entry: Vec<u8>,
+}
+
+impl VersionProof {
+    /// Encodes the proof.
+    pub fn encode(&self) -> Result<Vec<u8>, Error> {
+        let len = 1
+            + 8
+            + 64
+            + 1
+            + self.log_path.len() * 33
+            + 4
+            + vrf::PROOF_LEN
+            + self.step.prefix.len()
+            + 32
+            + 2
+            + self.entry.len();
+        let mut out = alloc::vec![0u8; len];
+        let mut w = Writer::new(&mut out);
+        w.u8(VERSION)?;
+        w.put(&self.tree_size.to_be_bytes())?;
+        w.put(&self.nonce)?;
+        w.put(&self.prefix_root)?;
+        w.u8(u8::try_from(self.log_path.len()).map_err(|_| Error::Malformed)?)?;
+        for step in &self.log_path {
+            w.u8(u8::from(step.sibling_right))?;
+            w.put(&step.sibling)?;
+        }
+        w.u32(self.version)?;
+        w.put(&self.step.vrf_proof)?;
+        self.step.prefix.write(&mut w)?;
+        w.put(&self.opening)?;
+        w.u16(u16::try_from(self.entry.len()).map_err(|_| Error::Malformed)?)?;
+        w.put(&self.entry)?;
+        Ok(out)
+    }
+
+    /// Reads a proof.
+    pub fn parse(bytes: &[u8]) -> Result<Self, Error> {
+        let mut r = Reader::new(bytes);
+        if r.u8()? != VERSION {
+            return Err(Error::Malformed);
+        }
+        let tree_size = u64::from_be_bytes(r.array()?);
+        let nonce = r.array()?;
+        let prefix_root = r.array()?;
+        let path_len = usize::from(r.u8()?);
+        if path_len > LOG_PATH_MAX {
+            return Err(Error::Malformed);
+        }
+        let mut log_path = Vec::with_capacity(path_len);
+        for _ in 0..path_len {
+            let sibling_right = match r.u8()? {
+                0 => false,
+                1 => true,
+                _ => return Err(Error::Malformed),
+            };
+            log_path.push(Step {
+                sibling: r.array()?,
+                sibling_right,
+            });
+        }
+        let version = r.u32()?;
+        let step = LadderStep {
+            vrf_proof: r.array()?,
+            prefix: PrefixProof::read(&mut r)?,
+        };
+        let opening = r.array()?;
+        let entry_len = usize::from(r.u16()?);
+        if entry_len > ENTRY_MAX {
+            return Err(Error::Malformed);
+        }
+        let entry = r.take(entry_len)?.to_vec();
+        r.finish()?;
+        Ok(VersionProof {
+            tree_size,
+            nonce,
+            prefix_root,
+            log_path,
+            version,
+            step,
+            opening,
+            entry,
+        })
+    }
+
+    /// Verifies the proof of `version` for `search_key` against a head that
+    /// the client accepted, and returns the entry of that version.
+    pub fn verify(
+        &self,
+        search_key: &[u8],
+        version: u32,
+        vrf_key: &vrf::PublicKey,
+        head: &AcceptedHead,
+    ) -> Result<&[u8], Error> {
+        if self.version != version || self.tree_size != head.tree_size || self.tree_size == 0 {
+            return Err(Error::Unverified);
+        }
+        let leaf = epoch_leaf(&self.nonce, &self.prefix_root);
+        verify_newest(&leaf, &self.log_path, &head.root)?;
+        let output = vrf_key.verify(&vrf_input(search_key, version), &self.step.vrf_proof)?;
+        let held = self
+            .step
+            .prefix
+            .verify(&self.nonce, &index_of(&output), &self.prefix_root)?;
+        if held != Some(commitment(&self.opening, &self.entry)) {
+            return Err(Error::Unverified);
+        }
+        Ok(&self.entry)
+    }
+}
+
 /// What one epoch added to the log, for the auditors (`DIS-049`,
 /// `DIS-050`). An auditor sees blinded indexes and commitments, and no
 /// label.
@@ -444,6 +577,31 @@ impl LogOperator {
         })
     }
 
+    /// The proof of one version of a label under the newest head, or an
+    /// error for a version that the log does not hold.
+    pub fn version(&self, search_key: &[u8], version: u32) -> Result<VersionProof, Error> {
+        let (nonce, prefix_root) = *self.epochs.last().ok_or(Error::NoPath)?;
+        let stored = self
+            .stored
+            .get(&(search_key.to_vec(), version))
+            .ok_or(Error::NoPath)?;
+        let vrf_proof = self.vrf.prove(&vrf_input(search_key, version))?;
+        let index = index_of(&vrf::proof_to_hash(&vrf_proof)?);
+        Ok(VersionProof {
+            tree_size: self.log_leaves.len() as u64,
+            nonce,
+            prefix_root,
+            log_path: prove_newest(&self.log_leaves).ok_or(Error::NoPath)?,
+            version,
+            step: LadderStep {
+                vrf_proof,
+                prefix: self.tree.prove(&nonce, &index),
+            },
+            opening: stored.opening,
+            entry: stored.entry.clone(),
+        })
+    }
+
     /// The consistency proof from the log of `first` epochs to the newest
     /// log, for a client or an auditor that holds the older head.
     pub fn consistency(&self, first: u64) -> Option<Vec<[u8; 32]>> {
@@ -586,6 +744,47 @@ mod tests {
         let mut older = head;
         older.tree_size -= 1;
         assert!(proof.verify(&[1; 64], &key, &older).is_err());
+    }
+
+    #[test]
+    fn a_version_proof_shows_one_version_and_no_other() {
+        let mut log = operator();
+        for round in 0..3u8 {
+            log.stage(&[1; 64], alloc::vec![round; 30], [round; 32])
+                .unwrap();
+            log.stage(&[2; 64], alloc::vec![0x40 + round; 30], [round; 32])
+                .unwrap();
+            log.close_epoch([0xB0 + round; 32]).unwrap();
+        }
+        let head = head_of(&log);
+        let key = vrf_key(&log);
+        for version in 0..3u32 {
+            let bytes = log.version(&[1; 64], version).unwrap().encode().unwrap();
+            let proof = VersionProof::parse(&bytes).unwrap();
+            assert_eq!(
+                proof.verify(&[1; 64], version, &key, &head).unwrap(),
+                [u8::try_from(version).unwrap(); 30].as_slice()
+            );
+            // The proof names its version and its label.
+            assert!(proof.verify(&[1; 64], version + 1, &key, &head).is_err());
+            assert!(proof.verify(&[2; 64], version, &key, &head).is_err());
+        }
+        assert!(log.version(&[1; 64], 3).is_err());
+
+        // Another entry under the opening of this version fails.
+        let mut forged = log.version(&[1; 64], 1).unwrap();
+        forged.entry = alloc::vec![0x41; 30];
+        assert!(forged.verify(&[1; 64], 1, &key, &head).is_err());
+        // The proof of the version of another label fails at its index.
+        let mut moved = log.version(&[2; 64], 1).unwrap();
+        moved.opening = [1; 32];
+        moved.entry = alloc::vec![1; 30];
+        assert!(moved.verify(&[1; 64], 1, &key, &head).is_err());
+        // A head of another epoch does not take the proof.
+        let proof = log.version(&[1; 64], 0).unwrap();
+        let mut older = head;
+        older.tree_size -= 1;
+        assert!(proof.verify(&[1; 64], 0, &key, &older).is_err());
     }
 
     #[test]
