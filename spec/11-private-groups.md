@@ -1361,7 +1361,23 @@ plain epoch, and the tag vector names the member that leaves.
 - **Two different members that make two successors is normal use.**
   **[GRP-118]** A client MUST NOT show a fork for that case. **[GRP-119]** A
   member whose epoch the order above did not select MUST publish that epoch
-  again against the selected epoch.
+  again against the selected epoch. **[GRP-416]** It MUST publish the change
+  of that epoch as it applies to the new head, and it MUST NOT publish a
+  change that the roster holds already.
+- **[GRP-417]** A client MUST keep the roster before the head of its chain,
+  and the member that made the head, until the next roster epoch, in the
+  store as well. An epoch that the order puts first then takes the place of
+  the head, also after a restart. An epoch that arrives after the chain moved
+  past its predecessor changes nothing, and its maker publishes it again.
+- **[GRP-418]** A plain epoch binds no maker, thus two self-removals at one
+  predecessor carry the same bytes and remove two members. A receiver MUST
+  take the same bytes from a second member as a second successor, and it
+  MUST NOT drop them as a copy.
+- **[GRP-419]** An admin whose add another epoch displaced MUST add the
+  joiner again, under the index of the new head, before it sends the admit;
+  the joiner waits in the list of joiners again. An admit that went out for
+  the displaced add leaves the joiner on no chain of the group, and the
+  joiner needs a new invitation under `GRP-297`.
 - The roster is hash-chained. **[GRP-070]** If a member sees two different
   successors to one epoch **from one member**, that member MUST show the fork.
   **[GRP-071]** That member MUST NOT select one successor silently. One member

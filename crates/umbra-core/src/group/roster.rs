@@ -23,7 +23,11 @@ pub(crate) const STORED_VERSION: u8 = 0x01;
 
 /// The version of the stored roster: version `0x01` with the re-key at the
 /// head of the chain and the moves of each re-key after it.
-const ROSTER_VERSION: u8 = 0x02;
+const ROSTER_VERSION_MOVES: u8 = 0x02;
+
+/// Version `0x02` with the roster before the head of the chain, and the
+/// maker of the head (`GRP-117`).
+const ROSTER_VERSION: u8 = 0x03;
 
 /// The entries of an authority path: `BE16(len) || GroupControl` each.
 pub fn split_path(path: &[u8]) -> Result<Vec<&[u8]>, Error> {
@@ -150,7 +154,27 @@ pub struct Fork {
     pub named: Option<u16>,
 }
 
+/// The head of the roster chain as the order of `GRP-117` can still move
+/// it: the roster before the head, and the member that made the head.
+#[derive(Clone)]
+struct Undo {
+    before: Roster,
+    maker: u16,
+}
+
+/// A head of the chain that a successor of another member took the place
+/// of (`GRP-117`). Its maker publishes it again against the new head
+/// (`GRP-119`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Displaced {
+    /// The member that made the displaced epoch.
+    pub maker: u16,
+    /// The hash of the displaced epoch.
+    pub hash: [u8; 32],
+}
+
 /// The roster of one group at one member.
+#[derive(Clone)]
 pub struct Roster {
     group_id: [u8; 32],
     epoch_index: u32,
@@ -164,6 +188,8 @@ pub struct Roster {
     head_rekey: Option<HeadRekey>,
     /// The new index of each re-key, under the index it excluded.
     moves: BTreeMap<u16, u16>,
+    undo: Option<alloc::boxed::Box<Undo>>,
+    displaced: Option<Displaced>,
 }
 
 impl Roster {
@@ -193,6 +219,8 @@ impl Roster {
             forks: Vec::new(),
             head_rekey: None,
             moves: BTreeMap::new(),
+            undo: None,
+            displaced: None,
         }
     }
 
@@ -255,6 +283,8 @@ impl Roster {
             forks: Vec::new(),
             head_rekey: None,
             moves: BTreeMap::new(),
+            undo: None,
+            displaced: None,
         };
         roster.verify_path(snapshot.path, creator_roster_pk)?;
         Ok(roster)
@@ -432,6 +462,113 @@ impl Roster {
         &self.forks
     }
 
+    /// The head that the last object displaced, once (`GRP-119`).
+    pub fn take_displaced(&mut self) -> Option<Displaced> {
+        self.displaced.take()
+    }
+
+    /// The member that made the head of the chain, while the order of
+    /// `GRP-117` can still move the head.
+    pub fn head_maker(&self) -> Option<u16> {
+        self.undo.as_ref().map(|undo| undo.maker)
+    }
+
+    /// This roster with no roster before its head.
+    fn detached(&mut self) -> Roster {
+        let undo = self.undo.take();
+        let copy = self.clone();
+        self.undo = undo;
+        copy
+    }
+
+    /// The chain fields of a roster object, if it is one.
+    fn chain_of(control: &GroupControl<'_>) -> Option<umbra_wire::group::control::Chain> {
+        match control.control_type {
+            ControlType::PlainEpoch => PlainEpoch::parse(control.payload).ok().map(|e| e.chain),
+            ControlType::GrantingEpoch => {
+                GrantingEpoch::parse(control.payload).ok().map(|e| e.chain)
+            }
+            ControlType::ModerationEpoch => ModerationEpoch::parse(control.payload)
+                .ok()
+                .map(|e| e.chain),
+            ControlType::Rekey => RekeyRecord::parse(control.payload)
+                .ok()
+                .filter(|record| !record.chain_is_zero())
+                .map(|record| record.chain),
+            _ => None,
+        }
+    }
+
+    /// A successor of the predecessor of the head, from `sender` (§11.9.4).
+    /// From another member it is the normal race of two makers, and the
+    /// order of `GRP-117` decides with no fork shown (`GRP-118`). From the
+    /// maker of the head it is a fork (`GRP-070`); a re-key of that kind
+    /// goes to the rule of `GRP-369`. The result is none for an object that
+    /// is no such successor.
+    fn contest(
+        &mut self,
+        control: &GroupControl<'_>,
+        chain: &umbra_wire::group::control::Chain,
+        sender: u16,
+        now: u64,
+    ) -> Result<Option<Applied>, Error> {
+        let Some(undo) = self.undo.as_ref() else {
+            return Ok(None);
+        };
+        if chain.group_id != self.group_id
+            || chain.epoch_index != self.epoch_index
+            || chain.previous_epoch_hash != undo.before.chain_hash
+        {
+            return Ok(None);
+        }
+        // The same object from the same maker is a copy. A plain epoch
+        // binds no maker, thus two self-removals at one predecessor carry
+        // the same bytes and remove two members.
+        if sender == undo.maker && control.epoch_hash() == self.chain_hash {
+            return Err(Error::Stale);
+        }
+        if sender == undo.maker {
+            if control.control_type == ControlType::Rekey {
+                return Ok(None);
+            }
+            // GRP-072 to GRP-074: a signed epoch names its maker, and a
+            // plain one names nobody.
+            let named = matches!(
+                control.control_type,
+                ControlType::GrantingEpoch | ControlType::ModerationEpoch
+            )
+            .then_some(sender);
+            self.show_fork(chain.previous_epoch_hash, named);
+            return Err(Error::Stale);
+        }
+        if undo
+            .before
+            .a_before_b(&chain.previous_epoch_hash, undo.maker, sender)
+        {
+            return Err(Error::Stale);
+        }
+        // The later object comes first: it applies to the roster before the
+        // head, and the head goes.
+        let displaced_maker = undo.maker;
+        let mut candidate = undo.before.clone();
+        let applied = candidate.apply_inner(control, sender, now)?;
+        let old = core::mem::replace(self, candidate);
+        let before = old.undo.map(|undo| undo.before).ok_or(Error::Malformed)?;
+        self.undo = Some(alloc::boxed::Box::new(Undo {
+            before,
+            maker: sender,
+        }));
+        self.forks = old.forks;
+        for (key, hash) in old.successors {
+            self.successors.entry(key).or_insert(hash);
+        }
+        self.displaced = Some(Displaced {
+            maker: displaced_maker,
+            hash: old.chain_hash,
+        });
+        Ok(Some(applied))
+    }
+
     /// The re-key at the head of the chain, if the head is one.
     pub const fn head_rekey(&self) -> Option<HeadRekey> {
         self.head_rekey
@@ -590,6 +727,36 @@ impl Roster {
     /// (`GRP-318`), at `now`. A re-key on the pairwise channel has no
     /// sender and zero chain fields, and does not come here.
     pub fn apply(
+        &mut self,
+        control: &GroupControl<'_>,
+        sender: u16,
+        now: u64,
+    ) -> Result<Applied, Error> {
+        let chain = Self::chain_of(control);
+        if let Some(chain) = &chain {
+            if let Some(applied) = self.contest(control, chain, sender, now)? {
+                return Ok(applied);
+            }
+        }
+        let extends = chain.as_ref().is_some_and(|chain| {
+            chain.epoch_index == self.epoch_index.saturating_add(1)
+                && chain.previous_epoch_hash == self.chain_hash
+        });
+        let before = extends.then(|| self.detached());
+        let epoch = self.epoch_index;
+        let applied = self.apply_inner(control, sender, now)?;
+        if let Some(before) = before {
+            if self.epoch_index != epoch {
+                self.undo = Some(alloc::boxed::Box::new(Undo {
+                    before,
+                    maker: sender,
+                }));
+            }
+        }
+        Ok(applied)
+    }
+
+    fn apply_inner(
         &mut self,
         control: &GroupControl<'_>,
         sender: u16,
@@ -906,13 +1073,23 @@ impl Roster {
             w.u16(*old);
             w.u16(*new);
         }
+        match &self.undo {
+            Some(undo) => {
+                w.flag(true);
+                w.u16(undo.maker);
+                let mut inner = Writer::new();
+                undo.before.export(&mut inner)?;
+                w.var(&inner.finish())?;
+            }
+            None => w.flag(false),
+        }
         Ok(())
     }
 
     /// Reads a roster that [`Roster::export`] wrote.
     pub fn import(r: &mut Reader<'_>) -> Result<Self, Error> {
         let version = r.u8()?;
-        if version != STORED_VERSION && version != ROSTER_VERSION {
+        if ![STORED_VERSION, ROSTER_VERSION_MOVES, ROSTER_VERSION].contains(&version) {
             return Err(Error::Stale);
         }
         let group_id = r.array()?;
@@ -959,7 +1136,8 @@ impl Roster {
         }
         let mut head_rekey = None;
         let mut moves = BTreeMap::new();
-        if version == ROSTER_VERSION {
+        let mut undo = None;
+        if version >= ROSTER_VERSION_MOVES {
             head_rekey = r.option(|r| {
                 Ok(HeadRekey {
                     predecessor: r.array()?,
@@ -976,6 +1154,14 @@ impl Roster {
                 moves.insert(old, new);
             }
         }
+        if version == ROSTER_VERSION && r.flag()? {
+            let maker = r.u16()?;
+            let before = Roster::import(&mut Reader::new(r.var()?))?;
+            if before.undo.is_some() {
+                return Err(Error::Malformed);
+            }
+            undo = Some(alloc::boxed::Box::new(Undo { before, maker }));
+        }
         Ok(Roster {
             group_id,
             epoch_index,
@@ -988,6 +1174,8 @@ impl Roster {
             forks,
             head_rekey,
             moves,
+            undo,
+            displaced: None,
         })
     }
 
@@ -1103,6 +1291,111 @@ pub(crate) mod tests {
         let n = control.encode(&mut out).unwrap();
         out.truncate(n);
         out
+    }
+
+    fn plain_control(roster: &Roster, op: PlainOp<'_>) -> Vec<u8> {
+        let epoch = PlainEpoch {
+            chain: Chain {
+                group_id: *roster.group_id(),
+                epoch_index: roster.epoch_index() + 1,
+                previous_epoch_hash: *roster.chain_hash(),
+            },
+            op,
+        };
+        let mut payload = alloc::vec![0u8; 2_000];
+        let n = epoch.encode(&mut payload).unwrap();
+        payload.truncate(n);
+        let control = GroupControl {
+            control_type: ControlType::PlainEpoch,
+            payload: &payload,
+        };
+        let mut out = alloc::vec![0u8; 2_100];
+        let n = control.encode(&mut out).unwrap();
+        out.truncate(n);
+        out
+    }
+
+    #[test]
+    fn two_makers_at_one_predecessor_take_the_order_of_grp_117() {
+        let creator = member(1);
+        let bob = member(2);
+        let carol = member(3);
+        let dave = member(4);
+        let erin = member(5);
+        let mut base = Roster::genesis([7; 32], entry_of(&creator, 0, Role::Owner), 0);
+        for (keys, index) in [(&bob, 1), (&carol, 2)] {
+            let add = add_control(&base, keys, index);
+            base.apply(&GroupControl::parse(&add).unwrap(), 0, 1)
+                .unwrap();
+        }
+        // Two members leave at one predecessor: one set of bytes, two
+        // makers. The owner adds a member at the same predecessor.
+        let leave = plain_control(&base, PlainOp::SelfRemoval);
+        let leave = GroupControl::parse(&leave).unwrap();
+        let add = add_control(&base, &dave, 3);
+        let add = GroupControl::parse(&add).unwrap();
+
+        // GRP-117: the role comes first, thus the add of the owner stands in
+        // each order of arrival, and no fork shows (GRP-118).
+        let mut a = base.clone();
+        let mut b = base.clone();
+        a.apply(&leave, 1, 2).unwrap();
+        assert_eq!(a.head_maker(), Some(1));
+        assert_eq!(a.apply(&add, 0, 3).unwrap(), Applied::Added(3));
+        assert_eq!(a.take_displaced().unwrap().maker, 1);
+        assert_eq!(a.head_maker(), Some(0));
+        b.apply(&add, 0, 2).unwrap();
+        assert_eq!(b.apply(&leave, 1, 3), Err(Error::Stale));
+        assert!(b.take_displaced().is_none());
+        assert_eq!(a.chain_hash(), b.chain_hash());
+        assert!(a.member(1).unwrap().active && b.member(1).unwrap().active);
+        assert!(a.member(3).unwrap().active && b.member(3).unwrap().active);
+        assert!(a.forks().is_empty() && b.forks().is_empty());
+
+        // Two plain members: the lower SHA3(predecessor || index) stands.
+        let mut c = base.clone();
+        let mut d = base.clone();
+        c.apply(&leave, 1, 2).unwrap();
+        let _ = c.apply(&leave, 2, 3);
+        d.apply(&leave, 2, 2).unwrap();
+        let _ = d.apply(&leave, 1, 3);
+        let first = if base.a_before_b(base.chain_hash(), 1, 2) {
+            1
+        } else {
+            2
+        };
+        for roster in [&c, &d] {
+            assert!(!roster.member(first).unwrap().active);
+            assert!(roster.member(3 - first).unwrap().active);
+        }
+
+        // The stored form keeps the roster before the head, thus a restart
+        // between the two objects still takes the order.
+        let mut e = base.clone();
+        e.apply(&leave, 1, 2).unwrap();
+        let mut w = Writer::new();
+        e.export(&mut w).unwrap();
+        let bytes = w.finish();
+        let mut e = Roster::import(&mut Reader::new(&bytes)).unwrap();
+        assert_eq!(e.apply(&add, 0, 3).unwrap(), Applied::Added(3));
+        assert_eq!(e.chain_hash(), b.chain_hash());
+
+        // A copy of the head from its maker changes nothing, and a second
+        // successor from that maker is a fork that names nobody (GRP-073).
+        assert_eq!(b.apply(&add, 0, 4), Err(Error::Stale));
+        let other = add_control(&base, &erin, 3);
+        assert_eq!(
+            b.apply(&GroupControl::parse(&other).unwrap(), 0, 4),
+            Err(Error::Stale)
+        );
+        assert_eq!(b.forks().len(), 1);
+        assert_eq!(b.forks()[0].named, None);
+
+        // An object on the head takes the head: the head before it cannot
+        // move any more.
+        let late = plain_control(&b, PlainOp::Remove { index: 2 });
+        b.apply(&GroupControl::parse(&late).unwrap(), 0, 5).unwrap();
+        assert_eq!(b.apply(&leave, 1, 6), Err(Error::Stale));
     }
 
     fn grant_control(

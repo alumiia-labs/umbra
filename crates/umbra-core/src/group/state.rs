@@ -151,6 +151,10 @@ pub struct Group {
     /// `GRP-190`). A plain member holds none.
     owners: Option<[Secret<32>; GROUP_REPLICAS]>,
     replicas: Option<Replicas>,
+    /// The head of the roster chain that the last roster object displaced
+    /// (`GRP-117`). The client takes it, and publishes it again when this
+    /// member made it (`GRP-119`).
+    displaced: Option<super::roster::Displaced>,
 }
 
 impl Group {
@@ -193,6 +197,7 @@ impl Group {
         Ok(Group {
             own_index: 0,
             previous: None,
+            displaced: None,
             roster: Roster::genesis(group_id, creator, now),
             keys: Box::new(keys),
             epochs,
@@ -213,6 +218,7 @@ impl Group {
         Ok(Group {
             own_index: admitted.index,
             previous: None,
+            displaced: None,
             keys: Box::new(keys),
             roster: admitted.roster,
             epochs,
@@ -307,6 +313,7 @@ impl Group {
         Ok(Group {
             own_index,
             previous,
+            displaced: None,
             keys: Box::new(MemberKeys::from_seed(seed)),
             roster,
             epochs,
@@ -545,6 +552,16 @@ impl Group {
     /// Whether this member still reads with the keys before a re-key.
     pub fn has_previous(&self) -> bool {
         self.previous.is_some()
+    }
+
+    /// Whether the keys of this member come from `seed`: the client checks
+    /// which of its stored seeds the group reads with after a re-key went
+    /// back (`GRP-411`).
+    pub fn reads_with(&self, seed: &Secret<32>) -> bool {
+        let key = |keys: &MemberKeys| {
+            umbra_crypto::hash::sha3_256(&[&keys.roster().verifying_key().to_bytes()])
+        };
+        key(&self.keys) == key(&MemberKeys::from_seed(seed))
     }
 
     /// Whether a re-key that another holder of the keys of this member made
@@ -1354,27 +1371,46 @@ impl Group {
         now: u64,
     ) -> Result<Applied, Error> {
         let applied = self.apply_roster(control, sender, now)?;
-        // GRP-369: a rival took the place of the re-key that this member
-        // made and adopted. The member goes back to the index and the keys
-        // before it, and those keys still read the group.
-        if let Applied::Rekeyed {
-            old,
-            new,
-            replaced: true,
-            ..
-        } = &applied
-        {
-            if *new == self.own_index && self.previous.as_ref().is_some_and(|p| p.index == *old) {
-                if let Some(previous) = self.previous.take() {
-                    self.keys = previous.keys;
-                    self.pairs = previous.pairs;
-                    self.own_index = previous.index;
-                    self.receiver.set_own_index(previous.index);
-                    self.sender = Sender::default();
-                }
-            }
-        }
+        self.revert_orphaned_rekey();
         Ok(applied)
+    }
+
+    /// Goes back to the index and the keys before a re-key of this member,
+    /// when the roster no longer holds the keys of that re-key at its index
+    /// and still holds the keys before it: a rival took its place
+    /// (`GRP-369`, `GRP-411`), or an epoch of another member came first
+    /// (`GRP-117`). The keys before it still read the group.
+    fn revert_orphaned_rekey(&mut self) {
+        let Some(previous) = self.previous.as_ref() else {
+            return;
+        };
+        let holds = |index: u16, keys: &MemberKeys| {
+            let hash = umbra_crypto::hash::sha3_256(&[&keys.roster().verifying_key().to_bytes()]);
+            self.roster
+                .member(index)
+                .is_some_and(|member| member.roster_pk_hash == hash)
+        };
+        let holds_own = self
+            .roster
+            .member(self.own_index)
+            .is_some_and(|member| member.active)
+            && holds(self.own_index, &self.keys);
+        if holds_own || !holds(previous.index, &previous.keys) {
+            return;
+        }
+        if let Some(previous) = self.previous.take() {
+            self.keys = previous.keys;
+            self.pairs = previous.pairs;
+            self.own_index = previous.index;
+            self.receiver.set_own_index(previous.index);
+            self.sender = Sender::default();
+        }
+    }
+
+    /// The head of the roster chain that the last roster object displaced,
+    /// once (`GRP-119`).
+    pub fn take_displaced(&mut self) -> Option<super::roster::Displaced> {
+        self.displaced.take()
     }
 
     /// Applies a roster object to the roster, and drops a pair key that no
@@ -1387,6 +1423,15 @@ impl Group {
         now: u64,
     ) -> Result<Applied, Error> {
         let applied = self.roster.apply(control, sender, now)?;
+        // GRP-117: another head took the place of the last one, and each
+        // pair key comes from the roster again.
+        if let Some(displaced) = self.roster.take_displaced() {
+            self.pairs = PairCache::default();
+            if let Some(previous) = self.previous.as_mut() {
+                previous.pairs = PairCache::default();
+            }
+            self.displaced = Some(displaced);
+        }
         match &applied {
             Applied::Removed(trigger) => {
                 if let Some(index) = trigger.excluded {
@@ -2041,6 +2086,70 @@ mod tests {
         let back = Group::restore(&creator.export().unwrap(), &creator_seed).unwrap();
         assert_eq!(back.roster().head_rekey(), creator.roster().head_rekey());
         assert_eq!(back.roster().successor_of(1), Some(2));
+    }
+
+    #[test]
+    fn an_owner_epoch_at_the_same_predecessor_displaces_a_member_rekey() {
+        let now = 1_700_000_000;
+        let (mut creator, mut member, _) = pair(now);
+        let mut rng = Rng(71);
+
+        // The member re-keys, and the owner adds a joiner at the same
+        // predecessor before it read the re-key.
+        let seed = Secret::new([0x45; 32]);
+        let fresh = JoinKeys {
+            seed: Secret::new(*seed.expose()),
+            keys: MemberKeys::from_seed(&seed),
+        };
+        let rekey = member.rekey_object(&fresh, &mut rng).unwrap();
+        let rekey_record = member.post(&control_app(&rekey, 8), now, &mut rng).unwrap();
+        member.adopt_rekey(&rekey, &seed, now).unwrap();
+        assert_eq!(member.own_index(), 2);
+
+        let joiner = JoinKeys::make(&mut rng).unwrap();
+        let kem_pk = joiner.keys.kem().public().to_bytes();
+        let add = creator
+            .add_object(&JoinRecord {
+                group_id: *creator.group_id(),
+                keys: joiner.wire_keys(&kem_pk),
+            })
+            .unwrap();
+        let add_record = creator.post(&control_app(&add, 9), now, &mut rng).unwrap();
+        creator
+            .apply_control(&GroupControl::parse(&add).unwrap(), 0, now)
+            .unwrap();
+
+        // GRP-117: the owner comes first. The creator keeps its add, and the
+        // member goes back to its index and its keys before the re-key.
+        assert_eq!(
+            read_control(&mut creator, &rekey_record, now),
+            Err(Error::Stale)
+        );
+        assert!(creator.take_displaced().is_none());
+        assert_eq!(
+            read_control(&mut member, &add_record, now).unwrap(),
+            Applied::Added(2)
+        );
+        let displaced = member.take_displaced().unwrap();
+        assert_eq!(displaced.maker, 1);
+        assert_eq!(member.own_index(), 1);
+        assert!(!member.has_previous());
+        assert!(!member.lost_rekey());
+        assert!(member.own_role().is_some());
+        assert_eq!(member.roster().chain_hash(), creator.roster().chain_hash());
+
+        // GRP-119: the member re-keys again against the new head, and the
+        // creator takes it.
+        let again = member.rekey_object(&fresh, &mut rng).unwrap();
+        let again_record = member
+            .post(&control_app(&again, 10), now, &mut rng)
+            .unwrap();
+        member.adopt_rekey(&again, &seed, now).unwrap();
+        assert!(matches!(
+            read_control(&mut creator, &again_record, now).unwrap(),
+            Applied::Rekeyed { old: 1, new: 3, .. }
+        ));
+        assert_eq!(member.roster().chain_hash(), creator.roster().chain_hash());
     }
 
     #[test]

@@ -2308,6 +2308,61 @@ mod tests {
     }
 
     #[test]
+    fn a_displaced_rekey_goes_again_against_the_new_head() {
+        use umbra_wire::group::control::Role;
+
+        let mut rng = Rng(71);
+        let mut admin = new_client(&mut rng);
+        let mut joiner = new_client(&mut rng);
+        let (group, member, _, _) = group_of_two(&mut admin, &mut joiner, &mut rng);
+
+        // The member re-keys, and the owner grants it a role at the same
+        // predecessor before it read the re-key.
+        joiner.rekey_groups(1_700_000_010_000, &mut rng).unwrap();
+        let rekey = joiner.take_group_post().unwrap();
+        admin
+            .set_group_role(group, 1, Role::Moderator, 1_700_000_010_500, &mut rng)
+            .unwrap();
+        let grant = admin.take_group_post().unwrap();
+        while admin.take_group_post().is_some() {}
+
+        // GRP-117: the owner comes first, and the admin keeps its grant.
+        admin
+            .on_group_record(&[0xC3; 32], 1, &rekey.record, 1_700_000_011_000, &mut rng)
+            .unwrap();
+        assert_eq!(admin.group_info(group).unwrap().members, 2);
+        assert!(
+            admin
+                .group_of(group)
+                .unwrap()
+                .roster()
+                .member(1)
+                .unwrap()
+                .active
+        );
+
+        // GRP-119: the member goes back, and it re-keys again against the
+        // grant.
+        joiner
+            .on_group_record(&[0xC3; 32], 2, &grant.record, 1_700_000_012_000, &mut rng)
+            .unwrap();
+        let again = joiner.take_group_post().unwrap();
+        assert_ne!(again.record, rekey.record);
+        assert_eq!(joiner.group_info(member).unwrap().own_index, 2);
+        admin
+            .on_group_record(&[0xC3; 32], 3, &again.record, 1_700_000_013_000, &mut rng)
+            .unwrap();
+        let held = admin.group_of(group).unwrap();
+        assert_eq!(held.roster().successor_of(1), Some(2));
+        // The re-key keeps the role that the grant gave the old index.
+        assert_eq!(held.roster().member(2).unwrap().role, Role::Moderator);
+        assert_eq!(
+            held.roster().chain_hash(),
+            joiner.group_of(member).unwrap().roster().chain_hash()
+        );
+    }
+
+    #[test]
     fn an_offer_a_join_record_an_add_and_an_admit_bring_a_member_in() {
         let mut rng = Rng(41);
         let mut admin = new_client(&mut rng);

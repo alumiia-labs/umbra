@@ -74,12 +74,12 @@ each column when a crate implements the requirement and a test covers it.
 | `NTF` | 74 | 28 | 0 | 0 | 3 | **105** |
 | `DIS` | 118 | 33 | 0 | 0 | 2 | **153** |
 | `REL` | 124 | 32 | 1 | 0 | 2 | **159** |
-| `GRP` | 227 | 64 | 0 | 0 | 6 | **297** |
+| `GRP` | 230 | 65 | 0 | 0 | 6 | **301** |
 | `ATT` | 142 | 45 | 2 | 0 | 2 | **191** |
 | `ABU` | 68 | 30 | 1 | 0 | 0 | **99** |
 | `IMP` | 119 | 41 | 0 | 0 | 2 | **162** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 1986 | 618 | 7 | 0 | 51 | **2662** |
+| **All** | 1989 | 619 | 7 | 0 | 51 | **2666** |
 
 ## SCP — Scope and Conventions
 
@@ -2346,6 +2346,10 @@ Source: `spec/11-private-groups.md`
 | `GRP-413` | §11.12 | MUST | The device | The device MUST then wait for the admit as a joiner of §11.9.1 waits, and it MUST send the record once for each wait. |  |  |
 | `GRP-414` | §11.12 | MUST | A member that gets that admit | A member that gets that admit MUST take the group of the admit in place of the group that it held, under the keys that it sent, in the conversation that it held. |  |  |
 | `GRP-415` | §11.12 | MUST NOT | A member whose index a rival took | A member whose index a rival took MUST NOT post to the group, because its index left the active set. |  |  |
+| `GRP-416` | §11.9.4 | MUST NOT | (unstated) | It MUST publish the change of that epoch as it applies to the new head, and it MUST NOT publish a change that the roster holds already. |  |  |
+| `GRP-417` | §11.9.4 | MUST | A client | A client MUST keep the roster before the head of its chain, and the member that made the head, until the next roster epoch, in the store as well. |  |  |
+| `GRP-418` | §11.9.4 | MUST | (unstated) | A plain epoch binds no maker, thus two self-removals at one predecessor carry the same bytes and remove two members. |  |  |
+| `GRP-419` | §11.9.4 | MUST | An admin whose add another epoch displaced | An admin whose add another epoch displaced MUST add the joiner again, under the index of the new head, before it sends the admit; the joiner waits in the list of joiners again. |  |  |
 
 ## ATT — Attachments and Large Objects
 

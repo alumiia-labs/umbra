@@ -33,7 +33,8 @@ use umbra_wire::{
         AppKind, AppMessage,
     },
     group::control::{
-        ControlType, GroupControl, GroupInvitation, InvitationStage, JoinRecord, ReplicaRef, Role,
+        ControlType, GrantingEpoch, GroupControl, GroupInvitation, InvitationStage, JoinRecord,
+        PlainEpoch, PlainOp, ReplicaRef, Role,
     },
 };
 use zeroize::Zeroizing;
@@ -151,6 +152,11 @@ pub(super) const GROUP_QUEUE: TableId = TableId(0x13);
 /// holds the `group_id` and then the `JoinRecord`, or nothing for an
 /// offer. The owner column names the pairwise conversation.
 pub(super) const GROUP_JOIN: TableId = TableId(0x14);
+/// The last roster object that this device posted to a group, under the
+/// group conversation. An epoch of another member can take its place under
+/// the order of `GRP-117`, and this device then posts it again against the
+/// new head (`GRP-119`).
+const OWN_EPOCH: TableId = TableId(0x2F);
 /// The contact behind a member index, for each member that an admin of
 /// this device brought in. The roster names no contact, thus a member that
 /// another admin added has no row here and the view shows its index alone.
@@ -642,33 +648,178 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         rng: &mut R,
     ) -> Result<(), Error> {
         for conversation in self.group_conversations()? {
-            if self.group_closed(conversation)? {
-                continue;
-            }
-            let group = self.group_of(conversation)?;
-            if !group
-                .roster()
-                .member(group.own_index())
-                .is_some_and(|member| member.active)
-            {
-                continue;
-            }
-            let fresh =
-                umbra_core::group::join::JoinKeys::make(rng).map_err(|_| Error::Malformed)?;
-            let object = group
-                .rekey_object(&fresh, rng)
-                .map_err(|_| Error::Malformed)?;
-            drop(group);
-            self.post_group_control(conversation, &object, now_ms, rng)?;
-            let mut group = self.group_of(conversation)?;
-            let group_id = *group.group_id();
-            group
-                .adopt_rekey(&object, &fresh.seed, now_ms / 1_000)
-                .map_err(|_| Error::Malformed)?;
-            self.store_rekeyed(conversation, &group, &fresh.seed, rng)?;
-            // DEV-300: each other device of the set moves with this one.
-            self.publish_group_rekey(&group_id, &fresh.seed, &object, rng)?;
+            self.rekey_group(conversation, now_ms, rng)?;
         }
+        Ok(())
+    }
+
+    /// Moves the member to new keys in one group. A closed group and a
+    /// group that no longer holds the member take no re-key.
+    fn rekey_group<R: CryptoRng + umbra_crypto::rand_core::TryCryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        if self.group_closed(conversation)? {
+            return Ok(());
+        }
+        let group = self.group_of(conversation)?;
+        if !group
+            .roster()
+            .member(group.own_index())
+            .is_some_and(|member| member.active)
+        {
+            return Ok(());
+        }
+        let fresh = umbra_core::group::join::JoinKeys::make(rng).map_err(|_| Error::Malformed)?;
+        let object = group
+            .rekey_object(&fresh, rng)
+            .map_err(|_| Error::Malformed)?;
+        drop(group);
+        self.post_group_control(conversation, &object, now_ms, rng)?;
+        let mut group = self.group_of(conversation)?;
+        let group_id = *group.group_id();
+        group
+            .adopt_rekey(&object, &fresh.seed, now_ms / 1_000)
+            .map_err(|_| Error::Malformed)?;
+        self.store_rekeyed(conversation, &group, &fresh.seed, rng)?;
+        // DEV-300: each other device of the set moves with this one.
+        self.publish_group_rekey(&group_id, &fresh.seed, &object, rng)
+    }
+
+    /// Posts again a roster object of this device that an epoch of another
+    /// member displaced under the order of `GRP-117` (`GRP-119`), against the
+    /// new head. An object whose change the roster holds already goes no
+    /// more. An add goes back to its joiner, and the admin admits it again.
+    fn repost_displaced<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        displaced: umbra_core::group::roster::Displaced,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        if !self.owns_channels()? {
+            return Ok(());
+        }
+        let row = self.open_ref()?.store.row_id(OWN_EPOCH, &conversation.0);
+        let Some(object) = self.open_ref()?.store.get(OWN_EPOCH, &row)? else {
+            return Ok(());
+        };
+        let control = GroupControl::parse(&object)?;
+        if control.epoch_hash() != displaced.hash {
+            return Ok(());
+        }
+        let open = self.open_mut()?;
+        let mut batch = open.store.begin();
+        batch.delete(OWN_EPOCH, row);
+        batch.commit()?;
+        let group = self.group_of(conversation)?;
+        match control.control_type {
+            ControlType::Rekey => {
+                drop(group);
+                self.rekey_group(conversation, now_ms, rng)
+            }
+            ControlType::PlainEpoch => match PlainEpoch::parse(control.payload)?.op {
+                PlainOp::Remove { index } => {
+                    let active = group.roster().member(index).is_some_and(|m| m.active);
+                    drop(group);
+                    if active {
+                        self.remove_from_group(conversation, index, now_ms, rng)?;
+                    }
+                    Ok(())
+                }
+                PlainOp::SelfRemoval => {
+                    let active = group.own_role().is_some();
+                    drop(group);
+                    if active {
+                        self.leave_group(conversation, now_ms, rng)?;
+                    }
+                    Ok(())
+                }
+                PlainOp::Add { index, keys } => {
+                    let group_id = *group.group_id();
+                    let held = group
+                        .roster()
+                        .active()
+                        .any(|member| member.roster_pk_hash == keys.roster_pk_hash);
+                    drop(group);
+                    if held {
+                        return Ok(());
+                    }
+                    let join = JoinRecord {
+                        group_id,
+                        keys: keys.clone(),
+                    };
+                    self.ask_again(conversation, &group_id, index, &join, rng)
+                }
+            },
+            ControlType::GrantingEpoch => {
+                let grant = GrantingEpoch::parse(control.payload)?;
+                let stands = group
+                    .roster()
+                    .member(grant.grantee_index)
+                    .is_some_and(|member| member.active && member.role != grant.role);
+                drop(group);
+                if stands {
+                    self.set_group_role(
+                        conversation,
+                        grant.grantee_index,
+                        grant.role,
+                        now_ms,
+                        rng,
+                    )?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Puts a joiner whose add another epoch displaced back into the list
+    /// of joiners, thus the admin adds it again under a new index and sends
+    /// the admit of that add (§11.9.1).
+    fn ask_again<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        group_id: &[u8; 32],
+        index: u16,
+        join: &JoinRecord<'_>,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let mut found = None;
+        for row in self.join_rows()? {
+            if let Some(JoinEntry::Added {
+                from,
+                group_id: held,
+                index: added,
+                ..
+            }) = self.join_entry(&row)?
+            {
+                if held == *group_id && added == index {
+                    found = Some((row, from));
+                }
+            }
+        }
+        let Some((row, from)) = found else {
+            return Ok(());
+        };
+        let mut payload = vec![0u8; 1_400];
+        let used = join.encode(&mut payload)?;
+        payload.truncate(used);
+        let mut entry = vec![ASKED];
+        entry.extend_from_slice(&from.0);
+        entry.extend_from_slice(group_id);
+        entry.extend_from_slice(&payload);
+        let open = self.open_mut()?;
+        let member = open
+            .store
+            .row_id(GROUP_MEMBER, &Self::member_key(conversation, index));
+        let mut batch = open.store.begin();
+        batch.put(GROUP_JOIN, row, Some(from.0), &entry, rng)?;
+        batch.delete(GROUP_MEMBER, member);
+        batch.commit()?;
+        self.events.push_back(Event::GroupJoiner { from });
         Ok(())
     }
 
@@ -783,15 +934,21 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .get(TableId::LOCAL_IDENTITY, &previous_row)?
                 .map(Zeroizing::new)
         };
-        // GRP-369: a rival took the place of the re-key, and the member
-        // reads with the keys before it again. The seed of the re-key waits
-        // for the pairwise channel (GRP-370). Otherwise a slot for the new
-        // index ended the seed before (GRP-372).
+        // The member reads with the keys before its re-key again: a rival
+        // took its place (GRP-369), or an epoch of another member came first
+        // (GRP-117). The seed before is the seed of the group again, and
+        // after a rival the seed of the re-key waits for the pairwise channel
+        // (GRP-370). Otherwise a slot for the new index ended the seed
+        // before (GRP-372).
         let seed_row = open.store.row_id(TableId::LOCAL_IDENTITY, group_id);
         let lost_row = open
             .store
             .row_id(TableId::LOCAL_IDENTITY, &lost_seed_key(group_id));
-        let fresh = if previous.is_some() && group.lost_rekey() {
+        let went_back = previous.as_ref().is_some_and(|seed| {
+            <[u8; 32]>::try_from(seed.as_slice())
+                .is_ok_and(|seed| group.reads_with(&Secret::new(seed)))
+        });
+        let fresh = if went_back && group.lost_rekey() {
             Some(Zeroizing::new(
                 open.store
                     .get(TableId::LOCAL_IDENTITY, &seed_row)?
@@ -804,9 +961,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         batch.put(GROUP, conversation.0, None, &row, rng)?;
         if let Some(previous) = previous {
             batch.delete(TableId::LOCAL_IDENTITY, previous_row);
+            if went_back {
+                batch.put(TableId::LOCAL_IDENTITY, seed_row, None, &previous, rng)?;
+            }
             if let Some(fresh) = fresh {
                 batch.put(TableId::LOCAL_IDENTITY, lost_row, None, &fresh, rng)?;
-                batch.put(TableId::LOCAL_IDENTITY, seed_row, None, &previous, rng)?;
             }
         }
         Ok(batch.commit()?)
@@ -2658,6 +2817,22 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
+        // GRP-119: a roster object of this device can lose its place.
+        if GroupControl::parse(body).is_ok_and(|control| {
+            matches!(
+                control.control_type,
+                ControlType::PlainEpoch
+                    | ControlType::GrantingEpoch
+                    | ControlType::ModerationEpoch
+                    | ControlType::Rekey
+            )
+        }) {
+            let open = self.open_mut()?;
+            let row = open.store.row_id(OWN_EPOCH, &conversation.0);
+            let mut batch = open.store.begin();
+            batch.put(OWN_EPOCH, row, Some(conversation.0), body, rng)?;
+            batch.commit()?;
+        }
         self.post_group_app(conversation, AppKind::GroupControl, body, now_ms, rng)
     }
 
@@ -3313,6 +3488,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     ) -> Result<Option<MsgRef>, Error> {
         let now = now_ms / 1_000;
         let mut first = None;
+        let mut displaced = Vec::new();
         while let Some(outcome) = outcomes.pop_front() {
             match outcome {
                 Outcome::EpochKey {
@@ -3376,6 +3552,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     if parsed.kind == AppKind::GroupControl {
                         if let Ok(control) = GroupControl::parse(parsed.body) {
                             if let Ok(applied) = group.apply_control(&control, sender, now) {
+                                if let Some(head) = group.take_displaced() {
+                                    displaced.push(head);
+                                }
                                 if matches!(applied, Applied::Granted { .. }) {
                                     self.note_grant(conversation, parsed.body, rng)?;
                                 }
@@ -3402,6 +3581,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // GRP-370: a rival re-key took the index of this member.
         if group.lost_rekey() {
             self.ask_to_return(conversation, now_ms, rng)?;
+        }
+        for head in displaced {
+            self.repost_displaced(conversation, head, now_ms, rng)?;
         }
         // GRP-363: an admin that installs an epoch it did not credential
         // moves each replica to it. A delivery of owner credentials alone
