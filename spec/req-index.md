@@ -74,12 +74,12 @@ each column when a crate implements the requirement and a test covers it.
 | `NTF` | 74 | 28 | 0 | 0 | 3 | **105** |
 | `DIS` | 130 | 34 | 0 | 0 | 3 | **167** |
 | `REL` | 124 | 32 | 1 | 0 | 2 | **159** |
-| `GRP` | 230 | 65 | 0 | 0 | 6 | **301** |
+| `GRP` | 232 | 65 | 0 | 0 | 6 | **303** |
 | `ATT` | 143 | 45 | 2 | 0 | 3 | **193** |
 | `ABU` | 71 | 30 | 1 | 0 | 0 | **102** |
 | `IMP` | 119 | 41 | 0 | 0 | 2 | **162** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2006 | 620 | 7 | 0 | 53 | **2686** |
+| **All** | 2008 | 620 | 7 | 0 | 53 | **2688** |
 
 ## SCP — Scope and Conventions
 
@@ -2365,6 +2365,8 @@ Source: `spec/11-private-groups.md`
 | `GRP-417` | §11.9.4 | MUST | A client | A client MUST keep the roster before the head of its chain, and the member that made the head, until the next roster epoch, in the store as well. |  |  |
 | `GRP-418` | §11.9.4 | MUST | (unstated) | A plain epoch binds no maker, thus two self-removals at one predecessor carry the same bytes and remove two members. |  |  |
 | `GRP-419` | §11.9.4 | MUST | An admin whose add another epoch displaced | An admin whose add another epoch displaced MUST add the joiner again, under the index of the new head, before it sends the admit; the joiner waits in the list of joiners again. |  |  |
+| `GRP-420` | §11.9.4 | MUST | An admin | An admin MUST keep the joiner of each admit that it sent while the add stays the head of its roster, thus an epoch that displaces the add after the admit puts the joiner in the list of joiners again. |  |  |
+| `GRP-421` | §11.9.4 | MUST | A joiner | A joiner MUST take a second admit of the admin that admitted it while its own add is the head of its roster, and the group of that admit MUST take the place of the group that it holds, as an exception to `GRP-153`. |  |  |
 
 ## ATT — Attachments and Large Objects
 

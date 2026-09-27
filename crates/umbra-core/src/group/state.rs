@@ -335,6 +335,12 @@ impl Group {
         self.own_index
     }
 
+    /// `GroupRosterKey_g.pk` of this member. The roster of a member that
+    /// joined holds the hash of it alone, thus the key comes from the seed.
+    pub fn own_roster_pk(&self) -> Vec<u8> {
+        self.keys.roster().verifying_key().to_bytes().to_vec()
+    }
+
     /// The roster.
     pub const fn roster(&self) -> &Roster {
         &self.roster

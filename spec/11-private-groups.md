@@ -1375,9 +1375,21 @@ plain epoch, and the tag vector names the member that leaves.
   MUST NOT drop them as a copy.
 - **[GRP-419]** An admin whose add another epoch displaced MUST add the
   joiner again, under the index of the new head, before it sends the admit;
-  the joiner waits in the list of joiners again. An admit that went out for
-  the displaced add leaves the joiner on no chain of the group, and the
-  joiner needs a new invitation under `GRP-297`.
+  the joiner waits in the list of joiners again. **[GRP-420]** An admin MUST
+  keep the joiner of each admit that it sent while the add stays the head of
+  its roster, thus an epoch that displaces the add after the admit puts the
+  joiner in the list of joiners again.
+- **[GRP-421]** A joiner MUST take a second admit of the admin that admitted
+  it while its own add is the head of its roster, and the group of that admit
+  MUST take the place of the group that it holds, as an exception to
+  `GRP-153`. After its roster moves past the add, the joiner MUST refuse such
+  an admit.
+
+> *Cause.* An earlier draft left a joiner whose admit went out for a
+> displaced add on no chain of the group, and that joiner needed a new
+> invitation. The joiner cannot see the displacement: no member builds on its
+> add. The admin sees it, and while the add is the head a second admit is the
+> one message that reaches the joiner.
 - The roster is hash-chained. **[GRP-070]** If a member sees two different
   successors to one epoch **from one member**, that member MUST show the fork.
   **[GRP-071]** That member MUST NOT select one successor silently. One member

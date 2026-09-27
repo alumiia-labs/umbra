@@ -2132,7 +2132,7 @@ mod tests {
         let admitted = accept_admit(&invitation, &snapshot, &add_hash, &creator_pk, now).unwrap();
         client.save_group(conversation, &group, rng).unwrap();
         other
-            .adopt_group(admitted, &joiner.seed, "Trail", rng)
+            .adopt_group(admitted, &joiner.seed, "Trail", false, rng)
             .unwrap()
     }
 
@@ -2416,6 +2416,102 @@ mod tests {
             held.roster().chain_hash(),
             joiner.group_of(member).unwrap().roster().chain_hash()
         );
+    }
+
+    #[test]
+    fn a_joiner_whose_admitted_add_lost_the_fork_joins_again() {
+        use umbra_wire::group::control::Role;
+
+        let mut rng = Rng(73);
+        let mut owner = new_client(&mut rng);
+        let mut admin = new_client(&mut rng);
+        let mut joiner = new_client(&mut rng);
+        let (group, at_admin, _, _) = group_of_two(&mut owner, &mut admin, &mut rng);
+        let group_id = owner.group_info(group).unwrap().group_id;
+        owner
+            .set_group_role(group, 1, Role::Admin, 1_700_000_010_000, &mut rng)
+            .unwrap();
+        let grant = owner.take_group_post().unwrap();
+        while owner.take_group_post().is_some() {}
+        admin
+            .on_group_record(&[0xC3; 32], 1, &grant.record, 1_700_000_010_500, &mut rng)
+            .unwrap();
+        while admin.take_group_post().is_some() {}
+
+        // The admin brings the joiner in on a pairwise channel of its own.
+        let joiner_at_admin = ContactId([0x61; 32]);
+        let admin_at_joiner = ContactId([0x62; 32]);
+        let pair_at_admin = admin.conversation_for(&joiner_at_admin.0).unwrap();
+        let pair_at_joiner = joiner.conversation_for(&admin_at_joiner.0).unwrap();
+        admin
+            .offer_group(at_admin, pair_at_admin, 1_700_000_011_000, &mut rng)
+            .unwrap();
+        let offer = admin.take_outgoing().unwrap();
+        deliver(&mut joiner, &admin_at_joiner, &offer.app, 1_700_000_011_500, &mut rng);
+        let offers = joiner.group_offers().unwrap();
+        joiner
+            .accept_group_offer(&offers[0], 1_700_000_012_000, &mut rng)
+            .unwrap();
+        let asked = joiner.take_outgoing().unwrap();
+        deliver(&mut admin, &joiner_at_admin, &asked.app, 1_700_000_012_500, &mut rng);
+        let joiners = admin.group_joiners().unwrap();
+        let first = admin
+            .add_joiner(&joiners[0], 1_700_000_013_000, &mut rng)
+            .unwrap();
+        let add = admin.take_group_post().unwrap();
+        while admin.take_group_post().is_some() {}
+        admin
+            .admit_joiner(&joiners[0], first.index, b"one", 1_700_000_013_500, &mut rng)
+            .unwrap();
+        let admit = admin.take_outgoing().unwrap();
+        deliver(&mut joiner, &admin_at_joiner, &admit.app, 1_700_000_014_000, &mut rng);
+        let joined = joiner
+            .accept_group_admit(pair_at_joiner, &group_id, &first.snapshot, 1_700_000_014, &mut rng)
+            .unwrap();
+
+        // The owner grants a role at the predecessor of the add, and its
+        // epoch comes first (GRP-117).
+        owner
+            .set_group_role(group, 1, Role::Owner, 1_700_000_013_200, &mut rng)
+            .unwrap();
+        let rival = owner.take_group_post().unwrap();
+        while owner.take_group_post().is_some() {}
+        owner
+            .on_group_record(&[0xC3; 32], 2, &add.record, 1_700_000_014_500, &mut rng)
+            .unwrap();
+        admin
+            .on_group_record(&[0xC3; 32], 3, &rival.record, 1_700_000_015_000, &mut rng)
+            .unwrap();
+
+        // GRP-420: the admit went out, and the joiner waits in the list of
+        // joiners again. The admin adds it under the new head and admits it
+        // again.
+        let joiners = admin.group_joiners().unwrap();
+        assert_eq!(joiners.len(), 1);
+        assert!(!joiners[0].is_added);
+        let second = admin
+            .add_joiner(&joiners[0], 1_700_000_016_000, &mut rng)
+            .unwrap();
+        assert_ne!(second.snapshot, first.snapshot);
+        let again = admin.take_group_post().unwrap();
+        while admin.take_group_post().is_some() {}
+        owner
+            .on_group_record(&[0xC3; 32], 4, &again.record, 1_700_000_016_500, &mut rng)
+            .unwrap();
+        admin
+            .admit_joiner(&joiners[0], second.index, b"two", 1_700_000_017_000, &mut rng)
+            .unwrap();
+        let admit = admin.take_outgoing().unwrap();
+        deliver(&mut joiner, &admin_at_joiner, &admit.app, 1_700_000_017_500, &mut rng);
+        assert_eq!(joiner.group_admits().unwrap().len(), 1);
+        let rejoined = joiner
+            .accept_group_admit(pair_at_joiner, &group_id, &second.snapshot, 1_700_000_018, &mut rng)
+            .unwrap();
+        assert_eq!(rejoined, joined);
+        assert_eq!(joiner.group_info(joined).unwrap().own_index, second.index);
+        let chain = *owner.group_of(group).unwrap().roster().chain_hash();
+        assert_eq!(*admin.group_of(at_admin).unwrap().roster().chain_hash(), chain);
+        assert_eq!(*joiner.group_of(joined).unwrap().roster().chain_hash(), chain);
     }
 
     #[test]

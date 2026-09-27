@@ -62,6 +62,16 @@ const ADMITTED: u8 = 4;
 /// snapshot is on its way to the chunk path, and a second press adds no
 /// second member.
 const ADDED: u8 = 5;
+/// The byte of an admit that this admin sent. The row stays while the add
+/// is the head of the roster, thus an epoch that displaces the add finds
+/// its joiner (`GRP-420`).
+const SENT: u8 = 6;
+/// The byte of a group that this device joined. The row stays while its
+/// add is the head of the roster, thus a second admit of that admin takes
+/// the place of the group (`GRP-421`).
+const JOINED: u8 = 7;
+/// The byte of such a second admit, which waits for its snapshot.
+const READMITTED: u8 = 8;
 
 /// The length of `GroupRosterKey_g.pk`, an ML-DSA-65 verifying key.
 const ROSTER_PK_LEN: usize = 1_952;
@@ -83,6 +93,22 @@ enum JoinEntry {
         from: ConversationId,
         creator_roster_pk: Vec<u8>,
         admit: Vec<u8>,
+        name: String,
+        /// A second admit of `GRP-421`, which replaces the held group.
+        again: bool,
+    },
+    /// An admit that this admin sent, while its add is the head.
+    Sent {
+        from: ConversationId,
+        group_id: [u8; 32],
+        index: u16,
+        add_epoch: u32,
+    },
+    /// A group that this device joined, while its add is the head.
+    Joined {
+        group_id: [u8; 32],
+        add_epoch: u32,
+        creator_roster_pk: Vec<u8>,
         name: String,
     },
     Asked {
@@ -789,16 +815,24 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     ) -> Result<(), Error> {
         let mut found = None;
         for row in self.join_rows()? {
-            if let Some(JoinEntry::Added {
-                from,
-                group_id: held,
-                index: added,
-                ..
-            }) = self.join_entry(&row)?
-            {
-                if held == *group_id && added == index {
-                    found = Some((row, from));
-                }
+            // GRP-420: an add whose admit went out finds its joiner too.
+            let (from, held, added) = match self.join_entry(&row)? {
+                Some(JoinEntry::Added {
+                    from,
+                    group_id,
+                    index,
+                    ..
+                }) => (from, group_id, index),
+                Some(JoinEntry::Sent {
+                    from,
+                    group_id,
+                    index,
+                    ..
+                }) => (from, group_id, index),
+                _ => continue,
+            };
+            if held == *group_id && added == index {
+                found = Some((row, from));
             }
         }
         let Some((row, from)) = found else {
@@ -1154,7 +1188,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if own.role < Role::Admin {
             return Err(Error::Malformed);
         }
-        let admin_roster_pk = own.roster_pk.clone().ok_or(Error::Integrity)?;
+        // A member that joined and became an admin holds the hash of its key
+        // in the roster alone.
+        let admin_roster_pk = held.own_roster_pk();
         let creator_roster_pk = held
             .roster()
             .member(0)
@@ -1264,14 +1300,21 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         };
         let row = self.join_row(from, &invitation.group_id)?;
         // An admit to a group that this device did not ask for is no admit.
-        let Some(JoinEntry::Waiting {
-            creator_roster_pk,
-            name,
-        }) = self.join_entry(&row)?
-        else {
-            return Ok(());
+        // GRP-421: a second admit of the admin of a join whose add is the
+        // head takes the place of the group.
+        let (creator_roster_pk, name, again) = match self.join_entry(&row)? {
+            Some(JoinEntry::Waiting {
+                creator_roster_pk,
+                name,
+            }) => (creator_roster_pk, name, false),
+            Some(JoinEntry::Joined {
+                creator_roster_pk,
+                name,
+                ..
+            }) => (creator_roster_pk, name, true),
+            _ => return Ok(()),
         };
-        let mut entry = vec![ADMITTED];
+        let mut entry = vec![if again { READMITTED } else { ADMITTED }];
         entry.extend_from_slice(&from.0);
         entry.extend_from_slice(&invitation.group_id);
         entry.extend_from_slice(&creator_roster_pk);
@@ -1463,7 +1506,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             return Ok(());
         };
         let row = self.join_row(admin, &group_id)?;
-        if self.join_entry(&row)?.is_some() {
+        if self.join_pending(&row)? {
             return Ok(());
         }
         let creator_roster_pk = group
@@ -1541,7 +1584,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             return Ok((false, true));
         };
         let row = self.join_row(admin, group.group_id())?;
-        Ok((self.join_entry(&row)?.is_some(), false))
+        Ok((self.join_pending(&row)?, false))
+    }
+
+    /// Whether a join row waits for an act: the rows of `GRP-420` and
+    /// `GRP-421` wait for none.
+    fn join_pending(&self, row: &RowId) -> Result<bool, Error> {
+        Ok(!matches!(
+            self.join_entry(row)?,
+            None | Some(JoinEntry::Sent { .. } | JoinEntry::Joined { .. })
+        ))
     }
 
     /// Step 3 of §11.9.1: the admin adds the joiner and posts the plain
@@ -1645,9 +1697,52 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .admit_at(index, roster_epoch, 0, descriptor, now_ms / 1_000)
             .map_err(|_| Error::Malformed)?;
         self.send_pairwise_control(joiner.from, &body, now_ms, rng)?;
+        // GRP-420: the row stays while the add is the head, thus an epoch
+        // that displaces the add finds the joiner.
+        let mut entry = vec![SENT];
+        entry.extend_from_slice(&joiner.from.0);
+        entry.extend_from_slice(&joiner.group_id);
+        entry.extend_from_slice(&roster_epoch.to_be_bytes());
+        entry.extend_from_slice(&index.to_be_bytes());
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
-        batch.delete(GROUP_JOIN, row);
+        batch.put(GROUP_JOIN, row, Some(joiner.from.0), &entry, rng)?;
+        Ok(batch.commit()?)
+    }
+
+    /// Drops the rows of `GRP-420` and `GRP-421` of a group whose roster moved past the
+    /// add that they name: no epoch displaces that add any more.
+    fn drop_passed_adds(&mut self, conversation: ConversationId) -> Result<(), Error> {
+        let group = self.group_of(conversation)?;
+        let (group_id, head) = (*group.group_id(), group.roster().epoch_index());
+        drop(group);
+        let mut gone = Vec::new();
+        for row in self.join_rows()? {
+            let passed = match self.join_entry(&row)? {
+                Some(JoinEntry::Sent {
+                    group_id: held,
+                    add_epoch,
+                    ..
+                }) => held == group_id && add_epoch < head,
+                Some(JoinEntry::Joined {
+                    group_id: held,
+                    add_epoch,
+                    ..
+                }) => held == group_id && add_epoch < head,
+                _ => false,
+            };
+            if passed {
+                gone.push(row);
+            }
+        }
+        if gone.is_empty() {
+            return Ok(());
+        }
+        let open = self.open_mut()?;
+        let mut batch = open.store.begin();
+        for row in gone {
+            batch.delete(GROUP_JOIN, row);
+        }
         Ok(batch.commit()?)
     }
 
@@ -1667,6 +1762,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             creator_roster_pk,
             admit,
             name,
+            again,
             ..
         }) = self.join_entry(&row)?
         else {
@@ -1695,7 +1791,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let add_hash = Self::add_hash_of(&invitation, &snapshot)?;
         let admitted = accept_admit(&invitation, &snapshot, &add_hash, &creator_roster_pk, now)
             .map_err(|_| Error::Integrity)?;
-        let conversation = self.adopt_group(admitted, &seed, &name, rng)?;
+        let add_epoch = snapshot.roster_epoch;
+        let conversation = self.adopt_group(admitted, &seed, &name, again, rng)?;
         // GRP-290: the contact that brought this device in is a member it
         // can ask on a pairwise channel when the group queue refuses it.
         self.note_contact_in(conversation, b"via", from, rng)?;
@@ -1704,9 +1801,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for grant in umbra_core::group::roster::split_path(snapshot.path)? {
             self.note_grant(conversation, grant, rng)?;
         }
+        // GRP-421: the row stays while the add is the head, thus a second
+        // admit of this admin takes the place of the group.
+        let mut entry = vec![JOINED];
+        entry.extend_from_slice(&from.0);
+        entry.extend_from_slice(group_id);
+        entry.extend_from_slice(&add_epoch.to_be_bytes());
+        entry.extend_from_slice(&creator_roster_pk);
+        entry.extend_from_slice(name.as_bytes());
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
-        batch.delete(GROUP_JOIN, row);
+        batch.put(GROUP_JOIN, row, Some(from.0), &entry, rng)?;
         batch.commit()?;
         // DEV-298: the group goes to the other devices of the set.
         self.group_state_due(conversation, rng)?;
@@ -1858,7 +1963,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         .to_owned(),
                 }
             }
-            ADMITTED => {
+            ADMITTED | READMITTED => {
                 let (key, rest) = rest
                     .split_at_checked(ROSTER_PK_LEN)
                     .ok_or(Error::Integrity)?;
@@ -1872,6 +1977,30 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     from,
                     creator_roster_pk: key.to_vec(),
                     admit: admit.to_vec(),
+                    name: core::str::from_utf8(name)
+                        .map_err(|_| Error::Integrity)?
+                        .to_owned(),
+                    again: kind == READMITTED,
+                }
+            }
+            SENT => {
+                let (epoch, index) = rest.split_at_checked(4).ok_or(Error::Integrity)?;
+                JoinEntry::Sent {
+                    from,
+                    group_id,
+                    index: u16::from_be_bytes(index.try_into().map_err(|_| Error::Integrity)?),
+                    add_epoch: u32::from_be_bytes(epoch.try_into().map_err(|_| Error::Integrity)?),
+                }
+            }
+            JOINED => {
+                let (epoch, rest) = rest.split_at_checked(4).ok_or(Error::Integrity)?;
+                let (key, name) = rest
+                    .split_at_checked(ROSTER_PK_LEN)
+                    .ok_or(Error::Integrity)?;
+                JoinEntry::Joined {
+                    group_id,
+                    add_epoch: u32::from_be_bytes(epoch.try_into().map_err(|_| Error::Integrity)?),
+                    creator_roster_pk: key.to_vec(),
                     name: core::str::from_utf8(name)
                         .map_err(|_| Error::Integrity)?
                         .to_owned(),
@@ -1903,6 +2032,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         admitted: Admitted,
         seed: &Secret<32>,
         name: &str,
+        replaces: bool,
         rng: &mut R,
     ) -> Result<ConversationId, Error> {
         let name = name.trim();
@@ -1913,9 +2043,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let group_id = *group.group_id();
         // GRP-153: a second admit to a group that this device holds is no
         // group. A member whose index a rival took comes back under the
-        // admit, and the new group takes the place of the one it held.
+        // admit, and the new group takes the place of the one it held. So
+        // does the second admit of `GRP-421`.
         let conversation = self.conversation_of_group(&group_id)?;
-        if self.is_group(conversation)? && !self.group_of(conversation)?.lost_rekey() {
+        if !replaces
+            && self.is_group(conversation)?
+            && !self.group_of(conversation)?.lost_rekey()
+        {
             return Err(Error::Malformed);
         }
         let row = Self::group_row(&group, OPEN)?;
@@ -2522,6 +2656,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             self.note_grant(conversation, object, rng)?;
         }
         self.roster_moved(conversation, &applied, now_ms / 1_000, rng)?;
+        self.drop_passed_adds(conversation)?;
         // DEV-303: a key that waited for this roster object installs now.
         self.retry_epoch_keys(conversation, now_ms, rng)?;
         Ok(applied)
@@ -3585,6 +3720,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for head in displaced {
             self.repost_displaced(conversation, head, now_ms, rng)?;
         }
+        self.drop_passed_adds(conversation)?;
         // GRP-363: an admin that installs an epoch it did not credential
         // moves each replica to it. A delivery of owner credentials alone
         // installs no epoch.
