@@ -19,6 +19,26 @@ pub const DISCRIMINATOR_MAX: usize = 9;
 pub const FRAGMENT_LEN: usize = 16;
 /// The version byte of a sealed profile blob.
 pub const BLOB_VERSION: u8 = 0x01;
+/// The prefix of the link of a handle with its profile (§9.3.1).
+pub const PROFILE_LINK_PREFIX: &str = "umbra://h/";
+
+/// Reads `umbra://h/<name>%23<discriminator>#<fragment>`: the handle, and
+/// the fragment in the base32 of Part 4 (`DIS-179`). A `#` in place of the
+/// `%23` reads too, because the last `#` starts the fragment.
+pub fn parse_profile_link(
+    text: &str,
+    profile: Profile<'_>,
+) -> Result<(Handle, [u8; FRAGMENT_LEN]), Error> {
+    let rest = text
+        .trim()
+        .strip_prefix(PROFILE_LINK_PREFIX)
+        .ok_or(Error::Malformed)?;
+    let (handle, fragment) = rest.rsplit_once('#').ok_or(Error::Malformed)?;
+    let handle = Handle::parse(&alloc::format!("@{}", handle.replace("%23", "#")), profile)?;
+    let mut out = [0u8; FRAGMENT_LEN];
+    crate::identity::address::base32_decode(fragment, &mut out)?;
+    Ok((handle, out))
+}
 
 /// A profile function: the `UsernameCaseMapped` output of a `name` part,
 /// or `None` when the profile rejects it (`DIS-088`, `DIS-089`).
@@ -115,6 +135,17 @@ impl Handle {
         key
     }
 
+    /// The link of this handle with the fragment that opens its profile
+    /// blob (`DIS-179`).
+    pub fn profile_link(&self, fragment: &[u8; FRAGMENT_LEN]) -> String {
+        alloc::format!(
+            "{PROFILE_LINK_PREFIX}{}%23{}#{}",
+            self.name,
+            self.discriminator,
+            crate::identity::address::base32(fragment)
+        )
+    }
+
     /// Seals a profile blob: the version, the nonce, and the ciphertext
     /// with its tag, with the canonical handle as associated data.
     pub fn seal_blob(
@@ -207,6 +238,26 @@ mod tests {
         assert!(Handle::parse(&long, &ascii_profile).is_err());
         assert!(Handle::is_canonical_name("alice", &ascii_profile));
         assert!(!Handle::is_canonical_name("Alice", &ascii_profile));
+    }
+
+    #[test]
+    fn a_profile_link_reads_back() {
+        let h = Handle::parse("@bob#42", &ascii_profile).unwrap();
+        let link = h.profile_link(&[0xA5; 16]);
+        assert!(link.starts_with("umbra://h/bob%2342#"), "{link}");
+        let (back, fragment) = parse_profile_link(&link, &ascii_profile).unwrap();
+        assert_eq!(back.canonical(), "@bob#42");
+        assert_eq!(fragment, [0xA5; 16]);
+        let plain = link.replace("%23", "#");
+        assert_eq!(
+            parse_profile_link(&plain, &ascii_profile)
+                .unwrap()
+                .0
+                .canonical(),
+            "@bob#42"
+        );
+        assert!(parse_profile_link("umbra://h/bob%2342", &ascii_profile).is_err());
+        assert!(parse_profile_link("umbra://p/bob%2342#00", &ascii_profile).is_err());
     }
 
     #[test]

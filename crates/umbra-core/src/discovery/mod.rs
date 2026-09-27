@@ -18,6 +18,7 @@ pub mod hello;
 pub mod lifecycle;
 pub mod logtree;
 pub mod prefix;
+pub mod profile;
 pub mod service;
 pub mod translog;
 

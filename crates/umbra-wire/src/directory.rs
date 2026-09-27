@@ -43,6 +43,8 @@ pub enum Kind {
     Write = 0x06,
     /// The renewal of a lease.
     Renew = 0x07,
+    /// The profile blob of a label (Part 9 §9.3.1).
+    Blob = 0x08,
     /// A batch of first-party tokens (Part 13 §13.9).
     Issue = 0x10,
 }
@@ -57,6 +59,7 @@ impl Kind {
             0x05 => Kind::Challenge,
             0x06 => Kind::Write,
             0x07 => Kind::Renew,
+            0x08 => Kind::Blob,
             0x10 => Kind::Issue,
             _ => return Err(Error::Malformed),
         })

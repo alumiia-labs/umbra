@@ -72,14 +72,14 @@ each column when a crate implements the requirement and a test covers it.
 | `WIR` | 395 | 85 | 0 | 0 | 7 | **487** |
 | `DEV` | 197 | 90 | 0 | 0 | 7 | **294** |
 | `NTF` | 74 | 28 | 0 | 0 | 3 | **105** |
-| `DIS` | 120 | 33 | 0 | 0 | 3 | **156** |
+| `DIS` | 124 | 34 | 0 | 0 | 3 | **161** |
 | `REL` | 124 | 32 | 1 | 0 | 2 | **159** |
 | `GRP` | 230 | 65 | 0 | 0 | 6 | **301** |
 | `ATT` | 143 | 45 | 2 | 0 | 3 | **193** |
 | `ABU` | 68 | 30 | 1 | 0 | 0 | **99** |
 | `IMP` | 119 | 41 | 0 | 0 | 2 | **162** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 1993 | 619 | 7 | 0 | 53 | **2672** |
+| **All** | 1997 | 620 | 7 | 0 | 53 | **2677** |
 
 ## SCP — Scope and Conventions
 
@@ -1880,6 +1880,11 @@ Source: `spec/09-discovery.md`
 | `DIS-172` | §9.10 | MAY | A registration | A registration MAY end with `lease`, in seconds. |  |  |
 | `DIS-173` | §9.10 | MUST | A directory | A directory MUST refuse a `lease` below `LEASE_MIN` or above `HANDLE_LEASE` as malformed. |  |  |
 | `DIS-174` | §9.10 | MUST | A holder | A holder MUST drop each hello that reaches the rendezvous queue of a timed entry after its end, and it MUST end that queue at its next upkeep. |  |  |
+| `DIS-175` | §9.3.1 | MUST NOT | (unstated) | The directory MUST keep the sealed blob of a live label beside it, and the log MUST NOT commit the blob. |  |  |
+| `DIS-176` | §9.3.1 | MUST | The plaintext of the blob | The plaintext of the blob MUST be `0x01 || name_len u8 || name || welcome_len u16 || welcome || picture_len u16 || picture`: UTF-8 of at most 32 bytes, UTF-8 of at most `WELCOME_MAX` bytes, and a JPEG of at most `PICTURE_MAX` bytes or nothing. |  |  |
+| `DIS-177` | §9.3.1 | MUST | A client | A client MUST reject each other form, and a blob that does not open under the fragment shows no profile. |  |  |
+| `DIS-178` | §9.3.1 | MUST | A tombstone | A tombstone MUST take the blob with it, whether the holder wrote it or the lease lapsed. |  |  |
+| `DIS-179` | §9.3.1 | MUST | The link | The link MUST be `umbra://h/<name>%23<discriminator>#<fragment>`, with the fragment in the base32 of Part 4 §4.2.3. |  |  |
 
 ## REL — Relay Directory
 

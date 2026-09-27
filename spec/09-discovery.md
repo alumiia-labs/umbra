@@ -119,6 +119,30 @@ A person that types a bare handle gets the rendezvous queue only, and that
 person has to ask for permission. A person that receives the full link gets the
 profile directly.
 
+- **[DIS-175]** The directory MUST keep the sealed blob of a live label beside
+  it, and the log MUST NOT commit the blob. The holder writes the blob under a
+  blob challenge (purpose `0x03` of §9.10) whose answer binds the blob bytes,
+  and an empty blob drops it. A lookup MUST return the blob of the label that
+  it proves, and no blob for a tombstone.
+- **[DIS-176]** The plaintext of the blob MUST be `0x01 || name_len u8 ||
+  name || welcome_len u16 || welcome || picture_len u16 || picture`: UTF-8 of
+  at most 32 bytes, UTF-8 of at most `WELCOME_MAX` bytes, and a JPEG of at most
+  `PICTURE_MAX` bytes or nothing. **[DIS-177]** A client MUST reject each other
+  form, and a blob that does not open under the fragment shows no profile.
+- **[DIS-178]** A tombstone MUST take the blob with it, whether the holder
+  wrote it or the lease lapsed.
+- **[DIS-179]** The link MUST be `umbra://h/<name>%23<discriminator>#<fragment>`,
+  with the fragment in the base32 of Part 4 §4.2.3. The `%23` keeps the `#` of
+  the handle out of the fragment of the URI. A client MUST also read a `#` in
+  its place, because the last `#` starts the fragment. A client MUST keep one
+  fragment for a handle until the handle goes.
+
+> *Cause.* An earlier draft gave the key and the seal of the blob and no place
+> for it. The directory holds the label already, and it answers each lookup
+> through OHTTP, thus it adds no party. It learns the length of a sealed blob
+> and the time of a write, and it holds no key. The answer binds the blob,
+> thus a replay of an answer writes no other blob.
+
 This design prevents the outcome of 77 million scraped profile photos.
 
 The blob holds the selected picture of a Profile (Part 4 §4.2.5). Three rules
@@ -977,12 +1001,13 @@ DirResponse {                     // padded to the smallest DIR_RESPONSE_SIZES v
 | Kind | Request body | Response body |
 | --- | --- | --- |
 | `0x01` Evaluate | `admission Admission`, `blinded [32]u8` | `element [32]u8`, `proof [64]u8` |
-| `0x02` Lookup | `search_key [64]u8` | `head_len u16`, the newest `SignedTreeHead`, the `LookupProof` |
+| `0x02` Lookup | `search_key [64]u8` | `head_len u16`, the newest `SignedTreeHead`, `blob_len u16`, the sealed blob of §9.3.1 or nothing, the `LookupProof` |
 | `0x03` Head | `from_size u64`, 0 for none | `head_len u16`, the newest `SignedTreeHead`, `count u8`, `count` hashes of the consistency proof from `from_size` |
 | `0x04` Register | `token [162]u8`, `label_len u16`, the label input, `entry_len u16`, the entry, and optionally `lease u32` | empty |
-| `0x05` Challenge | `purpose u8` (0x01 renew, 0x02 write), `label_len u16`, the label input | the 1 136 bytes of §9.9.1 or §9.9.3, then `lease_epoch u64` for a renewal |
+| `0x05` Challenge | `purpose u8` (0x01 renew, 0x02 write, 0x03 blob), `label_len u16`, the label input | the 1 136 bytes of §9.9.1 or §9.9.3, then `lease_epoch u64` for a renewal |
 | `0x06` Write | `label_len u16`, the label input, `answer [32]u8`, `entry_len u16`, the entry | empty |
 | `0x07` Renew | `label_len u16`, the label input, `answer [32]u8` | empty |
+| `0x08` Blob | `label_len u16`, the label input, `answer [32]u8`, `blob_len u16`, the sealed blob of §9.3.1 or nothing | empty |
 | `0x10` Issue | Part 13 §13.9 | Part 13 §13.9 |
 
 The label input is the canonical handle of §9.3.2 for a handle, the input of
@@ -1045,6 +1070,9 @@ directory computes the search key from it under its own key.
 | `GOSSIP_INTERVAL` | 6 h for each `source` (§9.5.3) |
 | `HANDLE_LEASE` | 180 days, renewed under §9.9.1 |
 | `LEASE_MIN` | 1 hour: the shortest `lease` of a registration (`DIS-173`) |
+| `WELCOME_MAX` | 280 bytes of UTF-8, the welcome text of a profile blob (`DIS-176`) |
+| `PICTURE_MAX` | 6 144 bytes, the JPEG of a profile blob (`DIS-176`) |
+| `PROFILE_BLOB_MAX` | 6 503 bytes, the longest sealed profile blob: the version, the nonce, the longest plaintext of `DIS-176`, and the tag |
 | `TREE_HEAD_FRESHNESS` | 7 days, measured by the client from the `timestamp` of the head (§9.5.2) |
 | `TREE_HEAD_RETAIN` | 14 days, measured by the client from the acceptance of the head (§9.5.2) |
 | `HANDLE_RESERVE` | 180 days, measured by the directory from the tombstone, equal to `BACKUP_TTL` of Part 4 §4.8 (§9.9.2) |

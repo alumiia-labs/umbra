@@ -311,6 +311,9 @@ object Core {
 
     /** The handle of this device, or none (Part 9 §9.3). */
     var myHandle by mutableStateOf<String?>(null)
+
+    /** The link of the handle with the fragment of its profile. */
+    var myHandleLink by mutableStateOf<String?>(null)
         private set
 
     /** The contact requests that wait (Part 9 §9.6). */
@@ -344,6 +347,7 @@ object Core {
     fun readDirectory() = call { client ->
         val links = client.publicLinks()
         val handle = client.myHandle()
+        val handleLink = client.myHandleLink()
         val requests = client.contactRequests()
         val warnings = client.directoryWarnings()
         val full = client.entriesAtLimit()
@@ -355,6 +359,7 @@ object Core {
             publicLinks.clear()
             publicLinks.addAll(links)
             myHandle = handle
+            myHandleLink = handleLink
             contactRequests.clear()
             contactRequests.addAll(requests)
         }
@@ -410,6 +415,29 @@ object Core {
     fun rotateEntry(label: String) = directory { client -> client.rotateEntry(label) }
 
     fun releaseHandle() = directory { client -> client.releaseHandle() }
+
+    /** The name and the welcome text that the profile link of the handle shows. */
+    fun profile(onProfile: (String, String) -> Unit) = call { client ->
+        val name = client.profileName()
+        val welcome = client.welcome()
+        main.post { onProfile(name, welcome) }
+    }
+
+    /** Sets the name and the welcome text, and writes the profile blob (Part 9 §9.3.1). */
+    fun setProfile(name: String, welcome: String) = directory { client ->
+        client.setProfileName(name)
+        client.setWelcome(welcome)
+    }
+
+    /** What a profile link shows, or nothing when the lookup fails. */
+    fun previewContact(link: String, onPreview: (uniffi.umbra_ffi.ContactPreview) -> Unit) = call { client ->
+        val preview = try {
+            client.previewContact(link)
+        } catch (failure: FfiException) {
+            null
+        }
+        preview?.let { main.post { onPreview(it) } }
+    }
 
     /** Sends a request to a reusable link or a handle, under the name of the user. */
     fun sendRequest(target: String, name: String) {

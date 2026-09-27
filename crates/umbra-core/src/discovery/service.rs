@@ -31,11 +31,12 @@ use umbra_wire::{
 };
 
 use super::{
-    challenge::{Issued, Purpose},
+    challenge::{Issued, Purpose, ANSWER_LEN},
     entry::{AddressEntry, DirectoryEntry},
-    handle::Handle,
+    handle::{Handle, BLOB_VERSION},
     head::{LogKeySet, SignedTreeHead, SignerSig},
     lifecycle::{Label, Needs},
+    profile::PROFILE_BLOB_MAX,
     translog::{Auditor, LogOperator},
     HANDLE_LEASE, LEASE_MIN,
 };
@@ -108,6 +109,8 @@ struct LabelRecord {
     input: Vec<u8>,
     /// The lease and the key.
     label: Label,
+    /// The sealed profile blob of §9.3.1, which no log commits.
+    blob: Option<Vec<u8>>,
 }
 
 impl LabelRecord {
@@ -121,6 +124,9 @@ impl LabelRecord {
         out.extend_from_slice(&self.label.tombstoned_at.unwrap_or(u64::MAX).to_be_bytes());
         out.extend_from_slice(&self.label.lease_epoch.to_be_bytes());
         out.extend_from_slice(&self.label.ends_at.unwrap_or(0).to_be_bytes());
+        let blob = self.blob.as_deref().unwrap_or(&[]);
+        out.extend_from_slice(&u16::try_from(blob.len()).unwrap_or(0).to_be_bytes());
+        out.extend_from_slice(blob);
         out
     }
 
@@ -138,6 +144,11 @@ impl LabelRecord {
         } else {
             u64::from_be_bytes(r.array()?)
         };
+        let blob = if r.remaining() == 0 {
+            Vec::new()
+        } else {
+            take_var16(&mut r)?.to_vec()
+        };
         r.finish()?;
         Ok(LabelRecord {
             input,
@@ -149,6 +160,7 @@ impl LabelRecord {
                 lease_epoch,
                 ends_at: (ends_at != 0).then_some(ends_at),
             },
+            blob: (!blob.is_empty()).then_some(blob),
         })
     }
 
@@ -328,7 +340,11 @@ impl Directory {
         Ok(version)
     }
 
-    fn keep_label(&mut self, search_key: &[u8], record: LabelRecord) {
+    fn keep_label(&mut self, search_key: &[u8], mut record: LabelRecord) {
+        // DIS-178: a tombstone takes the blob with it.
+        if record.label.is_tombstoned() {
+            record.blob = None;
+        }
         self.events.push(DirEvent::Label {
             search_key: search_key.to_vec(),
             state: record.encode(),
@@ -477,6 +493,7 @@ impl Directory {
             Kind::Challenge => self.challenge(body, now, rng),
             Kind::Write => self.write(body, now, rng),
             Kind::Renew => self.renew(body, now),
+            Kind::Blob => self.put_blob(body, now),
             Kind::Issue => self.issue(body, now, rng),
         };
         match result {
@@ -567,10 +584,51 @@ impl Directory {
             .lookup(body)
             .and_then(|proof| proof.encode())
             .map_err(|_| Status::NotFound)?;
+        // DIS-175: the sealed profile blob of a live label comes with it.
+        let blob = self
+            .labels
+            .get(body)
+            .filter(|record| !record.label.is_tombstoned())
+            .and_then(|record| record.blob.as_deref())
+            .unwrap_or(&[]);
         let mut out = Vec::new();
         put_var16(&mut out, head).map_err(|_| Status::Busy)?;
+        put_var16(&mut out, blob).map_err(|_| Status::Busy)?;
         out.extend_from_slice(&proof);
         Ok(out)
+    }
+
+    /// Keeps or drops the profile blob of a live label, under the answer
+    /// of a blob challenge that binds the blob (`DIS-175`). An empty blob
+    /// drops it. The log commits no blob, thus the write needs no epoch.
+    fn put_blob(&mut self, body: &[u8], now: u64) -> Result<Vec<u8>, Status> {
+        let mut r = Reader::new(body);
+        let input = take_var16(&mut r).map_err(|_| Status::Malformed)?.to_vec();
+        let answer: [u8; ANSWER_LEN] = r.array().map_err(|_| Status::Malformed)?;
+        let blob = take_var16(&mut r).map_err(|_| Status::Malformed)?.to_vec();
+        r.finish().map_err(|_| Status::Malformed)?;
+        if blob.len() > PROFILE_BLOB_MAX || blob.first().is_some_and(|v| *v != BLOB_VERSION) {
+            return Err(Status::Malformed);
+        }
+        let search_key = self.voprf.evaluate_direct(&input).to_vec();
+        let mut record = self
+            .labels
+            .get(&search_key)
+            .cloned()
+            .ok_or(Status::NotFound)?;
+        if record.label.is_tombstoned() {
+            return Err(Status::Stale);
+        }
+        let issued = self.take_pending(&search_key, now)?;
+        if issued.purpose() != Purpose::Blob {
+            return Err(Status::Stale);
+        }
+        issued
+            .verify(&answer, Some(&blob))
+            .map_err(|_| Status::Refused)?;
+        record.blob = (!blob.is_empty()).then_some(blob);
+        self.keep_label(&search_key, record);
+        Ok(Vec::new())
     }
 
     fn head_request(&self, body: &[u8]) -> Result<Vec<u8>, Status> {
@@ -677,7 +735,14 @@ impl Directory {
         if let Some(seconds) = lease {
             label.end_at(now.saturating_add(seconds));
         }
-        self.keep_label(&search_key, LabelRecord { input, label });
+        self.keep_label(
+            &search_key,
+            LabelRecord {
+                input,
+                label,
+                blob: None,
+            },
+        );
         Ok(Vec::new())
     }
 
@@ -709,6 +774,7 @@ impl Directory {
                 },
                 None,
             ),
+            0x03 if !record.label.is_tombstoned() => (Purpose::Blob, None),
             _ => return Err(Status::Stale),
         };
         let issued = Issued::new(purpose, &record.label.hk_pub, record.challenge_name(), rng)
@@ -1019,7 +1085,7 @@ mod tests {
         let evaluated = call(dir, Kind::Evaluate, &body, now, rng).unwrap();
         let search_key = dirclient::evaluate_finish(&state, &evaluated, &pk).unwrap();
         let looked = call(dir, Kind::Lookup, &search_key, now, rng).unwrap();
-        let (head, proof) = dirclient::parse_lookup(&looked).unwrap();
+        let (head, _, proof) = dirclient::parse_lookup(&looked).unwrap();
         let head = SignedTreeHead::parse(&head).unwrap();
         let (set, _) = LogKeySet::parse(keyset).unwrap();
         let mut heads = HeadState::new(set).unwrap();
@@ -1206,6 +1272,85 @@ mod tests {
                 .unwrap();
         assert!(entry.is_tombstone());
         assert_eq!(entry.version, 1);
+    }
+
+    /// The sealed profile blob that a lookup of `input` carries.
+    fn read_blob(dir: &mut Directory, input: &[u8], now: u64, rng: &mut Rng) -> Option<Vec<u8>> {
+        let pk = *dir.voprf_public();
+        let (state, body) =
+            dirclient::evaluate_request(input, &pk, epoch_number(now), None, rng).unwrap();
+        let evaluated = call(dir, Kind::Evaluate, &body, now, rng).unwrap();
+        let search_key = dirclient::evaluate_finish(&state, &evaluated, &pk).unwrap();
+        let looked = call(dir, Kind::Lookup, &search_key, now, rng).unwrap();
+        dirclient::parse_lookup(&looked).unwrap().1
+    }
+
+    #[test]
+    fn a_handle_keeps_its_profile_blob_and_a_tombstone_drops_it() {
+        use crate::discovery::profile::ProfilePlain;
+
+        let mut rng = Rng(12);
+        let (mut dir, _) = directory();
+        dir.tick(T0, &mut rng).unwrap();
+        let root = RootIdentity::new(Secret::new([12; 32]));
+        let hk = root.handle_key(0, 0);
+        let input = b"@erin#77";
+        let spent = tokens(&mut dir, epoch_number(T0), 1, T0, &mut rng);
+        let register =
+            dirclient::register_body(&spent[0], input, &handle_entry(input, &hk, 0), None).unwrap();
+        call(&mut dir, Kind::Register, &register, T0, &mut rng).unwrap();
+        let now = T0 + DIRECTORY_EPOCH;
+        dir.tick(now, &mut rng).unwrap();
+        assert!(read_blob(&mut dir, input, now, &mut rng).is_none());
+
+        let handle = Handle::parse("@erin#77", &ascii_profile).unwrap();
+        let plain = ProfilePlain {
+            name: "Erin",
+            welcome: "Say where we met.",
+            picture: &[],
+        }
+        .encode()
+        .unwrap();
+        let fragment = [5; 16];
+        let blob = handle.seal_blob(&fragment, [6; 24], &plain).unwrap();
+        let blob_challenge = |dir: &mut Directory, rng: &mut Rng| {
+            let body = dirclient::blob_challenge_body(input).unwrap();
+            call(dir, Kind::Challenge, &body, now, rng).unwrap()
+        };
+
+        // DIS-175: the answer binds the blob, thus another blob under it is
+        // refused.
+        let bytes = blob_challenge(&mut dir, &mut rng);
+        let ans = answer(Purpose::Blob, &hk, input, &bytes, Some(&blob)).unwrap();
+        let other = handle.seal_blob(&fragment, [7; 24], &plain).unwrap();
+        let wrong = dirclient::blob_body(input, &ans, &other).unwrap();
+        assert_eq!(
+            call(&mut dir, Kind::Blob, &wrong, now, &mut rng),
+            Err(DirError::Status(Status::Refused))
+        );
+        let bytes = blob_challenge(&mut dir, &mut rng);
+        let ans = answer(Purpose::Blob, &hk, input, &bytes, Some(&blob)).unwrap();
+        let write = dirclient::blob_body(input, &ans, &blob).unwrap();
+        call(&mut dir, Kind::Blob, &write, now, &mut rng).unwrap();
+        // The blob needs no epoch of the log, and the fragment opens it.
+        let held = read_blob(&mut dir, input, now, &mut rng).unwrap();
+        assert_eq!(held, blob);
+        let opened = handle.open_blob(&fragment, &held).unwrap();
+        assert_eq!(ProfilePlain::parse(&opened).unwrap().name, "Erin");
+        assert!(handle.open_blob(&[9; 16], &held).is_err());
+
+        // DIS-178: a tombstone takes the blob with it.
+        let tomb = DirectoryEntry::tombstone(input.to_vec(), 1);
+        let mut tomb_bytes = vec![0u8; tomb.len()];
+        let used = tomb.encode(&mut tomb_bytes).unwrap();
+        tomb_bytes.truncate(used);
+        let (bytes, purpose) = challenge(&mut dir, false, input, now, &mut rng).unwrap();
+        let ans = answer(purpose, &hk, input, &bytes, Some(&tomb_bytes)).unwrap();
+        let write = dirclient::write_body(input, &ans, &tomb_bytes).unwrap();
+        call(&mut dir, Kind::Write, &write, now, &mut rng).unwrap();
+        let later = now + DIRECTORY_EPOCH;
+        dir.tick(later, &mut rng).unwrap();
+        assert!(read_blob(&mut dir, input, later, &mut rng).is_none());
     }
 
     #[test]

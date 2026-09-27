@@ -64,7 +64,7 @@ class MainActivity : ComponentActivity() {
             Intent.ACTION_SEND -> intent.getStringExtra(Intent.EXTRA_TEXT)
             else -> null
         } ?: return
-        (INVITATION_LINK.find(text) ?: REUSABLE_LINK.find(text))
+        (INVITATION_LINK.find(text) ?: REUSABLE_LINK.find(text) ?: PROFILE_LINK.find(text))
             ?.let { Core.linkedInvitation = it.value }
     }
 
@@ -73,6 +73,9 @@ class MainActivity : ComponentActivity() {
 
         // Part 4 §4.3.2: the address in the Crockford alphabet.
         val REUSABLE_LINK = Regex("""umbra://p/[0-9A-Za-z]{32}""")
+
+        // Part 9 §9.3.1: the handle, then the fragment of its profile.
+        val PROFILE_LINK = Regex("""umbra://h/[^\s#]+(%23|#)[0-9]+#[0-9A-Za-z]{26}""")
     }
 
     override fun onUserInteraction() {

@@ -21,8 +21,12 @@ use umbra_core::{
         challenge::{answer, Purpose},
         dirclient::{self, DirError, DirectoryPins},
         entry::{AddressEntry, DirectoryEntry, ADDRESS_ENTRY_LEN, ENTRY_PK_LEN},
-        handle::{address_label_input, username_case_mapped, Handle as DirHandle},
+        handle::{
+            address_label_input, parse_profile_link, username_case_mapped, Handle as DirHandle,
+            PROFILE_LINK_PREFIX,
+        },
         head::{AcceptedHead, HeadState, LogKeySet, SignedTreeHead},
+        profile::ProfilePlain,
         translog::LookupProof,
         HANDLE_LEASE, LEASE_MIN,
     },
@@ -81,6 +85,8 @@ pub struct Found {
     pub entry: Option<Vec<u8>>,
     /// The newest version of the label.
     pub version: Option<u32>,
+    /// The sealed profile blob that the directory keeps beside the label.
+    pub blob: Option<Vec<u8>>,
 }
 
 impl DirectoryLink {
@@ -165,10 +171,13 @@ impl DirectoryLink {
 
     /// The lookup proof of a search key under the newest head, after the
     /// head verified under the pinned key set (`DIS-066`).
-    fn lookup(&self, search_key: &[u8; 64]) -> Result<(LookupProof, AcceptedHead), FfiError> {
+    fn lookup(
+        &self,
+        search_key: &[u8; 64],
+    ) -> Result<(LookupProof, AcceptedHead, Option<Vec<u8>>), FfiError> {
         for _ in 0..HEAD_TRIES {
             let looked = self.send(Kind::Lookup, search_key)?;
-            let (bytes, proof) =
+            let (bytes, blob, proof) =
                 dirclient::parse_lookup(&looked).map_err(|_| FfiError::Malformed)?;
             let now = unix_now();
             let head = self.verify_head(&bytes, now)?;
@@ -189,6 +198,7 @@ impl DirectoryLink {
                     timestamp: head.timestamp,
                     accepted_at: now,
                 },
+                blob,
             ));
         }
         Err(FfiError::Busy)
@@ -237,7 +247,7 @@ impl DirectoryLink {
     /// The newest entry of a label input, verified under the log.
     pub fn find(&self, input: &[u8]) -> Result<Found, FfiError> {
         let search_key = self.search_key(input)?;
-        let (proof, head) = self.lookup(&search_key)?;
+        let (proof, head, blob) = self.lookup(&search_key)?;
         let entry = proof
             .verify(&search_key, &self.vrf_key()?, &head)
             .map_err(|_| FfiError::Unverified)?
@@ -245,6 +255,7 @@ impl DirectoryLink {
         Ok(Found {
             entry,
             version: proof.newest,
+            blob,
         })
     }
 
@@ -254,7 +265,7 @@ impl DirectoryLink {
         let epoch = epoch_number(unix_now());
         let input = issuer_label_input(TYPE_FIRST_PARTY, epoch);
         let search_key = self.search_key(&input)?;
-        let (proof, head) = self.lookup(&search_key)?;
+        let (proof, head, _) = self.lookup(&search_key)?;
         let mut keys = IssuerKeys::default();
         keys.accept_from_log(
             TYPE_FIRST_PARTY,
@@ -308,6 +319,23 @@ impl DirectoryLink {
         self.send(Kind::Write, &body).map(|_| ())
     }
 
+    /// Writes the sealed profile blob of a label under the blob challenge,
+    /// whose answer binds the blob (`DIS-175`).
+    pub fn put_blob(
+        &self,
+        input: &[u8],
+        name: &[u8],
+        key: &KeyPair,
+        blob: &[u8],
+    ) -> Result<(), FfiError> {
+        let body = dirclient::blob_challenge_body(input).map_err(|_| FfiError::Malformed)?;
+        let challenge = self.send(Kind::Challenge, &body)?;
+        let ans = answer(Purpose::Blob, key, name, &challenge, Some(blob))
+            .map_err(|_| FfiError::Unverified)?;
+        let body = dirclient::blob_body(input, &ans, blob).map_err(|_| FfiError::Malformed)?;
+        self.send(Kind::Blob, &body).map(|_| ())
+    }
+
     /// Renews the lease of a label under its key (`DIS-040`).
     pub fn renew(&self, input: &[u8], name: &[u8], key: &KeyPair) -> Result<(), FfiError> {
         let body = dirclient::challenge_body(true, input).map_err(|_| FfiError::Malformed)?;
@@ -321,6 +349,17 @@ impl DirectoryLink {
         let body = dirclient::renew_body(input, &ans).map_err(|_| FfiError::Malformed)?;
         self.send(Kind::Renew, &body).map(|_| ())
     }
+}
+
+/// What a profile link shows before a request (§9.3.1).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ContactPreview {
+    /// The canonical handle.
+    pub handle: String,
+    /// The name from the profile blob, or empty.
+    pub name: String,
+    /// The welcome text from the profile blob, or empty.
+    pub welcome: String,
 }
 
 /// A reusable link of this device (Part 4 §4.3.2), as a view shows it.
@@ -524,6 +563,56 @@ impl Handle {
     }
 
     /// Writes the tombstone of an entry (`DIS-171`) and ends its queue.
+    /// Writes the profile blob of the handle when it waits: the name and
+    /// the welcome text, sealed under the key of the fragment of its link
+    /// (`DIS-141`, `DIS-176`). A device with no handle writes nothing.
+    fn publish_profile_blob(&self, link: &DirectoryLink) -> Result<(), FfiError> {
+        let (entry, key, blob) = {
+            let mut inner = locked(&self.inner);
+            if !inner.client.profile_blob_due()? {
+                return Ok(());
+            }
+            let Some(entry) = inner
+                .client
+                .published()?
+                .into_iter()
+                .find(|entry| entry.kind == EntryKind::Handle)
+            else {
+                return Ok(());
+            };
+            let handle = DirHandle::parse(
+                core::str::from_utf8(&entry.name).map_err(|_| FfiError::Integrity)?,
+                &username_case_mapped,
+            )
+            .map_err(|_| FfiError::Integrity)?;
+            let name = inner.client.profile_name()?;
+            let welcome = inner.client.welcome()?;
+            let plain = ProfilePlain {
+                name: &name,
+                welcome: &welcome,
+                picture: &[],
+            }
+            .encode()
+            .map_err(|_| FfiError::Malformed)?;
+            let fragment = inner.client.handle_fragment(&mut OsRng)?;
+            let mut nonce = [0u8; 24];
+            OsRng
+                .try_fill_bytes(&mut nonce)
+                .map_err(|_| FfiError::Storage)?;
+            let blob = handle
+                .seal_blob(&fragment, nonce, &plain)
+                .map_err(|_| FfiError::Malformed)?;
+            let key = inner
+                .client
+                .entry_key(EntryKind::Handle, entry.index, entry.rotation)?;
+            (entry, key, blob)
+        };
+        link.put_blob(&entry.label, &entry.name, &key, &blob)?;
+        Ok(locked(&self.inner)
+            .client
+            .set_profile_blob_due(false, &mut OsRng)?)
+    }
+
     fn retire(&self, link: &DirectoryLink, entry: &Published) -> Result<(), FfiError> {
         let key = locked(&self.inner)
             .client
@@ -684,6 +773,8 @@ impl Handle {
     #[doc(hidden)]
     pub fn maintain_directory_at(&self, now: u64) -> Result<(), FfiError> {
         let link = self.directory_link()?;
+        // §9.3.1: a profile blob that no write took yet goes now.
+        let _ = self.publish_profile_blob(&link);
         let entries = locked(&self.inner).client.published()?;
         for mut entry in entries {
             if entry.expires_at != 0 && now >= entry.expires_at {
@@ -939,7 +1030,14 @@ impl Handle {
                 0,
             );
             match published {
-                Ok(entry) => return Ok(via_text(&entry)),
+                Ok(entry) => {
+                    // §9.3.1: the profile of the new handle goes beside it.
+                    let _ = locked(&self.inner)
+                        .client
+                        .set_profile_blob_due(true, &mut OsRng);
+                    let _ = self.publish_profile_blob(&link);
+                    return Ok(via_text(&entry));
+                }
                 // A held label: another discriminator.
                 Err(FfiError::Stale) => continue,
                 Err(error) => return Err(error),
@@ -1026,7 +1124,12 @@ impl Handle {
             .into_iter()
             .find(|entry| entry.kind == EntryKind::Handle)
             .ok_or(FfiError::NotFound)?;
-        self.retire(&link, &entry)
+        self.retire(&link, &entry)?;
+        // DIS-178: the tombstone took the blob, and a later handle takes a
+        // new link.
+        let mut inner = locked(&self.inner);
+        inner.client.drop_handle_fragment()?;
+        Ok(inner.client.set_profile_blob_due(false, &mut OsRng)?)
     }
 
     /// Sends a contact request to a reusable link, an `umbra:pub:` string,
@@ -1036,9 +1139,16 @@ impl Handle {
     pub fn send_contact_request(&self, target: String) -> Result<(), FfiError> {
         let link = self.directory_link()?;
         let target = target.trim();
-        let (entry_pk, rendezvous) = if target.starts_with("@") {
-            let handle =
-                DirHandle::parse(target, &username_case_mapped).map_err(|_| FfiError::Malformed)?;
+        let (entry_pk, rendezvous) = if target.starts_with("@")
+            || target.starts_with(PROFILE_LINK_PREFIX)
+        {
+            let handle = if target.starts_with("@") {
+                DirHandle::parse(target, &username_case_mapped).map_err(|_| FfiError::Malformed)?
+            } else {
+                parse_profile_link(target, &username_case_mapped)
+                    .map_err(|_| FfiError::Malformed)?
+                    .0
+            };
             let input = handle.label_input();
             let found = link.find(&input)?;
             let bytes = found.entry.ok_or(FfiError::NotFound)?;
@@ -1075,11 +1185,69 @@ impl Handle {
         Ok(locked(&self.inner).client.profile_name()?)
     }
 
-    /// Sets that name, at most 32 bytes.
+    /// Sets that name, at most 32 bytes. The profile blob of the handle
+    /// takes it now, or at the next upkeep.
     pub fn set_profile_name(&self, name: String) -> Result<(), FfiError> {
-        Ok(locked(&self.inner)
+        locked(&self.inner)
             .client
-            .set_profile_name(&name, &mut OsRng)?)
+            .set_profile_name(&name, &mut OsRng)?;
+        if let Ok(link) = self.directory_link() {
+            let _ = self.publish_profile_blob(&link);
+        }
+        Ok(())
+    }
+
+    /// The welcome text that the profile link shows (§9.3.1).
+    pub fn welcome(&self) -> Result<String, FfiError> {
+        Ok(locked(&self.inner).client.welcome()?)
+    }
+
+    /// Sets the welcome text, at most 280 bytes.
+    pub fn set_welcome(&self, text: String) -> Result<(), FfiError> {
+        locked(&self.inner).client.set_welcome(&text, &mut OsRng)?;
+        if let Ok(link) = self.directory_link() {
+            let _ = self.publish_profile_blob(&link);
+        }
+        Ok(())
+    }
+
+    /// The link of the handle of this device with the fragment that opens
+    /// its profile (`DIS-179`), or none with no handle.
+    pub fn my_handle_link(&self) -> Result<Option<String>, FfiError> {
+        let Some(handle) = self.my_handle()? else {
+            return Ok(None);
+        };
+        let handle =
+            DirHandle::parse(&handle, &username_case_mapped).map_err(|_| FfiError::Integrity)?;
+        let fragment = locked(&self.inner).client.handle_fragment(&mut OsRng)?;
+        Ok(Some(handle.profile_link(&fragment)))
+    }
+
+    /// The profile that a profile link shows before a request: the name and
+    /// the welcome text from the blob that the directory keeps (§9.3.1). A
+    /// handle with no blob, or a blob that the fragment does not open,
+    /// shows none.
+    pub fn preview_contact(&self, target: String) -> Result<ContactPreview, FfiError> {
+        let link = self.directory_link()?;
+        let (handle, fragment) =
+            parse_profile_link(&target, &username_case_mapped).map_err(|_| FfiError::Malformed)?;
+        let found = link.find(&handle.label_input())?;
+        found.entry.ok_or(FfiError::NotFound)?;
+        let mut preview = ContactPreview {
+            handle: handle.canonical(),
+            name: String::new(),
+            welcome: String::new(),
+        };
+        if let Some(plain) = found
+            .blob
+            .and_then(|blob| handle.open_blob(&fragment, &blob).ok())
+        {
+            if let Ok(profile) = ProfilePlain::parse(&plain) {
+                preview.name = profile.name.to_owned();
+                preview.welcome = profile.welcome.to_owned();
+            }
+        }
+        Ok(preview)
     }
 
     /// Each contact request that waits, oldest first.

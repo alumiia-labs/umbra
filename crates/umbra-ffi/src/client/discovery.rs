@@ -46,6 +46,12 @@ const NEXT_ADDRESS_SETTING: &[u8] = b"next-address-index";
 const HELLO_COUNT_SETTING: &[u8] = b"hello-count/";
 /// The name that a hello of this device shows.
 const PROFILE_NAME_SETTING: &[u8] = b"profile-name";
+/// The welcome text of the profile blob (§9.3.1).
+const WELCOME_SETTING: &[u8] = b"profile-welcome";
+/// The fragment of the profile link of the handle.
+const FRAGMENT_SETTING: &[u8] = b"handle-fragment";
+/// Whether the profile blob waits for a write.
+const BLOB_DUE_SETTING: &[u8] = b"profile-blob-due";
 
 /// The longest name of a Profile (Part 4 §4.2.5).
 pub const PROFILE_NAME_MAX: usize = 32;
@@ -385,7 +391,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .unwrap_or_default())
     }
 
-    /// Sets that name, at most `PROFILE_NAME_MAX` bytes.
+    /// Sets that name, at most `PROFILE_NAME_MAX` bytes. The profile blob
+    /// of the handle takes it at the next write (§9.3.1).
     pub fn set_profile_name<R: CryptoRng + ?Sized>(
         &mut self,
         name: &str,
@@ -395,7 +402,69 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if name.len() > PROFILE_NAME_MAX {
             return Err(Error::TooLong);
         }
-        self.put_row(super::SETTINGS, PROFILE_NAME_SETTING, name.as_bytes(), rng)
+        self.put_row(super::SETTINGS, PROFILE_NAME_SETTING, name.as_bytes(), rng)?;
+        self.put_row(super::SETTINGS, BLOB_DUE_SETTING, &[1], rng)
+    }
+
+    /// The welcome text of the profile blob, or an empty one.
+    pub fn welcome(&self) -> Result<String, Error> {
+        Ok(self
+            .get_row(super::SETTINGS, WELCOME_SETTING)?
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_default())
+    }
+
+    /// Sets the welcome text, at most `WELCOME_MAX` bytes.
+    pub fn set_welcome<R: CryptoRng + ?Sized>(
+        &mut self,
+        text: &str,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let text = text.trim();
+        if text.len() > umbra_core::discovery::profile::WELCOME_MAX {
+            return Err(Error::TooLong);
+        }
+        self.put_row(super::SETTINGS, WELCOME_SETTING, text.as_bytes(), rng)?;
+        self.put_row(super::SETTINGS, BLOB_DUE_SETTING, &[1], rng)
+    }
+
+    /// The fragment of the profile link of the handle: drawn once, and kept
+    /// until the handle goes (`DIS-179`).
+    pub fn handle_fragment<R: CryptoRng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+    ) -> Result<[u8; umbra_core::discovery::handle::FRAGMENT_LEN], Error> {
+        if let Some(held) = self.get_row(super::SETTINGS, FRAGMENT_SETTING)? {
+            return held.as_slice().try_into().map_err(|_| Error::Integrity);
+        }
+        let mut fragment = [0u8; umbra_core::discovery::handle::FRAGMENT_LEN];
+        rng.fill_bytes(&mut fragment);
+        self.put_row(super::SETTINGS, FRAGMENT_SETTING, &fragment, rng)?;
+        Ok(fragment)
+    }
+
+    /// Drops the fragment with the handle, thus a later handle takes a new
+    /// link.
+    pub fn drop_handle_fragment(&mut self) -> Result<(), Error> {
+        self.delete_row(super::SETTINGS, FRAGMENT_SETTING)
+    }
+
+    /// Whether the profile blob waits for a write.
+    pub fn profile_blob_due(&self) -> Result<bool, Error> {
+        Ok(self.get_row(super::SETTINGS, BLOB_DUE_SETTING)?.is_some())
+    }
+
+    /// Marks the profile blob as written, or as due again.
+    pub fn set_profile_blob_due<R: CryptoRng + ?Sized>(
+        &mut self,
+        due: bool,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        if due {
+            self.put_row(super::SETTINGS, BLOB_DUE_SETTING, &[1], rng)
+        } else {
+            self.delete_row(super::SETTINGS, BLOB_DUE_SETTING)
+        }
     }
 
     /// Takes a hello from a rendezvous queue. The request waits for the user

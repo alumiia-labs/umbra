@@ -3367,6 +3367,25 @@ fn request_until_listed(handle: &Handle, target: &str) {
     }
 }
 
+/// The preview of a profile link, once the log lists its handle.
+#[track_caller]
+fn preview_until_listed(handle: &Handle, target: &str) -> (String, String, String) {
+    let start = Instant::now();
+    loop {
+        match handle.preview_contact(target.into()) {
+            Ok(preview) => return (preview.handle, preview.name, preview.welcome),
+            Err(FfiError::NotFound | FfiError::Busy) => {
+                assert!(
+                    start.elapsed() < Duration::from_secs(40),
+                    "{target} never listed"
+                );
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            Err(other) => panic!("{other:?}"),
+        }
+    }
+}
+
 /// Part 9 end to end through the app: a reusable link and a handle take
 /// requests, the link moves to a new queue at its rotation (`DIS-133`), and
 /// a retired link takes none.
@@ -3454,6 +3473,21 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
     let handle = alice.claim_handle("Alice".into()).unwrap();
     assert!(handle.starts_with("@alice#"), "{handle}");
     assert_eq!(alice.my_handle().unwrap(), Some(handle.clone()));
+    // §9.3.1: the profile link opens the blob beside the handle, and the
+    // directory holds no key of it.
+    alice.set_profile_name("Alice".into()).unwrap();
+    alice.set_welcome("Say where we met.".into()).unwrap();
+    let profile_link = alice.my_handle_link().unwrap().unwrap();
+    assert!(
+        profile_link.starts_with("umbra://h/alice%23"),
+        "{profile_link}"
+    );
+    let (shown, name, welcome) = preview_until_listed(&carol, &profile_link);
+    assert_eq!(shown, handle);
+    assert_eq!(
+        (name.as_str(), welcome.as_str()),
+        ("Alice", "Say where we met.")
+    );
     request_until_listed(&carol, &handle);
     wait_for_requests(&alice, 1);
     assert_eq!(alice.contact_requests().unwrap().len(), 1);
@@ -3485,7 +3519,10 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
         }
     }
     std::thread::sleep(Duration::from_secs(6));
-    request_until_listed(&bob, &handle);
+    // The blob stays beside the label through the rotation of its key, and
+    // a request through the profile link reaches the new key.
+    assert_eq!(preview_until_listed(&bob, &profile_link).1, "Alice");
+    request_until_listed(&bob, &profile_link);
     wait_for_requests(&alice, 2);
     assert_eq!(alice.contact_requests().unwrap().len(), 2);
     assert!(alice.directory_warnings().unwrap().is_empty());

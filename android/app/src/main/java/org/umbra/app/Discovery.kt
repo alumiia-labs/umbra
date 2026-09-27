@@ -21,6 +21,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -291,9 +292,24 @@ fun HandleScreen(onBack: () -> Unit) {
                 TakeoverWarning(handle)
                 LimitOffer(handle)
                 Spacer(Modifier.height(16.dp))
-                PrimaryButton("Share handle") { shareText(context, handle, "Share handle") }
-                Spacer(Modifier.height(8.dp))
+                // Part 9 §9.3.1: the link carries the key of the profile, and
+                // the bare handle carries none.
+                val link = Core.myHandleLink
+                if (link != null) {
+                    Text(
+                        link,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Palette.TextSecondary,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    PrimaryButton("Share link") { shareText(context, link, "Share link") }
+                    Spacer(Modifier.height(8.dp))
+                    SecondaryButton("Copy link") { copySensitive(context, link, "UMBRA link") }
+                    Spacer(Modifier.height(8.dp))
+                }
                 SecondaryButton("Copy handle") { copySensitive(context, handle, "UMBRA handle") }
+                Spacer(Modifier.height(20.dp))
+                ProfileFields()
                 Spacer(Modifier.height(8.dp))
                 QuietButton("New key and queue") { Core.rotateHandleKey() }
                 QuietButton("Release handle") { Core.releaseHandle() }
@@ -301,6 +317,50 @@ fun HandleScreen(onBack: () -> Unit) {
             }
         }
     }
+}
+
+/** The name and the welcome text of the profile blob (Part 9 §9.3.1). */
+@Composable
+private fun ProfileFields() {
+    var name by remember { mutableStateOf("") }
+    var welcome by remember { mutableStateOf("") }
+    var saved by remember { mutableStateOf("" to "") }
+    val focus = LocalFocusManager.current
+    LaunchedEffect(Unit) {
+        Core.profile { held, text ->
+            name = held
+            welcome = text
+            saved = held to text
+        }
+    }
+    OutlinedTextField(
+        value = name,
+        onValueChange = { name = it.take(32) },
+        label = { Text("Name") },
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words),
+        modifier = Modifier.fillMaxWidth(),
+    )
+    Spacer(Modifier.height(8.dp))
+    OutlinedTextField(
+        value = welcome,
+        onValueChange = { welcome = it.take(280) },
+        label = { Text("Welcome text") },
+        maxLines = 4,
+        modifier = Modifier.fillMaxWidth(),
+    )
+    Spacer(Modifier.height(8.dp))
+    SecondaryButton(
+        "Save",
+        enabled = Core.online && !Core.directoryBusy && (name to welcome) != saved,
+    ) {
+        focus.clearFocus()
+        Core.setProfile(name, welcome)
+        saved = name to welcome
+    }
+    Spacer(Modifier.height(8.dp))
+    // A technical fact: the directory holds the sealed blob, not its key.
+    Note("The link shows the name and the welcome text. The handle alone shows neither.")
 }
 
 @Composable

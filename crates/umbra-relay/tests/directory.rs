@@ -204,7 +204,7 @@ async fn a_token_registers_a_handle_that_a_lookup_reads_under_a_signed_head() {
     let mut waited = 0;
     let found = loop {
         let looked = client.send(Kind::Lookup, &search_key).await.unwrap();
-        let (head, proof) = dirclient::parse_lookup(&looked).unwrap();
+        let (head, _, proof) = dirclient::parse_lookup(&looked).unwrap();
         let head = SignedTreeHead::parse(&head).unwrap();
         let (set, _) = LogKeySet::parse(&keyset).unwrap();
         let mut heads = HeadState::new(set).unwrap();

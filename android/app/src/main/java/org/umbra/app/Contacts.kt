@@ -25,6 +25,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -243,6 +244,19 @@ fun UseInvitationScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
             )
             Spacer(Modifier.height(12.dp))
             if (isRequest) {
+                // Part 9 §9.3.1: a profile link shows the name and the
+                // welcome text of its holder before the request.
+                var preview by remember { mutableStateOf<uniffi.umbra_ffi.ContactPreview?>(null) }
+                LaunchedEffect(pasted) {
+                    preview = null
+                    if (pasted.trim().startsWith("umbra://h/")) {
+                        Core.previewContact(pasted.trim()) { preview = it }
+                    }
+                }
+                preview?.let { shown ->
+                    ProfilePreview(shown)
+                    Spacer(Modifier.height(12.dp))
+                }
                 OutlinedTextField(
                     value = name,
                     onValueChange = { name = it.take(32) },
@@ -291,10 +305,30 @@ fun UseInvitationScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
     }
 }
 
+/** The profile of a handle, as its link shows it before a request. */
+@Composable
+private fun ProfilePreview(preview: uniffi.umbra_ffi.ContactPreview) {
+    Column(Modifier.fillMaxWidth()) {
+        HorizontalDivider(color = Palette.Divider)
+        Spacer(Modifier.height(12.dp))
+        Text(preview.name.ifBlank { preview.handle }, style = MaterialTheme.typography.titleMedium)
+        if (preview.name.isNotBlank()) {
+            Text(preview.handle, style = MaterialTheme.typography.bodySmall, color = Palette.TextSecondary)
+        }
+        if (preview.welcome.isNotBlank()) {
+            Spacer(Modifier.height(8.dp))
+            Text(preview.welcome, style = MaterialTheme.typography.bodyMedium)
+        }
+        Spacer(Modifier.height(12.dp))
+        HorizontalDivider(color = Palette.Divider)
+    }
+}
+
 /** Whether a text names a reusable link, a Public Address, or a handle. */
 fun isRequestTarget(text: String): Boolean {
     val trimmed = text.trim()
     return trimmed.startsWith("umbra://p/") || trimmed.startsWith("umbra:pub:") ||
+        trimmed.startsWith("umbra://h/") ||
         (trimmed.startsWith("@") && trimmed.contains("#"))
 }
 

@@ -100,6 +100,7 @@ labels! {
     ROW_ID = "umbra/v1/row-id";
     ROTATE_JITTER = "umbra/v1/rotate-jitter";
     BACKUP_SALT = "umbra/v1/backup-salt";
+    HANDLE_BLOB = "umbra/v1/handle-blob";
 }
 
 /// `umbra/v1/handle-key`

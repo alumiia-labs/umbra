@@ -39,6 +39,9 @@ pub enum Purpose {
         /// The version of the entry the writer sends.
         version_new: u32,
     },
+    /// A write of the profile blob of the label, which the answer binds
+    /// (`DIS-175`).
+    Blob,
 }
 
 impl Purpose {
@@ -46,13 +49,20 @@ impl Purpose {
         match self {
             Purpose::Renew { .. } => labels::HANDLE_RENEW,
             Purpose::Write { .. } => labels::HANDLE_WRITE,
+            Purpose::Blob => labels::HANDLE_BLOB,
         }
+    }
+
+    /// Whether the answer binds the bytes that it authorizes.
+    const fn binds(self) -> bool {
+        matches!(self, Purpose::Write { .. } | Purpose::Blob)
     }
 
     fn info_tail(self) -> Vec<u8> {
         match self {
             Purpose::Renew { lease_epoch } => lease_epoch.to_be_bytes().to_vec(),
             Purpose::Write { version_new } => version_new.to_be_bytes().to_vec(),
+            Purpose::Blob => Vec::new(),
         }
     }
 }
@@ -134,7 +144,7 @@ impl Issued {
     /// write answer carries the entry it authorizes, and the entry's
     /// `version` must be `version_new` (`DIS-099`).
     pub fn verify(self, answer: &[u8], entry_new: Option<&[u8]>) -> Result<(), Error> {
-        if entry_new.is_some() != matches!(self.purpose, Purpose::Write { .. }) {
+        if entry_new.is_some() != self.purpose.binds() {
             return Err(Error::Malformed);
         }
         let expected = answer_of(&self.expected_k, &self.nonce, entry_new);
@@ -158,7 +168,7 @@ pub fn answer(
     if challenge.len() != CHALLENGE_LEN {
         return Err(Error::Malformed);
     }
-    if entry_new.is_some() != matches!(purpose, Purpose::Write { .. }) {
+    if entry_new.is_some() != purpose.binds() {
         return Err(Error::Malformed);
     }
     let ct = Ciphertext::from_bytes(challenge.get(..CIPHERTEXT_LEN).ok_or(Error::Malformed)?)?;

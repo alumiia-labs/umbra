@@ -169,11 +169,35 @@ pub fn evaluate_finish(
 }
 
 /// A lookup response: the head and the proof.
-pub fn parse_lookup(body: &[u8]) -> Result<(Vec<u8>, LookupProof), Error> {
+/// A parsed lookup: the head bytes, the sealed profile blob, and the proof.
+pub type Looked = (Vec<u8>, Option<Vec<u8>>, LookupProof);
+
+/// A lookup response: the head, the sealed profile blob of the label when
+/// it holds one (`DIS-175`), and the proof.
+pub fn parse_lookup(body: &[u8]) -> Result<Looked, Error> {
     let mut r = Reader::new(body);
     let head = take_var16(&mut r)?.to_vec();
+    let blob = take_var16(&mut r)?;
+    let blob = (!blob.is_empty()).then(|| blob.to_vec());
     let proof = LookupProof::parse(r.rest())?;
-    Ok((head, proof))
+    Ok((head, blob, proof))
+}
+
+/// The body of a blob challenge (`DIS-175`).
+pub fn blob_challenge_body(label_input: &[u8]) -> Result<Vec<u8>, Error> {
+    let mut body = vec![0x03];
+    put_var16(&mut body, label_input)?;
+    Ok(body)
+}
+
+/// The body of a blob write: the label, the answer, and the sealed blob,
+/// or no blob to drop it.
+pub fn blob_body(label_input: &[u8], answer: &[u8; 32], blob: &[u8]) -> Result<Vec<u8>, Error> {
+    let mut body = Vec::new();
+    put_var16(&mut body, label_input)?;
+    body.extend_from_slice(answer);
+    put_var16(&mut body, blob)?;
+    Ok(body)
 }
 
 /// A head response: the head and the consistency proof.

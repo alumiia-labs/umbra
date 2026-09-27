@@ -1526,6 +1526,7 @@ names the object type and its lifetime:
 "umbra/v1/row-id"
 "umbra/v1/rotate-jitter"
 "umbra/v1/backup-salt"
+"umbra/v1/handle-blob"
 ```
 
 **The list above is closed.** **[CRY-028]** An implementation MUST NOT use a label that this
@@ -1537,6 +1538,11 @@ primitive register in the same manner.
 > handle-addressed chunks. The offer and the hello each need a slot of their
 > own, the transcript and the code each need a hash of their own, and the
 > provision needs a slot and a seal key that only the two devices derive.
+
+> *The cause of `"umbra/v1/handle-blob"`.* Part 9 rule `DIS-175` writes the
+> profile blob under a challenge of its own. Its answer binds the blob, as the
+> write answer binds the entry, and a label of its own keeps a blob answer from
+> passing as a write answer or a renewal answer.
 
 > *The cause of the two blob labels.* Part 4 §4.3.1 derives the key of the
 > invitation blob from a link fragment. Part 9 §9.3.1 derives the key of the

@@ -52,6 +52,10 @@
                 <data
                     android:scheme="umbra"
                     android:host="p" />
+                <!-- Part 9 §9.3.1: the link of a handle with its profile. -->
+                <data
+                    android:scheme="umbra"
+                    android:host="h" />
             </intent-filter>
             <!-- A link that another app shares as text. -->
             <intent-filter>
