@@ -34,6 +34,9 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -190,6 +193,16 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
             val made = VoiceRecording(context)
             if (made.start()) recording = made else notice = "The microphone did not start."
         }
+    }
+    // A recording ends when the app leaves the screen, because the platform
+    // gives it no sound in the background.
+    val owner = LocalLifecycleOwner.current
+    DisposableEffect(owner) {
+        val watcher = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) recording?.end()
+        }
+        owner.lifecycle.addObserver(watcher)
+        onDispose { owner.lifecycle.removeObserver(watcher) }
     }
     val askMicrophone = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { allowed ->
         if (allowed) startRecording() else notice = "UMBRA has no access to the microphone."

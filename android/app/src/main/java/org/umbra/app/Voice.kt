@@ -1,5 +1,6 @@
 package org.umbra.app
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.media.AudioAttributes
 import android.media.MediaPlayer
@@ -54,8 +55,10 @@ const val VOICE_MAX_SECONDS = 900
  * (`IMP-160`). The encode is new, and it carries no metadata field of a file
  * (`ATT-155`).
  */
-@RequiresApi(Build.VERSION_CODES.R)
-class VoiceRecording(context: Context) {
+class VoiceRecording @RequiresApi(Build.VERSION_CODES.R) constructor(context: Context) {
+    // Only a device with `memfd_create` makes a recording, thus each other
+    // member runs there too.
+    @SuppressLint("NewApi")
     val memory: java.io.FileDescriptor = Os.memfd_create("umbra-voice", 0)
     private val recorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
         MediaRecorder(context)
@@ -69,6 +72,13 @@ class VoiceRecording(context: Context) {
     /** Whether the recorder stopped itself at `VOICE_MAX_SECONDS` (`ATT-071`). */
     var isAtLimit by mutableStateOf(false)
         private set
+
+    /** Whether the recorder ended, and the recording waits for a send or a discard. */
+    var isEnded by mutableStateOf(false)
+        private set
+
+    /** Whether the recorder closed its file, thus the file holds its samples. */
+    private var isWhole = false
 
     /** Starts the recording, or releases all of it and gives false. */
     fun start(): Boolean = try {
@@ -99,12 +109,14 @@ class VoiceRecording(context: Context) {
     fun elapsedMs(): Long = (if (endedAt > 0) endedAt else SystemClock.elapsedRealtime()) - startedAt
 
     /**
-     * Ends the recording. The result is its length in seconds, or -1 for a
-     * recording that holds no sample. The memory file stays for the send.
+     * Ends the recording, and keeps it for a send or a discard. A platform
+     * gives an app in the background no sound of the microphone, thus the
+     * view ends a recording when the app leaves the screen.
      */
-    fun finish(): Int {
+    fun end() {
+        if (isEnded) return
         if (endedAt == 0L) endedAt = SystemClock.elapsedRealtime()
-        val isWhole = try {
+        isWhole = try {
             recorder.stop()
             true
         } catch (stopped: RuntimeException) {
@@ -113,21 +125,34 @@ class VoiceRecording(context: Context) {
             isAtLimit
         }
         recorder.release()
+        isEnded = true
+    }
+
+    /**
+     * Ends the recording. The result is its length in seconds, or -1 for a
+     * recording that holds no sample. The memory file stays for the send.
+     */
+    fun finish(): Int {
+        end()
         if (!isWhole) {
             closeMemory()
             return -1
         }
-        return ((endedAt - startedAt + 500) / 1_000).toInt().coerceIn(1, VOICE_MAX_SECONDS)
+        // The bubble shows the time that the bar showed.
+        return ((endedAt - startedAt) / 1_000).toInt().coerceIn(1, VOICE_MAX_SECONDS)
     }
 
     /** Ends the recording and drops it. */
     fun discard() {
-        try {
-            recorder.stop()
-        } catch (stopped: RuntimeException) {
-            // A recorder that did not start has nothing to stop.
+        if (!isEnded) {
+            try {
+                recorder.stop()
+            } catch (stopped: RuntimeException) {
+                // A recorder that did not start has nothing to stop.
+            }
+            recorder.release()
+            isEnded = true
         }
-        recorder.release()
         closeMemory()
     }
 
@@ -352,7 +377,8 @@ fun RecordingBar(recording: VoiceRecording, onDiscard: () -> Unit, modifier: Mod
                 .press(role = Role.Button, label = "Discard the recording", onClick = onDiscard),
             contentAlignment = Alignment.Center,
         ) { FaIcon("trash-can", label = "Discard the recording", size = 18.dp, tint = Palette.TextSecondary) }
-        Box(Modifier.size(8.dp).background(Palette.Error, CircleShape))
+        val isRecording = !recording.isEnded && !recording.isAtLimit
+        Box(Modifier.size(8.dp).background(if (isRecording) Palette.Error else Palette.TextSecondary, CircleShape))
         Spacer(Modifier.width(10.dp))
         Text(
             if (recording.isAtLimit) "${Files.duration(elapsed)} · Limit" else Files.duration(elapsed),
