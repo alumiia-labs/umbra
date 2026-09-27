@@ -37,6 +37,9 @@ pub struct Label {
     pub tombstoned_at: Option<u64>,
     /// The lease epoch the directory issued last.
     pub lease_epoch: u64,
+    /// The end that the holder gave the label at its registration, which
+    /// no renewal and no write moves (`DIS-172`), or `None`.
+    pub ends_at: Option<u64>,
 }
 
 /// What a publication needs from the writer.
@@ -61,7 +64,22 @@ impl Label {
             lease_until: Some(now.saturating_add(HANDLE_LEASE)),
             tombstoned_at: None,
             lease_epoch: 0,
+            ends_at: None,
         }
+    }
+
+    /// Gives a live label the end of its registration (`DIS-172`): its
+    /// lease stops there, and the label then takes the tombstone of a
+    /// lapsed lease.
+    pub fn end_at(&mut self, ends_at: u64) {
+        self.ends_at = Some(ends_at);
+        self.lease_until = self.lease_until.map(|until| until.min(ends_at));
+    }
+
+    /// The end of a lease that starts at `now`.
+    fn lease_end(&self, now: u64) -> u64 {
+        let full = now.saturating_add(HANDLE_LEASE);
+        self.ends_at.map_or(full, |end| full.min(end))
     }
 
     /// Whether the label is tombstoned.
@@ -105,7 +123,7 @@ impl Label {
         }
         self.version = version_new;
         self.hk_pub = hk_pub;
-        self.lease_until = Some(now.saturating_add(HANDLE_LEASE));
+        self.lease_until = Some(self.lease_end(now));
         self.tombstoned_at = None;
         // A lease epoch issued before this version was encapsulated to the
         // key of an earlier version, thus it renews nothing now.
@@ -125,7 +143,7 @@ impl Label {
         if self.is_tombstoned() || lease_epoch != self.lease_epoch {
             return Err(Error::Stale);
         }
-        self.lease_until = Some(now.saturating_add(HANDLE_LEASE));
+        self.lease_until = Some(self.lease_end(now));
         Ok(())
     }
 
@@ -140,6 +158,7 @@ impl Label {
         self.lease_until = None;
         self.tombstoned_at = Some(now);
         self.lease_epoch = 0;
+        self.ends_at = None;
         Ok(())
     }
 
@@ -152,6 +171,7 @@ impl Label {
         self.version = self.version.saturating_add(1);
         self.lease_until = None;
         self.tombstoned_at = Some(now);
+        self.ends_at = None;
         Some(self.version)
     }
 }

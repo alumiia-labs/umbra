@@ -24,6 +24,7 @@ use umbra_core::{
         handle::{address_label_input, username_case_mapped, Handle as DirHandle},
         head::{AcceptedHead, HeadState, LogKeySet, SignedTreeHead},
         translog::LookupProof,
+        HANDLE_LEASE, LEASE_MIN,
     },
     identity::address,
 };
@@ -277,11 +278,12 @@ impl DirectoryLink {
         dirclient::token_bytes(token).map_err(|_| FfiError::Malformed)
     }
 
-    /// Registers the first version of a label under a token (`DIS-101`).
-    pub fn register(&self, input: &[u8], entry: &[u8]) -> Result<(), FfiError> {
+    /// Registers the first version of a label under a token (`DIS-101`),
+    /// with the lease of a timed link (`DIS-172`).
+    pub fn register(&self, input: &[u8], entry: &[u8], lease: Option<u32>) -> Result<(), FfiError> {
         let token = self.token()?;
-        let body =
-            dirclient::register_body(&token, input, entry).map_err(|_| FfiError::Malformed)?;
+        let body = dirclient::register_body(&token, input, entry, lease)
+            .map_err(|_| FfiError::Malformed)?;
         self.send(Kind::Register, &body).map(|_| ())
     }
 
@@ -474,12 +476,20 @@ impl Handle {
         entry_of: impl FnOnce(&KeyPair, QueueAddress) -> Result<Vec<u8>, FfiError>,
         expires_at: u64,
     ) -> Result<Published, FfiError> {
+        // DIS-172: the directory ends a timed link at its end, also while
+        // this device is off.
+        let lease = (expires_at != 0).then(|| {
+            let seconds = expires_at
+                .saturating_sub(unix_now())
+                .clamp(LEASE_MIN, HANDLE_LEASE);
+            u32::try_from(seconds).unwrap_or(u32::MAX)
+        });
         let (queue, rendezvous) = self.new_rendezvous()?;
         let registered = (|| {
             let key = locked(&self.inner).client.entry_key(kind, index, 0)?;
             let address = QueueAddress::parse(&rendezvous).map_err(|_| FfiError::Malformed)?;
             let entry = entry_of(&key, address)?;
-            link.register(&label, &entry)
+            link.register(&label, &entry, lease)
         })();
         if let Err(error) = registered {
             self.end_rendezvous(queue);
@@ -712,7 +722,9 @@ impl Handle {
                 let _ = self.rotate_queue(&link, &entry, now);
                 continue;
             }
-            if now.saturating_sub(entry.renewed_at) < RENEW_EVERY {
+            // A timed link ends inside its lease, and no renewal moves that
+            // end (DIS-172).
+            if entry.expires_at != 0 || now.saturating_sub(entry.renewed_at) < RENEW_EVERY {
                 continue;
             }
             let key =

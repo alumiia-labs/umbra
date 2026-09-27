@@ -25,6 +25,9 @@ pub mod translog;
 pub const GOSSIP_INTERVAL: u64 = 6 * 3_600;
 /// `HANDLE_LEASE`, in seconds.
 pub const HANDLE_LEASE: u64 = 180 * 86_400;
+/// `LEASE_MIN`, in seconds: the shortest lease that a registration names
+/// (`DIS-173`).
+pub const LEASE_MIN: u64 = 3_600;
 /// `TREE_HEAD_FRESHNESS`, in seconds, from the `timestamp` of the head.
 pub const TREE_HEAD_FRESHNESS: u64 = 7 * 86_400;
 /// `TREE_HEAD_RETAIN`, in seconds, from the acceptance of the head.

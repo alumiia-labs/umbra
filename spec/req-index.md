@@ -72,14 +72,14 @@ each column when a crate implements the requirement and a test covers it.
 | `WIR` | 394 | 85 | 0 | 0 | 7 | **486** |
 | `DEV` | 197 | 90 | 0 | 0 | 7 | **294** |
 | `NTF` | 74 | 28 | 0 | 0 | 3 | **105** |
-| `DIS` | 118 | 33 | 0 | 0 | 2 | **153** |
+| `DIS` | 120 | 33 | 0 | 0 | 3 | **156** |
 | `REL` | 124 | 32 | 1 | 0 | 2 | **159** |
 | `GRP` | 230 | 65 | 0 | 0 | 6 | **301** |
 | `ATT` | 142 | 45 | 2 | 0 | 2 | **191** |
 | `ABU` | 68 | 30 | 1 | 0 | 0 | **99** |
 | `IMP` | 119 | 41 | 0 | 0 | 2 | **162** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 1989 | 619 | 7 | 0 | 51 | **2666** |
+| **All** | 1991 | 619 | 7 | 0 | 52 | **2669** |
 
 ## SCP — Scope and Conventions
 
@@ -1876,6 +1876,9 @@ Source: `spec/09-discovery.md`
 | `DIS-169` | §9.10 | MUST | A directory | A directory MUST refuse a registration whose entry does not name the label input: the handle of a `DirectoryEntry`, or the `address` of an `AddressEntry` whose `check` passes. |  |  |
 | `DIS-170` | §9.10 | MUST | The version of a registered entry | The version of a registered entry MUST be 0, and the version of a written entry MUST be the version of the label plus one. |  |  |
 | `DIS-171` | §9.10 | MAY | A holder | A holder MAY write the tombstone form of §9.3 under the challenge of §9.9.3 to retire its entry before its lease ends. |  |  |
+| `DIS-172` | §9.10 | MAY | A registration | A registration MAY end with `lease`, in seconds. |  |  |
+| `DIS-173` | §9.10 | MUST | A directory | A directory MUST refuse a `lease` below `LEASE_MIN` or above `HANDLE_LEASE` as malformed. |  |  |
+| `DIS-174` | §9.10 | MUST | A holder | A holder MUST drop each hello that reaches the rendezvous queue of a timed entry after its end, and it MUST end that queue at its next upkeep. |  |  |
 
 ## REL — Relay Directory
 

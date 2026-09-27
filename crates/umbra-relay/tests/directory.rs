@@ -191,7 +191,7 @@ async fn a_token_registers_a_handle_that_a_lookup_reads_under_a_signed_head() {
     let mut encoded = vec![0u8; DIRECTORY_ENTRY_MAX];
     let used = entry.encode(&mut encoded).unwrap();
     encoded.truncate(used);
-    let register = dirclient::register_body(&token, input, &encoded).unwrap();
+    let register = dirclient::register_body(&token, input, &encoded, None).unwrap();
     client.send(Kind::Register, &register).await.unwrap();
 
     // The search key under a proof of work, and the lookup at the next

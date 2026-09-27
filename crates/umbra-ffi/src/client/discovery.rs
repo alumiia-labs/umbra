@@ -416,6 +416,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }) else {
             return Ok(None);
         };
+        // DIS-174: a timed link takes no hello after its end, although its
+        // queue waits for the upkeep of this device.
+        if entry.expires_at != 0 && now >= entry.expires_at {
+            return Ok(None);
+        }
         let key = self.entry_key(entry.kind, entry.index, entry.rotation)?;
         let Ok(plain) = hello::open(&key, envelope) else {
             return Ok(None);

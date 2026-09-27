@@ -3509,6 +3509,14 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
             Err(other) => panic!("{other:?}"),
         }
     }
+
+    // DIS-172: a timed link registers with its lease, which the directory
+    // keeps, and it takes requests before its end.
+    let timed = alice.create_public_link(3_600).unwrap();
+    assert!(timed.expires_at > 0);
+    std::thread::sleep(Duration::from_secs(6));
+    request_until_listed(&carol, &timed.link);
+    wait_for_requests(&alice, 3);
     for handle in [&alice, &bob, &carol] {
         handle.disconnect();
     }

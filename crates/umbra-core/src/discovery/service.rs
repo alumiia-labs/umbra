@@ -37,6 +37,7 @@ use super::{
     head::{LogKeySet, SignedTreeHead, SignerSig},
     lifecycle::{Label, Needs},
     translog::{Auditor, LogOperator},
+    HANDLE_LEASE, LEASE_MIN,
 };
 use crate::{
     abuse::{
@@ -119,6 +120,7 @@ impl LabelRecord {
         out.extend_from_slice(&self.label.lease_until.unwrap_or(0).to_be_bytes());
         out.extend_from_slice(&self.label.tombstoned_at.unwrap_or(u64::MAX).to_be_bytes());
         out.extend_from_slice(&self.label.lease_epoch.to_be_bytes());
+        out.extend_from_slice(&self.label.ends_at.unwrap_or(0).to_be_bytes());
         out
     }
 
@@ -130,6 +132,12 @@ impl LabelRecord {
         let lease_until = u64::from_be_bytes(r.array()?);
         let tombstoned_at = u64::from_be_bytes(r.array()?);
         let lease_epoch = u64::from_be_bytes(r.array()?);
+        // A record of an earlier build ends here.
+        let ends_at = if r.remaining() == 0 {
+            0
+        } else {
+            u64::from_be_bytes(r.array()?)
+        };
         r.finish()?;
         Ok(LabelRecord {
             input,
@@ -139,6 +147,7 @@ impl LabelRecord {
                 lease_until: (tombstoned_at == u64::MAX).then_some(lease_until),
                 tombstoned_at: (tombstoned_at != u64::MAX).then_some(tombstoned_at),
                 lease_epoch,
+                ends_at: (ends_at != 0).then_some(ends_at),
             },
         })
     }
@@ -617,6 +626,16 @@ impl Directory {
         let mut r = Reader::new(body.get(FIRST_PARTY_LEN..).ok_or(Status::Malformed)?);
         let input = take_var16(&mut r).map_err(|_| Status::Malformed)?.to_vec();
         let entry = take_var16(&mut r).map_err(|_| Status::Malformed)?.to_vec();
+        // DIS-172: a registration can end before a full lease.
+        let lease = if r.remaining() == 0 {
+            None
+        } else {
+            let seconds = u64::from(r.u32().map_err(|_| Status::Malformed)?);
+            if !(LEASE_MIN..=HANDLE_LEASE).contains(&seconds) {
+                return Err(Status::Malformed);
+            }
+            Some(seconds)
+        };
         r.finish().map_err(|_| Status::Malformed)?;
         let search_key = self.voprf.evaluate_direct(&input).to_vec();
         let held = self.labels.get(&search_key).cloned();
@@ -645,7 +664,7 @@ impl Directory {
         {
             return Err(Status::Stale);
         }
-        let label = match held {
+        let mut label = match held {
             None => Label::register(key, now),
             Some(mut record) => {
                 record
@@ -655,6 +674,9 @@ impl Directory {
                 record.label
             }
         };
+        if let Some(seconds) = lease {
+            label.end_at(now.saturating_add(seconds));
+        }
         self.keep_label(&search_key, LabelRecord { input, label });
         Ok(Vec::new())
     }
@@ -1026,7 +1048,7 @@ mod tests {
 
         let spent = tokens(&mut dir, epoch_number(T0), 2, T0, &mut rng);
         let register =
-            dirclient::register_body(&spent[0], input, &handle_entry(input, &hk, 0)).unwrap();
+            dirclient::register_body(&spent[0], input, &handle_entry(input, &hk, 0), None).unwrap();
         call(&mut dir, Kind::Register, &register, T0 + 1, &mut rng).unwrap();
         // DIS-170: a held label does not register again, and a token
         // spends once.
@@ -1036,14 +1058,14 @@ mod tests {
         );
         let other = b"@bob#99";
         let again =
-            dirclient::register_body(&spent[0], other, &handle_entry(other, &hk, 0)).unwrap();
+            dirclient::register_body(&spent[0], other, &handle_entry(other, &hk, 0), None).unwrap();
         assert_eq!(
             call(&mut dir, Kind::Register, &again, T0 + 2, &mut rng),
             Err(DirError::Status(Status::Refused))
         );
         // DIS-169: the entry names its label.
         let wrong =
-            dirclient::register_body(&spent[1], other, &handle_entry(input, &hk, 0)).unwrap();
+            dirclient::register_body(&spent[1], other, &handle_entry(input, &hk, 0), None).unwrap();
         assert_eq!(
             call(&mut dir, Kind::Register, &wrong, T0 + 2, &mut rng),
             Err(DirError::Status(Status::Refused))
@@ -1131,7 +1153,7 @@ mod tests {
             version: 0,
         });
         let spent = tokens(&mut dir, epoch_number(T0), 2, T0, &mut rng);
-        let register = dirclient::register_body(&spent[0], &input, &live).unwrap();
+        let register = dirclient::register_body(&spent[0], &input, &live, None).unwrap();
         call(&mut dir, Kind::Register, &register, T0, &mut rng).unwrap();
 
         // DIS-171: the holder writes the tombstone.
@@ -1171,7 +1193,8 @@ mod tests {
         let hk = root.handle_key(0, 0);
         let handle = b"@carol#42";
         let register =
-            dirclient::register_body(&spent[1], handle, &handle_entry(handle, &hk, 0)).unwrap();
+            dirclient::register_body(&spent[1], handle, &handle_entry(handle, &hk, 0), None)
+                .unwrap();
         call(&mut dir, Kind::Register, &register, now, &mut rng).unwrap();
         let lapse = now + HANDLE_LEASE + DIRECTORY_EPOCH;
         dir.tick(lapse, &mut rng).unwrap();
@@ -1183,6 +1206,61 @@ mod tests {
                 .unwrap();
         assert!(entry.is_tombstone());
         assert_eq!(entry.version, 1);
+    }
+
+    #[test]
+    fn a_timed_address_ends_at_the_directory_with_no_holder_online() {
+        let mut rng = Rng(9);
+        let (mut dir, keyset) = directory();
+        dir.tick(T0, &mut rng).unwrap();
+        let root = RootIdentity::new(Secret::new([9; 32]));
+        let key = root.public_address_key(5);
+        let pk = key.public().to_bytes();
+        let address = address_of(&pk);
+        let input = address_label_input(&address);
+        let mut live = vec![0u8; ADDRESS_ENTRY_LEN];
+        AddressEntry {
+            address,
+            address_pk: pk,
+            rendezvous: Some(queue(6)),
+            version: 0,
+        }
+        .encode(&mut live)
+        .unwrap();
+        let spent = tokens(&mut dir, epoch_number(T0), 2, T0, &mut rng);
+
+        // DIS-173: a lease below LEASE_MIN or above HANDLE_LEASE is no
+        // lease, and the token stays unspent.
+        let short = dirclient::register_body(&spent[0], &input, &live, Some(60)).unwrap();
+        assert_eq!(
+            call(&mut dir, Kind::Register, &short, T0, &mut rng),
+            Err(DirError::Status(Status::Malformed))
+        );
+        let register = dirclient::register_body(&spent[0], &input, &live, Some(3_600)).unwrap();
+        call(&mut dir, Kind::Register, &register, T0, &mut rng).unwrap();
+        let now = T0 + DIRECTORY_EPOCH;
+        dir.tick(now, &mut rng).unwrap();
+        assert_eq!(
+            read(&mut dir, &keyset, &input, now, &mut rng).unwrap(),
+            live
+        );
+
+        // DIS-172: a renewal keeps the end of the registration.
+        let (bytes, purpose) = challenge(&mut dir, true, &input, now, &mut rng).unwrap();
+        let ans = answer(purpose, &key, &address, &bytes, None).unwrap();
+        let renew = dirclient::renew_body(&input, &ans).unwrap();
+        call(&mut dir, Kind::Renew, &renew, now + 1, &mut rng).unwrap();
+
+        // The lease lapses at its end, and the directory writes the
+        // tombstone with no request of the holder.
+        let lapse = T0 + 3_600 + DIRECTORY_EPOCH;
+        dir.tick(lapse, &mut rng).unwrap();
+        let lapse = lapse + DIRECTORY_EPOCH;
+        dir.tick(lapse, &mut rng).unwrap();
+        let shown = read(&mut dir, &keyset, &input, lapse, &mut rng).unwrap();
+        let entry = AddressEntry::parse(&shown).unwrap();
+        assert!(entry.rendezvous.is_none());
+        assert_eq!(entry.address_pk, [0; 1_216]);
     }
 
     #[test]

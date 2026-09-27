@@ -979,7 +979,7 @@ DirResponse {                     // padded to the smallest DIR_RESPONSE_SIZES v
 | `0x01` Evaluate | `admission Admission`, `blinded [32]u8` | `element [32]u8`, `proof [64]u8` |
 | `0x02` Lookup | `search_key [64]u8` | `head_len u16`, the newest `SignedTreeHead`, the `LookupProof` |
 | `0x03` Head | `from_size u64`, 0 for none | `head_len u16`, the newest `SignedTreeHead`, `count u8`, `count` hashes of the consistency proof from `from_size` |
-| `0x04` Register | `token [162]u8`, `label_len u16`, the label input, `entry_len u16`, the entry | empty |
+| `0x04` Register | `token [162]u8`, `label_len u16`, the label input, `entry_len u16`, the entry, and optionally `lease u32` | empty |
 | `0x05` Challenge | `purpose u8` (0x01 renew, 0x02 write), `label_len u16`, the label input | the 1 136 bytes of §9.9.1 or §9.9.3, then `lease_epoch u64` for a renewal |
 | `0x06` Write | `label_len u16`, the label input, `answer [32]u8`, `entry_len u16`, the entry | empty |
 | `0x07` Renew | `label_len u16`, the label input, `answer [32]u8` | empty |
@@ -1012,9 +1012,24 @@ directory computes the search key from it under its own key.
   registered entry MUST be 0, and the version of a written entry MUST be the
   version of the label plus one.
 - **[DIS-171]** A holder MAY write the tombstone form of §9.3 under the
-  challenge of §9.9.3 to retire its entry before its lease ends. A reusable
-  link of a limited period is an address that the holder retires so.
+  challenge of §9.9.3 to retire its entry before its lease ends.
   `HANDLE_RESERVE` holds for such a tombstone as for a lapsed lease.
+- **[DIS-172]** A registration MAY end with `lease`, in seconds. The
+  directory MUST then end the lease of the label at the time of the
+  registration plus `lease`, and no renewal and no write MUST move that end.
+  The label then takes the tombstone of a lapsed lease under `DIS-073`. A
+  reusable link of a limited period is an address that registers so, thus it
+  ends while its holder is off. **[DIS-173]** A directory MUST refuse a
+  `lease` below `LEASE_MIN` or above `HANDLE_LEASE` as malformed.
+  **[DIS-174]** A holder MUST drop each hello that reaches the rendezvous
+  queue of a timed entry after its end, and it MUST end that queue at its
+  next upkeep.
+
+> *Cause.* An earlier draft ended a timed link by the tombstone write of its
+> holder alone. A phone that is off at the end left the link open, possibly
+> for days. The directory already writes the tombstone of a lapsed lease, and
+> a lease with an end moves that work to it. A requester that read the entry
+> before its end still holds its queue, thus the holder drops such a hello.
 
 > *Cause.* Part 1 §1.8 listed the lookup request, the registration request,
 > and the carrier of the challenges as gaps. The shape follows the Notification
@@ -1029,6 +1044,7 @@ directory computes the search key from it under its own key.
 | --- | --- |
 | `GOSSIP_INTERVAL` | 6 h for each `source` (§9.5.3) |
 | `HANDLE_LEASE` | 180 days, renewed under §9.9.1 |
+| `LEASE_MIN` | 1 hour: the shortest `lease` of a registration (`DIS-173`) |
 | `TREE_HEAD_FRESHNESS` | 7 days, measured by the client from the `timestamp` of the head (§9.5.2) |
 | `TREE_HEAD_RETAIN` | 14 days, measured by the client from the acceptance of the head (§9.5.2) |
 | `HANDLE_RESERVE` | 180 days, measured by the directory from the tombstone, equal to `BACKUP_TTL` of Part 4 §4.8 (§9.9.2) |

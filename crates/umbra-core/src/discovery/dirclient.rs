@@ -190,10 +190,19 @@ pub fn parse_head(body: &[u8]) -> Result<(Vec<u8>, Vec<[u8; 32]>), Error> {
 }
 
 /// The body of a registration.
-pub fn register_body(token: &[u8], label_input: &[u8], entry: &[u8]) -> Result<Vec<u8>, Error> {
+pub fn register_body(
+    token: &[u8],
+    label_input: &[u8],
+    entry: &[u8],
+    lease: Option<u32>,
+) -> Result<Vec<u8>, Error> {
     let mut body = token.to_vec();
     put_var16(&mut body, label_input)?;
     put_var16(&mut body, entry)?;
+    // DIS-172: the end of a timed link, which the directory keeps.
+    if let Some(seconds) = lease {
+        body.extend_from_slice(&seconds.to_be_bytes());
+    }
     Ok(body)
 }
 
