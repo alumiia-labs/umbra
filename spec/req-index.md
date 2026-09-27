@@ -69,7 +69,7 @@ each column when a crate implements the requirement and a test covers it.
 | `NET` | 239 | 85 | 1 | 0 | 8 | **333** |
 | `IDN` | 129 | 44 | 1 | 0 | 5 | **179** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
-| `WIR` | 394 | 85 | 0 | 0 | 7 | **486** |
+| `WIR` | 395 | 85 | 0 | 0 | 7 | **487** |
 | `DEV` | 197 | 90 | 0 | 0 | 7 | **294** |
 | `NTF` | 74 | 28 | 0 | 0 | 3 | **105** |
 | `DIS` | 120 | 33 | 0 | 0 | 3 | **156** |
@@ -79,7 +79,7 @@ each column when a crate implements the requirement and a test covers it.
 | `ABU` | 68 | 30 | 1 | 0 | 0 | **99** |
 | `IMP` | 119 | 41 | 0 | 0 | 2 | **162** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 1992 | 619 | 7 | 0 | 53 | **2671** |
+| **All** | 1993 | 619 | 7 | 0 | 53 | **2672** |
 
 ## SCP — Scope and Conventions
 
@@ -1300,9 +1300,10 @@ Source: `spec/06-wire-format.md`
 | `WIR-528` | §6.4.2 | MUST | A receiver | A receiver MUST take the content of a renewal record as a bundle in the layout of Part 5 §5.4.1, and it MUST read it on the queue of a contact whose handshake is complete. |  |  |
 | `WIR-529` | §6.4 | MUST | (unstated) | A relay that sends its proof-of-work challenge to a carrier of the manifest (Part 13 `ABU-102`) MUST send it as the value of one `UMBRA_CHALLENGE` capsule, on a connection of §6.2.1 that it opens for that challenge. |  |  |
 | `WIR-531` | §6.6 | MAY | A sender | A sender MAY put the trailer after the descriptor. |  |  |
-| `WIR-532` | §6.6 | MUST | A parser | A parser MUST reject a body of kind `0x02` whose bytes after the descriptor are not one complete trailer. |  |  |
+| `WIR-532` | §6.6 | MUST | A parser | A parser MUST reject a body of kind `0x02` whose bytes after the descriptor are not one complete trailer, with or without its caption. |  |  |
 | `WIR-533` | §6.6 | MUST | A `preview` | A `preview` MUST be a JPEG of at most `PREVIEW_MAX` bytes that starts with `FF D8 FF` and ends with `FF D9`. |  |  |
 | `WIR-534` | §6.4.2 | MUST | A receiver | A receiver MUST read a hello record on a rendezvous queue of Part 9 §9.6 alone, and it MUST reject a hello record on each other queue. |  |  |
+| `WIR-535` | §6.6 | MUST | (unstated) | A `caption` is the text that the sender wrote with the file. |  |  |
 
 ## DEV — Device Sets
 

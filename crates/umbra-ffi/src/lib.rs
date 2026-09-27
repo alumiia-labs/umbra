@@ -3185,9 +3185,10 @@ mod tests {
         };
         let photo = zeroize::Zeroizing::new(vec![0x5A; 50_000]);
 
-        // The record of a file holds no text and answers no message.
+        // The record of a file answers no message, and its text is a
+        // caption (WIR-535).
         let mut both = alice.new_draft(conversation);
-        both.set_text(&units("a caption")).unwrap();
+        both.set_reply_to(Some(MsgRef([1; 16])));
         both.attach(photo.clone(), shape).unwrap();
         assert_eq!(
             alice.send_draft(both, 1_000_000, &mut rng),

@@ -433,16 +433,24 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             uploaded.descriptor.encode(&mut bytes)?;
             bytes
         })?;
+        let held = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
+        let stored = AppMessage::parse(held, Channel::Pairwise)?;
+        // WIR-535: the record held the caption alone until now.
+        let caption = match core::str::from_utf8(stored.body) {
+            Ok(text) if !text.is_empty() => Some(text),
+            Ok(_) => None,
+            Err(_) => return Err(Error::Integrity),
+        };
         let attachment = AttachmentBody {
             descriptor,
             name: extras.name.as_deref(),
             preview: extras.preview.as_deref(),
+            caption,
         };
         let mut body = Zeroizing::new(vec![0u8; attachment.len()]);
         attachment.encode(&mut body)?;
         let app = {
-            let held = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
-            let parsed = AppMessage::parse(held, Channel::Pairwise)?;
+            let parsed = &stored;
             let record = AppMessage {
                 kind: AppKind::Attachment,
                 msg_id: parsed.msg_id,

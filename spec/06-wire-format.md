@@ -1537,6 +1537,8 @@ AttachmentBody {
     name           [name_len]u8     //   after the descriptor; UTF-8, the name
     preview_len    u16              //   of the file with no path; a JPEG
     preview        [preview_len]u8  //   thumbnail of an image or a video
+    caption_len    u16              // optional: absent when the body ends
+    caption        [caption_len]u8  //   after the preview; UTF-8 text
 }
 ```
 
@@ -1544,7 +1546,7 @@ AttachmentBody {
 of zero carries no name, and a `preview_len` of zero carries no preview. A
 body that ends after the descriptor carries neither.
 **[WIR-532]** A parser MUST reject a body of kind `0x02` whose bytes after the
-descriptor are not one complete trailer. It MUST also reject a `name` that is
+descriptor are not one complete trailer, with or without its caption. It MUST also reject a `name` that is
 not valid UTF-8, a `name_len` above `FILE_NAME_MAX`, a `name` that holds a
 control character, `/`, or `\`, and a `name` of `.` or `..`.
 **[WIR-533]** A `preview` MUST be a JPEG of at most `PREVIEW_MAX` bytes that
@@ -1552,6 +1554,12 @@ starts with `FF D8 FF` and ends with `FF D9`. A parser MUST reject a body with
 another `preview`, and a body whose `mime_class` is not `0x01` or `0x02` and
 that carries a preview. Part 12 §12.7 gives `FILE_NAME_MAX` and
 `PREVIEW_MAX`.
+**[WIR-535]** A `caption` is the text that the sender wrote with the file. A
+sender MUST put it only after a complete name and preview part, which may be
+empty. A parser MUST reject a `caption_len` of zero, one above `CAPTION_MAX`,
+and a `caption` that is not valid UTF-8. A view shows the caption as the text
+of the message. A record of kind `0x02` answers no message, thus a draft with
+a file and an answer is malformed. Part 12 §12.7 gives `CAPTION_MAX`.
 
 > *Cause.* The descriptor omits the name and the preview, because each party
 > that sees a descriptor sees it (Part 12 §12.3). The body is inside the

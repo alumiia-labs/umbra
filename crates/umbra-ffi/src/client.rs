@@ -2404,11 +2404,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         rng.fill_bytes(&mut msg_id);
         let conversation = draft.conversation();
         if let Some(file) = draft.take_file() {
-            // The record of a file holds the descriptor alone.
-            if !draft.text().is_empty() || draft.reply_to().is_some() {
+            // The record of a file answers nothing, and its text is a
+            // caption of CAPTION_MAX at most (WIR-535).
+            if draft.reply_to().is_some() {
                 return Err(Error::Malformed);
             }
-            return self.send_file(conversation, msg_id, file, now_ms, rng);
+            if draft.text().len() > umbra_wire::descriptor::CAPTION_MAX {
+                return Err(Error::TooLong);
+            }
+            return self.send_file(conversation, msg_id, file, draft.text(), now_ms, rng);
         }
         // A reply is a rich record around the text. The wire carries the raw
         // `msg_id` of the target, which the row of the target holds.
@@ -2491,14 +2495,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         conversation: ConversationId,
         msg_id: [u8; 16],
         file: crate::draft::DraftFile,
+        caption: &[u8],
         now_ms: u64,
         rng: &mut R,
     ) -> Result<MsgRef, Error> {
+        // The stored record holds the caption alone until the upload ends,
+        // and the body with the descriptor takes its place then.
         let record = AppMessage {
             kind: AppKind::Attachment,
             msg_id,
             sent_at: now_ms,
-            body: &[],
+            body: caption,
         };
         let mut app = vec![0u8; record.len()];
         record.encode(&mut app)?;
@@ -2660,10 +2667,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         );
         let app = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
         let parsed = AppMessage::parse(app, Channel::Pairwise)?;
-        // The record of a file holds no text (Part 6 §6.6), and a view of it
-        // shows the file.
+        // The text of a file is its caption (WIR-535). A file of this
+        // device holds the caption alone until its upload ends.
         let bytes = match parsed.kind {
-            AppKind::Attachment => &[][..],
+            AppKind::Attachment => match umbra_wire::descriptor::AttachmentBody::parse(parsed.body)
+            {
+                Ok(body) => body.caption.map_or(&[][..], str::as_bytes),
+                Err(_) if info_of(&plain)?.outgoing => parsed.body,
+                Err(_) => &[][..],
+            },
             _ => text_of(&parsed)?,
         };
         let text = core::str::from_utf8(bytes).map_err(|_| Error::Integrity)?;

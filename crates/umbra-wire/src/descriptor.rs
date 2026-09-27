@@ -20,9 +20,12 @@ pub const CHUNK_SIZE: u32 = 32_650;
 pub const FILE_NAME_MAX: usize = 255;
 /// `PREVIEW_MAX`, in bytes: a JPEG thumbnail of low quality (`WIR-533`).
 pub const PREVIEW_MAX: usize = 6_144;
-/// The largest trailer of an `AttachmentBody`: two length fields, the
-/// longest name, and the largest preview.
-pub const TRAILER_MAX: usize = 1 + FILE_NAME_MAX + 2 + PREVIEW_MAX;
+/// `CAPTION_MAX`, in bytes of UTF-8: the text that a file carries
+/// (`WIR-535`).
+pub const CAPTION_MAX: usize = 1_024;
+/// The largest trailer of an `AttachmentBody`: three length fields, the
+/// longest name, the largest preview, and the longest caption.
+pub const TRAILER_MAX: usize = 1 + FILE_NAME_MAX + 2 + PREVIEW_MAX + 2 + CAPTION_MAX;
 /// The offset of `ref_count` in the fixed part.
 const REF_COUNT_AT: usize = 124;
 
@@ -188,8 +191,8 @@ impl FileDescriptor {
 }
 
 /// The body of an `AppMessage` of kind `0x02` (Part 6 §6.6): the
-/// descriptor, then an optional name and an optional preview
-/// (`WIR-531`, `WIR-533`).
+/// descriptor, then an optional name, an optional preview, and an optional
+/// caption (`WIR-531`, `WIR-533`, `WIR-535`).
 pub struct AttachmentBody<'a> {
     /// The descriptor.
     pub descriptor: FileDescriptor,
@@ -197,12 +200,21 @@ pub struct AttachmentBody<'a> {
     pub name: Option<&'a str>,
     /// A JPEG thumbnail of an image or of the first frame of a video.
     pub preview: Option<&'a [u8]>,
+    /// The text that the sender wrote with the file.
+    pub caption: Option<&'a str>,
+}
+
+/// Whether text is a caption that `WIR-535` takes: UTF-8 of 1 to
+/// `CAPTION_MAX` bytes.
+pub fn is_caption(text: &str) -> bool {
+    !text.is_empty() && text.len() <= CAPTION_MAX
 }
 
 impl<'a> AttachmentBody<'a> {
-    /// Reads a body. A body ends after the descriptor, or after one
-    /// `name_len`, its name, one `preview_len`, and its preview. Each other
-    /// form is malformed (`WIR-532`).
+    /// Reads a body. A body ends after the descriptor, after one
+    /// `name_len`, its name, one `preview_len`, and its preview, or after
+    /// those and one `caption_len` and its caption. Each other form is
+    /// malformed (`WIR-532`).
     pub fn parse(body: &'a [u8]) -> Result<Self, Error> {
         let count = body
             .get(REF_COUNT_AT..REF_COUNT_AT + 4)
@@ -221,6 +233,7 @@ impl<'a> AttachmentBody<'a> {
                 descriptor,
                 name: None,
                 preview: None,
+                caption: None,
             });
         }
         let mut r = Reader::new(rest);
@@ -228,6 +241,17 @@ impl<'a> AttachmentBody<'a> {
         let name = r.take(name_len)?;
         let preview_len = usize::from(r.u16()?);
         let preview = r.take(preview_len)?;
+        let caption = if r.remaining() == 0 {
+            None
+        } else {
+            let caption_len = usize::from(r.u16()?);
+            let caption =
+                core::str::from_utf8(r.take(caption_len)?).map_err(|_| Error::Malformed)?;
+            if !is_caption(caption) {
+                return Err(Error::Malformed);
+            }
+            Some(caption)
+        };
         r.finish()?;
         let name = if name.is_empty() {
             None
@@ -252,14 +276,19 @@ impl<'a> AttachmentBody<'a> {
             descriptor,
             name,
             preview,
+            caption,
         })
     }
 
     /// The encoded length.
     pub fn len(&self) -> usize {
-        let trailer = match (self.name, self.preview) {
-            (None, None) => 0,
-            (name, preview) => 3 + name.map_or(0, str::len) + preview.map_or(0, <[u8]>::len),
+        let trailer = match (self.name, self.preview, self.caption) {
+            (None, None, None) => 0,
+            (name, preview, caption) => {
+                3 + name.map_or(0, str::len)
+                    + preview.map_or(0, <[u8]>::len)
+                    + caption.map_or(0, |caption| 2 + caption.len())
+            }
         };
         self.descriptor.len().saturating_add(trailer)
     }
@@ -272,8 +301,11 @@ impl<'a> AttachmentBody<'a> {
     /// Writes the body.
     pub fn encode(&self, out: &mut [u8]) -> Result<usize, Error> {
         let at = self.descriptor.encode(out)?;
-        if self.name.is_none() && self.preview.is_none() {
+        if self.name.is_none() && self.preview.is_none() && self.caption.is_none() {
             return Ok(at);
+        }
+        if self.caption.is_some_and(|caption| !is_caption(caption)) {
+            return Err(Error::Malformed);
         }
         if self.name.is_some_and(|name| !is_file_name(name)) {
             return Err(Error::Malformed);
@@ -293,6 +325,10 @@ impl<'a> AttachmentBody<'a> {
         w.put(name)?;
         w.u16(u16::try_from(preview.len()).map_err(|_| Error::Malformed)?)?;
         w.put(preview)?;
+        if let Some(caption) = self.caption {
+            w.u16(u16::try_from(caption.len()).map_err(|_| Error::Malformed)?)?;
+            w.put(caption.as_bytes())?;
+        }
         Ok(at + w.position())
     }
 }
@@ -386,6 +422,7 @@ mod tests {
             descriptor: one_ref_descriptor(),
             name: Some("Report 2026.pdf"),
             preview: None,
+            caption: None,
         };
         let mut out = vec![0u8; named.len()];
         assert_eq!(named.encode(&mut out).unwrap(), 257 + 3 + 15);
@@ -413,6 +450,7 @@ mod tests {
             descriptor: photo,
             name: None,
             preview: Some(hash),
+            caption: None,
         };
         let mut out = vec![0u8; shown.len()];
         shown.encode(&mut out).unwrap();
@@ -424,9 +462,57 @@ mod tests {
             descriptor: one_ref_descriptor(),
             name: None,
             preview: Some(hash),
+            caption: None,
         };
         let mut out = vec![0u8; wrong.len()];
         assert!(wrong.encode(&mut out).is_err());
+    }
+
+    #[test]
+    fn a_body_carries_a_caption_after_the_preview() {
+        let captioned = AttachmentBody {
+            descriptor: one_ref_descriptor(),
+            name: None,
+            preview: None,
+            caption: Some("The summit at six"),
+        };
+        let mut out = vec![0u8; captioned.len()];
+        assert_eq!(captioned.encode(&mut out).unwrap(), 257 + 3 + 2 + 17);
+        let back = AttachmentBody::parse(&out).unwrap();
+        assert_eq!(back.caption, Some("The summit at six"));
+        assert_eq!((back.name, back.preview), (None, None));
+
+        // WIR-535: an empty caption, a caption above CAPTION_MAX, and one
+        // that is not UTF-8 are malformed.
+        let mut empty = out[..257 + 3].to_vec();
+        empty.extend_from_slice(&[0, 0]);
+        assert!(AttachmentBody::parse(&empty).is_err());
+        let long = "a".repeat(CAPTION_MAX + 1);
+        let over = AttachmentBody {
+            descriptor: one_ref_descriptor(),
+            name: None,
+            preview: None,
+            caption: Some(&long),
+        };
+        let mut out = vec![0u8; over.len()];
+        assert!(over.encode(&mut out).is_err());
+        let mut bad = captioned_bytes();
+        let end = bad.len();
+        bad[end - 1] = 0xFF;
+        assert!(AttachmentBody::parse(&bad).is_err());
+        const { assert!(TRAILER_MAX > 1 + FILE_NAME_MAX + 2 + PREVIEW_MAX + CAPTION_MAX) };
+    }
+
+    fn captioned_bytes() -> Vec<u8> {
+        let body = AttachmentBody {
+            descriptor: one_ref_descriptor(),
+            name: None,
+            preview: None,
+            caption: Some("abc"),
+        };
+        let mut out = vec![0u8; body.len()];
+        body.encode(&mut out).unwrap();
+        out
     }
 
     #[test]
@@ -450,6 +536,7 @@ mod tests {
                 descriptor: one_ref_descriptor(),
                 name: Some(bad),
                 preview: None,
+                caption: None,
             };
             let mut out = vec![0u8; body.len()];
             assert!(body.encode(&mut out).is_err(), "{bad:?}");

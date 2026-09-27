@@ -1248,14 +1248,16 @@ object Core {
     }
 
     /** Sends a picked image as a message of its own. */
-    fun sendPhoto(context: Context, conversation: Conversation, source: android.net.Uri) {
+    fun sendPhoto(context: Context, conversation: Conversation, source: android.net.Uri, caption: CharArray? = null) {
         val app = context.applicationContext
         call { client ->
             client.newDraft(conversation.id).use { draft ->
                 if (!Photos.attach(app, source, draft)) {
+                    caption?.fill('\u0000')
                     main.post { fault = "That image did not open." }
                     return@call
                 }
+                putCaption(draft, caption)
                 client.sendDraft(draft).destroy()
             }
             main.post { revision++ }
@@ -1282,7 +1284,7 @@ object Core {
         private set
 
     /** Sends a picked video after its remux (`ATT-155`). */
-    fun sendVideo(context: Context, conversation: Conversation, source: android.net.Uri) {
+    fun sendVideo(context: Context, conversation: Conversation, source: android.net.Uri, caption: CharArray? = null) {
         val app = context.applicationContext
         call { client ->
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return@call
@@ -1290,15 +1292,17 @@ object Core {
             val bytes = Files.attachVideo(app, source, draft)
             if (bytes < 0) {
                 draft.destroy()
+                caption?.fill('\u0000')
                 main.post { fault = "That video did not open, or it is above 250 MB." }
                 return@call
             }
+            putCaption(draft, caption)
             offer(client, PendingSend(conversation, draft, bytes, isOriginal = false))
         }
     }
 
     /** Sends a picked audio file, encoded again with no field of the original. */
-    fun sendAudio(context: Context, conversation: Conversation, source: android.net.Uri) {
+    fun sendAudio(context: Context, conversation: Conversation, source: android.net.Uri, caption: CharArray? = null) {
         val app = context.applicationContext
         call { client ->
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return@call
@@ -1307,11 +1311,23 @@ object Core {
             val bytes = Files.attachAudio(app, source, picked, draft)
             if (bytes < 0) {
                 draft.destroy()
+                caption?.fill('\u0000')
                 main.post { fault = "That audio file did not open, or it is above 250 MB." }
                 return@call
             }
+            putCaption(draft, caption)
             offer(client, PendingSend(conversation, draft, bytes, isOriginal = false))
         }
+    }
+
+    /**
+     * Gives the text of the composer to a draft with a file, as its caption
+     * (Part 6 rule `WIR-535`). The array is zeros after the call.
+     */
+    private fun putCaption(draft: uniffi.umbra_ffi.DraftHandle, caption: CharArray?) {
+        caption ?: return
+        if (caption.isNotEmpty()) draft.setText(caption.map { it.code.toUShort() })
+        caption.fill('\u0000')
     }
 
     /** Sends a voice message that the composer recorded. */
@@ -1335,7 +1351,7 @@ object Core {
     }
 
     /** Sends a picked file as it is, with its name. */
-    fun sendDocument(context: Context, conversation: Conversation, source: android.net.Uri) {
+    fun sendDocument(context: Context, conversation: Conversation, source: android.net.Uri, caption: CharArray? = null) {
         val app = context.applicationContext
         call { client ->
             val picked = Files.describe(app, source)
@@ -1349,6 +1365,7 @@ object Core {
                 main.post { fault = "That file did not open." }
                 return@call
             }
+            putCaption(draft, caption)
             offer(client, PendingSend(conversation, draft, picked.size, Files.isMediaOriginal(picked.mime)))
         }
     }

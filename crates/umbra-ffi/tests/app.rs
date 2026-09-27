@@ -1633,9 +1633,12 @@ fn one_app_sends_a_file_and_the_other_app_gets_it() {
         )
         .unwrap();
     // The record of a file holds no text.
-    let both = alice.new_draft(alice_conversation.clone()).unwrap();
-    both.set_text(units("a caption")).unwrap();
-    both.attach_file(
+    // WIR-535: the text of a draft with a file is its caption, of
+    // CAPTION_MAX at most.
+    let long = alice.new_draft(alice_conversation.clone()).unwrap();
+    long.set_text(units(&"a".repeat(umbra_wire::descriptor::CAPTION_MAX + 1)))
+        .unwrap();
+    long.attach_file(
         path.to_str().unwrap().to_owned(),
         1,
         800,
@@ -1645,9 +1648,12 @@ fn one_app_sends_a_file_and_the_other_app_gets_it() {
         None,
     )
     .unwrap();
-    assert_eq!(alice.send_draft(both).err(), Some(FfiError::Malformed));
+    assert_eq!(alice.send_draft(long).err(), Some(FfiError::TooLong));
+    draft.set_text(units("the summit at six")).unwrap();
 
     let sent = alice.send_draft(draft).unwrap();
+    // The sender shows the caption while the upload runs.
+    assert_eq!(rendered(&alice, sent.clone()), "the summit at six");
     let info = alice.msg_info(sent.clone()).unwrap();
     let file = info.file.unwrap();
     assert_eq!((file.pixel_w, file.pixel_h, file.mime_class), (800, 600, 1));
@@ -1665,8 +1671,10 @@ fn one_app_sends_a_file_and_the_other_app_gets_it() {
     let file = info.file.unwrap();
     assert_eq!((file.pixel_w, file.pixel_h, file.mime_class), (800, 600, 1));
     assert_eq!(*bob.file_bytes(&received).unwrap(), plain);
-    // A file has no text to render.
-    assert_eq!(rendered(&bob, received.clone()), "");
+    // The caption travels in the body, and the sender keeps it after the
+    // upload.
+    assert_eq!(rendered(&bob, received.clone()), "the summit at six");
+    assert_eq!(rendered(&alice, sent.clone()), "the summit at six");
 
     // ATT-161: Alice deletes the message for each party. Her device erases
     // the chunks, and the two stores hold the file no more.

@@ -396,27 +396,40 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
         // An answer and an edit start with the keyboard open, as a user
         // expects it.
         LaunchedEffect(answered, edited) { if (answered != null || edited != null) composer.focus() }
+        // WIR-535: the text of the composer goes with a file as its
+        // caption. A caption above CAPTION_MAX stays in the composer, and
+        // the file does not go.
+        val takeCaption = takeCaption@{
+            val chars = composer.take() ?: CharArray(0)
+            if (utf8Length(chars) > CAPTION_MAX) {
+                composer.set(chars)
+                chars.fill(' ')
+                notice = "A caption can be 1 024 bytes at most."
+                return@takeCaption null
+            }
+            chars
+        }
         val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { picked ->
             if (picked != null) {
-                Core.sendPhoto(context, conversation, picked)
+                Core.sendPhoto(context, conversation, picked, takeCaption() ?: return@rememberLauncherForActivityResult)
                 jumpsAtNextLoad = true
             }
         }
         val videoPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { picked ->
             if (picked != null) {
-                Core.sendVideo(context, conversation, picked)
+                Core.sendVideo(context, conversation, picked, takeCaption() ?: return@rememberLauncherForActivityResult)
                 jumpsAtNextLoad = true
             }
         }
         val audioPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { picked ->
             if (picked != null) {
-                Core.sendAudio(context, conversation, picked)
+                Core.sendAudio(context, conversation, picked, takeCaption() ?: return@rememberLauncherForActivityResult)
                 jumpsAtNextLoad = true
             }
         }
         val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { picked ->
             if (picked != null) {
-                Core.sendDocument(context, conversation, picked)
+                Core.sendDocument(context, conversation, picked, takeCaption() ?: return@rememberLauncherForActivityResult)
                 jumpsAtNextLoad = true
             }
         }
@@ -826,6 +839,16 @@ private fun BubbleContent(line: Line, chat: Chat) {
                 else -> FileTile(line, file, Modifier.align(Alignment.Start))
             }
             Spacer(Modifier.height(4.dp))
+            // WIR-535: the caption sits under the file.
+            if (line.text.isNotEmpty()) {
+                PlatformText(
+                    line.text,
+                    Palette.Text,
+                    modifier = Modifier
+                        .align(Alignment.Start)
+                        .padding(horizontal = if (isPhoto) 10.dp else 0.dp, vertical = 2.dp),
+                )
+            }
         } else if (!line.info.deleted) {
             PlatformText(line.text, Palette.Text, modifier = Modifier.align(Alignment.Start))
         }

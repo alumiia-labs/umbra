@@ -77,6 +77,29 @@ const val CLASS_VIDEO: UByte = 2u
 const val CLASS_DOC: UByte = 5u
 const val CLASS_OTHER: UByte = 6u
 
+/** `CAPTION_MAX` of Part 12 §12.7, in bytes of UTF-8. */
+const val CAPTION_MAX = 1_024
+
+/** The length of text in UTF-8, read from its array with no `String`. */
+fun utf8Length(chars: CharArray): Int {
+    var length = 0
+    var i = 0
+    while (i < chars.size) {
+        val c = chars[i]
+        length += when {
+            c.code < 0x80 -> 1
+            c.code < 0x800 -> 2
+            Character.isHighSurrogate(c) && i + 1 < chars.size && Character.isLowSurrogate(chars[i + 1]) -> {
+                i++
+                4
+            }
+            else -> 3
+        }
+        i++
+    }
+    return length
+}
+
 /** `LARGE_FILE_WARN` of Part 12 §12.7, in bytes. */
 const val LARGE_FILE_WARN = 25L * 1_024 * 1_024
 
