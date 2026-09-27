@@ -62,9 +62,9 @@ impl Url {
     }
 }
 
-/// Posts `body` to `url` and reads the answer: the status and the body of
-/// a plain length. A body of another framing comes back empty, and the
-/// status still holds.
+/// Posts `body` to `url` and reads the answer: the status and the body, of
+/// a plain length or in chunks. A token endpoint of a provider sends its
+/// answer in chunks.
 pub async fn post(
     url: &Url,
     content_type: &str,
@@ -166,7 +166,10 @@ fn read_response(inbound: &[u8]) -> Result<(u16, Vec<u8>), NativeError> {
             continue;
         };
         if name.eq_ignore_ascii_case("Transfer-Encoding") {
-            return Ok((status, Vec::new()));
+            if !value.trim().eq_ignore_ascii_case("chunked") {
+                return Err(Error::Refused.into());
+            }
+            return Ok((status, dechunk(body)?));
         }
         if name.eq_ignore_ascii_case("Content-Length")
             && value.trim().parse::<usize>().ok() != Some(body.len())
@@ -175,6 +178,32 @@ fn read_response(inbound: &[u8]) -> Result<(u16, Vec<u8>), NativeError> {
         }
     }
     Ok((status, body.to_vec()))
+}
+
+/// The body of a chunked answer: each chunk after its size in hex, up to
+/// the chunk of size zero. An extension after the size and the trailers go.
+fn dechunk(mut rest: &[u8]) -> Result<Vec<u8>, NativeError> {
+    let mut out = Vec::with_capacity(rest.len());
+    loop {
+        let line_end = rest
+            .windows(2)
+            .position(|window| window == b"\r\n")
+            .ok_or(Error::Refused)?;
+        let line = core::str::from_utf8(rest.get(..line_end).unwrap_or(&[]))
+            .map_err(|_| Error::Refused)?;
+        let digits = line.split(';').next().unwrap_or("").trim();
+        let size = usize::from_str_radix(digits, 16).map_err(|_| Error::Refused)?;
+        rest = rest.get(line_end.saturating_add(2)..).unwrap_or(&[]);
+        if size == 0 {
+            return Ok(out);
+        }
+        let end = size.checked_add(2).ok_or(Error::Refused)?;
+        if rest.get(size..end) != Some(b"\r\n".as_slice()) {
+            return Err(Error::Refused.into());
+        }
+        out.extend_from_slice(rest.get(..size).unwrap_or(&[]));
+        rest = rest.get(end..).unwrap_or(&[]);
+    }
 }
 
 /// One request that a server read.
@@ -330,6 +359,16 @@ mod tests {
         assert_eq!(read_response(ok).unwrap(), (201, b"ok".to_vec()));
         let gone = b"HTTP/1.1 410 Gone\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n";
         assert_eq!(read_response(gone).unwrap(), (410, Vec::new()));
+        let chunks = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
+            4;x=y\r\n{\"a\"\r\na\r\n:\"token\"}\n\r\n0\r\nX-T: 1\r\n\r\n";
+        assert_eq!(
+            read_response(chunks).unwrap(),
+            (200, b"{\"a\":\"token\"}\n".to_vec())
+        );
+        let torn = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n9\r\nok\r\n";
+        assert!(read_response(torn).is_err());
+        let other = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\nok";
+        assert!(read_response(other).is_err());
         let short = b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\nok";
         assert!(read_response(short).is_err());
     }
