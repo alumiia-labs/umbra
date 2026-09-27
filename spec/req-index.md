@@ -69,17 +69,17 @@ each column when a crate implements the requirement and a test covers it.
 | `NET` | 239 | 85 | 1 | 0 | 8 | **333** |
 | `IDN` | 129 | 44 | 1 | 0 | 5 | **179** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
-| `WIR` | 396 | 85 | 0 | 0 | 7 | **488** |
+| `WIR` | 398 | 85 | 0 | 0 | 7 | **490** |
 | `DEV` | 197 | 90 | 0 | 0 | 7 | **294** |
 | `NTF` | 74 | 28 | 0 | 0 | 3 | **105** |
 | `DIS` | 130 | 34 | 0 | 0 | 3 | **167** |
-| `REL` | 136 | 33 | 1 | 0 | 2 | **172** |
+| `REL` | 144 | 33 | 1 | 0 | 2 | **180** |
 | `GRP` | 232 | 65 | 0 | 0 | 6 | **303** |
 | `ATT` | 143 | 45 | 2 | 0 | 3 | **193** |
 | `ABU` | 71 | 30 | 1 | 0 | 0 | **102** |
 | `IMP` | 119 | 41 | 0 | 0 | 2 | **162** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2021 | 621 | 7 | 0 | 53 | **2702** |
+| **All** | 2031 | 621 | 7 | 0 | 53 | **2712** |
 
 ## SCP — Scope and Conventions
 
@@ -1014,7 +1014,7 @@ Source: `spec/06-wire-format.md`
 | `WIR-215` | §6.4 | MUST | A relay | A relay MUST reject a `CRPUT` that arrives over a circuit. |  |  |
 | `WIR-216` | §6.2.1 | MUST | A sender | A sender MUST encode `type` in the 2-byte form. |  |  |
 | `WIR-217` | §6.2.1 | MUST | A sender | A sender MUST encode `length` in the 4-byte form. |  |  |
-| `WIR-218` | §6.2.1 | MUST | A receiver | A receiver MUST reject a capsule whose `type` is not `0x0B52` or `0x0B53`. |  |  |
+| `WIR-218` | §6.2.1 | MUST | A receiver | A receiver MUST reject a capsule whose `type` is not `0x0B52`, `0x0B53`, `0x0B54`, `0x0B55`, `0x0B56`, `0x0B57`, or `0x0B58`. |  |  |
 | `WIR-219` | §6.2.1 | MUST | A receiver | A receiver MUST take the cell length from `length`, and that length is `length` minus 12. |  |  |
 | `WIR-220` | §6.2.1 | MUST | A receiver | A receiver MUST reject an `UMBRA_CELL` capsule whose `length` is not 524, 2 060, 8 204, or 32 780. |  |  |
 | `WIR-221` | §6.2.1 | MUST | A receiver | A receiver MUST reject an `UMBRA_SESSION` capsule whose `length` does not equal the length that §6.2.3 gives for its `op`. |  |  |
@@ -1305,6 +1305,8 @@ Source: `spec/06-wire-format.md`
 | `WIR-534` | §6.4.2 | MUST | A receiver | A receiver MUST read a hello record on a rendezvous queue of Part 9 §9.6 alone, and it MUST reject a hello record on each other queue. |  |  |
 | `WIR-535` | §6.6 | MUST | (unstated) | A `caption` is the text that the sender wrote with the file. |  |  |
 | `WIR-536` | §6.4.2 | MUST | A receiver | A receiver MUST read a link-fault report on the report queue of a directory authority alone, and it MUST reject one on each other queue. |  |  |
+| `WIR-537` | §6.2.1 | MUST | A receiver | A receiver MUST reject an `UMBRA_RECEIPT` capsule whose `length` is not 3 422, and an `UMBRA_RELAY_HELLO` capsule whose `length` is not 3 342. |  |  |
+| `WIR-538` | §6.2.1 | MUST | A relay | A relay MUST reject each of the two on a client link, and a client MUST reject each of the two. |  |  |
 
 ## DEV — Device Sets
 
@@ -2071,6 +2073,14 @@ Source: `spec/10-relay-directory.md`
 | `REL-170` | §10.4.2 | MUST | An authority | An authority MUST drop a `SealedReport` that does not open, and a report whose `epoch` is neither the current epoch nor the one before it. |  |  |
 | `REL-171` | §10.4.2 | MUST | A client | A client MUST count the forced replacements of each consensus epoch. |  |  |
 | `REL-172` | §10.4.2 | MUST | (unstated) | When that count reaches `FORCED_REPEAT` in one epoch, the client MUST send one `LinkFaultReport` that names the chain of the last failure. |  |  |
+| `REL-173` | §10.4.2 | MUST | A relay that dials a relay | A relay that dials a relay MUST send a `RelayHello` right after the `Open` of Part 6 §6.2.3. |  |  |
+| `REL-174` | §10.4.2 | MUST | A relay | A relay MUST verify a `RelayHello` under the `identity_pk` of that `relay_id` in the relay set that it holds. |  |  |
+| `REL-175` | §10.4.2 | MUST | A relay | A relay MUST count the cells that it takes on each relay link in the order of that link, in windows of `RECEIPT_WINDOW` cells. |  |  |
+| `REL-176` | §10.4.2 | MUST | A relay | A relay MUST close a partial window at the end of each consensus epoch and issue its receipt, thus a cell late in an epoch gets a receipt too. |  |  |
+| `REL-177` | §10.4.2 | MUST | A relay | A relay MUST send each receipt that it issues to the other end of that link, as the value of an `UMBRA_RECEIPT` capsule of Part 6 §6.2.1. |  |  |
+| `REL-178` | §10.4.2 | MUST | A relay that takes a receipt | A relay that takes a receipt MUST verify its signature under the `identity_pk` of `to_relay`, and it MUST compute `batch_root` over the leaves of the next `cell_count` cells that it sent on that link. |  |  |
+| `REL-179` | §10.4.2 | MUST | A relay | A relay MUST answer a `ReceiptQuery` that verifies under the key of that authority in the key set of the relay set that it holds. |  |  |
+| `REL-180` | §10.4.2 | MUST | A relay | A relay MUST refuse a query that does not verify with HTTP status 403 and no body. |  |  |
 
 ## GRP — Private Groups
 

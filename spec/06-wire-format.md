@@ -115,12 +115,14 @@ receiver the length of the frame that it carries.
 Capsule {
     type      varint      // 0x0B52 UMBRA_CELL, 0x0B53 UMBRA_SESSION,
                           // 0x0B54 UMBRA_REPLICA, 0x0B55 UMBRA_DEPOSIT,
-                          // or 0x0B56 UMBRA_CHALLENGE
+                          // 0x0B56 UMBRA_CHALLENGE, 0x0B57 UMBRA_RECEIPT,
+                          // or 0x0B58 UMBRA_RELAY_HELLO
     length    varint      // the byte count of value, in the 4-byte form
     value     [length]u8  // a SessionFrame (§6.2.2), a session control
                           // record (§6.2.3), one CRPUT command (§6.4),
-                          // one SEND command of a relay (WIR-526), or one
-                          // PowChallenge (WIR-529)
+                          // one SEND command of a relay (WIR-526), one
+                          // PowChallenge (WIR-529), one LinkReceipt, or one
+                          // RelayHello (Part 10 §10.4.2)
 }
 ```
 
@@ -129,7 +131,11 @@ sender MUST encode `type` in the 2-byte form. **[WIR-217]** A sender MUST encode
 `length` in the 4-byte form. Thus the capsule header is 6 bytes at each bucket.
 RFC 9000 §16 permits a longer form than the minimum, and §6.1.1 rule 4 permits
 one form only. **[WIR-218]** A receiver MUST reject a capsule whose `type` is
-not `0x0B52`, `0x0B53`, `0x0B54`, `0x0B55`, or `0x0B56`.
+not `0x0B52`, `0x0B53`, `0x0B54`, `0x0B55`, `0x0B56`, `0x0B57`, or `0x0B58`.
+**[WIR-537]** A receiver MUST reject an `UMBRA_RECEIPT` capsule whose `length`
+is not 3 422, and an `UMBRA_RELAY_HELLO` capsule whose `length` is not 3 342.
+**[WIR-538]** A relay MUST reject each of the two on a client link, and a
+client MUST reject each of the two.
 
 **The cell length comes from the capsule.** **[WIR-219]** A receiver MUST take
 the cell length from `length`, and that length is `length` minus 12.

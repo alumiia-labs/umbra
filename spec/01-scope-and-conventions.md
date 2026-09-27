@@ -459,9 +459,10 @@ side channel that the user selects, such as a QR code scan.
 | Renewal challenge and answer | Part 9 §9.9.1 | OHTTP through an ingress relay, Part 9 §9.10 | Directory and client |
 | Registration request (Part 9 §9.9) | Part 9 §9.10 | OHTTP through an ingress relay, Part 9 §9.10 | Client |
 | `MeasurerCert` | Part 10 §10.3.1 | `MEAS_OPEN`, Part 6 §6.3 | Two or more directory authorities |
-| `LinkReceipt` | Part 10 §10.4.2 | none | Relay |
+| `LinkReceipt` | Part 10 §10.4.2 | An `UMBRA_RECEIPT` capsule on the link, Part 6 §6.2.1 | Relay |
+| `RelayHello` | Part 10 §10.4.2 | An `UMBRA_RELAY_HELLO` capsule on the link, Part 6 §6.2.1 | Relay |
 | `LinkFaultReport` | Part 10 §10.4.2 | A cover slot or a push-wake session, Part 10 §10.4.2 | Client |
-| Isolation query (Part 10 §10.4.2) | none | none | Directory authority |
+| Isolation query (Part 10 §10.4.2): `ReceiptQuery`, `ReceiptAnswer` | Part 10 §10.4.2 | HTTPS `POST /receipt` at a relay | Directory authority |
 | `DirectoryRoot`, `AuthoritySig` | Part 10 §10.5.2 | The bootstrap carriers of Part 3 §3.10 | Directory authority |
 | `DirectoryKeySet`, `SignedKeySet` | Part 10 §10.5.2 | The bootstrap carriers of Part 3 §3.10 | Directory authority |
 | `RelaySetDiff` | Part 10 §10.5.3 | The bootstrap carriers of Part 3 §3.10 | Directory authority |

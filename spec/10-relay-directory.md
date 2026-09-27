@@ -268,6 +268,47 @@ covers each field but `sig`, after the label.
   and Part 3 §3.4.4 makes each hop rewrite `circ_id`. Thus a receipt names a
   link and it does not name a user. Part 15 §15.1 holds that row.
 
+**The relay hello.** A relay that takes a link does not know the relay at its
+other end: a relay dials the next layer as a client dials the first. Thus the
+dialing relay names itself, and only a link whose peer is named carries
+receipts.
+
+```
+RelayHello {                     // the value of an UMBRA_RELAY_HELLO capsule
+    version      u8              // 0x01
+    relay_id     [32]u8          // the relay that dialed
+    sig          [3309]u8        // ML-DSA-65, label "umbra/v1/relay-hello"
+}
+```
+
+The hello is **3 342 bytes**. The signature covers the label, `relay_id`, and
+the `session_id` of the `Open` of that link, thus a hello of one link does not
+name the dialer on another link.
+
+- **[REL-173]** A relay that dials a relay MUST send a `RelayHello` right after
+  the `Open` of Part 6 §6.2.3. **[REL-174]** A relay MUST verify a
+  `RelayHello` under the `identity_pk` of that `relay_id` in the relay set that
+  it holds. A link with no hello that verified is a client link, and a relay
+  MUST NOT issue a receipt on a client link.
+
+**The window.** The leaf of a cell is the leaf of the Merkle tree of §10.5.3
+over the 32 bytes `circ_id || tag` of the cell as the link carried it, and
+`batch_root` is the root of that tree over the leaves of a window in the order
+of the link.
+
+- **[REL-175]** A relay MUST count the cells that it takes on each relay link
+  in the order of that link, in windows of `RECEIPT_WINDOW` cells. The first
+  window of each epoch is window 0. **[REL-176]** A relay MUST close a partial
+  window at the end of each consensus epoch and issue its receipt, thus a cell
+  late in an epoch gets a receipt too.
+- **[REL-177]** A relay MUST send each receipt that it issues to the other end
+  of that link, as the value of an `UMBRA_RECEIPT` capsule of Part 6 §6.2.1.
+- **[REL-178]** A relay that takes a receipt MUST verify its signature under
+  the `identity_pk` of `to_relay`, and it MUST compute `batch_root` over the
+  leaves of the next `cell_count` cells that it sent on that link. It MUST drop
+  a receipt that fails either check, and it MUST keep the leaves of a receipt
+  that it keeps, for the proof of a query.
+
 **The link-fault report is from a client to a directory authority.** It carries
 no signature, because a client holds no key that a third party verifies and a
 signature would give A5 a durable statement about that client.
@@ -409,6 +450,40 @@ authority therefore makes its own evidence with a probe that it builds.
   and the `tag` of the cell at that hop. The relay answers with the receipt
   and a Merkle inclusion proof of the cell. **[REL-082]** A relay MUST give its
   receipts to a directory authority at an isolation query.
+
+```
+ReceiptQuery {                   // the body of POST /receipt at a relay
+    version          u8          // 0x01
+    authority_index  u8
+    epoch            u64         // the consensus epoch of the probe
+    circ_id          [16]u8      // the cell as one link carried it
+    tag              [16]u8
+    sig              [3309]u8    // ML-DSA-65, label "umbra/v1/receipt-query"
+}
+
+ReceiptAnswer {
+    version          u8          // 0x01
+    found            u8          // 0x00 none, 0x01 a receipt that this relay
+                                 // issued, 0x02 a receipt that it took
+    receipt          LinkReceipt // present when found is not 0x00
+    leaf_index       u32         // present when found is not 0x00
+    step_count       u8          // present when found is not 0x00, 0 to 16
+    steps            [step_count]{ side u8, sibling [32]u8 }
+}
+```
+
+The query is **3 351 bytes**, and the signature covers each field but `sig`,
+after the label. A relay issued the receipt of a cell that reached it, and it
+took the receipt of a cell that it sent, thus the two values of one cell at
+one hop name the two sides of one link.
+
+- **[REL-179]** A relay MUST answer a `ReceiptQuery` that verifies under the
+  key of that authority in the key set of the relay set that it holds. The
+  answer MUST give the receipt of that `epoch`, issued or taken, whose window
+  holds the leaf of `circ_id || tag`, and the inclusion proof of that leaf. A
+  relay that holds no such receipt MUST answer `found` 0x00. **[REL-180]** A
+  relay MUST refuse a query that does not verify with HTTP status 403 and no
+  body.
 - A **contradiction** is a denial of a batch by a relay whose signature the
   query holds over that batch. A relay that forwarded a batch holds the receipt
   that the next relay issued for it. **[REL-083]** A directory authority MUST
