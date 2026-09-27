@@ -6,6 +6,7 @@ use alloc::{vec, vec::Vec};
 
 use umbra_crypto::{
     rand_core::TryCryptoRng,
+    rsabssa::PublicKey2048,
     voprf::{BatchEvaluation, BlindState, Evaluation},
 };
 use umbra_wire::{
@@ -22,7 +23,10 @@ use super::{
 use crate::{
     abuse::{
         pow::{PowSolution, SOLUTION_LEN},
-        token::{FirstPartyRequest, Token, TokenChallenge, TYPE_FIRST_PARTY},
+        token::{
+            CrossRelayRequest, FirstPartyRequest, Token, TokenChallenge, TYPE_CROSS_RELAY,
+            TYPE_FIRST_PARTY,
+        },
         POW_EFFORT_MAX, POW_LOOKUP_FLOOR,
     },
     Error,
@@ -88,6 +92,57 @@ pub fn issue_request<R: TryCryptoRng + ?Sized>(
         body.extend_from_slice(&encoded);
     }
     Ok((state, body))
+}
+
+/// A request for `count` cross-relay tokens of `epoch` (Part 13 §13.3.1),
+/// each blinded under the key of the issuer that the log gives, and each
+/// paid with a proof of work at `POW_EFFORT_MAX` (`ABU-076`).
+pub fn cross_relay_issue_request<R: TryCryptoRng + ?Sized>(
+    epoch: u32,
+    issuer_pk: &PublicKey2048,
+    count: usize,
+    rng: &mut R,
+) -> Result<(CrossRelayRequest, Vec<u8>), Error> {
+    if count == 0 || count > ISSUE_REQUEST_MAX {
+        return Err(Error::Malformed);
+    }
+    let challenge = TokenChallenge {
+        token_type: TYPE_CROSS_RELAY,
+        epoch,
+        redemption_context: [0; 32],
+    };
+    let (state, blinded) = CrossRelayRequest::new(count, &challenge, issuer_pk, rng)?;
+    let verifier = issue_verifier(issuer_pk.modulus());
+    let mut body = Vec::new();
+    body.extend_from_slice(&TYPE_CROSS_RELAY.to_be_bytes());
+    body.extend_from_slice(&epoch.to_be_bytes());
+    body.push(u8::try_from(count).map_err(|_| Error::Malformed)?);
+    for message in &blinded {
+        let solution =
+            PowSolution::solve(&verifier, &issue_seed(epoch, message), POW_EFFORT_MAX, rng)?;
+        let mut encoded = [0u8; SOLUTION_LEN];
+        solution.encode(&mut encoded)?;
+        body.extend_from_slice(message);
+        body.extend_from_slice(&encoded);
+    }
+    Ok((state, body))
+}
+
+/// The cross-relay tokens of an issuance response, each verified under the
+/// key of the issuer.
+pub fn cross_relay_issue_finish(
+    state: &CrossRelayRequest,
+    body: &[u8],
+    issuer_pk: &PublicKey2048,
+) -> Result<Vec<Token>, Error> {
+    let mut r = Reader::new(body);
+    let count = usize::from(r.u8()?);
+    let mut signatures = Vec::with_capacity(count);
+    for _ in 0..count {
+        signatures.push(r.take(PublicKey2048::MODULUS_LEN)?.to_vec());
+    }
+    r.finish()?;
+    state.finalize(&signatures, issuer_pk)
 }
 
 /// The tokens of an issuance response, after the batch proof verified.

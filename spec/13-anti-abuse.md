@@ -587,6 +587,19 @@ IssueResponse {
 > Path 3 needs no interaction beyond one request: the blinded element fixes
 > the seed, thus the issuer holds no challenge state and no replay set.
 
+**The cross-relay form.** A request for `token_type` `0x0002` holds items of
+`blinded [256]u8` and a `PowSolution`, and the answer holds `count u8` and
+`count` blind signatures of 256 bytes each, with no batch proof.
+
+- **[ABU-111]** An issuer MUST take the RSA key of `0x0002` for an epoch from
+  the log under `ABU-098`, and it MUST answer an epoch whose key the log does
+  not hold as stale. `ABU-076`, `ABU-077`, `ABU-109`, and `ABU-110` hold for
+  that form as for `0x0005`, with the modulus of the key as `pk`.
+  **[ABU-112]** A client MUST verify each token of the answer under that key
+  before it keeps the token. The signature of one blinded message is one
+  value, thus a second request with that message gives the same token, which a
+  verifier spends once.
+
 A batch of 256 tokens costs about 7 minutes of a phone under that rule. Thus a
 token that a user buys with time costs what the puzzle of one relay costs at
 its maximum. Path 3 does not undercut the valve of §13.8.

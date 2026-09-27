@@ -231,12 +231,12 @@ pub fn lookup_verifier(directory_pk: &[u8; 32]) -> [u8; 32] {
 }
 
 /// The seed of the proof of work of an issuance (`ABU-109`).
-pub fn issue_seed(epoch: u32, blinded: &[u8; 32]) -> [u8; 32] {
+pub fn issue_seed(epoch: u32, blinded: &[u8]) -> [u8; 32] {
     sha3_256(&[labels::ISSUE_POW, &epoch.to_be_bytes(), blinded])
 }
 
 /// The verifier of the proof of work of an issuance (`ABU-109`).
-pub fn issue_verifier(issuer_pk: &[u8; 32]) -> [u8; 32] {
+pub fn issue_verifier(issuer_pk: &[u8]) -> [u8; 32] {
     sha3_256(&[labels::ISSUE_POW, issuer_pk])
 }
 
@@ -894,6 +894,51 @@ impl Directory {
         Ok(Vec::new())
     }
 
+    /// Signs a batch of blinded cross-relay tokens (Part 13 §13.3.1): each
+    /// item is a blinded message of the modulus width and one proof of work
+    /// at `POW_EFFORT_MAX` (`ABU-076`, `ABU-109`). The answer is the count
+    /// and the blind signatures. The signature of one message is one value,
+    /// thus a second request for it gives the same token.
+    fn issue_cross_relay(
+        &mut self,
+        r: &mut Reader<'_>,
+        epoch: u32,
+        count: usize,
+    ) -> Result<Vec<u8>, Status> {
+        let modulus = self.cross_relay_public(epoch).ok_or(Status::NotFound)?;
+        let verifier = issue_verifier(&modulus);
+        let mut blinded = Vec::with_capacity(count);
+        for _ in 0..count {
+            let message = r.take(modulus.len()).map_err(|_| Status::Malformed)?;
+            let solution = PowSolution::parse(
+                r.take(crate::abuse::pow::SOLUTION_LEN)
+                    .map_err(|_| Status::Malformed)?,
+            )
+            .map_err(|_| Status::Malformed)?;
+            if solution.seed != issue_seed(epoch, message) || solution.effort < POW_EFFORT_MAX {
+                return Err(Status::Refused);
+            }
+            pow::verify(
+                &verifier,
+                &solution.seed,
+                &solution.nonce,
+                solution.effort,
+                &solution.solution,
+            )
+            .map_err(|_| Status::Refused)?;
+            blinded.push(message.to_vec());
+        }
+        r.finish().map_err(|_| Status::Malformed)?;
+        let key = self.cross_relay_key(epoch).ok_or(Status::NotFound)?;
+        let signed =
+            crate::abuse::token::issue_cross_relay(key, &blinded).map_err(|_| Status::Malformed)?;
+        let mut out = vec![u8::try_from(count).map_err(|_| Status::Malformed)?];
+        for signature in signed {
+            out.extend_from_slice(&signature);
+        }
+        Ok(out)
+    }
+
     fn renew(&mut self, body: &[u8], now: u64) -> Result<Vec<u8>, Status> {
         let mut r = Reader::new(body);
         let input = take_var16(&mut r).map_err(|_| Status::Malformed)?.to_vec();
@@ -928,16 +973,22 @@ impl Directory {
         let token_type = r.u16().map_err(|_| Status::Malformed)?;
         let epoch = r.u32().map_err(|_| Status::Malformed)?;
         let count = usize::from(r.u8().map_err(|_| Status::Malformed)?);
-        if token_type != TYPE_FIRST_PARTY || count == 0 || count > ISSUE_REQUEST_MAX {
+        if ![TYPE_FIRST_PARTY, TYPE_CROSS_RELAY].contains(&token_type)
+            || count == 0
+            || count > ISSUE_REQUEST_MAX
+        {
             return Err(Status::Malformed);
         }
         // ABU-110: this epoch, and the next once its key is in the log.
         let current = epoch_number(now);
         let allowed = epoch == current
             || (epoch == current.saturating_add(1)
-                && self.published_issuers.contains(&(TYPE_FIRST_PARTY, epoch)));
+                && self.published_issuers.contains(&(token_type, epoch)));
         if !allowed {
             return Err(Status::Stale);
+        }
+        if token_type == TYPE_CROSS_RELAY {
+            return self.issue_cross_relay(&mut r, epoch, count);
         }
         let issuer_pk = *self.issuer(epoch).map_err(|_| Status::Busy)?.public();
         let verifier = issue_verifier(&issuer_pk);
@@ -1081,8 +1132,9 @@ mod tests {
         let epoch = epoch_number(now);
         for epoch in [epoch, epoch + 1] {
             let input = issuer_label_input(TYPE_CROSS_RELAY, epoch);
-            let entry = IssuerKeyEntry::parse(&read(&mut dir, &keyset, &input, now, &mut rng).unwrap())
-                .unwrap();
+            let entry =
+                IssuerKeyEntry::parse(&read(&mut dir, &keyset, &input, now, &mut rng).unwrap())
+                    .unwrap();
             assert_eq!((entry.token_type, entry.epoch), (TYPE_CROSS_RELAY, epoch));
             assert_eq!(entry.public_key.len(), MODULUS_LEN_2048);
             assert_eq!(Some(entry.public_key), dir.cross_relay_public(epoch));
@@ -1093,6 +1145,54 @@ mod tests {
         assert_ne!(
             dir.cross_relay_public(epoch),
             dir.cross_relay_public(epoch + 1)
+        );
+    }
+
+    #[test]
+    fn a_client_takes_cross_relay_tokens_under_the_key_of_the_log() {
+        use crate::abuse::{
+            issuer::{issuer_label_input, IssuerKeyEntry},
+            token::{verify_cross_relay, TYPE_CROSS_RELAY},
+        };
+        use umbra_crypto::rsabssa::{PublicKey2048, SecretKey2048};
+
+        let mut rng = Rng(15);
+        let (mut keys, keyset) = keys();
+        let seed = Secret::new([0x4B; 32]);
+        keys.cross_relay = Some(alloc::boxed::Box::new(move |epoch: u32| {
+            SecretKey2048::from_seed(&seed, &epoch.to_be_bytes()).ok()
+        }));
+        let mut dir = Directory::new(keys, DIRECTORY_EPOCH, ascii_profile).unwrap();
+        dir.tick(T0, &mut rng).unwrap();
+        let now = T0 + DIRECTORY_EPOCH;
+        dir.tick(now, &mut rng).unwrap();
+        let epoch = epoch_number(now);
+        // ABU-002: the key comes from the log.
+        let input = issuer_label_input(TYPE_CROSS_RELAY, epoch);
+        let entry = IssuerKeyEntry::parse(&read(&mut dir, &keyset, &input, now, &mut rng).unwrap())
+            .unwrap();
+        let issuer_pk = PublicKey2048::from_modulus(&entry.public_key).unwrap();
+
+        let (state, body) =
+            dirclient::cross_relay_issue_request(epoch, &issuer_pk, 2, &mut rng).unwrap();
+        let answer = call(&mut dir, Kind::Issue, &body, now, &mut rng).unwrap();
+        let tokens = dirclient::cross_relay_issue_finish(&state, &answer, &issuer_pk).unwrap();
+        assert_eq!(tokens.len(), 2);
+        for token in &tokens {
+            // ABU-078: a third party verifies with the public key alone.
+            verify_cross_relay(&issuer_pk, token).unwrap();
+        }
+        // The signature of one blinded message is one value.
+        let again = call(&mut dir, Kind::Issue, &body, now, &mut rng).unwrap();
+        assert_eq!(again, answer);
+
+        // ABU-110: an epoch two ahead holds no key yet.
+        let far = epoch + 2;
+        let (_, far_body) =
+            dirclient::cross_relay_issue_request(far, &issuer_pk, 1, &mut rng).unwrap();
+        assert_eq!(
+            call(&mut dir, Kind::Issue, &far_body, now, &mut rng),
+            Err(DirError::Status(Status::Stale))
         );
     }
 
