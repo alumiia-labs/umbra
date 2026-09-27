@@ -4267,8 +4267,13 @@ impl ClientNode {
                 };
                 let envelope = crate::discovery::hello::seal(&entry_pk, &body, rng)?;
                 let to = QueueAddress::parse(&rendezvous)?;
-                let sealed =
-                    Outbound::new(&to).seal_record(L6Kind::Hello, &envelope, random(rng))?;
+                // DIS-181: each hello takes one size.
+                let sealed = Outbound::new(&to).seal_record_from(
+                    L6Kind::Hello,
+                    &envelope,
+                    random(rng),
+                    umbra_wire::bucket::Bucket::B3,
+                )?;
                 self.send_sealed(sealed, rng)?;
                 out.push(ClientEvent::HelloSent {
                     handle: keys.handle,

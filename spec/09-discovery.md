@@ -705,6 +705,10 @@ name and the picture of the sender, and in the place of the welcome text the
 note that the sender wrote with the request. A receiver MUST show the name,
 the picture, and the note as claims of the sender (§9.8), and it MUST read a
 profile that does not parse as a bare name of at most 32 bytes.
+**[DIS-181]** A client MUST seal each hello record in bucket `B3` of Part 6
+§6.9, whatever the hello holds. A picture and a note change the length of a
+hello, and a relay of the rendezvous queue would read that length. A request
+is a rare record, thus the fixed size costs little.
 
 **Contact through a Public Address.** The initiator holds the 20-byte address
 from a pasted string or from a reusable link of Part 4 §4.3.2. Step 1 then

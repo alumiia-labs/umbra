@@ -180,8 +180,22 @@ impl Outbound {
         inner: &[u8],
         nonce: [u8; 12],
     ) -> Result<Sealed, Error> {
+        self.seal_record_from(kind, inner, nonce, Bucket::B0)
+    }
+
+    /// Seals one inner record in the smallest bucket at or above `floor`
+    /// that holds it. A hello takes `B3` whatever it holds, thus its size
+    /// tells a relay nothing of its profile (Part 9 `DIS-181`).
+    pub fn seal_record_from(
+        &self,
+        kind: L6Kind,
+        inner: &[u8],
+        nonce: [u8; 12],
+        floor: Bucket,
+    ) -> Result<Sealed, Error> {
         let bucket = BUCKETS
             .into_iter()
+            .filter(|bucket| *bucket >= floor)
             .find(|bucket| inner.len() <= bucket.l7_record())
             .ok_or(Error::NoPath)?;
         let mut payload = alloc::vec![0u8; bucket.l6_record()];
@@ -779,5 +793,27 @@ impl PairwiseChannel {
         if let Some(inbound) = self.inbound_on_mut(queue) {
             inbound.acknowledged(point);
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_floor_raises_the_bucket_of_a_small_record() {
+        let address = crate::discovery::entry::tests::queue(3);
+        let outbound = Outbound::new(&address);
+        let small = outbound
+            .seal_record(L6Kind::Hello, &[1; 40], [2; 12])
+            .unwrap();
+        assert_eq!(small.bucket, Bucket::B0);
+        // DIS-181: a hello takes B3 whatever it holds.
+        let padded = outbound
+            .seal_record_from(L6Kind::Hello, &[1; 40], [2; 12], Bucket::B3)
+            .unwrap();
+        assert_eq!(padded.bucket, Bucket::B3);
+        assert_eq!(padded.payload.len(), Bucket::B3.l6_record());
     }
 }
