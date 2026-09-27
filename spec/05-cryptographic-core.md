@@ -1469,6 +1469,8 @@ names the object type and its lifetime:
 "umbra/v1/relay-family"
 "umbra/v1/relayref"
 "umbra/v1/link-receipt"
+"umbra/v1/report-queue"
+"umbra/v1/link-fault-seal"
 "umbra/v1/measurer-cert"
 "umbra/v1/device-roster"
 "umbra/v1/device-claim"

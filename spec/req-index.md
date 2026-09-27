@@ -69,17 +69,17 @@ each column when a crate implements the requirement and a test covers it.
 | `NET` | 239 | 85 | 1 | 0 | 8 | **333** |
 | `IDN` | 129 | 44 | 1 | 0 | 5 | **179** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
-| `WIR` | 395 | 85 | 0 | 0 | 7 | **487** |
+| `WIR` | 396 | 85 | 0 | 0 | 7 | **488** |
 | `DEV` | 197 | 90 | 0 | 0 | 7 | **294** |
 | `NTF` | 74 | 28 | 0 | 0 | 3 | **105** |
 | `DIS` | 130 | 34 | 0 | 0 | 3 | **167** |
-| `REL` | 127 | 32 | 1 | 0 | 2 | **162** |
+| `REL` | 136 | 33 | 1 | 0 | 2 | **172** |
 | `GRP` | 232 | 65 | 0 | 0 | 6 | **303** |
 | `ATT` | 143 | 45 | 2 | 0 | 3 | **193** |
 | `ABU` | 71 | 30 | 1 | 0 | 0 | **102** |
 | `IMP` | 119 | 41 | 0 | 0 | 2 | **162** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2011 | 620 | 7 | 0 | 53 | **2691** |
+| **All** | 2021 | 621 | 7 | 0 | 53 | **2702** |
 
 ## SCP — Scope and Conventions
 
@@ -1304,6 +1304,7 @@ Source: `spec/06-wire-format.md`
 | `WIR-533` | §6.6 | MUST | A `preview` | A `preview` MUST be a JPEG of at most `PREVIEW_MAX` bytes that starts with `FF D8 FF` and ends with `FF D9`. |  |  |
 | `WIR-534` | §6.4.2 | MUST | A receiver | A receiver MUST read a hello record on a rendezvous queue of Part 9 §9.6 alone, and it MUST reject a hello record on each other queue. |  |  |
 | `WIR-535` | §6.6 | MUST | (unstated) | A `caption` is the text that the sender wrote with the file. |  |  |
+| `WIR-536` | §6.4.2 | MUST | A receiver | A receiver MUST read a link-fault report on the report queue of a directory authority alone, and it MUST reject one on each other queue. |  |  |
 
 ## DEV — Device Sets
 
@@ -2060,6 +2061,16 @@ Source: `spec/10-relay-directory.md`
 | `REL-160` | §10.5 | MUST | The consensus digest, source `0x02` of Part 6 §6.6.4, | The consensus digest, source `0x02` of Part 6 §6.6.4, MUST be the SHA3-256 over the preimage that the signatures of the `DirectoryRoot` cover (§10.5.2), with `epoch` the consensus epoch of that root. |  |  |
 | `REL-161` | §10.5 | MUST | A client | A client MUST compare the consensus digest of a contact against the digest of the root that it verified at that epoch, and it MUST show an equivocation warning when the two differ. |  |  |
 | `REL-162` | §10.5 | MUST | A client | A client MUST keep the digest of each root that it verified for the validity of that root, thus a contact one epoch behind still compares. |  |  |
+| `REL-163` | §10.4.2 | MUST | A client | A client MUST count, for each chain and each consensus epoch, each loop that it sent and each loop that came back. |  |  |
+| `REL-164` | §10.4.2 | MUST | (unstated) | A loop that has not come back after `LOOP_RETURN_WAIT` is lost. |  |  |
+| `REL-165` | §10.4.2 | MUST NOT | A client | A client MUST NOT apply `LOOP_FAULT_RATE` to a chain with fewer than `LOOP_FAULT_MIN` loops in the epoch, because one lost loop of three is no signal. |  |  |
+| `REL-166` | §10.4.2 | MUST | A directory authority | A directory authority MUST publish one `ReportQueue`, and it MUST read that queue at least once in each epoch. |  |  |
+| `REL-167` | §10.4.2 | MUST | An authority that makes the manifest | An authority that makes the manifest MUST carry the newest report queue of each authority that published one. |  |  |
+| `REL-168` | §10.4.2 | MUST | A client | A client MUST verify each `ReportQueue` under the key set that verified the root, and it MUST drop one whose signature fails, whose `authority_index` names no key of the set, or whose `epoch` is above the epoch of the root. |  |  |
+| `REL-169` | §10.4.2 | MUST | A client | A client MUST send each `LinkFaultReport` to the report queue of one authority that it draws at random from the verified report queues, as a `SealedReport` under the `report_pk` of that queue. |  |  |
+| `REL-170` | §10.4.2 | MUST | An authority | An authority MUST drop a `SealedReport` that does not open, and a report whose `epoch` is neither the current epoch nor the one before it. |  |  |
+| `REL-171` | §10.4.2 | MUST | A client | A client MUST count the forced replacements of each consensus epoch. |  |  |
+| `REL-172` | §10.4.2 | MUST | (unstated) | When that count reaches `FORCED_REPEAT` in one epoch, the client MUST send one `LinkFaultReport` that names the chain of the last failure. |  |  |
 
 ## GRP — Private Groups
 

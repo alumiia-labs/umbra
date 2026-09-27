@@ -298,6 +298,87 @@ The report is **109 bytes**, thus it fits bucket `B0`.
   replaces the cover cell of its slot. In a push-wake session it is one real
   cell, and a fault is a rare event.
 
+**The loop count.** A client counts the loops of each chain in each epoch. A
+relay at the end of the chain sends a loop back on the circuit that carried it
+(Part 3 `NET-060`), thus the client counts a loop cell that comes back on a
+circuit of that chain.
+
+- **[REL-163]** A client MUST count, for each chain and each consensus epoch,
+  each loop that it sent and each loop that came back. **[REL-164]** A loop
+  that has not come back after `LOOP_RETURN_WAIT` is lost. **[REL-165]** A
+  client MUST NOT apply `LOOP_FAULT_RATE` to a chain with fewer than
+  `LOOP_FAULT_MIN` loops in the epoch, because one lost loop of three is no
+  signal.
+
+**The report queue.** A `LinkFaultReport` names three relays of the chain of a
+client. The report travels to an authority through a queue that the authority
+reads, and the report is sealed to that authority, thus the relay that holds
+the queue reads no chain.
+
+```
+ReportQueue {
+    version          u8          // 0x01
+    authority_index  u8          // the index of the authority in the key set
+    epoch            u64         // the first consensus epoch that it serves
+    address          [129]u8     // a QueueAddress of Part 6 §6.6.10
+    report_pk        [32]u8      // X25519 public key
+    sig              [3309]u8    // ML-DSA-65, label "umbra/v1/report-queue"
+}
+
+SealedReport {                   // 157 bytes, the L6 record of kind 0x08
+    ephemeral_pk     [32]u8      // X25519 public key of the sender, fresh
+    ciphertext       [125]u8     // the LinkFaultReport and the 16-byte tag
+}
+```
+
+The `ReportQueue` is **3 504 bytes**. Part 5 §5.11 holds the label. The
+signature covers each field but `sig`, after the label, under the key of the
+authority at `authority_index` in the current `DirectoryKeySet`. The
+`RelayManifest` of §10.5.5 carries the report queues after its entries.
+
+The key of a `SealedReport` is `HKDF-SHA3-256` with the X25519 output of
+`ephemeral_pk` and `report_pk` as the input key, `ephemeral_pk || report_pk`
+as the salt, and the label `"umbra/v1/link-fault-seal"` as the info. The AEAD
+is ChaCha20-Poly1305 with a nonce of 12 zero bytes, because each key seals one
+report.
+
+- **[REL-166]** A directory authority MUST publish one `ReportQueue`, and it
+  MUST read that queue at least once in each epoch. **[REL-167]** An
+  authority that makes the manifest MUST carry the newest report queue of
+  each authority that published one.
+- **[REL-168]** A client MUST verify each `ReportQueue` under the key set that
+  verified the root, and it MUST drop one whose signature fails, whose
+  `authority_index` names no key of the set, or whose `epoch` is above the
+  epoch of the root.
+- **[REL-169]** A client MUST send each `LinkFaultReport` to the report queue
+  of one authority that it draws at random from the verified report queues,
+  as a `SealedReport` under the `report_pk` of that queue. A client that holds
+  no verified report queue MUST drop the report.
+- **[REL-170]** An authority MUST drop a `SealedReport` that does not open, and
+  a report whose `epoch` is neither the current epoch nor the one before it.
+
+> *Cause.* An earlier draft gave the report a size and a slot and no
+> destination: a `B0` cell names a queue, and no queue of an authority
+> existed. The seal uses X25519 alone. A hybrid encapsulation with
+> ML-KEM-768 takes 1 088 bytes, and the L6 record of a `B0` cell holds 357
+> bytes, thus a hybrid seal would move the report out of `B0` and out of the
+> cover slot, where it becomes a visible event. A later quantum adversary that
+> opens a stored report learns that some client, which the circuit hid, lost
+> loops on three named relays in a past epoch. Part 9 §9.5.4 states the other
+> place where UMBRA is not post-quantum.
+
+**The forced replacement.** A **forced replacement** is a new chain that a
+client draws because a build of its chain failed, or because a circuit of that
+chain ended with no teardown by the client. `REL-014` forbids a replacement
+for a local performance measurement, and a failure is no measurement.
+
+- **[REL-171]** A client MUST count the forced replacements of each consensus
+  epoch. **[REL-172]** When that count reaches `FORCED_REPEAT` in one epoch, the
+  client MUST send one `LinkFaultReport` that names the chain of the last
+  failure. In that report `loops_sent` MUST hold the builds and the loops that
+  the client tried on that chain in the epoch, and `loops_lost` those that
+  failed. This rule is `REL-016`, and the report goes as each other report.
+
 **The fault rate of a relay.** The reports of one epoch name a relay in a hop
 field. The **fault rate** of that relay is that report count divided by the
 count of chains that the relay carried in the epoch. The chain count is a
@@ -973,6 +1054,8 @@ RelayManifest {
     root          [root_len]u8    // a DirectoryRoot of §10.5.2
     entry_count   u16
     entries       [entry_count]ProvenEntry
+    queue_count   u8              // 0 to 7, absent in a manifest of an earlier build
+    queues        [queue_count]ReportQueue   // §10.4.2
 }
 
 ProvenEntry {
@@ -1388,6 +1471,9 @@ relay with the notification role, and this section then applies to it.
 | `LOOP_FAULT_RATE` | 20 % of the loops of one chain in one epoch (§10.4.2) |
 | `RELAY_FAULT_RATE` | 2 % of the carried chains of one relay in one epoch (§10.4.2) |
 | `FAULT_MIN_REPORTS` | 3 link-fault reports (§10.4.2) |
+| `LOOP_RETURN_WAIT` | 120 s, the wait after which a loop is lost (§10.4.2) |
+| `LOOP_FAULT_MIN` | 10 loops of one chain in one epoch (§10.4.2) |
+| `FORCED_REPEAT` | 2 forced replacements in one epoch (§10.4.2) |
 | Chain-count noise | σ = 1 chain, ε = 0.1, thus b = 10 chains (§10.8) |
 | `FAMILY_MAX` | 64 members in one family certificate (§10.6.3) |
 

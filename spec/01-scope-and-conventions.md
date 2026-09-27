@@ -450,6 +450,8 @@ side channel that the user selects, such as a QR code scan.
 | Lookup request and response (Part 9 §9.4) | Part 9 §9.10 | OHTTP through an ingress relay, Part 9 §9.10 | Client and directory |
 | `LookupProof`, `LadderStep` | Part 9 §9.5.1 | The lookup response of Part 9 §9.4 step 4 | Directory |
 | `VersionProof` | Part 9 §9.9.2 | The `Version` response of Part 9 §9.10 | Directory |
+| `ReportQueue` | Part 10 §10.4.2 | The `RelayManifest` of Part 10 §10.5.5 | Directory authority |
+| `SealedReport` | Part 10 §10.4.2 | The L6 record of kind `0x08`, Part 6 §6.4.2 | Client |
 | `IssuerKeyEntry` | Part 13 §13.5 | A leaf of the log of Part 9 §9.5.1 | The issuer of Part 13 §13.9 |
 | `SignedTreeHead`, `SignerSig` | Part 9 §9.5.2 | The lookup response of Part 9 §9.4 step 4 | The signers of Part 9 §9.5.2 |
 | `LogKeySet`, `SignedLogKeySet` | Part 9 §9.5.2 | The client build, and the signers of Part 9 §9.5.2 | The signers of Part 9 §9.5.2 |

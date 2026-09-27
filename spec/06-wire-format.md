@@ -724,6 +724,10 @@ QueueE2E {
    The value `0x07` names a hello: the sealed envelope of Part 9 `DIS-143`.
    **[WIR-534]** A receiver MUST read a hello record on a rendezvous queue of
    Part 9 §9.6 alone, and it MUST reject a hello record on each other queue.
+   The value `0x08` names a link-fault report: the `SealedReport` of Part 10
+   §10.4.2. **[WIR-536]** A receiver MUST read a link-fault report on the
+   report queue of a directory authority alone, and it MUST reject one on
+   each other queue.
 6. **[WIR-024]** **A sender MUST fill the L6 record to a fixed length for the bucket.** That
    length is the "L6 record on a `MSG`" row of §6.9. That row gives 390 bytes at
    bucket `B0`. **[WIR-025]** Thus the `payload_len` of a `SEND` MUST equal that row.
