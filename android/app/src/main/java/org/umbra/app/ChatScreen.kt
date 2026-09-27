@@ -508,7 +508,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                             .clip(CircleShape)
                             .press(role = Role.Button, label = "Attach") { isAttaching = true },
                         contentAlignment = Alignment.Center,
-                    ) { FaIcon("plus", size = 18.dp, tint = Palette.TextSecondary) }
+                    ) { FaIcon("plus", label = "Attach", size = 18.dp, tint = Palette.TextSecondary) }
                     Box(
                         Modifier
                             .weight(1f)
