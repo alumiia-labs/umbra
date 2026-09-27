@@ -75,11 +75,11 @@ each column when a crate implements the requirement and a test covers it.
 | `DIS` | 120 | 33 | 0 | 0 | 3 | **156** |
 | `REL` | 124 | 32 | 1 | 0 | 2 | **159** |
 | `GRP` | 230 | 65 | 0 | 0 | 6 | **301** |
-| `ATT` | 142 | 45 | 2 | 0 | 2 | **191** |
+| `ATT` | 143 | 45 | 2 | 0 | 3 | **193** |
 | `ABU` | 68 | 30 | 1 | 0 | 0 | **99** |
 | `IMP` | 119 | 41 | 0 | 0 | 2 | **162** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 1991 | 619 | 7 | 0 | 52 | **2669** |
+| **All** | 1992 | 619 | 7 | 0 | 53 | **2671** |
 
 ## SCP — Scope and Conventions
 
@@ -2551,6 +2551,8 @@ Source: `spec/12-attachments.md`
 | `ATT-192` | §12.3 | MUST NOT | A sender | A sender MUST NOT put a name in the body of an image, a video, or a voice object. |  |  |
 | `ATT-193` | §12.3 | MUST | A receiver | A receiver MUST show a `mime_class` that it does not know as a file of class `0x06`. |  |  |
 | `ATT-194` | §12.3 | SHOULD | A sender | A sender SHOULD put a preview of Part 6 rule `WIR-533` in the body of an image and of a video: a thumbnail of low quality, at most `PREVIEW_SIDE` on its longest side. |  |  |
+| `ATT-195` | §12.3 | MUST | A container that the re-encode writes | A container that the re-encode writes MUST name no time: a sender MUST set the creation and the modification time of each MP4 header box (`mvhd`, `tkhd`, `mdhd`) to zero, and a value of the platform that names the device or its system MUST become zeros of the same length. |  |  |
+| `ATT-196` | §12.3 | MAY | An audio object that a sender encodes again | An audio object that a sender encodes again MAY keep the name that the user picked, with the extension of its new type. |  |  |
 
 ## ABU — Anti-Abuse Without Identifiers
 

@@ -376,7 +376,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                         line.info.file?.state?.toInt() == FILE_READY -> when (line.info.file?.mimeClass) {
                             CLASS_IMAGE -> ({ push(Screen.Photo(conversation, line)) })
                             CLASS_VIDEO -> ({ push(Screen.Video(conversation, line)) })
-                            CLASS_VOICE -> ({ VoicePlayer.toggle(line) })
+                            CLASS_VOICE, CLASS_AUDIO -> ({ VoicePlayer.toggle(line) })
                             else -> ({ save(line) })
                         }
                         else -> line.quote?.let { quote -> { jumpTo(quote.key) } }
@@ -408,6 +408,12 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                 jumpsAtNextLoad = true
             }
         }
+        val audioPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { picked ->
+            if (picked != null) {
+                Core.sendAudio(context, conversation, picked)
+                jumpsAtNextLoad = true
+            }
+        }
         val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { picked ->
             if (picked != null) {
                 Core.sendDocument(context, conversation, picked)
@@ -429,6 +435,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                             videoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
                         },
                     )
+                    add(RowEntry("music", "Audio") { audioPicker.launch(arrayOf("audio/*")) })
                 }
                 add(RowEntry("file", "File") { filePicker.launch(arrayOf("*/*")) })
             }
@@ -814,7 +821,7 @@ private fun BubbleContent(line: Line, chat: Chat) {
             when (file.mimeClass) {
                 CLASS_IMAGE -> PhotoTile(line, file, Modifier.align(Alignment.Start))
                 CLASS_VIDEO -> VideoTile(line, file, Modifier.align(Alignment.Start))
-                CLASS_VOICE -> VoiceTile(line, file, Modifier.align(Alignment.Start))
+                CLASS_VOICE, CLASS_AUDIO -> VoiceTile(line, file, Modifier.align(Alignment.Start))
                 // ATT-193: a class that this device does not know is a file.
                 else -> FileTile(line, file, Modifier.align(Alignment.Start))
             }

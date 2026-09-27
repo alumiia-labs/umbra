@@ -39,6 +39,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 import uniffi.umbra_ffi.MsgFile
@@ -295,6 +296,16 @@ fun VoiceTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
         }
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
+            // An audio file keeps the name that the user picked (ATT-192).
+            file.name?.let { name ->
+                Text(
+                    name,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Palette.Text,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
             val shown = when {
                 progress != null -> progress / 100f
                 isHeld && VoicePlayer.lengthMs > 0 -> VoicePlayer.positionMs.toFloat() / VoicePlayer.lengthMs

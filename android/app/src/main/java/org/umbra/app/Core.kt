@@ -1297,6 +1297,23 @@ object Core {
         }
     }
 
+    /** Sends a picked audio file, encoded again with no field of the original. */
+    fun sendAudio(context: Context, conversation: Conversation, source: android.net.Uri) {
+        val app = context.applicationContext
+        call { client ->
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return@call
+            val picked = Files.describe(app, source)
+            val draft = client.newDraft(conversation.id)
+            val bytes = Files.attachAudio(app, source, picked, draft)
+            if (bytes < 0) {
+                draft.destroy()
+                main.post { fault = "That audio file did not open, or it is above 250 MB." }
+                return@call
+            }
+            offer(client, PendingSend(conversation, draft, bytes, isOriginal = false))
+        }
+    }
+
     /** Sends a voice message that the composer recorded. */
     @RequiresApi(Build.VERSION_CODES.R)
     fun sendVoice(conversation: Conversation, recording: VoiceRecording) {
@@ -1584,6 +1601,7 @@ object Core {
                         CLASS_IMAGE -> "Photo"
                         CLASS_VIDEO -> "Video"
                         CLASS_VOICE -> "Voice message"
+                        CLASS_AUDIO -> quotedFile.name ?: "Audio"
                         else -> quotedFile.name ?: "File"
                     }.toCharArray()
                 }
@@ -1620,6 +1638,7 @@ object Core {
                         CLASS_IMAGE -> "Photo"
                         CLASS_VIDEO -> "Video"
                         CLASS_VOICE -> "Voice message"
+                        CLASS_AUDIO -> info.file?.name ?: "Audio"
                         else -> info.file?.name ?: "File"
                     }.toCharArray()
                     else -> client.msgRender(it, sink)

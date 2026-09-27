@@ -276,6 +276,7 @@ object Files {
                 muxer.stop()
                 val bytes = Os.fstat(memory).st_size
                 blankPlatformVersion(memory, bytes)
+                blankTimes(memory, bytes)
                 if (bytes > MAX_FILE_SIZE) return -1
                 val (shownW, shownH) = if (rotation % 180 == 0) width to height else height to width
                 val seconds = (micros / 1_000_000).coerceIn(0, 65_535)
@@ -336,6 +337,109 @@ object Files {
                 // Nothing is left to close.
             }
         }
+    }
+
+    /**
+     * Encodes a picked audio file again as AAC in a new MP4 in the memory,
+     * and gives it to a draft with its length and its name (`ATT-155`,
+     * `ATT-069`). The result is the size of the new file, or -1.
+     */
+    @RequiresApi(Build.VERSION_CODES.R)
+    fun attachAudio(context: Context, source: Uri, picked: Picked, draft: DraftHandle): Long {
+        val memory = Os.memfd_create("umbra-audio", 0)
+        try {
+            val micros = transcodeAudio(context, source, memory)
+            if (micros < 0) return -1
+            val bytes = Os.fstat(memory).st_size
+            if (bytes == 0L || bytes > MAX_FILE_SIZE) return -1
+            blankPlatformVersion(memory, bytes)
+            blankTimes(memory, bytes)
+            val seconds = ((micros + 500_000) / 1_000_000).coerceIn(1, 65_535)
+            Os.lseek(memory, 0, android.system.OsConstants.SEEK_SET)
+            val isGiven = throughPipe(java.io.FileInputStream(memory)) { path ->
+                draft.attachFile(path, CLASS_AUDIO, 0u, 0u, seconds.toInt().toUShort(), audioName(picked.name), null)
+            }
+            return if (isGiven) bytes else -1
+        } finally {
+            // The stream of the pipe closed the memory file when it ended.
+            try {
+                Os.close(memory)
+            } catch (closed: android.system.ErrnoException) {
+                // Nothing is left to close.
+            }
+        }
+    }
+
+    /** The name of a picked audio file after the re-encode: its type is MP4. */
+    private fun audioName(name: String?): String? {
+        name ?: return null
+        val stem = name.substringBeforeLast('.', name).ifEmpty { name }
+        return fileName("$stem.m4a")
+    }
+
+    /**
+     * The muxer of the platform writes the time of the encode into the
+     * header of the file, of each track, and of each medium: `mvhd`,
+     * `tkhd`, and `mdhd` in `moov`. Each such time becomes zero, thus the
+     * file names no time (`ATT-155`).
+     */
+    private fun blankTimes(memory: java.io.FileDescriptor, size: Long) {
+        var at = 0L
+        val header = ByteArray(16)
+        while (at + 8 <= size) {
+            if (!readFully(memory, header, 0, 8, at)) return
+            var boxSize = ByteBuffer.wrap(header, 0, 4).int.toLong() and 0xFFFF_FFFFL
+            val type = String(header, 4, 4, Charsets.US_ASCII)
+            var headerSize = 8
+            if (boxSize == 1L) {
+                if (!readFully(memory, header, 8, 8, at + 8)) return
+                boxSize = ByteBuffer.wrap(header, 8, 8).long
+                headerSize = 16
+            } else if (boxSize == 0L) {
+                boxSize = size - at
+            }
+            if (boxSize < headerSize || at + boxSize > size) return
+            if (type == "moov") {
+                if (boxSize > Int.MAX_VALUE) return
+                val moov = ByteArray(boxSize.toInt())
+                if (!readFully(memory, moov, 0, moov.size, at)) return
+                blankTimesIn(moov, headerSize, moov.size)
+                Os.pwrite(memory, moov, 0, moov.size, at)
+                return
+            }
+            at += boxSize
+        }
+    }
+
+    /** Zeroes the times of each `mvhd`, `tkhd`, and `mdhd` in a run of boxes. */
+    private fun blankTimesIn(bytes: ByteArray, from: Int, to: Int) {
+        var at = from
+        while (at + 8 <= to) {
+            val boxSize = ByteBuffer.wrap(bytes, at, 4).int
+            val type = String(bytes, at + 4, 4, Charsets.US_ASCII)
+            if (boxSize < 8 || at + boxSize > to) return
+            when (type) {
+                "trak", "mdia" -> blankTimesIn(bytes, at + 8, at + boxSize)
+                "mvhd", "tkhd", "mdhd" -> {
+                    // A full box: the version, three bytes of flags, then the
+                    // creation and the modification time, of 4 bytes each at
+                    // version 0 and of 8 bytes each at version 1.
+                    val width = if (bytes[at + 8].toInt() == 1) 16 else 8
+                    if (at + 12 + width <= at + boxSize) bytes.fill(0, at + 12, at + 12 + width)
+                }
+            }
+            at += boxSize
+        }
+    }
+
+    private fun readFully(memory: java.io.FileDescriptor, into: ByteArray, offset: Int, count: Int, at: Long): Boolean {
+        var read = 0
+        while (read < count) {
+            val got = Os.pread(memory, into, offset + read, count - read, at + read)
+            if (got <= 0) return false
+            read += got
+        }
+        return true
     }
 
     /**
@@ -441,6 +545,7 @@ object Files {
         CLASS_IMAGE -> "Photo.jpg"
         CLASS_VIDEO -> "Video.mp4"
         CLASS_VOICE -> "Voice.ogg"
+        CLASS_AUDIO -> "Audio.m4a"
         else -> "File"
     }
 
@@ -449,6 +554,7 @@ object Files {
         CLASS_IMAGE -> "image/jpeg"
         CLASS_VIDEO -> "video/mp4"
         CLASS_VOICE -> "audio/ogg"
+        CLASS_AUDIO -> "audio/mp4"
         else -> file.name?.substringAfterLast('.', "")?.lowercase()
             ?.let { MimeTypeMap.getSingleton().getMimeTypeFromExtension(it) }
             ?: "application/octet-stream"

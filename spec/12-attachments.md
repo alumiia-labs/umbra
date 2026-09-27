@@ -197,6 +197,12 @@ those fields to each platform service.
   **[ATT-157]** If the user selects the original for one send, the sender MUST
   skip both re-encodes for that send and MUST state that the original carries
   its metadata fields.
+- **[ATT-195]** A container that the re-encode writes MUST name no time: a
+  sender MUST set the creation and the modification time of each MP4 header
+  box (`mvhd`, `tkhd`, `mdhd`) to zero, and a value of the platform that names
+  the device or its system MUST become zeros of the same length.
+  **[ATT-196]** An audio object that a sender encodes again MAY keep the name
+  that the user picked, with the extension of its new type.
 - **[ATT-158]** A client MUST NOT reuse a `file_key`, a `file_nonce`, or a
   `ChunkRef` across two conversations. A forward is a new upload under a fresh
   key and fresh chunks.
