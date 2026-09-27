@@ -469,13 +469,24 @@ object Core {
         preview?.let { main.post { onPreview(it) } }
     }
 
-    /** Sends a request to a reusable link or a handle, under the name of the user. */
-    fun sendRequest(target: String, name: String, note: String) {
+    /** The handle that a different party now holds (Part 9 §9.9.2), which waits for a confirmation. */
+    var takeoverOf by mutableStateOf<String?>(null)
+
+    /**
+     * Sends a request to a reusable link or a handle, under the name of the user. A handle that
+     * a different party now holds waits in [takeoverOf] until the user confirms (`DIS-085`).
+     */
+    fun sendRequest(target: String, name: String, note: String, confirmed: Boolean = false) {
         requestSent = false
+        takeoverOf = null
         directory { client ->
             client.setProfileName(name)
-            client.sendContactRequest(target, note)
-            main.post { requestSent = true }
+            try {
+                client.sendContactRequest(target, note, confirmed)
+                main.post { requestSent = true }
+            } catch (takeover: FfiException.Takeover) {
+                main.post { takeoverOf = target }
+            }
         }
     }
 

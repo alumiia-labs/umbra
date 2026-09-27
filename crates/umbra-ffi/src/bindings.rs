@@ -101,6 +101,9 @@ pub enum FfiError {
     Unverified,
     /// A signed object is older than one that the client verified already.
     Stale,
+    /// A different party now holds the handle (Part 9 §9.9.2). A hello goes
+    /// only after the user confirms it (`DIS-085`).
+    Takeover,
 }
 
 impl core::fmt::Display for FfiError {

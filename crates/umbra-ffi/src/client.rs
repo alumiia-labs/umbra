@@ -17,6 +17,7 @@ mod discovery;
 mod files;
 mod group_sync;
 mod groups;
+mod held_handles;
 mod notify;
 mod sync;
 mod tokens;

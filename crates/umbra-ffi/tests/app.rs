@@ -3367,7 +3367,7 @@ fn request_until_listed(handle: &Handle, target: &str) {
 fn request_with_note(handle: &Handle, target: &str, note: &str) {
     let start = Instant::now();
     loop {
-        match handle.send_contact_request(target.into(), note.into()) {
+        match handle.send_contact_request(target.into(), note.into(), false) {
             Ok(()) => return,
             Err(FfiError::NotFound | FfiError::Busy) => {
                 assert!(
@@ -3568,6 +3568,11 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
     wait_for_requests(&alice, 2);
     assert_eq!(alice.contact_requests().unwrap().len(), 2);
     assert!(alice.directory_warnings().unwrap().is_empty());
+    // DIS-079: Carol holds the key of her first hello. The versions between
+    // it and the new key show a rotation and no tombstone, thus her second
+    // hello goes with no warning.
+    request_with_note(&carol, &handle, "Again.");
+    wait_for_requests(&alice, 3);
 
     // DIS-171: a retired link takes no request.
     let start = Instant::now();
@@ -3584,7 +3589,7 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
     assert!(alice.public_links().unwrap().is_empty());
     let start = Instant::now();
     loop {
-        match bob.send_contact_request(link.link.clone(), String::new()) {
+        match bob.send_contact_request(link.link.clone(), String::new(), false) {
             Err(FfiError::NotFound) => break,
             Ok(()) | Err(FfiError::Busy) => {
                 assert!(
@@ -3603,7 +3608,7 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
     assert!(timed.expires_at > 0);
     std::thread::sleep(Duration::from_secs(6));
     request_until_listed(&carol, &timed.link);
-    wait_for_requests(&alice, 3);
+    wait_for_requests(&alice, 4);
     for handle in [&alice, &bob, &carol] {
         handle.disconnect();
     }

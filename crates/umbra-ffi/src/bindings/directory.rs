@@ -26,9 +26,10 @@ use umbra_core::{
             PROFILE_LINK_PREFIX,
         },
         head::{AcceptedHead, HeadState, LogKeySet, SignedTreeHead},
+        lifecycle::{assess, Takeover, Version},
         profile::ProfilePlain,
         translog::LookupProof,
-        HANDLE_LEASE, LEASE_MIN,
+        HANDLE_HISTORY_MAX, HANDLE_LEASE, LEASE_MIN,
     },
     identity::address,
 };
@@ -179,29 +180,89 @@ impl DirectoryLink {
             let looked = self.send(Kind::Lookup, search_key)?;
             let (bytes, blob, proof) =
                 dirclient::parse_lookup(&looked).map_err(|_| FfiError::Malformed)?;
-            let now = unix_now();
-            let head = self.verify_head(&bytes, now)?;
-            if !self.extends_held(&head, now)? {
-                // An epoch closed between the lookup and the proof.
-                continue;
+            // None: an epoch closed between the lookup and the proof.
+            if let Some(head) = self.accept_head(&bytes)? {
+                return Ok((proof, head, blob));
             }
-            *self
-                .held
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                Some((head.tree_size, head.root, head.timestamp));
-            return Ok((
-                proof,
-                AcceptedHead {
-                    tree_size: head.tree_size,
-                    root: head.root,
-                    timestamp: head.timestamp,
-                    accepted_at: now,
-                },
-                blob,
-            ));
         }
         Err(FfiError::Busy)
+    }
+
+    /// Verifies the head of an answer and holds it when it extends the held
+    /// head, or gives none for a head whose proof names another epoch.
+    fn accept_head(&self, bytes: &[u8]) -> Result<Option<AcceptedHead>, FfiError> {
+        let now = unix_now();
+        let head = self.verify_head(bytes, now)?;
+        if !self.extends_held(&head, now)? {
+            return Ok(None);
+        }
+        *self
+            .held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some((head.tree_size, head.root, head.timestamp));
+        Ok(Some(AcceptedHead {
+            tree_size: head.tree_size,
+            root: head.root,
+            timestamp: head.timestamp,
+            accepted_at: now,
+        }))
+    }
+
+    /// The entry of one version of a label, verified under the log
+    /// (`DIS-183`, `DIS-184`).
+    fn version_entry(&self, search_key: &[u8; 64], version: u32) -> Result<Vec<u8>, FfiError> {
+        let body = dirclient::version_body(search_key, version);
+        for _ in 0..HEAD_TRIES {
+            let answer = self.send(Kind::Version, &body)?;
+            let (bytes, proof) =
+                dirclient::parse_version(&answer).map_err(|_| FfiError::Malformed)?;
+            if let Some(head) = self.accept_head(&bytes)? {
+                return proof
+                    .verify(search_key, version, &self.vrf_key()?, &head)
+                    .map(<[u8]>::to_vec)
+                    .map_err(|_| FfiError::Unverified);
+            }
+        }
+        Err(FfiError::Busy)
+    }
+
+    /// The takeover check of a hello to a handle (§9.9.2): a held key that
+    /// differs from the resolved one is replaced in silence after a
+    /// rotation, and a registration of another party warns (`DIS-078` to
+    /// `DIS-085`).
+    fn assess_handle(
+        &self,
+        input: &[u8],
+        search_key: &[u8; 64],
+        held: &Version,
+        resolved: &Version,
+    ) -> Result<Takeover, FfiError> {
+        if held.hk_pub == resolved.hk_pub {
+            return Ok(Takeover::Silent);
+        }
+        // DIS-061: the log does not give an older version than it gave.
+        if resolved.version <= held.version {
+            return Err(FfiError::Stale);
+        }
+        // DIS-080: a long history warns with no fetch.
+        if resolved.version.saturating_sub(held.version) > HANDLE_HISTORY_MAX {
+            return Ok(Takeover::Warn);
+        }
+        let mut between = Vec::new();
+        for version in held.version.saturating_add(1)..resolved.version {
+            let bytes = self.version_entry(search_key, version)?;
+            let entry = DirectoryEntry::parse(&bytes).map_err(|_| FfiError::Unverified)?;
+            if entry.handle != input || entry.version != version {
+                return Err(FfiError::Unverified);
+            }
+            between.push(Version {
+                version,
+                hk_pub: entry.hk_pub,
+            });
+        }
+        between.push(*resolved);
+        assess(held, &between).map_err(|_| FfiError::Unverified)
     }
 
     /// Whether a head extends the newest held head: a smaller log is a
@@ -246,17 +307,23 @@ impl DirectoryLink {
 
     /// The newest entry of a label input, verified under the log.
     pub fn find(&self, input: &[u8]) -> Result<Found, FfiError> {
+        Ok(self.find_keyed(input)?.0)
+    }
+
+    /// The newest entry of a label input and its search key.
+    fn find_keyed(&self, input: &[u8]) -> Result<(Found, [u8; 64]), FfiError> {
         let search_key = self.search_key(input)?;
         let (proof, head, blob) = self.lookup(&search_key)?;
         let entry = proof
             .verify(&search_key, &self.vrf_key()?, &head)
             .map_err(|_| FfiError::Unverified)?
             .map(<[u8]>::to_vec);
-        Ok(Found {
+        let found = Found {
             entry,
             version: proof.newest,
             blob,
-        })
+        };
+        Ok((found, search_key))
     }
 
     /// One first-party token of this epoch, under a proof of work
@@ -1245,14 +1312,23 @@ impl Handle {
     /// Sends a contact request to a reusable link, an `umbra:pub:` string,
     /// or a handle (Part 4 §4.3.3). The call looks the entry up under the
     /// log, and the hello leaves when the runtime has made its queue. A
-    /// [`FfiEvent::Contact`] follows when the addressee accepts.
-    pub fn send_contact_request(&self, target: String, note: String) -> Result<(), FfiError> {
+    /// [`FfiEvent::Contact`] follows when the addressee accepts. A handle
+    /// that a different party now holds gives [`FfiError::Takeover`], and
+    /// the hello goes only with `confirmed` (`DIS-085`).
+    pub fn send_contact_request(
+        &self,
+        target: String,
+        note: String,
+        confirmed: bool,
+    ) -> Result<(), FfiError> {
         let note = note.trim().to_owned();
         if note.len() > umbra_core::discovery::profile::WELCOME_MAX {
             return Err(FfiError::TooLong);
         }
         let link = self.directory_link()?;
         let target = target.trim();
+        // DIS-078: the key of a handle that this hello goes to.
+        let mut to_hold = None;
         let (entry_pk, rendezvous) = if target.starts_with("@")
             || target.starts_with(PROFILE_LINK_PREFIX)
         {
@@ -1264,13 +1340,25 @@ impl Handle {
                     .0
             };
             let input = handle.label_input();
-            let found = link.find(&input)?;
+            let (found, search_key) = link.find_keyed(&input)?;
             let bytes = found.entry.ok_or(FfiError::NotFound)?;
             let entry = DirectoryEntry::parse(&bytes).map_err(|_| FfiError::Unverified)?;
             if entry.handle != input || Some(entry.version) != found.version {
                 return Err(FfiError::Unverified);
             }
             let rendezvous = entry.rendezvous.ok_or(FfiError::NotFound)?;
+            let resolved = Version {
+                version: entry.version,
+                hk_pub: entry.hk_pub,
+            };
+            let held = locked(&self.inner).client.held_handle_key(&input)?;
+            if let Some(held) = held {
+                let verdict = link.assess_handle(&input, &search_key, &held, &resolved)?;
+                if verdict == Takeover::Warn && !confirmed {
+                    return Err(FfiError::Takeover);
+                }
+            }
+            to_hold = Some((input, resolved));
             (entry.hk_pub, rendezvous)
         } else {
             let address = address::parse(target).map_err(|_| FfiError::Malformed)?;
@@ -1306,9 +1394,15 @@ impl Handle {
         let token = locked(&self.inner)
             .client
             .take_token(epoch_number(unix_now()))?;
-        let inner = locked(&self.inner);
+        let mut inner = locked(&self.inner);
         let bridge = inner.bridge.as_ref().ok_or(FfiError::Offline)?;
-        Ok(bridge.hello(entry_pk.to_vec(), encoded, profile, token)?)
+        bridge.hello(entry_pk.to_vec(), encoded, profile, token)?;
+        if let Some((input, resolved)) = to_hold {
+            inner
+                .client
+                .hold_handle_key(&input, &resolved, &mut OsRng)?;
+        }
+        Ok(())
     }
 
     /// The name that a contact request of this device shows.
