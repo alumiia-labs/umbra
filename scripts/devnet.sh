@@ -55,9 +55,21 @@ cmp -s target/devnet/keyset.bin tests/fixtures/devnet/keyset.bin || {
     exit 1
 }
 
+# Push over FCM (Part 8 §8.2): with the service account of a Firebase
+# project at target/devnet/fcm-service-account.json, the NDR sends to FCM.
+# It then trusts the public roots, which FCM needs, in place of the test CA.
+# Git ignores target/, thus the key stays out of the repository.
+ndr_conf=tests/fixtures/devnet/ndr.conf
+if [ -f target/devnet/fcm-service-account.json ]; then
+    grep -v '^trust=' tests/fixtures/devnet/ndr.conf > target/devnet/conf/ndr.conf
+    echo "fcm_credentials=target/devnet/fcm-service-account.json" >> target/devnet/conf/ndr.conf
+    ndr_conf=target/devnet/conf/ndr.conf
+    echo "the NDR sends to FCM"
+fi
+
 # The debug build pins the gateway key of the NDR (`NTF-127`), and the seed
 # of ndr.conf gives the same one at each start.
-target/debug/umbra-ndr key-config tests/fixtures/devnet/ndr.conf     | python -c "import sys; sys.stdout.buffer.write(bytes.fromhex(sys.stdin.read().strip()))"     | cmp -s - tests/fixtures/devnet/ndr-key-config.bin || {
+target/debug/umbra-ndr key-config "$ndr_conf"     | python -c "import sys; sys.stdout.buffer.write(bytes.fromhex(sys.stdin.read().strip()))"     | cmp -s - tests/fixtures/devnet/ndr-key-config.bin || {
     echo "the NDR key differs from tests/fixtures/devnet/ndr-key-config.bin"
     exit 1
 }
@@ -73,7 +85,7 @@ pids=()
 trap 'kill "${pids[@]}" 2>/dev/null || true' EXIT INT TERM
 # The queue relays start first, thus each dial of a lower layer finds a port
 # that accepts.
-target/debug/umbra-ndr tests/fixtures/devnet/ndr.conf &
+target/debug/umbra-ndr "$ndr_conf" &
 pids+=($!)
 target/debug/umbra-directory tests/fixtures/devnet/directory.conf &
 pids+=($!)
