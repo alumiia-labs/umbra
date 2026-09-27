@@ -443,6 +443,11 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
             chat.isLapsed ->
                 "Your membership lapsed while this device was away. Ask a member for a new invitation."
             chat.isClosed -> "The relays of this group hold it no more. It takes no new message."
+            // GRP-373, GRP-374: a removed device took the index of this member.
+            chat.isReturning ->
+                "A removed device took your place in this group. Your request to an admin waits."
+            chat.needsInvitation ->
+                "A removed device took your place in this group. Ask an admin for a new invitation."
             chat.isGroup && !chat.isMember ->
                 "You are no longer a member of this group. The messages here stay on this device."
             else -> null

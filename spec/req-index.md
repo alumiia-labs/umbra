@@ -74,12 +74,12 @@ each column when a crate implements the requirement and a test covers it.
 | `NTF` | 74 | 28 | 0 | 0 | 3 | **105** |
 | `DIS` | 118 | 33 | 0 | 0 | 2 | **153** |
 | `REL` | 124 | 32 | 1 | 0 | 2 | **159** |
-| `GRP` | 225 | 63 | 0 | 0 | 6 | **294** |
+| `GRP` | 227 | 64 | 0 | 0 | 6 | **297** |
 | `ATT` | 142 | 45 | 2 | 0 | 2 | **191** |
 | `ABU` | 68 | 30 | 1 | 0 | 0 | **99** |
 | `IMP` | 119 | 41 | 0 | 0 | 2 | **162** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 1984 | 617 | 7 | 0 | 51 | **2659** |
+| **All** | 1986 | 618 | 7 | 0 | 51 | **2662** |
 
 ## SCP — Scope and Conventions
 
@@ -2301,10 +2301,10 @@ Source: `spec/11-private-groups.md`
 | `GRP-368` | §11.12 | MUST | (unstated) | A `RekeyRecord` is a rotation trigger of §11.4.1, and the index it excludes is `old_index`. |  |  |
 | `GRP-369` | §11.12 | MUST | (unstated) | A member that verifies two `RekeyRecord`s for one `old_index` with one `previous_epoch_hash` MUST apply the record whose SHA3-256 is lower, and it MUST show the fork under `GRP-070`, because one member made two successors. |  |  |
 | `GRP-370` | §11.12 | MUST NOT | (unstated) | The device whose record lost MUST send its `RekeyRecord` on a pairwise channel to a member of role `admin` or above that it holds a channel with, with `epoch_index` and `previous_epoch_hash` set to zero, and it MUST NOT post a second `RekeyRecord` as a group record. |  |  |
-| `GRP-371` | §11.12 | MUST | The admin | The admin MUST then post a plain epoch that removes the index that the record names as its current index, post a plain epoch that adds the new keys under a new index, and send the admit of §11.9.1 step 4 on the same pairwise channel. |  |  |
+| `GRP-371` | §11.12 | MUST | The admin | The admin MUST then post a plain epoch that removes the index that the rival holds now, which is the successor of the index that the record names, and rotate with it under `GRP-264`. |  |  |
 | `GRP-372` | §11.12 | MUST | The member | The member MUST zeroize the old seed and the old three keys when an epoch-key record with a slot for its new index arrives. |  |  |
 | `GRP-373` | §11.12 | MUST | The interface | The interface MUST show each group whose re-key waits for a rotation or for an admit. |  |  |
-| `GRP-374` | §11.12 | MUST | (unstated) | If the record of the user lost under `GRP-369` and the user holds no pairwise channel with an admin of that group, the interface MUST state that the group needs a new invitation, and the client MUST send a self-removal of its current index under `GRP-067`, which is a rotation trigger. |  |  |
+| `GRP-374` | §11.12 | MUST | (unstated) | If the record of the user lost under `GRP-369` and the user holds no pairwise channel with an admin of that group, the interface MUST state that the group needs a new invitation. |  |  |
 | `GRP-375` | §11.4.3 | MUST | (unstated) | Any active member that reads a `KeyRequest` of scope `0x02` from an index that the current roster holds MUST answer, after the backoff of §11.4.1 and only if no one-slot epoch-key record for that index arrived first, with a one-slot epoch-key record of the current epoch for that member, inline with `slot_count` 1 and `own_count` 0, and then with a `KeySupply` of status `0x01` on the path that carried the request. |  |  |
 | `GRP-376` | §11.4.3 | MUST | (unstated) | A member that receives a `KeyRequest` of scope `0x02` on a pairwise channel MUST post it again as a group record, thus every member reads it and the backoff applies. |  |  |
 | `GRP-377` | §11.4.3 | MUST NOT | A member | A member MUST NOT answer a `KeyRequest` from an index that the current roster does not hold. |  |  |
@@ -2343,6 +2343,9 @@ Source: `spec/11-private-groups.md`
 | `GRP-410` | §11.12 | MUST | A client | A client MUST keep the fact that the head of its roster chain is a re-key, with its predecessor, until the next roster epoch. |  |  |
 | `GRP-411` | §11.12 | MUST | A member whose own re-key a rival replaced | A member whose own re-key a rival replaced MUST read with the keys and the index before its re-key again, and it MUST keep the seed of its re-key for `GRP-370`. |  |  |
 | `GRP-412` | §11.12 | MUST | (unstated) | A linked device that applied a re-key of its own index from the group queue MUST adopt the seed of that re-key when the sync item of Part 7 rule `DEV-300` brings it, with no second apply. |  |  |
+| `GRP-413` | §11.12 | MUST | The device | The device MUST then wait for the admit as a joiner of §11.9.1 waits, and it MUST send the record once for each wait. |  |  |
+| `GRP-414` | §11.12 | MUST | A member that gets that admit | A member that gets that admit MUST take the group of the admit in place of the group that it held, under the keys that it sent, in the conversation that it held. |  |  |
+| `GRP-415` | §11.12 | MUST NOT | A member whose index a rival took | A member whose index a rival took MUST NOT post to the group, because its index left the active set. |  |  |
 
 ## ATT — Attachments and Large Objects
 

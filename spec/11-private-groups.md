@@ -1853,24 +1853,44 @@ The re-key below is that move, and it needs no admin.
   `RekeyRecord` on a pairwise channel to a member of role `admin` or above
   that it holds a channel with, with `epoch_index` and `previous_epoch_hash`
   set to zero, and it MUST NOT post a second `RekeyRecord` as a group record.
+  The roster names no contact, thus the device sends it to the contact that
+  brought the member in, which held `admin` at the add, and else to another
+  contact that it knows in the group. The record names the index that the
+  member held before the rival, and its keys are the keys of the re-key that
+  lost. A member whose rival came first makes fresh keys for it.
+  **[GRP-413]** The device MUST then wait for the admit as a joiner of
+  §11.9.1 waits, and it MUST send the record once for each wait.
 - **[GRP-348]** An admin that receives a `RekeyRecord` on a pairwise channel
   MUST verify it under Part 6 rule `WIR-478`. **[GRP-349]** The admin MUST
-  discard a record that fails that check, and it MUST NOT act on it.
+  discard a record that fails that check, and it MUST NOT act on it. A member
+  below `admin` discards the record as well, and so does an admin for a
+  record whose index no rival re-key moved.
   **[GRP-371]** The admin MUST then post a plain epoch that removes the index
-  that the record names as its current index, post a plain epoch that adds
-  the new keys under a new index, and send the admit of §11.9.1 step 4 on the
-  same pairwise channel. The removal is a rotation trigger of §11.4.1.
+  that the rival holds now, which is the successor of the index that the
+  record names, and rotate with it under `GRP-264`. The removal is a rotation
+  trigger of §11.4.1. The admin MUST then offer the member as a joiner with
+  the keys of the record, and the add and the admit of §11.9.1 steps 3 and 4
+  follow on the same pairwise channel when the admin accepts it.
   **[GRP-351]** The admin MUST NOT reuse the removed index.
+  **[GRP-414]** A member that gets that admit MUST take the group of the
+  admit in place of the group that it held, under the keys that it sent, in
+  the conversation that it held.
+
+  > *Cause.* The removal needs no confirmation, because the index it removes
+  > holds keys that the member did not make. The add waits for the admin as a
+  > join does, because the pairwise channel names a contact and the roster
+  > names no contact. An unrelated contact that holds a stolen device of the
+  > member could send the same record.
 - **[GRP-372]** The member MUST zeroize the old seed and the old three keys
   when an epoch-key record with a slot for its new index arrives. Until then
   the old keys stay, because the member still reads the group with them.
 - **[GRP-373]** The interface MUST show each group whose re-key waits for a
   rotation or for an admit. **[GRP-374]** If the record of the user lost
   under `GRP-369` and the user holds no pairwise channel with an admin of
-  that group, the interface MUST state that the group needs a new invitation,
-  and the client MUST send a self-removal of its current index under
-  `GRP-067`, which is a rotation trigger. The leaving member is the attacker's
-  device as much as its own.
+  that group, the interface MUST state that the group needs a new invitation.
+  The member holds no key of the index of the rival, thus it cannot remove
+  that index. **[GRP-415]** A member whose index a rival took MUST NOT post
+  to the group, because its index left the active set.
 - The new seed reaches the other devices of the member through the local
   identity table of Part 7 §7.5.1, as any group seed does.
 

@@ -1262,7 +1262,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             self.outgoing.push_back(outgoing);
         }
         for (conversation, body) in control {
-            self.on_pairwise_control(conversation, &body, rng)?;
+            self.on_pairwise_control(conversation, &body, now_ms, rng)?;
         }
         for (_, body) in key_requests {
             self.on_pairwise_key_request(&body, now_ms, rng)?;

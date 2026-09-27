@@ -2080,6 +2080,233 @@ mod tests {
             .unwrap()
     }
 
+    /// Brings `joiner` into a new group of `admin` through the pairwise
+    /// channel of §11.9.1, and returns the group at the admin, the group at
+    /// the joiner, and the two pairwise conversations.
+    fn group_of_two(
+        admin: &mut Client<MemoryBackend, Element>,
+        joiner: &mut Client<MemoryBackend, Element>,
+        rng: &mut Rng,
+    ) -> (
+        ConversationId,
+        ConversationId,
+        ConversationId,
+        ConversationId,
+    ) {
+        let peer_at_admin = ContactId([0x51; 32]);
+        let peer_at_joiner = ContactId([0x52; 32]);
+        let pair_at_admin = admin.conversation_for(&peer_at_admin.0).unwrap();
+        let pair_at_joiner = joiner.conversation_for(&peer_at_joiner.0).unwrap();
+        let relays = [[0xA1; 32], [0xB2; 32]];
+        let group = admin
+            .create_group("Summit", relays, 1_700_000_000, rng)
+            .unwrap();
+        let group_id = admin.group_info(group).unwrap().group_id;
+        admin
+            .group_queue_made(&group_id, 0, relays[0], [0xC3; 32], rng)
+            .unwrap();
+        admin
+            .group_queue_made(&group_id, 1, relays[1], [0xD4; 32], rng)
+            .unwrap();
+        admin
+            .offer_group(group, pair_at_admin, 1_700_000_001_000, rng)
+            .unwrap();
+        let offer = admin.take_outgoing().unwrap();
+        deliver(joiner, &peer_at_joiner, &offer.app, 1_700_000_001_500, rng);
+        let held = joiner.group_offers().unwrap();
+        joiner
+            .accept_group_offer(&held[0], 1_700_000_002_000, rng)
+            .unwrap();
+        let asked = joiner.take_outgoing().unwrap();
+        deliver(admin, &peer_at_admin, &asked.app, 1_700_000_002_500, rng);
+        let joiners = admin.group_joiners().unwrap();
+        let admission = admin
+            .add_joiner(&joiners[0], 1_700_000_003_000, rng)
+            .unwrap();
+        while admin.take_group_post().is_some() {}
+        admin
+            .admit_joiner(
+                &joiners[0],
+                admission.index,
+                b"a descriptor",
+                1_700_000_004_000,
+                rng,
+            )
+            .unwrap();
+        let admit = admin.take_outgoing().unwrap();
+        deliver(joiner, &peer_at_joiner, &admit.app, 1_700_000_004_500, rng);
+        let member = joiner
+            .accept_group_admit(
+                pair_at_joiner,
+                &group_id,
+                &admission.snapshot,
+                1_700_000_005,
+                rng,
+            )
+            .unwrap();
+        while admin.next_event().is_some() {}
+        while joiner.next_event().is_some() {}
+        (group, member, pair_at_admin, pair_at_joiner)
+    }
+
+    #[test]
+    fn a_member_whose_index_a_rival_took_comes_back_through_an_admin() {
+        use umbra_core::group::join::JoinKeys;
+        use umbra_wire::group::control::GroupControl;
+
+        let mut rng = Rng(61);
+        let mut admin = new_client(&mut rng);
+        let mut joiner = new_client(&mut rng);
+        let (group, member, pair_at_admin, pair_at_joiner) =
+            group_of_two(&mut admin, &mut joiner, &mut rng);
+        let peer_at_admin = ContactId([0x51; 32]);
+        let peer_at_joiner = ContactId([0x52; 32]);
+        let group_id = admin.group_info(group).unwrap().group_id;
+        assert_eq!(joiner.group_info(member).unwrap().own_index, 1);
+        assert_eq!(joiner.return_state(member).unwrap(), (false, false));
+
+        // The member re-keys, and a removed device of it posts a rival with
+        // a lower hash.
+        let mut rival = joiner.group_of(member).unwrap();
+        let mut reader = joiner.group_of(member).unwrap();
+        joiner.rekey_groups(1_700_000_010_000, &mut rng).unwrap();
+        let first = joiner.take_group_post().unwrap();
+        let umbra_core::group::receive::Outcome::Content { app, .. } =
+            reader.receive(&first.record, 1_700_000_011).unwrap()
+        else {
+            panic!("the reader got no re-key");
+        };
+        let body = umbra_wire::app::AppMessage::parse(&app, umbra_wire::app::Channel::Group)
+            .unwrap()
+            .body
+            .to_vec();
+        let hash = GroupControl::parse(&body).unwrap().epoch_hash();
+        let rival_object = loop {
+            let keys = JoinKeys::make(&mut rng).unwrap();
+            let made = rival.rekey_object(&keys, &mut rng).unwrap();
+            if GroupControl::parse(&made).unwrap().epoch_hash() < hash {
+                break made;
+            }
+        };
+        let second = rival
+            .post(&control_app(&rival_object), 1_700_000_012, &mut rng)
+            .unwrap();
+        for record in [&first.record, &second] {
+            admin
+                .on_group_record(&[0xC3; 32], 1, record, 1_700_000_013_000, &mut rng)
+                .unwrap();
+        }
+        let rival_index = admin
+            .group_of(group)
+            .unwrap()
+            .roster()
+            .successor_of(1)
+            .unwrap();
+        assert_eq!(rival_index, 2);
+
+        // GRP-370: the member reads the rival, goes back, and asks the admin
+        // that brought it in on the pairwise channel.
+        joiner
+            .on_group_record(&[0xC3; 32], 2, &second, 1_700_000_014_000, &mut rng)
+            .unwrap();
+        assert_eq!(joiner.group_info(member).unwrap().own_index, 1);
+        assert_eq!(joiner.return_state(member).unwrap(), (true, false));
+        let ask = joiner.take_outgoing().unwrap();
+        assert_eq!(ask.conversation, pair_at_joiner);
+        // A second record asks nothing again.
+        joiner
+            .on_group_record(&[0xC3; 32], 3, &second, 1_700_000_014_500, &mut rng)
+            .unwrap();
+        assert!(joiner.take_outgoing().is_none());
+
+        // GRP-371: the admin removes the index of the rival with a rotation,
+        // and lists the member as a joiner with its new keys.
+        deliver(
+            &mut admin,
+            &peer_at_admin,
+            &ask.app,
+            1_700_000_015_000,
+            &mut rng,
+        );
+        assert_eq!(
+            admin.next_event(),
+            Some(Event::GroupJoiner {
+                from: pair_at_admin
+            })
+        );
+        let roster = admin.group_of(group).unwrap();
+        assert!(!roster.roster().member(rival_index).unwrap().active);
+        assert_eq!(admin.group_info(group).unwrap().members, 1);
+        let mut moved = Vec::new();
+        while let Some(post) = admin.take_group_post() {
+            moved.push(post.record);
+        }
+        assert!(moved.len() >= 2, "a removal and a rotation");
+        let joiners = admin.group_joiners().unwrap();
+        assert_eq!(joiners.len(), 1);
+        let admission = admin
+            .add_joiner(&joiners[0], 1_700_000_016_000, &mut rng)
+            .unwrap();
+        assert_eq!(admission.index, 3);
+        while admin.take_group_post().is_some() {}
+        admin
+            .admit_joiner(
+                &joiners[0],
+                admission.index,
+                b"a descriptor",
+                1_700_000_017_000,
+                &mut rng,
+            )
+            .unwrap();
+        let admit = admin.take_outgoing().unwrap();
+        deliver(
+            &mut joiner,
+            &peer_at_joiner,
+            &admit.app,
+            1_700_000_017_500,
+            &mut rng,
+        );
+        assert_eq!(
+            joiner.next_event(),
+            Some(Event::GroupAdmit {
+                from: pair_at_joiner
+            })
+        );
+
+        // The admit brings the member back into the conversation it held,
+        // under the new index and the keys it sent.
+        let back = joiner
+            .accept_group_admit(
+                pair_at_joiner,
+                &group_id,
+                &admission.snapshot,
+                1_700_000_018,
+                &mut rng,
+            )
+            .unwrap();
+        assert_eq!(back, member);
+        let info = joiner.group_info(member).unwrap();
+        assert_eq!((info.own_index, info.members), (3, 2));
+        assert_eq!(joiner.return_state(member).unwrap(), (false, false));
+        joiner.lock();
+        joiner
+            .unlock(&units("correct horse"), 1_700_000_019)
+            .unwrap();
+        assert_eq!(joiner.group_info(member).unwrap().own_index, 3);
+
+        // A message of the admin reaches the member again.
+        let mut draft = admin.new_draft(group);
+        draft.set_text(&units("welcome back")).unwrap();
+        admin
+            .send_draft(draft, 1_700_000_020_000, &mut rng)
+            .unwrap();
+        let post = admin.take_group_post().unwrap();
+        assert!(joiner
+            .on_group_record(&[0xC3; 32], 9, &post.record, 1_700_000_020_500, &mut rng)
+            .unwrap()
+            .is_some());
+    }
+
     #[test]
     fn an_offer_a_join_record_an_add_and_an_admit_bring_a_member_in() {
         let mut rng = Rng(41);

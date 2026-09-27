@@ -101,6 +101,10 @@ class Chat(
     val ownerNeeded: Boolean = false,
     /** Whether this device lost the keys of a group and needs a new invitation. */
     val isLapsed: Boolean = false,
+    /** Whether a removed device took the index of this member, and an admit waits (`GRP-373`). */
+    val isReturning: Boolean = false,
+    /** Whether a removed device took the index of this member, and no contact can add it again (`GRP-374`). */
+    val needsInvitation: Boolean = false,
 ) {
     /** What each list shows: the name of the user, or a stable short label. */
     val title: String
@@ -1645,6 +1649,8 @@ object Core {
             isMember = group?.isMember ?: true,
             ownerNeeded = group?.ownerNeeded ?: false,
             isLapsed = group?.isLapsed ?: false,
+            isReturning = group?.isReturning ?: false,
+            needsInvitation = group?.needsInvitation ?: false,
         )
     }
 

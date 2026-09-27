@@ -378,6 +378,11 @@ impl Group {
         now: u64,
         rng: &mut R,
     ) -> Result<Vec<u8>, Error> {
+        // GRP-415: an index that left the active set posts nothing; each
+        // member drops its record under GRP-257.
+        if self.own_role().is_none() {
+            return Err(Error::NoPath);
+        }
         // GRP-231, GRP-386: the previous epoch ends with its grace.
         self.epochs.expire(now);
         let members = self.roster.active_count();
@@ -2018,6 +2023,10 @@ mod tests {
         assert!(!member.has_previous());
         assert!(member.lost_rekey());
         assert!(member.own_role().is_none());
+        assert_eq!(
+            member.post(&text("after the loss"), now, &mut rng),
+            Err(Error::NoPath)
+        );
 
         // GRP-370: the record for the pairwise channel has zero chain fields.
         let pairwise = member.pairwise_rekey_object(&fresh, &mut rng).unwrap();

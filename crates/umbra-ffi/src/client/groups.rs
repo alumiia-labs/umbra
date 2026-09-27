@@ -1143,6 +1143,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         &mut self,
         from: ConversationId,
         body: &[u8],
+        now_ms: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
         let Ok(control) = GroupControl::parse(body) else {
@@ -1203,8 +1204,185 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 self.events.push_back(Event::GroupJoiner { from });
                 Ok(())
             }
+            ControlType::Rekey => self.on_pairwise_rekey(from, control.payload, now_ms, rng),
             _ => Ok(()),
         }
+    }
+
+    /// A `RekeyRecord` on a pairwise channel from a member whose re-key a
+    /// rival replaced (`GRP-370`). An admin verifies it under the roster key
+    /// of the index that it names (`GRP-348`, `GRP-349`), and removes the
+    /// index that the rival holds now, with a rotation (`GRP-371`). The
+    /// member then waits as a joiner with its new keys, and the admin admits
+    /// it as each joiner (§11.9.1).
+    fn on_pairwise_rekey<R: CryptoRng + ?Sized>(
+        &mut self,
+        from: ConversationId,
+        payload: &[u8],
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        if !self.owns_channels()? {
+            return Ok(());
+        }
+        let Ok(record) = umbra_wire::group::control::RekeyRecord::parse(payload) else {
+            return Ok(());
+        };
+        if !record.chain_is_zero() {
+            return Ok(());
+        }
+        let group_id = record.chain.group_id;
+        let conversation = self.conversation_of_group(&group_id)?;
+        if !self.is_group(conversation)? || self.group_closed(conversation)? {
+            return Ok(());
+        }
+        let group = self.group_of(conversation)?;
+        if group.own_role().is_none_or(|role| role < Role::Admin) {
+            return Ok(());
+        }
+        let Some(old) = group.roster().member(record.old_index) else {
+            return Ok(());
+        };
+        if old.active || record.verify(&old.roster_pk_hash).is_err() {
+            return Ok(());
+        }
+        let Some(rival) = group.roster().successor_of(record.old_index) else {
+            return Ok(());
+        };
+        drop(group);
+        // GRP-351: the removed index is not used again, and GRP-264 rotates
+        // with the removal.
+        if self
+            .group_of(conversation)?
+            .roster()
+            .member(rival)
+            .is_some_and(|member| member.active)
+        {
+            self.remove_from_group(conversation, rival, now_ms, rng)?;
+        }
+        let join = JoinRecord {
+            group_id,
+            keys: record.new_keys.clone(),
+        };
+        let mut join_payload = vec![0u8; 1_400];
+        let used = join.encode(&mut join_payload)?;
+        join_payload.truncate(used);
+        let mut entry = vec![ASKED];
+        entry.extend_from_slice(&from.0);
+        entry.extend_from_slice(&group_id);
+        entry.extend_from_slice(&join_payload);
+        let row = self.join_row(from, &group_id)?;
+        let open = self.open_mut()?;
+        let mut batch = open.store.begin();
+        batch.put(GROUP_JOIN, row, Some(from.0), &entry, rng)?;
+        batch.commit()?;
+        self.events.push_back(Event::GroupJoiner { from });
+        Ok(())
+    }
+
+    /// Asks an admin to add this member again, after a rival re-key took
+    /// its index (`GRP-370`). The device that owns the channels sends the
+    /// `RekeyRecord` with zero chain fields to the contact that brought the
+    /// member in, else to another contact in the group, and it waits for
+    /// the admit as a joiner. A member with no such contact needs a new
+    /// invitation (`GRP-374`).
+    pub(super) fn ask_to_return<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        if !self.owns_channels()? {
+            return Ok(());
+        }
+        let group = self.group_of(conversation)?;
+        if !group.lost_rekey() {
+            return Ok(());
+        }
+        let group_id = *group.group_id();
+        let Some(admin) = self.return_contact(conversation)? else {
+            return Ok(());
+        };
+        let row = self.join_row(admin, &group_id)?;
+        if self.join_entry(&row)?.is_some() {
+            return Ok(());
+        }
+        let creator_roster_pk = group
+            .roster()
+            .member(0)
+            .and_then(|creator| creator.roster_pk.clone())
+            .ok_or(Error::Integrity)?;
+        // GRP-411: the seed of the re-key that lost, or a fresh one when the
+        // rival came first.
+        let lost_row = self
+            .open_ref()?
+            .store
+            .row_id(TableId::LOCAL_IDENTITY, &lost_seed_key(&group_id));
+        let held = self
+            .open_ref()?
+            .store
+            .get(TableId::LOCAL_IDENTITY, &lost_row)?
+            .map(Zeroizing::new);
+        let seed = match held {
+            Some(bytes) => Secret::new(bytes.as_slice().try_into().map_err(|_| Error::Integrity)?),
+            None => {
+                let mut seed = Secret::<32>::zeroed();
+                rng.fill_bytes(seed.expose_mut());
+                seed
+            }
+        };
+        let fresh = umbra_core::group::join::JoinKeys {
+            seed: Secret::new(*seed.expose()),
+            keys: MemberKeys::from_seed(&seed),
+        };
+        let object = group
+            .pairwise_rekey_object(&fresh, rng)
+            .map_err(|_| Error::Malformed)?;
+        drop(group);
+        self.send_pairwise_control(admin, &object, now_ms, rng)?;
+        let (_, name) = self.conversation_meta(conversation)?;
+        let mut entry = vec![WAITING];
+        entry.extend_from_slice(&admin.0);
+        entry.extend_from_slice(&group_id);
+        entry.extend_from_slice(&creator_roster_pk);
+        entry.extend_from_slice(name.as_bytes());
+        let open = self.open_mut()?;
+        let mut batch = open.store.begin();
+        batch.put(TableId::LOCAL_IDENTITY, lost_row, None, seed.expose(), rng)?;
+        batch.put(GROUP_JOIN, row, Some(admin.0), &entry, rng)?;
+        Ok(batch.commit()?)
+    }
+
+    /// The contact that a member asks to come back: the one that brought it
+    /// in, else another contact in the group.
+    fn return_contact(
+        &self,
+        conversation: ConversationId,
+    ) -> Result<Option<ConversationId>, Error> {
+        let store = &self.open_ref()?.store;
+        let via = store.row_id(GROUP_MEMBER, &[conversation.0.as_slice(), b"via"].concat());
+        if let Some(bytes) = store.get(GROUP_MEMBER, &via)? {
+            if let Ok(id) = <[u8; 16]>::try_from(bytes.as_slice()) {
+                return Ok(Some(ConversationId(id)));
+            }
+        }
+        Ok(self.contacts_in(conversation)?.into_iter().next())
+    }
+
+    /// Whether a member whose index a rival took waits for an admit
+    /// (`GRP-373`), or needs a new invitation because it holds no contact
+    /// in the group (`GRP-374`). The first value is the wait, the second the
+    /// need.
+    pub fn return_state(&self, conversation: ConversationId) -> Result<(bool, bool), Error> {
+        let group = self.group_of(conversation)?;
+        if !group.lost_rekey() {
+            return Ok((false, false));
+        }
+        let Some(admin) = self.return_contact(conversation)? else {
+            return Ok((false, true));
+        };
+        let row = self.join_row(admin, group.group_id())?;
+        Ok((self.join_entry(&row)?.is_some(), false))
     }
 
     /// Step 3 of §11.9.1: the admin adds the joiner and posts the plain
@@ -1337,12 +1515,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         };
         let seed = {
             let store = &self.open_ref()?.store;
+            // GRP-370: a member that comes back after a rival re-key joins
+            // under the seed that it sent to the admin.
+            let lost_row = store.row_id(TableId::LOCAL_IDENTITY, &lost_seed_key(group_id));
             let seed_row = store.row_id(TableId::LOCAL_IDENTITY, group_id);
-            let seed = Zeroizing::new(
-                store
+            let seed = Zeroizing::new(match store.get(TableId::LOCAL_IDENTITY, &lost_row)? {
+                Some(lost) => lost,
+                None => store
                     .get(TableId::LOCAL_IDENTITY, &seed_row)?
                     .ok_or(Error::Integrity)?,
-            );
+            });
             let seed: [u8; 32] = seed.as_slice().try_into().map_err(|_| Error::Integrity)?;
             Secret::new(seed)
         };
@@ -1571,17 +1753,26 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let group = Group::joined(admitted, seed).map_err(|_| Error::Malformed)?;
         let group_id = *group.group_id();
         // GRP-153: a second admit to a group that this device holds is no
-        // group.
+        // group. A member whose index a rival took comes back under the
+        // admit, and the new group takes the place of the one it held.
         let conversation = self.conversation_of_group(&group_id)?;
-        if self.is_group(conversation)? {
+        if self.is_group(conversation)? && !self.group_of(conversation)?.lost_rekey() {
             return Err(Error::Malformed);
         }
         let row = Self::group_row(&group, OPEN)?;
         let open = self.open_mut()?;
         let seed_row = open.store.row_id(TableId::LOCAL_IDENTITY, &group_id);
+        let lost_row = open
+            .store
+            .row_id(TableId::LOCAL_IDENTITY, &lost_seed_key(&group_id));
+        let previous_row = open
+            .store
+            .row_id(TableId::LOCAL_IDENTITY, &previous_seed_key(&group_id));
         let mut batch = open.store.begin();
         batch.put(GROUP, conversation.0, None, &row, rng)?;
         batch.put(TableId::LOCAL_IDENTITY, seed_row, None, seed.expose(), rng)?;
+        batch.delete(TableId::LOCAL_IDENTITY, lost_row);
+        batch.delete(TableId::LOCAL_IDENTITY, previous_row);
         batch.commit()?;
         self.put_conversation_meta(conversation, 0, name, rng)?;
         Ok(conversation)
@@ -3208,6 +3399,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
         // The counters, the held records and the roster moved.
         self.save_group(conversation, &group, rng)?;
+        // GRP-370: a rival re-key took the index of this member.
+        if group.lost_rekey() {
+            self.ask_to_return(conversation, now_ms, rng)?;
+        }
         // GRP-363: an admin that installs an epoch it did not credential
         // moves each replica to it. A delivery of owner credentials alone
         // installs no epoch.
@@ -3577,6 +3772,19 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     pub fn resume_group_work<R: CryptoRng + ?Sized>(&mut self, rng: &mut R) -> Result<(), Error> {
         self.requeue_group_creations()?;
         self.requeue_group_posts(rng)
+    }
+
+    /// Asks an admin of each group whose index a rival re-key took and that
+    /// waits for no admit yet (`GRP-370`).
+    pub fn ask_lost_groups<R: CryptoRng + ?Sized>(
+        &mut self,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        for conversation in self.group_conversations()? {
+            self.ask_to_return(conversation, now_ms, rng)?;
+        }
+        Ok(())
     }
 
     /// Puts each record of a group that no replica accepted back into the

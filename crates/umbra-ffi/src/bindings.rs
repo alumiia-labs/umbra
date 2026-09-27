@@ -274,6 +274,12 @@ pub struct FfiGroupInfo {
     /// Whether this device lacks the current epoch and the relay refused
     /// its request, thus it needs a new invitation (`GRP-297`).
     pub is_lapsed: bool,
+    /// Whether a rival re-key took the index of this member, and its
+    /// request to an admin waits for the admit (`GRP-373`).
+    pub is_returning: bool,
+    /// Whether a rival re-key took the index of this member, and it knows
+    /// no contact in the group to ask (`GRP-374`).
+    pub needs_invitation: bool,
 }
 
 /// The role of one member of a group (§11.9).
@@ -3468,6 +3474,9 @@ impl Handle {
             // A group record takes a fresh nonce, thus the group work comes
             // back at the start of a run and not at the unlock.
             client.resume_group_work(&mut OsRng)?;
+            // GRP-370: a member that a rival re-key put out and that did not
+            // ask an admin yet asks now.
+            client.ask_lost_groups(unix_now_ms(), &mut OsRng)?;
             // DEV-072: each record that a peer did not acknowledge goes
             // again on the channel of the new run, paced by the clock.
             client.start_sync_resend(&mut OsRng)?;
@@ -3871,8 +3880,11 @@ impl Handle {
         let inner = locked(&self.inner);
         let info = inner.client.group_info(conversation)?;
         let owner_needed = inner.client.owner_needed(conversation, unix_now_ms())?;
+        let (is_returning, needs_invitation) = inner.client.return_state(conversation)?;
         Ok(FfiGroupInfo {
             owner_needed,
+            is_returning,
+            needs_invitation,
             is_lapsed: info.is_lapsed,
             is_closed: info.is_closed,
             group_id: info.group_id.to_vec(),

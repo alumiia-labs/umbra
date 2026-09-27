@@ -149,6 +149,12 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                 // GRP-184: the group keeps two owners, thus a silent owner
                 // leaves only after another member becomes one.
                 Note("An owner has been silent for 30 days. Make another member an owner.")
+            } else if (chat.isReturning) {
+                Spacer(Modifier.height(12.dp))
+                Note("A removed device took your place in this group. Your request to an admin waits.")
+            } else if (chat.needsInvitation) {
+                Spacer(Modifier.height(12.dp))
+                Note("A removed device took your place in this group. Ask an admin for a new invitation.")
             } else if (!chat.isMember) {
                 Spacer(Modifier.height(12.dp))
                 Note("You are no longer a member of this group.")
