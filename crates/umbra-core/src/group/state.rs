@@ -512,9 +512,16 @@ impl Group {
         now: u64,
     ) -> Result<u16, Error> {
         let control = GroupControl::parse(object)?;
-        let Applied::Rekeyed { new, .. } = self.apply_control(&control, self.own_index, now)?
-        else {
-            return Err(Error::Malformed);
+        let new = match self.apply_roster(&control, self.own_index, now) {
+            Ok(Applied::Rekeyed { new, .. }) => new,
+            Ok(_) => return Err(Error::Malformed),
+            // DEV-300: a linked device can read the record on the group
+            // queue before its seed comes on the sync channel.
+            Err(Error::Stale) => self
+                .roster
+                .holds_rekey(&control, self.own_index)
+                .ok_or(Error::Stale)?,
+            Err(error) => return Err(error),
         };
         let keys = core::mem::replace(&mut self.keys, Box::new(MemberKeys::from_seed(seed)));
         let pairs = core::mem::take(&mut self.pairs);
@@ -533,6 +540,33 @@ impl Group {
     /// Whether this member still reads with the keys before a re-key.
     pub fn has_previous(&self) -> bool {
         self.previous.is_some()
+    }
+
+    /// Whether a re-key that another holder of the keys of this member made
+    /// took the index of this member (`GRP-369`). The member then reads with
+    /// the keys of that index until an admin adds it again (`GRP-370`,
+    /// `GRP-371`), or the group needs a new invitation (`GRP-374`).
+    pub fn lost_rekey(&self) -> bool {
+        self.previous.is_none()
+            && self
+                .roster
+                .member(self.own_index)
+                .is_some_and(|member| !member.active)
+            && self.roster.successor_of(self.own_index).is_some()
+    }
+
+    /// The `RekeyRecord` of `GRP-370` for the pairwise channel to an admin:
+    /// the chain fields are zero, the index is the one that this member
+    /// held, and the signature is under the keys of that index.
+    pub fn pairwise_rekey_object<R: TryCryptoRng + ?Sized>(
+        &self,
+        fresh: &super::join::JoinKeys,
+        rng: &mut R,
+    ) -> Result<Vec<u8>, Error> {
+        if !self.lost_rekey() {
+            return Err(Error::NoPath);
+        }
+        super::join::rekey_record(&self.keys, fresh, &self.roster, self.own_index, false, rng)
     }
 
     /// Whether a gap in the counter of one sender passed
@@ -1314,12 +1348,58 @@ impl Group {
         sender: u16,
         now: u64,
     ) -> Result<Applied, Error> {
-        let applied = self.roster.apply(control, sender, now)?;
-        if let Applied::Removed(trigger) = &applied {
-            if let Some(index) = trigger.excluded {
-                self.pairs.remove(index);
-                self.receiver.removed(index);
+        let applied = self.apply_roster(control, sender, now)?;
+        // GRP-369: a rival took the place of the re-key that this member
+        // made and adopted. The member goes back to the index and the keys
+        // before it, and those keys still read the group.
+        if let Applied::Rekeyed {
+            old,
+            new,
+            replaced: true,
+            ..
+        } = &applied
+        {
+            if *new == self.own_index && self.previous.as_ref().is_some_and(|p| p.index == *old) {
+                if let Some(previous) = self.previous.take() {
+                    self.keys = previous.keys;
+                    self.pairs = previous.pairs;
+                    self.own_index = previous.index;
+                    self.receiver.set_own_index(previous.index);
+                    self.sender = Sender::default();
+                }
             }
+        }
+        Ok(applied)
+    }
+
+    /// Applies a roster object to the roster, and drops a pair key that no
+    /// longer fits: the key of a member that left, and the key at an index
+    /// whose keys a rival re-key changed.
+    fn apply_roster(
+        &mut self,
+        control: &GroupControl<'_>,
+        sender: u16,
+        now: u64,
+    ) -> Result<Applied, Error> {
+        let applied = self.roster.apply(control, sender, now)?;
+        match &applied {
+            Applied::Removed(trigger) => {
+                if let Some(index) = trigger.excluded {
+                    self.pairs.remove(index);
+                    self.receiver.removed(index);
+                }
+            }
+            Applied::Rekeyed {
+                new,
+                replaced: true,
+                ..
+            } => {
+                self.pairs.remove(*new);
+                if let Some(previous) = self.previous.as_mut() {
+                    previous.pairs.remove(*new);
+                }
+            }
+            _ => {}
         }
         Ok(applied)
     }
@@ -1806,6 +1886,152 @@ mod tests {
             .unwrap();
         assert!(!member.has_previous());
         assert_eq!(member.epoch(), creator.epoch());
+    }
+
+    /// A group control object as the `AppMessage` of a group post.
+    fn control_app(object: &[u8], msg_id: u8) -> Vec<u8> {
+        let app = AppMessage {
+            kind: AppKind::GroupControl,
+            msg_id: [msg_id; 16],
+            sent_at: 1_700_000_000_000,
+            body: object,
+        };
+        let mut bytes = alloc::vec![0u8; app.len()];
+        let n = app.encode(&mut bytes).unwrap();
+        bytes.truncate(n);
+        bytes
+    }
+
+    /// Reads a record, and applies the roster object that it carries.
+    fn read_control(group: &mut Group, record: &[u8], now: u64) -> Result<Applied, Error> {
+        let outcome = group.receive(record, now).unwrap();
+        let Outcome::Content { sender, app, .. } = outcome else {
+            panic!("the record carried no content: {outcome:?}");
+        };
+        let control =
+            GroupControl::parse(AppMessage::parse(&app, Channel::Group).unwrap().body).unwrap();
+        group.apply_control(&control, sender, now)
+    }
+
+    #[test]
+    fn a_rival_rekey_with_the_lower_hash_takes_the_index_and_the_loser_goes_back() {
+        let now = 1_700_000_000;
+        let (mut creator, mut member, _) = pair(now);
+        let mut rng = Rng(41);
+        let creator_seed = Secret::new([0x21; 32]);
+        // A second reader that gets the two re-keys in the other order.
+        let mut late = Group::restore(&creator.export().unwrap(), &creator_seed).unwrap();
+
+        // The member moves to new keys, and posts the record first.
+        let seed = Secret::new([0x44; 32]);
+        let fresh = JoinKeys {
+            seed: Secret::new(*seed.expose()),
+            keys: MemberKeys::from_seed(&seed),
+        };
+        let object = member.rekey_object(&fresh, &mut rng).unwrap();
+        let record = member
+            .post(&control_app(&object, 8), now, &mut rng)
+            .unwrap();
+        // A removed device holds the keys of the member, and it makes a
+        // rival with a lower hash, as an attacker grinds one (§11.12).
+        let mut rival = Group::restore(&member.export().unwrap(), &JOINER_SEED).unwrap();
+        // A linked device of the member, which reads the record on the queue
+        // before the seed comes on its sync channel (DEV-300).
+        let mut linked = Group::restore(&member.export().unwrap(), &JOINER_SEED).unwrap();
+        member.adopt_rekey(&object, &seed, now).unwrap();
+        let hash = GroupControl::parse(&object).unwrap().epoch_hash();
+        let mut attempt = 0u8;
+        let rival_object = loop {
+            let seed = Secret::new([0x60u8.wrapping_add(attempt); 32]);
+            let keys = JoinKeys {
+                seed: Secret::new(*seed.expose()),
+                keys: MemberKeys::from_seed(&seed),
+            };
+            let made = rival.rekey_object(&keys, &mut rng).unwrap();
+            if GroupControl::parse(&made).unwrap().epoch_hash() < hash {
+                break made;
+            }
+            attempt += 1;
+        };
+        let rival_hash = GroupControl::parse(&rival_object).unwrap().epoch_hash();
+        let rival_record = rival
+            .post(&control_app(&rival_object, 9), now, &mut rng)
+            .unwrap();
+
+        // GRP-369: the reader applies the first re-key, and the rival with
+        // the lower hash takes its place. One member made two successors,
+        // thus the fork shows and names it.
+        assert!(matches!(
+            read_control(&mut creator, &record, now).unwrap(),
+            Applied::Rekeyed {
+                old: 1,
+                new: 2,
+                replaced: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            read_control(&mut creator, &rival_record, now).unwrap(),
+            Applied::Rekeyed {
+                old: 1,
+                new: 2,
+                replaced: true,
+                ..
+            }
+        ));
+        assert_eq!(*creator.roster().chain_hash(), rival_hash);
+        assert_eq!(creator.roster().forks().len(), 1);
+        assert_eq!(creator.roster().forks()[0].named, Some(1));
+        assert_eq!(creator.roster().successor_of(1), Some(2));
+        assert_eq!(creator.roster().active_count(), 2);
+        // The same record again changes nothing.
+        assert_eq!(
+            read_control(&mut creator, &rival_record, now),
+            Err(Error::Stale)
+        );
+
+        assert!(matches!(
+            read_control(&mut linked, &record, now).unwrap(),
+            Applied::Rekeyed {
+                replaced: false,
+                ..
+            }
+        ));
+        assert_eq!(linked.adopt_rekey(&object, &seed, now).unwrap(), 2);
+        assert!(linked.has_previous());
+
+        // The other order gives the same chain, and the higher hash stays out.
+        read_control(&mut late, &rival_record, now).unwrap();
+        assert_eq!(read_control(&mut late, &record, now), Err(Error::Stale));
+        assert_eq!(late.roster().chain_hash(), creator.roster().chain_hash());
+        assert_eq!(late.roster().forks().len(), 1);
+
+        // The member reads the rival with no tag for itself, and goes back
+        // to the index and the keys before its re-key.
+        assert_eq!(member.own_index(), 2);
+        assert!(!member.lost_rekey());
+        assert!(matches!(
+            read_control(&mut member, &rival_record, now).unwrap(),
+            Applied::Rekeyed { replaced: true, .. }
+        ));
+        assert_eq!(member.own_index(), 1);
+        assert!(!member.has_previous());
+        assert!(member.lost_rekey());
+        assert!(member.own_role().is_none());
+
+        // GRP-370: the record for the pairwise channel has zero chain fields.
+        let pairwise = member.pairwise_rekey_object(&fresh, &mut rng).unwrap();
+        let control = GroupControl::parse(&pairwise).unwrap();
+        let parsed = umbra_wire::group::control::RekeyRecord::parse(control.payload).unwrap();
+        assert!(parsed.chain_is_zero());
+        assert_eq!(parsed.old_index, 1);
+
+        // The stored form keeps the head of the chain and the loss.
+        let back = Group::restore(&member.export().unwrap(), &JOINER_SEED).unwrap();
+        assert!(back.lost_rekey());
+        let back = Group::restore(&creator.export().unwrap(), &creator_seed).unwrap();
+        assert_eq!(back.roster().head_rekey(), creator.roster().head_rekey());
+        assert_eq!(back.roster().successor_of(1), Some(2));
     }
 
     #[test]

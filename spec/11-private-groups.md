@@ -571,6 +571,7 @@ the steps below for each content record.
 6. **[GRP-257]** A receiver MUST reject a record whose `sender_index` names no
    member of the receiver's **current** roster. A removed member's in-flight
    records under the old epoch fail here, whatever `roster_epoch` they name.
+   `GRP-407` of §11.12 states the one exception, a rival re-key.
 7. **[GRP-258]** A receiver MUST identify the record by the triple of
    `GRP-035`. **[GRP-259]** A receiver MUST track `counter` for each (sender,
    epoch) pair, for the gap detection of §11.2.2 and the order of §11.7. A
@@ -1820,7 +1821,35 @@ The re-key below is that move, and it needs no admin.
 - **[GRP-369]** A member that verifies two `RekeyRecord`s for one `old_index`
   with one `previous_epoch_hash` MUST apply the record whose SHA3-256 is
   lower, and it MUST show the fork under `GRP-070`, because one member made
-  two successors. **[GRP-370]** The device whose record lost MUST send its
+  two successors.
+- **[GRP-407]** A receiver MUST take a `RekeyRecord` from the index that the
+  re-key at the head of the roster chain excluded, when the record names the
+  roster epoch before that head. That index left the active set with the
+  head, and `GRP-257` would drop the rival that `GRP-369` compares.
+  **[GRP-408]** A member MUST take a `RekeyRecord` under its own index,
+  although a record carries no tag for its sender. The signature of the
+  record under the old roster key names the maker. **[GRP-409]** A receiver
+  MUST NOT drop a `RekeyRecord` for its `counter` under `GRP-259`, because two
+  holders of the keys of one index count apart. The roster knows a re-key it
+  holds by its hash.
+- **[GRP-410]** A client MUST keep the fact that the head of its roster chain
+  is a re-key, with its predecessor, until the next roster epoch. A rival
+  that arrives after the chain moved past the re-key MUST show the fork under
+  `GRP-070`, and it MUST change nothing. **[GRP-411]** A member whose own
+  re-key a rival replaced MUST read with the keys and the index before its
+  re-key again, and it MUST keep the seed of its re-key for `GRP-370`.
+  **[GRP-412]** A linked device that applied a re-key of its own index from
+  the group queue MUST adopt the seed of that re-key when the sync item of
+  Part 7 rule `DEV-300` brings it, with no second apply. The chain knows the
+  re-key by its hash.
+
+  > *Cause.* Both re-keys take the same new index, because each one names
+  > the same predecessor. The rival therefore changes the keys at that index
+  > and the head hash. The two replicas give no order, and a device that
+  > holds the keys of a removed device can grind a lower hash. The loser
+  > learns of the rival from the record alone, because no member tags a
+  > record for its own sender.
+- **[GRP-370]** The device whose record lost MUST send its
   `RekeyRecord` on a pairwise channel to a member of role `admin` or above
   that it holds a channel with, with `epoch_index` and `previous_epoch_hash`
   set to zero, and it MUST NOT post a second `RekeyRecord` as a group record.

@@ -21,6 +21,10 @@ use crate::Error;
 /// The version of each stored object of a group.
 pub(crate) const STORED_VERSION: u8 = 0x01;
 
+/// The version of the stored roster: version `0x01` with the re-key at the
+/// head of the chain and the moves of each re-key after it.
+const ROSTER_VERSION: u8 = 0x02;
+
 /// The entries of an authority path: `BE16(len) || GroupControl` each.
 pub fn split_path(path: &[u8]) -> Result<Vec<&[u8]>, Error> {
     let mut entries = Vec::new();
@@ -118,7 +122,23 @@ pub enum Applied {
         new: u16,
         /// The trigger.
         trigger: Trigger,
+        /// Whether this re-key took the place of a rival re-key of the same
+        /// index at the head of the chain (`GRP-369`). The keys at `new`
+        /// changed, and the index did not.
+        replaced: bool,
     },
+}
+
+/// A re-key at the head of the chain. A rival re-key of the same index at
+/// the same predecessor can still take its place (`GRP-369`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeadRekey {
+    /// The epoch hash that both re-keys name as their predecessor.
+    pub predecessor: [u8; 32],
+    /// The index that the re-key excluded.
+    pub old_index: u16,
+    /// The index that the re-key added. A rival gets the same one.
+    pub new_index: u16,
 }
 
 /// A fork the client must show (`GRP-070` to `GRP-074`).
@@ -141,6 +161,9 @@ pub struct Roster {
     admission_epoch: u32,
     successors: BTreeMap<([u8; 32], u16), [u8; 32]>,
     forks: Vec<Fork>,
+    head_rekey: Option<HeadRekey>,
+    /// The new index of each re-key, under the index it excluded.
+    moves: BTreeMap<u16, u16>,
 }
 
 impl Roster {
@@ -168,6 +191,8 @@ impl Roster {
             admission_epoch: 0,
             successors: BTreeMap::new(),
             forks: Vec::new(),
+            head_rekey: None,
+            moves: BTreeMap::new(),
         }
     }
 
@@ -228,6 +253,8 @@ impl Roster {
             admission_epoch: snapshot.roster_epoch,
             successors: BTreeMap::new(),
             forks: Vec::new(),
+            head_rekey: None,
+            moves: BTreeMap::new(),
         };
         roster.verify_path(snapshot.path, creator_roster_pk)?;
         Ok(roster)
@@ -405,6 +432,45 @@ impl Roster {
         &self.forks
     }
 
+    /// The re-key at the head of the chain, if the head is one.
+    pub const fn head_rekey(&self) -> Option<HeadRekey> {
+        self.head_rekey
+    }
+
+    /// The index that a member holds now after each re-key since `index`,
+    /// or none when no re-key moved it.
+    pub fn successor_of(&self, index: u16) -> Option<u16> {
+        let mut at = *self.moves.get(&index)?;
+        // Each move goes to a higher index, thus the walk ends.
+        while let Some(next) = self.moves.get(&at) {
+            at = *next;
+        }
+        Some(at)
+    }
+
+    /// The new index of a re-key of `old` that the chain holds already, by
+    /// its hash, or none.
+    pub fn holds_rekey(&self, control: &GroupControl<'_>, old: u16) -> Option<u16> {
+        if control.control_type != ControlType::Rekey {
+            return None;
+        }
+        let record = RekeyRecord::parse(control.payload).ok()?;
+        let held = self
+            .successors
+            .get(&(record.chain.previous_epoch_hash, old))?;
+        (record.old_index == old && *held == control.epoch_hash())
+            .then(|| self.moves.get(&old).copied())
+            .flatten()
+    }
+
+    /// Shows a fork once for each predecessor and maker (`GRP-070`).
+    fn show_fork(&mut self, predecessor: [u8; 32], named: Option<u16>) {
+        let fork = Fork { predecessor, named };
+        if !self.forks.contains(&fork) {
+            self.forks.push(fork);
+        }
+    }
+
     /// The rotation triggers the roster chain holds after `roster_epoch`
     /// (§11.4.1, `GRP-357`): each epoch whose active set lost an index. A
     /// removal, a self-removal, an eviction, and a re-key each lose one,
@@ -488,6 +554,7 @@ impl Roster {
     }
 
     fn commit(&mut self, hash: [u8; 32], now: u64) {
+        self.head_rekey = None;
         self.epoch_index = self.epoch_index.saturating_add(1);
         self.chain_hash = hash;
         let active: Vec<u16> = self.active().map(|m| m.index).collect();
@@ -653,10 +720,28 @@ impl Roster {
                 if record.chain_is_zero() {
                     return Err(Error::Malformed);
                 }
-                self.check_chain(record.chain.epoch_index, &record.chain.previous_epoch_hash)?;
                 if record.chain.group_id != self.group_id || record.old_index != sender {
                     return Err(Error::Unverified);
                 }
+                let predecessor = record.chain.previous_epoch_hash;
+                if let Some(head) = self.head_rekey.filter(|head| {
+                    head.old_index == record.old_index
+                        && head.predecessor == predecessor
+                        && record.chain.epoch_index == self.epoch_index
+                }) {
+                    return self.replace_rekey(&record, head, hash);
+                }
+                // The chain moved past the re-key that this one rivals, thus
+                // the fork shows and nothing changes.
+                if self
+                    .successors
+                    .get(&(predecessor, sender))
+                    .is_some_and(|held| *held != hash)
+                {
+                    self.show_fork(predecessor, Some(sender));
+                    return Err(Error::Stale);
+                }
+                self.check_chain(record.chain.epoch_index, &predecessor)?;
                 let old = self
                     .members
                     .get(&record.old_index)
@@ -675,6 +760,12 @@ impl Roster {
                     m.active = false;
                 }
                 self.commit(hash, now);
+                self.head_rekey = Some(HeadRekey {
+                    predecessor,
+                    old_index: record.old_index,
+                    new_index: record.new_index,
+                });
+                self.moves.insert(record.old_index, record.new_index);
                 let trigger = Trigger {
                     excluded: Some(record.old_index),
                     roster_epoch: self.epoch_index,
@@ -683,10 +774,68 @@ impl Roster {
                     old: record.old_index,
                     new: record.new_index,
                     trigger,
+                    replaced: false,
                 })
             }
             _ => Err(Error::Malformed),
         }
+    }
+
+    /// A rival of the re-key at the head of the chain: the same old index
+    /// and the same predecessor (`GRP-369`). The fork shows, because one
+    /// member made two successors, and the record whose SHA3-256 is lower
+    /// stands. Both re-keys take the same new index, thus the rival changes
+    /// the keys at that index and the head hash, and nothing else.
+    fn replace_rekey(
+        &mut self,
+        record: &RekeyRecord<'_>,
+        head: HeadRekey,
+        hash: [u8; 32],
+    ) -> Result<Applied, Error> {
+        if hash == self.chain_hash {
+            return Err(Error::Stale);
+        }
+        let old = self
+            .members
+            .get(&record.old_index)
+            .ok_or(Error::Unverified)?;
+        record.verify(&old.roster_pk_hash)?;
+        if record.new_index != head.new_index {
+            return Err(Error::Unverified);
+        }
+        self.show_fork(head.predecessor, Some(record.old_index));
+        if hash > self.chain_hash {
+            return Err(Error::Stale);
+        }
+        let role = self
+            .members
+            .get(&head.new_index)
+            .map(|member| member.role)
+            .ok_or(Error::Unverified)?;
+        let mut member = Member {
+            index: head.new_index,
+            role,
+            pair_pk: record.new_keys.pair_pk,
+            roster_pk_hash: record.new_keys.roster_pk_hash,
+            kem_pk_hash: sha3_256(&[record.new_keys.kem_pk]),
+            kem_pk: None,
+            roster_pk: None,
+            active: true,
+        };
+        member.set_kem_pk(record.new_keys.kem_pk)?;
+        self.members.insert(head.new_index, member);
+        self.chain_hash = hash;
+        self.successors
+            .insert((head.predecessor, record.old_index), hash);
+        Ok(Applied::Rekeyed {
+            old: record.old_index,
+            new: head.new_index,
+            trigger: Trigger {
+                excluded: Some(record.old_index),
+                roster_epoch: self.epoch_index,
+            },
+            replaced: true,
+        })
     }
 
     /// The order of two epochs that name one predecessor from two members
@@ -706,7 +855,7 @@ impl Roster {
 
     /// Writes the roster to the stored form of Part 14 §14.6.4.
     pub fn export(&self, w: &mut Writer) -> Result<(), Error> {
-        w.u8(STORED_VERSION);
+        w.u8(ROSTER_VERSION);
         w.bytes(&self.group_id);
         w.u32(self.epoch_index);
         w.bytes(&self.chain_hash);
@@ -747,12 +896,23 @@ impl Roster {
             w.bytes(&fork.predecessor);
             w.option(fork.named.as_ref(), |w, index| w.u16(*index));
         }
+        w.option(self.head_rekey.as_ref(), |w, head| {
+            w.bytes(&head.predecessor);
+            w.u16(head.old_index);
+            w.u16(head.new_index);
+        });
+        w.u32(count(self.moves.len())?);
+        for (old, new) in &self.moves {
+            w.u16(*old);
+            w.u16(*new);
+        }
         Ok(())
     }
 
     /// Reads a roster that [`Roster::export`] wrote.
     pub fn import(r: &mut Reader<'_>) -> Result<Self, Error> {
-        if r.u8()? != STORED_VERSION {
+        let version = r.u8()?;
+        if version != STORED_VERSION && version != ROSTER_VERSION {
             return Err(Error::Stale);
         }
         let group_id = r.array()?;
@@ -797,6 +957,25 @@ impl Roster {
                 named: r.option(Reader::u16)?,
             });
         }
+        let mut head_rekey = None;
+        let mut moves = BTreeMap::new();
+        if version == ROSTER_VERSION {
+            head_rekey = r.option(|r| {
+                Ok(HeadRekey {
+                    predecessor: r.array()?,
+                    old_index: r.u16()?,
+                    new_index: r.u16()?,
+                })
+            })?;
+            for _ in 0..r.u32()? {
+                let old = r.u16()?;
+                let new = r.u16()?;
+                if new <= old {
+                    return Err(Error::Malformed);
+                }
+                moves.insert(old, new);
+            }
+        }
         Ok(Roster {
             group_id,
             epoch_index,
@@ -807,6 +986,8 @@ impl Roster {
             admission_epoch,
             successors,
             forks,
+            head_rekey,
+            moves,
         })
     }
 

@@ -486,6 +486,13 @@ pub(super) fn previous_seed_key(group_id: &[u8; 32]) -> Vec<u8> {
     [group_id.as_slice(), b"previous"].concat()
 }
 
+/// The key of the row that holds the seed of a re-key that a rival took
+/// the place of (`GRP-369`). Its keys go to an admin on a pairwise channel
+/// (`GRP-370`).
+pub(super) fn lost_seed_key(group_id: &[u8; 32]) -> Vec<u8> {
+    [group_id.as_slice(), b"lost"].concat()
+}
+
 impl<B: Backend, E: SecureElement> Client<B, E> {
     /// The conversation of a group: the surrogate of its identifier under
     /// the store key, as a contact has one.
@@ -765,20 +772,42 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let state = self.group_state(conversation).unwrap_or(OPEN);
         let row = Self::group_row(group, state)?;
         let open = self.open_mut()?;
-        // GRP-372: a slot for the new index ends the seed before a re-key.
-        let previous_row = open.store.row_id(
-            TableId::LOCAL_IDENTITY,
-            &previous_seed_key(group.group_id()),
-        );
-        let ends_previous = !group.has_previous()
-            && open
-                .store
+        let group_id = group.group_id();
+        let previous_row = open
+            .store
+            .row_id(TableId::LOCAL_IDENTITY, &previous_seed_key(group_id));
+        let previous = if group.has_previous() {
+            None
+        } else {
+            open.store
                 .get(TableId::LOCAL_IDENTITY, &previous_row)?
-                .is_some();
+                .map(Zeroizing::new)
+        };
+        // GRP-369: a rival took the place of the re-key, and the member
+        // reads with the keys before it again. The seed of the re-key waits
+        // for the pairwise channel (GRP-370). Otherwise a slot for the new
+        // index ended the seed before (GRP-372).
+        let seed_row = open.store.row_id(TableId::LOCAL_IDENTITY, group_id);
+        let lost_row = open
+            .store
+            .row_id(TableId::LOCAL_IDENTITY, &lost_seed_key(group_id));
+        let fresh = if previous.is_some() && group.lost_rekey() {
+            Some(Zeroizing::new(
+                open.store
+                    .get(TableId::LOCAL_IDENTITY, &seed_row)?
+                    .ok_or(Error::Integrity)?,
+            ))
+        } else {
+            None
+        };
         let mut batch = open.store.begin();
         batch.put(GROUP, conversation.0, None, &row, rng)?;
-        if ends_previous {
+        if let Some(previous) = previous {
             batch.delete(TableId::LOCAL_IDENTITY, previous_row);
+            if let Some(fresh) = fresh {
+                batch.put(TableId::LOCAL_IDENTITY, lost_row, None, &fresh, rng)?;
+                batch.put(TableId::LOCAL_IDENTITY, seed_row, None, &previous, rng)?;
+            }
         }
         Ok(batch.commit()?)
     }

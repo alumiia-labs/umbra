@@ -116,6 +116,16 @@ fn is_presence(app: &[u8]) -> bool {
     })
 }
 
+/// Whether an `AppMessage` carries a `RekeyRecord` (§11.12).
+fn is_rekey(app: &[u8]) -> bool {
+    let Ok(message) = AppMessage::parse(app, Channel::Group) else {
+        return false;
+    };
+    message.kind == AppKind::GroupControl
+        && GroupControl::parse(message.body)
+            .is_ok_and(|control| control.control_type == ControlType::Rekey)
+}
+
 /// The receiver state of one member in one group.
 pub struct Receiver {
     own_index: u16,
@@ -265,8 +275,34 @@ impl Receiver {
                 .and_then(|set| u16::try_from(set.len()).ok())
         })?;
         let sender = plain.sender_index;
-        // The sender must be in the current roster (GRP-257, GRP-232).
-        if !roster.member(sender).is_some_and(|m| m.active) || sender == self.own_index {
+        let rekey = is_rekey(plain.app);
+        if sender == self.own_index {
+            // GRP-369: a re-key under the index of this member that another
+            // holder of its keys made. A record holds no tag for its own
+            // sender, and the signature under the old roster key names the
+            // maker, which the roster checks. Each other record of this
+            // index is an echo.
+            if !rekey {
+                return Err(Error::Unverified);
+            }
+            return Ok(Outcome::Content {
+                sender,
+                counter: plain.counter,
+                roster_epoch,
+                epoch: record.epoch,
+                app: plain.app.to_vec(),
+                previous_epoch,
+            });
+        }
+        // The sender must be in the current roster (GRP-257, GRP-232). A
+        // rival of the re-key at the head of the chain comes from the index
+        // that re-key excluded, at the roster epoch before it (GRP-369).
+        let is_rival = rekey
+            && roster
+                .head_rekey()
+                .is_some_and(|head| head.old_index == sender)
+            && roster_epoch.saturating_add(1) == roster.epoch_index();
+        if !roster.member(sender).is_some_and(|m| m.active) && !is_rival {
             return Err(Error::Unverified);
         }
         let rank = roster
@@ -298,15 +334,19 @@ impl Receiver {
             return Ok(Outcome::Presence { sender });
         }
         let last = self.counters.entry((sender, record.epoch)).or_insert(0);
-        if plain.counter <= *last {
+        if plain.counter > *last {
+            if plain.counter > last.saturating_add(1) {
+                self.gaps.entry(sender).or_insert(now);
+            } else {
+                self.gaps.remove(&sender);
+            }
+            *last = plain.counter;
+        } else if !rekey {
             return Ok(Outcome::Duplicate);
         }
-        if plain.counter > last.saturating_add(1) {
-            self.gaps.entry(sender).or_insert(now);
-        } else {
-            self.gaps.remove(&sender);
-        }
-        *last = plain.counter;
+        // GRP-369: two holders of the keys of one index each count on their
+        // own, thus a rival re-key can come under a counter that the other
+        // one passed. The roster knows a re-key again by its hash.
         Ok(Outcome::Content {
             sender,
             counter: plain.counter,

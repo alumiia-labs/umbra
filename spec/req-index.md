@@ -74,12 +74,12 @@ each column when a crate implements the requirement and a test covers it.
 | `NTF` | 74 | 28 | 0 | 0 | 3 | **105** |
 | `DIS` | 118 | 33 | 0 | 0 | 2 | **153** |
 | `REL` | 124 | 32 | 1 | 0 | 2 | **159** |
-| `GRP` | 220 | 62 | 0 | 0 | 6 | **288** |
+| `GRP` | 225 | 63 | 0 | 0 | 6 | **294** |
 | `ATT` | 142 | 45 | 2 | 0 | 2 | **191** |
 | `ABU` | 68 | 30 | 1 | 0 | 0 | **99** |
 | `IMP` | 119 | 41 | 0 | 0 | 2 | **162** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 1979 | 616 | 7 | 0 | 51 | **2653** |
+| **All** | 1984 | 617 | 7 | 0 | 51 | **2659** |
 
 ## SCP — Scope and Conventions
 
@@ -2337,6 +2337,12 @@ Source: `spec/11-private-groups.md`
 | `GRP-404` | §11.4.3 | MUST NOT | A member | A member MUST NOT answer it for an index that the active set at the `roster_epoch` of the current epoch does not hold, and a member that holds no `K_e` of that epoch MUST NOT answer it. |  |  |
 | `GRP-405` | §11.4.3 | MUST | (unstated) | A member that shows a group as lapsed and then installs the epoch it lacked MUST show the group as open again. |  |  |
 | `GRP-406` | §11.4.2 | MUST | A rotator | A rotator MUST post the chunked epoch-key record only after the object reached the chunk path, and MAY write the object again when that failed. |  |  |
+| `GRP-407` | §11.12 | MUST | A receiver | A receiver MUST take a `RekeyRecord` from the index that the re-key at the head of the roster chain excluded, when the record names the roster epoch before that head. |  |  |
+| `GRP-408` | §11.12 | MUST | A member | A member MUST take a `RekeyRecord` under its own index, although a record carries no tag for its sender. |  |  |
+| `GRP-409` | §11.12 | MUST NOT | A receiver | A receiver MUST NOT drop a `RekeyRecord` for its `counter` under `GRP-259`, because two holders of the keys of one index count apart. |  |  |
+| `GRP-410` | §11.12 | MUST | A client | A client MUST keep the fact that the head of its roster chain is a re-key, with its predecessor, until the next roster epoch. |  |  |
+| `GRP-411` | §11.12 | MUST | A member whose own re-key a rival replaced | A member whose own re-key a rival replaced MUST read with the keys and the index before its re-key again, and it MUST keep the seed of its re-key for `GRP-370`. |  |  |
+| `GRP-412` | §11.12 | MUST | (unstated) | A linked device that applied a re-key of its own index from the group queue MUST adopt the seed of that re-key when the sync item of Part 7 rule `DEV-300` brings it, with no second apply. |  |  |
 
 ## ATT — Attachments and Large Objects
 

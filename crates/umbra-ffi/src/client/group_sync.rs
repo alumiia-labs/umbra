@@ -23,7 +23,10 @@ use umbra_wire::descriptor::FileDescriptor;
 use zeroize::Zeroizing;
 
 use super::{
-    groups::{previous_seed_key, GROUP, GROUP_GRANTS, GROUP_MEMBER, GROUP_OWNERS, GROUP_PRESENCE},
+    groups::{
+        lost_seed_key, previous_seed_key, GROUP, GROUP_GRANTS, GROUP_MEMBER, GROUP_OWNERS,
+        GROUP_PRESENCE,
+    },
     Client, CONVERSATION,
 };
 use crate::{ConversationId, Error};
@@ -123,7 +126,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             owner: None,
             plain: group_row,
         }];
-        for key in [group_id.to_vec(), previous_seed_key(&group_id)] {
+        for key in [
+            group_id.to_vec(),
+            previous_seed_key(&group_id),
+            lost_seed_key(&group_id),
+        ] {
             let row = store.row_id(TableId::LOCAL_IDENTITY, &key);
             if let Some(plain) = store.get(TableId::LOCAL_IDENTITY, &row)? {
                 rows.push(BackupRow::Put {
@@ -243,7 +250,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if table == TableId::LOCAL_IDENTITY {
                 let seed = store.row_id(TableId::LOCAL_IDENTITY, &group_id);
                 let previous = store.row_id(TableId::LOCAL_IDENTITY, &previous_seed_key(&group_id));
-                return (*row == seed || *row == previous) && owner.is_none();
+                let lost = store.row_id(TableId::LOCAL_IDENTITY, &lost_seed_key(&group_id));
+                return (*row == seed || *row == previous || *row == lost) && owner.is_none();
             }
             if table == CONVERSATION {
                 return *row == store.row_id(CONVERSATION, &conversation.0) && owner.is_none();

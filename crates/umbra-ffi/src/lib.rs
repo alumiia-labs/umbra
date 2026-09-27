@@ -549,6 +549,92 @@ mod tests {
         assert_eq!(name_of(&client).as_deref(), Some("Hiking"));
     }
 
+    /// A group control object as the `AppMessage` of a group post.
+    fn control_app(object: &[u8]) -> Vec<u8> {
+        let app = umbra_wire::app::AppMessage {
+            kind: umbra_wire::app::AppKind::GroupControl,
+            msg_id: [0x5A; 16],
+            sent_at: 1_700_000_020_000,
+            body: object,
+        };
+        let mut bytes = vec![0u8; app.len()];
+        let n = app.encode(&mut bytes).unwrap();
+        bytes.truncate(n);
+        bytes
+    }
+
+    #[test]
+    fn a_rival_rekey_takes_the_index_and_the_seed_before_comes_back() {
+        use umbra_core::group::join::JoinKeys;
+        use umbra_wire::group::control::{GroupControl, RekeyRecord};
+
+        let mut rng = Rng(51);
+        let mut client = new_client(&mut rng);
+        let relays = [[0xA1; 32], [0xB2; 32]];
+        let conversation = client
+            .create_group("Race", relays, 1_700_000_000, &mut rng)
+            .unwrap();
+        let group_id = client.group_info(conversation).unwrap().group_id;
+        client
+            .group_queue_made(&group_id, 0, relays[0], [0xC3; 32], &mut rng)
+            .unwrap();
+        client
+            .group_queue_made(&group_id, 1, relays[1], [0xD4; 32], &mut rng)
+            .unwrap();
+        while client.take_group_post().is_some() {}
+
+        // A removed device holds the group as it stood, and a reader of the
+        // same keys sees the re-key that this device makes.
+        let mut rival = client.group_of(conversation).unwrap();
+        let mut reader = client.group_of(conversation).unwrap();
+        client.rekey_groups(1_700_000_010_000, &mut rng).unwrap();
+        let post = client.take_group_post().unwrap();
+        assert_eq!(client.group_info(conversation).unwrap().own_index, 1);
+        let umbra_core::group::receive::Outcome::Content { app, .. } =
+            reader.receive(&post.record, 1_700_000_011).unwrap()
+        else {
+            panic!("the reader got no re-key");
+        };
+        let body = umbra_wire::app::AppMessage::parse(&app, umbra_wire::app::Channel::Group)
+            .unwrap()
+            .body
+            .to_vec();
+        let hash = GroupControl::parse(&body).unwrap().epoch_hash();
+
+        // GRP-369: the rival with the lower hash takes the index.
+        let rival_object = loop {
+            let keys = JoinKeys::make(&mut rng).unwrap();
+            let made = rival.rekey_object(&keys, &mut rng).unwrap();
+            if GroupControl::parse(&made).unwrap().epoch_hash() < hash {
+                break made;
+            }
+        };
+        let record = rival
+            .post(&control_app(&rival_object), 1_700_000_012, &mut rng)
+            .unwrap();
+        client
+            .on_group_record(&[0xC3; 32], 2, &record, 1_700_000_013_000, &mut rng)
+            .unwrap();
+        let info = client.group_info(conversation).unwrap();
+        assert_eq!(info.own_index, 0);
+
+        // The seed before the re-key is the seed of the group again, thus a
+        // new unlock makes the same keys, and the pairwise record of
+        // GRP-370 signs under them.
+        client.lock();
+        client
+            .unlock(&units("correct horse"), 1_700_000_020)
+            .unwrap();
+        let group = client.group_of(conversation).unwrap();
+        assert!(group.lost_rekey());
+        let fresh = JoinKeys::make(&mut rng).unwrap();
+        let pairwise = group.pairwise_rekey_object(&fresh, &mut rng).unwrap();
+        let control = GroupControl::parse(&pairwise).unwrap();
+        let parsed = RekeyRecord::parse(control.payload).unwrap();
+        let held = group.roster().member(0).unwrap().roster_pk_hash;
+        parsed.verify(&held).unwrap();
+    }
+
     #[test]
     fn a_group_message_waits_for_the_two_queues_and_a_record_becomes_a_message() {
         let mut rng = Rng(31);
