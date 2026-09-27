@@ -5,6 +5,7 @@ import android.content.Intent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -354,12 +355,15 @@ private fun ProfileFields() {
                 },
         ) { ProfilePicture(picture, name, 72) }
         Spacer(Modifier.width(16.dp))
-        Column {
-            QuietButton("Choose picture") {
+        // The two actions start at one edge beside the picture.
+        Column(Modifier.width(IntrinsicSize.Max), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            InlineButton("Choose picture", modifier = Modifier.fillMaxWidth()) {
                 picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
             }
             if (picture.isNotEmpty()) {
-                QuietButton("Remove picture") { Core.setProfilePicture(context, null) { picture = it } }
+                InlineButton("Remove picture", modifier = Modifier.fillMaxWidth()) {
+                    Core.setProfilePicture(context, null) { picture = it }
+                }
             }
         }
     }

@@ -405,11 +405,16 @@ fun QuietButton(label: String, onClick: () -> Unit) {
 
 /** A secondary button that takes the width of its label, for a row. */
 @Composable
-fun InlineButton(label: String, enabled: Boolean = true, onClick: () -> Unit) {
+fun InlineButton(
+    label: String,
+    enabled: Boolean = true,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
     OutlinedButton(
         onClick = onClick,
         enabled = enabled,
-        modifier = Modifier.heightIn(min = 40.dp),
+        modifier = modifier.heightIn(min = 40.dp),
         colors = ButtonDefaults.outlinedButtonColors(contentColor = Palette.Action),
         border = BorderStroke(1.dp, Palette.Outline),
     ) { Text(label, fontWeight = FontWeight.SemiBold) }
