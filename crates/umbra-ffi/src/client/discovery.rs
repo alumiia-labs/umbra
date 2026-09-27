@@ -52,6 +52,9 @@ const WELCOME_SETTING: &[u8] = b"profile-welcome";
 const FRAGMENT_SETTING: &[u8] = b"handle-fragment";
 /// Whether the profile blob waits for a write.
 const BLOB_DUE_SETTING: &[u8] = b"profile-blob-due";
+/// The selected picture of the profile blob: a JPEG after the re-encode of
+/// `DIS-001`.
+const PICTURE_SETTING: &[u8] = b"profile-picture";
 
 /// The longest name of a Profile (Part 4 §4.2.5).
 pub const PROFILE_NAME_MAX: usize = 32;
@@ -425,6 +428,37 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             return Err(Error::TooLong);
         }
         self.put_row(super::SETTINGS, WELCOME_SETTING, text.as_bytes(), rng)?;
+        self.put_row(super::SETTINGS, BLOB_DUE_SETTING, &[1], rng)
+    }
+
+    /// The selected picture of the profile, or an empty one for the
+    /// generated picture of Part 4 §4.2.5.
+    pub fn profile_picture(&self) -> Result<Vec<u8>, Error> {
+        Ok(self
+            .get_row(super::SETTINGS, PICTURE_SETTING)?
+            .map(|bytes| bytes.to_vec())
+            .unwrap_or_default())
+    }
+
+    /// Sets the picture, a JPEG of at most `PICTURE_MAX` bytes that the
+    /// platform encoded anew (`DIS-001` to `DIS-003`), or none.
+    pub fn set_profile_picture<R: CryptoRng + ?Sized>(
+        &mut self,
+        picture: &[u8],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        if picture.is_empty() {
+            self.delete_row(super::SETTINGS, PICTURE_SETTING)?;
+        } else {
+            umbra_core::discovery::profile::ProfilePlain {
+                name: "",
+                welcome: "",
+                picture,
+            }
+            .encode()
+            .map_err(|_| Error::Malformed)?;
+            self.put_row(super::SETTINGS, PICTURE_SETTING, picture, rng)?;
+        }
         self.put_row(super::SETTINGS, BLOB_DUE_SETTING, &[1], rng)
     }
 

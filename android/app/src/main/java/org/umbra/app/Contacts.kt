@@ -311,9 +311,15 @@ private fun ProfilePreview(preview: uniffi.umbra_ffi.ContactPreview) {
     Column(Modifier.fillMaxWidth()) {
         HorizontalDivider(color = Palette.Divider)
         Spacer(Modifier.height(12.dp))
-        Text(preview.name.ifBlank { preview.handle }, style = MaterialTheme.typography.titleMedium)
-        if (preview.name.isNotBlank()) {
-            Text(preview.handle, style = MaterialTheme.typography.bodySmall, color = Palette.TextSecondary)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            ProfilePicture(preview.picture, preview.name.ifBlank { preview.handle.removePrefix("@") }, 56)
+            Spacer(Modifier.width(14.dp))
+            Column {
+                Text(preview.name.ifBlank { preview.handle }, style = MaterialTheme.typography.titleMedium)
+                if (preview.name.isNotBlank()) {
+                    Text(preview.handle, style = MaterialTheme.typography.bodySmall, color = Palette.TextSecondary)
+                }
+            }
         }
         if (preview.welcome.isNotBlank()) {
             Spacer(Modifier.height(8.dp))

@@ -417,10 +417,31 @@ object Core {
     fun releaseHandle() = directory { client -> client.releaseHandle() }
 
     /** The name and the welcome text that the profile link of the handle shows. */
-    fun profile(onProfile: (String, String) -> Unit) = call { client ->
+    fun profile(onProfile: (String, String, ByteArray) -> Unit) = call { client ->
         val name = client.profileName()
         val welcome = client.welcome()
-        main.post { onProfile(name, welcome) }
+        val picture = client.profilePicture()
+        main.post { onProfile(name, welcome, picture) }
+    }
+
+    /**
+     * Encodes a picked image anew as the picture of the profile, and
+     * writes the profile blob (Part 9 §9.3.1). A null source removes it.
+     */
+    fun setProfilePicture(context: Context, source: android.net.Uri?, onPicture: (ByteArray) -> Unit) {
+        val app = context.applicationContext
+        directory { client ->
+            val picture = if (source == null) {
+                ByteArray(0)
+            } else {
+                Photos.profilePicture(app, source) ?: run {
+                    main.post { directoryNote = "That image did not open." }
+                    return@directory
+                }
+            }
+            client.setProfilePicture(picture)
+            main.post { onPicture(picture) }
+        }
     }
 
     /** Sets the name and the welcome text, and writes the profile blob (Part 9 §9.3.1). */

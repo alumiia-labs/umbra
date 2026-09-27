@@ -47,6 +47,12 @@ import uniffi.umbra_ffi.MsgFile
 const val CLASS_IMAGE: UByte = 1u
 
 /** The states of the file of a message, as the core gives them. */
+/** The side of the picture of a profile, in pixels. */
+private const val PROFILE_PICTURE_SIDE = 192
+
+/** `PICTURE_MAX` of Part 9 §9.12, in bytes. */
+private const val PICTURE_MAX = 6_144
+
 const val FILE_UPLOADING = 1
 const val FILE_WANTED = 2
 const val FILE_READY = 3
@@ -72,6 +78,45 @@ object Photos {
      * core through a pipe, thus the device holds no file of them
      * (`IMP-160`, `IMP-165`).
      */
+    /**
+     * The picture of the profile blob (Part 9 §9.3.1): the middle square of
+     * a picked image at `PROFILE_PICTURE_SIDE`, as a new JPEG of at most
+     * `PICTURE_MAX` bytes. A new JPEG holds no metadata field of the source
+     * (`DIS-001` to `DIS-003`). The result is null for an image that does
+     * not open or does not fit.
+     */
+    fun profilePicture(context: Context, source: Uri): ByteArray? {
+        val decoded = try {
+            ImageDecoder.decodeBitmap(ImageDecoder.createSource(context.contentResolver, source)) { decoder, info, _ ->
+                decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                val shortest = minOf(info.size.width, info.size.height).coerceAtLeast(1)
+                if (shortest > PROFILE_PICTURE_SIDE * 2) {
+                    val scale = PROFILE_PICTURE_SIDE * 2f / shortest
+                    decoder.setTargetSize(
+                        (info.size.width * scale).toInt().coerceAtLeast(1),
+                        (info.size.height * scale).toInt().coerceAtLeast(1),
+                    )
+                }
+            }
+        } catch (unreadable: Exception) {
+            return null
+        }
+        val side = minOf(decoded.width, decoded.height)
+        val square = Bitmap.createBitmap(decoded, (decoded.width - side) / 2, (decoded.height - side) / 2, side, side)
+        val picture = Bitmap.createScaledBitmap(square, PROFILE_PICTURE_SIDE, PROFILE_PICTURE_SIDE, true)
+        try {
+            for (quality in intArrayOf(80, 65, 50, 35, 25)) {
+                val out = ByteArrayOutputStream()
+                picture.compress(Bitmap.CompressFormat.JPEG, quality, out)
+                val bytes = out.toByteArray()
+                if (bytes.size <= PICTURE_MAX) return bytes
+            }
+            return null
+        } finally {
+            for (made in listOf(picture, square, decoded).distinct()) made.recycle()
+        }
+    }
+
     fun attach(context: Context, source: Uri, draft: DraftHandle): Boolean {
         val bitmap = try {
             ImageDecoder.decodeBitmap(ImageDecoder.createSource(context.contentResolver, source)) { decoder, info, _ ->

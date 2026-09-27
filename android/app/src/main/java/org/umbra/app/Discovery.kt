@@ -33,6 +33,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.shape.CircleShape
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.Role
@@ -322,17 +327,43 @@ fun HandleScreen(onBack: () -> Unit) {
 /** The name and the welcome text of the profile blob (Part 9 §9.3.1). */
 @Composable
 private fun ProfileFields() {
+    val context = LocalContext.current
     var name by remember { mutableStateOf("") }
     var welcome by remember { mutableStateOf("") }
+    var picture by remember { mutableStateOf(ByteArray(0)) }
     var saved by remember { mutableStateOf("" to "") }
     val focus = LocalFocusManager.current
     LaunchedEffect(Unit) {
-        Core.profile { held, text ->
+        Core.profile { held, text, image ->
             name = held
             welcome = text
+            picture = image
             saved = held to text
         }
     }
+    // The picker gives this app the picked image alone.
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { picked ->
+        if (picked != null) Core.setProfilePicture(context, picked) { picture = it }
+    }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(
+            Modifier
+                .clip(CircleShape)
+                .press(role = Role.Button, label = "Choose a picture") {
+                    picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                },
+        ) { ProfilePicture(picture, name, 72) }
+        Spacer(Modifier.width(16.dp))
+        Column {
+            QuietButton("Choose picture") {
+                picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+            }
+            if (picture.isNotEmpty()) {
+                QuietButton("Remove picture") { Core.setProfilePicture(context, null) { picture = it } }
+            }
+        }
+    }
+    Spacer(Modifier.height(12.dp))
     OutlinedTextField(
         value = name,
         onValueChange = { name = it.take(32) },
@@ -360,7 +391,7 @@ private fun ProfileFields() {
     }
     Spacer(Modifier.height(8.dp))
     // A technical fact: the directory holds the sealed blob, not its key.
-    Note("The link shows the name and the welcome text. The handle alone shows neither.")
+    Note("The link shows the picture, the name, and the welcome text. The handle alone shows none of them.")
 }
 
 @Composable

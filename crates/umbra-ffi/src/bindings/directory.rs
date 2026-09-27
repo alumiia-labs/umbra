@@ -360,6 +360,8 @@ pub struct ContactPreview {
     pub name: String,
     /// The welcome text from the profile blob, or empty.
     pub welcome: String,
+    /// The JPEG picture from the profile blob, or empty.
+    pub picture: Vec<u8>,
 }
 
 /// A reusable link of this device (Part 4 §4.3.2), as a view shows it.
@@ -587,10 +589,11 @@ impl Handle {
             .map_err(|_| FfiError::Integrity)?;
             let name = inner.client.profile_name()?;
             let welcome = inner.client.welcome()?;
+            let picture = inner.client.profile_picture()?;
             let plain = ProfilePlain {
                 name: &name,
                 welcome: &welcome,
-                picture: &[],
+                picture: &picture,
             }
             .encode()
             .map_err(|_| FfiError::Malformed)?;
@@ -1197,6 +1200,24 @@ impl Handle {
         Ok(())
     }
 
+    /// The picture of the profile, or empty for the generated one.
+    pub fn profile_picture(&self) -> Result<Vec<u8>, FfiError> {
+        Ok(locked(&self.inner).client.profile_picture()?)
+    }
+
+    /// Sets the picture of the profile, a JPEG of at most 6 144 bytes that
+    /// the platform encoded anew, or empty for the generated one. The
+    /// profile blob takes it now, or at the next upkeep.
+    pub fn set_profile_picture(&self, picture: Vec<u8>) -> Result<(), FfiError> {
+        locked(&self.inner)
+            .client
+            .set_profile_picture(&picture, &mut OsRng)?;
+        if let Ok(link) = self.directory_link() {
+            let _ = self.publish_profile_blob(&link);
+        }
+        Ok(())
+    }
+
     /// The welcome text that the profile link shows (§9.3.1).
     pub fn welcome(&self) -> Result<String, FfiError> {
         Ok(locked(&self.inner).client.welcome()?)
@@ -1237,6 +1258,7 @@ impl Handle {
             handle: handle.canonical(),
             name: String::new(),
             welcome: String::new(),
+            picture: Vec::new(),
         };
         if let Some(plain) = found
             .blob
@@ -1245,6 +1267,7 @@ impl Handle {
             if let Ok(profile) = ProfilePlain::parse(&plain) {
                 preview.name = profile.name.to_owned();
                 preview.welcome = profile.welcome.to_owned();
+                preview.picture = profile.picture.to_vec();
             }
         }
         Ok(preview)

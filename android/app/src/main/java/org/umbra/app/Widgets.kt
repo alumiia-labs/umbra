@@ -52,6 +52,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
@@ -470,6 +471,28 @@ fun Avatar(chat: Chat, size: Int = 44) {
     // A group with no name shows the icon of a group and no letter.
     val icon = if (chat.isGroup && chat.name.isEmpty()) "user-group" else null
     LetterAvatar(chat.name, chat.conversation.hashCode(), size, icon)
+}
+
+/**
+ * The picture of a profile in a circle, or the generated picture of Part 4
+ * §4.2.5 when the profile holds none: its letter on a pastel ground.
+ */
+@Composable
+fun ProfilePicture(picture: ByteArray?, name: String, size: Int) {
+    val image = remember(picture) {
+        picture?.takeIf { it.isNotEmpty() }?.let {
+            android.graphics.BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap()
+        }
+    }
+    if (image == null) {
+        LetterAvatar(name, name.hashCode(), size)
+        return
+    }
+    androidx.compose.foundation.Image(
+        image,
+        contentDescription = null,
+        modifier = Modifier.size(size.dp).clip(CircleShape),
+    )
 }
 
 /** The same circle from a name that names no conversation of the store. */

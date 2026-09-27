@@ -3369,11 +3369,18 @@ fn request_until_listed(handle: &Handle, target: &str) {
 
 /// The preview of a profile link, once the log lists its handle.
 #[track_caller]
-fn preview_until_listed(handle: &Handle, target: &str) -> (String, String, String) {
+fn preview_until_listed(handle: &Handle, target: &str) -> (String, String, String, Vec<u8>) {
     let start = Instant::now();
     loop {
         match handle.preview_contact(target.into()) {
-            Ok(preview) => return (preview.handle, preview.name, preview.welcome),
+            Ok(preview) => {
+                return (
+                    preview.handle,
+                    preview.name,
+                    preview.welcome,
+                    preview.picture,
+                )
+            }
             Err(FfiError::NotFound | FfiError::Busy) => {
                 assert!(
                     start.elapsed() < Duration::from_secs(40),
@@ -3477,13 +3484,21 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
     // directory holds no key of it.
     alice.set_profile_name("Alice".into()).unwrap();
     alice.set_welcome("Say where we met.".into()).unwrap();
+    // DIS-176: the picture is a JPEG, and other bytes are refused.
+    let picture = vec![0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3, 0xFF, 0xD9];
+    assert_eq!(
+        alice.set_profile_picture(b"GIF89a".to_vec()).err(),
+        Some(FfiError::Malformed)
+    );
+    alice.set_profile_picture(picture.clone()).unwrap();
     let profile_link = alice.my_handle_link().unwrap().unwrap();
     assert!(
         profile_link.starts_with("umbra://h/alice%23"),
         "{profile_link}"
     );
-    let (shown, name, welcome) = preview_until_listed(&carol, &profile_link);
+    let (shown, name, welcome, shown_picture) = preview_until_listed(&carol, &profile_link);
     assert_eq!(shown, handle);
+    assert_eq!(shown_picture, picture);
     assert_eq!(
         (name.as_str(), welcome.as_str()),
         ("Alice", "Say where we met.")
