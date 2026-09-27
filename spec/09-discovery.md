@@ -692,6 +692,14 @@ cross-relay token of Part 13 §13.3.1 or a `PowSolution` of Part 13 §13.4. Part
 14 §13.4 gives the verification at the addressee, and the queue relay reads a
 padded message and nothing more.
 
+**[DIS-182]** An addressee MUST admit a hello under a cross-relay token only
+when the key that the token names is the key of the issuer for the epoch of
+the addressee or the one before it, as the log of Part 13 §13.5 gives it, when
+the challenge digest of the token names that epoch, when the signature
+verifies, and when no earlier hello spent its nonce at this device. The
+addressee keeps the spent nonces of those two epochs (`ABU-006`). A
+first-party token needs the secret of its issuer, thus it admits no hello.
+
 **[DIS-143]** A client MUST seal a hello as `0x01 || ct || nonce [24]u8 ||
 XChaCha20-Poly1305(K_hello, nonce, body, ad = ct)`, where `(ct, ss) =
 UMBRA-KEM.Encap(entry_pk)`, `K_hello = HKDF-SHA3-256(salt = "", ikm = ss, info

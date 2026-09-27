@@ -119,11 +119,13 @@ impl Bridge {
         entry_pk: Vec<u8>,
         rendezvous: Vec<u8>,
         profile: Vec<u8>,
+        token: Option<Vec<u8>>,
     ) -> Result<(), Error> {
         self.command(Command::Hello {
             entry_pk,
             rendezvous,
             profile,
+            token,
         })
     }
 

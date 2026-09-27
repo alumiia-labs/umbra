@@ -564,6 +564,62 @@ mod tests {
     }
 
     #[test]
+    fn a_cross_relay_token_admits_one_hello_under_the_key_of_the_log() {
+        use umbra_core::abuse::token::{
+            issue_cross_relay, CrossRelayRequest, TokenChallenge, TYPE_CROSS_RELAY,
+        };
+        use umbra_crypto::rsabssa::SecretKey2048;
+
+        let mut rng = Rng(81);
+        let mut client = new_client(&mut rng);
+        use umbra_crypto::secret::Secret;
+        let epoch: u32 = 2_900;
+        let key = SecretKey2048::from_seed(&Secret::new([0x71; 32]), &epoch.to_be_bytes()).unwrap();
+        let other =
+            SecretKey2048::from_seed(&Secret::new([0x72; 32]), &epoch.to_be_bytes()).unwrap();
+        let mint = |key: &SecretKey2048, epoch: u32, rng: &mut Rng| {
+            let challenge = TokenChallenge {
+                token_type: TYPE_CROSS_RELAY,
+                epoch,
+                redemption_context: [0; 32],
+            };
+            let (state, blinded) =
+                CrossRelayRequest::new(1, &challenge, key.public(), rng).unwrap();
+            let signed = issue_cross_relay(key, &blinded).unwrap();
+            let token = state.finalize(&signed, key.public()).unwrap().remove(0);
+            umbra_core::discovery::dirclient::token_bytes(&token).unwrap()
+        };
+        let token = mint(&key, epoch, &mut rng);
+        // No key from the log yet: no admission.
+        assert!(!client.admit_token(&token, epoch, &mut rng).unwrap());
+        client
+            .put_cross_relay_key(epoch, key.public().modulus(), &mut rng)
+            .unwrap();
+        assert!(client.admit_token(&token, epoch, &mut rng).unwrap());
+        // ABU-006: this device spends a nonce once.
+        assert!(!client.admit_token(&token, epoch, &mut rng).unwrap());
+        // A key that the log does not hold admits nothing.
+        let forged = mint(&other, epoch, &mut rng);
+        assert!(!client.admit_token(&forged, epoch, &mut rng).unwrap());
+        // A token of the epoch before still admits, one of two before does not.
+        let fresh = mint(&key, epoch, &mut rng);
+        assert!(client.admit_token(&fresh, epoch + 1, &mut rng).unwrap());
+        let late = mint(&key, epoch, &mut rng);
+        assert!(!client.admit_token(&late, epoch + 2, &mut rng).unwrap());
+
+        // The tokens of this device: one goes to each hello, and an older
+        // epoch goes.
+        client
+            .put_tokens(epoch, &[token.clone(), fresh.clone()], &mut rng)
+            .unwrap();
+        assert_eq!(client.token_count(epoch).unwrap(), 2);
+        assert!(client.take_token(epoch).unwrap().is_some());
+        assert_eq!(client.token_count(epoch).unwrap(), 1);
+        assert!(client.take_token(epoch + 1).unwrap().is_none());
+        assert_eq!(client.token_count(epoch).unwrap(), 0);
+    }
+
+    #[test]
     fn a_rival_rekey_takes_the_index_and_the_seed_before_comes_back() {
         use umbra_core::group::join::JoinKeys;
         use umbra_wire::group::control::{GroupControl, RekeyRecord};

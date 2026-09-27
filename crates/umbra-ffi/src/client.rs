@@ -19,6 +19,7 @@ mod group_sync;
 mod groups;
 mod notify;
 mod sync;
+mod tokens;
 
 pub use backup::{BackupUpload, PendingBackup, RestoredBackup, RootWrite};
 pub use dead::DeadWork;

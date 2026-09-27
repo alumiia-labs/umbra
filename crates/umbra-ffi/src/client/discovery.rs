@@ -537,18 +537,26 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Ok(body) = HelloBody::parse(&plain) else {
             return Ok(None);
         };
-        // ABU-079: a first-party token needs the secret of its issuer, and
-        // no cross-relay issuer runs yet, thus a proof of work alone admits.
-        if body.admission.kind != AdmissionKind::Pow {
-            return Ok(None);
-        }
-        let Ok(solution) = PowSolution::parse(body.admission.body) else {
-            return Ok(None);
-        };
+        // DIS-132: a cross-relay token that the log vouches for, or a proof
+        // of work. ABU-079: a first-party token needs the secret of its
+        // issuer, thus it admits no hello.
         let epoch = epoch_number(now);
-        let entry_pk = key.public().to_bytes();
-        if umbra_core::abuse::pow::verify_hello(&entry_pk, epoch, &solution).is_err() {
-            return Ok(None);
+        match body.admission.kind {
+            AdmissionKind::Token => {
+                if !self.admit_token(body.admission.body, epoch, rng)? {
+                    return Ok(None);
+                }
+            }
+            AdmissionKind::Pow => {
+                let Ok(solution) = PowSolution::parse(body.admission.body) else {
+                    return Ok(None);
+                };
+                let entry_pk = key.public().to_bytes();
+                if umbra_core::abuse::pow::verify_hello(&entry_pk, epoch, &solution).is_err() {
+                    return Ok(None);
+                }
+            }
+            _ => return Ok(None),
         }
         // ABU-086: HELLO_INBOUND_LIMIT hellos for one entry in one epoch.
         let count_key = [HELLO_COUNT_SETTING, entry.id.as_slice()].concat();

@@ -617,6 +617,9 @@ enum Purpose {
         profile: Vec<u8>,
         /// The epoch of Part 13 §13.6, for the proof of work.
         epoch: u32,
+        /// A cross-relay token that admits the hello in place of the proof
+        /// of work (Part 9 `DIS-132`).
+        token: Option<Vec<u8>>,
     },
     /// The queue and the bundle of a channel renewal that this device
     /// offers, as the responder (Part 3 §3.2.6).
@@ -1875,6 +1878,7 @@ impl ClientNode {
         rendezvous: &[u8],
         profile: &[u8],
         epoch: u32,
+        token: Option<&[u8]>,
         rng: &mut R,
     ) -> Result<u64, Error> {
         QueueAddress::parse(rendezvous)?;
@@ -1884,6 +1888,7 @@ impl ClientNode {
                 rendezvous: rendezvous.to_vec(),
                 profile: profile.to_vec(),
                 epoch,
+                token: token.map(<[u8]>::to_vec),
             },
             rng,
         )
@@ -4252,18 +4257,29 @@ impl ClientNode {
                 rendezvous,
                 profile,
                 epoch,
+                token,
             } => {
                 let (inviter, bundle) = Inviter::issue(&identity, own_address(), rng)?;
-                let solution = crate::abuse::pow::solve_hello(&entry_pk, epoch, rng)?;
+                // DIS-132: a cross-relay token, or a proof of work.
                 let mut encoded = [0u8; crate::abuse::pow::SOLUTION_LEN];
-                solution.encode(&mut encoded)?;
+                let admission = match &token {
+                    Some(token) => Admission {
+                        kind: umbra_wire::admission::AdmissionKind::Token,
+                        body: token,
+                    },
+                    None => {
+                        let solution = crate::abuse::pow::solve_hello(&entry_pk, epoch, rng)?;
+                        solution.encode(&mut encoded)?;
+                        Admission {
+                            kind: umbra_wire::admission::AdmissionKind::Pow,
+                            body: &encoded,
+                        }
+                    }
+                };
                 let body = crate::discovery::hello::HelloBody {
                     bundle: Bundle::parse(&bundle)?,
                     profile: &profile,
-                    admission: Admission {
-                        kind: umbra_wire::admission::AdmissionKind::Pow,
-                        body: &encoded,
-                    },
+                    admission,
                 };
                 let envelope = crate::discovery::hello::seal(&entry_pk, &body, rng)?;
                 let to = QueueAddress::parse(&rendezvous)?;

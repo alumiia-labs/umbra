@@ -50,3 +50,7 @@ uniffi = { version = "=0.32.1", default-features = false, optional = true }
 getrandom = { version = "0.4", optional = true }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "time", "sync", "io-util", "macros"], optional = true }
 rusqlite = { version = "0.40", default-features = false, features = ["bundled"], optional = true }
+
+[dev-dependencies]
+# The tests of cross-relay tokens make the RSA key of an issuer.
+umbra-crypto = { version = "0.1.0", path = "../umbra-crypto", features = ["keygen"] }

@@ -671,7 +671,7 @@ fn a_hello_on_a_rendezvous_queue_becomes_a_contact() {
     let entry_pk = key.public().to_bytes();
     let epoch = umbra_core::abuse::epoch_number(network.now);
     network.clients[BOB]
-        .hello(&entry_pk, &address, b"Bob", epoch, &mut Rng(2))
+        .hello(&entry_pk, &address, b"Bob", epoch, None, &mut Rng(2))
         .unwrap();
     network.settle();
     let sent = network.take_events(BOB);

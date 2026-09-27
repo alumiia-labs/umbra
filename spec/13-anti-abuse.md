@@ -599,6 +599,11 @@ IssueResponse {
   before it keeps the token. The signature of one blinded message is one
   value, thus a second request with that message gives the same token, which a
   verifier spends once.
+- **[ABU-113]** A client MUST hold the cross-relay keys of its epoch and of
+  the next one from the log, thus it verifies a hello of Part 9 `DIS-182`
+  with no lookup at its arrival. A client SHOULD keep a few cross-relay tokens
+  of its epoch, and it spends one on each hello that it sends; with none it
+  sends the proof of work of §13.8. A token of an older epoch goes.
 
 A batch of 256 tokens costs about 7 minutes of a phone under that rule. Thus a
 token that a user buys with time costs what the puzzle of one relay costs at

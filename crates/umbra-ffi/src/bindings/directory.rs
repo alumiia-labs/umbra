@@ -14,8 +14,8 @@ use umbra_core::discovery::{RENDEZVOUS_ROTATE, ROTATE_GRACE};
 use umbra_core::{
     abuse::{
         epoch_number,
-        issuer::{issuer_label_input, IssuerKeys},
-        token::TYPE_FIRST_PARTY,
+        issuer::{issuer_label_input, IssuerKeyEntry, IssuerKeys},
+        token::{TYPE_CROSS_RELAY, TYPE_FIRST_PARTY},
     },
     discovery::{
         challenge::{answer, Purpose},
@@ -32,7 +32,7 @@ use umbra_core::{
     },
     identity::address,
 };
-use umbra_crypto::{kem::KeyPair, rand_core::TryRng, vrf};
+use umbra_crypto::{kem::KeyPair, rand_core::TryRng, rsabssa::PublicKey2048, vrf};
 use umbra_transport::{
     directory::{call, DirectoryRoute},
     https::Url,
@@ -319,6 +319,38 @@ impl DirectoryLink {
         self.send(Kind::Write, &body).map(|_| ())
     }
 
+    /// The key of the cross-relay issuer of `epoch` from the log: version
+    /// 0 of its label, of that type and that epoch (`ABU-099` to `ABU-101`).
+    pub fn cross_relay_key(&self, epoch: u32) -> Result<PublicKey2048, FfiError> {
+        let found = self.find(&issuer_label_input(TYPE_CROSS_RELAY, epoch))?;
+        let bytes = found.entry.ok_or(FfiError::NotFound)?;
+        let entry = IssuerKeyEntry::parse(&bytes).map_err(|_| FfiError::Unverified)?;
+        if found.version != Some(0) || entry.token_type != TYPE_CROSS_RELAY || entry.epoch != epoch
+        {
+            return Err(FfiError::Unverified);
+        }
+        PublicKey2048::from_modulus(&entry.public_key).map_err(|_| FfiError::Unverified)
+    }
+
+    /// `count` cross-relay tokens of `epoch`, each paid with a proof of work
+    /// and each verified under `key` (`ABU-111`, `ABU-112`).
+    pub fn cross_relay_tokens(
+        &self,
+        epoch: u32,
+        key: &PublicKey2048,
+        count: usize,
+    ) -> Result<Vec<Vec<u8>>, FfiError> {
+        let (state, body) = dirclient::cross_relay_issue_request(epoch, key, count, &mut OsRng)
+            .map_err(|_| FfiError::Malformed)?;
+        let answer = self.send(Kind::Issue, &body)?;
+        let tokens = dirclient::cross_relay_issue_finish(&state, &answer, key)
+            .map_err(|_| FfiError::Unverified)?;
+        tokens
+            .iter()
+            .map(|token| dirclient::token_bytes(token).map_err(|_| FfiError::Malformed))
+            .collect()
+    }
+
     /// Writes the sealed profile blob of a label under the blob challenge,
     /// whose answer binds the blob (`DIS-175`).
     pub fn put_blob(
@@ -393,6 +425,12 @@ pub struct ContactRequestInfo {
     /// The JPEG picture of the sender, or an empty one.
     pub picture: Vec<u8>,
 }
+
+/// The tokens below which the upkeep asks the issuer for a batch.
+const TOKEN_LOW: usize = 2;
+/// The tokens of one batch. Each one costs a proof of work at
+/// `POW_EFFORT_MAX` on this device.
+const TOKEN_BATCH: usize = 4;
 
 /// The wait for the relay to make a rendezvous queue.
 const QUEUE_WAIT: Duration = Duration::from_secs(60);
@@ -569,6 +607,46 @@ impl Handle {
     }
 
     /// Writes the tombstone of an entry (`DIS-171`) and ends its queue.
+    /// Keeps the key of the cross-relay issuer of this epoch and of the
+    /// next one, thus a token in a hello verifies here, and keeps
+    /// `TOKEN_LOW` tokens of this epoch for the hellos of this device.
+    fn keep_cross_relay_tokens(&self, link: &DirectoryLink, now: u64) -> Result<(), FfiError> {
+        self.keep_cross_relay_keys(link, now)?;
+        let epoch = epoch_number(now);
+        if locked(&self.inner).client.token_count(epoch)? >= TOKEN_LOW {
+            return Ok(());
+        }
+        self.fetch_tokens(link, epoch, TOKEN_BATCH)
+    }
+
+    fn fetch_tokens(&self, link: &DirectoryLink, epoch: u32, count: usize) -> Result<(), FfiError> {
+        let key = locked(&self.inner)
+            .client
+            .cross_relay_key(epoch)?
+            .ok_or(FfiError::NotFound)?;
+        let tokens = link.cross_relay_tokens(epoch, &key, count)?;
+        Ok(locked(&self.inner)
+            .client
+            .put_tokens(epoch, &tokens, &mut OsRng)?)
+    }
+
+    fn keep_cross_relay_keys(&self, link: &DirectoryLink, now: u64) -> Result<(), FfiError> {
+        let epoch = epoch_number(now);
+        for held in [epoch, epoch.saturating_add(1)] {
+            if locked(&self.inner).client.cross_relay_key(held)?.is_none() {
+                // The next key enters the log before its epoch (ABU-098).
+                if let Ok(key) = link.cross_relay_key(held) {
+                    locked(&self.inner).client.put_cross_relay_key(
+                        held,
+                        key.modulus(),
+                        &mut OsRng,
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Writes the profile blob of the handle when it waits: the name and
     /// the welcome text, sealed under the key of the fragment of its link
     /// (`DIS-141`, `DIS-176`). A device with no handle writes nothing.
@@ -782,6 +860,9 @@ impl Handle {
         let link = self.directory_link()?;
         // §9.3.1: a profile blob that no write took yet goes now.
         let _ = self.publish_profile_blob(&link);
+        // Part 13 §13.3.1: the keys that a hello of a stranger names, and
+        // the tokens of the hellos of this device.
+        let _ = self.keep_cross_relay_tokens(&link, now);
         let entries = locked(&self.inner).client.published()?;
         for mut entry in entries {
             if entry.expires_at != 0 && now >= entry.expires_at {
@@ -840,6 +921,28 @@ impl Handle {
             }
         }
         Ok(())
+    }
+
+    /// Takes the keys of the cross-relay issuer from the log, and `count`
+    /// tokens of this epoch, for a test that needs no full batch.
+    #[doc(hidden)]
+    pub fn stock_tokens(&self, count: u32) -> Result<(), FfiError> {
+        let link = self.directory_link()?;
+        let now = unix_now();
+        self.keep_cross_relay_keys(&link, now)?;
+        if count == 0 {
+            return Ok(());
+        }
+        self.fetch_tokens(&link, epoch_number(now), count as usize)
+    }
+
+    /// The tokens of this epoch that this device holds, for a test.
+    #[doc(hidden)]
+    pub fn tokens_held(&self) -> Result<u32, FfiError> {
+        let count = locked(&self.inner)
+            .client
+            .token_count(epoch_number(unix_now()))?;
+        Ok(u32::try_from(count).unwrap_or(u32::MAX))
     }
 
     /// The rendezvous queue of an entry and the one before it, for a test.
@@ -1197,8 +1300,15 @@ impl Handle {
         }
         .encode()
         .map_err(|_| FfiError::Malformed)?;
+        drop(inner);
+        // DIS-132: a cross-relay token of this epoch, when the device holds
+        // one, and else a proof of work.
+        let token = locked(&self.inner)
+            .client
+            .take_token(epoch_number(unix_now()))?;
+        let inner = locked(&self.inner);
         let bridge = inner.bridge.as_ref().ok_or(FfiError::Offline)?;
-        Ok(bridge.hello(entry_pk.to_vec(), encoded, profile)?)
+        Ok(bridge.hello(entry_pk.to_vec(), encoded, profile, token)?)
     }
 
     /// The name that a contact request of this device shows.

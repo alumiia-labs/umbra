@@ -123,6 +123,8 @@ pub enum Command {
         rendezvous: Vec<u8>,
         /// The profile that the hello shows.
         profile: Vec<u8>,
+        /// A cross-relay token in place of the proof of work.
+        token: Option<Vec<u8>>,
     },
 }
 
@@ -651,9 +653,17 @@ pub async fn run_client(
                     entry_pk,
                     rendezvous,
                     profile,
+                    token,
                 } => {
                     let epoch = umbra_core::abuse::epoch_number(now);
-                    let _ = node.hello(&entry_pk, &rendezvous, &profile, epoch, &mut rng);
+                    let _ = node.hello(
+                        &entry_pk,
+                        &rendezvous,
+                        &profile,
+                        epoch,
+                        token.as_deref(),
+                        &mut rng,
+                    );
                 }
             }
             if let Err(ended) = settle(&mut node, persist.as_mut(), &[]) {

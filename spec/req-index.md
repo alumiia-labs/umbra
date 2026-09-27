@@ -72,14 +72,14 @@ each column when a crate implements the requirement and a test covers it.
 | `WIR` | 395 | 85 | 0 | 0 | 7 | **487** |
 | `DEV` | 197 | 90 | 0 | 0 | 7 | **294** |
 | `NTF` | 74 | 28 | 0 | 0 | 3 | **105** |
-| `DIS` | 126 | 34 | 0 | 0 | 3 | **163** |
+| `DIS` | 127 | 34 | 0 | 0 | 3 | **164** |
 | `REL` | 124 | 32 | 1 | 0 | 2 | **159** |
 | `GRP` | 230 | 65 | 0 | 0 | 6 | **301** |
 | `ATT` | 143 | 45 | 2 | 0 | 3 | **193** |
-| `ABU` | 70 | 30 | 1 | 0 | 0 | **101** |
+| `ABU` | 71 | 30 | 1 | 0 | 0 | **102** |
 | `IMP` | 119 | 41 | 0 | 0 | 2 | **162** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2001 | 620 | 7 | 0 | 53 | **2681** |
+| **All** | 2003 | 620 | 7 | 0 | 53 | **2683** |
 
 ## SCP — Scope and Conventions
 
@@ -1887,6 +1887,7 @@ Source: `spec/09-discovery.md`
 | `DIS-179` | §9.3.1 | MUST | The link | The link MUST be `umbra://h/<name>%23<discriminator>#<fragment>`, with the fragment in the base32 of Part 4 §4.2.3. |  |  |
 | `DIS-180` | §9.6 | MUST | The profile in a hello | The profile in a hello MUST be the plaintext of `DIS-176`: the name and the picture of the sender, and in the place of the welcome text the note that the sender wrote with the request. |  |  |
 | `DIS-181` | §9.6 | MUST | A client | A client MUST seal each hello record in bucket `B3` of Part 6 §6.9, whatever the hello holds. |  |  |
+| `DIS-182` | §9.6 | MUST | An addressee | An addressee MUST admit a hello under a cross-relay token only when the key that the token names is the key of the issuer for the epoch of the addressee or the one before it, as the log of Part 13 §13.5 gives it, when the challenge digest of the token names that epoch, when the signature verifies, and when no earlier hello spent its nonce at this device. |  |  |
 
 ## REL — Relay Directory
 
@@ -2669,6 +2670,7 @@ Source: `spec/13-anti-abuse.md`
 | `ABU-110` | §13.9 | MUST | An issuer | An issuer MUST answer the epoch of its clock and the next one only, and the next one only after its key is in the log under `ABU-098`. |  |  |
 | `ABU-111` | §13.9 | MUST | An issuer | An issuer MUST take the RSA key of `0x0002` for an epoch from the log under `ABU-098`, and it MUST answer an epoch whose key the log does not hold as stale. |  |  |
 | `ABU-112` | §13.9 | MUST | A client | A client MUST verify each token of the answer under that key before it keeps the token. |  |  |
+| `ABU-113` | §13.9 | MUST | A client | A client MUST hold the cross-relay keys of its epoch and of the next one from the log, thus it verifies a hello of Part 9 `DIS-182` with no lookup at its arrival. |  |  |
 
 ## IMP — Implementation
 

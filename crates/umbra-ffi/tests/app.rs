@@ -1019,7 +1019,14 @@ fn start_test_directory(relays: &tokio::runtime::Runtime) -> (u16, Vec<u8>) {
             issuer_seed: Secret::new([0x63; 32]),
             signers,
             keyset: keyset.clone(),
-            cross_relay: None,
+            // Part 13 §13.3.1: the RSA key of each epoch from one seed.
+            cross_relay: Some(Box::new(|epoch: u32| {
+                umbra_crypto::rsabssa::SecretKey2048::from_seed(
+                    &Secret::new([0x64; 32]),
+                    &epoch.to_be_bytes(),
+                )
+                .ok()
+            })),
         },
         1,
         username_case_mapped,
@@ -3446,8 +3453,14 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
     let link = alice.create_public_link(0).unwrap();
     assert!(link.link.starts_with("umbra://p/"));
     bob.set_profile_name("Bob".into()).unwrap();
+    // DIS-132: a cross-relay token admits the hello in place of the proof
+    // of work. The addressee holds the key from the log.
+    alice.stock_tokens(0).unwrap();
+    bob.stock_tokens(1).unwrap();
+    assert_eq!(bob.tokens_held().unwrap(), 1);
     // DIS-180: the hello carries the profile of the sender and its note.
     request_with_note(&bob, &link.link, "We met at the summit.");
+    assert_eq!(bob.tokens_held().unwrap(), 0);
     wait_for_requests(&alice, 1);
     let request = alice.contact_requests().unwrap().remove(0);
     assert_eq!(
