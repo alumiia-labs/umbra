@@ -25,6 +25,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -142,6 +146,21 @@ fun ConnectionScreen(onBack: () -> Unit) {
                 },
             )
             HorizontalDivider(color = Palette.Divider)
+            // Part 8 §8.2: the carrier, and what the relays and the NDR hold.
+            var push by remember { mutableStateOf<uniffi.umbra_ffi.PushStatus?>(null) }
+            LaunchedEffect(state) { Core.pushStatus { push = it } }
+            push?.let {
+                FactRow(
+                    "bell",
+                    "Push",
+                    if (it.carrier.isEmpty()) {
+                        "Polling"
+                    } else {
+                        "${it.carrier} · ${it.registeredGroups} groups at the NDR · ${it.boundQueues} queues bound"
+                    },
+                )
+                HorizontalDivider(color = Palette.Divider)
+            }
             Spacer(Modifier.height(16.dp))
             SecondaryButton("Reconnect") { Core.connect(context, force = true) }
             Spacer(Modifier.height(24.dp))

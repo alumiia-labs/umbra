@@ -5,6 +5,7 @@ import android.os.Build
 import androidx.annotation.RequiresApi
 import android.os.Handler
 import android.os.Looper
+import android.os.Process
 import android.os.SystemClock
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -339,8 +340,16 @@ object Core {
     /** The name that an accepted request showed, for the naming view. */
     var suggestedName: String? = null
 
-    /** The calls to the directory take seconds each, thus they have a thread of their own. */
-    private val directoryWorker = Executors.newSingleThreadExecutor { Thread(it, "umbra-directory") }
+    /**
+     * The calls to the directory take seconds each, thus they have a thread of their own. The
+     * proofs of work of the token upkeep run on it, at a priority below the view.
+     */
+    private val directoryWorker = Executors.newSingleThreadExecutor { work ->
+        Thread({
+            Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND)
+            work.run()
+        }, "umbra-directory")
+    }
     private const val MAINTAIN_MS = 5 * 60_000L
     private var maintains = false
 
@@ -1017,6 +1026,12 @@ object Core {
 
     /** Whether the client is open, thus it holds the keys of its queues. */
     fun isOpen() = phase == Phase.Open
+
+    /** The push state for the view of the connection. */
+    fun pushStatus(onStatus: (uniffi.umbra_ffi.PushStatus) -> Unit) = call { client ->
+        val status = client.pushStatus()
+        main.post { onStatus(status) }
+    }
 
     /** The FCM token of this device goes to the core (Part 8 §8.2.7). */
     fun setFcmToken(token: String) = call { it.setFcmToken(token) }

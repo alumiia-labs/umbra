@@ -282,6 +282,17 @@ pub struct FfiGroupInfo {
     pub needs_invitation: bool,
 }
 
+/// The push state of this device (Part 8 §8.2).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct PushStatus {
+    /// The carrier of the token, or empty for none: the device polls.
+    pub carrier: String,
+    /// The queues that bound for push at their relays.
+    pub bound_queues: u32,
+    /// The handle groups that the NDR holds.
+    pub registered_groups: u32,
+}
+
 /// The role of one member of a group (§11.9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum FfiRole {
@@ -3180,6 +3191,28 @@ impl Handle {
 
 #[uniffi::export]
 impl Handle {
+    /// The push state that the view of the connection shows: the carrier of
+    /// the token that the NDR holds, the queues that bound for push, and the
+    /// handle groups that the NDR holds (Part 8 §8.2).
+    pub fn push_status(&self) -> Result<PushStatus, FfiError> {
+        let inner = locked(&self.inner);
+        let carrier = match inner
+            .client
+            .push_token()?
+            .and_then(|token| token.first().copied())
+        {
+            Some(byte) if byte == TokenCarrier::Fcm as u8 => "FCM",
+            Some(byte) if byte == TokenCarrier::UnifiedPush as u8 => "UnifiedPush",
+            _ => "",
+        };
+        let (bound, registered) = inner.client.push_state()?;
+        Ok(PushStatus {
+            carrier: carrier.to_owned(),
+            bound_queues: u32::try_from(bound).unwrap_or(u32::MAX),
+            registered_groups: u32::try_from(registered).unwrap_or(u32::MAX),
+        })
+    }
+
     /// Takes the FCM registration token that Firebase gave, or none when
     /// it took the token back. Each handle group of this device registers
     /// with the NDR under it, or leaves (Part 8 §8.2.7).
