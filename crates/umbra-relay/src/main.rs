@@ -97,7 +97,8 @@ use umbra_relay::{
     node::{Config, RelayNode},
     placement::placement,
     server::{
-        run_relay, tls_acceptor, Carried, ConnectionLimits, OhttpForward, OsRng, PACING_MEAN_MS,
+        run_relay, tls_acceptor, Carried, ConnectionLimits, ManifestSource, OhttpForward, OsRng,
+        PACING_MEAN_MS,
     },
     sqlite_store::SqliteStore,
     store::{MemoryStore, RelayStore},
@@ -146,6 +147,9 @@ struct Settings {
     /// The manifest that gave this relay its place. The relay serves it to
     /// a client that asks over HTTPS (Part 3 §3.10).
     manifest: Option<Vec<u8>>,
+    /// The file of the manifest, which the relay reads again for a newer
+    /// one to serve.
+    manifest_source: Option<ManifestSource>,
     /// The gateway of the NDR, for a relay with the OHTTP relay role.
     ohttp_gateway: Option<https::Url>,
     /// The gateway of the directory and the issuer.
@@ -233,6 +237,15 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
         _ => return None,
     };
     let (placed, manifest) = placed.unzip();
+    let manifest_source = match (values.get("manifest"), values.get("keyset"), &manifest) {
+        (Some(path), Some(keyset), Some(_)) => Some(ManifestSource {
+            path: std::path::PathBuf::from(path),
+            keyset: std::fs::read(keyset).ok()?,
+            relay_id: relay.relay_id,
+            s: relay.s,
+        }),
+        _ => None,
+    };
     let layer = match &placed {
         Some(placed) => placed.layer,
         None if !takes_place => 0,
@@ -306,6 +319,7 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
         identities,
         identity,
         manifest,
+        manifest_source,
         // NET-334: the clients arrive at an ingress relay alone, thus the
         // cap of one address applies there.
         limits: ConnectionLimits {
@@ -585,7 +599,8 @@ async fn run() -> ExitCode {
         PACING_MEAN_MS,
         store,
         Carried {
-            manifest: settings.manifest,
+            manifest: std::sync::Mutex::new(settings.manifest),
+            manifest_source: settings.manifest_source,
             // NTF-127: the OHTTP relay role posts to the gateway of the NDR.
             ohttp: settings.ohttp_gateway.map(|gateway| OhttpForward {
                 gateway,

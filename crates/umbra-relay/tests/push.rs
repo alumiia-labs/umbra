@@ -95,7 +95,7 @@ async fn a_registration_and_a_push_cross_the_ohttp_relay_to_the_endpoint() {
     let (relay_listener, relay_port) = listener().await;
     let (node, _unused) = mpsc::channel(8);
     let carried = Carried {
-        manifest: None,
+        manifest: std::sync::Mutex::new(None),
         ohttp: Some(OhttpForward {
             gateway: Url::parse(&format!("https://localhost:{ndr_port}{GATEWAY_PATH}")).unwrap(),
             tls: trust.clone(),
@@ -294,7 +294,7 @@ async fn an_fcm_token_gets_a_data_message_under_the_account_of_the_ndr() {
         tls_acceptor(&fixture("leaf.pem"), &fixture("leaf.key")).unwrap(),
         node,
         Arc::new(Carried {
-            manifest: None,
+            manifest: std::sync::Mutex::new(None),
             ohttp: Some(OhttpForward {
                 gateway: Url::parse(&format!("https://localhost:{ndr_port}{GATEWAY_PATH}"))
                     .unwrap(),

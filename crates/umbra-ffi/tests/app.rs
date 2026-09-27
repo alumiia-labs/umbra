@@ -1186,7 +1186,7 @@ fn start_signed_network_with(
         }
         // The ingress relay is the carrier of the manifest, and of the
         // requests to the directory (`DIS-162`).
-        carried.manifest = (placed.layer == 1).then(|| manifest.clone());
+        carried.manifest = std::sync::Mutex::new((placed.layer == 1).then(|| manifest.clone()));
         if placed.layer == 1 {
             carried.directory = directory.map(|port| OhttpForward {
                 gateway: Url::parse(&format!("https://localhost:{port}/gateway")).unwrap(),

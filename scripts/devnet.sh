@@ -81,4 +81,14 @@ for relay in 3 5 7 2 4 1 6; do
     target/debug/umbra-relay "target/devnet/conf/relay$relay.conf" &
     pids+=($!)
 done
+# The authorities sign a new manifest each 30 minutes, and each relay reads
+# the file again and serves it. A client then sees no clock gap after an
+# hour of the network.
+(
+    while sleep 1800; do
+        target/debug/umbra-test-authority tests/fixtures/devnet/authority.conf target/devnet >/dev/null ||
+            echo "the new manifest failed"
+    done
+) &
+pids+=($!)
 wait

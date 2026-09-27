@@ -365,8 +365,11 @@ impl Drop for Held {
 /// pushes of its own queues.
 #[derive(Default)]
 pub struct Carried {
-    /// The manifest, for a client that asks for it.
-    pub manifest: Option<Vec<u8>>,
+    /// The manifest, for a client that asks for it. A newer one that the
+    /// file gives takes its place (see [`ManifestSource`]).
+    pub manifest: std::sync::Mutex<Option<Vec<u8>>>,
+    /// The file of the manifest and what a new one must verify against.
+    pub manifest_source: Option<ManifestSource>,
     /// The gateway, for a relay with the OHTTP relay role.
     pub ohttp: Option<OhttpForward>,
     /// The gateway of the directory and the issuer, for a relay with that
@@ -381,6 +384,56 @@ pub struct Carried {
     pub challenges: std::sync::Mutex<Vec<u8>>,
     /// The limits of the connections (`NET-333` to `NET-335`).
     pub limits: ConnectionLimits,
+}
+
+/// The file that the authorities write each new manifest to, with the key
+/// set and the identity that a new manifest must place (Part 10 §10.5.5).
+pub struct ManifestSource {
+    /// The file of the manifest.
+    pub path: std::path::PathBuf,
+    /// The key set of the authorities.
+    pub keyset: Vec<u8>,
+    /// The identifier of this relay.
+    pub relay_id: [u8; 32],
+    /// The static key of this relay.
+    pub s: [u8; 32],
+}
+
+/// How often a relay reads the file of the manifest again.
+const MANIFEST_READ_PERIOD: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Reads the file of the manifest again at each period, and serves a new
+/// manifest that verifies and still places this relay. The place that the
+/// relay took at its start holds until a restart.
+async fn reload_manifest(carried: Arc<Carried>) {
+    let Some(source) = carried.manifest_source.as_ref() else {
+        return;
+    };
+    loop {
+        tokio::time::sleep(MANIFEST_READ_PERIOD).await;
+        let Ok(fresh) = std::fs::read(&source.path) else {
+            continue;
+        };
+        let held = carried
+            .manifest
+            .lock()
+            .map(|held| held.as_deref() == Some(fresh.as_slice()))
+            .unwrap_or(true);
+        if held {
+            continue;
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |at| at.as_secs());
+        if crate::placement::placement(&fresh, &source.keyset, &source.relay_id, &source.s, now)
+            .is_err()
+        {
+            continue;
+        }
+        if let Ok(mut held) = carried.manifest.lock() {
+            *held = Some(fresh);
+        }
+    }
 }
 
 /// Forwards one encapsulated request to the gateway and gives its answer
@@ -469,7 +522,12 @@ pub async fn serve_connection<S>(
             return;
         }
         if native::asks_manifest(&inbound) && inbound.windows(4).any(|w| w == b"\r\n\r\n") {
-            let _ = match &carried.manifest {
+            let manifest = carried
+                .manifest
+                .lock()
+                .map(|held| held.clone())
+                .unwrap_or_default();
+            let _ = match &manifest {
                 Some(bytes) => {
                     let head = native::manifest_response_head(bytes.len());
                     let _ = stream.write_all(head.as_bytes()).await;
@@ -692,6 +750,7 @@ pub async fn run_relay(
 ) {
     let carried_ndr = carried.ndr.clone();
     let carried = Arc::new(carried);
+    tokio::spawn(reload_manifest(carried.clone()));
     let carried_challenges = carried.clone();
     let (inputs, node_inputs) = mpsc::channel::<Input>(1_024);
     let (requests, mut node_requests) = mpsc::unbounded_channel::<Request>();
