@@ -2725,6 +2725,84 @@ mod tests {
     }
 
     #[test]
+    fn a_digest_of_a_contact_compares_against_the_view_of_this_device() {
+        use umbra_wire::app::keys::DigestSource;
+
+        let mut rng = Rng(81);
+        let mut sender = new_client(&mut rng);
+        let mut receiver = new_client(&mut rng);
+        let peer = ContactId([0x91; 32]);
+        receiver.conversation_for(&peer.0).unwrap();
+        let now = 1_700_000_000;
+
+        // REL-008: the digest of the verified root goes once in each
+        // GOSSIP_INTERVAL.
+        sender
+            .keep_consensus_digest(40, &[0xA1; 32], &mut rng)
+            .unwrap();
+        let (source, app) = sender.due_digest(now, &mut rng).unwrap().unwrap();
+        assert_eq!(source, DigestSource::ConsensusRoot);
+        sender.digest_sent(source, now, &mut rng).unwrap();
+        assert!(sender.due_digest(now + 1, &mut rng).unwrap().is_none());
+        let interval = umbra_core::discovery::GOSSIP_INTERVAL;
+        assert!(sender.due_digest(now + interval, &mut rng).unwrap().is_some());
+
+        // A root of the same epoch agrees, and one that differs warns.
+        receiver
+            .keep_consensus_digest(40, &[0xA1; 32], &mut rng)
+            .unwrap();
+        deliver(&mut receiver, &peer, &app, now * 1_000, &mut rng);
+        assert!(receiver.gossip_warnings().unwrap().is_empty());
+        assert!(receiver.summaries().unwrap().iter().all(|s| s.last.is_none()));
+        receiver
+            .keep_consensus_digest(40, &[0xB2; 32], &mut rng)
+            .unwrap();
+        deliver(&mut receiver, &peer, &app, now * 1_000 + 1, &mut rng);
+        let warnings = receiver.gossip_warnings().unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(
+            (warnings[0].source, warnings[0].epoch),
+            (DigestSource::ConsensusRoot, 40)
+        );
+
+        // DIS-033: a tree head of a held size compares at once, and one of
+        // another size waits for its proof (DIS-136).
+        let mut other = new_client(&mut rng);
+        other.conversation_for(&peer.0).unwrap();
+        other
+            .keep_head(9, &[0xC3; 32], now, now, &mut rng)
+            .unwrap();
+        sender
+            .keep_head(9, &[0xC3; 32], now, now, &mut rng)
+            .unwrap();
+        let (source, same) = sender.due_digest(now, &mut rng).unwrap().unwrap();
+        assert_eq!(source, DigestSource::TreeHead);
+        deliver(&mut other, &peer, &same, now * 1_000, &mut rng);
+        assert!(other.gossip_warnings().unwrap().is_empty());
+        sender
+            .keep_head(12, &[0xD4; 32], now, now, &mut rng)
+            .unwrap();
+        let (_, later) = sender.due_digest(now, &mut rng).unwrap().unwrap();
+        deliver(&mut other, &peer, &later, now * 1_000 + 1, &mut rng);
+        let checks = other.head_checks().unwrap();
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].tree_size, 12);
+        other.head_check_done(&checks[0], false, &mut rng).unwrap();
+        assert!(other.head_checks().unwrap().is_empty());
+        assert!(other.gossip_warnings().unwrap().is_empty());
+        let mut split = new_client(&mut rng);
+        split.conversation_for(&peer.0).unwrap();
+        split
+            .keep_head(12, &[0xEE; 32], now, now, &mut rng)
+            .unwrap();
+        deliver(&mut split, &peer, &later, now * 1_000, &mut rng);
+        assert_eq!(
+            split.gossip_warnings().unwrap()[0].source,
+            DigestSource::TreeHead
+        );
+    }
+
+    #[test]
     fn a_draft_becomes_a_stored_message_and_renders_into_a_sink() {
         let mut rng = Rng(1);
         let mut client = new_client(&mut rng);

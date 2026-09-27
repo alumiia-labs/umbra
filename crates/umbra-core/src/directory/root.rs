@@ -195,6 +195,13 @@ pub struct DirectoryRoot<'a> {
 }
 
 impl<'a> DirectoryRoot<'a> {
+    /// The consensus digest that a client gossips (`REL-008`): SHA3-256 over
+    /// the preimage that the signatures cover (`REL-160`). Two roots of one
+    /// epoch that differ in any signed field give two digests.
+    pub fn digest(&self) -> [u8; 32] {
+        sha3_256(&[&self.preimage()])
+    }
+
     pub(crate) fn preimage(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(160);
         out.extend_from_slice(labels::DIRECTORY_ROOT);

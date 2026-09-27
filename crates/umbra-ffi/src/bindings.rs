@@ -296,6 +296,17 @@ pub struct PushStatus {
     pub registered_groups: u32,
 }
 
+/// A digest of a contact that differs from the view of this device (Part 9
+/// `DIS-034`, Part 10 `REL-161`).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct GossipWarningInfo {
+    /// "directory" for the tree head of the handle directory, "relays" for
+    /// the consensus root of the relay directory.
+    pub source: String,
+    /// The tree size or the consensus epoch that the two views differ at.
+    pub epoch: u64,
+}
+
 /// The role of one member of a group (§11.9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum FfiRole {
@@ -2857,6 +2868,14 @@ fn conversation_of(bytes: &[u8]) -> Result<ConversationId, FfiError> {
     ))
 }
 
+/// The record that one cover slot got from the store (Part 3 `NET-065`).
+enum Given {
+    /// A batch of receipts.
+    Receipt(crate::DueReceipt),
+    /// A transparency digest of one source.
+    Digest(umbra_wire::app::keys::DigestSource),
+}
+
 /// The store of the client, as the runtime of one run sees it. It holds a
 /// weak reference, thus a handle that the platform drops ends the run.
 struct HandleStore {
@@ -2864,8 +2883,8 @@ struct HandleStore {
     /// The run of this store. A run that a later connect replaced writes
     /// nothing.
     run: u64,
-    /// The batch of receipts that the last slot got.
-    given: Option<crate::DueReceipt>,
+    /// What the last slot got: a batch of receipts, or a digest.
+    given: Option<Given>,
 }
 
 impl Persist for HandleStore {
@@ -2904,10 +2923,22 @@ impl Persist for HandleStore {
         let handle = self.handle.upgrade()?;
         let mut inner = locked(&handle.inner);
         // A locked client gives none, and its receipts wait in the store.
-        let due = inner.client.due_receipt(now, &mut OsRng).ok()??;
-        let contact = inner.bridge.as_ref()?.contact_for(&due.conversation)?;
-        let app = due.app.clone();
-        self.given = Some(due);
+        if let Some(due) = inner.client.due_receipt(now, &mut OsRng).ok()? {
+            let contact = inner.bridge.as_ref()?.contact_for(&due.conversation)?;
+            let app = due.app.clone();
+            self.given = Some(Given::Receipt(due));
+            return Some((contact, app));
+        }
+        // NET-065: a transparency digest comes after a receipt, to one
+        // contact at random (DIS-029, DIS-031, REL-008).
+        let (source, app) = inner.client.due_digest(now, &mut OsRng).ok()??;
+        let contacts = inner.bridge.as_ref()?.contacts();
+        let all: Vec<ConversationId> = contacts.iter().map(|(conversation, _)| *conversation).collect();
+        let open = inner.client.gossip_contacts(&all).ok()?;
+        let pick = usize::try_from(random_u64() % u64::try_from(open.len()).ok()?.max(1)).ok()?;
+        let conversation = open.get(pick)?;
+        let contact = inner.bridge.as_ref()?.contact_for(conversation)?;
+        self.given = Some(Given::Digest(source));
         Some((contact, app))
     }
 
@@ -2915,7 +2946,11 @@ impl Persist for HandleStore {
         let (Some(handle), Some(given)) = (self.handle.upgrade(), self.given.take()) else {
             return;
         };
-        let _ = locked(&handle.inner).client.receipt_sent(&given);
+        let mut inner = locked(&handle.inner);
+        let _ = match given {
+            Given::Receipt(due) => inner.client.receipt_sent(&due),
+            Given::Digest(source) => inner.client.digest_sent(source, unix_now(), &mut OsRng),
+        };
     }
 }
 
@@ -3216,6 +3251,23 @@ impl Handle {
         })
     }
 
+    /// The digests of contacts that differ from the view of this device: a
+    /// log served another view to one of the two.
+    pub fn gossip_warnings(&self) -> Result<Vec<GossipWarningInfo>, FfiError> {
+        let warnings = locked(&self.inner).client.gossip_warnings()?;
+        Ok(warnings
+            .into_iter()
+            .map(|warning| GossipWarningInfo {
+                source: match warning.source {
+                    umbra_wire::app::keys::DigestSource::TreeHead => "directory",
+                    _ => "relays",
+                }
+                .to_owned(),
+                epoch: warning.epoch,
+            })
+            .collect())
+    }
+
     /// Takes the FCM registration token that Firebase gave, or none when
     /// it took the token back. Each handle group of this device registers
     /// with the NDR under it, or leaves (Part 8 §8.2.7).
@@ -3285,6 +3337,11 @@ impl Handle {
             return Err(FfiError::Malformed);
         }
         inner.client.set_directory_epoch(set.epoch, &mut OsRng)?;
+        // REL-008: the digest of this root is the one that the gossip sends
+        // and compares.
+        inner
+            .client
+            .keep_consensus_digest(set.epoch, &set.digest, &mut OsRng)?;
         Ok(VerifiedNetwork {
             network: Network {
                 relays,

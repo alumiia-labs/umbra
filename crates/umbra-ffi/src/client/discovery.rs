@@ -276,8 +276,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// The newest head of the log that this device accepted: its size, its
     /// root, and its timestamp.
     pub fn newest_head(&self) -> Result<Option<(u64, [u8; 32], u64)>, Error> {
+        Ok(self
+            .held_heads()?
+            .into_iter()
+            .max_by_key(|(size, _, _)| *size))
+    }
+
+    /// Each head of the log that this device keeps (`DIS-063`): its size,
+    /// its root, and its timestamp.
+    pub fn held_heads(&self) -> Result<Vec<(u64, [u8; 32], u64)>, Error> {
         let store = &self.open_ref()?.store;
-        let mut newest: Option<(u64, [u8; 32], u64)> = None;
+        let mut heads = Vec::new();
         for (_, plain) in store.list(DIRECTORY_HEADS, None)? {
             let plain = Zeroizing::new(plain);
             if plain.len() != HEAD_ROW_LEN {
@@ -287,11 +296,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let size = u64::from_be_bytes(r.array()?);
             let root = r.array()?;
             let timestamp = u64::from_be_bytes(r.array()?);
-            if newest.is_none_or(|(held, _, _)| size > held) {
-                newest = Some((size, root, timestamp));
-            }
+            heads.push((size, root, timestamp));
         }
-        Ok(newest)
+        Ok(heads)
     }
 
     /// Keeps a head that this device accepted, and drops each other head

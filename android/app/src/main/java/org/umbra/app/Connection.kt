@@ -161,6 +161,22 @@ fun ConnectionScreen(onBack: () -> Unit) {
                 )
                 HorizontalDivider(color = Palette.Divider)
             }
+            // DIS-034, REL-161: a contact holds another view of a log.
+            var warnings by remember { mutableStateOf(emptyList<uniffi.umbra_ffi.GossipWarningInfo>()) }
+            LaunchedEffect(state) { Core.gossipWarnings { warnings = it } }
+            for (warning in warnings) {
+                Spacer(Modifier.height(12.dp))
+                Note(
+                    if (warning.source == "directory") {
+                        "A contact holds another handle directory at size ${warning.epoch}. " +
+                            "One of the two views is forged."
+                    } else {
+                        "A contact holds another relay directory at epoch ${warning.epoch}. " +
+                            "One of the two views is forged."
+                    },
+                    isError = true,
+                )
+            }
             Spacer(Modifier.height(16.dp))
             SecondaryButton("Reconnect") { Core.connect(context, force = true) }
             Spacer(Modifier.height(24.dp))

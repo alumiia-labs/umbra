@@ -149,6 +149,8 @@ pub struct RelaySet {
     pub epoch: u64,
     /// The Merkle root over the relay set.
     pub root: [u8; 32],
+    /// The consensus digest of the root (`REL-160`).
+    pub digest: [u8; 32],
     /// The relays, in ascending order of `relay_id`.
     pub relays: Vec<ListedRelay>,
 }
@@ -172,7 +174,7 @@ impl RelaySet {
         // The root comes first: a carrier must not make a client verify the
         // signature of each entry under a root that no authority signed.
         consensus.verify(&root, device_clock)?;
-        let (epoch, merkle_root) = (root.epoch, root.root);
+        let (epoch, merkle_root, digest) = (root.epoch, root.root, root.digest());
         // The consensus takes the root after the last entry, because a
         // manifest with a bad entry must leave the consensus as it was.
         let mut relays: Vec<ListedRelay> = Vec::with_capacity(manifest.entries.len());
@@ -206,6 +208,7 @@ impl RelaySet {
         Ok(RelaySet {
             epoch,
             root: merkle_root,
+            digest,
             relays,
         })
     }

@@ -15,6 +15,7 @@ mod dead;
 mod devices;
 mod discovery;
 mod files;
+mod gossip;
 mod group_sync;
 mod groups;
 mod held_handles;
@@ -24,6 +25,7 @@ mod tokens;
 
 pub use backup::{BackupUpload, PendingBackup, RestoredBackup, RootWrite};
 pub use dead::DeadWork;
+pub use gossip::{GossipWarning, HeadCheck};
 pub use devices::DeviceInfo;
 pub use discovery::{ContactRequest, EntryKind, Published, PROFILE_NAME_MAX};
 pub use files::{DownloadJob, ErasureJob, FileExtras, FileInfo, FileState, UploadJob};
@@ -48,6 +50,7 @@ use umbra_crypto::{hierarchy::RootIdentity, rand_core::CryptoRng, secret::Secret
 use umbra_queue::client::receipts::ReceiptHold;
 use umbra_wire::app::{
     edit::{DeleteBody, DeleteScope, EditBody},
+    keys::DigestBody,
     msg_ref,
     rich::RichRecord,
     signal::{ReactionAction, ReactionBody, ReceiptBody},
@@ -708,6 +711,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
         }
         let mut sync_bodies: Vec<(ConversationId, Vec<u8>)> = Vec::new();
+        let mut digests: Vec<DigestBody> = Vec::new();
         let mut to_publish: Vec<(ConversationId, Vec<u8>)> = Vec::new();
         let mut handoffs: Vec<Outgoing> = Vec::new();
         // IMP-167, IMP-168: a file above this size waits for a tap.
@@ -779,6 +783,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
             // DEV-050: kind 0x20 on a pairwise channel changes nothing.
             if parsed.kind == AppKind::DeviceSet {
+                continue;
+            }
+            // DIS-033, REL-008: the digest of a contact is no message, and
+            // it compares after the batch. A body that does not parse goes.
+            if parsed.kind == AppKind::TransparencyDigest {
+                if !from_user && !blocked.contains(&conversation) {
+                    if let Ok(body) = DigestBody::parse(parsed.body) {
+                        digests.push(body);
+                    }
+                }
                 continue;
             }
             // ABU-027 to ABU-030: the record of a blocked contact goes, after
@@ -1272,6 +1286,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // DEV-268: each record of a contact goes to each device of the set.
         for (conversation, app) in to_publish {
             self.publish_sync(conversation, &app, false, None, now_ms / 1_000, rng)?;
+        }
+        if !digests.is_empty() {
+            self.take_digests(&digests, now_ms / 1_000, rng)?;
         }
         if !sync_bodies.is_empty() {
             let synced = self.take_sync_bodies(sync_bodies, now_ms / 1_000, rng)?;

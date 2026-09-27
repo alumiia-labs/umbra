@@ -624,8 +624,10 @@ Part 6 §6.6.4 gives the carrier, which is an `AppMessage` of kind `0x31` with a
   digest to more than one contact in one cover slot.
 - **[DIS-033]** A receiver MUST compare a digest against the tree head that it
   holds at that `epoch`. **[DIS-136]** If the receiver holds no head at that
-  `epoch`, it MUST fetch the co-signed head of that `epoch` before the
-  comparison. **[DIS-034]** If the two values differ, a receiver MUST show a
+  `epoch`, it MUST send a `Head` request of §9.10 with `from_size` set to that
+  `epoch`, and it MUST verify the digest under the consistency proof from that
+  size to the newest head of the answer. A proof that fails is a difference.
+  **[DIS-034]** If the two values differ, a receiver MUST show a
   split-view warning. Rule `DIS-063` retains the fetched head.
 
 This method costs almost nothing. A digest replaces the cover cell of its slot,

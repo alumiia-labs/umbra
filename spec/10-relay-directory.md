@@ -397,6 +397,18 @@ Requirements:
   consensus digest in band, over the existing queue traffic and loop traffic.
   This method gives UMBRA an always-on equivocation detector at no cost. It
   needs no separate monitoring service, and it makes no new correlator.
+- **[REL-160]** The consensus digest, source `0x02` of Part 6 §6.6.4, MUST be
+  the SHA3-256 over the preimage that the signatures of the `DirectoryRoot`
+  cover (§10.5.2), with `epoch` the consensus epoch of that root. Thus two
+  roots of one epoch that differ in any signed field give two digests. The
+  rules `DIS-028` to `DIS-032` of Part 9 §9.5.3 give the rate, the slot, and
+  the contact of a consensus digest as of a tree head.
+- **[REL-161]** A client MUST compare the consensus digest of a contact
+  against the digest of the root that it verified at that epoch, and it MUST
+  show an equivocation warning when the two differ. A client that holds no
+  root of that epoch MUST drop the digest. **[REL-162]** A client MUST keep
+  the digest of each root that it verified for the validity of that root,
+  thus a contact one epoch behind still compares.
 - The **epoch is 1 hour and the validity is 3 hours**. Thus a five-minute DDoS
   against the authorities causes staleness and not an outage.
 - **[REL-009]** A client MUST fetch the `RelaySetDiff` of §10.5.3 only when the

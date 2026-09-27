@@ -1044,6 +1044,12 @@ object Core {
         main.post { onStatus(status) }
     }
 
+    /** The digests of contacts that differ from the view of this device. */
+    fun gossipWarnings(onWarnings: (List<uniffi.umbra_ffi.GossipWarningInfo>) -> Unit) = call { client ->
+        val warnings = client.gossipWarnings()
+        main.post { onWarnings(warnings) }
+    }
+
     /** The FCM token of this device goes to the core (Part 8 §8.2.7). */
     fun setFcmToken(token: String) = call { it.setFcmToken(token) }
 

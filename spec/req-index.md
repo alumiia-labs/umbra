@@ -73,13 +73,13 @@ each column when a crate implements the requirement and a test covers it.
 | `DEV` | 197 | 90 | 0 | 0 | 7 | **294** |
 | `NTF` | 74 | 28 | 0 | 0 | 3 | **105** |
 | `DIS` | 130 | 34 | 0 | 0 | 3 | **167** |
-| `REL` | 124 | 32 | 1 | 0 | 2 | **159** |
+| `REL` | 127 | 32 | 1 | 0 | 2 | **162** |
 | `GRP` | 232 | 65 | 0 | 0 | 6 | **303** |
 | `ATT` | 143 | 45 | 2 | 0 | 3 | **193** |
 | `ABU` | 71 | 30 | 1 | 0 | 0 | **102** |
 | `IMP` | 119 | 41 | 0 | 0 | 2 | **162** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2008 | 620 | 7 | 0 | 53 | **2688** |
+| **All** | 2011 | 620 | 7 | 0 | 53 | **2691** |
 
 ## SCP — Scope and Conventions
 
@@ -1841,7 +1841,7 @@ Source: `spec/09-discovery.md`
 | `DIS-133` | §9.9 | MUST | A client | A client MUST publish a new rendezvous queue for each published entry at each `RENDEZVOUS_ROTATE`. |  |  |
 | `DIS-134` | §9.9 | MUST | The client | The client MUST keep the previous queue for `ROTATE_GRACE` of Part 3 §3.2.6 after the write. |  |  |
 | `DIS-135` | §9.9 | MUST | The client | The client MUST drain both queues under Part 8 §8.2.6 during that period. |  |  |
-| `DIS-136` | §9.5.3 | MUST | (unstated) | If the receiver holds no head at that `epoch`, it MUST fetch the co-signed head of that `epoch` before the comparison. |  |  |
+| `DIS-136` | §9.5.3 | MUST | If the receiver holds no head at that `epoch`, it | If the receiver holds no head at that `epoch`, it MUST send a `Head` request of §9.10 with `from_size` set to that `epoch`, and it MUST verify the digest under the consistency proof from that size to the newest head of the answer. |  |  |
 | `DIS-137` | §9.5.2 | MUST | A client that holds a published label | A client that holds a published label MUST fetch the inclusion proof of its newest version at each head that it accepts. |  |  |
 | `DIS-138` | §9.5.2 | MUST | (unstated) | If that version differs from the version that the client published, the client MUST show the takeover warning of §9.9.2. |  |  |
 | `DIS-139` | §9.5.2 | MUST NOT | The client | The client MUST NOT publish a new version over a version that it did not publish, without a user action. |  |  |
@@ -2057,6 +2057,9 @@ Source: `spec/10-relay-directory.md`
 | `REL-157` | §10.5.4 | MUST NOT | An authority | An authority MUST NOT set bit 1 in the same root as bit 2. |  |  |
 | `REL-158` | §10.5.4 | MUST NOT | A client | A client MUST NOT select a relay whose entry sets bit 2 for any hop, and a relay MUST NOT open a circuit to one. |  |  |
 | `REL-159` | §10.5.4 | MUST | The relays of the first root of a directory | The relays of the first root of a directory MUST take their layer under `GENESIS_ROOT` at epoch 0, with no pending root. |  |  |
+| `REL-160` | §10.5 | MUST | The consensus digest, source `0x02` of Part 6 §6.6.4, | The consensus digest, source `0x02` of Part 6 §6.6.4, MUST be the SHA3-256 over the preimage that the signatures of the `DirectoryRoot` cover (§10.5.2), with `epoch` the consensus epoch of that root. |  |  |
+| `REL-161` | §10.5 | MUST | A client | A client MUST compare the consensus digest of a contact against the digest of the root that it verified at that epoch, and it MUST show an equivocation warning when the two differ. |  |  |
+| `REL-162` | §10.5 | MUST | A client | A client MUST keep the digest of each root that it verified for the validity of that root, thus a contact one epoch behind still compares. |  |  |
 
 ## GRP — Private Groups
 

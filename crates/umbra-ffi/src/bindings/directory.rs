@@ -227,6 +227,38 @@ impl DirectoryLink {
         Err(FfiError::Busy)
     }
 
+    /// Whether the tree head of a contact at `tree_size` lies in the log
+    /// that this device reads (`DIS-136`): the proof of consistency from that
+    /// size to the newest head. None while the log is not that long here, or
+    /// when an epoch closed between two answers.
+    fn holds_head(&self, tree_size: u64, root: &[u8; 32]) -> Result<Option<bool>, FfiError> {
+        let answer = match self.send(Kind::Head, &tree_size.to_be_bytes()) {
+            Ok(answer) => answer,
+            Err(FfiError::NotFound | FfiError::Stale | FfiError::Malformed) => return Ok(None),
+            Err(other) => return Err(other),
+        };
+        let (bytes, proof) = dirclient::parse_head(&answer).map_err(|_| FfiError::Malformed)?;
+        let Some(newest) = self.accept_head(&bytes)? else {
+            return Ok(None);
+        };
+        if newest.tree_size < tree_size {
+            return Ok(None);
+        }
+        if newest.tree_size == tree_size {
+            return Ok(Some(newest.root == *root));
+        }
+        Ok(Some(
+            umbra_core::discovery::logtree::verify_consistency(
+                tree_size,
+                root,
+                newest.tree_size,
+                &newest.root,
+                &proof,
+            )
+            .is_ok(),
+        ))
+    }
+
     /// The takeover check of a hello to a handle (§9.9.2): a held key that
     /// differs from the resolved one is replaced in silence after a
     /// rotation, and a registration of another party warns (`DIS-078` to
@@ -674,6 +706,21 @@ impl Handle {
     }
 
     /// Writes the tombstone of an entry (`DIS-171`) and ends its queue.
+    /// Proves each tree head that a contact gossiped and that no held head
+    /// names against the log, and a failed proof is a split view
+    /// (`DIS-034`, `DIS-136`).
+    fn check_gossiped_heads(&self, link: &DirectoryLink) -> Result<(), FfiError> {
+        let checks = locked(&self.inner).client.head_checks()?;
+        for check in checks {
+            if let Some(holds) = link.holds_head(check.tree_size, &check.root)? {
+                locked(&self.inner)
+                    .client
+                    .head_check_done(&check, !holds, &mut OsRng)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Keeps the key of the cross-relay issuer of this epoch and of the
     /// next one, thus a token in a hello verifies here, and keeps
     /// `TOKEN_LOW` tokens of this epoch for the hellos of this device.
@@ -930,6 +977,8 @@ impl Handle {
         // Part 13 §13.3.1: the keys that a hello of a stranger names, and
         // the tokens of the hellos of this device.
         let _ = self.keep_cross_relay_tokens(&link, now);
+        // DIS-136: the tree heads of contacts that no held head names.
+        let _ = self.check_gossiped_heads(&link);
         let entries = locked(&self.inner).client.published()?;
         for mut entry in entries {
             if entry.expires_at != 0 && now >= entry.expires_at {
