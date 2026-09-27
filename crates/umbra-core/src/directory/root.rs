@@ -132,6 +132,14 @@ impl<'a> DirectoryKeySet<'a> {
         ))
     }
 
+    /// Verifies one signature of the authority at `index` over `message`,
+    /// as a report queue carries it (Part 10 `REL-168`).
+    pub fn verify_by(&self, index: u8, message: &[u8], sig: &[u8]) -> Result<(), Error> {
+        let key = self.key(index)?;
+        let sig = Signature::from_bytes(sig)?;
+        key.verify(message, &sig).map_err(|_| Error::Unverified)
+    }
+
     fn key(&self, index: u8) -> Result<VerifyingKey, Error> {
         let bytes = self.keys.get(usize::from(index)).ok_or(Error::Malformed)?;
         Ok(VerifyingKey::from_bytes(bytes)?)

@@ -16,6 +16,7 @@ pub mod channel;
 pub mod circuit;
 pub mod contact;
 pub mod dead;
+pub mod faults;
 pub mod node;
 
 #[cfg(test)]

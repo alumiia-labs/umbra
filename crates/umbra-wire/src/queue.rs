@@ -35,6 +35,9 @@ pub enum L6Kind {
     /// A hello of Part 9 §9.6 on a rendezvous queue: the sealed envelope of
     /// `DIS-143`.
     Hello = 0x07,
+    /// A link-fault report of Part 10 §10.4.2 on the report queue of an
+    /// authority: a `SealedReport` (`WIR-536`).
+    LinkFault = 0x08,
 }
 
 impl L6Kind {
@@ -45,6 +48,7 @@ impl L6Kind {
             0x05 => Ok(L6Kind::Handshake),
             0x06 => Ok(L6Kind::Renewal),
             0x07 => Ok(L6Kind::Hello),
+            0x08 => Ok(L6Kind::LinkFault),
             _ => Err(Error::Malformed),
         }
     }

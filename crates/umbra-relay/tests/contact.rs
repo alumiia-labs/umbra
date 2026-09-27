@@ -28,7 +28,10 @@ use umbra_relay::{
     service::queue::NdrPush,
     store::{MemoryStore, RelayStore},
 };
-use umbra_wire::app::{AppKind, AppMessage, Channel};
+use umbra_wire::{
+    address::QueueAddress,
+    app::{AppKind, AppMessage, Channel},
+};
 
 struct Rng(u64);
 
@@ -410,14 +413,14 @@ fn two_clients_become_contacts_and_exchange_text() {
     // background, and a relay gives a cover cell no answer.
     let now = network.now;
     let slot = network.clients[ALICE]
-        .on_cover_slot(false, None, now, &mut Rng(4))
+        .on_cover_slot(false, None, None, now, &mut Rng(4))
         .unwrap();
     assert_eq!(slot, CoverSlot::Nothing);
     let mut kinds = Vec::new();
     for seed in 0..24 {
         kinds.push(
             network.clients[ALICE]
-                .on_cover_slot(true, None, now, &mut Rng(40 + seed))
+                .on_cover_slot(true, None, None, now, &mut Rng(40 + seed))
                 .unwrap(),
         );
     }
@@ -430,11 +433,11 @@ fn two_clients_become_contacts_and_exchange_text() {
     network.now += RECEIPT_MIN_DELAY;
     let now = network.now;
     let slot = network.clients[ALICE]
-        .on_cover_slot(false, None, now, &mut Rng(90))
+        .on_cover_slot(false, None, None, now, &mut Rng(90))
         .unwrap();
     assert_eq!(slot, CoverSlot::Acknowledgment);
     let slot = network.clients[ALICE]
-        .on_cover_slot(false, None, now, &mut Rng(91))
+        .on_cover_slot(false, None, None, now, &mut Rng(91))
         .unwrap();
     assert_eq!(slot, CoverSlot::Nothing);
     network.settle();
@@ -469,7 +472,7 @@ fn two_clients_become_contacts_and_exchange_text() {
     let now = network.now;
     for (seed, carried) in [(92, CoverSlot::Acknowledgment), (94, CoverSlot::Receipt)] {
         let slot = network.clients[BOB]
-            .on_cover_slot(false, Some((&bob_contact, &receipt)), now, &mut Rng(seed))
+            .on_cover_slot(false, Some((&bob_contact, &receipt)), None, now, &mut Rng(seed))
             .unwrap();
         assert_eq!(slot, carried);
     }
@@ -483,10 +486,51 @@ fn two_clients_become_contacts_and_exchange_text() {
     network.now += RECEIPT_MIN_DELAY;
     let now = network.now;
     let slot = network.clients[BOB]
-        .on_cover_slot(false, Some((&bob_contact, &receipt)), now, &mut Rng(93))
+        .on_cover_slot(false, Some((&bob_contact, &receipt)), None, now, &mut Rng(93))
         .unwrap();
     assert_eq!(slot, CoverSlot::Acknowledgment);
     network.settle();
+
+    // REL-169: a link-fault report takes a slot after the receipts. It goes
+    // to a report queue whose relay a ready circuit reaches, thus it builds
+    // no circuit, and with no such queue it waits.
+    let queue_at = |relay: [u8; 32]| {
+        let mut address = [0u8; 129];
+        QueueAddress {
+            relay_id: relay,
+            sender_id: [0x77; 32],
+            qs_auth_sk: Secret::new([0x78; 32]),
+            qe: Secret::new([0x79; 32]),
+        }
+        .encode(&mut address)
+        .unwrap();
+        (address, [0x7A; 32])
+    };
+    let chain = [[0x11; 32], [0x12; 32], [0x13; 32]];
+    let now = network.now;
+    let faults = network.clients[BOB].faults_mut();
+    faults.forced_replacement(&chain, now);
+    faults.forced_replacement(&chain, now);
+    network.clients[BOB].set_report_queues(vec![queue_at([0xEE; 32])]);
+    let slot = network.clients[BOB]
+        .on_cover_slot(false, None, None, now, &mut Rng(95))
+        .unwrap();
+    assert_eq!(slot, CoverSlot::Nothing);
+    network.clients[BOB]
+        .set_report_queues((1..=5).map(|layer| queue_at(relay_static(layer).0.relay_id)).collect());
+    let slot = network.clients[BOB]
+        .on_cover_slot(false, None, None, now, &mut Rng(96))
+        .unwrap();
+    assert_eq!(slot, CoverSlot::Report);
+    // REL-107: one report in a run that makes no cover cell.
+    let faults = network.clients[BOB].faults_mut();
+    faults.forced_replacement(&[[0x11; 32], [0x14; 32], [0x15; 32]], now);
+    let slot = network.clients[BOB]
+        .on_cover_slot(false, None, None, now, &mut Rng(97))
+        .unwrap();
+    assert_eq!(slot, CoverSlot::Nothing);
+    network.settle();
+    network.take_events(BOB);
 
     // A second use of the bundle gets no contact, because its prekey served.
     let carol = network.add_client(0x50);
@@ -805,7 +849,7 @@ fn a_circuit_near_its_cells_ends_the_run_and_the_relay_ends_it_after() {
     // The first cell of a circuit at the exit starts its pacing clock.
     let now = network.now;
     network.clients[0]
-        .on_cover_slot(true, None, now, &mut Rng(5))
+        .on_cover_slot(true, None, None, now, &mut Rng(5))
         .unwrap();
     // The exit paces one cell toward the client at each step, thus the
     // count toward the client reaches the limit first.

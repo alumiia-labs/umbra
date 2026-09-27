@@ -146,6 +146,15 @@ pub trait Persist: Send {
     /// The batch of the last [`Persist::due_receipt`] left in a slot, and
     /// the store erases it (`NET-054`).
     fn receipt_sent(&mut self) {}
+
+    /// A transparency digest that may leave at `now`, and the contact that
+    /// gets it (Part 9 §9.5.3, Part 10 `REL-008`).
+    fn due_digest(&mut self, _now: u64) -> Option<(ContactId, Vec<u8>)> {
+        None
+    }
+
+    /// The digest of the last [`Persist::due_digest`] left in a slot.
+    fn digest_sent(&mut self) {}
 }
 
 /// A store that keeps nothing, for a run whose state ends with it.
@@ -421,9 +430,14 @@ pub async fn run_client(
                 next_slot = tokio::time::Instant::now() + cover_delay(&mut rng);
                 let now = unix_now();
                 let receipt = persist.due_receipt(now);
+                // NET-065: a digest only where no receipt waits.
+                let digest = if receipt.is_none() { persist.due_digest(now) } else { None };
                 let given = receipt.as_ref().map(|(contact, app)| (contact, app.as_slice()));
-                if node.on_cover_slot(is_foreground, given, now, &mut rng) == Ok(CoverSlot::Receipt) {
-                    persist.receipt_sent();
+                let offered = digest.as_ref().map(|(contact, app)| (contact, app.as_slice()));
+                match node.on_cover_slot(is_foreground, given, offered, now, &mut rng) {
+                    Ok(CoverSlot::Receipt) => persist.receipt_sent(),
+                    Ok(CoverSlot::Digest) => persist.digest_sent(),
+                    _ => {}
                 }
                 Vec::new()
             }

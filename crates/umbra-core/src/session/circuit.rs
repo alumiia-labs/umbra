@@ -55,6 +55,9 @@ pub enum Event {
         /// The reason of the `NACK`.
         reason: Reject,
     },
+    /// A loop cell of this client came back from the end of the chain
+    /// (Part 3 `NET-060`).
+    LoopReturned,
     /// A command that the relay started, other than a `MSG`.
     Relay {
         /// The command.
@@ -248,8 +251,12 @@ impl CircuitSession {
             .open(parsed.tag, &mut body)
             .map_err(|_| Error::Unverified)?;
         let (command, content) = unpad_body(&body)?;
+        // NET-060: a loop of this client came back (REL-163).
+        if command == CellCommand::Loop {
+            return Ok(alloc::vec![Event::LoopReturned]);
+        }
         if command != CellCommand::Data {
-            // A reflected cover cell and a padding cell carry no command.
+            // A padding cell carries no command.
             return Ok(Vec::new());
         }
         let mut events = Vec::new();

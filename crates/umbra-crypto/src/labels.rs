@@ -44,6 +44,8 @@ labels! {
     RELAY_FAMILY = "umbra/v1/relay-family";
     RELAYREF = "umbra/v1/relayref";
     LINK_RECEIPT = "umbra/v1/link-receipt";
+    REPORT_QUEUE = "umbra/v1/report-queue";
+    LINK_FAULT_SEAL = "umbra/v1/link-fault-seal";
     MEASURER_CERT = "umbra/v1/measurer-cert";
     DEVICE_ROSTER = "umbra/v1/device-roster";
     DEVICE_CLAIM = "umbra/v1/device-claim";

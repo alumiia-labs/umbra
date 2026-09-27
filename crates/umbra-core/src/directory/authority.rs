@@ -170,6 +170,7 @@ pub fn sign_manifest<R: TryCryptoRng + ?Sized>(
     RelayManifest {
         root: &root_bytes,
         entries: proven,
+        queues: Vec::new(),
     }
     .encode()
 }

@@ -8,6 +8,7 @@ pub mod family;
 pub mod layer;
 pub mod manifest;
 pub mod path;
+pub mod report;
 pub mod root;
 pub mod tree;
 

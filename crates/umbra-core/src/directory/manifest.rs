@@ -10,6 +10,7 @@ use super::{
     bloc::BlocList,
     descriptor::{roles, RelayEntry, ENTRY_LEN},
     path::Candidate,
+    report::{ReportQueue, REPORT_QUEUES_MAX, REPORT_QUEUE_LEN},
     root::{Consensus, DirectoryRoot},
     tree::{self, Step},
 };
@@ -36,6 +37,9 @@ pub struct RelayManifest<'a> {
     pub root: &'a [u8],
     /// The entries, in ascending order of `relay_id`.
     pub entries: Vec<ProvenEntry<'a>>,
+    /// The signed report queue of each authority that published one
+    /// (`REL-167`). A manifest of an earlier build holds none.
+    pub queues: Vec<&'a [u8]>,
 }
 
 impl<'a> RelayManifest<'a> {
@@ -46,7 +50,12 @@ impl<'a> RelayManifest<'a> {
             .iter()
             .map(|entry| ENTRY_LEN + 1 + entry.proof.len() * STEP_LEN)
             .sum();
-        1 + 2 + self.root.len() + 2 + entries
+        let queues = if self.queues.is_empty() {
+            0
+        } else {
+            1 + self.queues.len() * REPORT_QUEUE_LEN
+        };
+        1 + 2 + self.root.len() + 2 + entries + queues
     }
 
     /// Whether the manifest holds no entry.
@@ -71,6 +80,20 @@ impl<'a> RelayManifest<'a> {
             for step in &proven.proof {
                 w.u8(u8::from(step.sibling_right))?;
                 w.put(&step.sibling)?;
+            }
+        }
+        // The count is absent with no queue, thus a manifest with none keeps
+        // the bytes of an earlier build.
+        if !self.queues.is_empty() {
+            if self.queues.len() > REPORT_QUEUES_MAX {
+                return Err(Error::Malformed);
+            }
+            w.u8(u8::try_from(self.queues.len()).map_err(|_| Error::Malformed)?)?;
+            for queue in &self.queues {
+                if queue.len() != REPORT_QUEUE_LEN {
+                    return Err(Error::Malformed);
+                }
+                w.put(queue)?;
             }
         }
         Ok(out)
@@ -110,8 +133,22 @@ impl<'a> RelayManifest<'a> {
             }
             entries.push(ProvenEntry { entry, proof });
         }
+        let mut queues = Vec::new();
+        if r.remaining() > 0 {
+            let count = usize::from(r.u8()?);
+            if count > REPORT_QUEUES_MAX {
+                return Err(Error::Malformed);
+            }
+            for _ in 0..count {
+                queues.push(r.take(REPORT_QUEUE_LEN)?);
+            }
+        }
         r.finish()?;
-        Ok(RelayManifest { root, entries })
+        Ok(RelayManifest {
+            root,
+            entries,
+            queues,
+        })
     }
 }
 
@@ -153,6 +190,8 @@ pub struct RelaySet {
     pub digest: [u8; 32],
     /// The relays, in ascending order of `relay_id`.
     pub relays: Vec<ListedRelay>,
+    /// The report queues that verified under the key set (`REL-168`).
+    pub report_queues: Vec<ReportQueue>,
 }
 
 impl RelaySet {
@@ -204,12 +243,19 @@ impl RelaySet {
                 class: entry.class,
             });
         }
+        // REL-168: a queue that fails goes, and the manifest stays.
+        let report_queues = manifest
+            .queues
+            .iter()
+            .filter_map(|bytes| ReportQueue::verify(bytes, consensus.keyset(), epoch).ok())
+            .collect();
         consensus.commit(root, device_clock);
         Ok(RelaySet {
             epoch,
             root: merkle_root,
             digest,
             relays,
+            report_queues,
         })
     }
 }
@@ -265,7 +311,29 @@ mod tests {
                     proof: tree::prove(&leaves, *index).unwrap(),
                 })
                 .collect(),
+            queues: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_manifest_carries_report_queues_after_its_entries() {
+        let entries = [alloc::vec![3u8; ENTRY_LEN]];
+        let root = [9u8; 40];
+        let plain = manifest_of(&root, &entries, &[0]);
+        let old = plain.encode().unwrap();
+        // With no queue the bytes are those of an earlier build.
+        assert_eq!(old.len(), 1 + 2 + 40 + 2 + ENTRY_LEN + 1);
+        assert_eq!(RelayManifest::parse(&old).unwrap(), plain);
+        let queue = alloc::vec![5u8; REPORT_QUEUE_LEN];
+        let with = RelayManifest {
+            queues: alloc::vec![queue.as_slice()],
+            ..plain.clone()
+        };
+        let bytes = with.encode().unwrap();
+        assert_eq!(bytes.len(), old.len() + 1 + REPORT_QUEUE_LEN);
+        assert_eq!(RelayManifest::parse(&bytes).unwrap(), with);
+        let torn = &bytes[..bytes.len() - 1];
+        assert!(RelayManifest::parse(torn).is_err());
     }
 
     #[test]

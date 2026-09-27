@@ -332,6 +332,7 @@ fn network_of(ports: &[u16]) -> Network {
         directory_relay_url: None,
         directory_pins: None,
         directory_relay_ipv4: None,
+        report_queues: Vec::new(),
     }
 }
 

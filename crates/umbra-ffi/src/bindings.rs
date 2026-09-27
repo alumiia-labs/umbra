@@ -74,6 +74,9 @@ fn unix_now() -> u64 {
     unix_now_ms() / 1_000
 }
 
+/// The width of a `QueueAddress` in a report queue of [`Network`].
+const REPORT_ADDRESS_LEN: usize = 129;
+
 /// The error of the surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Error)]
 pub enum FfiError {
@@ -405,6 +408,10 @@ pub struct Network {
     pub directory_pins: Option<Vec<u8>>,
     /// The IPv4 address to dial for that relay, as above.
     pub directory_relay_ipv4: Option<Vec<u8>>,
+    /// The report queue of each authority that the manifest carried and
+    /// that verified: the `QueueAddress` and the X25519 key, 161 bytes each
+    /// (Part 10 `REL-168`).
+    pub report_queues: Vec<Vec<u8>>,
 }
 
 /// Reads the relay manifest from an HTTPS carrier of Part 3 §3.10: the host
@@ -632,6 +639,7 @@ pub fn parse_network(text: String, root_ca_path: Option<String>) -> Result<Netwo
         directory_relay_url: None,
         directory_pins: None,
         directory_relay_ipv4: None,
+        report_queues: Vec::new(),
     })
 }
 
@@ -2923,14 +2931,18 @@ impl Persist for HandleStore {
         let handle = self.handle.upgrade()?;
         let mut inner = locked(&handle.inner);
         // A locked client gives none, and its receipts wait in the store.
-        if let Some(due) = inner.client.due_receipt(now, &mut OsRng).ok()? {
-            let contact = inner.bridge.as_ref()?.contact_for(&due.conversation)?;
-            let app = due.app.clone();
-            self.given = Some(Given::Receipt(due));
-            return Some((contact, app));
-        }
-        // NET-065: a transparency digest comes after a receipt, to one
-        // contact at random (DIS-029, DIS-031, REL-008).
+        let due = inner.client.due_receipt(now, &mut OsRng).ok()??;
+        let contact = inner.bridge.as_ref()?.contact_for(&due.conversation)?;
+        let app = due.app.clone();
+        self.given = Some(Given::Receipt(due));
+        Some((contact, app))
+    }
+
+    fn due_digest(&mut self, now: u64) -> Option<(ContactId, Vec<u8>)> {
+        let handle = self.handle.upgrade()?;
+        let inner = locked(&handle.inner);
+        // NET-065: a transparency digest comes after a receipt and a
+        // report, to one contact at random (DIS-029, DIS-031, REL-008).
         let (source, app) = inner.client.due_digest(now, &mut OsRng).ok()??;
         let contacts = inner.bridge.as_ref()?.contacts();
         let all: Vec<ConversationId> = contacts.iter().map(|(conversation, _)| *conversation).collect();
@@ -2940,6 +2952,10 @@ impl Persist for HandleStore {
         let contact = inner.bridge.as_ref()?.contact_for(conversation)?;
         self.given = Some(Given::Digest(source));
         Some((contact, app))
+    }
+
+    fn digest_sent(&mut self) {
+        self.receipt_sent();
     }
 
     fn receipt_sent(&mut self) {
@@ -3355,6 +3371,11 @@ impl Handle {
                 directory_relay_url: None,
                 directory_pins: None,
                 directory_relay_ipv4: None,
+                report_queues: set
+                    .report_queues
+                    .iter()
+                    .map(|queue| [&queue.address[..], &queue.report_pk].concat())
+                    .collect(),
             },
             epoch: set.epoch,
             is_clock_corrected: consensus.clock_state() == ClockState::Corrected,
@@ -3500,6 +3521,17 @@ impl Handle {
             // earlier runs. A linked device runs its sync channels alone:
             // the device that owns a channel reads its queue (`DEV-287`).
             let mut node = ClientNode::with_relays(ingress, candidates, client.root_identity()?);
+            // REL-169: the link-fault reports of this run go to these queues.
+            node.set_report_queues(
+                network
+                    .report_queues
+                    .iter()
+                    .filter_map(|queue| {
+                        let (address, key) = queue.split_at_checked(REPORT_ADDRESS_LEN)?;
+                        Some((address.try_into().ok()?, key.try_into().ok()?))
+                    })
+                    .collect(),
+            );
             let stored = client.stored_network()?;
             let device_peers = client.device_peers()?;
             let mut contacts = BTreeMap::new();

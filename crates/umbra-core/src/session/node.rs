@@ -63,6 +63,7 @@ use super::{
     },
     circuit::{CircuitSession, Event as CircuitEvent},
     contact::{Invitee, Inviter, FLIGHT_1, FLIGHT_2},
+    faults::LinkFaults,
 };
 use crate::{
     attach::{
@@ -941,6 +942,10 @@ pub enum CoverSlot {
     Acknowledgment,
     /// The batch of receipts that the caller gave.
     Receipt,
+    /// A link-fault report (Part 10 §10.4.2).
+    Report,
+    /// The transparency digest that the caller gave.
+    Digest,
     /// A loop cell, which comes back and measures the path (`NET-060`).
     Loop,
     /// A `COVER` command.
@@ -1068,6 +1073,16 @@ pub struct ClientNode {
     /// age of their queue: a dead channel (`NET-182`), or a peer that moved
     /// while this device holds no address of its own queue (`NET-191`).
     forced: BTreeSet<[u8; 32]>,
+    /// The loop count and the forced replacements (Part 10 §10.4.2).
+    faults: LinkFaults,
+    /// The report queues of the manifest that verified: the address, and
+    /// the key that a report seals to (`REL-168`).
+    report_queues: Vec<([u8; QUEUE_ADDRESS_LEN], [u8; 32])>,
+    /// Whether this run sent a report while it made no cover cell
+    /// (`REL-107`).
+    background_report: bool,
+    /// The newest time that the runtime gave, for a step that takes none.
+    clock: u64,
     /// The contacts whose channel moved since the last
     /// [`ClientNode::take_changes`].
     moved: BTreeSet<[u8; 32]>,
@@ -1180,6 +1195,10 @@ impl ClientNode {
             rotating: BTreeSet::new(),
             renewing: BTreeSet::new(),
             forced: BTreeSet::new(),
+            faults: LinkFaults::default(),
+            report_queues: Vec::new(),
+            background_report: false,
+            clock: 0,
             notify: BTreeMap::new(),
             rendezvous: BTreeMap::new(),
             rendezvous_wait: 0,
@@ -2201,6 +2220,9 @@ impl ClientNode {
     /// A ready circuit near `CIRCUIT_MAX_AGE` gives `CircuitAged`
     /// (`NET-320`).
     pub fn on_tick(&mut self, now: u64) -> Vec<ClientEvent> {
+        self.clock = now;
+        self.faults.tick(now);
+        let mut failed_chains = Vec::new();
         let mut has_ended = false;
         let mut has_aged = false;
         let mut unreachable = Vec::new();
@@ -2234,6 +2256,9 @@ impl ClientNode {
             }
             slot.building_since = None;
             has_ended = true;
+            // REL-171: a build that ran past its time is a forced
+            // replacement.
+            failed_chains.extend(slot.chain);
             // A circuit of another range to one relay stays empty, and the
             // next run builds it again (`NET-024`).
             if let Some(relay) = slot.exit.filter(|_| is_group) {
@@ -2244,6 +2269,9 @@ impl ClientNode {
             // A link that is gone carries no cell, and the relay ends the
             // circuit with it.
             let _ = self.send_cell(&cell);
+        }
+        for chain in failed_chains {
+            self.faults.forced_replacement(&chain, now);
         }
         let mut events = Vec::new();
         for relay in unreachable {
@@ -2605,6 +2633,7 @@ impl ClientNode {
         // A new circuit in an old slot has an age of its own.
         if build.built() == 0 {
             self.slot_mut()?.born = None;
+            self.faults.build_started(&chain, self.clock);
         }
         self.slot_mut()?.circuit = Circuit::Building {
             build: Box::new(build),
@@ -3596,9 +3625,11 @@ impl ClientNode {
         &mut self,
         makes_cover: bool,
         receipt: Option<(&ContactId, &[u8])>,
+        digest: Option<(&ContactId, &[u8])>,
         now: u64,
         rng: &mut R,
     ) -> Result<CoverSlot, Error> {
+        self.clock = now;
         let contacts: Vec<[u8; 32]> = self.contacts.keys().copied().collect();
         for contact in contacts {
             let is_served = self
@@ -3630,6 +3661,23 @@ impl ClientNode {
                 return Ok(CoverSlot::Receipt);
             }
         }
+        // NET-065: a link-fault report after a receipt, and at most one in a
+        // run that makes no cover cell (REL-078, REL-107).
+        if (makes_cover || !self.background_report) && self.send_report(rng)? {
+            self.background_report |= !makes_cover;
+            return Ok(CoverSlot::Report);
+        }
+        // NET-065: a transparency digest after a report (DIS-029).
+        if let Some((contact, app)) = digest {
+            let can_send = self
+                .contacts
+                .get(&contact.0)
+                .is_some_and(|held| held.channel.can_send());
+            if can_send && self.slot_of(&contact.0).is_some() {
+                self.send_now(contact.0, app, Waiting::Other, now, rng)?;
+                return Ok(CoverSlot::Digest);
+            }
+        }
         let ready = self
             .slots
             .iter()
@@ -3646,11 +3694,71 @@ impl ClientNode {
         if is_loop {
             let cell = session.cover_cell(Bucket::B0)?;
             self.send_cell(&cell)?;
+            // REL-163: each loop counts for its chain.
+            if let Some(chain) = self.slots.get(ready).and_then(|slot| slot.chain) {
+                self.faults.loop_sent(&chain, now);
+            }
             return Ok(CoverSlot::Loop);
         }
         session.queue_cover(corr_id)?;
         self.pump()?;
         Ok(CoverSlot::Cover)
+    }
+
+    /// The loop count and the forced replacements, for a test that makes a
+    /// report due.
+    #[doc(hidden)]
+    pub fn faults_mut(&mut self) -> &mut LinkFaults {
+        &mut self.faults
+    }
+
+    /// Takes the report queues of the manifest that verified (`REL-168`).
+    pub fn set_report_queues(&mut self, queues: Vec<([u8; QUEUE_ADDRESS_LEN], [u8; 32])>) {
+        self.report_queues = queues;
+    }
+
+    /// Sends the oldest link-fault report that waits to the report queue
+    /// of one authority at random, of those whose relay a ready circuit
+    /// reaches, thus the report builds no circuit (`REL-169`). A client with
+    /// no report queue drops each report.
+    fn send_report<R: CryptoRng + ?Sized>(&mut self, rng: &mut R) -> Result<bool, Error> {
+        let Some(report) = self.faults.due().copied() else {
+            return Ok(false);
+        };
+        if self.report_queues.is_empty() {
+            self.faults.sent();
+            return Ok(false);
+        }
+        let open: Vec<QueueAddress> = self
+            .report_queues
+            .iter()
+            .filter_map(|(address, _)| QueueAddress::parse(address).ok())
+            .filter(|address| self.ready_slot_to(&address.relay_id, None).is_some())
+            .collect();
+        if open.is_empty() {
+            return Ok(false);
+        }
+        let draw = u64::from_be_bytes(random(rng));
+        let pick = usize::try_from(draw % open.len() as u64).map_err(|_| Error::Malformed)?;
+        let to = open.get(pick).ok_or(Error::NoPath)?;
+        let report_pk = self
+            .report_queues
+            .iter()
+            .find(|(address, _)| {
+                QueueAddress::parse(address).is_ok_and(|held| held.sender_id == to.sender_id)
+            })
+            .map(|(_, key)| *key)
+            .ok_or(Error::NoPath)?;
+        let sealed_report = report.seal(&report_pk, rng)?;
+        let sealed = Outbound::new(to).seal_record_from(
+            L6Kind::LinkFault,
+            &sealed_report,
+            random(rng),
+            Bucket::B0,
+        )?;
+        self.send_sealed(sealed, rng)?;
+        self.faults.sent();
+        Ok(true)
     }
 
     /// Acknowledges the records of a contact that the runtime committed and
@@ -3725,6 +3833,7 @@ impl ClientNode {
         now: u64,
         rng: &mut R,
     ) -> Result<Vec<ClientEvent>, Error> {
+        self.clock = now;
         let (kind, value, _) = capsule::parse(bytes)?;
         if kind == capsule::CapsuleType::Session {
             return Ok(self.on_destroy(value));
@@ -3746,7 +3855,15 @@ impl ClientNode {
         match circuit {
             Circuit::None => Ok(Vec::new()),
             Circuit::Building { build, pending } => {
-                self.on_build_cell(*build, *pending, &cell, now, rng)
+                let chain = self.slot()?.chain;
+                let built = self.on_build_cell(*build, *pending, &cell, now, rng);
+                // REL-171: a build that a hop failed is a forced replacement.
+                if let (Ok(events), Some(chain)) = (&built, chain) {
+                    if events.contains(&ClientEvent::CircuitLost) {
+                        self.faults.forced_replacement(&chain, now);
+                    }
+                }
+                built
             }
             Circuit::Ready(mut session) => {
                 let received = session.receive_cell(&cell);
@@ -3755,6 +3872,9 @@ impl ClientNode {
                     Ok(events) => self.on_events(events, now, rng),
                     // NET-115: a failed check ends the circuit.
                     Err(_) => {
+                        if let Some(chain) = self.slot()?.chain {
+                            self.faults.forced_replacement(&chain, now);
+                        }
                         self.slot_mut()?.circuit = Circuit::None;
                         Ok(alloc::vec![ClientEvent::CircuitLost])
                     }
@@ -3860,6 +3980,10 @@ impl ClientNode {
             return Vec::new();
         };
         slot.circuit = Circuit::None;
+        // REL-171: a circuit that a relay ended is a forced replacement.
+        if let Some(chain) = slot.chain {
+            self.faults.forced_replacement(&chain, self.clock);
+        }
         alloc::vec![ClientEvent::CircuitLost]
     }
 
@@ -4092,6 +4216,11 @@ impl ClientNode {
                 } => {
                     if cmd == Cmd::Group(GroupCmd::Gmsg) {
                         out.extend(group_record(queue_id, &payload));
+                    }
+                }
+                CircuitEvent::LoopReturned => {
+                    if let Some(chain) = self.slots.get(arrival).and_then(|slot| slot.chain) {
+                        self.faults.loop_back(&chain, now);
                     }
                 }
             }

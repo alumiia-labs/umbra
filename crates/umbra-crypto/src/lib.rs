@@ -32,6 +32,7 @@ pub mod queue;
 pub mod ratchet;
 pub mod rng;
 pub mod rsabssa;
+pub mod seal;
 pub mod secret;
 pub mod sign;
 pub mod stored;
