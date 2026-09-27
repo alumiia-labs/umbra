@@ -35,6 +35,7 @@ sha2 = { version = "0.11", default-features = false }
 # Register R2 AUX-1 of Part 14 §14.2.2: the blind RSA signature of RFC 9474,
 # written here over the big-integer arithmetic alone.
 crypto-bigint = { version = "0.7.5", default-features = false, features = ["zeroize", "subtle"] }
+crypto-primes = { version = "0.7.2", default-features = false, optional = true }
 # Register R2 AUX-8 of Part 14 §14.2.2: Equi-X with the JIT feature off. The
 # crate needs std, which each v1 platform has, thus a feature carries it.
 equix = { version = "0.2.5", default-features = false, optional = true }
@@ -42,6 +43,9 @@ equix = { version = "0.2.5", default-features = false, optional = true }
 [features]
 default = ["pow"]
 pow = ["dep:equix"]
+# The key generation of an issuer of cross-relay tokens (Part 13 §13.3.1).
+# A client verifies and blinds, and it generates no RSA key.
+keygen = ["dep:crypto-primes"]
 
 [dev-dependencies]
 # The known-answer harness reads the vendored ACVP JSON. A dev-dependency

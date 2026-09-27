@@ -104,6 +104,7 @@ async fn a_token_registers_a_handle_that_a_lookup_reads_under_a_signed_head() {
             issuer_seed: Secret::new([3; 32]),
             signers,
             keyset: keyset.clone(),
+            cross_relay: None,
         },
         1,
         username_case_mapped,

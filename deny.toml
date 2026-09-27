@@ -59,6 +59,7 @@ allow = [
   { crate = "password-hash" },           # R2, under argon2
   { crate = "sha2" },                   # R2, AUX-2 and AUX-3
   { crate = "crypto-bigint" },          # R2, AUX-1
+  { crate = "crypto-primes" },          # R2, AUX-1, the RSA keys of an issuer
   { crate = "equix" },                  # R2, AUX-8
   { crate = "hashx" },                  # R2, under equix
   { crate = "arrayvec" },               # R2, under equix

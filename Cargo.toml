@@ -27,6 +27,14 @@ opt-level = 3
 [profile.dev.package.hashx]
 opt-level = 3
 
+# The RSA key of an issuer takes two 1 024-bit primes, which a build with no
+# optimization finds in minutes.
+[profile.dev.package.crypto-primes]
+opt-level = 3
+
+[profile.dev.package.crypto-bigint]
+opt-level = 3
+
 [profile.release]
 opt-level = 3
 codegen-units = 1

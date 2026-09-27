@@ -1019,6 +1019,7 @@ fn start_test_directory(relays: &tokio::runtime::Runtime) -> (u16, Vec<u8>) {
             issuer_seed: Secret::new([0x63; 32]),
             signers,
             keyset: keyset.clone(),
+            cross_relay: None,
         },
         1,
         username_case_mapped,

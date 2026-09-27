@@ -13,6 +13,7 @@
 //! voprf_seed=<64 hex characters>
 //! vrf_seed=<64 hex characters>
 //! issuer_seed=<64 hex characters>
+//! cross_relay_seed=<64 hex characters, optional>
 //! signer_seeds=<64 hex>,<64 hex>,<64 hex>
 //! keyset_epoch=1
 //! epoch_seconds=600
@@ -37,11 +38,11 @@ use umbra_core::{
         dirclient::DirectoryPins,
         handle::username_case_mapped,
         head::{LogKeySet, KEYSET_LEN},
-        service::{Directory, DirectoryKeys, DIRECTORY_EPOCH},
+        service::{CrossRelayKeys, Directory, DirectoryKeys, DIRECTORY_EPOCH},
     },
     notify::seeded_pair,
 };
-use umbra_crypto::{kem::KeyPair, ohttp, secret::Secret, sign::SigningKey};
+use umbra_crypto::{kem::KeyPair, ohttp, rsabssa::SecretKey2048, secret::Secret, sign::SigningKey};
 use umbra_relay::{
     directory_server::{run_directory, DirectoryStore, SqliteDirectoryStore},
     ndr_server::Gateway,
@@ -120,6 +121,13 @@ fn keys(values: &BTreeMap<&str, &str>) -> Option<(DirectoryKeys, Vec<u8>)> {
             issuer_seed: seed("issuer_seed")?,
             signers,
             keyset: keyset.clone(),
+            // Part 13 §13.3.1: the seed of the RSA key of each epoch, for a
+            // directory that issues cross-relay tokens.
+            cross_relay: seed("cross_relay_seed").map(|seed| -> CrossRelayKeys {
+                Box::new(move |epoch: u32| {
+                    SecretKey2048::from_seed(&seed, &epoch.to_be_bytes()).ok()
+                })
+            }),
         },
         keyset,
     ))

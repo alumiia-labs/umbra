@@ -24,3 +24,7 @@ umbra-wire = { version = "0.1.0", path = "../umbra-wire" }
 umbra-onion = { version = "0.1.0", path = "../umbra-onion" }
 umbra-queue = { version = "0.1.0", path = "../umbra-queue" }
 umbra-transport = { version = "0.1.0", path = "../umbra-transport" }
+
+[dev-dependencies]
+# The tests of an issuer of cross-relay tokens generate its RSA keys.
+umbra-crypto = { version = "0.1.0", path = "../umbra-crypto", features = ["keygen"] }

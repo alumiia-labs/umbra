@@ -19,6 +19,7 @@ use umbra_crypto::{
     hash::sha3_256,
     labels, pow,
     rand_core::{CryptoRng, TryCryptoRng},
+    rsabssa::SecretKey2048,
     secret::Secret,
     sign::SigningKey,
     voprf::ServerKey,
@@ -46,7 +47,10 @@ use crate::{
         issuer::{issuer_label_input, IssuerKeyEntry},
         pow::PowSolution,
         spend::SpendSet,
-        token::{FirstPartyIssuer, Token, TokenChallenge, FIRST_PARTY_LEN, TYPE_FIRST_PARTY},
+        token::{
+            FirstPartyIssuer, Token, TokenChallenge, FIRST_PARTY_LEN, TYPE_CROSS_RELAY,
+            TYPE_FIRST_PARTY,
+        },
         POW_EFFORT_MAX, POW_LOOKUP_FLOOR,
     },
     Error,
@@ -71,7 +75,14 @@ pub struct DirectoryKeys {
     pub signers: Vec<SigningKey>,
     /// The encoded `LogKeySet` of the three signers.
     pub keyset: Vec<u8>,
+    /// The RSA key of the cross-relay tokens of each epoch (Part 13
+    /// §13.3.1), or none for a directory that issues first-party tokens
+    /// alone. The key generation lives outside this crate.
+    pub cross_relay: Option<CrossRelayKeys>,
 }
+
+/// The source of the RSA key of the cross-relay tokens of one epoch.
+pub type CrossRelayKeys = alloc::boxed::Box<dyn Fn(u32) -> Option<SecretKey2048> + Send>;
 
 /// What the store keeps, in order, for a replay (the log itself and the
 /// lease of each label).
@@ -195,7 +206,10 @@ pub struct Directory {
     spent: SpendSet,
     issuer_seed: Secret<32>,
     issuers: BTreeMap<u32, FirstPartyIssuer>,
-    published_issuers: BTreeSet<u32>,
+    cross_relay: Option<CrossRelayKeys>,
+    cross_relay_keys: BTreeMap<u32, SecretKey2048>,
+    /// Each issuer key in the log: its token type and its epoch.
+    published_issuers: BTreeSet<(u16, u32)>,
     profile: fn(&str) -> Option<String>,
     events: Vec<DirEvent>,
 }
@@ -254,6 +268,8 @@ impl Directory {
             challenges: BTreeMap::new(),
             spent: SpendSet::default(),
             issuer_seed: keys.issuer_seed,
+            cross_relay: keys.cross_relay,
+            cross_relay_keys: BTreeMap::new(),
             issuers: BTreeMap::new(),
             published_issuers: BTreeSet::new(),
             profile,
@@ -291,7 +307,8 @@ impl Directory {
                 } => {
                     self.operator.stage(search_key, entry.clone(), *opening)?;
                     if let Ok(issuer) = IssuerKeyEntry::parse(entry) {
-                        self.published_issuers.insert(issuer.epoch);
+                        self.published_issuers
+                            .insert((issuer.token_type, issuer.epoch));
                     }
                 }
                 DirEvent::Closed { nonce, at } => self.advance(*nonce, *at)?,
@@ -316,6 +333,22 @@ impl Directory {
             self.issuers.insert(epoch, FirstPartyIssuer::new(key));
         }
         self.issuers.get(&epoch).ok_or(Error::NoPath)
+    }
+
+    /// The RSA key of the cross-relay tokens of an epoch, when this
+    /// directory issues them.
+    fn cross_relay_key(&mut self, epoch: u32) -> Option<&SecretKey2048> {
+        if !self.cross_relay_keys.contains_key(&epoch) {
+            let key = (self.cross_relay.as_ref()?)(epoch)?;
+            self.cross_relay_keys.insert(epoch, key);
+        }
+        self.cross_relay_keys.get(&epoch)
+    }
+
+    /// The modulus of the cross-relay key of an epoch, for a test.
+    pub fn cross_relay_public(&mut self, epoch: u32) -> Option<Vec<u8>> {
+        self.cross_relay_key(epoch)
+            .map(|key| key.public().modulus().to_vec())
     }
 
     /// The issuer key of an epoch, for a test and for a build that pins it.
@@ -447,23 +480,34 @@ impl Directory {
             self.stage(&search_key, entry, rng)?;
             self.keep_label(&search_key, record);
         }
+        // ABU-098: each key of this epoch and of the next one goes into the
+        // log before its epoch starts.
         let epoch = epoch_number(now);
         for epoch in [epoch, epoch.saturating_add(1)] {
-            if self.published_issuers.contains(&epoch) {
-                continue;
+            for token_type in [TYPE_FIRST_PARTY, TYPE_CROSS_RELAY] {
+                if self.published_issuers.contains(&(token_type, epoch)) {
+                    continue;
+                }
+                let public_key = if token_type == TYPE_FIRST_PARTY {
+                    self.issuer_public(epoch)?.to_vec()
+                } else {
+                    let Some(modulus) = self.cross_relay_public(epoch) else {
+                        continue;
+                    };
+                    modulus
+                };
+                let entry = IssuerKeyEntry {
+                    token_type,
+                    epoch,
+                    public_key,
+                }
+                .encode()?;
+                let search_key = self
+                    .voprf
+                    .evaluate_direct(&issuer_label_input(token_type, epoch));
+                self.stage(&search_key, entry, rng)?;
+                self.published_issuers.insert((token_type, epoch));
             }
-            let public_key = self.issuer_public(epoch)?.to_vec();
-            let entry = IssuerKeyEntry {
-                token_type: TYPE_FIRST_PARTY,
-                epoch,
-                public_key,
-            }
-            .encode()?;
-            let search_key = self
-                .voprf
-                .evaluate_direct(&issuer_label_input(TYPE_FIRST_PARTY, epoch));
-            self.stage(&search_key, entry, rng)?;
-            self.published_issuers.insert(epoch);
         }
         let mut nonce = [0u8; 32];
         rng.fill_bytes(&mut nonce);
@@ -890,7 +934,8 @@ impl Directory {
         // ABU-110: this epoch, and the next once its key is in the log.
         let current = epoch_number(now);
         let allowed = epoch == current
-            || (epoch == current.saturating_add(1) && self.published_issuers.contains(&epoch));
+            || (epoch == current.saturating_add(1)
+                && self.published_issuers.contains(&(TYPE_FIRST_PARTY, epoch)));
         if !allowed {
             return Err(Status::Stale);
         }
@@ -998,6 +1043,7 @@ mod tests {
                 issuer_seed: Secret::new([3; 32]),
                 signers,
                 keyset: keyset.clone(),
+                cross_relay: None,
             },
             keyset,
         )
@@ -1009,6 +1055,45 @@ mod tests {
             Directory::new(keys, DIRECTORY_EPOCH, ascii_profile).unwrap(),
             keyset,
         )
+    }
+
+    #[test]
+    fn each_epoch_puts_its_cross_relay_key_into_the_log() {
+        use crate::abuse::{
+            issuer::{issuer_label_input, IssuerKeyEntry},
+            token::{TYPE_CROSS_RELAY, TYPE_FIRST_PARTY},
+        };
+        use umbra_crypto::rsabssa::{SecretKey2048, MODULUS_LEN_2048};
+
+        let mut rng = Rng(14);
+        let (mut keys, keyset) = keys();
+        let seed = Secret::new([0x4A; 32]);
+        keys.cross_relay = Some(alloc::boxed::Box::new(move |epoch: u32| {
+            SecretKey2048::from_seed(&seed, &epoch.to_be_bytes()).ok()
+        }));
+        let mut dir = Directory::new(keys, DIRECTORY_EPOCH, ascii_profile).unwrap();
+        dir.tick(T0, &mut rng).unwrap();
+        let now = T0 + DIRECTORY_EPOCH;
+        dir.tick(now, &mut rng).unwrap();
+
+        // ABU-098: the key of this epoch and of the next one, beside the
+        // first-party keys, each under its own label.
+        let epoch = epoch_number(now);
+        for epoch in [epoch, epoch + 1] {
+            let input = issuer_label_input(TYPE_CROSS_RELAY, epoch);
+            let entry = IssuerKeyEntry::parse(&read(&mut dir, &keyset, &input, now, &mut rng).unwrap())
+                .unwrap();
+            assert_eq!((entry.token_type, entry.epoch), (TYPE_CROSS_RELAY, epoch));
+            assert_eq!(entry.public_key.len(), MODULUS_LEN_2048);
+            assert_eq!(Some(entry.public_key), dir.cross_relay_public(epoch));
+            let input = issuer_label_input(TYPE_FIRST_PARTY, epoch);
+            assert!(read(&mut dir, &keyset, &input, now, &mut rng).is_some());
+        }
+        // Two epochs take two keys.
+        assert_ne!(
+            dir.cross_relay_public(epoch),
+            dir.cross_relay_public(epoch + 1)
+        );
     }
 
     fn call(

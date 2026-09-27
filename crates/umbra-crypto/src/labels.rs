@@ -101,6 +101,7 @@ labels! {
     ROTATE_JITTER = "umbra/v1/rotate-jitter";
     BACKUP_SALT = "umbra/v1/backup-salt";
     HANDLE_BLOB = "umbra/v1/handle-blob";
+    ISSUER_RSA = "umbra/v1/issuer-rsa";
 }
 
 /// `umbra/v1/handle-key`

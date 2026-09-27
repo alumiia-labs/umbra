@@ -146,6 +146,99 @@ impl<const LIMBS: usize> SecretKey<LIMBS> {
     }
 }
 
+#[cfg(feature = "keygen")]
+mod keygen {
+    use core::convert::Infallible;
+
+    use crypto_bigint::U1024;
+    use crypto_primes::{random_prime, Flavor};
+    use hmac::{Hmac, KeyInit, Mac};
+    use rand_core::{TryCryptoRng, TryRng};
+    use sha3::Sha3_256;
+
+    use super::{Error, NonZero, SecretKey, Uint, EXPONENT, LIMBS_2048, U2048};
+    use crate::{labels, secret::Secret};
+
+    /// `HMAC-SHA3-256(key, BE64(counter))` blocks: the primes of one seed
+    /// and one context, the same at each call.
+    struct SeedStream {
+        mac: Hmac<Sha3_256>,
+        counter: u64,
+    }
+
+    impl TryRng for SeedStream {
+        type Error = Infallible;
+
+        fn try_next_u32(&mut self) -> Result<u32, Infallible> {
+            let mut b = [0u8; 4];
+            self.try_fill_bytes(&mut b)?;
+            Ok(u32::from_le_bytes(b))
+        }
+
+        fn try_next_u64(&mut self) -> Result<u64, Infallible> {
+            let mut b = [0u8; 8];
+            self.try_fill_bytes(&mut b)?;
+            Ok(u64::from_le_bytes(b))
+        }
+
+        fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Infallible> {
+            for chunk in dst.chunks_mut(32) {
+                let mut mac = self.mac.clone();
+                mac.update(&self.counter.to_be_bytes());
+                self.counter = self.counter.wrapping_add(1);
+                let block = mac.finalize().into_bytes();
+                let n = chunk.len().min(block.len());
+                if let (Some(to), Some(from)) = (chunk.get_mut(..n), block.get(..n)) {
+                    to.copy_from_slice(from);
+                }
+            }
+            Ok(())
+        }
+    }
+
+    impl TryCryptoRng for SeedStream {}
+
+    impl SecretKey<LIMBS_2048> {
+        /// The 2 048-bit key of one issuer for one `context`, such as an
+        /// epoch, from a secret seed: the stream of
+        /// `HMAC-SHA3-256(seed, "umbra/v1/issuer-rsa" || context)` gives
+        /// the two primes, thus a restart of the issuer finds the same key
+        /// (Part 13 §13.6).
+        pub fn from_seed(seed: &Secret<32>, context: &[u8]) -> Result<Self, Error> {
+            let mut outer = <Hmac<Sha3_256> as KeyInit>::new_from_slice(seed.expose())
+                .map_err(|_| Error::Key)?;
+            outer.update(labels::ISSUER_RSA);
+            outer.update(context);
+            let key = outer.finalize().into_bytes();
+            let mac = <Hmac<Sha3_256> as KeyInit>::new_from_slice(&key).map_err(|_| Error::Key)?;
+            let mut stream = SeedStream { mac, counter: 0 };
+            let e = U2048::from_u32(EXPONENT);
+            loop {
+                let p: U1024 = random_prime(&mut stream, Flavor::Any, 1_024);
+                let q: U1024 = random_prime(&mut stream, Flavor::Any, 1_024);
+                if p == q {
+                    continue;
+                }
+                let n: U2048 = p.concatenating_mul(&q);
+                if n.bits() != 2_048 {
+                    continue;
+                }
+                let phi: U2048 = p
+                    .wrapping_sub(&U1024::ONE)
+                    .concatenating_mul(&q.wrapping_sub(&U1024::ONE));
+                let Some(phi) = Option::<NonZero<Uint<LIMBS_2048>>>::from(NonZero::new(phi)) else {
+                    continue;
+                };
+                // 65 537 must have an inverse modulo the order.
+                let Some(d) = Option::<U2048>::from(e.invert_mod(&phi)) else {
+                    continue;
+                };
+                return Self::from_parts(n.to_be_bytes().as_ref(), d.to_be_bytes().as_ref());
+            }
+        }
+    }
+}
+
 /// The inverse of the blind, which the client keeps until the finalize.
 pub struct BlindInverse<const LIMBS: usize>(Uint<LIMBS>);
 
@@ -308,6 +401,27 @@ mod tests {
     use crypto_bigint::U4096;
 
     const LIMBS_4096: usize = U4096::LIMBS;
+
+    #[cfg(feature = "keygen")]
+    #[test]
+    fn a_seed_gives_one_key_that_signs_a_blind_message() {
+        use crate::{secret::Secret, test_rng::TestRng};
+
+        let seed = Secret::new([0x5A; 32]);
+        let key = SecretKey2048::from_seed(&seed, &7u32.to_be_bytes()).unwrap();
+        let again = SecretKey2048::from_seed(&seed, &7u32.to_be_bytes()).unwrap();
+        assert_eq!(key.public().modulus(), again.public().modulus());
+        assert_eq!(key.public().modulus().len(), MODULUS_LEN_2048);
+        let other = SecretKey2048::from_seed(&seed, &8u32.to_be_bytes()).unwrap();
+        assert_ne!(key.public().modulus(), other.public().modulus());
+
+        let mut rng = TestRng::new(b"blind");
+        let (blinded, inverse) = blind(key.public(), b"token input", &mut rng).unwrap();
+        let signed = key.blind_sign(&blinded).unwrap();
+        let sig = finalize(key.public(), b"token input", &signed, &inverse).unwrap();
+        verify(key.public(), b"token input", &sig).unwrap();
+        assert!(verify(other.public(), b"token input", &sig).is_err());
+    }
 
     fn hex(s: &str) -> Vec<u8> {
         (0..s.len())

@@ -1527,6 +1527,7 @@ names the object type and its lifetime:
 "umbra/v1/rotate-jitter"
 "umbra/v1/backup-salt"
 "umbra/v1/handle-blob"
+"umbra/v1/issuer-rsa"
 ```
 
 **The list above is closed.** **[CRY-028]** An implementation MUST NOT use a label that this
@@ -1538,6 +1539,13 @@ primitive register in the same manner.
 > handle-addressed chunks. The offer and the hello each need a slot of their
 > own, the transcript and the code each need a hash of their own, and the
 > provision needs a slot and a seal key that only the two devices derive.
+
+> *The cause of `"umbra/v1/issuer-rsa"`.* An issuer of the cross-relay token
+> of Part 13 §13.3.1 derives the RSA key of each epoch from one secret seed
+> under this label and the epoch, thus a restart of the issuer finds the key
+> that the log already holds. The primes come from
+> `HMAC-SHA3-256(HMAC-SHA3-256(seed, label || BE32(epoch)), BE64(counter))`,
+> and no other derivation takes that input.
 
 > *The cause of `"umbra/v1/handle-blob"`.* Part 9 rule `DIS-175` writes the
 > profile blob under a challenge of its own. Its answer binds the blob, as the
