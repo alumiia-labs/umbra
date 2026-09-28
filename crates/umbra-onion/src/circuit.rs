@@ -69,6 +69,27 @@ impl Circuit {
         Ok(left)
     }
 
+    /// As [`Circuit::seal`], and gives the `tag` that each hop reads, hop 1
+    /// first. A relay checks the tag of its own layer, and the layer before
+    /// it computed that value, thus only the client holds the three. A probe
+    /// of an isolation query names its cell at each hop with them (Part 10
+    /// `REL-111`).
+    pub fn seal_with_tags(&mut self, body: &mut [u8]) -> Result<[[u8; BLOCK]; HOPS], Error> {
+        let mut tags = [[0u8; BLOCK]; HOPS];
+        let mut left = [0u8; BLOCK];
+        for (index, hop) in self.hops.iter_mut().enumerate().rev() {
+            left = hop.forward.encipher(&left, body)?;
+            if index == HOPS - 1 {
+                hop.forward.update(&left);
+            }
+            if let Some(tag) = tags.get_mut(index) {
+                *tag = left;
+            }
+        }
+        self.sent = self.sent.saturating_add(1);
+        Ok(tags)
+    }
+
     /// Removes the three backward layers and makes the check of `NET-114`.
     /// The body holds the payload on success and nothing usable on failure
     /// (`NET-130`).

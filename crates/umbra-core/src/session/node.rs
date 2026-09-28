@@ -955,6 +955,10 @@ pub enum StateChange {
     },
 }
 
+/// The chain of a probe of an isolation query, and the tag that each hop
+/// read (Part 10 `REL-111`).
+pub type Probe = ([[u8; 32]; HOPS], [[u8; 16]; HOPS]);
+
 /// What one slot of the cover clock carried.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoverSlot {
@@ -3770,6 +3774,26 @@ impl ClientNode {
     /// The counts of this run.
     pub fn faults(&self) -> &LinkFaults {
         &self.faults
+    }
+
+    /// Sends the loop cell of a probe of an isolation query on a ready
+    /// circuit, and gives its chain and the tag that each hop reads (Part 10
+    /// `REL-109` to `REL-111`). An authority runs it on a node whose one
+    /// chain is the chain under query.
+    pub fn probe(&mut self) -> Result<Probe, Error> {
+        let ready = self
+            .slots
+            .iter()
+            .position(|slot| slot.is_general() && slot.is_ready())
+            .ok_or(Error::NoPath)?;
+        let chain = self.slots.get(ready).and_then(|slot| slot.chain).ok_or(Error::NoPath)?;
+        let Some(Circuit::Ready(session)) = self.slots.get_mut(ready).map(|slot| &mut slot.circuit)
+        else {
+            return Err(Error::NoPath);
+        };
+        let (cell, tags) = session.probe_cell(Bucket::B0)?;
+        self.send_cell(&cell)?;
+        Ok((chain, tags))
     }
 
     /// The loop count and the forced replacements, for a test that makes a

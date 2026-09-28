@@ -313,6 +313,55 @@ impl ReceiptAnswer {
     }
 }
 
+/// What an isolation query found on one link of a probe chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkVerdict {
+    /// The relay at the end of the link issued the receipt of the probe
+    /// cell: the link carried it.
+    Held,
+    /// The relay at the end of the link denied a batch that the relay
+    /// before it holds under its signature: a contradiction (`REL-083`).
+    Contradiction {
+        /// The relay that denied.
+        relay: [u8; 32],
+    },
+    /// No receipt of the cell on the link names one relay (`REL-084`).
+    LinkFault {
+        /// The relay that sent.
+        from: [u8; 32],
+        /// The relay that took, or did not.
+        to: [u8; 32],
+    },
+}
+
+/// Judges the link `from` → `to` for the probe cell that `query` names by
+/// its tag at `to`. `from_answer` is the answer of `from` (a receipt that it
+/// took), `to_answer` the answer of `to` (a receipt that it issued), and
+/// `None` a relay that gave no answer. A receipt counts when it verifies
+/// under `to_identity_pk`, names the link, and covers the cell.
+pub fn judge_link(
+    from: [u8; 32],
+    to: [u8; 32],
+    query: &ReceiptQuery,
+    from_answer: Option<&ReceiptAnswer>,
+    to_answer: Option<&ReceiptAnswer>,
+    to_identity_pk: &[u8],
+) -> LinkVerdict {
+    let covers = |answer: Option<&ReceiptAnswer>, found: Found| {
+        answer
+            .filter(|answer| answer.found == found)
+            .and_then(|answer| answer.covers(query, to_identity_pk).ok())
+            .is_some_and(|receipt| receipt.from_relay == from && receipt.to_relay == to)
+    };
+    if covers(to_answer, Found::Issued) {
+        LinkVerdict::Held
+    } else if covers(from_answer, Found::Taken) {
+        LinkVerdict::Contradiction { relay: to }
+    } else {
+        LinkVerdict::LinkFault { from, to }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
@@ -375,6 +424,56 @@ mod tests {
             ReceiptAnswer::parse(&ReceiptAnswer::none().encode().unwrap()).unwrap(),
             ReceiptAnswer::none()
         );
+    }
+
+    #[test]
+    fn a_link_holds_or_names_the_relay_that_denied_or_neither() {
+        let mut rng = Rng(7);
+        let keys = authorities(80);
+        let to_key = &keys[1];
+        let to_pk = to_key.verifying_key().to_bytes();
+        let (from, to) = ([0xA1; 32], [0xB2; 32]);
+        let tags: Vec<[u8; 16]> = (0..8u8).map(|i| [i; 16]).collect();
+        let leaves: Vec<[u8; 32]> = tags.iter().map(cell_leaf).collect();
+        let signed = LinkReceipt {
+            from_relay: from,
+            to_relay: to,
+            epoch: 3,
+            window: 0,
+            cell_count: 8,
+            batch_root: tree::root(&leaves).unwrap(),
+        }
+        .sign(to_key, &mut rng)
+        .unwrap();
+        let query = ReceiptQuery {
+            authority_index: 0,
+            epoch: 3,
+            tag: tags[5],
+        };
+        let answer = |found| ReceiptAnswer {
+            found,
+            receipt: signed.clone(),
+            leaf_index: 5,
+            proof: tree::prove(&leaves, 5).unwrap(),
+        };
+        let (taken, issued, none) = (answer(Found::Taken), answer(Found::Issued), ReceiptAnswer::none());
+        let judge = |f: Option<&ReceiptAnswer>, t: Option<&ReceiptAnswer>| {
+            judge_link(from, to, &query, f, t, &to_pk)
+        };
+        assert_eq!(judge(Some(&taken), Some(&issued)), LinkVerdict::Held);
+        assert_eq!(judge(None, Some(&issued)), LinkVerdict::Held);
+        // REL-083: the relay denied what it signed.
+        assert_eq!(
+            judge(Some(&taken), Some(&none)),
+            LinkVerdict::Contradiction { relay: to }
+        );
+        assert_eq!(judge(Some(&taken), None), LinkVerdict::Contradiction { relay: to });
+        // REL-084: neither side shows the cell, or a side gives no answer.
+        assert_eq!(judge(Some(&none), Some(&none)), LinkVerdict::LinkFault { from, to });
+        assert_eq!(judge(None, None), LinkVerdict::LinkFault { from, to });
+        // A receipt under another key names no one.
+        let forged = judge_link(from, to, &query, Some(&taken), Some(&none), &keys[2].verifying_key().to_bytes());
+        assert_eq!(forged, LinkVerdict::LinkFault { from, to });
     }
 
     #[test]

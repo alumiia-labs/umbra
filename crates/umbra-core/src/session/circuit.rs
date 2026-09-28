@@ -238,6 +238,23 @@ impl CircuitSession {
         self.seal_cell(bucket, CellCommand::Loop, &[])
     }
 
+    /// The loop cell of a probe of an isolation query, and the tag that each
+    /// hop reads, hop 1 first (Part 10 `REL-110`, `REL-111`). The cell is a
+    /// loop of the common shape, thus no relay tells it from a cover cell.
+    pub fn probe_cell(&mut self, bucket: Bucket) -> Result<(Vec<u8>, [[u8; 16]; 3]), Error> {
+        let mut cell = alloc::vec![0u8; bucket.cell_len()];
+        let (head, body) = cell.split_at_mut(32);
+        pad_body(bucket, CellCommand::Loop, &[], body)?;
+        let tags = self
+            .circuit
+            .seal_with_tags(body)
+            .map_err(|_| Error::Unverified)?;
+        let (circ_id, tag_out) = head.split_at_mut(16);
+        circ_id.copy_from_slice(&self.circuit.circ_id());
+        tag_out.copy_from_slice(&tags[0]);
+        Ok((cell, tags))
+    }
+
     /// Removes the three layers of an inbound cell and reads its commands.
     /// A cell that fails the check of the onion layer gives an error, and
     /// the caller tears the circuit down (`NET-130`).

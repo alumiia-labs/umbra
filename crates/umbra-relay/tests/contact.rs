@@ -1651,3 +1651,48 @@ fn a_link_fault_report_reaches_the_report_queue_of_an_authority() {
     assert_eq!(report.hops, chain);
     assert_eq!((report.loops_sent, report.loops_lost), (2, 2));
 }
+
+/// Part 10 §10.4.2: the probe of an isolation query names its cell at each
+/// hop by the tag that the client computed, and after the epoch each relay
+/// answers with the receipt that covers it, thus each link of the chain
+/// holds (`REL-109` to `REL-111`, `REL-179`).
+#[test]
+fn a_probe_cell_is_covered_by_the_receipts_of_each_link() {
+    use umbra_core::directory::receipt::{judge_link, LinkVerdict, ReceiptQuery};
+
+    const AUTHORITY: usize = 0;
+    let mut network = Network::new();
+    network.settle();
+    let (chain, tags) = network.clients[AUTHORITY].probe().unwrap();
+    let relays: Vec<[u8; 32]> = (1..=3u8).map(|layer| relay_static(layer).0.relay_id).collect();
+    assert_eq!(chain.to_vec(), relays);
+    network.settle();
+    let epoch = network.now / 3_600;
+    network.now += 3_600;
+    for relay in 0..3 {
+        let outputs = network.relays[relay].push_tick(network.now, &mut Rng(300 + relay as u64));
+        network.route(relay, outputs);
+    }
+    network.settle();
+    let identity =
+        |layer: u8| SigningKey::from_seed(Secret::new([0x30 + layer; 32])).verifying_key().to_bytes();
+    // The link from hop k to hop k + 1 carries the tag of hop k + 1.
+    for hop in 1..3usize {
+        let query = ReceiptQuery {
+            authority_index: 0,
+            epoch,
+            tag: tags[hop],
+        };
+        let taken = network.relays[hop - 1].receipt_answer(&query);
+        let issued = network.relays[hop].receipt_answer(&query);
+        let verdict = judge_link(
+            chain[hop - 1],
+            chain[hop],
+            &query,
+            Some(&taken),
+            Some(&issued),
+            &identity(hop as u8 + 1),
+        );
+        assert_eq!(verdict, LinkVerdict::Held, "link {hop}");
+    }
+}
