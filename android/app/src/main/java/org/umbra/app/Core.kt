@@ -19,6 +19,7 @@ import uniffi.umbra_ffi.Config
 import uniffi.umbra_ffi.Connection
 import uniffi.umbra_ffi.ContactRequestInfo
 import uniffi.umbra_ffi.ConversationTimer
+import uniffi.umbra_ffi.FfiKeyChange
 import uniffi.umbra_ffi.FfiModNote
 import uniffi.umbra_ffi.FfiRosterNote
 import uniffi.umbra_ffi.FfiPoll
@@ -1088,6 +1089,19 @@ object Core {
 
     /** The FCM token of this device goes to the core (Part 8 §8.2.7). */
     fun setFcmToken(token: String) = call { it.setFcmToken(token) }
+
+    /** The key-change notice that waits in a conversation (Part 4 §4.5.1). */
+    fun keyChange(conversation: Conversation, onLoaded: (FfiKeyChange?) -> Unit) = call { client ->
+        val pending = client.keyChange(conversation.id)
+        main.post { onLoaded(pending) }
+    }
+
+    /** Accepts the new key of one contact (`IDN-062`). */
+    fun acceptKeyChange(conversation: Conversation) = call { client ->
+        client.acceptKeyChange(conversation.id)
+        main.post { revision++ }
+        refreshChats()
+    }
 
     /** Sends a failed message again (`IMP-075`). */
     fun sendAgain(message: MsgHandle) = call { client ->

@@ -21,6 +21,7 @@ mod group_sync;
 mod group_changes;
 mod groups;
 mod held_handles;
+mod key_changes;
 mod notify;
 mod sync;
 mod moderation;
@@ -44,6 +45,7 @@ pub use groups::{
 pub use notify::NdrCall;
 pub use sync::SyncSend;
 pub use moderation::{ModNote, MOD_HIDE, MOD_REMOVE, MOD_UNHIDE};
+pub use key_changes::PendingKeyChange;
 pub use polls::PollView;
 pub use roster_notes::{
     RosterNote, NOTE_EVICTED, NOTE_FORK, NOTE_JOINED, NOTE_LEFT, NOTE_NOBODY, NOTE_ROLE,
@@ -755,6 +757,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // The requests of Part 11 §11.4.3 of a member that lacks an epoch.
         let mut key_requests: Vec<(ConversationId, Vec<u8>)> = Vec::new();
         let mut votes: Vec<(ConversationId, Vec<u8>, u16)> = Vec::new();
+        let mut key_changes: Vec<(ConversationId, Vec<u8>)> = Vec::new();
         for change in changes {
             planned.push(match change {
                 StateChange::Contact { contact, state } => Planned::Put(
@@ -965,6 +968,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if parsed.kind == AppKind::KeyRequest {
                 if !record.synced {
                     key_requests.push((conversation, parsed.body.to_vec()));
+                }
+                continue;
+            }
+            // IDN-059: a key-change notice of the contact comes on its
+            // receiving chain, and it waits for the user. It is no message.
+            if parsed.kind == AppKind::KeyChange {
+                if !from_user {
+                    key_changes.push((conversation, parsed.body.to_vec()));
                 }
                 continue;
             }
@@ -1380,6 +1391,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
         for (_, body) in key_requests {
             self.on_pairwise_key_request(&body, now_ms, rng)?;
+        }
+        for (conversation, body) in key_changes {
+            self.take_key_change(conversation, &body, now_ms, rng)?;
         }
         for (conversation, body, voter) in votes {
             self.take_vote(conversation, &body, voter, now_ms, now_ms / 1_000, rng)?;
@@ -2684,6 +2698,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         message.encode(&mut app)?;
         drop(rich);
 
+        // IDN-025: a conversation with a key change that waits takes no
+        // message before the answer of the user.
+        if !is_group && self.key_change(conversation)?.is_some() {
+            return Err(Error::Busy);
+        }
         // A group record goes to the two replicas of its group queue and
         // on no pairwise channel (Part 11 §11.2).
         if is_group {

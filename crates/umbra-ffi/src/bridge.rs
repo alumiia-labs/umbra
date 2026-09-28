@@ -93,6 +93,11 @@ impl Bridge {
         self.command(Command::RotateNow(contact))
     }
 
+    /// The user accepted a new pairwise key of the peer (Part 4 §4.5.1).
+    pub fn peer_key(&self, contact: ContactId, key: [u8; 32]) -> Result<(), Error> {
+        self.command(Command::PeerKey { contact, key })
+    }
+
     /// The peer moved to `address` (`NET-190`).
     pub fn peer_moved(&self, contact: ContactId, address: Zeroizing<Vec<u8>>) -> Result<(), Error> {
         self.command(Command::PeerMoved { contact, address })

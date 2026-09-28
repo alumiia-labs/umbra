@@ -103,6 +103,13 @@ pub enum Command {
         /// The encoded `QueueAddress`.
         address: Zeroizing<Vec<u8>>,
     },
+    /// The user accepted a new pairwise key of the peer (Part 4 §4.5.1).
+    PeerKey {
+        /// The contact.
+        contact: ContactId,
+        /// The new X25519 key of the peer.
+        key: [u8; 32],
+    },
     /// Send the `NKEY` of an inbound queue. An [`Update::NotifyKey`]
     /// follows with the notification key of its relay (Part 8 §8.2.3).
     NotifyQueue([u8; 32]),
@@ -683,6 +690,9 @@ pub async fn run_client(
                 }
                 Command::PeerMoved { contact, address } => {
                     let _ = node.peer_moved(&contact, &address, now, &mut rng);
+                }
+                Command::PeerKey { contact, key } => {
+                    let _ = node.set_peer_key(&contact, key);
                 }
                 Command::NotifyQueue(recipient_id) => {
                     let _ = node.notify_queue(&recipient_id, &mut rng);

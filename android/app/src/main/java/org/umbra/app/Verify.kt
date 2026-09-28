@@ -313,3 +313,32 @@ fun VerifyPrompt(push: (Screen) -> Unit) {
         FaIcon("chevron-right", size = 14.dp, tint = Palette.TextSecondary)
     }
 }
+
+/**
+ * The blocking notice of a key change (Part 4 §4.5.1). It states that an
+ * acceptance ends the healing of the channel (`IDN-089`), and it offers the
+ * new safety number for a comparison first (`IDN-090`). The acceptance is
+ * no default action (`IDN-091`), and it answers for this contact alone
+ * (`IDN-092`).
+ */
+@Composable
+fun KeyChangePanel(chat: Chat, pending: uniffi.umbra_ffi.FfiKeyChange) {
+    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
+        Text("${chat.title} has a new key", style = MaterialTheme.typography.titleMedium)
+        Spacer(Modifier.height(6.dp))
+        Text(
+            "Compare this number with ${chat.title} in person or over a call that you trust. " +
+                "If you accept, this chat no longer recovers from an earlier break-in.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = Palette.TextSecondary,
+        )
+        Spacer(Modifier.height(10.dp))
+        Text(
+            pending.newSafetyNumber,
+            style = MaterialTheme.typography.bodyLarge,
+            fontFamily = Fonts.Mono,
+        )
+        Spacer(Modifier.height(12.dp))
+        SecondaryButton("Accept the new key") { Core.acceptKeyChange(chat.conversation) }
+    }
+}

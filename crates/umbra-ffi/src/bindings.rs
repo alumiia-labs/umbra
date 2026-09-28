@@ -805,6 +805,17 @@ pub struct MsgInfo {
     pub sender: Option<u16>,
 }
 
+/// A key-change notice that waits for the answer of the user (Part 4
+/// §4.5.1).
+#[derive(uniffi::Record)]
+pub struct FfiKeyChange {
+    /// The safety number under the new key, for a comparison out of band
+    /// before the answer (`IDN-090`).
+    pub new_safety_number: String,
+    /// The time of its arrival, in milliseconds.
+    pub at_ms: u64,
+}
+
 /// One change of the roster of a group, as the conversation shows it.
 #[derive(uniffi::Record)]
 pub struct FfiRosterNote {
@@ -4297,6 +4308,32 @@ impl Handle {
         drop(inner);
         self.changed.notify_all();
         Ok(Arc::new(MsgHandle(message)))
+    }
+
+    /// The key-change notice that waits in a conversation, or none. While
+    /// one waits the conversation takes no message (`IDN-025`).
+    pub fn key_change(&self, conversation: Vec<u8>) -> Result<Option<FfiKeyChange>, FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        let pending = locked(&self.inner).client.key_change(conversation)?;
+        Ok(pending.map(|pending| FfiKeyChange {
+            new_safety_number: pending.new_safety_number,
+            at_ms: pending.at_ms,
+        }))
+    }
+
+    /// Accepts the new key of one contact (`IDN-062`, `IDN-092`). The node
+    /// that runs takes it too, thus its next handshake binds it.
+    pub fn accept_key_change(&self, conversation: Vec<u8>) -> Result<(), FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        let mut inner = locked(&self.inner);
+        let Inner { client, bridge, .. } = &mut *inner;
+        let (contact, key) = client.accept_key_change(conversation, &mut OsRng)?;
+        if let Some(running) = bridge {
+            running.peer_key(contact, key)?;
+        }
+        drop(inner);
+        self.changed.notify_all();
+        Ok(())
     }
 
     /// Sends a failed message again, at the action of the user (`IMP-075`).

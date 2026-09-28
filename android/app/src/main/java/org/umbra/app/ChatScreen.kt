@@ -88,6 +88,7 @@ import android.os.PersistableBundle
 import android.content.Context
 import android.content.ClipboardManager
 import android.content.ClipData
+import uniffi.umbra_ffi.FfiKeyChange
 import uniffi.umbra_ffi.FfiModNote
 import uniffi.umbra_ffi.FfiRole
 import uniffi.umbra_ffi.FfiRosterNote
@@ -189,6 +190,11 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
     var modNotes by remember(conversation) { mutableStateOf(emptyList<FfiModNote>()) }
     var rosterNotes by remember(conversation) { mutableStateOf(emptyList<FfiRosterNote>()) }
     var removing by remember(conversation) { mutableStateOf<Line?>(null) }
+    // Part 4 §4.5.1: a new key of the contact waits for the answer.
+    var keyChange by remember(conversation) { mutableStateOf<FfiKeyChange?>(null) }
+    LaunchedEffect(conversation, Core.revision) {
+        if (!chat.isGroup) Core.keyChange(conversation) { keyChange = it }
+    }
     val revealed = remember(conversation) { mutableStateListOf<List<Byte>>() }
     LaunchedEffect(conversation, Core.revision) {
         if (chat.isGroup) {
@@ -579,6 +585,11 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
             Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
                 Note(stopped)
             }
+            return@Column
+        }
+        // IDN-025: a key change blocks the conversation until the answer.
+        keyChange?.let { pending ->
+            KeyChangePanel(chat, pending)
             return@Column
         }
         Row(

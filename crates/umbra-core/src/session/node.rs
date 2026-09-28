@@ -854,6 +854,18 @@ pub fn stored_contact_keys(
     Ok((root.pairwise_identity(&salt).x25519_public(), peer_static))
 }
 
+/// A stored contact with a new pairwise key of the peer, which the user
+/// accepted after a key-change notice (Part 4 §4.5.1). The next handshake
+/// with that contact binds it (`IDN-060`).
+pub fn stored_with_peer_key(state: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, Error> {
+    let mut reader = Reader::new(state);
+    contact_version(&mut reader)?;
+    let mut out = state.to_vec();
+    // The version and the salt come first, and the key of the peer after.
+    out.get_mut(17..49).ok_or(Error::Malformed)?.copy_from_slice(key);
+    Ok(out)
+}
+
 /// The dead-channel secret of a stored contact (Part 3 §3.2.6), with the
 /// pairwise key of this device and the one of the peer. The first names
 /// the handle of this device as a writer, and the second the one of the
@@ -1707,6 +1719,16 @@ impl ClientNode {
         if held.channel.previous().is_none() && !self.rotating.contains(&contact.0) {
             self.forced.insert(contact.0);
         }
+        Ok(())
+    }
+
+    /// The user accepted a new pairwise key of the peer after a key-change
+    /// notice (Part 4 §4.5.1): the next handshake with that contact binds
+    /// it (`IDN-060`), and the stored state takes it.
+    pub fn set_peer_key(&mut self, contact: &ContactId, key: [u8; 32]) -> Result<(), Error> {
+        let held = self.contacts.get_mut(&contact.0).ok_or(Error::NoPath)?;
+        held.peer_static = key;
+        self.moved.insert(contact.0);
         Ok(())
     }
 

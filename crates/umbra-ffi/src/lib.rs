@@ -3142,6 +3142,55 @@ mod tests {
     }
 
     #[test]
+    fn a_key_change_blocks_the_conversation_until_the_user_accepts_it() {
+        use umbra_core::session::node::StateChange;
+        use umbra_wire::app::{keys::KeyChangeNotice, AppKind};
+
+        let mut rng = Rng(99);
+        let mut client = new_client(&mut rng);
+        let contact = ContactId([0x44; 32]);
+        let state = [&[0x01][..], &[5; 16], &[7; 32], &[0; 8]].concat();
+        let change = StateChange::Contact {
+            contact,
+            state: zeroize::Zeroizing::new(state),
+        };
+        client.commit_network(&[change], &[], 1_000_000, &mut rng).unwrap();
+        let conversation = client.conversation_for(&contact.0).unwrap();
+        client.set_verified(conversation, &[7; 32], 1_000_000, &mut rng).unwrap();
+        assert!(client.is_verified(conversation).unwrap());
+        assert!(client.key_change(conversation).unwrap().is_none());
+
+        let mlkem = [0x5A; 1_184];
+        let notice = KeyChangeNotice {
+            new_x25519_pk: [0xAB; 32],
+            new_mlkem_pk: &mlkem,
+        };
+        let mut body = vec![0u8; 1_217];
+        notice.encode(&mut body).unwrap();
+        deliver(&mut client, &contact, &record(AppKind::KeyChange, [3; 16], &body), 2_000_000, &mut rng);
+        // IDN-061, IDN-062: the notice waits, and the old key holds.
+        let pending = client.key_change(conversation).unwrap().unwrap();
+        assert_eq!(pending.at_ms, 2_000_000);
+        assert_ne!(pending.new_safety_number, client.safety_number(conversation).unwrap());
+        assert!(client.messages(conversation).unwrap().is_empty());
+        assert!(client.is_verified(conversation).unwrap());
+        // IDN-025: the conversation takes no message before the answer.
+        let mut draft = client.new_draft(conversation);
+        draft.set_text(&units("hello")).unwrap();
+        assert_eq!(client.send_draft(draft, 2_001_000, &mut rng), Err(Error::Busy));
+
+        let (named, key) = client.accept_key_change(conversation, &mut rng).unwrap();
+        assert_eq!((named, key), (contact, [0xAB; 32]));
+        assert_eq!(client.safety_number(conversation).unwrap(), pending.new_safety_number);
+        // IDN-175: the verification of the earlier key counts for nothing.
+        assert!(!client.is_verified(conversation).unwrap());
+        assert!(client.key_change(conversation).unwrap().is_none());
+        let mut draft = client.new_draft(conversation);
+        draft.set_text(&units("hello")).unwrap();
+        assert!(client.send_draft(draft, 2_002_000, &mut rng).is_ok());
+    }
+
+    #[test]
     fn a_failed_message_goes_again_at_the_action_of_the_user() {
         let mut rng = Rng(97);
         let mut client = new_client(&mut rng);
