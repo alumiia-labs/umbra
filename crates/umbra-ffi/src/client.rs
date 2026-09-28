@@ -21,6 +21,7 @@ mod groups;
 mod held_handles;
 mod notify;
 mod sync;
+mod moderation;
 mod polls;
 mod timers;
 mod tokens;
@@ -38,6 +39,7 @@ pub use groups::{
 };
 pub use notify::NdrCall;
 pub use sync::SyncSend;
+pub use moderation::{ModNote, MOD_HIDE, MOD_REMOVE, MOD_UNHIDE};
 pub use polls::PollView;
 pub use timers::{timer_body, TimerSetting, TIMER_VALUES};
 use umbra_core::{
@@ -1887,6 +1889,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         batch.delete(timers::DEADLINES, message.0);
         batch.delete(polls::POLLS, message.0);
         batch.delete(groups::MENTIONED, message.0);
+        batch.delete(moderation::MODERATED, message.0);
         for row in votes {
             batch.delete(polls::VOTES, row);
         }
@@ -2864,6 +2867,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         info.file = self.file_info(message)?;
         info.expires_at = self.deadline_of(message)?.map(|deadline| deadline.at);
         info.mentions_me = open.store.get(groups::MENTIONED, &message.0)?.is_some();
+        if let Some((state, role)) = self.moderation_of(message)? {
+            info.moderation = state;
+            info.moderator_role = role;
+        }
         info.revisions = match open.store.get(REVISION, &message.0)? {
             None => 0,
             Some(count) => *count.first().ok_or(Error::Integrity)?,
@@ -2975,6 +2982,9 @@ fn info_of(plain: &[u8]) -> Result<MessageInfo, Error> {
         poll: parsed.kind == AppKind::Poll,
         // The store holds the mark: see `Client::info`.
         mentions_me: false,
+        // The store holds the state: see `Client::info`.
+        moderation: 0,
+        moderator_role: 0,
     })
 }
 

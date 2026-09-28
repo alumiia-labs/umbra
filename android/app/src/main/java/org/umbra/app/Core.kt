@@ -19,6 +19,7 @@ import uniffi.umbra_ffi.Config
 import uniffi.umbra_ffi.Connection
 import uniffi.umbra_ffi.ContactRequestInfo
 import uniffi.umbra_ffi.ConversationTimer
+import uniffi.umbra_ffi.FfiModNote
 import uniffi.umbra_ffi.FfiPoll
 import uniffi.umbra_ffi.FfiEvent
 import uniffi.umbra_ffi.FfiException
@@ -1380,6 +1381,18 @@ object Core {
             at++
         }
         return false
+    }
+
+    /** Hides, removes, or puts back a message of a group (Part 11 §11.9.6). */
+    fun moderate(message: MsgHandle, action: UByte) = call { client ->
+        client.moderate(message, action)
+        main.post { revision++ }
+    }
+
+    /** The moderation epochs that this device applied in a conversation. */
+    fun moderationNotes(conversation: Conversation, onLoaded: (List<FfiModNote>) -> Unit) = call { client ->
+        val notes = client.moderationNotes(conversation.id)
+        main.post { onLoaded(notes) }
     }
 
     /** Sends a poll to a conversation. */

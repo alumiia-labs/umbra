@@ -24,7 +24,8 @@ use umbra_wire::{
     group::{
         control::{
             Chain, ControlType, GrantingEpoch, GroupControl, GroupMemberEntry, JoinRecord,
-            MemberKemKey, PlainEpoch, PlainOp, ReplicaRef, Role, RosterSnapshot,
+            MemberKemKey, ModAction, ModerationEpoch, PlainEpoch, PlainOp, ReplicaRef, Role,
+            RosterSnapshot,
         },
         record::{
             slot_len, Carrier, EpochKeyBody, GroupQueueRecord, RecordKind, SlotPayload,
@@ -655,6 +656,49 @@ impl Group {
         let n = epoch.encode(&mut payload)?;
         super::join::wrap(
             ControlType::GrantingEpoch,
+            payload.get(..n).ok_or(Error::Malformed)?,
+        )
+    }
+
+    /// The moderation epoch of `actions`, each an action byte and the
+    /// `msg_id` of its target, signed under the roster key of this member
+    /// (`GRP-077`, `GRP-078`). The preimage names no author (`GRP-179`),
+    /// thus each hint is `0xFFFF`. A member below `moderator` makes none
+    /// (`GRP-081`).
+    pub fn moderate<R: TryCryptoRng + ?Sized>(
+        &self,
+        actions: &[(u8, [u8; 16])],
+        rng: &mut R,
+    ) -> Result<Vec<u8>, Error> {
+        let Some(role) = self.own_role().filter(|role| *role >= Role::Moderator) else {
+            return Err(Error::Unverified);
+        };
+        let actor_pk = self.keys.roster().verifying_key().to_bytes();
+        let mut epoch = ModerationEpoch {
+            chain: Chain {
+                group_id: *self.roster.group_id(),
+                epoch_index: self.roster.epoch_index().saturating_add(1),
+                previous_epoch_hash: *self.roster.chain_hash(),
+            },
+            actor_index: self.own_index,
+            actor_role: role,
+            actions: actions
+                .iter()
+                .map(|(action, target)| ModAction {
+                    action: *action,
+                    target: *target,
+                    author_hint: 0xFFFF,
+                })
+                .collect(),
+            actor_roster_pk: &actor_pk,
+            sig: &[],
+        };
+        let sig = self.keys.roster().sign(&epoch.preimage(), rng)?.to_bytes();
+        epoch.sig = &sig;
+        let mut payload = alloc::vec![0u8; 6_000];
+        let n = epoch.encode(&mut payload)?;
+        super::join::wrap(
+            ControlType::ModerationEpoch,
             payload.get(..n).ok_or(Error::Malformed)?,
         )
     }

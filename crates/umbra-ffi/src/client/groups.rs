@@ -2718,7 +2718,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
     /// Applies a roster object that this device made, after the record
     /// that carries it went to the work list (`GRP-389`).
-    fn apply_own_roster_object<R: CryptoRng + ?Sized>(
+    pub(super) fn apply_own_roster_object<R: CryptoRng + ?Sized>(
         &mut self,
         conversation: ConversationId,
         object: &[u8],
@@ -3024,7 +3024,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
     /// Seals one roster object for a group and queues it for each replica.
     /// It carries no message row, thus no view shows it.
-    fn post_group_control<R: CryptoRng + ?Sized>(
+    pub(super) fn post_group_control<R: CryptoRng + ?Sized>(
         &mut self,
         conversation: ConversationId,
         body: &[u8],
@@ -3955,6 +3955,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
+        // A message that arrived after its removal leaves at once.
+        self.enforce_moderation(conversation, message, rng)?;
         let parsed = AppMessage::parse(app, umbra_wire::app::Channel::Group)?;
         match parsed.kind {
             AppKind::Rich => {
@@ -4080,6 +4082,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             Applied::Rekeyed { old, new, .. } => {
                 self.move_member_block(conversation, *old, *new, rng)
             }
+            Applied::Moderated {
+                actor_role,
+                actions,
+            } => self.apply_moderation(conversation, *actor_role, actions, now.saturating_mul(1_000), rng),
             Applied::Removed(trigger) => {
                 if let Some(index) = trigger.excluded {
                     self.groups.evictions.remove(&(conversation, index));

@@ -116,8 +116,14 @@ pub enum Applied {
         /// The new role.
         role: Role,
     },
-    /// Moderation actions to apply, after the signature check.
-    Moderated(Vec<ModAction>),
+    /// Moderation actions to apply, after the signature check, and the role
+    /// of the actor for the placeholder of each target (`GRP-082`).
+    Moderated {
+        /// The role of the acting member.
+        actor_role: Role,
+        /// The actions, in the order of the epoch.
+        actions: Vec<ModAction>,
+    },
     /// A member moved to new keys under a new index; a trigger.
     Rekeyed {
         /// The old index, which the trigger excludes.
@@ -880,7 +886,10 @@ impl Roster {
                 epoch.verify(&actor.roster_pk_hash)?;
                 self.note_successor(epoch.chain.previous_epoch_hash, sender, hash, true)?;
                 self.commit(hash, now);
-                Ok(Applied::Moderated(epoch.actions))
+                Ok(Applied::Moderated {
+                    actor_role: epoch.actor_role,
+                    actions: epoch.actions,
+                })
             }
             ControlType::Rekey => {
                 let record = RekeyRecord::parse(control.payload)?;

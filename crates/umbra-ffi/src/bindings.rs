@@ -796,6 +796,26 @@ pub struct MsgInfo {
     pub poll: bool,
     /// Whether a message of a group names this member (Part 11 §11.11).
     pub mentions_me: bool,
+    /// The moderator action on the message: 0 none, 1 hidden, 2 removed.
+    pub moderation: u8,
+    /// The role of the member that acted, with the values of [`FfiRole`],
+    /// or 0.
+    pub moderator_role: u8,
+}
+
+/// One moderation epoch that this device applied (`GRP-089`).
+#[derive(uniffi::Record)]
+pub struct FfiModNote {
+    /// The time of the application, in milliseconds.
+    pub at_ms: u64,
+    /// The role of the acting member.
+    pub actor_role: u8,
+    /// The messages that it hid.
+    pub hidden: u16,
+    /// The messages that it removed.
+    pub removed: u16,
+    /// The messages that it put back.
+    pub shown: u16,
 }
 
 /// A poll with the count that this device holds. The count is the local
@@ -4524,7 +4544,36 @@ impl Handle {
             expires_at: info.expires_at,
             poll: info.poll,
             mentions_me: info.mentions_me,
+            moderation: info.moderation,
+            moderator_role: info.moderator_role,
         })
+    }
+
+    /// Hides (1), removes (2), or puts back (3) one message of a group, in a
+    /// moderation epoch that this member signs (Part 11 §11.9.6).
+    pub fn moderate(&self, message: Arc<MsgHandle>, action: u8) -> Result<(), FfiError> {
+        let mut inner = locked(&self.inner);
+        inner.client.moderate(&message.0, action, unix_now_ms(), &mut OsRng)?;
+        inner.pump_groups();
+        drop(inner);
+        self.changed.notify_all();
+        Ok(())
+    }
+
+    /// The moderation epochs that this device applied in a conversation.
+    pub fn moderation_notes(&self, conversation: Vec<u8>) -> Result<Vec<FfiModNote>, FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        let notes = locked(&self.inner).client.moderation_notes(conversation)?;
+        Ok(notes
+            .into_iter()
+            .map(|note| FfiModNote {
+                at_ms: note.at_ms,
+                actor_role: note.actor_role,
+                hidden: note.hidden,
+                removed: note.removed,
+                shown: note.shown,
+            })
+            .collect())
     }
 
     /// The poll of a message with the count that this device holds.

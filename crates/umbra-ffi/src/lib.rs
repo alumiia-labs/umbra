@@ -162,6 +162,11 @@ pub struct MessageInfo {
     pub poll: bool,
     /// Whether a message of a group names this member (Part 11 §11.11).
     pub mentions_me: bool,
+    /// The moderator action on the message: 0 none, 1 hidden, 2 removed
+    /// (Part 11 §11.9.6).
+    pub moderation: u8,
+    /// The role of the member that acted, or 0.
+    pub moderator_role: u8,
 }
 
 /// The longest local name of a contact, in bytes of UTF-8.
@@ -837,6 +842,57 @@ mod tests {
         other.render(&named, &mut view).unwrap();
         assert_eq!(String::from_utf16(&view.0).unwrap(), "@Dana which one");
         let _ = member;
+    }
+
+    #[test]
+    fn a_moderator_hides_then_removes_and_each_member_keeps_a_trace() {
+        use crate::client::{MOD_HIDE, MOD_REMOVE, MOD_UNHIDE};
+
+        let mut rng = Rng(89);
+        let mut client = new_client(&mut rng);
+        let mut other = new_client(&mut rng);
+        let (conversation, member) = ready_pair(&mut client, &mut other, &mut rng);
+        let now = 1_700_000_200u64;
+        let deliver_post = |from: &mut Client<MemoryBackend, Element>,
+                            to: &mut Client<MemoryBackend, Element>,
+                            at: u64,
+                            rng: &mut Rng| {
+            let post = from.take_group_post().unwrap();
+            to.on_group_record(&[0xC3; 32], 1, &post.record, at * 1_000, rng).unwrap()
+        };
+
+        let mut draft = other.new_draft(member);
+        draft.set_text(&units("off topic")).unwrap();
+        let mine = other.send_draft(draft, now * 1_000, &mut rng).unwrap();
+        let held = deliver_post(&mut other, &mut client, now + 1, &mut rng).unwrap();
+
+        // GRP-081: a plain member moderates nothing.
+        assert!(other.moderate(&mine, MOD_HIDE, (now + 2) * 1_000, &mut rng).is_err());
+
+        // GRP-085: a hide keeps the record, out of the view.
+        client.moderate(&held, MOD_HIDE, (now + 2) * 1_000, &mut rng).unwrap();
+        assert_eq!(client.info(&held).unwrap().moderation, MOD_HIDE);
+        assert!(deliver_post(&mut client, &mut other, now + 3, &mut rng).is_none());
+        let info = other.info(&mine).unwrap();
+        assert_eq!((info.moderation, info.moderator_role, info.deleted), (MOD_HIDE, 5, false));
+        client.moderate(&held, MOD_UNHIDE, (now + 4) * 1_000, &mut rng).unwrap();
+        deliver_post(&mut client, &mut other, now + 5, &mut rng);
+        assert_eq!(other.info(&mine).unwrap().moderation, 0);
+
+        // A remove leaves a placeholder that names the role (GRP-082), and a
+        // removed message takes no second act (GRP-084).
+        client.moderate(&held, MOD_REMOVE, (now + 6) * 1_000, &mut rng).unwrap();
+        assert!(client.moderate(&held, MOD_HIDE, (now + 7) * 1_000, &mut rng).is_err());
+        deliver_post(&mut client, &mut other, now + 7, &mut rng);
+        let info = other.info(&mine).unwrap();
+        assert_eq!((info.moderation, info.deleted), (MOD_REMOVE, true));
+
+        // GRP-089: each epoch keeps its count.
+        let notes = other.moderation_notes(member).unwrap();
+        assert_eq!(notes.len(), 3);
+        assert_eq!((notes[0].hidden, notes[1].shown, notes[2].removed), (1, 1, 1));
+        assert_eq!(notes[2].actor_role, 5);
+        let _ = conversation;
     }
 
     /// A group of `client` with both queues, and `other` in it at index 1.

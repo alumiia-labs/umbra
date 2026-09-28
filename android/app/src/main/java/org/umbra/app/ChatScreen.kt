@@ -38,6 +38,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -87,6 +88,8 @@ import android.os.PersistableBundle
 import android.content.Context
 import android.content.ClipboardManager
 import android.content.ClipData
+import uniffi.umbra_ffi.FfiModNote
+import uniffi.umbra_ffi.FfiRole
 import uniffi.umbra_ffi.MsgReaction
 import androidx.compose.ui.unit.sp
 
@@ -176,6 +179,19 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
     // The message that the user wants to delete, and a word for a user who
     // deletes faster than the rate limit permits.
     var deleting by remember(conversation) { mutableStateOf<Line?>(null) }
+    // Part 11 §11.9.6: the role of this member, the epochs of the moderators,
+    // a remove that waits for its second confirmation, and each hidden
+    // message that the user opened.
+    var ownRole by remember(conversation) { mutableStateOf<FfiRole?>(null) }
+    var modNotes by remember(conversation) { mutableStateOf(emptyList<FfiModNote>()) }
+    var removing by remember(conversation) { mutableStateOf<Line?>(null) }
+    val revealed = remember(conversation) { mutableStateListOf<List<Byte>>() }
+    LaunchedEffect(conversation, Core.revision) {
+        if (chat.isGroup) {
+            Core.groupMembers(conversation) { members -> ownRole = members.firstOrNull { it.isSelf }?.role }
+            Core.moderationNotes(conversation) { modNotes = it }
+        }
+    }
     var notice by remember(conversation) { mutableStateOf<String?>(null) }
     val save = rememberSave()
     // The sheet of the plus: a photo, a video, or a file.
@@ -224,6 +240,15 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
         val entries = if (line.info.deleted) {
             // DEV-105: the user can clear a placeholder.
             listOf(RowEntry("trash-can", "Remove") { Core.deleteForMe(line.handle) })
+        } else if (line.info.moderation == MOD_HIDE && line.key !in revealed) {
+            // A hidden message that the user did not open gives no content.
+            buildList {
+                if (chat.isGroup && (ownRole ?: FfiRole.MEMBER) >= FfiRole.MODERATOR) {
+                    add(RowEntry("eye", "Show for everyone") { Core.moderate(line.handle, MOD_UNHIDE) })
+                    add(RowEntry("ban", "Remove for everyone") { removing = line })
+                }
+                add(RowEntry("trash-can", "Delete") { deleting = line })
+            }
         } else {
             buildList {
                 add(
@@ -249,6 +274,23 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                 } else if (file.state.toInt() == FILE_READY || line.info.outgoing) {
                     // IMP-045: the user saves one file.
                     add(RowEntry("download", "Save to device") { save(line) })
+                }
+                // GRP-085: a hide is the first act of a moderator, and a
+                // remove asks again (GRP-086).
+                if (chat.isGroup && (ownRole ?: FfiRole.MEMBER) >= FfiRole.MODERATOR) {
+                    if (line.info.moderation == MOD_HIDE) {
+                        add(RowEntry("eye", "Show for everyone") { Core.moderate(line.handle, MOD_UNHIDE) })
+                    } else {
+                        add(
+                            RowEntry(
+                                "eye",
+                                "Hide for everyone",
+                                "This takes the message out of the view of each member. A member keeps the " +
+                                    "message on their device, and a later change puts it back.",
+                            ) { Core.moderate(line.handle, MOD_HIDE) },
+                        )
+                    }
+                    add(RowEntry("ban", "Remove for everyone") { removing = line })
                 }
                 add(RowEntry("trash-can", "Delete") { deleting = line })
             }
@@ -284,6 +326,16 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
             listOf(RowEntry("paper-plane", "Send") { Core.confirmSend(pending) }),
             note = notes.joinToString(" "),
             onDismiss = { Core.cancelSend() },
+        )
+    }
+    removing?.let { line ->
+        ActionSheet(
+            "Remove this message?",
+            listOf(RowEntry("ban", "Remove for everyone") { Core.moderate(line.handle, MOD_REMOVE) }),
+            // GRP-087: a remove is not reversible, and the sheet says so.
+            note = "This deletes the message on the device of each member. You cannot undo this. " +
+                "Each member sees that you removed a message.",
+            onDismiss = { removing = null },
         )
     }
     deleting?.let { line ->
@@ -358,6 +410,10 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                     DayLabel(line.info.storedAtMs.toLong())
                 }
                 if (!line.info.outgoing && line.info.storedAtMs == newFrom) NewLabel()
+                // GRP-089: each moderation epoch shows at its time.
+                if (index == 0) {
+                    for (note in modNotes.filter { it.atMs < line.info.storedAtMs }) ModLine(note)
+                }
                 // DEV-207: a timer change is a row of the conversation.
                 if (line.info.timer != null) {
                     TimerLine(line, chat)
@@ -370,6 +426,8 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                     // the message that it answers.
                     onQuote = when {
                         line.info.deleted -> null
+                        // A tap opens a hidden message on this device alone.
+                        line.info.moderation == MOD_HIDE && line.key !in revealed -> ({ revealed.add(line.key) })
                         // IMP-167: a tap fetches a file that waits above the
                         // limit, and a file that failed.
                         // ATT-050: an expired file has nothing to fetch.
@@ -387,10 +445,17 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                     onLongPress = { chosen = line },
                     // A placeholder has no content to answer.
                     onReply = if (line.info.deleted) null else ({ answered = line }),
+                    isRevealed = line.key in revealed,
                 )
                 // The contact saw each message up to this one. The mark
                 // sits under it and under no other, as a read marker does.
                 if (index == readUpTo) ReadMark(chat)
+                val next = lines.getOrNull(index + 1)
+                for (note in modNotes) {
+                    if (note.atMs >= line.info.storedAtMs && (next == null || note.atMs < next.info.storedAtMs)) {
+                        ModLine(note)
+                    }
+                }
             }
         }
         notice?.let {
@@ -659,6 +724,7 @@ private fun Bubble(
     onQuote: (() -> Unit)?,
     onLongPress: () -> Unit,
     onReply: (() -> Unit)?,
+    isRevealed: Boolean = false,
 ) {
     val isOutgoing = line.info.outgoing
     // A slide to the right answers the message. The bubble follows the
@@ -731,7 +797,7 @@ private fun Bubble(
                     onLongClick = onLongPress,
                     // The options of a poll take their own press.
                     isOver = line.poll == null,
-                ) { BubbleContent(line, chat) }
+                ) { BubbleContent(line, chat, isRevealed) }
                 if (line.reactions.isNotEmpty()) ReactionPills(line)
             }
         }
@@ -801,8 +867,11 @@ private val SLIDE_REACH = 72.dp
 private const val SLIDE_POINT = 0.8f
 
 @Composable
-private fun BubbleContent(line: Line, chat: Chat) {
+private fun BubbleContent(line: Line, chat: Chat, isRevealed: Boolean = false) {
     val isOutgoing = line.info.outgoing
+    // Part 11 §11.9.6: a hidden message shows its placeholder until a tap.
+    val isHidden = line.info.moderation == MOD_HIDE && !isRevealed
+    val isGone = line.info.deleted || isHidden
     // A photo and a video fill the bubble to a thin rim, as each messenger
     // shows one. A file sits in a bubble as a text does.
     val shownClass = line.info.file?.mimeClass
@@ -816,14 +885,29 @@ private fun BubbleContent(line: Line, chat: Chat) {
             .padding(horizontal = if (isPhoto) 4.dp else 14.dp, vertical = if (isPhoto) 4.dp else 10.dp),
         horizontalAlignment = Alignment.End,
     ) {
-        if (line.info.deleted) {
+        if (isHidden) {
+            Row(Modifier.align(Alignment.Start), verticalAlignment = Alignment.CenterVertically) {
+                FaIcon("eye", size = 13.dp, tint = Palette.TextSecondary)
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "${roleWord(line.info.moderatorRole)} hid this message",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontStyle = FontStyle.Italic,
+                    color = Palette.TextSecondary,
+                )
+            }
+        } else if (line.info.deleted) {
             // The placeholder of Part 7 §7.5.6. It names the party only
             // where this device held the message (DEV-102, DEV-103).
             Row(Modifier.align(Alignment.Start), verticalAlignment = Alignment.CenterVertically) {
                 FaIcon("ban", size = 13.dp, tint = Palette.TextSecondary)
                 Spacer(Modifier.width(8.dp))
                 Text(
-                    if (isOutgoing) "You deleted this message" else "This message was deleted",
+                    when {
+                        line.info.moderation == MOD_REMOVE -> "${roleWord(line.info.moderatorRole)} removed this message"
+                        isOutgoing -> "You deleted this message"
+                        else -> "This message was deleted"
+                    },
                     style = MaterialTheme.typography.bodyMedium,
                     fontStyle = FontStyle.Italic,
                     color = Palette.TextSecondary,
@@ -839,7 +923,7 @@ private fun BubbleContent(line: Line, chat: Chat) {
         }
         // The text starts at the left edge, and the time sits at the right.
         val file = line.info.file
-        if (!line.info.deleted && file != null) {
+        if (!isGone && file != null) {
             when (file.mimeClass) {
                 CLASS_IMAGE -> PhotoTile(line, file, Modifier.align(Alignment.Start))
                 CLASS_VIDEO -> VideoTile(line, file, Modifier.align(Alignment.Start))
@@ -858,9 +942,9 @@ private fun BubbleContent(line: Line, chat: Chat) {
                         .padding(horizontal = if (isPhoto) 10.dp else 0.dp, vertical = 2.dp),
                 )
             }
-        } else if (!line.info.deleted && line.poll != null) {
+        } else if (!isGone && line.poll != null) {
             PollContent(line, line.poll, Modifier.align(Alignment.Start))
-        } else if (!line.info.deleted) {
+        } else if (!isGone) {
             // A mention of this member in a group (Part 11 §11.11).
             if (line.info.mentionsMe) {
                 Text(
