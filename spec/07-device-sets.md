@@ -1729,6 +1729,23 @@ A full identity reset does not change a group roster key by derivation. Part
 hold a device of the user. **[DEV-263]** A full identity reset MUST also start
 the group re-key of Part 11 §11.12 in each group of the user.
 
+**The storage seed stays.** The first `RootIdentity` of a device also gives
+`K_store`, which the passphrase wraps, and `K_set`, which names each stored
+message by `msg_ref`. **[DEV-305]** A full identity reset MUST keep that seed
+as the storage seed, and it MUST keep `K_store` and `K_set`. **[DEV-306]** The
+new `RootIdentity` MUST give each pairwise identity and each key of discovery
+of Part 9 after the reset. **[DEV-307]** A device set of more than one device
+MUST remove each other device under §7.7 before the reset.
+
+> *Cause.* A reply holds its target as a `msg_ref` alone, and a new `K_set`
+> would name each stored message by another value. No party could map a stored
+> reference to the new one, thus a new `K_set` would strand each reply, edit,
+> and deletion of the history. **The residual.** `K_set` blinds the subjects of
+> §7.3.1, and an attacker that held the root holds `K_set`. §7.3.1 states that
+> the blinding does not protect a seized device, and the reset gives no more.
+> A set of one device takes the new roster of `DEV-173` with no transfer of
+> the new root to a device that could be in hostile hands.
+
 ## 7.8 Limits
 
 | Parameter | Value |

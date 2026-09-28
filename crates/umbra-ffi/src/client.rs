@@ -26,6 +26,7 @@ mod notify;
 mod sync;
 mod moderation;
 mod polls;
+mod reset;
 mod roster_notes;
 mod timers;
 mod tokens;
@@ -47,6 +48,7 @@ pub use sync::SyncSend;
 pub use moderation::{ModNote, MOD_HIDE, MOD_REMOVE, MOD_UNHIDE};
 pub use key_changes::PendingKeyChange;
 pub use polls::PollView;
+pub use reset::ResetSummary;
 pub use roster_notes::{
     RosterNote, NOTE_EVICTED, NOTE_FORK, NOTE_JOINED, NOTE_LEFT, NOTE_NOBODY, NOTE_ROLE,
 };
@@ -2573,6 +2575,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
     /// The root identity of the device, for the network runtime.
     pub fn root_identity(&self) -> Result<RootIdentity, Error> {
+        // Part 7 §7.7.1: a reset gives an identity root of its own.
+        if let Some(seed) = self.identity_seed()? {
+            return Ok(RootIdentity::new(Secret::new(seed)));
+        }
         let store = &self.open_ref()?.store;
         let row = store.row_id(TableId::LOCAL_IDENTITY, ROOT_KEY);
         let seed = Zeroizing::new(
@@ -3101,6 +3107,7 @@ fn is_request(plain: &[u8]) -> Result<bool, Error> {
         AppKind::Edit
             | AppKind::Reaction
             | AppKind::PollVote
+            | AppKind::KeyChange
             | AppKind::GroupControl
             | AppKind::KeyRequest
     ) || tombstone_of(&parsed)? == Some(Tombstone::Request))

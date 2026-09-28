@@ -3191,6 +3191,61 @@ mod tests {
     }
 
     #[test]
+    fn a_reset_sends_each_contact_a_notice_that_the_contact_accepts() {
+        use umbra_core::session::node::StateChange;
+        use umbra_wire::app::{AppKind, AppMessage, Channel};
+
+        let mut rng = Rng(101);
+        let mut alice = new_client(&mut rng);
+        let mut bob = new_client(&mut rng);
+        let at_alice = ContactId([0x61; 32]);
+        let at_bob = ContactId([0x62; 32]);
+        let store = |client: &mut Client<MemoryBackend, Element>, contact: ContactId, salt: [u8; 16], peer: [u8; 32], rng: &mut Rng| {
+            let state = [&[0x01][..], &salt, &peer, &[0; 8]].concat();
+            let change = StateChange::Contact {
+                contact,
+                state: zeroize::Zeroizing::new(state),
+            };
+            client.commit_network(&[change], &[], 1_000_000, rng).unwrap();
+            client.conversation_for(&contact.0).unwrap()
+        };
+        let salt = [5; 16];
+        let old = alice.root_identity().unwrap().pairwise_identity(&salt).x25519_public();
+        let with_bob = store(&mut alice, at_alice, salt, [7; 32], &mut rng);
+        let with_alice = store(&mut bob, at_bob, [9; 16], old, &mut rng);
+        let mut draft = alice.new_draft(with_bob);
+        draft.set_text(&units("before the reset")).unwrap();
+        let kept = alice.send_draft(draft, 1_001_000, &mut rng).unwrap();
+        alice.take_outgoing().unwrap();
+
+        let now = 2_000_000u64;
+        let summary = alice.reset_identity(now * 1_000, &mut rng).unwrap();
+        assert_eq!((summary.contacts, summary.groups), (1, 0));
+        let new = alice.root_identity().unwrap().pairwise_identity(&salt).x25519_public();
+        assert_ne!(new, old);
+        // K_set stays, thus each stored message keeps its place.
+        assert_eq!(alice.messages(with_bob).unwrap(), [kept]);
+        assert_eq!(alice.info(&kept).unwrap().delivery, Delivery::Queued);
+        // IDN-063: the notice waits for its delay, and then it goes on the
+        // session that exists. No view shows it.
+        assert_eq!(alice.send_due_notices(now, &mut rng).unwrap(), 0);
+        assert_eq!(alice.send_due_notices(now + 10_000_000, &mut rng).unwrap(), 1);
+        let notice = alice.take_outgoing().unwrap();
+        assert_eq!(notice.conversation, with_bob);
+        assert_eq!(AppMessage::parse(&notice.app, Channel::Pairwise).unwrap().kind, AppKind::KeyChange);
+        assert_eq!(alice.messages(with_bob).unwrap(), [kept]);
+
+        // The contact holds the notice until its user accepts it.
+        deliver(&mut bob, &at_bob, &notice.app, (now + 20) * 1_000, &mut rng);
+        let before = bob.safety_number(with_alice).unwrap();
+        let pending = bob.key_change(with_alice).unwrap().unwrap();
+        assert_ne!(pending.new_safety_number, before);
+        let (_, key) = bob.accept_key_change(with_alice, &mut rng).unwrap();
+        assert_eq!(key, new);
+        assert_eq!(bob.safety_number(with_alice).unwrap(), pending.new_safety_number);
+    }
+
+    #[test]
     fn a_failed_message_goes_again_at_the_action_of_the_user() {
         let mut rng = Rng(97);
         let mut client = new_client(&mut rng);

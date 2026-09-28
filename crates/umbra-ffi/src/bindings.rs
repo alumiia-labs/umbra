@@ -805,6 +805,15 @@ pub struct MsgInfo {
     pub sender: Option<u16>,
 }
 
+/// What a reset started.
+#[derive(uniffi::Record)]
+pub struct ResetCounts {
+    /// The contacts that take a key-change notice.
+    pub contacts: u32,
+    /// The groups that take a re-key.
+    pub groups: u32,
+}
+
 /// A key-change notice that waits for the answer of the user (Part 4
 /// §4.5.1).
 #[derive(uniffi::Record)]
@@ -4336,6 +4345,21 @@ impl Handle {
         Ok(())
     }
 
+    /// Resets the identity (Part 7 §7.7.1): a new identity root, a
+    /// key-change notice to each contact at its own delay, a new device
+    /// roster, and the re-key of each group. The network runs again under
+    /// the new root. A set of more than one device takes none.
+    pub fn reset_identity(self: Arc<Self>) -> Result<ResetCounts, FfiError> {
+        let summary = locked(&self.inner)
+            .client
+            .reset_identity(unix_now_ms(), &mut OsRng)?;
+        self.changed.notify_all();
+        Ok(ResetCounts {
+            contacts: summary.contacts,
+            groups: summary.groups,
+        })
+    }
+
     /// Sends a failed message again, at the action of the user (`IMP-075`).
     pub fn send_again(&self, message: Arc<MsgHandle>) -> Result<(), FfiError> {
         let mut inner = locked(&self.inner);
@@ -4940,6 +4964,13 @@ impl Handle {
         inner.pump_sync_resend(now);
         // DEV-210: a timed message goes at its deadline, on each device.
         let _ = inner.client.sweep_timed(now);
+        // IDN-063: each key-change notice of a reset goes at its delay.
+        if inner.client.send_due_notices(now, &mut OsRng).unwrap_or(0) > 0 {
+            let Inner { client, bridge, .. } = &mut *inner;
+            if let Some(running) = bridge {
+                let _ = running.flush(client, &mut OsRng);
+            }
+        }
         let is_due = inner.bridge.is_some()
             && now.saturating_sub(inner.challenges_at) >= umbra_core::abuse::POW_CHALLENGE_PERIOD;
         drop(inner);

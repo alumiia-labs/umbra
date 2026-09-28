@@ -59,6 +59,7 @@ sealed interface Screen {
     data object Connection : Screen
     data object AutoLock : Screen
     data object Notifications : Screen
+    data object ResetIdentity : Screen
     data object AutoDownload : Screen
     data object ChangePassphrase : Screen
     data object RecoveryCode : Screen
@@ -197,6 +198,7 @@ private fun OpenApp() {
             Screen.Connection -> ConnectionScreen(pop)
             Screen.AutoLock -> AutoLockScreen(pop)
             Screen.Notifications -> NotificationsScreen(pop)
+            Screen.ResetIdentity -> ResetIdentityScreen(pop)
             Screen.AutoDownload -> AutoDownloadScreen(pop)
             Screen.ChangePassphrase -> ChangePassphraseScreen(pop)
             Screen.RecoveryCode -> RecoveryCodeScreen(pop)
@@ -573,6 +575,9 @@ private fun SettingsTab(push: (Screen) -> Unit) {
             SettingRow("key", "Recovery code", backup) { push(Screen.RecoveryCode) }
         }
         SettingRow("laptop", "Linked devices", devicesLabel(Core.devices.size)) { push(Screen.Devices) }
+        if (Core.ownsChannels) {
+            SettingRow("rotate", "Reset identity", "For a device in hostile hands") { push(Screen.ResetIdentity) }
+        }
         LaunchedEffect(Unit) { Core.readDevices() }
     }
 }

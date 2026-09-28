@@ -187,7 +187,9 @@ object Core {
         private set
 
     private val main = Handler(Looper.getMainLooper())
-    private val worker = Executors.newSingleThreadExecutor { Thread(it, "umbra-core") }
+    // The keys of ML-DSA and ML-KEM take a deep stack, as the tokio runtime
+    // of the network gives its own threads.
+    private val worker = Executors.newSingleThreadExecutor { Thread(null, it, "umbra-core", 16L shl 20) }
     private var handle: Handle? = null
     private var draining = false
 
@@ -352,10 +354,10 @@ object Core {
      * proofs of work of the token upkeep run on it, at a priority below the view.
      */
     private val directoryWorker = Executors.newSingleThreadExecutor { work ->
-        Thread({
+        Thread(null, {
             Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND)
             work.run()
-        }, "umbra-directory")
+        }, "umbra-directory", 16L shl 20)
     }
     private const val MAINTAIN_MS = 5 * 60_000L
     private var maintains = false
@@ -1190,6 +1192,32 @@ object Core {
                 "The passphrase did not change: ${other.javaClass.simpleName}."
             }
             main.post { onResult(failure) }
+        }
+    }
+
+    /**
+     * Resets the identity (Part 7 §7.7.1). The network runs again under the
+     * new root, and the public links and the handle of the old root end.
+     */
+    fun resetIdentity(context: Context, onDone: (String?) -> Unit) {
+        val app = context.applicationContext
+        call { client ->
+            val result = try {
+                val counts = client.resetIdentity()
+                val contacts = if (counts.contacts == 1u) "1 contact gets" else "${counts.contacts} contacts get"
+                val groups = if (counts.groups == 1u) "1 group moves" else "${counts.groups} groups move"
+                "$contacts your new key. $groups you to new keys."
+            } catch (busy: FfiException.Busy) {
+                main.post { onDone(null) }
+                return@call
+            }
+            client.disconnect()
+            main.post {
+                connect(app, force = true)
+                for (link in publicLinks.toList()) retirePublicLink(link)
+                releaseHandle()
+                onDone(result)
+            }
         }
     }
 

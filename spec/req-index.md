@@ -70,7 +70,7 @@ each column when a crate implements the requirement and a test covers it.
 | `IDN` | 129 | 44 | 1 | 0 | 5 | **179** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
 | `WIR` | 398 | 85 | 0 | 0 | 7 | **490** |
-| `DEV` | 197 | 90 | 0 | 0 | 7 | **294** |
+| `DEV` | 200 | 90 | 0 | 0 | 7 | **297** |
 | `NTF` | 74 | 28 | 0 | 0 | 3 | **105** |
 | `DIS` | 130 | 34 | 0 | 0 | 3 | **167** |
 | `REL` | 159 | 33 | 1 | 0 | 2 | **195** |
@@ -79,7 +79,7 @@ each column when a crate implements the requirement and a test covers it.
 | `ABU` | 71 | 30 | 1 | 0 | 0 | **102** |
 | `IMP` | 119 | 41 | 0 | 0 | 2 | **162** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2046 | 621 | 7 | 0 | 53 | **2727** |
+| **All** | 2049 | 621 | 7 | 0 | 53 | **2730** |
 
 ## SCP — Scope and Conventions
 
@@ -1608,6 +1608,9 @@ Source: `spec/07-device-sets.md`
 | `DEV-302` | §7.5.3 | MUST NOT | An existing device | An existing device MUST NOT start a second link while the sync channel of the last one has not opened, since the new device of that link takes its handshake then. |  |  |
 | `DEV-303` | §7.5.3 | MUST | A device that does not own the channels | A device that does not own the channels MUST keep an epoch-key record of the next epoch that does not install, and it MUST try it again after each roster object of the member that it applies. |  |  |
 | `DEV-304` | §7.5.3 | MUST | The device that owns the channels | The device that owns the channels MUST publish the delivery state of each message that it sent when that state becomes delivered, read, or failed. |  |  |
+| `DEV-305` | §7.7.1 | MUST | A full identity reset | A full identity reset MUST keep that seed as the storage seed, and it MUST keep `K_store` and `K_set`. |  |  |
+| `DEV-306` | §7.7.1 | MUST | The new `RootIdentity` | The new `RootIdentity` MUST give each pairwise identity and each key of discovery of Part 9 after the reset. |  |  |
+| `DEV-307` | §7.7.1 | MUST | A device set of more than one device | A device set of more than one device MUST remove each other device under §7.7 before the reset. |  |  |
 
 ## NTF — Notifications
 

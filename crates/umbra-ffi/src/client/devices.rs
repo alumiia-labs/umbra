@@ -142,6 +142,46 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         self.put_roster(&bytes, rng)
     }
 
+    /// A new identity of this device and a new roster epoch 0 with it alone,
+    /// at a full identity reset (Part 7 `DEV-172`, `DEV-173`). The old
+    /// roster chain has no authority over the new one.
+    pub(super) fn new_device_set<R: CryptoRng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+    ) -> Result<(DeviceIdentity, Vec<u8>), Error> {
+        let label = match self.device_identity()? {
+            Some(held) => {
+                let end = held.label.iter().position(|b| *b == 0).unwrap_or(held.label.len());
+                String::from_utf8_lossy(held.label.get(..end).unwrap_or_default()).into_owned()
+            }
+            None => String::new(),
+        };
+        let identity = DeviceIdentity::generate(&label, rng);
+        let keys = EntryKeys::of(&identity);
+        let genesis = Roster {
+            epoch: 0,
+            devices: vec![keys.entry(identity.device_id, identity.label, 0, SyncScope::Full)?],
+            revoked: Vec::new(),
+            claims: Vec::new(),
+            prev_hash: [0; 32],
+            signer_id: identity.device_id,
+            sig: &[0; umbra_crypto::sign::SIGNATURE_LEN],
+        };
+        let bytes = sign_roster(&genesis, &identity.roster_key(), rng)?;
+        Ok((identity, bytes))
+    }
+
+    /// Keeps a device set that [`Client::new_device_set`] made.
+    pub(super) fn keep_device_set<R: CryptoRng + ?Sized>(
+        &mut self,
+        identity: &DeviceIdentity,
+        roster: &[u8],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        self.put_device_identity(identity, true, rng)?;
+        self.put_roster(roster, rng)
+    }
+
     /// Signs the roster epoch that adds the device of `hello`, and gives
     /// its encoding (`DEV-166`, `DEV-176`). The store keeps it at
     /// [`Client::commit_roster`], when the sync channel of the device opens.

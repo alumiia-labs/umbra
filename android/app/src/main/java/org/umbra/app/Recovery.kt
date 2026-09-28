@@ -215,3 +215,59 @@ fun RestoreForm(onCancel: () -> Unit) {
         SecondaryButton("Back", onClick = onCancel)
     }
 }
+
+/**
+ * The full identity reset of Part 7 §7.7.1. It is visible and slow on
+ * purpose: the screen states what changes, and a second sheet asks again.
+ */
+@Composable
+fun ResetIdentityScreen(onBack: () -> Unit) {
+    val context = LocalContext.current
+    var isAsking by remember { mutableStateOf(false) }
+    var result by remember { mutableStateOf<String?>(null) }
+    var fault by remember { mutableStateOf<String?>(null) }
+    Column(Modifier.fillMaxSize()) {
+        BackBar("Reset identity", onBack = onBack)
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
+            Text("UMBRA makes a new identity for this device.")
+            Spacer(Modifier.height(12.dp))
+            for (line in listOf(
+                "Each contact gets your new key, and cannot write to you until they accept it.",
+                "Each group moves you to new keys.",
+                "Your public links and your handle end.",
+                "Your messages and your contacts stay.",
+            )) {
+                Text("· $line", color = Palette.TextSecondary, modifier = Modifier.padding(bottom = 6.dp))
+            }
+            Spacer(Modifier.height(16.dp))
+            result?.let {
+                Note(it)
+                return@Column
+            }
+            fault?.let {
+                Note(it, isError = true)
+                Spacer(Modifier.height(12.dp))
+            }
+            if (Core.devices.size > 1) {
+                // DEV-307: the other devices leave the set first.
+                Note("Remove your other devices first.")
+            } else {
+                DangerButton("Reset identity") { isAsking = true }
+            }
+        }
+    }
+    if (isAsking) {
+        ActionSheet(
+            "Reset your identity?",
+            listOf(
+                RowEntry("rotate", "Reset identity") {
+                    Core.resetIdentity(context) { done ->
+                        if (done == null) fault = "Remove your other devices first." else result = done
+                    }
+                },
+            ),
+            note = "You cannot undo this.",
+            onDismiss = { isAsking = false },
+        )
+    }
+}
