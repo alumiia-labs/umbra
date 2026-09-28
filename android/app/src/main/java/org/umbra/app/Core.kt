@@ -265,8 +265,8 @@ object Core {
             // screen, and the platform permits the start.
             DeliveryService.start(app)
             refreshJoinFlow()
-            Push.opened(app)
-            Poll.schedule(app)
+            // Part 8 §8.3: the carriers of the mode of this device.
+            Modes.apply(app)
         }
     }
 
@@ -914,9 +914,22 @@ object Core {
                 // DEV-223: the device woke on its mode, and the setting of the
                 // conversation decides what it shows.
                 if (!isVisible) {
+                    val preview = Modes.preview(app)
+                    val title = chats.firstOrNull { it.conversation.id.contentEquals(event.conversation) }?.title
                     call { client ->
                         if (client.shouldAlert(event.message)) {
-                            main.post { Notifier.message(app, Conversation(event.conversation)) }
+                            // NTF-083: the sender and the text only when the
+                            // user turned the preview on.
+                            val text = if (preview) {
+                                val sink = CharSink()
+                                runCatching { client.msgRender(event.message, sink) }
+                                String(sink.chars)
+                            } else {
+                                null
+                            }
+                            main.post {
+                                Notifier.message(app, Conversation(event.conversation), title.takeIf { preview }, text)
+                            }
                         }
                     }
                 }
@@ -1075,6 +1088,9 @@ object Core {
 
     /** The FCM token of this device goes to the core (Part 8 §8.2.7). */
     fun setFcmToken(token: String) = call { it.setFcmToken(token) }
+
+    /** Private mode and Off hold no token, thus the NDR holds no handle. */
+    fun clearPushToken() = call { it.setFcmToken(null) }
 
     /** A push came: an open client with no run starts one and drains. */
     fun wake(context: Context) {

@@ -16,7 +16,7 @@ import java.util.concurrent.TimeUnit
  * queue, thus the poll finds nothing to do then.
  */
 object Poll {
-    private const val NAME = "poll"
+    const val NAME = "poll"
 
     fun schedule(context: Context) {
         val request = PeriodicWorkRequestBuilder<PollWorker>(15, TimeUnit.MINUTES).build()

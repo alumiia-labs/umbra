@@ -26,6 +26,8 @@ class MainActivity : ComponentActivity() {
         val clear = Color.TRANSPARENT
         enableEdgeToEdge(SystemBarStyle.light(clear, clear), SystemBarStyle.light(clear, clear))
         Notifier.makeChannels(this)
+        // NTF-052: a network change draws a new phase of the Private clock.
+        Modes.watchNetwork(this)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             // With no permission the app shows no alert, and it takes each
             // record all the same.

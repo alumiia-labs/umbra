@@ -22,7 +22,8 @@ object Push {
 
     /** The client opened: it takes the token of this device. */
     fun opened(context: Context) {
-        if (!isAvailable(context)) return
+        // Part 8 §8.3: Private mode and Off hold no token.
+        if (!isAvailable(context) || Modes.mode(context) != NotifyMode.Instant) return
         val preferences = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
         preferences.getString(WAITING_TOKEN, null)?.let { waiting ->
             Core.setFcmToken(waiting)
@@ -33,6 +34,7 @@ object Push {
 
     /** Firebase gave a new token. A locked client takes it at the unlock. */
     fun tokenChanged(context: Context, token: String) {
+        if (Modes.mode(context) != NotifyMode.Instant) return
         if (Core.isOpen()) {
             Core.setFcmToken(token)
         } else {

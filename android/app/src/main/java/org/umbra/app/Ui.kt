@@ -58,6 +58,7 @@ sealed interface Screen {
     data object AppLock : Screen
     data object Connection : Screen
     data object AutoLock : Screen
+    data object Notifications : Screen
     data object AutoDownload : Screen
     data object ChangePassphrase : Screen
     data object RecoveryCode : Screen
@@ -195,6 +196,7 @@ private fun OpenApp() {
             Screen.AppLock -> AppLockScreen(pop, push)
             Screen.Connection -> ConnectionScreen(pop)
             Screen.AutoLock -> AutoLockScreen(pop)
+            Screen.Notifications -> NotificationsScreen(pop)
             Screen.AutoDownload -> AutoDownloadScreen(pop)
             Screen.ChangePassphrase -> ChangePassphraseScreen(pop)
             Screen.RecoveryCode -> RecoveryCodeScreen(pop)
@@ -557,6 +559,7 @@ private fun SettingsTab(push: (Screen) -> Unit) {
         // Mockup 105: this row leads to the settings of the lock. The lock
         // itself is the icon of the bar.
         SettingRow("lock", "App lock", "Passphrase and auto-lock") { push(Screen.AppLock) }
+        SettingRow("bell", "Notifications", Modes.mode(LocalContext.current).label) { push(Screen.Notifications) }
         SettingRow("download", "Automatic download", autoDownloadLabel(Core.autoDownloadLimit, Core.autoDownloadWifiOnly)) {
             push(Screen.AutoDownload)
         }

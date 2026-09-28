@@ -63,11 +63,12 @@ object Notifier {
             .build()
 
     /** One alert for each conversation. A later record updates that alert. */
-    fun message(context: Context, conversation: Conversation) {
+    fun message(context: Context, conversation: Conversation, title: String? = null, text: String? = null) {
         if (!mayPost(context)) return
         val alert = Notification.Builder(context, MESSAGE_CHANNEL)
             .setSmallIcon(R.drawable.ic_stat_umbra)
-            .setContentTitle("New message")
+            .setContentTitle(title ?: "New message")
+            .apply { if (!text.isNullOrEmpty()) setContentText(text) }
             .setGroup(conversation.label)
             .setAutoCancel(true)
             .setContentIntent(openApp(context))

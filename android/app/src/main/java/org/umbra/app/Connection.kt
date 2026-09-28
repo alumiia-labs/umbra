@@ -153,10 +153,13 @@ fun ConnectionScreen(onBack: () -> Unit) {
                 FactRow(
                     "bell",
                     "Push",
-                    if (it.carrier.isEmpty()) {
-                        "Polling"
-                    } else {
-                        "${it.carrier} · ${it.registeredGroups} groups at the NDR · ${it.boundQueues} queues bound"
+                    when {
+                        // Part 8 §8.3: the mode decides the carrier.
+                        Modes.mode(context) == NotifyMode.Private -> "Private · fixed clock, no token"
+                        Modes.mode(context) == NotifyMode.Off -> "Off · no token"
+                        it.carrier.isEmpty() -> "Polling"
+                        else ->
+                            "${it.carrier} · ${it.registeredGroups} groups at the NDR · ${it.boundQueues} queues bound"
                     },
                 )
                 HorizontalDivider(color = Palette.Divider)
