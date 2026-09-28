@@ -38,6 +38,12 @@ cargo build -p umbra-ffi --features runtime --bin umbra-authority
 # Each relay keeps its queues in a file here, thus a restart of this script
 # ends no contact. Delete the directory for an empty network.
 mkdir -p target/devnet/conf
+# A run that ended with no trap, as a killed shell does, leaves its signing
+# loop, which then signs over the manifest of this run with its own
+# settings. The loop of the last run stops here.
+if [ -f target/devnet/signer.pid ]; then
+    kill "$(cat target/devnet/signer.pid)" 2>/dev/null || true
+fi
 
 # The configuration of each relay, with the address of the host.
 host="${UMBRA_DEVNET_HOST:-10.0.2.2}"
@@ -118,4 +124,5 @@ pids+=($!)
     done
 ) &
 pids+=($!)
+echo $! > target/devnet/signer.pid
 wait
