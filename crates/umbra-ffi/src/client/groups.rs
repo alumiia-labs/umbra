@@ -2100,6 +2100,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         batch.put(OUTBOX, row, None, &super::outbox_row(), rng)?;
         batch.commit()?;
         let message = MsgRef(row);
+        // DEV-245: the period of a record of this device runs from its send,
+        // and the sync copy carries it.
+        let kind = AppMessage::parse(app, umbra_wire::app::Channel::Group)?.kind;
+        self.stamp_deadline(conversation, message, kind, now_ms / 1_000, rng)?;
         self.queue_group_post(conversation, Some(message), app, now_ms, rng)?;
         Ok(message)
     }
@@ -2177,6 +2181,53 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// peer handed to it (GRP-340). Another device applies a roster object
     /// of the member, and keeps each other record as one of the user.
     pub(super) fn apply_synced_group<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        app: &[u8],
+        expires_in: u32,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let parsed = AppMessage::parse(app, umbra_wire::app::Channel::Group)?;
+        // DEV-248: a device of an admin sets the timer, and no other.
+        let timer = if parsed.kind == AppKind::ConversationTimer {
+            let group = self.group_of(conversation)?;
+            if group.own_role().is_none_or(|role| role < Role::Admin) {
+                return Ok(());
+            }
+            let Some(seconds) = super::timers::timer_body(parsed.body) else {
+                return Ok(());
+            };
+            Some(seconds)
+        } else {
+            None
+        };
+        let open = self.open_ref()?;
+        let reference = super::msg_ref(&open.device_set_key, &parsed.msg_id);
+        let natural = [conversation.0.as_slice(), &reference].concat();
+        let message = MsgRef(open.store.row_id(umbra_core::store::record::TableId::MESSAGE, &natural));
+        // A second copy moves no timer and no deadline.
+        if open
+            .store
+            .get(umbra_core::store::record::TableId::MESSAGE, &message.0)?
+            .is_some()
+        {
+            return Ok(());
+        }
+        self.store_synced_group(conversation, app, now_ms, rng)?;
+        if let Some(seconds) = timer {
+            self.put_timer(conversation, seconds, now_ms, true, rng)?;
+        } else if expires_in > 0 && super::timers::is_timed_kind(parsed.kind) {
+            // DEV-244: the sync copy carries the deadline, and the owner of
+            // the channels takes it from there (DEV-245).
+            let deadline = umbra_core::devset::edits::Deadline::from_sync(now_ms / 1_000, expires_in);
+            self.put_deadline(conversation, message, deadline, rng)?;
+        }
+        Ok(())
+    }
+
+    /// The store and the post of [`Client::apply_synced_group`].
+    fn store_synced_group<R: CryptoRng + ?Sized>(
         &mut self,
         conversation: ConversationId,
         app: &[u8],
@@ -3705,7 +3756,26 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         self.count_discarded(conversation, rng)?;
                         continue;
                     }
+                    // DEV-249: a timer record of a member below admin goes.
+                    let timer = if parsed.kind == AppKind::ConversationTimer {
+                        let is_admin = group
+                            .roster()
+                            .member(sender)
+                            .is_some_and(|member| member.role >= Role::Admin);
+                        match super::timers::timer_body(parsed.body) {
+                            Some(seconds) if is_admin => Some(seconds),
+                            _ => continue,
+                        }
+                    } else {
+                        None
+                    };
                     let stored = self.store_group_message(conversation, &app, now_ms, rng)?;
+                    if let Some(message) = stored {
+                        match timer {
+                            Some(seconds) => self.put_timer(conversation, seconds, now_ms, false, rng)?,
+                            None => self.stamp_deadline(conversation, message, parsed.kind, now, rng)?,
+                        }
+                    }
                     first = first.or(stored);
                 }
                 Outcome::Held | Outcome::ClockSuspect | Outcome::Duplicate => {}

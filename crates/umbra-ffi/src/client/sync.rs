@@ -19,7 +19,7 @@ use umbra_core::{
         engine::{SyncEngine, Taken},
         roster::{ClaimScope, OwnerClaim, Roster},
         sync::{
-            group_subject, IdentityEntry, Origin, AUTHOR_PEER, AUTHOR_USER, ITEM_CONTACT_NAME,
+            group_subject, restamp_expires_in, IdentityEntry, Origin, SyncedRecord, AUTHOR_PEER, AUTHOR_USER, ITEM_CONTACT_NAME,
             ITEM_DELIVERY, ITEM_GROUP_REKEY, ITEM_GROUP_STATE, ITEM_IDENTITY_ENTRY, SCOPE_GROUP,
             SCOPE_PAIRWISE,
         },
@@ -74,6 +74,8 @@ pub(super) struct Synced {
     pub from_user: bool,
     /// Whether the conversation is a private group (`DEV-296`).
     pub is_group: bool,
+    /// The remaining period of a timed record, or zero (`DEV-244`).
+    pub expires_in: u32,
 }
 
 fn counter_key(counter: u64) -> [u8; 8] {
@@ -284,8 +286,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             subject,
             author: if from_user { AUTHOR_USER } else { AUTHOR_PEER },
         };
+        // DEV-242: a timed record carries the rest of its period.
+        let expires_in = self.expires_in_of(conversation, app, now)?;
         let counter = engine.counter().saturating_add(1);
-        let published = engine.publish(app, origin, counter_ref(counter), 0, now)?;
+        let published = engine.publish(app, origin, counter_ref(counter), expires_in, now)?;
         self.put_engine(&engine, Some((published.counter, &published.body)), rng)?;
         let channels = self.peer_channels()?;
         let mut first = message;
@@ -585,7 +589,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
     /// Queues the next record of a resend, one at each call, thus a resend
     /// is no burst (`DEV-073`, `DEV-074`). The result is whether one went.
-    pub fn resend_one<R: CryptoRng + ?Sized>(&mut self, rng: &mut R) -> Result<bool, Error> {
+    pub fn resend_one<R: CryptoRng + ?Sized>(&mut self, now: u64, rng: &mut R) -> Result<bool, Error> {
         let Some(mut engine) = self.sync_engine()? else {
             return Ok(false);
         };
@@ -609,7 +613,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .unwrap_or_default();
             self.put_engine(&engine, None, rng)?;
             if let Some(body) = body {
-                self.queue_sync(channel, &body, None, rng)?;
+                if let Some(body) = self.restamped(body, now)? {
+                    self.queue_sync(channel, &body, None, rng)?;
+                }
             }
             return Ok(true);
         }
@@ -643,18 +649,23 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             // DEV-273: a record that does not name its channel changes
             // nothing, and it ends no batch.
             match engine.receive(source, &body, now) {
-                Ok(Taken::Record { origin, inner, .. }) => {
+                Ok(Taken::Record {
+                    origin,
+                    inner,
+                    expires_in,
+                }) => {
                     if let Some(conversation) = self.conversation_of_subject(&origin.subject)? {
                         out.push(Synced {
                             conversation,
                             app: inner,
                             from_user: origin.author == AUTHOR_USER,
                             is_group: origin.scope == SCOPE_GROUP,
+                            expires_in,
                         });
                     } else if origin.scope == SCOPE_GROUP {
                         // DEV-299: the state of the group is on its way on
                         // the chunk path, and its records wait for it.
-                        self.hold_group_record(&origin.subject, &inner, rng)?;
+                        self.hold_group_record(&origin.subject, &inner, expires_in, now, rng)?;
                     }
                 }
                 Ok(Taken::Acknowledged) => acked = true,
@@ -677,6 +688,65 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             self.prune_sync_sent(engine.acked_by_all())?;
         }
         Ok(out)
+    }
+
+    /// A body for a resend at `now`: a timed record carries the period that
+    /// remains then (`DEV-243`), and one whose period ended goes nowhere.
+    fn restamped(&mut self, mut body: Vec<u8>, now: u64) -> Result<Option<Vec<u8>>, Error> {
+        let (subject, inner) = match SyncedRecord::parse(&body) {
+            Ok(record) if record.context.expires_in > 0 => {
+                (record.origin.subject, Zeroizing::new(record.inner.to_vec()))
+            }
+            _ => return Ok(Some(body)),
+        };
+        let Some(conversation) = self.conversation_of_subject(&subject)? else {
+            return Ok(None);
+        };
+        let expires_in = self.expires_in_of(conversation, &inner, now)?;
+        if expires_in == 0 {
+            return Ok(None);
+        }
+        restamp_expires_in(&mut body, expires_in)?;
+        Ok(Some(body))
+    }
+
+    /// Drops the body of each timed record whose period ended, thus no
+    /// resend holds it (`DEV-211`).
+    pub(super) fn drop_sync_sent_of(&mut self, due: &[(ConversationId, MsgRef)]) -> Result<(), Error> {
+        let mut gone = Vec::new();
+        for (row, value) in self.open_ref()?.store.list(SYNC_SENT, None)? {
+            let value = Zeroizing::new(value);
+            let Some(Ok(record)) = value.get(8..).map(SyncedRecord::parse) else {
+                continue;
+            };
+            if record.context.expires_in == 0 {
+                continue;
+            }
+            let Some(conversation) = self.conversation_of_subject(&record.origin.subject)? else {
+                continue;
+            };
+            let channel = if record.origin.scope == SCOPE_GROUP {
+                umbra_wire::app::Channel::Group
+            } else {
+                umbra_wire::app::Channel::Pairwise
+            };
+            let Ok(parsed) = AppMessage::parse(record.inner, channel) else {
+                continue;
+            };
+            let open = self.open_ref()?;
+            let reference = super::msg_ref(&open.device_set_key, &parsed.msg_id);
+            let natural = [conversation.0.as_slice(), &reference].concat();
+            let message = MsgRef(open.store.row_id(TableId::MESSAGE, &natural));
+            if due.contains(&(conversation, message)) {
+                gone.push(row);
+            }
+        }
+        let open = self.open_mut()?;
+        let mut batch = open.store.begin();
+        for row in gone {
+            batch.delete(SYNC_SENT, row);
+        }
+        Ok(batch.commit()?)
     }
 
     /// Drops the body of each record that each peer acknowledged.

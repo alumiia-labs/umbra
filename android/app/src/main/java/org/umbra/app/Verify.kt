@@ -93,11 +93,13 @@ fun ContactDetailsScreen(chat: Chat, onBack: () -> Unit, onMessage: () -> Unit, 
     }
 }
 
-/** The settings of one conversation: the receipts that this device sends. */
+/** The settings of one conversation: its timer, and the receipts that this device sends. */
 @Composable
-fun ConversationSettingsScreen(chat: Chat, onBack: () -> Unit) {
+fun ConversationSettingsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
     var receipts by remember { mutableStateOf<Receipts?>(null) }
+    var timer by remember { mutableStateOf<UInt?>(null) }
     LaunchedEffect(chat.conversation) { Core.receipts(chat.conversation) { receipts = it } }
+    LaunchedEffect(chat.conversation, Core.revision) { Core.timer(chat.conversation) { timer = it.seconds } }
     val change = { next: Receipts ->
         receipts = next
         Core.setReceipts(chat.conversation, next)
@@ -105,6 +107,14 @@ fun ConversationSettingsScreen(chat: Chat, onBack: () -> Unit) {
     Column(Modifier.fillMaxSize()) {
         BackBar("Conversation settings", onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
+            timer?.let {
+                EntryRow(
+                    RowEntry("clock", "Disappearing messages", timerLabel(it)) {
+                        push(Screen.Disappearing(chat.conversation))
+                    },
+                )
+                HorizontalDivider(color = Palette.Divider)
+            }
             receipts?.let { now ->
                 ToggleRow("Send delivery receipts", now.delivery) { change(Receipts(it, now.read)) }
                 HorizontalDivider(color = Palette.Divider)

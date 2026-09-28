@@ -290,6 +290,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         &mut self,
         subject: &[u8; 32],
         app: &[u8],
+        expires_in: u32,
+        now: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
         if self.owns_channels()? {
@@ -304,7 +306,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut nonce = [0u8; 16];
         rng.fill_bytes(&mut nonce);
         let row = open.store.row_id(GROUP_RECORDS_HELD, &nonce);
-        let value = Zeroizing::new([subject.as_slice(), &order.to_be_bytes(), app].concat());
+        // DEV-244: a timed record waits with its deadline, thus the wait
+        // does not lengthen its period.
+        let at = if expires_in > 0 {
+            umbra_core::devset::edits::Deadline::from_sync(now, expires_in).at
+        } else {
+            0
+        };
+        let value = Zeroizing::new(
+            [subject.as_slice(), &order.to_be_bytes(), &at.to_be_bytes(), app].concat(),
+        );
         let mut batch = open.store.begin();
         batch.put(GROUP_RECORDS_HELD, row, None, &value, rng)?;
         Ok(batch.commit()?)
@@ -317,7 +328,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         conversation: ConversationId,
         rng: &mut R,
     ) -> Result<(), Error> {
-        let mut held: Vec<(u64, RowId, Zeroizing<Vec<u8>>)> = Vec::new();
+        let mut held: Vec<(u64, RowId, u64, Zeroizing<Vec<u8>>)> = Vec::new();
         for (row, plain) in self.open_ref()?.store.list(GROUP_RECORDS_HELD, None)? {
             let plain = Zeroizing::new(plain);
             if plain.get(..32) != Some(subject.as_slice()) {
@@ -329,18 +340,28 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     .and_then(|b| b.try_into().ok())
                     .ok_or(Error::Integrity)?,
             );
-            let app = Zeroizing::new(plain.get(40..).ok_or(Error::Integrity)?.to_vec());
-            held.push((order, row, app));
+            let at = u64::from_be_bytes(
+                plain
+                    .get(40..48)
+                    .and_then(|b| b.try_into().ok())
+                    .ok_or(Error::Integrity)?,
+            );
+            let app = Zeroizing::new(plain.get(48..).ok_or(Error::Integrity)?.to_vec());
+            held.push((order, row, at, app));
         }
-        held.sort_by_key(|(order, _, _)| *order);
+        held.sort_by_key(|(order, _, _, _)| *order);
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |elapsed| {
                 u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
             });
-        for (_, row, app) in held {
-            // A record that does not apply ends no replay.
-            let _ = self.apply_synced_group(conversation, &app, now_ms, rng);
+        for (_, row, at, app) in held {
+            // A record that does not apply ends no replay, and a timed one
+            // whose period ended goes (DEV-210).
+            let expires_in = u32::try_from(at.saturating_sub(now_ms / 1_000)).unwrap_or(u32::MAX);
+            if at == 0 || expires_in > 0 {
+                let _ = self.apply_synced_group(conversation, &app, expires_in, now_ms, rng);
+            }
             let open = self.open_mut()?;
             let mut batch = open.store.begin();
             batch.delete(GROUP_RECORDS_HELD, row);

@@ -153,6 +153,11 @@ pub struct MessageInfo {
     pub revisions: u8,
     /// The file of the message, or none for a message with no file.
     pub file: Option<client::FileInfo>,
+    /// The period that a timer record set, in seconds: the row is the mark
+    /// of a timer change (`DEV-207`).
+    pub timer: Option<u32>,
+    /// The time at which the timer erases the message, in seconds.
+    pub expires_at: Option<u64>,
 }
 
 /// The longest local name of a contact, in bytes of UTF-8.
@@ -2722,6 +2727,96 @@ mod tests {
         client
             .commit_network(&[], &[(*from, app.to_vec())], now_ms, rng)
             .unwrap();
+    }
+
+    #[test]
+    fn a_timer_times_each_later_message_and_a_sweep_erases_it() {
+        use umbra_core::{
+            identity::backup::{BackupObject, BackupRow},
+            store::record::TableId,
+        };
+        use umbra_wire::app::AppKind;
+
+        let mut rng = Rng(83);
+        let mut client = new_client(&mut rng);
+        let peer = ContactId([0x93; 32]);
+        let conversation = client.conversation_for(&peer.0).unwrap();
+        let now = 1_800_000_000u64;
+        let at = |seconds: u64| (now + seconds) * 1_000;
+
+        // DEV-204: a record before the timer keeps no deadline.
+        let before = record(AppKind::Text, [1; 16], b"before");
+        deliver(&mut client, &peer, &before, at(0), &mut rng);
+        // WIR-202: a period out of the set changes nothing.
+        let odd = record(AppKind::ConversationTimer, [2; 16], &[1, 0, 0, 0x10, 0xF1]);
+        deliver(&mut client, &peer, &odd, at(0), &mut rng);
+        assert_eq!(client.conversation_timer(conversation).unwrap(), None);
+        let hour = record(AppKind::ConversationTimer, [3; 16], &[1, 0, 0, 0x0E, 0x10]);
+        deliver(&mut client, &peer, &hour, at(1), &mut rng);
+        let setting = client.conversation_timer(conversation).unwrap().unwrap();
+        assert_eq!((setting.seconds, setting.set_at_ms, setting.by_user), (3_600, at(1), false));
+        // DEV-208: the period runs from the receive time.
+        let after = record(AppKind::Text, [4; 16], b"after");
+        deliver(&mut client, &peer, &after, at(10), &mut rng);
+        let infos: Vec<_> = client
+            .messages(conversation)
+            .unwrap()
+            .iter()
+            .map(|message| client.info(message).unwrap())
+            .collect();
+        assert_eq!(infos.len(), 3);
+        assert_eq!((infos[0].timer, infos[0].expires_at), (None, None));
+        // DEV-207: the change is a row of the conversation, with no text.
+        assert_eq!((infos[1].timer, infos[1].expires_at), (Some(3_600), None));
+        let mut view = View::default();
+        let rows = client.messages(conversation).unwrap();
+        client.render(&rows[1], &mut view).unwrap();
+        assert!(view.0.is_empty());
+        assert_eq!((infos[2].timer, infos[2].expires_at), (None, Some(now + 3_610)));
+
+        // DEV-215: a backup carries the untimed rows and the timer alone.
+        let upload = client.backup_due(now + 20, true).unwrap().unwrap();
+        let full = BackupObject::parse(&upload.plain).unwrap();
+        let count = |table: TableId| {
+            full.rows
+                .iter()
+                .filter(|row| matches!(row, BackupRow::Put { table: held, .. } if *held == table))
+                .count()
+        };
+        assert_eq!(count(TableId::MESSAGE), 2);
+        assert_eq!(count(TableId(0x34)), 1);
+
+        // DEV-210: the message goes at its deadline, and no sooner.
+        while client.next_event().is_some() {}
+        assert_eq!(client.sweep_timed(now + 3_609).unwrap(), 0);
+        assert_eq!(client.sweep_timed(now + 3_610).unwrap(), 1);
+        assert_eq!(client.messages(conversation).unwrap().len(), 2);
+        assert!(matches!(client.next_event(), Some(Event::Deleted { .. })));
+        assert_eq!(client.sweep_timed(now + 9_999).unwrap(), 0);
+
+        // DEV-205, DEV-245: this device sets a timer, and its own message
+        // takes the period from its send.
+        assert!(client
+            .set_conversation_timer(conversation, 31, at(4_000), &mut rng)
+            .is_err());
+        let change = client
+            .set_conversation_timer(conversation, 30, at(4_000), &mut rng)
+            .unwrap();
+        assert_eq!(client.info(&change).unwrap().timer, Some(30));
+        assert!(client.conversation_timer(conversation).unwrap().unwrap().by_user);
+        let outgoing = client.take_outgoing().unwrap();
+        assert_eq!(outgoing.message, change);
+        let mut draft = client.new_draft(conversation);
+        draft.set_text(&units("brief")).unwrap();
+        let sent = client.send_draft(draft, at(4_001), &mut rng).unwrap();
+        assert_eq!(client.info(&sent).unwrap().expires_at, Some(now + 4_031));
+        client
+            .set_conversation_timer(conversation, 0, at(4_002), &mut rng)
+            .unwrap();
+        let mut draft = client.new_draft(conversation);
+        draft.set_text(&units("kept")).unwrap();
+        let kept = client.send_draft(draft, at(4_003), &mut rng).unwrap();
+        assert_eq!(client.info(&kept).unwrap().expires_at, None);
     }
 
     #[test]

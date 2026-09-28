@@ -73,6 +73,7 @@ sealed interface Screen {
     data class BlockContact(val conversation: Conversation) : Screen
     data class BlockMember(val conversation: Conversation, val index: UShort, val name: String) : Screen
     data class ConversationSettings(val conversation: Conversation) : Screen
+    data class Disappearing(val conversation: Conversation) : Screen
     data class Verify(val conversation: Conversation) : Screen
     data class VerifyCode(val conversation: Conversation, val starts: Boolean) : Screen
     data class SafetyNumber(val conversation: Conversation) : Screen
@@ -106,6 +107,7 @@ sealed interface Screen {
             is BlockContact -> conversation
             is BlockMember -> conversation
             is ConversationSettings -> conversation
+            is Disappearing -> conversation
             is Verify -> conversation
             is VerifyCode -> conversation
             is SafetyNumber -> conversation
@@ -233,7 +235,8 @@ private fun ContactView(
         is Screen.EditName -> RenameContactScreen(chat, pop)
         is Screen.BlockContact -> BlockContactScreen(chat, pop)
         is Screen.BlockMember -> BlockMemberScreen(chat, top.index, top.name, pop)
-        is Screen.ConversationSettings -> ConversationSettingsScreen(chat, pop)
+        is Screen.ConversationSettings -> ConversationSettingsScreen(chat, pop, push)
+        is Screen.Disappearing -> DisappearingScreen(chat, pop)
         is Screen.Verify -> VerifyScreen(chat, pop, push)
         is Screen.VerifyCode -> VerifyCodeScreen(chat, top.starts, pop)
         is Screen.SafetyNumber -> SafetyNumberScreen(chat, pop)

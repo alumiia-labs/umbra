@@ -358,7 +358,10 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                     DayLabel(line.info.storedAtMs.toLong())
                 }
                 if (!line.info.outgoing && line.info.storedAtMs == newFrom) NewLabel()
-                Bubble(
+                // DEV-207: a timer change is a row of the conversation.
+                if (line.info.timer != null) {
+                    TimerLine(line, chat)
+                } else Bubble(
                     line,
                     chat,
                     isFlashed = flashed == line.key,
@@ -867,6 +870,10 @@ private fun BubbleContent(line: Line, chat: Chat) {
             buildString {
                 if (line.info.edited) append("Edited · ")
                 append(clock)
+                // A timed message says when it goes.
+                line.info.expiresAt?.let { at ->
+                    append(" · ").append(leftLabel(at.toLong() - System.currentTimeMillis() / 1_000))
+                }
                 if (isOutgoing && state != READ && !line.info.deleted) {
                     // A file goes to the relays first, and its record follows.
                     val isUploading = file?.state?.toInt() == FILE_UPLOADING

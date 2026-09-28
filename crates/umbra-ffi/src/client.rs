@@ -21,6 +21,7 @@ mod groups;
 mod held_handles;
 mod notify;
 mod sync;
+mod timers;
 mod tokens;
 
 pub use backup::{BackupUpload, PendingBackup, RestoredBackup, RootWrite};
@@ -36,7 +37,9 @@ pub use groups::{
 };
 pub use notify::NdrCall;
 pub use sync::SyncSend;
+pub use timers::{timer_body, TimerSetting, TIMER_VALUES};
 use umbra_core::{
+    devset::edits::Deadline,
     directory::path::IngressPins,
     identity::address::safety_number,
     session::node::{stored_contact_keys, ContactId, StateChange},
@@ -262,6 +265,8 @@ struct Record {
     from_user: bool,
     /// Whether the record came on a sync channel (`DEV-268`).
     synced: bool,
+    /// The `expires_in` of a sync copy, or zero (`DEV-244`).
+    expires_in: u32,
 }
 
 fn passphrase_bytes(code_units: &[u16]) -> Result<Zeroizing<Vec<u8>>, Error> {
@@ -670,6 +675,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 app: app.clone(),
                 from_user: false,
                 synced: false,
+                expires_in: 0,
             });
         }
         let mut kept: Vec<&StateChange> = Vec::with_capacity(changes.len());
@@ -705,9 +711,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
         }
         let mut blocked = Vec::new();
+        // The timer of each conversation, which a timer record of this
+        // batch moves for each record after it (`DEV-203`).
+        let mut timers: BTreeMap<ConversationId, u32> = BTreeMap::new();
         for record in records {
             if !blocked.contains(&record.conversation) && self.is_blocked(record.conversation)? {
                 blocked.push(record.conversation);
+            }
+            if let std::collections::btree_map::Entry::Vacant(slot) = timers.entry(record.conversation) {
+                slot.insert(self.timer_seconds(record.conversation)?);
             }
         }
         let mut sync_bodies: Vec<(ConversationId, Vec<u8>)> = Vec::new();
@@ -1159,6 +1171,46 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if in_batch || open.store.get(TableId::MESSAGE, &row)?.is_some() {
                 continue;
             }
+            // DEV-205: either party sets the timer, and the record stays in
+            // the conversation as the mark of the change (`DEV-207`).
+            if parsed.kind == AppKind::ConversationTimer {
+                let Some(seconds) = timers::timer_body(parsed.body) else {
+                    continue;
+                };
+                timers.insert(conversation, seconds);
+                let setting = TimerSetting {
+                    seconds,
+                    set_at_ms: now_ms,
+                    by_user: from_user,
+                };
+                planned.push(Planned::Put(
+                    timers::TIMERS,
+                    open.store.row_id(timers::TIMERS, &conversation.0),
+                    Some(conversation.0),
+                    setting.encode(),
+                ));
+            }
+            // DEV-208, DEV-244: the period runs from the receive time here,
+            // and a sync copy brings the rest of its own.
+            let now = now_ms / 1_000;
+            let deadline = if !timers::is_timed_kind(parsed.kind) {
+                None
+            } else if record.synced {
+                (record.expires_in > 0).then(|| Deadline::from_sync(now, record.expires_in))
+            } else {
+                timers
+                    .get(&conversation)
+                    .filter(|seconds| **seconds > 0)
+                    .map(|seconds| Deadline::received(now, *seconds))
+            };
+            if let Some(deadline) = deadline {
+                planned.push(Planned::Put(
+                    timers::DEADLINES,
+                    row,
+                    Some(conversation.0),
+                    timers::deadline_row(conversation, deadline.at),
+                ));
+            }
             if handoff {
                 // The record goes as the peer wrote it: its reply target
                 // becomes a reference at the send (`WIR-071`).
@@ -1296,7 +1348,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 synced.into_iter().partition(|synced| synced.is_group);
             for record in groups {
                 // A record that does not apply ends no batch.
-                let _ = self.apply_synced_group(record.conversation, &record.app, now_ms, rng);
+                let _ = self.apply_synced_group(
+                    record.conversation,
+                    &record.app,
+                    record.expires_in,
+                    now_ms,
+                    rng,
+                );
             }
             let records: Vec<Record> = synced
                 .into_iter()
@@ -1305,6 +1363,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     app: synced.app,
                     from_user: synced.from_user,
                     synced: true,
+                    expires_in: synced.expires_in,
                 })
                 .collect();
             if !records.is_empty() {
@@ -1784,6 +1843,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         batch.delete(TableId::MESSAGE, message.0);
         batch.delete(OUTBOX, message.0);
         batch.delete(REVISION, message.0);
+        batch.delete(timers::DEADLINES, message.0);
         for table in [FILE_STATE, FILE_DATA, CHUNK_CRED] {
             batch.delete(table, message.0);
         }
@@ -2496,6 +2556,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         batch.commit()?;
 
         let message = MsgRef(row);
+        self.stamp_deadline(conversation, message, AppKind::Text, now_ms / 1_000, rng)?;
         self.outgoing.push_back(Outgoing {
             message,
             conversation,
@@ -2552,6 +2613,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         batch.put(FILE_DATA, row, Some(conversation.0), &file.plain, rng)?;
         batch.commit()?;
         let message = MsgRef(row);
+        self.stamp_deadline(conversation, message, AppKind::Attachment, now_ms / 1_000, rng)?;
         self.files.uploads.push_back(UploadJob {
             message,
             plain: file.plain,
@@ -2695,6 +2757,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 Err(_) if info_of(&plain)?.outgoing => parsed.body,
                 Err(_) => &[][..],
             },
+            // The mark of a timer change holds no text.
+            AppKind::ConversationTimer => &[][..],
             _ => text_of(&parsed)?,
         };
         let text = core::str::from_utf8(bytes).map_err(|_| Error::Integrity)?;
@@ -2714,6 +2778,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         );
         let mut info = info_of(&plain)?;
         info.file = self.file_info(message)?;
+        info.expires_at = self.deadline_of(message)?.map(|deadline| deadline.at);
         info.revisions = match open.store.get(REVISION, &message.0)? {
             None => 0,
             Some(count) => *count.first().ok_or(Error::Integrity)?,
@@ -2815,6 +2880,13 @@ fn info_of(plain: &[u8]) -> Result<MessageInfo, Error> {
         revisions: 0,
         // The store holds the state of a file: see `Client::info`.
         file: None,
+        timer: if parsed.kind == AppKind::ConversationTimer {
+            timers::timer_body(parsed.body)
+        } else {
+            None
+        },
+        // The store holds the deadline: see `Client::info`.
+        expires_at: None,
     })
 }
 

@@ -88,6 +88,8 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
     }
     // GRP-310: an admin alone brings a contact in.
     val isAdmin = members.any { it.isSelf && it.role >= FfiRole.ADMIN }
+    var timer by remember { mutableStateOf<UInt?>(null) }
+    LaunchedEffect(chat.conversation, Core.revision) { Core.timer(chat.conversation) { timer = it.seconds } }
     Column(Modifier.fillMaxSize()) {
         BackBar("Group details", onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
@@ -120,6 +122,18 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                     push(Screen.Media(chat.conversation))
                 },
             )
+            // DEV-248: an admin alone sets the timer of a group.
+            timer?.let {
+                if (chat.isMember && isAdmin) {
+                    EntryRow(
+                        RowEntry("clock", "Disappearing messages", timerLabel(it)) {
+                            push(Screen.Disappearing(chat.conversation))
+                        },
+                    )
+                } else {
+                    FactRow("clock", "Disappearing messages", timerLabel(it))
+                }
+            }
             if (chat.isMember) {
                 if (isAdmin) {
                     EntryRow(

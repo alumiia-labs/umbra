@@ -18,6 +18,7 @@ import kotlin.concurrent.thread
 import uniffi.umbra_ffi.Config
 import uniffi.umbra_ffi.Connection
 import uniffi.umbra_ffi.ContactRequestInfo
+import uniffi.umbra_ffi.ConversationTimer
 import uniffi.umbra_ffi.FfiEvent
 import uniffi.umbra_ffi.FfiException
 import uniffi.umbra_ffi.PublicLink
@@ -1272,6 +1273,19 @@ object Core {
     fun setReceipts(conversation: Conversation, settings: Receipts) =
         call { it.setReceiptSettings(conversation.id, settings) }
 
+    /** The timer of a conversation (Part 7 §7.5.8). */
+    fun timer(conversation: Conversation, onLoaded: (ConversationTimer) -> Unit) = call { client ->
+        val timer = client.conversationTimer(conversation.id)
+        main.post { onLoaded(timer) }
+    }
+
+    /** Sets the timer of a conversation, and the change goes to each party. */
+    fun setTimer(conversation: Conversation, seconds: UInt) = call { client ->
+        client.setConversationTimer(conversation.id, seconds)
+        main.post { revision++ }
+        refreshChats()
+    }
+
     /** The 60 digits of the two keys of a conversation. It needs no network. */
     fun safetyNumber(conversation: Conversation, onLoaded: (String) -> Unit) = call { client ->
         val number = client.safetyNumber(conversation.id)
@@ -1738,6 +1752,7 @@ object Core {
                 // The words of a placeholder are words of the interface.
                 when {
                     info.deleted -> sink.chars = "Message deleted".toCharArray()
+                    info.timer != null -> sink.chars = timerPreview(info.timer!!).toCharArray()
                     info.file != null -> sink.chars = when (info.file?.mimeClass) {
                         CLASS_IMAGE -> "Photo"
                         CLASS_VIDEO -> "Video"

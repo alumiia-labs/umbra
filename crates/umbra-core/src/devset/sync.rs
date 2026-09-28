@@ -235,6 +235,19 @@ impl<'a> SyncedRecord<'a> {
     }
 }
 
+/// Writes `expires_in` into a written record, for a resend of it at a later
+/// time (`DEV-243`).
+pub fn restamp_expires_in(body: &mut [u8], expires_in: u32) -> Result<(), Error> {
+    if body.first() != Some(&0x03) {
+        return Err(Error::Malformed);
+    }
+    let end = context_len_at(body.get(1..).ok_or(Error::Malformed)?)?.saturating_add(1);
+    body.get_mut(end.saturating_sub(4)..end)
+        .ok_or(Error::Malformed)?
+        .copy_from_slice(&expires_in.to_be_bytes());
+    Ok(())
+}
+
 /// The length of the context at the front of `bytes`, from its count.
 fn context_len_at(bytes: &[u8]) -> Result<usize, Error> {
     let count = usize::from(*bytes.get(9).ok_or(Error::Malformed)?);
@@ -605,6 +618,10 @@ mod tests {
         let mut out = [0u8; 200];
         let n = rec.encode(&mut out).unwrap();
         assert_eq!(SyncedRecord::parse(&out[..n]).unwrap(), rec);
+        // DEV-243: a resend carries the period that remains then.
+        restamp_expires_in(&mut out[..n], 42).unwrap();
+        assert_eq!(SyncedRecord::parse(&out[..n]).unwrap().context.expires_in, 42);
+        assert_eq!(SyncedRecord::parse(&out[..n]).unwrap().inner, rec.inner);
         let entry = IdentityEntry {
             salt: [5; 16],
             conversation: [6; 32],

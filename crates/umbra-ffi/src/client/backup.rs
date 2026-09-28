@@ -107,8 +107,9 @@ const INDEX_VALUE_LEN: usize = 1 + 16 + 32;
 /// The tables that a backup carries (`IDN-179`). Invitations, push
 /// registrations, the dead-channel state, the files, and the state of the
 /// backup itself stay on the device (`IDN-180`). The state of each file goes
-/// as one that waits for a tap (`IDN-186`).
-const BACKED_UP: [TableId; 21] = [
+/// as one that waits for a tap (`IDN-186`). A timed record stays, and the
+/// timer of its conversation goes (`DEV-215`).
+const BACKED_UP: [TableId; 22] = [
     super::files::FILE_STATE,
     TableId::MESSAGE,
     TableId::TOMBSTONE,
@@ -130,6 +131,7 @@ const BACKED_UP: [TableId; 21] = [
     super::groups::GROUP_PRESENCE,
     super::groups::GROUP_OWNERS,
     super::groups::GROUP_GRANTS,
+    super::timers::TIMERS,
 ];
 
 /// A backup object that is due: its bytes, which go up as a file of the
@@ -363,6 +365,28 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             return Ok(local
                 .iter()
                 .any(|key| store.row_id(super::SETTINGS, key) == *row));
+        }
+        // DEV-215: a timed record enters no store but the local database,
+        // and each row of it stays with it.
+        let message = if table == super::REACTION {
+            match (owner, plain.get(16..32)) {
+                (Some(conversation), Some(reference)) => {
+                    let natural = [conversation.as_slice(), reference].concat();
+                    Some(store.row_id(TableId::MESSAGE, &natural))
+                }
+                _ => None,
+            }
+        } else if [TableId::MESSAGE, super::OUTBOX, super::REVISION, super::files::FILE_STATE]
+            .contains(&table)
+        {
+            Some(*row)
+        } else {
+            None
+        };
+        if let Some(message) = message {
+            if store.get(super::timers::DEADLINES, &message)?.is_some() {
+                return Ok(true);
+            }
         }
         if table == TableId::MESSAGE {
             if let Ok(info) = super::info_of(plain) {

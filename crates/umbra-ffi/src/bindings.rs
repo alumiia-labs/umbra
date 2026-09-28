@@ -787,6 +787,23 @@ pub struct MsgInfo {
     pub reply_to: Option<Arc<MsgHandle>>,
     /// The file of the message, or none.
     pub file: Option<MsgFile>,
+    /// The period that a timer record set, in seconds, for the row that
+    /// marks a timer change (`DEV-207`).
+    pub timer: Option<u32>,
+    /// The time at which the timer erases the message, in seconds.
+    pub expires_at: Option<u64>,
+}
+
+/// The timer of a conversation (`DEV-206`).
+#[derive(uniffi::Record)]
+pub struct ConversationTimer {
+    /// The period in seconds, or 0 for no timer.
+    pub seconds: u32,
+    /// The time of the change on this device, in milliseconds, or 0 when no
+    /// party set one.
+    pub set_at_ms: u64,
+    /// Whether the user set it, on this device or another of the set.
+    pub by_user: bool,
 }
 
 /// The file of a message, with no byte of it.
@@ -1967,7 +1984,7 @@ impl Inner {
         let Some(running) = bridge.as_mut() else {
             return;
         };
-        if client.resend_one(&mut OsRng).unwrap_or(false) {
+        if client.resend_one(now, &mut OsRng).unwrap_or(false) {
             let _ = running.flush(client, &mut OsRng);
         }
     }
@@ -4457,7 +4474,53 @@ impl Handle {
                 total,
                 has_preview: extras.preview.is_some(),
             }),
+            timer: info.timer,
+            expires_at: info.expires_at,
         })
+    }
+
+    /// The periods that a conversation timer takes, in seconds (`WIR-201`).
+    pub fn timer_values(&self) -> Vec<u32> {
+        crate::client::TIMER_VALUES.to_vec()
+    }
+
+    /// The timer of a conversation.
+    pub fn conversation_timer(&self, conversation: Vec<u8>) -> Result<ConversationTimer, FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        let setting = locked(&self.inner).client.conversation_timer(conversation)?;
+        Ok(setting.map_or(
+            ConversationTimer {
+                seconds: 0,
+                set_at_ms: 0,
+                by_user: false,
+            },
+            |setting| ConversationTimer {
+                seconds: setting.seconds,
+                set_at_ms: setting.set_at_ms,
+                by_user: setting.by_user,
+            },
+        ))
+    }
+
+    /// Sets the timer of a conversation, and the record of the change goes
+    /// to the other party or to the group (`DEV-205`). In a group a member
+    /// below admin sets no timer (`DEV-248`).
+    pub fn set_conversation_timer(
+        &self,
+        conversation: Vec<u8>,
+        seconds: u32,
+    ) -> Result<Arc<MsgHandle>, FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        let mut inner = locked(&self.inner);
+        let Inner { client, bridge, .. } = &mut *inner;
+        let message = client.set_conversation_timer(conversation, seconds, unix_now_ms(), &mut OsRng)?;
+        if let Some(running) = bridge {
+            running.flush(client, &mut OsRng)?;
+        }
+        inner.pump_groups();
+        drop(inner);
+        self.changed.notify_all();
+        Ok(Arc::new(MsgHandle(message)))
     }
 
     /// Asks for the file of a received message whose download failed, or
@@ -4615,6 +4678,8 @@ impl Handle {
         inner.stop_network_if_locked();
         inner.pump_link(now);
         inner.pump_sync_resend(now);
+        // DEV-210: a timed message goes at its deadline, on each device.
+        let _ = inner.client.sweep_timed(now);
         let is_due = inner.bridge.is_some()
             && now.saturating_sub(inner.challenges_at) >= umbra_core::abuse::POW_CHALLENGE_PERIOD;
         drop(inner);
