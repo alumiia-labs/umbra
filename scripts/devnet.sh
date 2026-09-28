@@ -61,6 +61,8 @@ done
 # carries the report queue of authority 0 once that queue exists.
 cp tests/fixtures/devnet/authority.conf target/devnet/conf/authority.conf
 echo "report_queue=0,target/devnet/report-queue.bin" >> target/devnet/conf/authority.conf
+# A relay that an isolation query of authority 0 expelled leaves it.
+echo "verdicts=target/devnet/verdicts.txt" >> target/devnet/conf/authority.conf
 target/debug/umbra-test-authority target/devnet/conf/authority.conf target/devnet
 # The relays and the debug build of the Android app hold the key set of the
 # repository. The seed of the authorities gives the same one at each start.

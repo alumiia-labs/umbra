@@ -304,6 +304,8 @@ impl Bridge {
             // The report queue belongs to an authority, and no app holds one.
             | Update::ReportQueue { .. }
             | Update::LinkFault(_)
+            | Update::Probe { .. }
+            | Update::ProbeFailed
             | Update::Faults(_) => None,
             Update::Online => Some(NetEvent::Online),
             Update::Offline(ended) => Some(NetEvent::Offline(ended)),

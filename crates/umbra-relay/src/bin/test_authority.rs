@@ -16,6 +16,7 @@
 //! seed=<64 hex characters>
 //! relay=<descriptor file>,<operator name>,<class 0 to 3>,<ingress|chain>
 //! report_queue=<authority index>,<queue file>
+//! verdicts=<file of verdicts>
 //! ```
 //!
 //! The `relay` line repeats. Each relay is of the first root of its network,
@@ -26,6 +27,10 @@
 //! The manifest then carries a `ReportQueue` that the key of that authority
 //! signs (Part 10 `REL-166`, `REL-167`). A file that does not exist yet
 //! gives no queue.
+//!
+//! A `verdicts` line names the file of the isolation queries of
+//! `umbra-authority`. A relay of an `expel <relay_id>` line leaves the
+//! manifest (`REL-083`).
 
 #![forbid(unsafe_code)]
 
@@ -89,11 +94,21 @@ fn run(settings: &str, out: &Path) -> Result<(), &'static str> {
     let mut seed = None;
     let mut relays = Vec::new();
     let mut report_queues = Vec::new();
+    let mut expelled: Vec<[u8; 32]> = Vec::new();
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
         match line.split_once('=') {
             Some(("seed", value)) => seed = hex32(value),
             Some(("relay", value)) => {
                 relays.push(read_relay(value).ok_or("a relay line does not parse")?);
+            }
+            Some(("verdicts", value)) => {
+                // A file that does not exist yet holds no verdict.
+                let held = std::fs::read_to_string(value).unwrap_or_default();
+                expelled.extend(
+                    held.lines()
+                        .filter_map(|line| line.strip_prefix("expel "))
+                        .filter_map(|relay| hex32(relay.trim())),
+                );
             }
             Some(("report_queue", value)) => {
                 let (index, file) = value.split_once(',').ok_or("a report_queue line does not parse")?;
@@ -132,6 +147,10 @@ fn run(settings: &str, out: &Path) -> Result<(), &'static str> {
         )
         .map_err(|_| "a descriptor does not verify")?;
         let read = RelayEntry::parse(&entry).map_err(|_| "an entry does not verify")?;
+        if expelled.contains(&read.descriptor.relay_id) {
+            println!("relay {} expelled", to_hex(&read.descriptor.relay_id));
+            continue;
+        }
         println!(
             "relay {} layer={} host={}",
             to_hex(&read.descriptor.relay_id),

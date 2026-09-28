@@ -40,7 +40,7 @@ required-features = ["bindgen"]
 # §10.4.2), which runs as a queue client.
 [[bin]]
 name = "umbra-authority"
-path = "src/bin/umbra_authority.rs"
+path = "src/bin/umbra_authority/main.rs"
 required-features = ["runtime"]
 
 [dependencies]

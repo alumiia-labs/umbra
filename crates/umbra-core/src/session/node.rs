@@ -3776,6 +3776,12 @@ impl ClientNode {
         &self.faults
     }
 
+    /// Builds a circuit to `relay` with no queue on it, for the probe of an
+    /// isolation query (Part 10 `REL-109`).
+    pub fn open_circuit<R: CryptoRng + ?Sized>(&mut self, relay: [u8; 32], rng: &mut R) -> Result<(), Error> {
+        self.circuit_to(relay, rng)
+    }
+
     /// Sends the loop cell of a probe of an isolation query on a ready
     /// circuit, and gives its chain and the tag that each hop reads (Part 10
     /// `REL-109` to `REL-111`). An authority runs it on a node whose one

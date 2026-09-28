@@ -119,6 +119,12 @@ pub enum Command {
     /// Make the report queue of an authority (Part 10 `REL-166`). An
     /// [`Update::ReportQueue`] follows.
     MakeReportQueue,
+    /// Build a circuit to a relay for the probe of an isolation query
+    /// (Part 10 `REL-109`).
+    OpenCircuit([u8; 32]),
+    /// Send the loop of a probe on a ready circuit. An [`Update::Probe`]
+    /// follows, or [`Update::ProbeFailed`].
+    Probe,
     /// End a rendezvous queue with a `DEL`.
     EndRendezvousQueue([u8; 32]),
     /// Send a hello of Part 9 §9.6 to the rendezvous queue of an entry.
@@ -210,6 +216,15 @@ pub enum Update {
     },
     /// A `SealedReport` arrived on the report queue (`WIR-536`).
     LinkFault(Vec<u8>),
+    /// The loop of a probe left: its chain and the tag that each hop read.
+    Probe {
+        /// The relays of the chain, the ingress first.
+        chain: [[u8; 32]; 3],
+        /// The tag of the cell at each hop.
+        tags: [[u8; 16]; 3],
+    },
+    /// No ready circuit took the probe.
+    ProbeFailed,
     /// The loop count and the forced replacements of the run, for the next
     /// run. It comes before [`Update::Offline`].
     Faults(Box<LinkFaults>),
@@ -688,6 +703,15 @@ pub async fn run_client(
                 },
                 Command::MakeReportQueue => {
                     let _ = node.make_report_queue(&mut rng);
+                }
+                Command::OpenCircuit(relay) => {
+                    let _ = node.open_circuit(relay, &mut rng);
+                }
+                Command::Probe => {
+                    let _ = updates.send(match node.probe() {
+                        Ok((chain, tags)) => Update::Probe { chain, tags },
+                        Err(_) => Update::ProbeFailed,
+                    });
                 }
                 Command::EndRendezvousQueue(recipient_id) => {
                     let _ = node.end_rendezvous_queue(&recipient_id, &mut rng);
