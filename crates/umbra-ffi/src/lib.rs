@@ -167,6 +167,8 @@ pub struct MessageInfo {
     pub moderation: u8,
     /// The role of the member that acted, or 0.
     pub moderator_role: u8,
+    /// The member index that sent a message of a group that arrived.
+    pub sender: Option<u16>,
 }
 
 /// The longest local name of a contact, in bytes of UTF-8.
@@ -893,6 +895,51 @@ mod tests {
         assert_eq!((notes[0].hidden, notes[1].shown, notes[2].removed), (1, 1, 1));
         assert_eq!(notes[2].actor_role, 5);
         let _ = conversation;
+    }
+
+    #[test]
+    fn an_author_edits_and_deletes_in_a_group_and_each_member_follows() {
+        let mut rng = Rng(91);
+        let mut client = new_client(&mut rng);
+        let mut other = new_client(&mut rng);
+        let (conversation, member) = ready_pair(&mut client, &mut other, &mut rng);
+        let now = 1_700_000_300u64;
+        let mut draft = other.new_draft(member);
+        draft.set_text(&units("meet at 8")).unwrap();
+        let mine = other.send_draft(draft, now * 1_000, &mut rng).unwrap();
+        let post = other.take_group_post().unwrap();
+        let held = client
+            .on_group_record(&[0xC3; 32], 1, &post.record, (now + 1) * 1_000, &mut rng)
+            .unwrap()
+            .unwrap();
+        // The receiver keeps the member that the tag named.
+        assert_eq!(client.info(&held).unwrap().sender, Some(1));
+        assert_eq!(other.info(&mine).unwrap().sender, None);
+        // A member deletes no message of another member.
+        assert!(client.delete_for_everyone(&held, (now + 2) * 1_000, &mut rng).is_err());
+
+        let mut draft = other.new_draft(member);
+        draft.set_text(&units("meet at 9")).unwrap();
+        other.edit(&mine, draft, (now + 3) * 1_000, &mut rng).unwrap();
+        let post = other.take_group_post().unwrap();
+        assert!(other.take_outgoing().is_none());
+        client
+            .on_group_record(&[0xC3; 32], 1, &post.record, (now + 4) * 1_000, &mut rng)
+            .unwrap();
+        let mut view = View::default();
+        client.render(&held, &mut view).unwrap();
+        assert_eq!(String::from_utf16(&view.0).unwrap(), "meet at 9");
+        assert!(client.info(&held).unwrap().revisions == 1);
+
+        other.delete_for_everyone(&mine, (now + 5) * 1_000, &mut rng).unwrap();
+        let post = other.take_group_post().unwrap();
+        client
+            .on_group_record(&[0xC3; 32], 1, &post.record, (now + 6) * 1_000, &mut rng)
+            .unwrap();
+        assert!(client.info(&held).unwrap().deleted);
+        // The request is no row of the view on either side.
+        assert_eq!(client.messages(conversation).unwrap(), [held]);
+        assert_eq!(other.messages(member).unwrap(), [mine]);
     }
 
     /// A group of `client` with both queues, and `other` in it at index 1.

@@ -2218,6 +2218,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         {
             return Ok(());
         }
+        // An edit and a deletion of the user from another device change the
+        // message here, and the owner of the channels posts them.
+        if matches!(parsed.kind, AppKind::Edit | AppKind::Delete) {
+            if self.owns_channels()? {
+                self.post_to_group(conversation, parsed.msg_id, app, now_ms, rng)?;
+            }
+            self.take_group_change(conversation, None, &parsed, now_ms, rng)?;
+            return Ok(());
+        }
         // A vote of the user from another device moves the count here.
         if parsed.kind == AppKind::PollVote {
             if self.owns_channels()? {
@@ -3789,6 +3798,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         self.count_discarded(conversation, rng)?;
                         continue;
                     }
+                    // An edit and a deletion of an author name a message of
+                    // that member alone (Part 11 §11.9.6).
+                    if matches!(parsed.kind, AppKind::Edit | AppKind::Delete) {
+                        self.take_group_change(conversation, Some(sender), &parsed, now_ms, rng)?;
+                        continue;
+                    }
                     // GRP-336: a vote is one group record, and each member
                     // counts it in the order of its sender (WIR-190).
                     if parsed.kind == AppKind::PollVote {
@@ -3824,6 +3839,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     };
                     let stored = self.store_group_message(conversation, &app, now_ms, rng)?;
                     if let Some(message) = stored {
+                        self.put_group_sender(conversation, message, sender, rng)?;
                         self.after_group_store(conversation, &group, message, &app, now, rng)?;
                         match timer {
                             Some(seconds) => self.put_timer(conversation, seconds, now_ms, false, rng)?,

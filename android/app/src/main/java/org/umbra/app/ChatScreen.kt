@@ -183,12 +183,22 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
     // a remove that waits for its second confirmation, and each hidden
     // message that the user opened.
     var ownRole by remember(conversation) { mutableStateOf<FfiRole?>(null) }
+    // The name of each member, for the bubbles of a group.
+    var memberNames by remember(conversation) { mutableStateOf(emptyMap<UShort, String>()) }
     var modNotes by remember(conversation) { mutableStateOf(emptyList<FfiModNote>()) }
     var removing by remember(conversation) { mutableStateOf<Line?>(null) }
     val revealed = remember(conversation) { mutableStateListOf<List<Byte>>() }
     LaunchedEffect(conversation, Core.revision) {
         if (chat.isGroup) {
-            Core.groupMembers(conversation) { members -> ownRole = members.firstOrNull { it.isSelf }?.role }
+            Core.groupMembers(conversation) { members ->
+                ownRole = members.firstOrNull { it.isSelf }?.role
+                memberNames = members.associate { member ->
+                    val title = member.contact?.let { contact ->
+                        Core.chats.firstOrNull { it.conversation.id.contentEquals(contact) }?.title
+                    }
+                    member.index to (title ?: "Member ${member.index}")
+                }
+            }
             Core.moderationNotes(conversation) { modNotes = it }
         }
     }
@@ -298,8 +308,9 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
         ActionSheet(
             "Message",
             entries,
-            // A placeholder takes no reaction.
-            top = if (line.info.deleted) {
+            // A placeholder takes no reaction, and Part 11 gives a group no
+            // reaction path.
+            top = if (line.info.deleted || chat.isGroup) {
                 null
             } else {
                 {
@@ -357,7 +368,14 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
             "Delete this message?",
             entries,
             // A fact that a user cannot know, and that decides the choice.
-            note = if (line.info.outgoing) "${chat.title} can hold a copy." else null,
+            note = when {
+                !line.info.outgoing -> null
+                // The text of Part 7 §7.5.6 for a deletion in a group.
+                chat.isGroup -> "This asks the app of each member to delete the message. A member who left " +
+                    "the group never gets the request. A member who sends nothing for more than 30 days " +
+                    "leaves the group and never gets the request. A member can keep a copy."
+                else -> "${chat.title} can hold a copy."
+            },
             onDismiss = { deleting = null },
         )
     }
@@ -446,6 +464,10 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                     // A placeholder has no content to answer.
                     onReply = if (line.info.deleted) null else ({ answered = line }),
                     isRevealed = line.key in revealed,
+                    // A group names the sender of a run of its messages.
+                    author = line.info.sender?.takeIf {
+                        chat.isGroup && (before == null || before.info.outgoing || before.info.sender != it)
+                    }?.let { memberNames[it] ?: "Member $it" },
                 )
                 // The contact saw each message up to this one. The mark
                 // sits under it and under no other, as a read marker does.
@@ -725,6 +747,7 @@ private fun Bubble(
     onLongPress: () -> Unit,
     onReply: (() -> Unit)?,
     isRevealed: Boolean = false,
+    author: String? = null,
 ) {
     val isOutgoing = line.info.outgoing
     // A slide to the right answers the message. The bubble follows the
@@ -797,7 +820,7 @@ private fun Bubble(
                     onLongClick = onLongPress,
                     // The options of a poll take their own press.
                     isOver = line.poll == null,
-                ) { BubbleContent(line, chat, isRevealed) }
+                ) { BubbleContent(line, chat, isRevealed, author) }
                 if (line.reactions.isNotEmpty()) ReactionPills(line)
             }
         }
@@ -867,7 +890,7 @@ private val SLIDE_REACH = 72.dp
 private const val SLIDE_POINT = 0.8f
 
 @Composable
-private fun BubbleContent(line: Line, chat: Chat, isRevealed: Boolean = false) {
+private fun BubbleContent(line: Line, chat: Chat, isRevealed: Boolean = false, author: String? = null) {
     val isOutgoing = line.info.outgoing
     // Part 11 §11.9.6: a hidden message shows its placeholder until a tap.
     val isHidden = line.info.moderation == MOD_HIDE && !isRevealed
@@ -885,6 +908,14 @@ private fun BubbleContent(line: Line, chat: Chat, isRevealed: Boolean = false) {
             .padding(horizontal = if (isPhoto) 4.dp else 14.dp, vertical = if (isPhoto) 4.dp else 10.dp),
         horizontalAlignment = Alignment.End,
     ) {
+        if (author != null) {
+            Text(
+                author,
+                style = MaterialTheme.typography.labelMedium,
+                color = Palette.Action,
+                modifier = Modifier.align(Alignment.Start).padding(bottom = 2.dp),
+            )
+        }
         if (isHidden) {
             Row(Modifier.align(Alignment.Start), verticalAlignment = Alignment.CenterVertically) {
                 FaIcon("eye", size = 13.dp, tint = Palette.TextSecondary)

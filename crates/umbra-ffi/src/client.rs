@@ -17,6 +17,7 @@ mod discovery;
 mod files;
 mod gossip;
 mod group_sync;
+mod group_changes;
 mod groups;
 mod held_handles;
 mod notify;
@@ -1890,6 +1891,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         batch.delete(polls::POLLS, message.0);
         batch.delete(groups::MENTIONED, message.0);
         batch.delete(moderation::MODERATED, message.0);
+        batch.delete(group_changes::GROUP_SENDER, message.0);
         for row in votes {
             batch.delete(polls::VOTES, row);
         }
@@ -2084,11 +2086,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if draft.is_empty() || draft.conversation() != self.conversation_of_message(message)? {
             return Err(Error::Malformed);
         }
-        // An edit and a deletion of a group travel on its queue, and Part
-        // 11 gives that path no rule yet.
-        if self.is_group(draft.conversation())? {
-            return Err(Error::Malformed);
-        }
+        // An edit in a group is one group record (Part 7 §7.5.6).
+        let is_group = self.is_group(draft.conversation())?;
         let open = self.open_mut()?;
         let plain = Zeroizing::new(
             open.store
@@ -2146,15 +2145,22 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             rng,
         )?;
         batch.put(REVISION, message.0, None, &[count.saturating_add(1)], rng)?;
-        batch.put(
-            TableId::MESSAGE,
-            request_row,
-            Some(conversation.0),
-            &stored,
-            rng,
-        )?;
-        batch.put(OUTBOX, request_row, None, &outbox_row(), rng)?;
+        if !is_group {
+            batch.put(
+                TableId::MESSAGE,
+                request_row,
+                Some(conversation.0),
+                &stored,
+                rng,
+            )?;
+            batch.put(OUTBOX, request_row, None, &outbox_row(), rng)?;
+        }
         batch.commit()?;
+        if is_group {
+            self.post_to_group(conversation, msg_id, &request, now_ms, rng)?;
+            self.auto_lock.touch(now_ms / 1_000);
+            return Ok(());
+        }
 
         // A message that the send path did not take yet goes with its new
         // text, and the edit follows it.
@@ -2193,9 +2199,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
-        if self.is_group(self.conversation_of_message(message)?)? {
-            return Err(Error::Malformed);
-        }
+        // A deletion in a group is one group record (Part 7 §7.5.6).
+        let is_group = self.is_group(self.conversation_of_message(message)?)?;
         let open = self.open_mut()?;
         let plain = Zeroizing::new(
             open.store
@@ -2248,16 +2253,26 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for row in reactions {
             batch.delete(REACTION, row);
         }
-        batch.put(
-            TableId::MESSAGE,
-            request_row,
-            Some(conversation.0),
-            &stored,
-            rng,
-        )?;
-        batch.put(OUTBOX, request_row, None, &outbox_row(), rng)?;
+        if !is_group {
+            batch.put(
+                TableId::MESSAGE,
+                request_row,
+                Some(conversation.0),
+                &stored,
+                rng,
+            )?;
+            batch.put(OUTBOX, request_row, None, &outbox_row(), rng)?;
+        }
         batch.put(SETTINGS, limit_row, None, &now.to_be_bytes(), rng)?;
         batch.commit()?;
+        if is_group {
+            self.files.erasures.extend(erasures);
+            self.files.uploads.retain(|job| job.message != *message);
+            self.outgoing.retain(|waiting| waiting.message != *message);
+            self.post_to_group(conversation, msg_id, &request, now_ms, rng)?;
+            self.auto_lock.touch(now);
+            return Ok(());
+        }
 
         // ATT-161: the chunks of a file that this device uploaded go too.
         self.files.erasures.extend(erasures);
@@ -2867,6 +2882,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         info.file = self.file_info(message)?;
         info.expires_at = self.deadline_of(message)?.map(|deadline| deadline.at);
         info.mentions_me = open.store.get(groups::MENTIONED, &message.0)?.is_some();
+        info.sender = self.group_sender(message)?;
         if let Some((state, role)) = self.moderation_of(message)? {
             info.moderation = state;
             info.moderator_role = role;
@@ -2985,6 +3001,8 @@ fn info_of(plain: &[u8]) -> Result<MessageInfo, Error> {
         // The store holds the state: see `Client::info`.
         moderation: 0,
         moderator_role: 0,
+        // The store holds the sender: see `Client::info`.
+        sender: None,
     })
 }
 

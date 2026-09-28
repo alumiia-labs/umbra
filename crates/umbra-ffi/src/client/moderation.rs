@@ -107,7 +107,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
                 MOD_REMOVE => {
                     self.put_moderation(conversation, message, MOD_REMOVE, actor_role, rng)?;
-                    self.remove_content(conversation, message, rng)?;
+                    self.leave_placeholder(conversation, message, rng)?;
                     note.removed = note.removed.saturating_add(1);
                 }
                 _ => continue,
@@ -150,10 +150,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(batch.commit()?)
     }
 
-    /// Overwrites a removed message with a placeholder, and erases each row
-    /// of it (`GRP-082`). A message that did not arrive yet takes the same
-    /// at its arrival.
-    fn remove_content<R: CryptoRng + ?Sized>(
+    /// Overwrites a message with a placeholder, and erases each row of it:
+    /// a removal (`GRP-082`), or a deletion of its author. A message that
+    /// did not arrive yet takes a removal at its arrival.
+    pub(super) fn leave_placeholder<R: CryptoRng + ?Sized>(
         &mut self,
         conversation: ConversationId,
         message: MsgRef,
@@ -205,7 +205,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         rng: &mut R,
     ) -> Result<(), Error> {
         if self.moderation_of(&message)?.is_some_and(|(state, _)| state == MOD_REMOVE) {
-            self.remove_content(conversation, message, rng)?;
+            self.leave_placeholder(conversation, message, rng)?;
         }
         Ok(())
     }

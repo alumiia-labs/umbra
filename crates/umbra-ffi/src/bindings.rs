@@ -801,6 +801,8 @@ pub struct MsgInfo {
     /// The role of the member that acted, with the values of [`FfiRole`],
     /// or 0.
     pub moderator_role: u8,
+    /// The member index that sent a message of a group that arrived.
+    pub sender: Option<u16>,
 }
 
 /// One moderation epoch that this device applied (`GRP-089`).
@@ -4546,6 +4548,7 @@ impl Handle {
             mentions_me: info.mentions_me,
             moderation: info.moderation,
             moderator_role: info.moderator_role,
+            sender: info.sender,
         })
     }
 
