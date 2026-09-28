@@ -26,10 +26,15 @@
 # directory of Part 9 with the issuer of Part 13 §13.9 listens on port 7451,
 # and the two ingress relays carry its requests (`POST /directory`). Its
 # epoch is 60 seconds here, thus a new handle shows within a minute.
+#
+# Authority 0 holds a report queue at a queue relay (Part 10 §10.4.2), as a
+# client holds one. Once the relay made it, the manifest names it, and each
+# link-fault report of a client shows as one line of umbra-authority.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 cargo build -p umbra-relay --features native
+cargo build -p umbra-ffi --features runtime --bin umbra-authority
 # Each relay keeps its queues in a file here, thus a restart of this script
 # ends no contact. Delete the directory for an empty network.
 mkdir -p target/devnet/conf
@@ -46,8 +51,11 @@ for relay in 1 2 3 4 5 6 7; do
     target/debug/umbra-relay sign-descriptor \
         "target/devnet/conf/relay$relay.conf" "target/devnet/relay$relay.desc"
 done
-# The manifest holds the present epoch, thus each start signs a new one.
-target/debug/umbra-test-authority tests/fixtures/devnet/authority.conf target/devnet
+# The manifest holds the present epoch, thus each start signs a new one. It
+# carries the report queue of authority 0 once that queue exists.
+cp tests/fixtures/devnet/authority.conf target/devnet/conf/authority.conf
+echo "report_queue=0,target/devnet/report-queue.bin" >> target/devnet/conf/authority.conf
+target/debug/umbra-test-authority target/devnet/conf/authority.conf target/devnet
 # The relays and the debug build of the Android app hold the key set of the
 # repository. The seed of the authorities gives the same one at each start.
 cmp -s target/devnet/keyset.bin tests/fixtures/devnet/keyset.bin || {
@@ -93,12 +101,19 @@ for relay in 3 5 7 2 4 1 6; do
     target/debug/umbra-relay "target/devnet/conf/relay$relay.conf" &
     pids+=($!)
 done
+# The report queue of authority 0, once the relays listen.
+sleep 2
+target/debug/umbra-authority tests/fixtures/devnet/authority-queue.conf &
+pids+=($!)
 # The authorities sign a new manifest each 30 minutes, and each relay reads
 # the file again and serves it. A client then sees no clock gap after an
-# hour of the network.
+# hour of the network. The first new one follows the report queue.
 (
+    until [ -f target/devnet/report-queue.bin ]; do sleep 2; done
+    target/debug/umbra-test-authority target/devnet/conf/authority.conf target/devnet >/dev/null &&
+        echo "the manifest names the report queue"
     while sleep 1800; do
-        target/debug/umbra-test-authority tests/fixtures/devnet/authority.conf target/devnet >/dev/null ||
+        target/debug/umbra-test-authority target/devnet/conf/authority.conf target/devnet >/dev/null ||
             echo "the new manifest failed"
     done
 ) &

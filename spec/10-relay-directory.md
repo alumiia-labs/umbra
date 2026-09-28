@@ -396,8 +396,20 @@ report.
   of one authority that it draws at random from the verified report queues,
   as a `SealedReport` under the `report_pk` of that queue. A client that holds
   no verified report queue MUST drop the report.
+- **[REL-181]** A client MUST send a report on a ready circuit whose last relay
+  holds a verified report queue, and it MUST build no circuit for a report
+  before the report waited `REPORT_WAIT`. **[REL-182]** After that wait, a
+  client in the foreground MUST build one circuit to the relay of a report
+  queue that it draws at random, at most once in each epoch, and the report
+  goes on that circuit.
 - **[REL-170]** An authority MUST drop a `SealedReport` that does not open, and
   a report whose `epoch` is neither the current epoch nor the one before it.
+
+> *Cause of `REL-182`.* A client holds circuits to the relays of its own
+> queues and of the queues of its contacts, and the relay of a report queue
+> can be none of them; a test network kept a report that never left. The wait
+> puts at least `REPORT_WAIT` between the fault and the build, and a client
+> builds circuits for its own queues at other times too.
 
 > *Cause.* An earlier draft gave the report a size and a slot and no
 > destination: a `B0` cell names a queue, and no queue of an authority
@@ -1557,6 +1569,7 @@ relay with the notification role, and this section then applies to it.
 | `LOOP_RETURN_WAIT` | 120 s, the wait after which a loop is lost (§10.4.2) |
 | `LOOP_FAULT_MIN` | 10 loops of one chain in one epoch (§10.4.2) |
 | `FORCED_REPEAT` | 2 forced replacements in one epoch (§10.4.2) |
+| `REPORT_WAIT` | 15 min, the wait of a report before it builds a circuit (§10.4.2) |
 | Chain-count noise | σ = 1 chain, ε = 0.1, thus b = 10 chains (§10.8) |
 | `FAMILY_MAX` | 64 members in one family certificate (§10.6.3) |
 

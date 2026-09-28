@@ -73,13 +73,13 @@ each column when a crate implements the requirement and a test covers it.
 | `DEV` | 197 | 90 | 0 | 0 | 7 | **294** |
 | `NTF` | 74 | 28 | 0 | 0 | 3 | **105** |
 | `DIS` | 130 | 34 | 0 | 0 | 3 | **167** |
-| `REL` | 144 | 33 | 1 | 0 | 2 | **180** |
+| `REL` | 146 | 33 | 1 | 0 | 2 | **182** |
 | `GRP` | 232 | 65 | 0 | 0 | 6 | **303** |
 | `ATT` | 143 | 45 | 2 | 0 | 3 | **193** |
 | `ABU` | 71 | 30 | 1 | 0 | 0 | **102** |
 | `IMP` | 119 | 41 | 0 | 0 | 2 | **162** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2031 | 621 | 7 | 0 | 53 | **2712** |
+| **All** | 2033 | 621 | 7 | 0 | 53 | **2714** |
 
 ## SCP — Scope and Conventions
 
@@ -2081,6 +2081,8 @@ Source: `spec/10-relay-directory.md`
 | `REL-178` | §10.4.2 | MUST | A relay that takes a receipt | A relay that takes a receipt MUST verify its signature under the `identity_pk` of `to_relay`, and it MUST compute `batch_root` over the leaves of the next `cell_count` cells that it sent on that link. |  |  |
 | `REL-179` | §10.4.2 | MUST | A relay | A relay MUST answer a `ReceiptQuery` that verifies under the key of that authority in the key set of the relay set that it holds. |  |  |
 | `REL-180` | §10.4.2 | MUST | A relay | A relay MUST refuse a query that does not verify with HTTP status 403 and no body. |  |  |
+| `REL-181` | §10.4.2 | MUST | A client | A client MUST send a report on a ready circuit whose last relay holds a verified report queue, and it MUST build no circuit for a report before the report waited `REPORT_WAIT`. |  |  |
+| `REL-182` | §10.4.2 | MUST | After that wait, a client in the foreground | After that wait, a client in the foreground MUST build one circuit to the relay of a report queue that it draws at random, at most once in each epoch, and the report goes on that circuit. |  |  |
 
 ## GRP — Private Groups
 

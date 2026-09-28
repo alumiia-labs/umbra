@@ -36,6 +36,13 @@ sockets-test = ["runtime", "dep:umbra-relay", "umbra-relay/native"]
 name = "uniffi-bindgen"
 required-features = ["bindgen"]
 
+# The report queue of a directory authority of a test network (Part 10
+# §10.4.2), which runs as a queue client.
+[[bin]]
+name = "umbra-authority"
+path = "src/bin/umbra_authority.rs"
+required-features = ["runtime"]
+
 [dependencies]
 umbra-crypto = { version = "0.1.0", path = "../umbra-crypto" }
 umbra-wire = { version = "0.1.0", path = "../umbra-wire" }

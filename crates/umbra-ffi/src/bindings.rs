@@ -1050,6 +1050,9 @@ struct Inner {
     /// Whether the next run dials the second pinned ingress relay. A dial
     /// that failed turns it, thus the loss of one relay stops no delivery.
     uses_second_pin: bool,
+    /// The loop count and the forced replacements of the last run, which
+    /// the next run continues (Part 10 `REL-172`).
+    faults: umbra_core::session::faults::LinkFaults,
     /// The relays of the run, for the view of the connection.
     relays: Vec<RelayEndpoint>,
     /// The circuits of the run that hold their three hops.
@@ -2824,6 +2827,7 @@ fn handle_of(database_path: String, client: Client<SqliteBackend, ForeignElement
             net_events: VecDeque::new(),
             guard: None,
             uses_second_pin: false,
+            faults: Default::default(),
             relays: Vec::new(),
             circuits: Vec::new(),
             circuits_changed: false,
@@ -3004,6 +3008,7 @@ impl Handle {
             net_events,
             guard,
             uses_second_pin,
+            faults,
             circuits,
             circuits_changed,
             notify_pending,
@@ -3121,6 +3126,7 @@ impl Handle {
                     }
                 }
             }
+            Update::Faults(held) => *faults = (**held).clone(),
             // NET-178: the push binding of a queue that ended goes with it.
             Update::QueueEnded(queue) => {
                 let _ = client.unbind_queue(queue, &mut OsRng);
@@ -3515,12 +3521,14 @@ impl Handle {
                 bridge,
                 net_events,
                 owns_channels,
+                faults: inner_faults,
                 ..
             } = &mut *inner;
             // The node continues each contact and each invitation of the
             // earlier runs. A linked device runs its sync channels alone:
             // the device that owns a channel reads its queue (`DEV-287`).
             let mut node = ClientNode::with_relays(ingress, candidates, client.root_identity()?);
+            node.set_faults(core::mem::take(inner_faults));
             // REL-169: the link-fault reports of this run go to these queues.
             node.set_report_queues(
                 network

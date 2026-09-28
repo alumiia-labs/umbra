@@ -540,6 +540,14 @@ fn two_clients_become_contacts_and_exchange_text() {
         .on_cover_slot(false, None, None, now, &mut Rng(95))
         .unwrap();
     assert_eq!(slot, CoverSlot::Nothing);
+    // REL-182: after REPORT_WAIT a report builds a circuit, and to a relay
+    // of the set alone: this queue names none, thus the report waits.
+    let later = now + umbra_core::session::faults::REPORT_WAIT;
+    let slot = network.clients[BOB]
+        .on_cover_slot(true, None, None, later, &mut Rng(98))
+        .unwrap();
+    assert_ne!(slot, CoverSlot::Report);
+    assert!(network.clients[BOB].faults_mut().due().is_some());
     network.clients[BOB]
         .set_report_queues((1..=5).map(|layer| queue_at(relay_static(layer).0.relay_id)).collect());
     let slot = network.clients[BOB]
@@ -1590,4 +1598,56 @@ fn each_relay_link_returns_receipts_for_its_cells() {
     // The middle relay has two relay links, the other two have one.
     let held: Vec<(usize, usize)> = (0..3).map(|relay| network.relays[relay].receipts_held()).collect();
     assert_eq!(held, [(1, 1), (2, 2), (1, 1)], "{held:?}");
+}
+
+/// Part 10 §10.4.2: an authority makes a report queue, a client seals a
+/// report to it in a cover slot, and the authority opens the report
+/// (`REL-166`, `REL-169`, `WIR-536`).
+#[test]
+fn a_link_fault_report_reaches_the_report_queue_of_an_authority() {
+    use umbra_core::directory::report::LinkFaultReport;
+    use umbra_crypto::seal;
+
+    const AUTHORITY: usize = 0;
+    const CLIENT: usize = 1;
+    let mut network = Network::new();
+    network.settle();
+    network.clients[AUTHORITY]
+        .make_report_queue(&mut Rng(1))
+        .unwrap();
+    network.settle();
+    let events = network.take_events(AUTHORITY);
+    let Some(ClientEvent::ReportQueue { address, .. }) = events
+        .iter()
+        .find(|event| matches!(event, ClientEvent::ReportQueue { .. }))
+    else {
+        panic!("{events:?}");
+    };
+    let address: [u8; 129] = address.as_slice().try_into().unwrap();
+    let report_sk = Secret::new([0x5A; 32]);
+    let report_pk = seal::public_of(&report_sk);
+
+    let chain = [[0x11; 32], [0x12; 32], [0x13; 32]];
+    let now = network.now;
+    let faults = network.clients[CLIENT].faults_mut();
+    faults.forced_replacement(&chain, now);
+    faults.forced_replacement(&chain, now);
+    network.clients[CLIENT].set_report_queues(vec![(address, report_pk)]);
+    let slot = network.clients[CLIENT]
+        .on_cover_slot(true, None, None, now, &mut Rng(2))
+        .unwrap();
+    assert_eq!(slot, CoverSlot::Report);
+    network.settle();
+    let sealed: Vec<Vec<u8>> = network
+        .take_events(AUTHORITY)
+        .into_iter()
+        .filter_map(|event| match event {
+            ClientEvent::LinkFault { sealed, .. } => Some(sealed),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sealed.len(), 1);
+    let report = LinkFaultReport::open(&report_sk, &sealed[0]).unwrap();
+    assert_eq!(report.hops, chain);
+    assert_eq!((report.loops_sent, report.loops_lost), (2, 2));
 }

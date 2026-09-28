@@ -12,7 +12,10 @@ use std::{
 use tokio::sync::mpsc;
 use umbra_core::{
     identity::invitation::FRAGMENT_LEN,
-    session::node::{ClientEvent, ClientNode, ContactId, CoverSlot, StateChange},
+    session::{
+        faults::LinkFaults,
+        node::{ClientEvent, ClientNode, ContactId, CoverSlot, StateChange},
+    },
 };
 use umbra_crypto::rand_core::{TryCryptoRng, TryRng};
 use umbra_transport::{
@@ -113,6 +116,9 @@ pub enum Command {
     /// Make a rendezvous queue of Part 9 §9.6. An
     /// [`Update::RendezvousQueue`] with the same tag follows.
     MakeRendezvousQueue(u64),
+    /// Make the report queue of an authority (Part 10 `REL-166`). An
+    /// [`Update::ReportQueue`] follows.
+    MakeReportQueue,
     /// End a rendezvous queue with a `DEL`.
     EndRendezvousQueue([u8; 32]),
     /// Send a hello of Part 9 §9.6 to the rendezvous queue of an entry.
@@ -197,6 +203,16 @@ pub enum Update {
     },
     /// No relay made the rendezvous queue of this tag.
     RendezvousRefused(u64),
+    /// The report queue of an authority exists at its relay.
+    ReportQueue {
+        /// The encoded `QueueAddress` that a client writes to.
+        address: Vec<u8>,
+    },
+    /// A `SealedReport` arrived on the report queue (`WIR-536`).
+    LinkFault(Vec<u8>),
+    /// The loop count and the forced replacements of the run, for the next
+    /// run. It comes before [`Update::Offline`].
+    Faults(Box<LinkFaults>),
     /// A hello arrived on a rendezvous queue.
     Hello {
         /// The rendezvous queue.
@@ -376,6 +392,7 @@ pub async fn run_client(
     let plan = Plan::Only(Wire::Tcp);
     let Ok(mut link) = native::connect(&guard, tls, plan, key, mask, Duration::from_secs(10)).await
     else {
+        let _ = updates.send(Update::Faults(Box::new(node.take_faults())));
         let _ = updates.send(Update::Offline(Ended::DialFailed));
         return;
     };
@@ -532,6 +549,8 @@ pub async fn run_client(
                     None => continue,
                 },
                 ClientEvent::Hello { queue, envelope } => Update::Hello { queue, envelope },
+                ClientEvent::ReportQueue { address, .. } => Update::ReportQueue { address },
+                ClientEvent::LinkFault { sealed, .. } => Update::LinkFault(sealed),
                 // The contact follows flight 1 of the addressee.
                 ClientEvent::HelloSent { .. } => continue,
                 ClientEvent::NotifyKey {
@@ -660,6 +679,9 @@ pub async fn run_client(
                         let _ = updates.send(Update::RendezvousRefused(tag));
                     }
                 },
+                Command::MakeReportQueue => {
+                    let _ = node.make_report_queue(&mut rng);
+                }
                 Command::EndRendezvousQueue(recipient_id) => {
                     let _ = node.end_rendezvous_queue(&recipient_id, &mut rng);
                 }
@@ -685,5 +707,7 @@ pub async fn run_client(
             }
         }
     };
+    // REL-172: the counts go to the next run.
+    let _ = updates.send(Update::Faults(Box::new(node.take_faults())));
     let _ = updates.send(Update::Offline(ended));
 }

@@ -22,10 +22,13 @@ pub const LOOP_FAULT_MIN: u16 = 10;
 pub const LOOP_FAULT_RATE: u16 = 20;
 /// `FORCED_REPEAT`: the forced replacements of one epoch that send a report.
 pub const FORCED_REPEAT: u16 = 2;
+/// `REPORT_WAIT`: the wait of a report before it builds a circuit
+/// (`REL-181`, `REL-182`).
+pub const REPORT_WAIT: u64 = 15 * 60;
 /// The reports that wait for a slot at one time. An older one goes first.
 const DUE_MAX: usize = 4;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Count {
     loops_sent: u16,
     loops_back: u16,
@@ -37,14 +40,15 @@ struct Count {
 }
 
 /// The counts of the chains of this client.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LinkFaults {
     counts: BTreeMap<(u64, Chain), Count>,
     /// The forced replacements of each epoch.
     forced: BTreeMap<u64, u16>,
     /// The chains of each epoch that a report named already.
     reported: BTreeSet<(u64, Chain)>,
-    due: VecDeque<LinkFaultReport>,
+    /// Each report that waits, with the time it became due.
+    due: VecDeque<(LinkFaultReport, u64)>,
 }
 
 fn epoch_of(now: u64) -> u64 {
@@ -97,23 +101,24 @@ impl LinkFaults {
         let forced = self.forced.entry(epoch).or_default();
         *forced = forced.saturating_add(1);
         if *forced == FORCED_REPEAT {
-            self.report(epoch, chain, sent.max(lost), lost);
+            self.report(epoch, chain, sent.max(lost), lost, now);
         }
     }
 
-    fn report(&mut self, epoch: u64, chain: &Chain, loops_sent: u16, loops_lost: u16) {
+    fn report(&mut self, epoch: u64, chain: &Chain, loops_sent: u16, loops_lost: u16, now: u64) {
         if !self.reported.insert((epoch, *chain)) {
             return;
         }
         if self.due.len() >= DUE_MAX {
             self.due.pop_front();
         }
-        self.due.push_back(LinkFaultReport {
+        let report = LinkFaultReport {
             epoch,
             hops: *chain,
             loops_sent,
             loops_lost,
-        });
+        };
+        self.due.push_back((report, now));
     }
 
     /// Counts the loops lost at `now`, and closes each epoch before the
@@ -142,7 +147,7 @@ impl LinkFaults {
             let at_rate = u32::from(count.loops_lost) * 100
                 >= u32::from(count.loops_sent) * u32::from(LOOP_FAULT_RATE);
             if count.loops_sent >= LOOP_FAULT_MIN && at_rate {
-                self.report(key.0, &key.1, count.loops_sent, count.loops_lost);
+                self.report(key.0, &key.1, count.loops_sent, count.loops_lost, now);
             }
         }
         // The reports and the counts of forced replacements older than the
@@ -151,12 +156,17 @@ impl LinkFaults {
         let floor = epoch.saturating_sub(1);
         self.forced.retain(|held, _| *held >= floor);
         self.reported.retain(|(held, _)| *held >= floor);
-        self.due.retain(|report| report.epoch >= floor);
+        self.due.retain(|(report, _)| report.epoch >= floor);
     }
 
     /// The oldest report that waits for a slot.
     pub fn due(&self) -> Option<&LinkFaultReport> {
-        self.due.front()
+        self.due.front().map(|(report, _)| report)
+    }
+
+    /// The time at which the oldest report that waits became due.
+    pub fn due_since(&self) -> Option<u64> {
+        self.due.front().map(|(_, since)| *since)
     }
 
     /// The oldest report left in a slot.

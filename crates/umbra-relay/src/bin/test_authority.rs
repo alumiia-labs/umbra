@@ -15,10 +15,17 @@
 //! ```text
 //! seed=<64 hex characters>
 //! relay=<descriptor file>,<operator name>,<class 0 to 3>,<ingress|chain>
+//! report_queue=<authority index>,<queue file>
 //! ```
 //!
 //! The `relay` line repeats. Each relay is of the first root of its network,
 //! thus the layer function of `REL-060` takes the genesis root.
+//!
+//! A `report_queue` line names the file that `umbra-authority` writes: the
+//! `QueueAddress` and the X25519 key of the report queue of that authority.
+//! The manifest then carries a `ReportQueue` that the key of that authority
+//! signs (Part 10 `REL-166`, `REL-167`). A file that does not exist yet
+//! gives no queue.
 
 #![forbid(unsafe_code)]
 
@@ -28,6 +35,8 @@ use umbra_core::directory::{
     authority::{entry_of, keyset_bytes, sign_manifest, Admission, Listing, GENESIS_ROOT},
     bloc::BlocList,
     descriptor::RelayEntry,
+    manifest::RelayManifest,
+    report::{ReportQueue, QUEUE_ADDRESS_LEN},
     AUTHORITY_COUNT, EPOCH_SECONDS,
 };
 use umbra_crypto::{hash::sha3_256, secret::Secret, sign::SigningKey};
@@ -79,11 +88,17 @@ fn run(settings: &str, out: &Path) -> Result<(), &'static str> {
     let text = std::fs::read_to_string(settings).map_err(|_| "the settings file does not read")?;
     let mut seed = None;
     let mut relays = Vec::new();
+    let mut report_queues = Vec::new();
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
         match line.split_once('=') {
             Some(("seed", value)) => seed = hex32(value),
             Some(("relay", value)) => {
                 relays.push(read_relay(value).ok_or("a relay line does not parse")?);
+            }
+            Some(("report_queue", value)) => {
+                let (index, file) = value.split_once(',').ok_or("a report_queue line does not parse")?;
+                let index: u8 = index.parse().map_err(|_| "a report_queue line does not parse")?;
+                report_queues.push((index, file.to_owned()));
             }
             _ => return Err("the settings file does not parse"),
         }
@@ -140,14 +155,40 @@ fn run(settings: &str, out: &Path) -> Result<(), &'static str> {
         &mut OsRng,
     )
     .map_err(|_| "the manifest does not build")?;
+    // REL-167: the report queue of each authority that wrote one.
+    let mut signed_queues = Vec::new();
+    for (index, file) in &report_queues {
+        let Ok(held) = std::fs::read(file) else {
+            continue;
+        };
+        let (address, report_pk) = held
+            .split_at_checked(QUEUE_ADDRESS_LEN)
+            .ok_or("a report queue file does not parse")?;
+        let queue = ReportQueue {
+            authority_index: *index,
+            epoch,
+            address: address.try_into().map_err(|_| "a report queue file does not parse")?,
+            report_pk: report_pk.try_into().map_err(|_| "a report queue file does not parse")?,
+        };
+        let key = keys.get(usize::from(*index)).ok_or("no authority of that index")?;
+        signed_queues.push(queue.sign(key, &mut OsRng).map_err(|_| "a report queue does not sign")?);
+    }
+    let manifest = if signed_queues.is_empty() {
+        manifest
+    } else {
+        let mut parsed = RelayManifest::parse(&manifest).map_err(|_| "the manifest does not parse")?;
+        parsed.queues = signed_queues.iter().map(Vec::as_slice).collect();
+        parsed.encode().map_err(|_| "the manifest does not build")?
+    };
     let keyset = keyset_bytes(&keys, KEYSET_EPOCH).map_err(|_| "the key set does not build")?;
     std::fs::write(out.join("manifest.bin"), &manifest)
         .and_then(|()| std::fs::write(out.join("keyset.bin"), &keyset))
         .map_err(|_| "the output directory does not take a file")?;
     println!(
-        "epoch={epoch} manifest={} bytes keyset={} bytes",
+        "epoch={epoch} manifest={} bytes keyset={} bytes report_queues={}",
         manifest.len(),
-        keyset.len()
+        keyset.len(),
+        signed_queues.len()
     );
     Ok(())
 }

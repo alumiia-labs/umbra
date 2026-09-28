@@ -63,7 +63,7 @@ use super::{
     },
     circuit::{CircuitSession, Event as CircuitEvent},
     contact::{Invitee, Inviter, FLIGHT_1, FLIGHT_2},
-    faults::LinkFaults,
+    faults::{LinkFaults, REPORT_WAIT},
 };
 use crate::{
     attach::{
@@ -268,6 +268,23 @@ pub enum ClientEvent {
         queue: [u8; 32],
         /// The envelope.
         envelope: Vec<u8>,
+    },
+    /// The report queue of an authority exists at its relay (`REL-166`).
+    /// The caller publishes `address` in a `ReportQueue`.
+    ReportQueue {
+        /// The handle that [`ClientNode::make_report_queue`] gave.
+        handle: u64,
+        /// The `RecipientId` of the queue.
+        recipient_id: [u8; 32],
+        /// The encoded `QueueAddress` that a client writes to.
+        address: Vec<u8>,
+    },
+    /// A `SealedReport` arrived on the report queue (`WIR-536`).
+    LinkFault {
+        /// The report queue.
+        queue: [u8; 32],
+        /// The sealed report.
+        sealed: Vec<u8>,
     },
     /// A hello went to a rendezvous queue, and its invitation waits for
     /// flight 1 of the addressee (`DIS-087`).
@@ -607,6 +624,9 @@ enum Purpose {
     Notify,
     /// A rendezvous queue of Part 9 §9.6.
     Rendezvous,
+    /// The report queue of a directory authority (Part 10 §10.4.2). It
+    /// lives beside the rendezvous queues, on an ordinary circuit.
+    Report,
     /// The queue of a hello of Part 9 §9.6: its bundle goes in a hello to
     /// the rendezvous queue of an entry.
     Hello {
@@ -1064,6 +1084,9 @@ pub struct ClientNode {
     /// The delay of the first build of the rendezvous circuits in a run,
     /// in seconds, and the time at which it ends (`DIS-015`).
     rendezvous_wait: u64,
+    /// The queues of the rendezvous map that are report queues of an
+    /// authority, which carry link-fault reports and no hello.
+    reports: BTreeSet<[u8; 32]>,
     rendezvous_at: Option<u64>,
     /// The contacts whose new queue the relay makes now.
     rotating: BTreeSet<[u8; 32]>,
@@ -1081,6 +1104,8 @@ pub struct ClientNode {
     /// Whether this run sent a report while it made no cover cell
     /// (`REL-107`).
     background_report: bool,
+    /// The epoch in which a report built its circuit (`REL-182`).
+    report_build: Option<u64>,
     /// The newest time that the runtime gave, for a step that takes none.
     clock: u64,
     /// The contacts whose channel moved since the last
@@ -1198,10 +1223,12 @@ impl ClientNode {
             faults: LinkFaults::default(),
             report_queues: Vec::new(),
             background_report: false,
+            report_build: None,
             clock: 0,
             notify: BTreeMap::new(),
             rendezvous: BTreeMap::new(),
             rendezvous_wait: 0,
+            reports: BTreeSet::new(),
             rendezvous_at: None,
             moved: BTreeSet::new(),
             changes: Vec::new(),
@@ -1840,6 +1867,29 @@ impl ClientNode {
         rng: &mut R,
     ) -> Result<u64, Error> {
         self.make_queue(Purpose::Rendezvous, rng)
+    }
+
+    /// Makes the report queue of an authority (Part 10 `REL-166`). A
+    /// [`ClientEvent::ReportQueue`] with the same handle follows.
+    pub fn make_report_queue<R: CryptoRng + ?Sized>(&mut self, rng: &mut R) -> Result<u64, Error> {
+        self.make_queue(Purpose::Report, rng)
+    }
+
+    /// Takes the report queue of an earlier run from its stored form, which
+    /// a [`StateChange::RendezvousQueue`] gave.
+    pub fn restore_report_queue(&mut self, state: &[u8]) -> Result<[u8; 32], Error> {
+        let mut reader = Reader::new(state);
+        if reader.u8()? != NOTIFY_STORED_VERSION {
+            return Err(Error::Malformed);
+        }
+        let relay = reader.array()?;
+        let inbound = Inbound::restore(&mut reader)?;
+        reader.end()?;
+        let id = *inbound.recipient_id();
+        self.assign_to(id, relay, false);
+        self.rendezvous.insert(id, NotifyQueue { inbound, relay });
+        self.reports.insert(id);
+        Ok(id)
     }
 
     /// Takes a rendezvous queue of an earlier run from its stored form.
@@ -3663,7 +3713,7 @@ impl ClientNode {
         }
         // NET-065: a link-fault report after a receipt, and at most one in a
         // run that makes no cover cell (REL-078, REL-107).
-        if (makes_cover || !self.background_report) && self.send_report(rng)? {
+        if (makes_cover || !self.background_report) && self.send_report(makes_cover, now, rng)? {
             self.background_report |= !makes_cover;
             return Ok(CoverSlot::Report);
         }
@@ -3705,6 +3755,18 @@ impl ClientNode {
         Ok(CoverSlot::Cover)
     }
 
+    /// Takes the loop count and the forced replacements of this run. A
+    /// new run continues them, because a circuit that a relay ended ends
+    /// the run too, and a forced replacement counts across runs (`REL-172`).
+    pub fn take_faults(&mut self) -> LinkFaults {
+        core::mem::take(&mut self.faults)
+    }
+
+    /// Continues the counts of an earlier run.
+    pub fn set_faults(&mut self, faults: LinkFaults) {
+        self.faults = faults;
+    }
+
     /// The loop count and the forced replacements, for a test that makes a
     /// report due.
     #[doc(hidden)]
@@ -3719,9 +3781,16 @@ impl ClientNode {
 
     /// Sends the oldest link-fault report that waits to the report queue
     /// of one authority at random, of those whose relay a ready circuit
-    /// reaches, thus the report builds no circuit (`REL-169`). A client with
-    /// no report queue drops each report.
-    fn send_report<R: CryptoRng + ?Sized>(&mut self, rng: &mut R) -> Result<bool, Error> {
+    /// reaches (`REL-169`, `REL-181`). A report that waited `REPORT_WAIT`
+    /// with no such circuit builds one in the foreground, once in each
+    /// epoch, and goes when it is ready (`REL-182`); the slot then carries
+    /// no cell of it. A client with no report queue drops each report.
+    fn send_report<R: CryptoRng + ?Sized>(
+        &mut self,
+        makes_cover: bool,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<bool, Error> {
         let Some(report) = self.faults.due().copied() else {
             return Ok(false);
         };
@@ -3729,15 +3798,31 @@ impl ClientNode {
             self.faults.sent();
             return Ok(false);
         }
-        let open: Vec<QueueAddress> = self
+        let all: Vec<QueueAddress> = self
             .report_queues
             .iter()
             .filter_map(|(address, _)| QueueAddress::parse(address).ok())
-            .filter(|address| self.ready_slot_to(&address.relay_id, None).is_some())
             .collect();
-        if open.is_empty() {
-            return Ok(false);
-        }
+        let (ready, mut waiting): (Vec<QueueAddress>, Vec<QueueAddress>) = all
+            .into_iter()
+            .partition(|address| self.ready_slot_to(&address.relay_id, None).is_some());
+        // A circuit builds to a relay of the set alone.
+        waiting.retain(|address| self.key_of(&address.relay_id).is_some());
+        let builds = ready.is_empty();
+        let open = if builds {
+            let epoch = now / crate::directory::EPOCH_SECONDS;
+            let waited = self
+                .faults
+                .due_since()
+                .is_some_and(|since| now.saturating_sub(since) >= REPORT_WAIT);
+            if !makes_cover || !waited || self.report_build == Some(epoch) || waiting.is_empty() {
+                return Ok(false);
+            }
+            self.report_build = Some(epoch);
+            waiting
+        } else {
+            ready
+        };
         let draw = u64::from_be_bytes(random(rng));
         let pick = usize::try_from(draw % open.len() as u64).map_err(|_| Error::Malformed)?;
         let to = open.get(pick).ok_or(Error::NoPath)?;
@@ -3756,9 +3841,11 @@ impl ClientNode {
             random(rng),
             Bucket::B0,
         )?;
+        // A report with no ready circuit waits in the held records, and
+        // the circuit to its relay builds now (REL-182).
         self.send_sealed(sealed, rng)?;
         self.faults.sent();
-        Ok(true)
+        Ok(!builds)
     }
 
     /// Acknowledges the records of a contact that the runtime committed and
@@ -4310,7 +4397,7 @@ impl ClientNode {
                 address,
             }]);
         }
-        if matches!(keys.purpose, Purpose::Rendezvous) {
+        if matches!(keys.purpose, Purpose::Rendezvous | Purpose::Report) {
             let mut address = alloc::vec![0u8; QUEUE_ADDRESS_LEN];
             own_address().encode(&mut address)?;
             let held = NotifyQueue {
@@ -4322,6 +4409,14 @@ impl ClientNode {
                 state: notify_state(&held)?,
             });
             self.rendezvous.insert(ids.recipient_id, held);
+            if matches!(keys.purpose, Purpose::Report) {
+                self.reports.insert(ids.recipient_id);
+                return Ok(alloc::vec![ClientEvent::ReportQueue {
+                    handle: keys.handle,
+                    recipient_id: ids.recipient_id,
+                    address,
+                }]);
+            }
             return Ok(alloc::vec![ClientEvent::RendezvousQueue {
                 handle: keys.handle,
                 recipient_id: ids.recipient_id,
@@ -4427,7 +4522,7 @@ impl ClientNode {
             }
             // The notify queue, the rendezvous queue, and the rotation took
             // their paths above.
-            Purpose::Notify | Purpose::Rendezvous | Purpose::Rotate { .. } => {
+            Purpose::Notify | Purpose::Rendezvous | Purpose::Report | Purpose::Rotate { .. } => {
                 return Err(Error::Malformed)
             }
             // NET-326: the bundle goes to the queue of the peer.
@@ -4519,6 +4614,23 @@ impl ClientNode {
         now: u64,
         rng: &mut R,
     ) -> Result<Vec<ClientEvent>, Error> {
+        if self.reports.contains(&queue_id) {
+            let held = self.rendezvous.get_mut(&queue_id).ok_or(Error::NoPath)?;
+            self.moved.insert(queue_id);
+            // WIR-536: a report queue carries link-fault reports alone.
+            if let Opened::Record {
+                kind: L6Kind::LinkFault,
+                inner,
+                ..
+            } = held.inbound.open(payload, bucket, now)?
+            {
+                return Ok(alloc::vec![ClientEvent::LinkFault {
+                    queue: queue_id,
+                    sealed: inner,
+                }]);
+            }
+            return Ok(Vec::new());
+        }
         if let Some(held) = self.rendezvous.get_mut(&queue_id) {
             self.moved.insert(queue_id);
             // WIR-534: a rendezvous queue carries hellos alone.

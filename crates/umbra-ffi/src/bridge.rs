@@ -300,7 +300,11 @@ impl Bridge {
             | Update::RendezvousQueue { .. }
             | Update::RendezvousRefused(_)
             | Update::Hello { .. }
-            | Update::Digest { .. } => None,
+            | Update::Digest { .. }
+            // The report queue belongs to an authority, and no app holds one.
+            | Update::ReportQueue { .. }
+            | Update::LinkFault(_)
+            | Update::Faults(_) => None,
             Update::Online => Some(NetEvent::Online),
             Update::Offline(ended) => Some(NetEvent::Offline(ended)),
             Update::Invitation(bundle) => Some(NetEvent::Invitation(bundle)),
