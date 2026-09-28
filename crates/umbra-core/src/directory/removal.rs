@@ -117,11 +117,73 @@ impl LinkRemoval {
     }
 }
 
+/// `LINK_FAULT_DEGREE`: the removed links of one relay at which the
+/// dense-subgraph search expels it (`REL-188`).
+pub const LINK_FAULT_DEGREE: usize = 8;
+
+/// The dense-subgraph search of step 5 of §10.4 (`REL-188`): while a relay
+/// holds `LINK_FAULT_DEGREE` or more removed links, the relay with the most,
+/// the lower `relay_id` first at a tie, leaves, and its links leave the
+/// graph with it. The result is each relay that the search expels, in the
+/// order of the search.
+pub fn peel(removals: &[LinkRemoval]) -> Vec<[u8; 32]> {
+    let mut edges: Vec<([u8; 32], [u8; 32])> = removals
+        .iter()
+        .map(|removal| (removal.relay_a, removal.relay_b))
+        .collect();
+    edges.sort_unstable();
+    edges.dedup();
+    let mut expelled = Vec::new();
+    loop {
+        let mut degree: alloc::collections::BTreeMap<[u8; 32], usize> = alloc::collections::BTreeMap::new();
+        for (one, other) in &edges {
+            for relay in [one, other] {
+                let held = degree.entry(*relay).or_insert(0);
+                *held = held.saturating_add(1);
+            }
+        }
+        // The map is in `relay_id` order, thus the first of the most is
+        // the lower one.
+        let Some((top, count)) = degree
+            .iter()
+            .fold(None::<(&[u8; 32], usize)>, |best, (relay, count)| match best {
+                Some((_, held)) if held >= *count => best,
+                _ => Some((relay, *count)),
+            })
+        else {
+            break;
+        };
+        if count < LINK_FAULT_DEGREE {
+            break;
+        }
+        let top = *top;
+        edges.retain(|(one, other)| *one != top && *other != top);
+        expelled.push(top);
+    }
+    expelled
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
     use crate::directory::{descriptor::tests::Rng, root::tests::authorities};
+
+    #[test]
+    fn the_search_expels_the_attacker_and_spares_each_victim() {
+        let relay = |n: u8| [n; 32];
+        // An attacker at 9 drops on a link to each of 8 honest relays, and
+        // one honest relay loses one more link to another attacker.
+        let mut removals: Vec<LinkRemoval> = (1..=8).map(|n| LinkRemoval::of(5, relay(9), relay(n))).collect();
+        removals.push(LinkRemoval::of(5, relay(1), relay(20)));
+        assert_eq!(peel(&removals), [relay(9)]);
+        // Below the degree, nobody leaves.
+        assert!(peel(&removals[..7]).is_empty());
+        // A tie takes the lower relay_id first, and its links leave with it.
+        let mut two: Vec<LinkRemoval> = (1..=8).map(|n| LinkRemoval::of(5, relay(40), relay(n))).collect();
+        two.extend((1..=8).map(|n| LinkRemoval::of(5, relay(30), relay(n + 10))));
+        assert_eq!(peel(&two), [relay(30), relay(40)]);
+    }
 
     #[test]
     fn a_removal_verifies_under_five_authorities_for_its_life() {

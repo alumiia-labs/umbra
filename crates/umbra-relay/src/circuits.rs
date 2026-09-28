@@ -175,9 +175,17 @@ pub struct CircuitTable {
     /// `NET-332`). A link of a relay of another layer carries the circuits
     /// of many clients, thus it has none.
     budgets: BTreeMap<LinkId, LinkBudget>,
+    /// The chains that this relay opened as one hop since the last take
+    /// (`REL-189`).
+    builds: u64,
 }
 
 impl CircuitTable {
+    /// The chains that this relay opened since the last call.
+    pub fn take_builds(&mut self) -> u64 {
+        core::mem::take(&mut self.builds)
+    }
+
     /// The table of a relay in `layer`, which is 1, 2, or 3.
     pub fn new(relay: RelayStatic, static_secret: StaticSecret, layer: u8) -> Self {
         CircuitTable {
@@ -187,6 +195,7 @@ impl CircuitTable {
             held: BTreeMap::new(),
             back: BTreeMap::new(),
             budgets: BTreeMap::new(),
+            builds: 0,
         }
     }
 
@@ -291,6 +300,7 @@ impl CircuitTable {
                 cells: (1, 1),
             },
         );
+        self.builds = self.builds.saturating_add(1);
         let mut out = vec![0u8; BUILD_BUCKET.body_len()];
         if build_cell_body(CellCommand::Extended, &reply, &mut out).is_err() {
             return Vec::new();

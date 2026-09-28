@@ -12,6 +12,7 @@ pub mod receipt;
 pub mod removal;
 pub mod report;
 pub mod root;
+pub mod stat;
 pub mod tree;
 
 /// The consensus epoch length, in seconds.

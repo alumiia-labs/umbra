@@ -48,6 +48,7 @@ labels! {
     LINK_FAULT_SEAL = "umbra/v1/link-fault-seal";
     RELAY_HELLO = "umbra/v1/relay-hello";
     RECEIPT_QUERY = "umbra/v1/receipt-query";
+    STAT_QUERY = "umbra/v1/stat-query";
     LINK_REMOVAL = "umbra/v1/link-removal";
     MEASURER_CERT = "umbra/v1/measurer-cert";
     DEVICE_ROSTER = "umbra/v1/device-roster";

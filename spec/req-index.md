@@ -73,13 +73,13 @@ each column when a crate implements the requirement and a test covers it.
 | `DEV` | 197 | 90 | 0 | 0 | 7 | **294** |
 | `NTF` | 74 | 28 | 0 | 0 | 3 | **105** |
 | `DIS` | 130 | 34 | 0 | 0 | 3 | **167** |
-| `REL` | 149 | 33 | 1 | 0 | 2 | **185** |
+| `REL` | 159 | 33 | 1 | 0 | 2 | **195** |
 | `GRP` | 232 | 65 | 0 | 0 | 6 | **303** |
 | `ATT` | 143 | 45 | 2 | 0 | 3 | **193** |
 | `ABU` | 71 | 30 | 1 | 0 | 0 | **102** |
 | `IMP` | 119 | 41 | 0 | 0 | 2 | **162** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2036 | 621 | 7 | 0 | 53 | **2717** |
+| **All** | 2046 | 621 | 7 | 0 | 53 | **2727** |
 
 ## SCP — Scope and Conventions
 
@@ -2086,6 +2086,16 @@ Source: `spec/10-relay-directory.md`
 | `REL-183` | §10.4.2 | MUST | The directory authorities | The directory authorities MUST sign a `LinkRemoval` for each link that they remove, and each manifest MUST carry it for `LINK_REMOVAL_EPOCHS` after its `epoch`. |  |  |
 | `REL-184` | §10.4.2 | MUST | A client | A client MUST verify a `LinkRemoval` under the key set of the root as it verifies a root (`REL-007`), and it MUST drop one that fails, one whose `relay_a` is not below its `relay_b`, and one whose `epoch` is more than `LINK_REMOVAL_EPOCHS` before the epoch of the root. |  |  |
 | `REL-185` | §10.4.2 | MUST | A client | A client MUST reject a chain in which two adjacent relays form a removed link, in either order. |  |  |
+| `REL-186` | §10.4.2 | MUST | A relay | A relay MUST answer at most `RECEIPT_QUERY_MAX` queries of one authority in one consensus epoch of its own clock, and the queries of §10.8 count in that bound. |  |  |
+| `REL-187` | §10.4.2 | MUST | A relay | A relay MUST refuse each further query of that authority in that epoch with HTTP status 429 and no body. |  |  |
+| `REL-188` | §10.4.2 | MUST | The directory authorities | The directory authorities MUST peel the link-fault graph at each epoch. |  |  |
+| `REL-189` | §10.8 | MUST | A relay | A relay MUST count the chains that it carries in each consensus epoch. |  |  |
+| `REL-190` | §10.8 | MUST | At the end of an epoch a relay | At the end of an epoch a relay MUST draw a uniform 64-bit value `r` and keep two shares: share 0 is `count + r` and share 1 is `−r`, modulo 2⁶⁴. |  |  |
+| `REL-191` | §10.8 | MUST | A relay | A relay MUST discard the count when it holds the shares, and it MUST discard the shares after `RECEIPT_RETENTION`. |  |  |
+| `REL-192` | §10.8 | MUST | A relay | A relay MUST answer a `StatQuery` of aggregator *k* that verifies under `REL-179` with share *k*. |  |  |
+| `REL-193` | §10.8 | MUST | An aggregator | An aggregator MUST add an integer sample of Laplace(`b`) to each share that it takes, before any other party reads the share. |  |  |
+| `REL-194` | §10.8 | MUST | An authority | An authority MUST read the chain count of a relay as the sum of the two noised shares modulo 2⁶⁴, read as a signed value, and it MUST read a negative sum as 0. |  |  |
+| `REL-195` | §10.8 | MUST | An authority | An authority MUST compute the fault rate of `REL-080` for an epoch after the end of that epoch, from the shares of that epoch. |  |  |
 
 ## GRP — Private Groups
 

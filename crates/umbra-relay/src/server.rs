@@ -24,6 +24,7 @@ use umbra_core::{
     abuse::POW_CHALLENGE_PERIOD,
     directory::{
         receipt::{ReceiptQuery, RECEIPT_QUERY_LEN},
+        stat::{StatQuery, STAT_QUERY_LEN},
         root::DirectoryKeySet,
     },
     group::backoff::exponential,
@@ -125,8 +126,15 @@ pub enum Input {
     ReceiptQuery {
         /// The query.
         query: ReceiptQuery,
-        /// The encoded `ReceiptAnswer`.
-        reply: oneshot::Sender<Vec<u8>>,
+        /// The encoded `ReceiptAnswer`, or none above `REL-186`.
+        reply: oneshot::Sender<Option<Vec<u8>>>,
+    },
+    /// A query of an aggregator that verified (Part 10 `REL-192`).
+    StatQuery {
+        /// The query.
+        query: StatQuery,
+        /// The encoded `StatAnswer`, or none above `REL-186`.
+        reply: oneshot::Sender<Option<Vec<u8>>>,
     },
 }
 
@@ -203,7 +211,16 @@ pub async fn run_node(
                     Vec::new()
                 }
                 Some(Input::ReceiptQuery { query, reply }) => {
-                    let answer = node.receipt_answer(&query).encode().unwrap_or_default();
+                    let answer = node
+                        .receipt_answer(&query, unix_now())
+                        .map(|answer| answer.encode().unwrap_or_default());
+                    let _ = reply.send(answer);
+                    Vec::new()
+                }
+                Some(Input::StatQuery { query, reply }) => {
+                    let answer = node
+                        .stat_answer(&query, unix_now())
+                        .map(|answer| answer.encode().to_vec());
                     let _ = reply.send(answer);
                     Vec::new()
                 }
@@ -492,10 +509,57 @@ async fn answer_receipt_query<S>(
         Ok(()) => answer.await.ok(),
         Err(_) => None,
     };
+    respond_answer(stream, answer).await;
+}
+
+/// The answer of the node to a query: the body, 429 above the bound of
+/// `REL-187`, or 503 when the node gave none.
+async fn respond_answer<S>(stream: &mut S, answer: Option<Option<Vec<u8>>>)
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let _ = match answer {
-        Some(body) => https::respond(stream, 200, "application/octet-stream", &body).await,
+        Some(Some(body)) => https::respond(stream, 200, "application/octet-stream", &body).await,
+        Some(None) => https::respond(stream, 429, "text/plain", &[]).await,
         None => https::respond(stream, 503, "text/plain", &[]).await,
     };
+}
+
+/// The path of the query of an aggregator (Part 10 `REL-192`).
+pub const STAT_PATH: &str = "/stat";
+
+/// Answers a query of an aggregator: a query that verifies under the key
+/// set of this relay gets the share of that aggregator, and each other gets
+/// 403 with no body (`REL-192`).
+async fn answer_stat_query<S>(
+    stream: &mut S,
+    inbound: &mut Vec<u8>,
+    node: &mpsc::Sender<Input>,
+    carried: &Carried,
+) where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let request = https::read_request(stream, inbound, STAT_QUERY_LEN).await;
+    let keyset = carried
+        .manifest_source
+        .as_ref()
+        .map(|source| source.keyset.as_slice());
+    let query = match (request, keyset) {
+        (Ok(request), Some(keyset)) if request.method == "POST" => DirectoryKeySet::parse(keyset)
+            .ok()
+            .and_then(|(set, _)| StatQuery::verify(&request.body, &set).ok()),
+        _ => None,
+    };
+    let Some(query) = query else {
+        let _ = https::respond(stream, 403, "text/plain", &[]).await;
+        return;
+    };
+    let (reply, answer) = oneshot::channel();
+    let answer = match node.send(Input::StatQuery { query, reply }).await {
+        Ok(()) => answer.await.ok(),
+        Err(_) => None,
+    };
+    respond_answer(stream, answer).await;
 }
 
 async fn relay_ohttp<S>(
@@ -570,6 +634,10 @@ pub async fn serve_connection<S>(
         }
         if inbound.starts_with(format!("POST {RECEIPT_PATH} ").as_bytes()) {
             answer_receipt_query(&mut stream, &mut inbound, &node, &carried).await;
+            return;
+        }
+        if inbound.starts_with(format!("POST {STAT_PATH} ").as_bytes()) {
+            answer_stat_query(&mut stream, &mut inbound, &node, &carried).await;
             return;
         }
         if native::asks_challenges(&inbound) && inbound.windows(4).any(|w| w == b"\r\n\r\n") {

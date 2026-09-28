@@ -1683,8 +1683,9 @@ fn a_probe_cell_is_covered_by_the_receipts_of_each_link() {
             epoch,
             tag: tags[hop],
         };
-        let taken = network.relays[hop - 1].receipt_answer(&query);
-        let issued = network.relays[hop].receipt_answer(&query);
+        let at = epoch * umbra_core::directory::EPOCH_SECONDS;
+        let taken = network.relays[hop - 1].receipt_answer(&query, at).unwrap();
+        let issued = network.relays[hop].receipt_answer(&query, at).unwrap();
         let verdict = judge_link(
             chain[hop - 1],
             chain[hop],
@@ -1695,4 +1696,24 @@ fn a_probe_cell_is_covered_by_the_receipts_of_each_link() {
         );
         assert_eq!(verdict, LinkVerdict::Held, "link {hop}");
     }
+    // REL-186, REL-187: the middle relay answered this authority twice, and
+    // it answers RECEIPT_QUERY_MAX in one epoch and no more.
+    let query = ReceiptQuery {
+        authority_index: 0,
+        epoch,
+        tag: tags[1],
+    };
+    let at = epoch * umbra_core::directory::EPOCH_SECONDS;
+    let max = umbra_core::directory::stat::RECEIPT_QUERY_MAX;
+    for _ in 2..max {
+        assert!(network.relays[1].receipt_answer(&query, at).is_some());
+    }
+    assert!(network.relays[1].receipt_answer(&query, at).is_none());
+    // Another authority, and the next epoch, have their own bound.
+    let other = ReceiptQuery {
+        authority_index: 1,
+        ..query
+    };
+    assert!(network.relays[1].receipt_answer(&other, at).is_some());
+    assert!(network.relays[1].receipt_answer(&query, at + umbra_core::directory::EPOCH_SECONDS).is_some());
 }

@@ -496,6 +496,17 @@ one hop name the two sides of one link.
   relay that holds no such receipt MUST answer `found` 0x00. **[REL-180]** A
   relay MUST refuse a query that does not verify with HTTP status 403 and no
   body.
+- **[REL-186]** A relay MUST answer at most `RECEIPT_QUERY_MAX` queries of one
+  authority in one consensus epoch of its own clock, and the queries of §10.8
+  count in that bound. **[REL-187]** A relay MUST refuse each further query of
+  that authority in that epoch with HTTP status 429 and no body.
+
+> *Cause of `REL-186`.* A query costs the relay one signature check, a search
+> of its receipts, and an inclusion proof. One isolation query asks one relay
+> at most twice, because a middle relay is the far end of one link and the near
+> end of the next. The bound thus lets one authority run 30 or more isolation
+> queries through one relay in each epoch, and one authority key that an
+> attacker holds cannot keep a relay busy with queries.
 > *Cause.* An earlier draft made the leaf of a cell and the query name its
 > `circ_id` and its tag, and said that the authority holds each value because
 > it encrypted each layer. Part 3 `NET-154` makes the relay before a hop draw
@@ -547,6 +558,24 @@ the label.
 > thus no client could avoid the link. A removal changes the paths of each
 > client, thus it takes the signatures of a root and not the key of one
 > authority.
+
+**The dense-subgraph search.** Step 5 of §10.4 runs at each consensus epoch
+over the **link-fault graph**. That graph has one vertex for each relay of the
+set and one edge for each `LinkRemoval` that the manifest carries.
+
+- **[REL-188]** The directory authorities MUST peel the link-fault graph at
+  each epoch. While a relay holds `LINK_FAULT_DEGREE` or more edges, they MUST
+  expel the relay with the most edges, the lower `relay_id` first at a tie, and
+  they MUST take the edges of that relay out of the graph before the next step.
+
+> *Cause.* An honest relay loses one link for each attacker that drops on a
+> link to it. An attacker loses one link for each relay whose traffic it drops.
+> Thus the relay with the most edges is an attacker before it is a victim, and
+> its expulsion takes one edge from each of its victims. One incident expels no
+> relay. **The residual.** `LINK_FAULT_DEGREE` attackers that each give up one
+> link to one honest relay expel that relay, and each attacker stays. The trade
+> costs the attackers one link each for one honest relay, and the Miranda
+> evaluation of §10.4 names the same residual.
 
 **The cost.** A relay signs one receipt for each `RECEIPT_WINDOW` cells. §10.9.1
 sizes a held 2 h session at 7 200 cells, thus a relay signs about 7 receipts for
@@ -1493,6 +1522,52 @@ not a byte volume. Its scale is σ = 1 chain at the same ε, thus `b` is 10
 chains. A noised count near zero makes the fault rate of a small relay large,
 and `REL-112` is the floor that holds in that case.
 
+**The shares of the chain count.** The two directory authorities at index 0
+and index 1 of the key set are the two **aggregators**. Each aggregator asks
+each relay for its share with a signed query.
+
+```
+StatQuery {                      // the body of POST /stat at a relay
+    version          u8          // 0x01
+    authority_index  u8          // 0 or 1, the aggregator
+    epoch            u64         // the consensus epoch of the count
+    sig              [3309]u8    // ML-DSA-65, label "umbra/v1/stat-query"
+}
+
+StatAnswer {
+    version          u8          // 0x01
+    found            u8          // 0x00 no share, 0x01 a share
+    share            u64         // 0 when found is 0x00
+}
+```
+
+The query is **3 319 bytes**, and the signature covers each field but `sig`,
+after the label. The answer is **10 bytes**.
+
+- **[REL-189]** A relay MUST count the chains that it carries in each consensus
+  epoch. A chain is each circuit that the relay opens as one hop.
+- **[REL-190]** At the end of an epoch a relay MUST draw a uniform 64-bit value
+  `r` and keep two shares: share 0 is `count + r` and share 1 is `−r`, modulo
+  2⁶⁴. **[REL-191]** A relay MUST discard the count when it holds the shares,
+  and it MUST discard the shares after `RECEIPT_RETENTION`.
+- **[REL-192]** A relay MUST answer a `StatQuery` of aggregator *k* that
+  verifies under `REL-179` with share *k*. A relay MUST refuse a query of each
+  other authority with HTTP status 403 and no body.
+- **[REL-193]** An aggregator MUST add an integer sample of Laplace(`b`) to each
+  share that it takes, before any other party reads the share.
+  **[REL-194]** An authority MUST read the chain count of a relay as the sum of
+  the two noised shares modulo 2⁶⁴, read as a signed value, and it MUST read a
+  negative sum as 0.
+- **[REL-195]** An authority MUST compute the fault rate of `REL-080` for an
+  epoch after the end of that epoch, from the shares of that epoch.
+
+> *Cause.* Each share alone is uniform, thus one aggregator learns nothing of
+> the count. Each aggregator adds the full noise, thus the noise of an honest
+> aggregator protects the count when the other one colludes with a reader. This
+> is the additive construction of PrivEx-S2 with two parties. The sum of two
+> noises is the price of that bound, and `REL-112` holds the floor that a large
+> noise on a small count needs.
+
 Implement the PrivEx-S2 construction directly, which is about 300 lines. Do
 **not** take a dependency on `draft-ietf-ppm-dap`. That draft is at draft-19,
 and its VDAF dependency is unpublished. A moving unpublished standard is the
@@ -1608,6 +1683,8 @@ relay with the notification role, and this section then applies to it.
 | `FORCED_REPEAT` | 2 forced replacements in one epoch (§10.4.2) |
 | `REPORT_WAIT` | 15 min, the wait of a report before it builds a circuit (§10.4.2) |
 | `LINK_REMOVAL_EPOCHS` | 168 epochs (7 days), the life of a removed link (§10.4.2) |
+| `LINK_FAULT_DEGREE` | 8 removed links of one relay, the step of the dense-subgraph search (§10.4.2) |
+| `RECEIPT_QUERY_MAX` | 64 queries of one authority at one relay in one epoch (§10.4.2) |
 | Chain-count noise | σ = 1 chain, ε = 0.1, thus b = 10 chains (§10.8) |
 | `FAMILY_MAX` | 64 members in one family certificate (§10.6.3) |
 

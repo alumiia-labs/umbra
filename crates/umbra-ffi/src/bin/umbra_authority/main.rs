@@ -20,6 +20,7 @@
 //! report_seed=<64 hex characters>         # the X25519 key of the reports
 //! state=target/devnet/report-queue.state  # the queue, across a restart
 //! queue=target/devnet/report-queue.bin    # the address and the key, for the signer
+//! aggregators=0,1                         # the aggregators of §10.8 that it plays
 //! ```
 //!
 //! The seeds are in the settings file, thus this program protects nothing.
@@ -27,12 +28,12 @@
 //! signs that file into the next manifest (`REL-167`). Each report that
 //! opens is one line on the standard output.
 //!
-//! A relay that `FAULT_MIN_REPORTS` reports of one epoch name gets an
-//! isolation query on the chain of the last of them (`REL-080`, `REL-112`).
-//! The rate of `REL-080` needs the chain count of each relay, the statistic
-//! of §10.8, which this network does not make, thus the count of reports
-//! alone starts a query here. A query on the evidence of the authority
-//! (`REL-108`) runs as
+//! After the end of each epoch the authority reads the noised chain count
+//! of each relay that `FAULT_MIN_REPORTS` reports of that epoch name, from
+//! the two aggregators of §10.8. A relay whose fault rate reaches
+//! `RELAY_FAULT_RATE` gets an isolation query on the chain of the last of
+//! its reports (`REL-080`, `REL-112`, `REL-195`). A query on the evidence of
+//! the authority (`REL-108`) runs as
 //!
 //! ```text
 //! umbra-authority <settings file> probe <relay>,<relay>,<relay>
@@ -44,6 +45,7 @@
 #![forbid(unsafe_code)]
 
 mod isolation;
+mod stats;
 
 use std::{collections::BTreeMap, path::PathBuf, process::ExitCode, sync::Arc, time::Duration};
 
@@ -70,6 +72,14 @@ const RETRY: Duration = Duration::from_secs(5);
 /// `FAULT_MIN_REPORTS`: the reports of one epoch below which no query runs
 /// (`REL-112`).
 const FAULT_MIN_REPORTS: u16 = 3;
+/// `RELAY_FAULT_RATE`: the reports of one epoch over the chains of one
+/// relay at which a query runs (`REL-080`).
+const RELAY_FAULT_RATE: f64 = 0.02;
+/// The wait after the end of an epoch before its shares are read: each
+/// relay makes them at its first tick of the next epoch (`REL-190`).
+const SHARE_SETTLE: u64 = 120;
+/// The period of the check for an ended epoch.
+const EVALUATE_EVERY: Duration = Duration::from_secs(60);
 
 struct Settings {
     seed: [u8; 32],
@@ -82,6 +92,8 @@ struct Settings {
     report_seed: [u8; 32],
     state: PathBuf,
     queue: PathBuf,
+    /// The aggregators of §10.8 that this program plays, by index.
+    aggregators: Vec<u8>,
 }
 
 fn hex32(text: &str) -> Option<[u8; 32]> {
@@ -119,6 +131,10 @@ fn read_settings(path: &str) -> Option<Settings> {
         report_seed: hex32(values.get("report_seed")?)?,
         state: values.get("state")?.into(),
         queue: values.get("queue")?.into(),
+        aggregators: values
+            .get("aggregators")
+            .map(|list| list.split(',').filter_map(|index| index.trim().parse().ok()).collect())
+            .unwrap_or_default(),
     })
 }
 
@@ -209,29 +225,78 @@ fn relay_set(settings: &Settings) -> Result<RelaySet, &'static str> {
         .map_err(|_| "the manifest does not verify")
 }
 
-/// The reports of each relay in each epoch, and the chain of the last one.
-type Counts = BTreeMap<(u64, [u8; 32]), (u16, [[u8; 32]; 3])>;
+/// The reports of one relay in one epoch.
+struct Tally {
+    /// The reports that name the relay.
+    reports: u16,
+    /// The chain of the last of them.
+    chain: [[u8; 32]; 3],
+    /// Whether the fault rate of the epoch ran.
+    is_done: bool,
+}
 
-/// Counts one report under each relay that it names, and starts a query on
-/// a relay that reaches `FAULT_MIN_REPORTS` in the epoch (`REL-080`,
-/// `REL-112`).
-fn count_report(settings: &Arc<Settings>, key: &Arc<SigningKey>, counts: &mut Counts, report: &LinkFaultReport) {
-    let floor = (unix_now() / EPOCH_SECONDS).saturating_sub(1);
+/// The reports of each relay in each epoch.
+type Counts = BTreeMap<(u64, [u8; 32]), Tally>;
+
+/// Counts one report under each relay that it names.
+fn count_report(counts: &mut Counts, report: &LinkFaultReport) {
+    let floor = (unix_now() / EPOCH_SECONDS).saturating_sub(2);
     counts.retain(|(epoch, _), _| *epoch >= floor);
     for relay in report.hops {
-        let held = counts.entry((report.epoch, relay)).or_insert((0, report.hops));
-        held.0 = held.0.saturating_add(1);
-        held.1 = report.hops;
-        if held.0 == FAULT_MIN_REPORTS {
-            let (settings, key, chain) = (Arc::clone(settings), Arc::clone(key), report.hops);
-            println!("isolation query on {}", to_hex(&relay));
-            tokio::spawn(async move {
-                match isolation::isolate(&settings, &key, chain).await {
-                    Ok((verdict, epoch)) => isolation::record(&settings, &chain, &verdict, epoch),
-                    Err(cause) => eprintln!("the isolation query failed: {cause}"),
-                }
-            });
+        let held = counts.entry((report.epoch, relay)).or_insert(Tally {
+            reports: 0,
+            chain: report.hops,
+            is_done: false,
+        });
+        held.reports = held.reports.saturating_add(1);
+        held.chain = report.hops;
+    }
+}
+
+/// Runs the fault rate of each ended epoch once its shares exist
+/// (`REL-195`): a relay that `FAULT_MIN_REPORTS` reports name, whose
+/// reports over its noised chain count reach `RELAY_FAULT_RATE`, gets an
+/// isolation query (`REL-080`, `REL-112`).
+fn evaluate(settings: &Arc<Settings>, key: &Arc<SigningKey>, counts: &mut Counts) {
+    let now = unix_now();
+    for ((epoch, relay), tally) in counts.iter_mut() {
+        let ended = (epoch + 1) * EPOCH_SECONDS + SHARE_SETTLE;
+        if tally.is_done || now < ended {
+            continue;
         }
+        tally.is_done = true;
+        if tally.reports < FAULT_MIN_REPORTS {
+            continue;
+        }
+        let (settings, key, chain) = (Arc::clone(settings), Arc::clone(key), tally.chain);
+        let (epoch, relay, reports) = (*epoch, *relay, tally.reports);
+        tokio::spawn(async move {
+            let Ok(set) = relay_set(&settings) else {
+                return;
+            };
+            let Some(listed) = set.relays.iter().find(|listed| listed.candidate.relay_id == relay) else {
+                return;
+            };
+            let Some(chains) = stats::chain_count(&settings, listed, epoch).await else {
+                println!("no chain count for {} in epoch {epoch}", to_hex(&relay));
+                return;
+            };
+            // A noised count of 0 gives the largest rate, and REL-112 is the
+            // floor that holds then.
+            let rate = f64::from(reports) / chains.max(1) as f64;
+            println!(
+                "fault rate {} epoch={epoch} reports={reports} chains={chains} rate={rate:.3}",
+                to_hex(&relay)
+            );
+            if rate < RELAY_FAULT_RATE {
+                return;
+            }
+            println!("isolation query on {}", to_hex(&relay));
+            match isolation::isolate(&settings, &key, chain).await {
+                Ok((verdict, epoch)) => isolation::record(&settings, &chain, &verdict, epoch),
+                Err(cause) => eprintln!("the isolation query failed: {cause}"),
+            }
+        });
     }
 }
 
@@ -268,7 +333,18 @@ async fn run_once(
         store,
     ));
     let report_pk = seal::public_of(report_sk);
-    while let Some(update) = updates.recv().await {
+    let mut clock = tokio::time::interval(EVALUATE_EVERY);
+    loop {
+        let update = tokio::select! {
+            update = updates.recv() => update,
+            _ = clock.tick() => {
+                evaluate(settings, key, counts);
+                continue;
+            }
+        };
+        let Some(update) = update else {
+            break;
+        };
         match update {
             Update::Online => println!("authority online, queue restored={restored}"),
             Update::ReportQueue { address } => {
@@ -290,7 +366,7 @@ async fn run_once(
                     // REL-170: a report of an older epoch goes.
                     let epoch = unix_now() / EPOCH_SECONDS;
                     if report.epoch.saturating_add(1) >= epoch {
-                        count_report(settings, key, counts, &report);
+                        count_report(counts, &report);
                     }
                 }
                 // REL-170: a report that does not open goes.

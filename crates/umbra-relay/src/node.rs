@@ -14,7 +14,10 @@ use umbra_core::{
         pow::{ChallengeBook, PowChallenge},
     },
     attach::command::{CrputPayload, CRPUT_LEN},
-    directory::receipt,
+    directory::{
+        receipt,
+        stat::{StatAnswer, StatQuery},
+    },
     notify::digest::NotifyDigest,
     session::{
         batch::{unpack, Range},
@@ -474,6 +477,8 @@ impl RelayNode {
             .collect();
         // REL-074, REL-176: the windows of an ended epoch close, and an old
         // receipt goes.
+        let built = self.circuits.take_builds();
+        self.receipts.count_chains(built, now, rng);
         if let Some(key) = self.pow_key.as_ref() {
             let own = self.relay.relay_id;
             for (link, signed) in self.receipts.tick(&own, key, now, rng) {
@@ -490,8 +495,23 @@ impl RelayNode {
     }
 
     /// The answer to a receipt query that verified (`REL-179`).
-    pub fn receipt_answer(&self, query: &receipt::ReceiptQuery) -> receipt::ReceiptAnswer {
-        self.receipts.answer(query)
+    pub fn receipt_answer(&mut self, query: &receipt::ReceiptQuery, now: u64) -> Option<receipt::ReceiptAnswer> {
+        // REL-186: one authority asks at most RECEIPT_QUERY_MAX times.
+        if !self.receipts.admit(query.authority_index, now) {
+            return None;
+        }
+        Some(self.receipts.answer(query))
+    }
+
+    /// The answer to a query of an aggregator that verified (`REL-192`), or
+    /// none above the bound of `REL-186`.
+    pub fn stat_answer(&mut self, query: &StatQuery, now: u64) -> Option<StatAnswer> {
+        if !self.receipts.admit(query.authority_index, now) {
+            return None;
+        }
+        Some(StatAnswer {
+            share: self.receipts.share(query.authority_index, query.epoch),
+        })
     }
 
     /// The NDR answered `gone` for a handle (`NTF-125`).

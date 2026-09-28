@@ -32,7 +32,9 @@
 //! `umbra-authority`. A relay of an `expel <relay_id>` line leaves the
 //! manifest (`REL-083`), and a link of a `link <relay_id> <relay_id>
 //! <epoch>` line takes a `LinkRemoval` that the seven keys sign, for
-//! `LINK_REMOVAL_EPOCHS` after that epoch (`REL-183`).
+//! `LINK_REMOVAL_EPOCHS` after that epoch (`REL-183`). The dense-subgraph
+//! search peels the removed links of their life, and each relay that it
+//! peels leaves the manifest too (`REL-188`).
 
 #![forbid(unsafe_code)]
 
@@ -43,7 +45,7 @@ use umbra_core::directory::{
     bloc::BlocList,
     descriptor::RelayEntry,
     manifest::RelayManifest,
-    removal::{LinkRemoval, LINK_REMOVAL_EPOCHS},
+    removal::{peel, LinkRemoval, LINK_REMOVAL_EPOCHS},
     report::{ReportQueue, QUEUE_ADDRESS_LEN},
     AUTHORITY_COUNT, EPOCH_SECONDS,
 };
@@ -140,6 +142,23 @@ fn run(settings: &str, out: &Path) -> Result<(), &'static str> {
         })
         .collect();
 
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| "the clock is before 1970")?
+        .as_secs();
+    let epoch = now / EPOCH_SECONDS;
+    // REL-188: the dense-subgraph search over the removed links of their
+    // life expels each relay that it peels.
+    let live: Vec<LinkRemoval> = removed
+        .iter()
+        .filter(|removal| removal.epoch <= epoch && removal.epoch + LINK_REMOVAL_EPOCHS >= epoch)
+        .copied()
+        .collect();
+    for relay in peel(&live) {
+        println!("relay {} expelled by the link-fault search", to_hex(&relay));
+        expelled.push(relay);
+    }
+
     let mut entries = Vec::with_capacity(relays.len());
     for relay in &relays {
         let listing = Listing {
@@ -169,11 +188,6 @@ fn run(settings: &str, out: &Path) -> Result<(), &'static str> {
         );
         entries.push(entry);
     }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|_| "the clock is before 1970")?
-        .as_secs();
-    let epoch = now / EPOCH_SECONDS;
     let manifest = sign_manifest(
         &keys,
         &[0, 1, 2, 3, 4, 5, 6],
