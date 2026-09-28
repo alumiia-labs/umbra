@@ -36,6 +36,7 @@ pub struct Draft {
     text: Zeroizing<Vec<u8>>,
     file: Option<DraftFile>,
     reply_to: Option<MsgRef>,
+    mentions: Vec<u16>,
 }
 
 impl Draft {
@@ -46,7 +47,19 @@ impl Draft {
             text: Zeroizing::new(Vec::new()),
             file: None,
             reply_to: None,
+            mentions: Vec::new(),
         }
+    }
+
+    /// Names members of a group in the draft, by their roster index
+    /// (Part 11 §11.11). A pairwise draft takes none.
+    pub fn set_mentions(&mut self, members: Vec<u16>) {
+        self.mentions = members;
+    }
+
+    /// The members that the draft names.
+    pub fn mentions(&self) -> &[u16] {
+        &self.mentions
     }
 
     /// Makes the draft an answer to a message of its conversation

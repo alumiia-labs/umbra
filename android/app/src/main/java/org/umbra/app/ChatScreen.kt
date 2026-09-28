@@ -454,6 +454,10 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                     add(RowEntry("music", "Audio") { audioPicker.launch(arrayOf("audio/*")) })
                 }
                 add(RowEntry("file", "File") { filePicker.launch(arrayOf("*/*")) })
+                // GRP-149: a group above POLL_GROUP_MAX members takes no poll.
+                if (!chat.isGroup || chat.members <= POLL_GROUP_MAX) {
+                    add(RowEntry("chart-bar", "Poll") { push(Screen.NewPoll(conversation)) })
+                }
             }
             ActionSheet("Attach", entries, onDismiss = { isAttaching = false })
         }
@@ -725,6 +729,8 @@ private fun Bubble(
                     onClick = onQuote,
                     longLabel = "Message actions",
                     onLongClick = onLongPress,
+                    // The options of a poll take their own press.
+                    isOver = line.poll == null,
                 ) { BubbleContent(line, chat) }
                 if (line.reactions.isNotEmpty()) ReactionPills(line)
             }
@@ -852,7 +858,18 @@ private fun BubbleContent(line: Line, chat: Chat) {
                         .padding(horizontal = if (isPhoto) 10.dp else 0.dp, vertical = 2.dp),
                 )
             }
+        } else if (!line.info.deleted && line.poll != null) {
+            PollContent(line, line.poll, Modifier.align(Alignment.Start))
         } else if (!line.info.deleted) {
+            // A mention of this member in a group (Part 11 §11.11).
+            if (line.info.mentionsMe) {
+                Text(
+                    "Mentions you",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = Palette.Action,
+                    modifier = Modifier.align(Alignment.Start).padding(bottom = 2.dp),
+                )
+            }
             PlatformText(line.text, Palette.Text, modifier = Modifier.align(Alignment.Start))
         }
         Spacer(Modifier.height(2.dp))

@@ -19,6 +19,7 @@ import uniffi.umbra_ffi.Config
 import uniffi.umbra_ffi.Connection
 import uniffi.umbra_ffi.ContactRequestInfo
 import uniffi.umbra_ffi.ConversationTimer
+import uniffi.umbra_ffi.FfiPoll
 import uniffi.umbra_ffi.FfiEvent
 import uniffi.umbra_ffi.FfiException
 import uniffi.umbra_ffi.PublicLink
@@ -61,6 +62,8 @@ class Line(
     val info: MsgInfo,
     val quote: Quoted?,
     val reactions: List<MsgReaction>,
+    /** The poll of the line, with the count that this device holds. */
+    val poll: FfiPoll? = null,
 ) {
     /**
      * The identity of the message: two loads of one message give one key. A
@@ -922,6 +925,7 @@ object Core {
             // A reaction, an edit, and a deletion are no arrival, thus they
             // raise no alert.
             is FfiEvent.Reacted -> revision++
+            is FfiEvent.Voted -> revision++
             is FfiEvent.Edited -> {
                 revision++
                 refreshChats()
@@ -1336,16 +1340,66 @@ object Core {
      * Sends the text of a composer, as an answer to `replyTo` when the user
      * chose one. This call overwrites `text`.
      */
-    fun send(conversation: Conversation, text: CharArray, replyTo: MsgHandle? = null) = call { client ->
-        val units = text.map { it.code.toUShort() }
-        text.fill('\u0000')
-        client.newDraft(conversation.id).use { draft ->
-            draft.setText(units)
-            draft.setReplyTo(replyTo)
-            client.sendDraft(draft).destroy()
+    fun send(conversation: Conversation, text: CharArray, replyTo: MsgHandle? = null) {
+        // The names of the contacts, read on the main thread.
+        val titles = chats.associate { it.conversation.id.toList() to it.title }
+        call { client ->
+            // GRP-334: an @name of a member of a group names that member.
+            val mentions = if (client.isGroup(conversation.id)) {
+                client.groupMembers(conversation.id)
+                    .filter { !it.isSelf }
+                    .filter { member ->
+                        val name = member.contact?.let { titles[it.toList()] } ?: "Member ${member.index}"
+                        mentions(text, name)
+                    }
+                    .map { it.index }
+            } else {
+                emptyList()
+            }
+            val units = text.map { it.code.toUShort() }
+            text.fill('\u0000')
+            client.newDraft(conversation.id).use { draft ->
+                draft.setText(units)
+                draft.setReplyTo(replyTo)
+                if (mentions.isNotEmpty()) draft.setMentions(mentions)
+                client.sendDraft(draft).destroy()
+            }
+            main.post { revision++ }
+            refreshChats()
         }
+    }
+
+    /** Whether `text` holds `@name` as a word. The text stays a `CharArray`. */
+    private fun mentions(text: CharArray, name: String): Boolean {
+        val needle = "@$name"
+        var at = 0
+        while (at + needle.length <= text.size) {
+            val isMatch = needle.indices.all { text[at + it].equals(needle[it], ignoreCase = true) }
+            val end = at + needle.length
+            if (isMatch && (end == text.size || !text[end].isLetterOrDigit())) return true
+            at++
+        }
+        return false
+    }
+
+    /** Sends a poll to a conversation. */
+    fun sendPoll(
+        conversation: Conversation,
+        question: String,
+        options: List<String>,
+        multiple: Boolean,
+        hidden: Boolean,
+        openSeconds: UInt,
+    ) = call { client ->
+        client.sendPoll(conversation.id, question, options, multiple, hidden, openSeconds).destroy()
         main.post { revision++ }
         refreshChats()
+    }
+
+    /** Votes on a poll, or changes the vote of the user. */
+    fun vote(poll: MsgHandle, choices: List<UByte>) = call { client ->
+        client.vote(poll, choices.map { it.toByte() }.toByteArray())
+        main.post { revision++ }
     }
 
     /** Sends a picked image as a message of its own. */
@@ -1725,7 +1779,8 @@ object Core {
                 }
                 Quoted(target.key().toList(), of.outgoing, quoted.chars)
             }
-            Line(message, sink.chars, info, quote, client.reactions(message))
+            val poll = if (info.poll && !info.deleted) client.pollView(message) else null
+            Line(message, sink.chars, info, quote, client.reactions(message), poll)
         }
         main.post { onLoaded(lines) }
     }

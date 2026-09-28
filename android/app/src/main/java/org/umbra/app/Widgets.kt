@@ -661,6 +661,10 @@ fun ActionSheet(
  * content, such as message text, takes a touch before a composable does,
  * thus the area lies on top. For a screen reader the content and the
  * actions are one node: the area itself says nothing.
+ *
+ * Content with presses of its own and no view of the platform, such as a
+ * poll, takes `isOver` false: the press then lies under the content, and a
+ * press of the content goes to the content.
  */
 @Composable
 fun PressOver(
@@ -668,8 +672,19 @@ fun PressOver(
     onClick: (() -> Unit)? = null,
     longLabel: String? = null,
     onLongClick: (() -> Unit)? = null,
+    isOver: Boolean = true,
     content: @Composable () -> Unit,
 ) {
+    if (!isOver) {
+        Box(
+            if (onLongClick != null) {
+                modifier.pressLong(onClick ?: {}, onLongClick)
+            } else {
+                modifier
+            },
+        ) { content() }
+        return
+    }
     Box(
         modifier.semantics(mergeDescendants = true) {
             if (onClick != null) {

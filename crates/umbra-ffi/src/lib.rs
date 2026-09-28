@@ -158,6 +158,10 @@ pub struct MessageInfo {
     pub timer: Option<u32>,
     /// The time at which the timer erases the message, in seconds.
     pub expires_at: Option<u64>,
+    /// Whether the message is a poll: see `Client::poll_view`.
+    pub poll: bool,
+    /// Whether a message of a group names this member (Part 11 §11.11).
+    pub mentions_me: bool,
 }
 
 /// The longest local name of a contact, in bytes of UTF-8.
@@ -227,6 +231,13 @@ pub enum Event {
         /// The conversation.
         conversation: ConversationId,
         /// The message.
+        message: MsgRef,
+    },
+    /// A vote moved the count of a poll.
+    Voted {
+        /// The conversation.
+        conversation: ConversationId,
+        /// The poll.
         message: MsgRef,
     },
     /// The contact changed the text of a message.
@@ -776,6 +787,56 @@ mod tests {
             .on_group_record(&[0xEE; 32], 1, &post.record, 1_700_000_004_000, &mut rng)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn a_group_counts_each_vote_and_marks_a_mention_for_the_member_it_names() {
+        let mut rng = Rng(87);
+        let mut client = new_client(&mut rng);
+        let mut other = new_client(&mut rng);
+        let (conversation, member) = ready_pair(&mut client, &mut other, &mut rng);
+        let now = 1_700_000_100u64;
+
+        let poll = client
+            .send_poll(conversation, "trail?", &["ridge", "lake"], false, false, 0, now * 1_000, &mut rng)
+            .unwrap();
+        assert!(client.info(&poll).unwrap().poll);
+        assert_eq!(client.poll_view(&poll, now).unwrap().voters, 0);
+        let post = client.take_group_post().unwrap();
+        let held = other
+            .on_group_record(&[0xC3; 32], 1, &post.record, (now + 1) * 1_000, &mut rng)
+            .unwrap()
+            .unwrap();
+        assert_eq!(other.poll_view(&held, now + 1).unwrap().options, ["ridge", "lake"]);
+
+        // GRP-336: the vote is one group record, and each member counts it.
+        other.vote(&held, &[1], (now + 2) * 1_000, &mut rng).unwrap();
+        assert_eq!(other.poll_view(&held, now + 2).unwrap().mine, [1]);
+        let vote = other.take_group_post().unwrap();
+        assert!(other.take_outgoing().is_none());
+        assert!(client
+            .on_group_record(&[0xC3; 32], 1, &vote.record, (now + 3) * 1_000, &mut rng)
+            .unwrap()
+            .is_none());
+        let count = client.poll_view(&poll, now + 3).unwrap();
+        assert_eq!((count.counts, count.voters), (vec![0, 1], 1));
+
+        // GRP-334: a mention names the member by its pair key, and the
+        // member sees the mark and no list.
+        let mut draft = client.new_draft(conversation);
+        draft.set_text(&units("@Dana which one")).unwrap();
+        draft.set_mentions(vec![1]);
+        client.send_draft(draft, (now + 4) * 1_000, &mut rng).unwrap();
+        let post = client.take_group_post().unwrap();
+        let named = other
+            .on_group_record(&[0xC3; 32], 1, &post.record, (now + 5) * 1_000, &mut rng)
+            .unwrap()
+            .unwrap();
+        assert!(other.info(&named).unwrap().mentions_me);
+        let mut view = View::default();
+        other.render(&named, &mut view).unwrap();
+        assert_eq!(String::from_utf16(&view.0).unwrap(), "@Dana which one");
+        let _ = member;
     }
 
     /// A group of `client` with both queues, and `other` in it at index 1.
@@ -2817,6 +2878,84 @@ mod tests {
         draft.set_text(&units("kept")).unwrap();
         let kept = client.send_draft(draft, at(4_003), &mut rng).unwrap();
         assert_eq!(client.info(&kept).unwrap().expires_at, None);
+    }
+
+    #[test]
+    fn a_poll_counts_the_last_vote_of_each_voter_until_its_close() {
+        use umbra_wire::app::{rich::RichRecord, AppKind, Channel};
+
+        let mut rng = Rng(85);
+        let mut alice = new_client(&mut rng);
+        let mut bob = new_client(&mut rng);
+        let (at_alice, at_bob) = (ContactId([0xA5; 32]), ContactId([0xB5; 32]));
+        let with_bob = alice.conversation_for(&at_alice.0).unwrap();
+        let with_alice = bob.conversation_for(&at_bob.0).unwrap();
+        let now = 1_800_000_000u64;
+
+        // A hidden count needs a close.
+        assert!(alice
+            .send_poll(with_bob, "lunch?", &["soup", "salad"], false, true, 0, now * 1_000, &mut rng)
+            .is_err());
+        let poll = alice
+            .send_poll(with_bob, "lunch?", &["soup", "salad", "none"], false, false, 3_600, now * 1_000, &mut rng)
+            .unwrap();
+        let sent = alice.take_outgoing().unwrap();
+        assert!(alice.info(&poll).unwrap().poll);
+        let mut view = View::default();
+        alice.render(&poll, &mut view).unwrap();
+        assert_eq!(String::from_utf16(&view.0).unwrap(), "lunch?");
+
+        // WIR-187: the period runs from the receive time of each party.
+        deliver(&mut bob, &at_bob, &sent.app, (now + 60) * 1_000, &mut rng);
+        let held = *bob.messages(with_alice).unwrap().last().unwrap();
+        let seen = bob.poll_view(&held, now + 60).unwrap();
+        assert_eq!((seen.options.len(), seen.closes_at, seen.voters), (3, now + 3_660, 0));
+
+        // WIR-186: one choice alone. A vote is no row of the view.
+        assert!(bob.vote(&held, &[0, 1], (now + 61) * 1_000, &mut rng).is_err());
+        bob.vote(&held, &[1], (now + 61) * 1_000, &mut rng).unwrap();
+        let first = bob.take_outgoing().unwrap();
+        bob.vote(&held, &[0], (now + 62) * 1_000, &mut rng).unwrap();
+        let second = bob.take_outgoing().unwrap();
+        assert_eq!(bob.messages(with_alice).unwrap().len(), 1);
+        let mine = bob.poll_view(&held, now + 62).unwrap();
+        assert_eq!((mine.counts, mine.mine), (vec![1, 0, 0], vec![0]));
+
+        // WIR-190: the last vote of the contact counts, once.
+        deliver(&mut alice, &at_alice, &first.app, (now + 70) * 1_000, &mut rng);
+        deliver(&mut alice, &at_alice, &second.app, (now + 71) * 1_000, &mut rng);
+        alice.vote(&poll, &[0], (now + 72) * 1_000, &mut rng).unwrap();
+        let count = alice.poll_view(&poll, now + 72).unwrap();
+        assert_eq!((count.counts, count.voters, count.mine), (vec![2, 0, 0], 2, vec![0]));
+        assert_eq!(alice.messages(with_bob).unwrap(), [poll]);
+
+        // WIR-189: a vote after the close goes, and this device votes no more.
+        bob.vote(&held, &[2], (now + 3_000) * 1_000, &mut rng).unwrap();
+        let late = bob.take_outgoing().unwrap();
+        deliver(&mut alice, &at_alice, &late.app, (now + 3_700) * 1_000, &mut rng);
+        let closed = alice.poll_view(&poll, now + 3_700).unwrap();
+        assert!(closed.closed);
+        assert_eq!(closed.counts, vec![2, 0, 0]);
+        assert!(alice.vote(&poll, &[1], (now + 3_701) * 1_000, &mut rng).is_err());
+
+        // WIR-176: a pairwise record that names a member goes.
+        let named = RichRecord {
+            reply_target: [0; 16],
+            thread_root: [0; 16],
+            forward_depth: 0,
+            mentions: vec![[3; 16]],
+            inner_kind: AppKind::Text,
+            inner_body: b"hi",
+        };
+        let mut body = vec![0u8; named.len()];
+        named.encode(Channel::Group, &mut body).unwrap();
+        deliver(&mut bob, &at_bob, &record(AppKind::Rich, [9; 16], &body), now * 1_000, &mut rng);
+        assert_eq!(bob.messages(with_alice).unwrap().len(), 1);
+        // A pairwise draft names no member (WIR-175).
+        let mut draft = bob.new_draft(with_alice);
+        draft.set_text(&units("hi")).unwrap();
+        draft.set_mentions(vec![1]);
+        assert!(bob.send_draft(draft, now * 1_000, &mut rng).is_err());
     }
 
     #[test]

@@ -21,6 +21,7 @@ mod groups;
 mod held_handles;
 mod notify;
 mod sync;
+mod polls;
 mod timers;
 mod tokens;
 
@@ -37,6 +38,7 @@ pub use groups::{
 };
 pub use notify::NdrCall;
 pub use sync::SyncSend;
+pub use polls::PollView;
 pub use timers::{timer_body, TimerSetting, TIMER_VALUES};
 use umbra_core::{
     devset::edits::Deadline,
@@ -55,6 +57,7 @@ use umbra_wire::app::{
     edit::{DeleteBody, DeleteScope, EditBody},
     keys::DigestBody,
     msg_ref,
+    poll::Poll,
     rich::RichRecord,
     signal::{ReactionAction, ReactionBody, ReceiptBody},
     AppKind, AppMessage, Channel,
@@ -334,7 +337,7 @@ fn with_text(app: &[u8], text: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error> {
     let body = match parsed.kind {
         AppKind::Text => Zeroizing::new(text.to_vec()),
         AppKind::Rich => {
-            let rich = RichRecord::parse(parsed.body, Channel::Pairwise)?;
+            let rich = RichRecord::parse(parsed.body, Channel::Group)?;
             if rich.inner_kind != AppKind::Text {
                 return Err(Error::Malformed);
             }
@@ -343,7 +346,7 @@ fn with_text(app: &[u8], text: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error> {
                 ..rich
             };
             let mut encoded = Zeroizing::new(vec![0u8; changed.len()]);
-            changed.encode(Channel::Pairwise, &mut encoded)?;
+            changed.encode(Channel::Group, &mut encoded)?;
             encoded
         }
         _ => return Err(Error::Malformed),
@@ -384,8 +387,10 @@ fn placeholder_of(plain: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error> {
 fn text_of<'a>(parsed: &AppMessage<'a>) -> Result<&'a [u8], Error> {
     match parsed.kind {
         AppKind::Text => Ok(parsed.body),
+        // A stored record passed the check of its channel at its arrival,
+        // and the layout of a group is the wider one.
         AppKind::Rich => {
-            let rich = RichRecord::parse(parsed.body, Channel::Pairwise)?;
+            let rich = RichRecord::parse(parsed.body, Channel::Group)?;
             if rich.inner_kind != AppKind::Text {
                 return Err(Error::Malformed);
             }
@@ -403,7 +408,7 @@ fn reply_field(app: &[u8]) -> Result<Option<core::ops::Range<usize>>, Error> {
     if parsed.kind != AppKind::Rich {
         return Ok(None);
     }
-    let rich = RichRecord::parse(parsed.body, Channel::Pairwise)?;
+    let rich = RichRecord::parse(parsed.body, Channel::Group)?;
     if rich.reply_target == [0; 16] {
         return Ok(None);
     }
@@ -740,6 +745,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut control: Vec<(ConversationId, Vec<u8>)> = Vec::new();
         // The requests of Part 11 §11.4.3 of a member that lacks an epoch.
         let mut key_requests: Vec<(ConversationId, Vec<u8>)> = Vec::new();
+        let mut votes: Vec<(ConversationId, Vec<u8>, u16)> = Vec::new();
         for change in changes {
             planned.push(match change {
                 StateChange::Contact { contact, state } => Planned::Put(
@@ -807,6 +813,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
                 continue;
             }
+            // WIR-176: a pairwise record names no member, and a poll that
+            // does not parse is no poll (WIR-180 to WIR-182).
+            let is_invalid = match parsed.kind {
+                AppKind::Rich => RichRecord::parse(parsed.body, Channel::Pairwise).is_err(),
+                AppKind::Poll => Poll::parse(parsed.body).is_err(),
+                _ => false,
+            };
+            if is_invalid {
+                continue;
+            }
             // ABU-027 to ABU-030: the record of a blocked contact goes, after
             // its acknowledgment, with no view and no alert. A delivery
             // receipt keeps the rate that held before the block.
@@ -841,7 +857,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if handoff
                 && matches!(
                     parsed.kind,
-                    AppKind::Reaction | AppKind::Edit | AppKind::Delete
+                    AppKind::Reaction | AppKind::Edit | AppKind::Delete | AppKind::PollVote
                 )
             {
                 let reference = msg_ref(&open.device_set_key, &parsed.msg_id);
@@ -941,6 +957,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 if !record.synced {
                     key_requests.push((conversation, parsed.body.to_vec()));
                 }
+                continue;
+            }
+            if parsed.kind == AppKind::PollVote {
+                // A vote is no message: it moves the count of its poll
+                // after the batch.
+                let voter = if from_user {
+                    polls::VOTER_SELF
+                } else {
+                    polls::VOTER_PEER
+                };
+                votes.push((conversation, parsed.body.to_vec(), voter));
                 continue;
             }
             if parsed.kind == AppKind::Reaction {
@@ -1269,6 +1296,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 Some(conversation.0),
                 stored_message(direction, delivery, conversation, now_ms, &kept),
             ));
+            // WIR-187: the period of a poll runs from its receive time.
+            if parsed.kind == AppKind::Poll {
+                let open_seconds = Poll::parse(parsed.body).map_or(0, |poll| poll.open_seconds);
+                planned.push(Planned::Put(
+                    polls::POLLS,
+                    row,
+                    Some(conversation.0),
+                    polls::poll_row(conversation, open_seconds, now),
+                ));
+            }
             if parsed.kind == AppKind::Attachment {
                 let (state, descriptor) = files::incoming_state_row(parsed.body, limit);
                 planned.push(Planned::Put(
@@ -1334,6 +1371,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
         for (_, body) in key_requests {
             self.on_pairwise_key_request(&body, now_ms, rng)?;
+        }
+        for (conversation, body, voter) in votes {
+            self.take_vote(conversation, &body, voter, now_ms, now_ms / 1_000, rng)?;
         }
         // DEV-268: each record of a contact goes to each device of the set.
         for (conversation, app) in to_publish {
@@ -1834,6 +1874,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         self.files.downloads.retain(|job| job.message != *message);
         let conversation = self.conversation_of_message(message)?;
         let reactions = self.reaction_rows(message, conversation)?;
+        let votes = self.vote_rows(message, conversation)?;
         let erasures = self.file_erasures(message)?;
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
@@ -1844,6 +1885,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         batch.delete(OUTBOX, message.0);
         batch.delete(REVISION, message.0);
         batch.delete(timers::DEADLINES, message.0);
+        batch.delete(polls::POLLS, message.0);
+        batch.delete(groups::MENTIONED, message.0);
+        for row in votes {
+            batch.delete(polls::VOTES, row);
+        }
         for table in [FILE_STATE, FILE_DATA, CHUNK_CRED] {
             batch.delete(table, message.0);
         }
@@ -2493,10 +2539,38 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
             return self.send_file(conversation, msg_id, file, draft.text(), now_ms, rng);
         }
+        // A mention names a member of a group by its pair key (`GRP-334`).
+        let is_group = self.is_group(conversation)?;
+        let mentions = if is_group && !draft.mentions().is_empty() {
+            self.mention_ids(conversation, draft.mentions())?
+        } else if draft.mentions().is_empty() {
+            Vec::new()
+        } else {
+            // WIR-175: a pairwise record names no member.
+            return Err(Error::Malformed);
+        };
+        let channel = if is_group {
+            Channel::Group
+        } else {
+            Channel::Pairwise
+        };
         // A reply is a rich record around the text. The wire carries the raw
         // `msg_id` of the target, which the row of the target holds.
         let rich = match draft.reply_to() {
-            None => None,
+            None if mentions.is_empty() => None,
+            None => {
+                let record = RichRecord {
+                    reply_target: [0; 16],
+                    thread_root: [0; 16],
+                    forward_depth: 0,
+                    mentions,
+                    inner_kind: AppKind::Text,
+                    inner_body: draft.text(),
+                };
+                let mut body = Zeroizing::new(vec![0u8; record.len()]);
+                record.encode(channel, &mut body)?;
+                Some(body)
+            }
             Some(target) => {
                 let plain = Zeroizing::new(
                     self.open_ref()?
@@ -2509,16 +2583,19 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     return Err(Error::Malformed);
                 }
                 let held = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
+                // The row of a message of this device holds the raw
+                // `msg_id` of its answer while no relay took it, and the
+                // raw `msg_id` of the message itself at each time.
                 let record = RichRecord {
-                    reply_target: AppMessage::parse(held, Channel::Pairwise)?.msg_id,
+                    reply_target: AppMessage::parse(held, Channel::Group)?.msg_id,
                     thread_root: [0; 16],
                     forward_depth: 0,
-                    mentions: Vec::new(),
+                    mentions,
                     inner_kind: AppKind::Text,
                     inner_body: draft.text(),
                 };
                 let mut body = Zeroizing::new(vec![0u8; record.len()]);
-                record.encode(Channel::Pairwise, &mut body)?;
+                record.encode(channel, &mut body)?;
                 Some(body)
             }
         };
@@ -2538,7 +2615,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
         // A group record goes to the two replicas of its group queue and
         // on no pairwise channel (Part 11 §11.2).
-        if self.is_group(conversation)? {
+        if is_group {
             let message = self.post_to_group(conversation, msg_id, &app, now_ms, rng)?;
             self.auto_lock.touch(now_ms / 1_000);
             return Ok(message);
@@ -2754,11 +2831,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             AppKind::Attachment => match umbra_wire::descriptor::AttachmentBody::parse(parsed.body)
             {
                 Ok(body) => body.caption.map_or(&[][..], str::as_bytes),
-                Err(_) if info_of(&plain)?.outgoing => parsed.body,
+                // A body that is no descriptor and no text shows no
+                // caption, and the rest of the conversation shows.
+                Err(_) if info_of(&plain)?.outgoing && core::str::from_utf8(parsed.body).is_ok() => {
+                    parsed.body
+                }
                 Err(_) => &[][..],
             },
             // The mark of a timer change holds no text.
             AppKind::ConversationTimer => &[][..],
+            // A poll shows its question.
+            AppKind::Poll => umbra_wire::app::poll::Poll::parse(parsed.body)
+                .map_or(&[][..], |poll| poll.question.as_bytes()),
             _ => text_of(&parsed)?,
         };
         let text = core::str::from_utf8(bytes).map_err(|_| Error::Integrity)?;
@@ -2779,6 +2863,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut info = info_of(&plain)?;
         info.file = self.file_info(message)?;
         info.expires_at = self.deadline_of(message)?.map(|deadline| deadline.at);
+        info.mentions_me = open.store.get(groups::MENTIONED, &message.0)?.is_some();
         info.revisions = match open.store.get(REVISION, &message.0)? {
             None => 0,
             Some(count) => *count.first().ok_or(Error::Integrity)?,
@@ -2887,6 +2972,9 @@ fn info_of(plain: &[u8]) -> Result<MessageInfo, Error> {
         },
         // The store holds the deadline: see `Client::info`.
         expires_at: None,
+        poll: parsed.kind == AppKind::Poll,
+        // The store holds the mark: see `Client::info`.
+        mentions_me: false,
     })
 }
 
@@ -2901,7 +2989,11 @@ fn is_request(plain: &[u8]) -> Result<bool, Error> {
     // is no message of that conversation (`GRP-309`, `GRP-312`).
     Ok(matches!(
         parsed.kind,
-        AppKind::Edit | AppKind::Reaction | AppKind::GroupControl | AppKind::KeyRequest
+        AppKind::Edit
+            | AppKind::Reaction
+            | AppKind::PollVote
+            | AppKind::GroupControl
+            | AppKind::KeyRequest
     ) || tombstone_of(&parsed)? == Some(Tombstone::Request))
 }
 

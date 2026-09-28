@@ -792,6 +792,35 @@ pub struct MsgInfo {
     pub timer: Option<u32>,
     /// The time at which the timer erases the message, in seconds.
     pub expires_at: Option<u64>,
+    /// Whether the message is a poll: see [`Handle::poll_view`].
+    pub poll: bool,
+    /// Whether a message of a group names this member (Part 11 §11.11).
+    pub mentions_me: bool,
+}
+
+/// A poll with the count that this device holds. The count is the local
+/// view, and no agreed count (`GRP-147`, `GRP-148`).
+#[derive(uniffi::Record)]
+pub struct FfiPoll {
+    /// The question.
+    pub question: String,
+    /// The options, in their order.
+    pub options: Vec<String>,
+    /// Whether a vote takes more than one option.
+    pub multiple: bool,
+    /// Whether the count stays hidden until the close.
+    pub hidden: bool,
+    /// The close time in seconds, or 0 for no close.
+    pub closes_at: u64,
+    /// Whether the poll closed.
+    pub closed: bool,
+    /// The votes that this device holds for each option, or none while a
+    /// hidden poll is open.
+    pub counts: Vec<u32>,
+    /// The voters that this device holds.
+    pub voters: u32,
+    /// The options of the vote of the user.
+    pub mine: Vec<u8>,
 }
 
 /// The timer of a conversation (`DEV-206`).
@@ -953,6 +982,11 @@ pub enum FfiEvent {
         /// The conversation.
         conversation: Vec<u8>,
     },
+    /// A vote moved the count of a poll of a conversation.
+    Voted {
+        /// The conversation.
+        conversation: Vec<u8>,
+    },
     /// The contact changed the text of a message of a conversation.
     Edited {
         /// The conversation.
@@ -1023,6 +1057,15 @@ impl DraftHandle {
             .ok_or(FfiError::NotFound)?
             .set_text(&code_units)
             .map_err(FfiError::from)
+    }
+
+    /// Names members of a group in the draft, by their roster index.
+    pub fn set_mentions(&self, members: Vec<u16>) -> Result<(), FfiError> {
+        locked(&self.0)
+            .as_mut()
+            .ok_or(FfiError::NotFound)?
+            .set_mentions(members);
+        Ok(())
     }
 
     /// Makes the draft an answer to a message of its conversation, or takes
@@ -2626,6 +2669,9 @@ impl Inner {
                     state: delivery as u8,
                 },
                 Event::Reacted { conversation, .. } => FfiEvent::Reacted {
+                    conversation: conversation.0.to_vec(),
+                },
+                Event::Voted { conversation, .. } => FfiEvent::Voted {
                     conversation: conversation.0.to_vec(),
                 },
                 Event::Edited { conversation, .. } => FfiEvent::Edited {
@@ -4476,7 +4522,74 @@ impl Handle {
             }),
             timer: info.timer,
             expires_at: info.expires_at,
+            poll: info.poll,
+            mentions_me: info.mentions_me,
         })
+    }
+
+    /// The poll of a message with the count that this device holds.
+    pub fn poll_view(&self, message: Arc<MsgHandle>) -> Result<FfiPoll, FfiError> {
+        let view = locked(&self.inner).client.poll_view(&message.0, unix_now())?;
+        Ok(FfiPoll {
+            question: view.question,
+            options: view.options,
+            multiple: view.multiple,
+            hidden: view.hidden,
+            closes_at: view.closes_at,
+            closed: view.closed,
+            counts: view.counts,
+            voters: view.voters,
+            mine: view.mine,
+        })
+    }
+
+    /// Sends a poll. `open_seconds` is its period after the receive time of
+    /// each party, or 0 for no close. A group above `POLL_GROUP_MAX`
+    /// members takes none (`GRP-149`).
+    pub fn send_poll(
+        &self,
+        conversation: Vec<u8>,
+        question: String,
+        options: Vec<String>,
+        multiple: bool,
+        hidden: bool,
+        open_seconds: u32,
+    ) -> Result<Arc<MsgHandle>, FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        let options: Vec<&str> = options.iter().map(String::as_str).collect();
+        let mut inner = locked(&self.inner);
+        let Inner { client, bridge, .. } = &mut *inner;
+        let message = client.send_poll(
+            conversation,
+            &question,
+            &options,
+            multiple,
+            hidden,
+            open_seconds,
+            unix_now_ms(),
+            &mut OsRng,
+        )?;
+        if let Some(running) = bridge {
+            running.flush(client, &mut OsRng)?;
+        }
+        inner.pump_groups();
+        drop(inner);
+        self.changed.notify_all();
+        Ok(Arc::new(MsgHandle(message)))
+    }
+
+    /// Votes on a poll, or changes the vote of the user.
+    pub fn vote(&self, poll: Arc<MsgHandle>, choices: Vec<u8>) -> Result<(), FfiError> {
+        let mut inner = locked(&self.inner);
+        let Inner { client, bridge, .. } = &mut *inner;
+        client.vote(&poll.0, &choices, unix_now_ms(), &mut OsRng)?;
+        if let Some(running) = bridge {
+            running.flush(client, &mut OsRng)?;
+        }
+        inner.pump_groups();
+        drop(inner);
+        self.changed.notify_all();
+        Ok(())
     }
 
     /// The periods that a conversation timer takes, in seconds (`WIR-201`).

@@ -210,6 +210,10 @@ pub(super) const GROUP_GRANTS: TableId = TableId(0x18);
 /// replicas, the time the queue was made, and the queue that it replaces
 /// until that one leaves (`NTF-105`).
 pub(super) const GROUP_NOTIFY: TableId = TableId(0x1C);
+/// The mark of each message of a group that names this member
+/// (Part 11 §11.11), under the row of the message. The mention list itself
+/// stays in the record, and no view shows it (`GRP-141`).
+pub(super) const MENTIONED: TableId = TableId(0x38);
 const GROUP_NOTIFY_LEN_V1: usize = 32 + umbra_wire::address::LEN + 16;
 const GROUP_NOTIFY_LEN: usize = GROUP_NOTIFY_LEN_V1 + 8 + 1 + 32 + umbra_wire::address::LEN;
 /// A registration lives 7 days plus `CLOCK_SKEW` at a group-queue relay
@@ -2214,7 +2218,27 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         {
             return Ok(());
         }
+        // A vote of the user from another device moves the count here.
+        if parsed.kind == AppKind::PollVote {
+            if self.owns_channels()? {
+                self.post_to_group(conversation, parsed.msg_id, app, now_ms, rng)?;
+            }
+            self.take_vote(
+                conversation,
+                parsed.body,
+                super::polls::VOTER_SELF,
+                now_ms,
+                now_ms / 1_000,
+                rng,
+            )?;
+            return Ok(());
+        }
         self.store_synced_group(conversation, app, now_ms, rng)?;
+        if parsed.kind == AppKind::Poll {
+            let open_seconds =
+                umbra_wire::app::poll::Poll::parse(parsed.body).map_or(0, |poll| poll.open_seconds);
+            self.open_poll(conversation, message, open_seconds, now_ms / 1_000, rng)?;
+        }
         if let Some(seconds) = timer {
             self.put_timer(conversation, seconds, now_ms, true, rng)?;
         } else if expires_in > 0 && super::timers::is_timed_kind(parsed.kind) {
@@ -2267,12 +2291,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
         let limit = self.download_limit_now()?;
         let open = self.open_mut()?;
+        let mut kept = Zeroizing::new(app.to_vec());
+        if super::keep_reply_as_reference(&mut kept, &open.device_set_key).is_err() {
+            return Ok(());
+        }
         let plain = stored_message(
             super::OUTGOING,
             Delivery::Accepted,
             conversation,
             now_ms,
-            app,
+            &kept,
         );
         let mut batch = open.store.begin();
         batch.put(
@@ -3720,7 +3748,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 Outcome::Presence { sender } => {
                     self.note_seen(conversation, &group, sender, now, rng)?;
                 }
-                Outcome::Content { sender, app, .. } => {
+                Outcome::Content {
+                    sender,
+                    app,
+                    counter,
+                    ..
+                } => {
                     self.note_seen(conversation, &group, sender, now, rng)?;
                     let parsed =
                         umbra_wire::app::AppMessage::parse(&app, umbra_wire::app::Channel::Group)?;
@@ -3756,6 +3789,26 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         self.count_discarded(conversation, rng)?;
                         continue;
                     }
+                    // GRP-336: a vote is one group record, and each member
+                    // counts it in the order of its sender (WIR-190).
+                    if parsed.kind == AppKind::PollVote {
+                        self.take_vote(conversation, parsed.body, sender, u64::from(counter), now, rng)?;
+                        continue;
+                    }
+                    // A record that does not parse under the layout of a
+                    // group goes (WIR-163, WIR-180).
+                    let is_invalid = match parsed.kind {
+                        AppKind::Rich => umbra_wire::app::rich::RichRecord::parse(
+                            parsed.body,
+                            umbra_wire::app::Channel::Group,
+                        )
+                        .is_err(),
+                        AppKind::Poll => umbra_wire::app::poll::Poll::parse(parsed.body).is_err(),
+                        _ => false,
+                    };
+                    if is_invalid {
+                        continue;
+                    }
                     // DEV-249: a timer record of a member below admin goes.
                     let timer = if parsed.kind == AppKind::ConversationTimer {
                         let is_admin = group
@@ -3771,6 +3824,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     };
                     let stored = self.store_group_message(conversation, &app, now_ms, rng)?;
                     if let Some(message) = stored {
+                        self.after_group_store(conversation, &group, message, &app, now, rng)?;
                         match timer {
                             Some(seconds) => self.put_timer(conversation, seconds, now_ms, false, rng)?,
                             None => self.stamp_deadline(conversation, message, parsed.kind, now, rng)?,
@@ -3841,12 +3895,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         {
             return Ok(None);
         }
+        // GRP-142: the answer resolves inside this group, as a reference.
+        let mut kept = Zeroizing::new(app.to_vec());
+        if super::keep_reply_as_reference(&mut kept, &open.device_set_key).is_err() {
+            return Ok(None);
+        }
         let plain = stored_message(
             super::INCOMING,
             Delivery::Delivered,
             conversation,
             now_ms,
-            app,
+            &kept,
         );
         let mut batch = open.store.begin();
         batch.put(
@@ -3883,6 +3942,69 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             message,
         });
         Ok(Some(message))
+    }
+
+    /// What a stored message of a group gives beside its row: the mark of a
+    /// mention of this member, and the close time of a poll.
+    fn after_group_store<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        group: &Group,
+        message: MsgRef,
+        app: &[u8],
+        now: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let parsed = AppMessage::parse(app, umbra_wire::app::Channel::Group)?;
+        match parsed.kind {
+            AppKind::Rich => {
+                let rich = umbra_wire::app::rich::RichRecord::parse(
+                    parsed.body,
+                    umbra_wire::app::Channel::Group,
+                )?;
+                // GRP-335: the pair key of the roster entry. This device
+                // tests its own identifier alone, thus a mention of no
+                // member names nobody here (GRP-140).
+                let own = group
+                    .roster()
+                    .member(group.own_index())
+                    .map(|member| umbra_wire::app::rich::mention_id(group.group_id(), &member.pair_pk));
+                if own.is_some_and(|own| rich.mentions.contains(&own)) {
+                    let open = self.open_mut()?;
+                    let mut batch = open.store.begin();
+                    batch.put(MENTIONED, message.0, Some(conversation.0), &[1], rng)?;
+                    batch.commit()?;
+                }
+            }
+            AppKind::Poll => {
+                let open_seconds =
+                    umbra_wire::app::poll::Poll::parse(parsed.body).map_or(0, |poll| poll.open_seconds);
+                self.open_poll(conversation, message, open_seconds, now, rng)?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// The mention identifiers of members of a group, from their roster
+    /// indices, in the order of `WIR-166` (`GRP-334`).
+    pub(super) fn mention_ids(&self, conversation: ConversationId, members: &[u16]) -> Result<Vec<[u8; 16]>, Error> {
+        let group = self.group_of(conversation)?;
+        let mut ids = Vec::with_capacity(members.len());
+        for index in members {
+            let member = group
+                .roster()
+                .member(*index)
+                .filter(|member| member.active)
+                .ok_or(Error::NotFound)?;
+            ids.push(umbra_wire::app::rich::mention_id(group.group_id(), &member.pair_pk));
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        if ids.len() > umbra_core::group::MENTION_MAX {
+            return Err(Error::TooLong);
+        }
+        Ok(ids)
     }
 
     /// Writes one activity clock of §11.9.7.

@@ -109,7 +109,7 @@ const INDEX_VALUE_LEN: usize = 1 + 16 + 32;
 /// backup itself stay on the device (`IDN-180`). The state of each file goes
 /// as one that waits for a tap (`IDN-186`). A timed record stays, and the
 /// timer of its conversation goes (`DEV-215`).
-const BACKED_UP: [TableId; 22] = [
+const BACKED_UP: [TableId; 25] = [
     super::files::FILE_STATE,
     TableId::MESSAGE,
     TableId::TOMBSTONE,
@@ -132,6 +132,9 @@ const BACKED_UP: [TableId; 22] = [
     super::groups::GROUP_OWNERS,
     super::groups::GROUP_GRANTS,
     super::timers::TIMERS,
+    super::polls::POLLS,
+    super::polls::VOTES,
+    super::groups::MENTIONED,
 ];
 
 /// A backup object that is due: its bytes, which go up as a file of the
@@ -376,8 +379,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
                 _ => None,
             }
-        } else if [TableId::MESSAGE, super::OUTBOX, super::REVISION, super::files::FILE_STATE]
-            .contains(&table)
+        } else if table == super::polls::VOTES {
+            plain.get(16..32).and_then(|poll| poll.try_into().ok())
+        } else if [
+            TableId::MESSAGE,
+            super::OUTBOX,
+            super::REVISION,
+            super::files::FILE_STATE,
+            super::polls::POLLS,
+            super::groups::MENTIONED,
+        ]
+        .contains(&table)
         {
             Some(*row)
         } else {
