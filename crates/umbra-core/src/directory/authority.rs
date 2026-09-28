@@ -171,6 +171,7 @@ pub fn sign_manifest<R: TryCryptoRng + ?Sized>(
         root: &root_bytes,
         entries: proven,
         queues: Vec::new(),
+        removals: Vec::new(),
     }
     .encode()
 }

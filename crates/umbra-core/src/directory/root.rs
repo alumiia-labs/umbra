@@ -26,7 +26,7 @@ pub struct AuthoritySig<'a> {
     pub sig: &'a [u8],
 }
 
-fn read_sigs<'a>(r: &mut Reader<'a>) -> Result<Vec<AuthoritySig<'a>>, Error> {
+pub(crate) fn read_sigs<'a>(r: &mut Reader<'a>) -> Result<Vec<AuthoritySig<'a>>, Error> {
     let count = usize::from(r.u8()?);
     if !(SIGNATURES_NEEDED..=AUTHORITY_COUNT).contains(&count) {
         return Err(Error::Malformed);
@@ -147,7 +147,7 @@ impl<'a> DirectoryKeySet<'a> {
 
     /// Counts the valid signatures over `preimage` and fails below five
     /// (`REL-031`, `REL-032`).
-    fn verify_multi(&self, preimage: &[u8], sigs: &[AuthoritySig<'_>]) -> Result<(), Error> {
+    pub(crate) fn verify_multi(&self, preimage: &[u8], sigs: &[AuthoritySig<'_>]) -> Result<(), Error> {
         let mut valid = 0usize;
         for s in sigs {
             let key = self.key(s.authority_index)?;

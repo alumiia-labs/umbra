@@ -73,7 +73,8 @@ use crate::{
     },
     directory::{
         bloc::BlocId,
-        path::{select, Candidate},
+        path::{select_avoiding, Candidate},
+        removal::LinkRemoval,
     },
     identity::{
         invitation::{Bundle, Fragment, FRAGMENT_LEN},
@@ -1102,6 +1103,9 @@ pub struct ClientNode {
     forced: BTreeSet<[u8; 32]>,
     /// The loop count and the forced replacements (Part 10 §10.4.2).
     faults: LinkFaults,
+    /// The removed links of the manifest that verified, which no chain
+    /// holds (Part 10 `REL-185`).
+    removed_links: Vec<LinkRemoval>,
     /// The report queues of the manifest that verified: the address, and
     /// the key that a report seals to (`REL-168`).
     report_queues: Vec<([u8; QUEUE_ADDRESS_LEN], [u8; 32])>,
@@ -1226,6 +1230,7 @@ impl ClientNode {
             forced: BTreeSet::new(),
             faults: LinkFaults::default(),
             report_queues: Vec::new(),
+            removed_links: Vec::new(),
             background_report: false,
             report_build: None,
             clock: 0,
@@ -2588,7 +2593,7 @@ impl ClientNode {
             .collect();
         order.sort_by_key(|(used, draw, _)| (*used, *draw));
         let candidates: Vec<Candidate> = order.into_iter().map(|(_, _, c)| c).collect();
-        let chain = select(&self.ingress.candidate, &candidates)?;
+        let chain = select_avoiding(&self.ingress.candidate, &candidates, &self.removed_links)?;
         self.slot_mut()?.chain = Some(chain.hops);
         Ok(())
     }
@@ -3807,6 +3812,11 @@ impl ClientNode {
     #[doc(hidden)]
     pub fn faults_mut(&mut self) -> &mut LinkFaults {
         &mut self.faults
+    }
+
+    /// Takes the removed links of the manifest that verified (`REL-185`).
+    pub fn set_removed_links(&mut self, removed: Vec<LinkRemoval>) {
+        self.removed_links = removed;
     }
 
     /// Takes the report queues of the manifest that verified (`REL-168`).

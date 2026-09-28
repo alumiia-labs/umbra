@@ -1473,6 +1473,7 @@ names the object type and its lifetime:
 "umbra/v1/link-fault-seal"
 "umbra/v1/relay-hello"
 "umbra/v1/receipt-query"
+"umbra/v1/link-removal"
 "umbra/v1/measurer-cert"
 "umbra/v1/device-roster"
 "umbra/v1/device-claim"

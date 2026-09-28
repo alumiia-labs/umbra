@@ -99,9 +99,13 @@ async fn ask(settings: &Settings, relay: &ListedRelay, body: &[u8]) -> Option<Re
     (status == 200).then(|| ReceiptAnswer::parse(&answer).ok()).flatten()
 }
 
-/// Runs one isolation query on `chain` and gives its verdict (`REL-081` to
-/// `REL-084`).
-pub async fn isolate(settings: &Settings, key: &SigningKey, chain: [[u8; 32]; 3]) -> Result<Verdict, &'static str> {
+/// Runs one isolation query on `chain` and gives its verdict and the epoch
+/// of its probe (`REL-081` to `REL-084`).
+pub async fn isolate(
+    settings: &Settings,
+    key: &SigningKey,
+    chain: [[u8; 32]; 3],
+) -> Result<(Verdict, u64), &'static str> {
     let set = relay_set(settings)?;
     let (tags, epoch) = probe(settings, &set, &chain).await?;
     println!("probe sent in epoch {epoch}, the receipts follow its end");
@@ -122,20 +126,20 @@ pub async fn isolate(settings: &Settings, key: &SigningKey, chain: [[u8; 32]; 3]
         let issued = ask(settings, to_relay, &body).await;
         let verdict = judge_link(from, to, &query, taken.as_ref(), issued.as_ref(), &to_relay.identity_pk);
         if verdict != LinkVerdict::Held {
-            return Ok(Verdict::Link(verdict));
+            return Ok((Verdict::Link(verdict), epoch));
         }
     }
-    Ok(Verdict::Held)
+    Ok((Verdict::Held, epoch))
 }
 
 /// Prints a verdict and keeps it in the file of verdicts, which the signer
-/// of the manifest reads (`REL-083`).
-pub fn record(settings: &Settings, chain: &[[u8; 32]; 3], verdict: &Verdict) {
+/// of the manifest reads (`REL-083`, `REL-183`).
+pub fn record(settings: &Settings, chain: &[[u8; 32]; 3], verdict: &Verdict, epoch: u64) {
     let line = match verdict {
         Verdict::Held => format!("held {}", chain.map(|relay| to_hex(&relay)).join(",")),
         Verdict::Link(LinkVerdict::Contradiction { relay }) => format!("expel {}", to_hex(relay)),
         Verdict::Link(LinkVerdict::LinkFault { from, to }) => {
-            format!("link {} {}", to_hex(from), to_hex(to))
+            format!("link {} {} {epoch}", to_hex(from), to_hex(to))
         }
         Verdict::Link(LinkVerdict::Held) => return,
     };

@@ -30,7 +30,9 @@
 //!
 //! A `verdicts` line names the file of the isolation queries of
 //! `umbra-authority`. A relay of an `expel <relay_id>` line leaves the
-//! manifest (`REL-083`).
+//! manifest (`REL-083`), and a link of a `link <relay_id> <relay_id>
+//! <epoch>` line takes a `LinkRemoval` that the seven keys sign, for
+//! `LINK_REMOVAL_EPOCHS` after that epoch (`REL-183`).
 
 #![forbid(unsafe_code)]
 
@@ -41,6 +43,7 @@ use umbra_core::directory::{
     bloc::BlocList,
     descriptor::RelayEntry,
     manifest::RelayManifest,
+    removal::{LinkRemoval, LINK_REMOVAL_EPOCHS},
     report::{ReportQueue, QUEUE_ADDRESS_LEN},
     AUTHORITY_COUNT, EPOCH_SECONDS,
 };
@@ -95,6 +98,7 @@ fn run(settings: &str, out: &Path) -> Result<(), &'static str> {
     let mut relays = Vec::new();
     let mut report_queues = Vec::new();
     let mut expelled: Vec<[u8; 32]> = Vec::new();
+    let mut removed: Vec<LinkRemoval> = Vec::new();
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
         match line.split_once('=') {
             Some(("seed", value)) => seed = hex32(value),
@@ -109,6 +113,12 @@ fn run(settings: &str, out: &Path) -> Result<(), &'static str> {
                         .filter_map(|line| line.strip_prefix("expel "))
                         .filter_map(|relay| hex32(relay.trim())),
                 );
+                removed.extend(held.lines().filter_map(|line| {
+                    let mut words = line.strip_prefix("link ")?.split_whitespace();
+                    let (one, other) = (hex32(words.next()?)?, hex32(words.next()?)?);
+                    let epoch = words.next()?.parse().ok()?;
+                    Some(LinkRemoval::of(epoch, one, other))
+                }));
             }
             Some(("report_queue", value)) => {
                 let (index, file) = value.split_once(',').ok_or("a report_queue line does not parse")?;
@@ -192,11 +202,23 @@ fn run(settings: &str, out: &Path) -> Result<(), &'static str> {
         let key = keys.get(usize::from(*index)).ok_or("no authority of that index")?;
         signed_queues.push(queue.sign(key, &mut OsRng).map_err(|_| "a report queue does not sign")?);
     }
-    let manifest = if signed_queues.is_empty() {
+    // REL-183: each removed link of its life, under each key.
+    removed.sort();
+    removed.dedup_by(|one, other| one.relay_a == other.relay_a && one.relay_b == other.relay_b);
+    let signers: Vec<(u8, &SigningKey)> = (0u8..).zip(keys.iter()).collect();
+    let mut signed_removals = Vec::new();
+    for removal in removed
+        .iter()
+        .filter(|removal| removal.epoch <= epoch && removal.epoch + LINK_REMOVAL_EPOCHS >= epoch)
+    {
+        signed_removals.push(removal.sign(&signers, &mut OsRng).map_err(|_| "a link removal does not sign")?);
+    }
+    let manifest = if signed_queues.is_empty() && signed_removals.is_empty() {
         manifest
     } else {
         let mut parsed = RelayManifest::parse(&manifest).map_err(|_| "the manifest does not parse")?;
         parsed.queues = signed_queues.iter().map(Vec::as_slice).collect();
+        parsed.removals = signed_removals.iter().map(Vec::as_slice).collect();
         parsed.encode().map_err(|_| "the manifest does not build")?
     };
     let keyset = keyset_bytes(&keys, KEYSET_EPOCH).map_err(|_| "the key set does not build")?;
@@ -204,10 +226,11 @@ fn run(settings: &str, out: &Path) -> Result<(), &'static str> {
         .and_then(|()| std::fs::write(out.join("keyset.bin"), &keyset))
         .map_err(|_| "the output directory does not take a file")?;
     println!(
-        "epoch={epoch} manifest={} bytes keyset={} bytes report_queues={}",
+        "epoch={epoch} manifest={} bytes keyset={} bytes report_queues={} removed_links={}",
         manifest.len(),
         keyset.len(),
-        signed_queues.len()
+        signed_queues.len(),
+        signed_removals.len()
     );
     Ok(())
 }

@@ -227,7 +227,7 @@ fn count_report(settings: &Arc<Settings>, key: &Arc<SigningKey>, counts: &mut Co
             println!("isolation query on {}", to_hex(&relay));
             tokio::spawn(async move {
                 match isolation::isolate(&settings, &key, chain).await {
-                    Ok(verdict) => isolation::record(&settings, &chain, &verdict),
+                    Ok((verdict, epoch)) => isolation::record(&settings, &chain, &verdict, epoch),
                     Err(cause) => eprintln!("the isolation query failed: {cause}"),
                 }
             });
@@ -349,8 +349,8 @@ fn main() -> ExitCode {
     if let Some(chain) = probe {
         return runtime.block_on(async {
             match isolation::isolate(&settings, &key, chain).await {
-                Ok(verdict) => {
-                    isolation::record(&settings, &chain, &verdict);
+                Ok((verdict, epoch)) => {
+                    isolation::record(&settings, &chain, &verdict, epoch);
                     ExitCode::SUCCESS
                 }
                 Err(cause) => {

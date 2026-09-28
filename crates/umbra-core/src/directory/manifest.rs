@@ -10,6 +10,7 @@ use super::{
     bloc::BlocList,
     descriptor::{roles, RelayEntry, ENTRY_LEN},
     path::Candidate,
+    removal::LinkRemoval,
     report::{ReportQueue, REPORT_QUEUES_MAX, REPORT_QUEUE_LEN},
     root::{Consensus, DirectoryRoot},
     tree::{self, Step},
@@ -40,6 +41,8 @@ pub struct RelayManifest<'a> {
     /// The signed report queue of each authority that published one
     /// (`REL-167`). A manifest of an earlier build holds none.
     pub queues: Vec<&'a [u8]>,
+    /// The signed removal of each removed link (`REL-183`).
+    pub removals: Vec<&'a [u8]>,
 }
 
 impl<'a> RelayManifest<'a> {
@@ -50,12 +53,17 @@ impl<'a> RelayManifest<'a> {
             .iter()
             .map(|entry| ENTRY_LEN + 1 + entry.proof.len() * STEP_LEN)
             .sum();
-        let queues = if self.queues.is_empty() {
+        let queues = if self.queues.is_empty() && self.removals.is_empty() {
             0
         } else {
             1 + self.queues.len() * REPORT_QUEUE_LEN
         };
-        1 + 2 + self.root.len() + 2 + entries + queues
+        let removals = if self.removals.is_empty() {
+            0
+        } else {
+            2 + self.removals.iter().map(|removal| removal.len()).sum::<usize>()
+        };
+        1 + 2 + self.root.len() + 2 + entries + queues + removals
     }
 
     /// Whether the manifest holds no entry.
@@ -82,9 +90,9 @@ impl<'a> RelayManifest<'a> {
                 w.put(&step.sibling)?;
             }
         }
-        // The count is absent with no queue, thus a manifest with none keeps
-        // the bytes of an earlier build.
-        if !self.queues.is_empty() {
+        // The count is absent with no queue and no removal, thus a manifest
+        // with none keeps the bytes of an earlier build.
+        if !self.queues.is_empty() || !self.removals.is_empty() {
             if self.queues.len() > REPORT_QUEUES_MAX {
                 return Err(Error::Malformed);
             }
@@ -94,6 +102,15 @@ impl<'a> RelayManifest<'a> {
                     return Err(Error::Malformed);
                 }
                 w.put(queue)?;
+            }
+        }
+        if !self.removals.is_empty() {
+            w.u16(u16::try_from(self.removals.len()).map_err(|_| Error::Malformed)?)?;
+            for removal in &self.removals {
+                if LinkRemoval::len_of(removal)? != removal.len() {
+                    return Err(Error::Malformed);
+                }
+                w.put(removal)?;
             }
         }
         Ok(out)
@@ -143,11 +160,27 @@ impl<'a> RelayManifest<'a> {
                 queues.push(r.take(REPORT_QUEUE_LEN)?);
             }
         }
+        let mut removals = Vec::new();
+        if r.remaining() > 0 {
+            let count = usize::from(r.u16()?);
+            let mut rest = r.rest();
+            for _ in 0..count {
+                let (removal, after) = rest
+                    .split_at_checked(LinkRemoval::len_of(rest)?)
+                    .ok_or(Error::Malformed)?;
+                removals.push(removal);
+                rest = after;
+            }
+            if !rest.is_empty() {
+                return Err(Error::Malformed);
+            }
+        }
         r.finish()?;
         Ok(RelayManifest {
             root,
             entries,
             queues,
+            removals,
         })
     }
 }
@@ -192,6 +225,8 @@ pub struct RelaySet {
     pub relays: Vec<ListedRelay>,
     /// The report queues that verified under the key set (`REL-168`).
     pub report_queues: Vec<ReportQueue>,
+    /// The removed links that verified under the key set (`REL-184`).
+    pub removed_links: Vec<LinkRemoval>,
 }
 
 impl RelaySet {
@@ -249,6 +284,12 @@ impl RelaySet {
             .iter()
             .filter_map(|bytes| ReportQueue::verify(bytes, consensus.keyset(), epoch).ok())
             .collect();
+        // REL-184: a removal that fails or ended goes, and the manifest stays.
+        let removed_links = manifest
+            .removals
+            .iter()
+            .filter_map(|bytes| LinkRemoval::verify(bytes, consensus.keyset(), epoch).ok())
+            .collect();
         consensus.commit(root, device_clock);
         Ok(RelaySet {
             epoch,
@@ -256,6 +297,7 @@ impl RelaySet {
             digest,
             relays,
             report_queues,
+            removed_links,
         })
     }
 }
@@ -312,6 +354,7 @@ mod tests {
                 })
                 .collect(),
             queues: Vec::new(),
+            removals: Vec::new(),
         }
     }
 

@@ -430,6 +430,9 @@ pub struct Network {
     /// that verified: the `QueueAddress` and the X25519 key, 161 bytes each
     /// (Part 10 `REL-168`).
     pub report_queues: Vec<Vec<u8>>,
+    /// The removed links of the manifest that verified: the epoch and the
+    /// two `relay_id` values, 72 bytes each (Part 10 `REL-185`).
+    pub removed_links: Vec<Vec<u8>>,
 }
 
 /// Reads the relay manifest from an HTTPS carrier of Part 3 §3.10: the host
@@ -658,6 +661,7 @@ pub fn parse_network(text: String, root_ca_path: Option<String>) -> Result<Netwo
         directory_pins: None,
         directory_relay_ipv4: None,
         report_queues: Vec::new(),
+        removed_links: Vec::new(),
     })
 }
 
@@ -3418,6 +3422,11 @@ impl Handle {
                     .iter()
                     .map(|queue| [&queue.address[..], &queue.report_pk].concat())
                     .collect(),
+                removed_links: set
+                    .removed_links
+                    .iter()
+                    .map(|link| [&link.epoch.to_be_bytes()[..], &link.relay_a, &link.relay_b].concat())
+                    .collect(),
             },
             epoch: set.epoch,
             is_clock_corrected: consensus.clock_state() == ClockState::Corrected,
@@ -3566,6 +3575,22 @@ impl Handle {
             // the device that owns a channel reads its queue (`DEV-287`).
             let mut node = ClientNode::with_relays(ingress, candidates, client.root_identity()?);
             node.set_faults(core::mem::take(inner_faults));
+            // REL-185: no chain of this run holds a removed link.
+            node.set_removed_links(
+                network
+                    .removed_links
+                    .iter()
+                    .filter_map(|link| {
+                        let (epoch, relays) = link.split_at_checked(8)?;
+                        let (a, b) = relays.split_at_checked(32)?;
+                        Some(umbra_core::directory::removal::LinkRemoval::of(
+                            u64::from_be_bytes(epoch.try_into().ok()?),
+                            a.try_into().ok()?,
+                            b.try_into().ok()?,
+                        ))
+                    })
+                    .collect(),
+            );
             // REL-169: the link-fault reports of this run go to these queues.
             node.set_report_queues(
                 network

@@ -513,6 +513,41 @@ one hop name the two sides of one link.
   the same rule. A relay that gives no answer to a query is such a case, and
   the authority removes the link.
 
+**The removed link.** An expelled relay leaves the relay set, and the manifest
+lists it no more. A removed link keeps both relays, thus the manifest carries
+the link itself, and each client avoids it.
+
+```
+LinkRemoval {                    // in the RelayManifest after its report queues
+    version      u8              // 0x01
+    epoch        u64             // the consensus epoch of the verdict
+    relay_a      [32]u8          // the lower relay_id of the two
+    relay_b      [32]u8          // the higher relay_id
+    sig_count    u8              // 5 to 7
+    sigs         [sig_count]AuthoritySig   // ML-DSA-65, label "umbra/v1/link-removal"
+}
+```
+
+Each signature covers the label, `version`, `epoch`, `relay_a`, and `relay_b`,
+under the key of its authority in the key set of the root. Part 5 §5.11 holds
+the label.
+
+- **[REL-183]** The directory authorities MUST sign a `LinkRemoval` for each
+  link that they remove, and each manifest MUST carry it for
+  `LINK_REMOVAL_EPOCHS` after its `epoch`.
+- **[REL-184]** A client MUST verify a `LinkRemoval` under the key set of the
+  root as it verifies a root (`REL-007`), and it MUST drop one that fails, one
+  whose `relay_a` is not below its `relay_b`, and one whose `epoch` is more than
+  `LINK_REMOVAL_EPOCHS` before the epoch of the root.
+- **[REL-185]** A client MUST reject a chain in which two adjacent relays form
+  a removed link, in either order. Each relay of the link stays in each other
+  chain.
+
+> *Cause.* An earlier draft removed a link and gave the removal no carrier,
+> thus no client could avoid the link. A removal changes the paths of each
+> client, thus it takes the signatures of a root and not the key of one
+> authority.
+
 **The cost.** A relay signs one receipt for each `RECEIPT_WINDOW` cells. §10.9.1
 sizes a held 2 h session at 7 200 cells, thus a relay signs about 7 receipts for
 each such session on each link. That cost falls on a relay on mains power. In
@@ -1151,6 +1186,8 @@ RelayManifest {
     entries       [entry_count]ProvenEntry
     queue_count   u8              // 0 to 7, absent in a manifest of an earlier build
     queues        [queue_count]ReportQueue   // §10.4.2
+    removal_count u16             // absent with no removal
+    removals      [removal_count]LinkRemoval // §10.4.2
 }
 
 ProvenEntry {
@@ -1570,6 +1607,7 @@ relay with the notification role, and this section then applies to it.
 | `LOOP_FAULT_MIN` | 10 loops of one chain in one epoch (§10.4.2) |
 | `FORCED_REPEAT` | 2 forced replacements in one epoch (§10.4.2) |
 | `REPORT_WAIT` | 15 min, the wait of a report before it builds a circuit (§10.4.2) |
+| `LINK_REMOVAL_EPOCHS` | 168 epochs (7 days), the life of a removed link (§10.4.2) |
 | Chain-count noise | σ = 1 chain, ε = 0.1, thus b = 10 chains (§10.8) |
 | `FAMILY_MAX` | 64 members in one family certificate (§10.6.3) |
 

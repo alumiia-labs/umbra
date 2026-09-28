@@ -73,13 +73,13 @@ each column when a crate implements the requirement and a test covers it.
 | `DEV` | 197 | 90 | 0 | 0 | 7 | **294** |
 | `NTF` | 74 | 28 | 0 | 0 | 3 | **105** |
 | `DIS` | 130 | 34 | 0 | 0 | 3 | **167** |
-| `REL` | 146 | 33 | 1 | 0 | 2 | **182** |
+| `REL` | 149 | 33 | 1 | 0 | 2 | **185** |
 | `GRP` | 232 | 65 | 0 | 0 | 6 | **303** |
 | `ATT` | 143 | 45 | 2 | 0 | 3 | **193** |
 | `ABU` | 71 | 30 | 1 | 0 | 0 | **102** |
 | `IMP` | 119 | 41 | 0 | 0 | 2 | **162** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2033 | 621 | 7 | 0 | 53 | **2714** |
+| **All** | 2036 | 621 | 7 | 0 | 53 | **2717** |
 
 ## SCP — Scope and Conventions
 
@@ -2083,6 +2083,9 @@ Source: `spec/10-relay-directory.md`
 | `REL-180` | §10.4.2 | MUST | A relay | A relay MUST refuse a query that does not verify with HTTP status 403 and no body. |  |  |
 | `REL-181` | §10.4.2 | MUST | A client | A client MUST send a report on a ready circuit whose last relay holds a verified report queue, and it MUST build no circuit for a report before the report waited `REPORT_WAIT`. |  |  |
 | `REL-182` | §10.4.2 | MUST | After that wait, a client in the foreground | After that wait, a client in the foreground MUST build one circuit to the relay of a report queue that it draws at random, at most once in each epoch, and the report goes on that circuit. |  |  |
+| `REL-183` | §10.4.2 | MUST | The directory authorities | The directory authorities MUST sign a `LinkRemoval` for each link that they remove, and each manifest MUST carry it for `LINK_REMOVAL_EPOCHS` after its `epoch`. |  |  |
+| `REL-184` | §10.4.2 | MUST | A client | A client MUST verify a `LinkRemoval` under the key set of the root as it verifies a root (`REL-007`), and it MUST drop one that fails, one whose `relay_a` is not below its `relay_b`, and one whose `epoch` is more than `LINK_REMOVAL_EPOCHS` before the epoch of the root. |  |  |
+| `REL-185` | §10.4.2 | MUST | A client | A client MUST reject a chain in which two adjacent relays form a removed link, in either order. |  |  |
 
 ## GRP — Private Groups
 

@@ -8,6 +8,7 @@ use alloc::vec::Vec;
 use super::{
     bloc::{BlocId, BlocList},
     descriptor::{roles, RelayEntry},
+    removal::LinkRemoval,
     INGRESS_PIN_CONFIRMED, INGRESS_PIN_UNCONFIRMED,
 };
 use crate::Error;
@@ -134,9 +135,30 @@ pub fn check(
 /// under the relaxation, then failure (`NET-033`). The caller gives the
 /// candidates in a consensus-random order (`REL-015`).
 pub fn select(ingress: &Candidate, candidates: &[Candidate]) -> Result<Chain, Error> {
+    select_avoiding(ingress, candidates, &[])
+}
+
+/// As [`select`], and no two adjacent relays of the chain form a link of
+/// `removed` (Part 10 `REL-185`).
+pub fn select_avoiding(
+    ingress: &Candidate,
+    candidates: &[Candidate],
+    removed: &[LinkRemoval],
+) -> Result<Chain, Error> {
+    let is_removed = |one: &Candidate, other: &Candidate| {
+        removed
+            .iter()
+            .any(|link| link.names(&one.relay_id, &other.relay_id))
+    };
     for relax in [false, true] {
-        for hop2 in candidates.iter().filter(|c| c.layer == 2) {
-            for hop3 in candidates.iter().filter(|c| c.is_exit()) {
+        for hop2 in candidates
+            .iter()
+            .filter(|c| c.layer == 2 && !is_removed(ingress, c))
+        {
+            for hop3 in candidates
+                .iter()
+                .filter(|c| c.is_exit() && !is_removed(hop2, c))
+            {
                 if let Ok(chain) = check(ingress, hop2, hop3, relax) {
                     return Ok(chain);
                 }
@@ -329,6 +351,28 @@ mod tests {
             queue: true,
             layer,
         }
+    }
+
+    #[test]
+    fn a_removed_link_leaves_each_chain_that_holds_it_and_no_other() {
+        let list = BlocList::v1();
+        let ingress = cand(1, list.bloc_of(b"DE"), 0, true);
+        let middles = [cand(2, list.bloc_of(b"US"), 2, false), cand(4, list.bloc_of(b"JP"), 2, false)];
+        let exits = [cand(3, list.bloc_of(b"CH"), 3, false), cand(5, list.bloc_of(b"BR"), 3, false)];
+        let all: Vec<Candidate> = middles.iter().chain(&exits).copied().collect();
+        assert_eq!(select(&ingress, &all).unwrap().hops, [[1; 32], [2; 32], [3; 32]]);
+        // REL-185: the link 2-3 goes, in the order the removal names it.
+        let removed = [LinkRemoval::of(7, [3; 32], [2; 32])];
+        assert_eq!(
+            select_avoiding(&ingress, &all, &removed).unwrap().hops,
+            [[1; 32], [2; 32], [5; 32]]
+        );
+        // The link 1-2 goes too: relay 2 serves no chain from this ingress.
+        let both = [removed[0], LinkRemoval::of(7, [1; 32], [2; 32])];
+        assert_eq!(
+            select_avoiding(&ingress, &all, &both).unwrap().hops,
+            [[1; 32], [4; 32], [3; 32]]
+        );
     }
 
     #[test]
