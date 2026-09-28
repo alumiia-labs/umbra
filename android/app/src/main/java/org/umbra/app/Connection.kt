@@ -161,6 +161,19 @@ fun ConnectionScreen(onBack: () -> Unit) {
                 )
                 HorizontalDivider(color = Palette.Divider)
             }
+            // Part 10 §10.4.2: the loops of this device, and its reports.
+            var faults by remember { mutableStateOf<uniffi.umbra_ffi.LinkFaultStatus?>(null) }
+            LaunchedEffect(state) { Core.linkFaultStatus { faults = it } }
+            faults?.let {
+                FactRow(
+                    "route",
+                    "Link faults",
+                    "${it.loopsBack} of ${it.loopsSent} loops back · ${it.loopsLost} lost · " +
+                        "${it.forced} forced · ${it.reportsWaiting} reports waiting · " +
+                        "${it.reportQueues} report queues",
+                )
+                HorizontalDivider(color = Palette.Divider)
+            }
             // DIS-034, REL-161: a contact holds another view of a log.
             var warnings by remember { mutableStateOf(emptyList<uniffi.umbra_ffi.GossipWarningInfo>()) }
             LaunchedEffect(state) { Core.gossipWarnings { warnings = it } }

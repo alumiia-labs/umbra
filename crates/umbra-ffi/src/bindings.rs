@@ -299,6 +299,24 @@ pub struct PushStatus {
     pub registered_groups: u32,
 }
 
+/// The link-fault counts of this device (Part 10 §10.4.2), for the view of
+/// the connection.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct LinkFaultStatus {
+    /// The loops sent in the epochs that the counts hold.
+    pub loops_sent: u32,
+    /// The loops that came back.
+    pub loops_back: u32,
+    /// The loops that did not come back in time.
+    pub loops_lost: u32,
+    /// The forced replacements of this epoch.
+    pub forced: u32,
+    /// The reports that wait for a slot.
+    pub reports_waiting: u32,
+    /// The report queues of the manifest of the last run.
+    pub report_queues: u32,
+}
+
 /// A digest of a contact that differs from the view of this device (Part 9
 /// `DIS-034`, Part 10 `REL-161`).
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -1053,6 +1071,8 @@ struct Inner {
     /// The loop count and the forced replacements of the last run, which
     /// the next run continues (Part 10 `REL-172`).
     faults: umbra_core::session::faults::LinkFaults,
+    /// The report queues of the manifest of the last run.
+    report_queue_count: u32,
     /// The relays of the run, for the view of the connection.
     relays: Vec<RelayEndpoint>,
     /// The circuits of the run that hold their three hops.
@@ -2828,6 +2848,7 @@ fn handle_of(database_path: String, client: Client<SqliteBackend, ForeignElement
             guard: None,
             uses_second_pin: false,
             faults: Default::default(),
+            report_queue_count: 0,
             relays: Vec::new(),
             circuits: Vec::new(),
             circuits_changed: false,
@@ -3273,6 +3294,21 @@ impl Handle {
         })
     }
 
+    /// The link-fault counts of this device and of its run (Part 10
+    /// §10.4.2).
+    pub fn link_fault_status(&self) -> LinkFaultStatus {
+        let inner = locked(&self.inner);
+        let summary = inner.faults.summary(unix_now());
+        LinkFaultStatus {
+            loops_sent: u32::from(summary.loops_sent),
+            loops_back: u32::from(summary.loops_back),
+            loops_lost: u32::from(summary.loops_lost),
+            forced: u32::from(summary.forced),
+            reports_waiting: u32::from(summary.reports_waiting),
+            report_queues: inner.report_queue_count,
+        }
+    }
+
     /// The digests of contacts that differ from the view of this device: a
     /// log served another view to one of the two.
     pub fn gossip_warnings(&self) -> Result<Vec<GossipWarningInfo>, FfiError> {
@@ -3494,6 +3530,7 @@ impl Handle {
             inner.invitation_host.clone_from(&network.invitation_host);
             inner.guard = Some(ingress.key.relay_id);
             inner.relays.clone_from(&network.relays);
+            inner.report_queue_count = u32::try_from(network.report_queues.len()).unwrap_or(u32::MAX);
             inner.circuits.clear();
             inner.circuits_changed = true;
             inner.me = Arc::downgrade(&self);

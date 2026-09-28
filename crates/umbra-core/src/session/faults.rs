@@ -39,6 +39,21 @@ struct Count {
     failed_builds: u16,
 }
 
+/// The counts that the view of the connection shows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FaultSummary {
+    /// The loops sent in the epochs that the counts hold.
+    pub loops_sent: u16,
+    /// The loops that came back.
+    pub loops_back: u16,
+    /// The loops that did not come back in `LOOP_RETURN_WAIT`.
+    pub loops_lost: u16,
+    /// The forced replacements of this epoch.
+    pub forced: u16,
+    /// The reports that wait for a slot.
+    pub reports_waiting: u16,
+}
+
 /// The counts of the chains of this client.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LinkFaults {
@@ -162,6 +177,23 @@ impl LinkFaults {
     /// The oldest report that waits for a slot.
     pub fn due(&self) -> Option<&LinkFaultReport> {
         self.due.front().map(|(report, _)| report)
+    }
+
+    /// What the view of the connection shows at `now`: the loops sent, back,
+    /// and lost of the epochs held, the forced replacements of this epoch,
+    /// and the reports that wait.
+    pub fn summary(&self, now: u64) -> FaultSummary {
+        let mut summary = FaultSummary {
+            forced: self.forced.get(&epoch_of(now)).copied().unwrap_or(0),
+            reports_waiting: u16::try_from(self.due.len()).unwrap_or(u16::MAX),
+            ..FaultSummary::default()
+        };
+        for count in self.counts.values() {
+            summary.loops_sent = summary.loops_sent.saturating_add(count.loops_sent);
+            summary.loops_back = summary.loops_back.saturating_add(count.loops_back);
+            summary.loops_lost = summary.loops_lost.saturating_add(count.loops_lost);
+        }
+        summary
     }
 
     /// The time at which the oldest report that waits became due.

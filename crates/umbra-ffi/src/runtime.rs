@@ -416,6 +416,7 @@ pub async fn run_client(
     // The check of the queue rotations of Part 3 §3.2.6. A rotation
     // counts in days, thus a check each minute is on time.
     let mut next_rotation_check = unix_now();
+    let mut last_faults = LinkFaults::default();
     let ended = 'run: loop {
         for capsule in node.take_capsules() {
             if link.send(&capsule).await.is_err() {
@@ -471,6 +472,12 @@ pub async fn run_client(
                     next_rotation_check = now.saturating_add(60);
                     events.extend(node.rotate_due(now, &mut rng).unwrap_or_default());
                     let _ = updates.send(Update::Tick);
+                }
+                // The view of the connection reads the counts while the run
+                // holds them.
+                if node.faults() != &last_faults {
+                    last_faults = node.faults().clone();
+                    let _ = updates.send(Update::Faults(Box::new(last_faults.clone())));
                 }
                 events
             }

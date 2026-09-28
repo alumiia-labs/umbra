@@ -1044,6 +1044,12 @@ object Core {
         main.post { onStatus(status) }
     }
 
+    /** The link-fault counts of this device (Part 10 §10.4.2). */
+    fun linkFaultStatus(onStatus: (uniffi.umbra_ffi.LinkFaultStatus) -> Unit) = call { client ->
+        val status = client.linkFaultStatus()
+        main.post { onStatus(status) }
+    }
+
     /** The digests of contacts that differ from the view of this device. */
     fun gossipWarnings(onWarnings: (List<uniffi.umbra_ffi.GossipWarningInfo>) -> Unit) = call { client ->
         val warnings = client.gossipWarnings()

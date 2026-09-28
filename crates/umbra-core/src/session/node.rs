@@ -3767,6 +3767,11 @@ impl ClientNode {
         self.faults = faults;
     }
 
+    /// The counts of this run.
+    pub fn faults(&self) -> &LinkFaults {
+        &self.faults
+    }
+
     /// The loop count and the forced replacements, for a test that makes a
     /// report due.
     #[doc(hidden)]
