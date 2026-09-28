@@ -1089,6 +1089,12 @@ object Core {
     /** The FCM token of this device goes to the core (Part 8 §8.2.7). */
     fun setFcmToken(token: String) = call { it.setFcmToken(token) }
 
+    /** Sends a failed message again (`IMP-075`). */
+    fun sendAgain(message: MsgHandle) = call { client ->
+        client.sendAgain(message)
+        main.post { revision++ }
+    }
+
     /** Private mode and Off hold no token, thus the NDR holds no handle. */
     fun clearPushToken() = call { it.setFcmToken(null) }
 

@@ -264,6 +264,10 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
             }
         } else {
             buildList {
+                // IMP-075: a failed text goes again at the action of the user.
+                if (line.info.outgoing && line.info.delivery.toInt() == FAILED && line.info.file == null) {
+                    add(RowEntry("rotate", "Send again") { Core.sendAgain(line.handle) })
+                }
                 add(
                     RowEntry("reply", "Reply") {
                         edited = null

@@ -4299,6 +4299,20 @@ impl Handle {
         Ok(Arc::new(MsgHandle(message)))
     }
 
+    /// Sends a failed message again, at the action of the user (`IMP-075`).
+    pub fn send_again(&self, message: Arc<MsgHandle>) -> Result<(), FfiError> {
+        let mut inner = locked(&self.inner);
+        let Inner { client, bridge, .. } = &mut *inner;
+        client.send_again(&message.0, unix_now_ms(), &mut OsRng)?;
+        if let Some(running) = bridge {
+            running.flush(client, &mut OsRng)?;
+        }
+        inner.pump_groups();
+        drop(inner);
+        self.changed.notify_all();
+        Ok(())
+    }
+
     /// Cancels a send that the send path did not take yet.
     pub fn cancel_send(&self, message: Arc<MsgHandle>) -> Result<bool, FfiError> {
         Ok(locked(&self.inner).client.cancel_send(&message.0)?)

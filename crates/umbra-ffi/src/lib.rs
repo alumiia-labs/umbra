@@ -3142,6 +3142,33 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_message_goes_again_at_the_action_of_the_user() {
+        let mut rng = Rng(97);
+        let mut client = new_client(&mut rng);
+        let conversation = ConversationId([8; 16]);
+        let mut draft = client.new_draft(conversation);
+        draft.set_text(&units("first")).unwrap();
+        let first = client.send_draft(draft, 1_000_000, &mut rng).unwrap();
+        client.take_outgoing().unwrap();
+        let mut draft = client.new_draft(conversation);
+        draft.set_text(&units("an answer")).unwrap();
+        draft.set_reply_to(Some(first));
+        let answer = client.send_draft(draft, 1_001_000, &mut rng).unwrap();
+        let sent = client.take_outgoing().unwrap();
+        // IMP-075: a queued record does not go again, and a failed one waits
+        // for the user.
+        assert!(client.send_again(&answer, 1_002_000, &mut rng).is_err());
+        client.set_delivery(&answer, Delivery::Failed, &mut rng).unwrap();
+        assert!(client.take_outgoing().is_none());
+        assert_eq!(client.info(&answer).unwrap().reply, ReplyTarget::Message(first));
+        client.send_again(&answer, 1_003_000, &mut rng).unwrap();
+        let again = client.take_outgoing().unwrap();
+        // The record goes as it went the first time, with its raw target.
+        assert_eq!((again.message, again.app), (answer, sent.app));
+        assert_eq!(client.info(&answer).unwrap().delivery, Delivery::Queued);
+    }
+
+    #[test]
     fn a_digest_of_a_contact_compares_against_the_view_of_this_device() {
         use umbra_wire::app::keys::DigestSource;
 

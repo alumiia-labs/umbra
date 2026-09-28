@@ -2182,6 +2182,53 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(())
     }
 
+    /// Sends a message of this device again after a failure. A failed
+    /// record goes again only by an action of the user (`IMP-075`). A file
+    /// takes its own path, thus this call refuses one.
+    pub fn send_again<R: CryptoRng + ?Sized>(
+        &mut self,
+        message: &MsgRef,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let open = self.open_ref()?;
+        let mut plain = Zeroizing::new(
+            open.store
+                .get(TableId::MESSAGE, &message.0)?
+                .ok_or(Error::NotFound)?,
+        );
+        let info = info_of(&plain)?;
+        if !info.outgoing || info.delivery != Delivery::Failed || info.deleted || is_request(&plain)? {
+            return Err(Error::Malformed);
+        }
+        if open.store.get(FILE_STATE, &message.0)?.is_some() {
+            return Err(Error::Malformed);
+        }
+        let conversation = conversation_of(&plain)?;
+        let app = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?.to_vec();
+        *plain.get_mut(1).ok_or(Error::Integrity)? = Delivery::Queued as u8;
+        let open = self.open_mut()?;
+        let mut batch = open.store.begin();
+        batch.put(TableId::MESSAGE, message.0, Some(conversation.0), &plain, rng)?;
+        batch.put(OUTBOX, message.0, None, &outbox_row(), rng)?;
+        batch.commit()?;
+        self.events.push_back(Event::Delivery {
+            message: *message,
+            delivery: Delivery::Queued,
+        });
+        if self.is_group(conversation)? {
+            self.queue_group_post(conversation, Some(*message), &app, now_ms, rng)?;
+        } else {
+            self.outgoing.push_back(Outgoing {
+                message: *message,
+                conversation,
+                app,
+            });
+        }
+        self.auto_lock.touch(now_ms / 1_000);
+        Ok(())
+    }
+
     /// The conversation of a message.
     pub fn conversation_of_message(&self, message: &MsgRef) -> Result<ConversationId, Error> {
         let plain = Zeroizing::new(
@@ -2766,7 +2813,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             batch.delete(OUTBOX, message.0);
             return Ok(batch.commit()?);
         }
-        if info_of(&plain)?.delivery == Delivery::Queued && delivery != Delivery::Queued {
+        // A failed record keeps its raw target, because the user can send it
+        // again (`IMP-075`).
+        if info_of(&plain)?.delivery == Delivery::Queued
+            && !matches!(delivery, Delivery::Queued | Delivery::Failed)
+        {
             // WIR-071: the raw target served the send, and its time ends.
             let app = plain.get_mut(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
             keep_reply_as_reference(app, &open.device_set_key)?;
@@ -2907,8 +2958,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .get(field)
                 .and_then(|bytes| bytes.try_into().ok())
                 .ok_or(Error::Integrity)?;
-            // A record that waits for its relay holds the raw target still.
-            let reference = if info.outgoing && info.delivery == Delivery::Queued {
+            // A record that waits for its relay, or that failed, holds the
+            // raw target still.
+            let reference = if info.outgoing && matches!(info.delivery, Delivery::Queued | Delivery::Failed) {
                 msg_ref(&open.device_set_key, &held)
             } else {
                 held
