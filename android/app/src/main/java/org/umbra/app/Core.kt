@@ -910,7 +910,15 @@ object Core {
             is FfiEvent.Message -> {
                 revision++
                 refreshChats()
-                if (!isVisible) Notifier.message(app, Conversation(event.conversation))
+                // DEV-223: the device woke on its mode, and the setting of the
+                // conversation decides what it shows.
+                if (!isVisible) {
+                    call { client ->
+                        if (client.shouldAlert(event.message)) {
+                            main.post { Notifier.message(app, Conversation(event.conversation)) }
+                        }
+                    }
+                }
             }
             is FfiEvent.Delivery -> {
                 revision++
@@ -1382,6 +1390,14 @@ object Core {
         }
         return false
     }
+
+    /** The notification setting of a conversation (Part 7 §7.5.9). */
+    fun alertSetting(conversation: Conversation, onLoaded: (UByte) -> Unit) = call { client ->
+        val value = client.alertSetting(conversation.id)
+        main.post { onLoaded(value) }
+    }
+
+    fun setAlert(conversation: Conversation, value: UByte) = call { it.setAlertSetting(conversation.id, value) }
 
     /** Hides, removes, or puts back a message of a group (Part 11 §11.9.6). */
     fun moderate(message: MsgHandle, action: UByte) = call { client ->

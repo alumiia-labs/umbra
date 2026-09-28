@@ -40,7 +40,12 @@
 //! ```
 //!
 //! with the three `relay_id` values of a chain in hex, the ingress first. A
-//! verdict is one line of the file `verdicts`.
+//! verdict is one line of the file `verdicts`. The noised chain count of one
+//! relay in one ended epoch prints as
+//!
+//! ```text
+//! umbra-authority <settings file> count <relay> <epoch>
+//! ```
 
 #![forbid(unsafe_code)]
 
@@ -390,10 +395,44 @@ fn read_chain(text: &str) -> Option<[[u8; 32]; 3]> {
     relays.try_into().ok()
 }
 
+/// Prints the noised chain count of one relay in one epoch (§10.8).
+fn print_count(path: &str, relay: &str, epoch: &str) -> ExitCode {
+    let (Some(settings), Some(relay), Ok(epoch)) = (read_settings(path), hex32(relay), epoch.parse::<u64>()) else {
+        eprintln!("usage: umbra-authority <settings file> count <relay> <epoch>");
+        return ExitCode::from(2);
+    };
+    let Ok(runtime) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
+        return ExitCode::from(1);
+    };
+    runtime.block_on(async {
+        let Ok(set) = relay_set(&settings) else {
+            eprintln!("the manifest does not verify");
+            return ExitCode::from(1);
+        };
+        let Some(listed) = set.relays.iter().find(|listed| listed.candidate.relay_id == relay) else {
+            eprintln!("the manifest names no such relay");
+            return ExitCode::from(1);
+        };
+        match stats::chain_count(&settings, listed, epoch).await {
+            Some(count) => {
+                println!("chains {} epoch={epoch} noised={count}", to_hex(&relay));
+                ExitCode::SUCCESS
+            }
+            None => {
+                eprintln!("no count: an aggregator is not this program, or the relay holds no share");
+                ExitCode::from(1)
+            }
+        }
+    })
+}
+
 fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let (path, probe) = match arguments.as_slice() {
         [path] => (path, None),
+        [path, word, relay, epoch] if word == "count" => {
+            return print_count(path, relay, epoch);
+        }
         [path, word, chain] if word == "probe" => match read_chain(chain) {
             Some(chain) => (path, Some(chain)),
             None => {

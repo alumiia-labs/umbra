@@ -75,6 +75,7 @@ sealed interface Screen {
     data class ConversationSettings(val conversation: Conversation) : Screen
     data class Disappearing(val conversation: Conversation) : Screen
     data class NewPoll(val conversation: Conversation) : Screen
+    data class Alerts(val conversation: Conversation) : Screen
     data class Verify(val conversation: Conversation) : Screen
     data class VerifyCode(val conversation: Conversation, val starts: Boolean) : Screen
     data class SafetyNumber(val conversation: Conversation) : Screen
@@ -110,6 +111,7 @@ sealed interface Screen {
             is ConversationSettings -> conversation
             is Disappearing -> conversation
             is NewPoll -> conversation
+            is Alerts -> conversation
             is Verify -> conversation
             is VerifyCode -> conversation
             is SafetyNumber -> conversation
@@ -240,6 +242,7 @@ private fun ContactView(
         is Screen.ConversationSettings -> ConversationSettingsScreen(chat, pop, push)
         is Screen.Disappearing -> DisappearingScreen(chat, pop)
         is Screen.NewPoll -> NewPollScreen(chat, pop)
+        is Screen.Alerts -> AlertsScreen(chat, pop)
         is Screen.Verify -> VerifyScreen(chat, pop, push)
         is Screen.VerifyCode -> VerifyCodeScreen(chat, top.starts, pop)
         is Screen.SafetyNumber -> SafetyNumberScreen(chat, pop)

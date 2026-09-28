@@ -98,7 +98,9 @@ fun ContactDetailsScreen(chat: Chat, onBack: () -> Unit, onMessage: () -> Unit, 
 fun ConversationSettingsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
     var receipts by remember { mutableStateOf<Receipts?>(null) }
     var timer by remember { mutableStateOf<UInt?>(null) }
+    var alert by remember { mutableStateOf<UByte?>(null) }
     LaunchedEffect(chat.conversation) { Core.receipts(chat.conversation) { receipts = it } }
+    LaunchedEffect(chat.conversation, Core.revision) { Core.alertSetting(chat.conversation) { alert = it } }
     LaunchedEffect(chat.conversation, Core.revision) { Core.timer(chat.conversation) { timer = it.seconds } }
     val change = { next: Receipts ->
         receipts = next
@@ -107,6 +109,14 @@ fun ConversationSettingsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) ->
     Column(Modifier.fillMaxSize()) {
         BackBar("Conversation settings", onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
+            alert?.let {
+                EntryRow(
+                    RowEntry("bell", "Notifications", alertLabel(it)) {
+                        push(Screen.Alerts(chat.conversation))
+                    },
+                )
+                HorizontalDivider(color = Palette.Divider)
+            }
             timer?.let {
                 EntryRow(
                     RowEntry("clock", "Disappearing messages", timerLabel(it)) {

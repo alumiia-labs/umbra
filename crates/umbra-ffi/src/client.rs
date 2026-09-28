@@ -9,6 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+mod alerts;
 mod backup;
 mod block;
 mod dead;
@@ -27,6 +28,7 @@ mod polls;
 mod timers;
 mod tokens;
 
+pub use alerts::{ALERT_ALL, ALERT_MENTIONS, ALERT_NONE};
 pub use backup::{BackupUpload, PendingBackup, RestoredBackup, RootWrite};
 pub use dead::DeadWork;
 pub use gossip::{GossipWarning, HeadCheck};

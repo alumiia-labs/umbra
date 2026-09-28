@@ -633,6 +633,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for job in jobs {
             self.groups.creations.push_back(job);
         }
+        self.start_group_alert(conversation, 1, rng)?;
         Ok(conversation)
     }
 
@@ -1819,6 +1820,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         batch.commit()?;
         // DEV-298: the group goes to the other devices of the set.
         self.group_state_due(conversation, rng)?;
+        let members = self.group_of(conversation)?.roster().active_count();
+        self.start_group_alert(conversation, members, rng)?;
         Ok(conversation)
     }
 

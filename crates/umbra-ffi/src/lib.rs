@@ -942,6 +942,50 @@ mod tests {
         assert_eq!(other.messages(member).unwrap(), [mine]);
     }
 
+    #[test]
+    fn the_notification_setting_decides_what_a_record_shows() {
+        use crate::client::{ALERT_ALL, ALERT_MENTIONS, ALERT_NONE};
+
+        let mut rng = Rng(93);
+        let mut client = new_client(&mut rng);
+        let mut other = new_client(&mut rng);
+        let (conversation, member) = ready_pair(&mut client, &mut other, &mut rng);
+        let now = 1_700_000_400u64;
+        // DEV-258, DEV-259: a pairwise conversation and a small group show
+        // each record.
+        let pairwise = other.conversation_for(&[0x71; 32]).unwrap();
+        assert_eq!(other.alert_setting(pairwise).unwrap(), ALERT_ALL);
+        assert_eq!(other.alert_setting(member).unwrap(), ALERT_ALL);
+        assert!(other.set_alert_setting(member, 3, &mut rng).is_err());
+
+        let send = |client: &mut Client<MemoryBackend, Element>,
+                        other: &mut Client<MemoryBackend, Element>,
+                        text: &str,
+                        mentions: Vec<u16>,
+                        at: u64,
+                        rng: &mut Rng| {
+            let mut draft = client.new_draft(conversation);
+            draft.set_text(&units(text)).unwrap();
+            draft.set_mentions(mentions);
+            client.send_draft(draft, at * 1_000, rng).unwrap();
+            let post = client.take_group_post().unwrap();
+            other
+                .on_group_record(&[0xC3; 32], 1, &post.record, at * 1_000, rng)
+                .unwrap()
+                .unwrap()
+        };
+        let plain = send(&mut client, &mut other, "plain", vec![], now, &mut rng);
+        assert!(other.should_alert(&plain).unwrap());
+        other.set_alert_setting(member, ALERT_MENTIONS, &mut rng).unwrap();
+        assert!(!other.should_alert(&plain).unwrap());
+        let named = send(&mut client, &mut other, "@you", vec![1], now + 1, &mut rng);
+        assert!(other.should_alert(&named).unwrap());
+        other.set_alert_setting(member, ALERT_NONE, &mut rng).unwrap();
+        assert!(!other.should_alert(&named).unwrap());
+        // The conversation stays in the list.
+        assert!(other.summaries().unwrap().iter().any(|summary| summary.conversation == member));
+    }
+
     /// A group of `client` with both queues, and `other` in it at index 1.
     fn ready_pair(
         client: &mut Client<MemoryBackend, Element>,

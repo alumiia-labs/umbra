@@ -4644,6 +4644,32 @@ impl Handle {
         Ok(())
     }
 
+    /// The notification setting of a conversation: 0 each record, 1 the
+    /// mentions of the user, 2 none (Part 7 §7.5.9).
+    pub fn alert_setting(&self, conversation: Vec<u8>) -> Result<u8, FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        Ok(locked(&self.inner).client.alert_setting(conversation)?)
+    }
+
+    /// Sets the notification setting of a conversation, for each device of
+    /// the set.
+    pub fn set_alert_setting(&self, conversation: Vec<u8>, value: u8) -> Result<(), FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        let mut inner = locked(&self.inner);
+        let Inner { client, bridge, .. } = &mut *inner;
+        client.set_alert_setting(conversation, value, &mut OsRng)?;
+        if let Some(running) = bridge {
+            running.flush(client, &mut OsRng)?;
+        }
+        Ok(())
+    }
+
+    /// Whether a message that arrived gives a notification under the
+    /// setting of its conversation.
+    pub fn should_alert(&self, message: Arc<MsgHandle>) -> Result<bool, FfiError> {
+        Ok(locked(&self.inner).client.should_alert(&message.0)?)
+    }
+
     /// The periods that a conversation timer takes, in seconds (`WIR-201`).
     pub fn timer_values(&self) -> Vec<u32> {
         crate::client::TIMER_VALUES.to_vec()
