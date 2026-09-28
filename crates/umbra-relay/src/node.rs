@@ -14,6 +14,7 @@ use umbra_core::{
         pow::{ChallengeBook, PowChallenge},
     },
     attach::command::{CrputPayload, CRPUT_LEN},
+    directory::receipt,
     notify::digest::NotifyDigest,
     session::{
         batch::{unpack, Range},
@@ -40,6 +41,7 @@ use umbra_wire::{
 
 use crate::{
     circuits::{Action, CircuitKey, CircuitTable, LinkId},
+    receipts::ReceiptBook,
     service::{
         chunk::{ChunkService, Push},
         group::GroupService,
@@ -96,6 +98,14 @@ pub enum Output {
         /// The link.
         link: LinkId,
     },
+}
+
+/// One capsule of `kind` for `link`.
+fn capsule_output(link: LinkId, kind: CapsuleType, value: &[u8]) -> Option<Output> {
+    let mut capsule = vec![0u8; capsule::HEADER_LEN + value.len()];
+    let used = capsule::encode(kind, value, &mut capsule).ok()?;
+    capsule.truncate(used);
+    Some(Output::Send { link, capsule })
 }
 
 /// The session capsule that tells a neighbor that the circuit of
@@ -222,6 +232,8 @@ pub struct RelayNode {
     challenges: ChallengeBook,
     /// Whether the book moved since the last read of it.
     challenges_moved: bool,
+    /// The link receipts (Part 10 §10.4.2).
+    receipts: ReceiptBook,
 }
 
 impl RelayNode {
@@ -256,6 +268,7 @@ impl RelayNode {
             identities: BTreeMap::new(),
             challenges: ChallengeBook::default(),
             challenges_moved: false,
+            receipts: ReceiptBook::default(),
         }
     }
 
@@ -453,11 +466,32 @@ impl RelayNode {
     /// re-push. The runtime calls it about once each second.
     pub fn push_tick<R: CryptoRng + ?Sized>(&mut self, now: u64, rng: &mut R) -> Vec<Output> {
         self.queues.push_tick(now, rng);
-        self.queues
+        let mut outputs: Vec<Output> = self
+            .queues
             .take_ndr_pushes()
             .into_iter()
             .map(Output::NdrPush)
-            .collect()
+            .collect();
+        // REL-074, REL-176: the windows of an ended epoch close, and an old
+        // receipt goes.
+        if let Some(key) = self.pow_key.as_ref() {
+            let own = self.relay.relay_id;
+            for (link, signed) in self.receipts.tick(&own, key, now, rng) {
+                outputs.extend(capsule_output(link, CapsuleType::Receipt, &signed));
+            }
+        }
+        outputs
+    }
+
+    /// The receipts that this relay issued and took, for a test.
+    #[doc(hidden)]
+    pub fn receipts_held(&self) -> (usize, usize) {
+        self.receipts.held()
+    }
+
+    /// The answer to a receipt query that verified (`REL-179`).
+    pub fn receipt_answer(&self, query: &receipt::ReceiptQuery) -> receipt::ReceiptAnswer {
+        self.receipts.answer(query)
     }
 
     /// The NDR answered `gone` for a handle (`NTF-125`).
@@ -504,7 +538,13 @@ impl RelayNode {
         capsule.truncate(used);
         self.links.insert(link, Framing::Dialed(client));
         self.next_hops.insert(relay_id, link);
+        self.receipts.set_peer(link, relay_id);
         let mut outputs = vec![Output::Send { link, capsule }];
+        // REL-173: the next hop learns which relay dialed it.
+        if let Some(key) = self.pow_key.as_ref() {
+            let hello = receipt::relay_hello(&self.relay.relay_id, &session_id, key, rng);
+            outputs.extend(hello.ok().and_then(|hello| capsule_output(link, CapsuleType::RelayHello, &hello)));
+        }
         let mut actions = Vec::new();
         for waiting in self.extending.remove(&relay_id).unwrap_or_default() {
             // The client ended a build older than its timeout.
@@ -574,6 +614,33 @@ impl RelayNode {
                 self.take_challenge(value, now);
                 Vec::new()
             }
+            // REL-174: the relay that dialed this link names itself.
+            CapsuleType::RelayHello => {
+                if let Some(Framing::Accepted(framing)) = self.links.get(&link) {
+                    let session_id = framing.session_id();
+                    let identities = &self.identities;
+                    let named = receipt::verify_relay_hello(value, &session_id, |id| {
+                        identities.get(id).cloned()
+                    });
+                    if let Ok(relay_id) = named {
+                        self.receipts.set_peer(link, relay_id);
+                    }
+                }
+                Vec::new()
+            }
+            // REL-178: the receipt of the cells that this relay sent.
+            CapsuleType::Receipt => {
+                if let Some(identity) = self
+                    .receipts
+                    .peer(link)
+                    .and_then(|peer| self.identities.get(&peer))
+                {
+                    let identity = identity.clone();
+                    self.receipts
+                        .receipt_taken(link, value, &self.relay.relay_id, &identity, now);
+                }
+                Vec::new()
+            }
             CapsuleType::Cell => {
                 let cell = match self.links.get_mut(&link) {
                     Some(Framing::Accepted(framing)) => framing.receive(value),
@@ -583,8 +650,18 @@ impl RelayNode {
                 match cell {
                     Ok(Some(cell)) => {
                         let cell = cell.to_vec();
+                        // REL-175: a cell of a relay link counts for its
+                        // receipt.
+                        let mut outputs = Vec::new();
+                        if let Some(key) = self.pow_key.as_ref() {
+                            let own = self.relay.relay_id;
+                            for signed in self.receipts.cell_taken(link, &cell, &own, key, now, rng) {
+                                outputs.extend(capsule_output(link, CapsuleType::Receipt, &signed));
+                            }
+                        }
                         let actions = self.circuits.on_cell(link, &cell, now, rng);
-                        self.run(actions, now, rng)
+                        outputs.extend(self.run(actions, now, rng));
+                        outputs
                     }
                     // WIR-141: a frame that the link accepted before.
                     Ok(None) => Vec::new(),
@@ -639,6 +716,7 @@ impl RelayNode {
             }
         };
         capsule.truncate(used);
+        self.receipts.cell_sent(link, cell);
         Some(Output::Send { link, capsule })
     }
 
@@ -887,6 +965,7 @@ impl RelayNode {
     /// A link closed. Each circuit on it ends.
     pub fn link_closed(&mut self, link: LinkId, now: u64) -> Vec<Output> {
         self.links.remove(&link);
+        self.receipts.link_closed(link);
         self.next_hops.retain(|_, held| *held != link);
         let actions = self.circuits.link_closed(link);
         let mut outputs = self.finish(actions, now);

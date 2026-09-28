@@ -2011,7 +2011,7 @@ Source: `spec/10-relay-directory.md`
 | `REL-108` | §10.4.2 | MAY | A directory authority | A directory authority MAY run an isolation query on one link on its own evidence. |  |  |
 | `REL-109` | §10.4.2 | MUST | (unstated) | At an isolation query, a directory authority MUST build a circuit through the relay under query and its reported neighbor. |  |  |
 | `REL-110` | §10.4.2 | MUST | That authority | That authority MUST send a loop cell on that circuit. |  |  |
-| `REL-111` | §10.4.2 | MUST | That authority | That authority MUST record the `circ_id` and the `tag` of the probe cell at each hop. |  |  |
+| `REL-111` | §10.4.2 | MUST | That authority | That authority MUST record the `tag` of the probe cell at each hop. |  |  |
 | `REL-112` | §10.4.2 | MUST NOT | A directory authority | A directory authority MUST NOT run that query from fewer than `FAULT_MIN_REPORTS` reports. |  |  |
 | `REL-113` | §10.5.2 | MUST NOT | A client with no correction | A client with no correction MUST NOT apply `REL-035`. |  |  |
 | `REL-114` | §10.5.2 | MUST | A client with no correction | A client with no correction MUST record the correction from the first `DirectoryRoot` that it accepts. |  |  |

@@ -30,7 +30,20 @@ pub enum CapsuleType {
     /// The signed `PowChallenge` of a relay to a carrier of the relay
     /// manifest (Part 13 `ABU-102`).
     Challenge = 0x0B56,
+    /// A `LinkReceipt` from the relay that took a window of cells to the
+    /// relay that sent it (Part 10 `REL-177`).
+    Receipt = 0x0B57,
+    /// The `RelayHello` of a relay that dialed another (Part 10 `REL-173`).
+    RelayHello = 0x0B58,
 }
+
+/// The value of an `UMBRA_RECEIPT` capsule: one `LinkReceipt` of Part 10
+/// §10.4.2 (`WIR-537`).
+pub const RECEIPT_LEN: usize = 1 + 32 + 32 + 8 + 4 + 4 + 32 + 3_309;
+
+/// The value of an `UMBRA_RELAY_HELLO` capsule: one `RelayHello` of Part 10
+/// §10.4.2 (`WIR-537`).
+pub const RELAY_HELLO_LEN: usize = 1 + 32 + 3_309;
 
 /// The value of an `UMBRA_REPLICA` capsule: the command header, and the
 /// 32 682 bytes of a `CRPUT` payload (`WIR-213`).
@@ -53,6 +66,8 @@ impl CapsuleType {
             0x0B54 => Ok(CapsuleType::Replica),
             0x0B55 => Ok(CapsuleType::Deposit),
             0x0B56 => Ok(CapsuleType::Challenge),
+            0x0B57 => Ok(CapsuleType::Receipt),
+            0x0B58 => Ok(CapsuleType::RelayHello),
             _ => Err(Error::Malformed),
         }
     }
@@ -132,6 +147,10 @@ fn check_value_len(kind: CapsuleType, len: usize) -> Result<(), Error> {
                 Err(Error::Malformed)
             }
         }
+        // WIR-537: one length each.
+        CapsuleType::Receipt if len == RECEIPT_LEN => Ok(()),
+        CapsuleType::RelayHello if len == RELAY_HELLO_LEN => Ok(()),
+        CapsuleType::Receipt | CapsuleType::RelayHello => Err(Error::Malformed),
     }
 }
 

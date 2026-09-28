@@ -17,10 +17,17 @@ use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpListener,
-    sync::mpsc,
+    sync::{mpsc, oneshot},
 };
 use tokio_rustls::TlsAcceptor;
-use umbra_core::{abuse::POW_CHALLENGE_PERIOD, group::backoff::exponential};
+use umbra_core::{
+    abuse::POW_CHALLENGE_PERIOD,
+    directory::{
+        receipt::{ReceiptQuery, RECEIPT_QUERY_LEN},
+        root::DirectoryKeySet,
+    },
+    group::backoff::exponential,
+};
 use umbra_crypto::{
     rand_core::{TryCryptoRng, TryRng},
     secret::Secret,
@@ -114,6 +121,13 @@ pub enum Input {
         /// The handle.
         handle: [u8; 16],
     },
+    /// A receipt query of an authority that verified (Part 10 `REL-179`).
+    ReceiptQuery {
+        /// The query.
+        query: ReceiptQuery,
+        /// The encoded `ReceiptAnswer`.
+        reply: oneshot::Sender<Vec<u8>>,
+    },
 }
 
 /// What the node task asks of the process around it.
@@ -186,6 +200,11 @@ pub async fn run_node(
                 }
                 Some(Input::NdrGone { handle }) => {
                     node.ndr_gone(&handle);
+                    Vec::new()
+                }
+                Some(Input::ReceiptQuery { query, reply }) => {
+                    let answer = node.receipt_answer(&query).encode().unwrap_or_default();
+                    let _ = reply.send(answer);
                     Vec::new()
                 }
             },
@@ -439,6 +458,46 @@ async fn reload_manifest(carried: Arc<Carried>) {
 /// Forwards one encapsulated request to the gateway and gives its answer
 /// back (`NTF-127`). The relay reads no byte of either, it keeps neither,
 /// and the gateway sees this relay alone.
+/// The path of the receipt query of an authority (Part 10 `REL-179`).
+pub const RECEIPT_PATH: &str = "/receipt";
+
+/// Answers a receipt query of an authority: a query that verifies under the
+/// key set of this relay gets the answer of the node, and each other gets
+/// 403 with no body (`REL-179`, `REL-180`).
+async fn answer_receipt_query<S>(
+    stream: &mut S,
+    inbound: &mut Vec<u8>,
+    node: &mpsc::Sender<Input>,
+    carried: &Carried,
+) where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let request = https::read_request(stream, inbound, RECEIPT_QUERY_LEN).await;
+    let keyset = carried
+        .manifest_source
+        .as_ref()
+        .map(|source| source.keyset.as_slice());
+    let query = match (request, keyset) {
+        (Ok(request), Some(keyset)) if request.method == "POST" => DirectoryKeySet::parse(keyset)
+            .ok()
+            .and_then(|(set, _)| ReceiptQuery::verify(&request.body, &set).ok()),
+        _ => None,
+    };
+    let Some(query) = query else {
+        let _ = https::respond(stream, 403, "text/plain", &[]).await;
+        return;
+    };
+    let (reply, answer) = oneshot::channel();
+    let answer = match node.send(Input::ReceiptQuery { query, reply }).await {
+        Ok(()) => answer.await.ok(),
+        Err(_) => None,
+    };
+    let _ = match answer {
+        Some(body) => https::respond(stream, 200, "application/octet-stream", &body).await,
+        None => https::respond(stream, 503, "text/plain", &[]).await,
+    };
+}
+
 async fn relay_ohttp<S>(
     stream: &mut S,
     inbound: &mut Vec<u8>,
@@ -507,6 +566,10 @@ pub async fn serve_connection<S>(
                 limits,
             )
             .await;
+            return;
+        }
+        if inbound.starts_with(format!("POST {RECEIPT_PATH} ").as_bytes()) {
+            answer_receipt_query(&mut stream, &mut inbound, &node, &carried).await;
             return;
         }
         if native::asks_challenges(&inbound) && inbound.windows(4).any(|w| w == b"\r\n\r\n") {

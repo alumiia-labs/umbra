@@ -249,7 +249,7 @@ LinkReceipt {
     epoch        u64       // the consensus epoch of §10.11
     window       u32       // the batch index inside that epoch
     cell_count   u32
-    batch_root   [32]u8    // Merkle root over the circ_id and the tag of each cell
+    batch_root   [32]u8    // Merkle root over the tag of each cell
     sig          [3309]u8  // ML-DSA-65, label "umbra/v1/link-receipt"
 }
 ```
@@ -264,9 +264,9 @@ covers each field but `sig`, after the label.
   that it took, for `RECEIPT_RETENTION`. **[REL-074]** A relay MUST erase a
   receipt after that period.
 - **[REL-075]** A relay MUST NOT put a client address, a queue identifier, or a
-  payload byte in a receipt. The Merkle root covers `circ_id` and `tag` only,
-  and Part 3 §3.4.4 makes each hop rewrite `circ_id`. Thus a receipt names a
-  link and it does not name a user. Part 15 §15.1 holds that row.
+  payload byte in a receipt. The Merkle root covers the `tag` of each cell
+  only, and Part 3 §3.4.4 makes each hop compute a new tag. Thus a receipt
+  names a link and it does not name a user. Part 15 §15.1 holds that row.
 
 **The relay hello.** A relay that takes a link does not know the relay at its
 other end: a relay dials the next layer as a client dials the first. Thus the
@@ -292,9 +292,10 @@ name the dialer on another link.
   MUST NOT issue a receipt on a client link.
 
 **The window.** The leaf of a cell is the leaf of the Merkle tree of §10.5.3
-over the 32 bytes `circ_id || tag` of the cell as the link carried it, and
-`batch_root` is the root of that tree over the leaves of a window in the order
-of the link.
+over the 16-byte `tag` of the cell as the link carried it, and `batch_root` is
+the root of that tree over the leaves of a window in the order of the link.
+The tag is the output of the rugged PRP of Part 3 §3.4.4, thus two cells share
+one only by chance.
 
 - **[REL-175]** A relay MUST count the cells that it takes on each relay link
   in the order of that link, in windows of `RECEIPT_WINDOW` cells. The first
@@ -442,13 +443,13 @@ authority therefore makes its own evidence with a probe that it builds.
   reported neighbor is the adjacent relay that the reports name. The authority
   builds the circuit under Part 3 §3.4, thus it is an ordinary client circuit.
   **[REL-110]** That authority MUST send a loop cell on that circuit.
-  **[REL-111]** That authority MUST record the `circ_id` and the `tag` of the
-  probe cell at each hop. The authority encrypted each layer, thus it holds
-  each value. The loop cell is a probe of §10.4.1.
+  **[REL-111]** That authority MUST record the `tag` of the probe cell at each
+  hop. The authority computed each layer, thus it holds each tag. The loop
+  cell is a probe of §10.4.1.
 - **[REL-081]** That authority MUST then request the receipt that covers the
-  probe cell from each relay of the circuit. The request names the `circ_id`
-  and the `tag` of the cell at that hop. The relay answers with the receipt
-  and a Merkle inclusion proof of the cell. **[REL-082]** A relay MUST give its
+  probe cell from each relay of the circuit. The request names the `tag` of
+  the cell at that hop. The relay answers with the receipt and a Merkle
+  inclusion proof of the cell. **[REL-082]** A relay MUST give its
   receipts to a directory authority at an isolation query.
 
 ```
@@ -456,8 +457,7 @@ ReceiptQuery {                   // the body of POST /receipt at a relay
     version          u8          // 0x01
     authority_index  u8
     epoch            u64         // the consensus epoch of the probe
-    circ_id          [16]u8      // the cell as one link carried it
-    tag              [16]u8
+    tag              [16]u8      // the cell as one link carried it
     sig              [3309]u8    // ML-DSA-65, label "umbra/v1/receipt-query"
 }
 
@@ -472,7 +472,7 @@ ReceiptAnswer {
 }
 ```
 
-The query is **3 351 bytes**, and the signature covers each field but `sig`,
+The query is **3 335 bytes**, and the signature covers each field but `sig`,
 after the label. A relay issued the receipt of a cell that reached it, and it
 took the receipt of a cell that it sent, thus the two values of one cell at
 one hop name the two sides of one link.
@@ -480,10 +480,18 @@ one hop name the two sides of one link.
 - **[REL-179]** A relay MUST answer a `ReceiptQuery` that verifies under the
   key of that authority in the key set of the relay set that it holds. The
   answer MUST give the receipt of that `epoch`, issued or taken, whose window
-  holds the leaf of `circ_id || tag`, and the inclusion proof of that leaf. A
+  holds the leaf of `tag`, and the inclusion proof of that leaf. A
   relay that holds no such receipt MUST answer `found` 0x00. **[REL-180]** A
   relay MUST refuse a query that does not verify with HTTP status 403 and no
   body.
+> *Cause.* An earlier draft made the leaf of a cell and the query name its
+> `circ_id` and its tag, and said that the authority holds each value because
+> it encrypted each layer. Part 3 `NET-154` makes the relay before a hop draw
+> the `circ_id` of the link to that hop, thus a client holds the `circ_id` of
+> its first link alone, and the query could not name the cell at hop 2 or at
+> hop 3. The client computes the tag of each layer, thus the tag alone names
+> the cell at each hop.
+
 - A **contradiction** is a denial of a batch by a relay whose signature the
   query holds over that batch. A relay that forwarded a batch holds the receipt
   that the next relay issued for it. **[REL-083]** A directory authority MUST

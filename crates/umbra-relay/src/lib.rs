@@ -21,6 +21,7 @@ pub mod fcm;
 pub mod ndr_server;
 pub mod node;
 pub mod placement;
+pub mod receipts;
 #[cfg(feature = "native")]
 pub mod server;
 pub mod service;

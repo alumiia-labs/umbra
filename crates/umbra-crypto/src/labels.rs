@@ -46,6 +46,8 @@ labels! {
     LINK_RECEIPT = "umbra/v1/link-receipt";
     REPORT_QUEUE = "umbra/v1/report-queue";
     LINK_FAULT_SEAL = "umbra/v1/link-fault-seal";
+    RELAY_HELLO = "umbra/v1/relay-hello";
+    RECEIPT_QUERY = "umbra/v1/receipt-query";
     MEASURER_CERT = "umbra/v1/measurer-cert";
     DEVICE_ROSTER = "umbra/v1/device-roster";
     DEVICE_CLAIM = "umbra/v1/device-claim";

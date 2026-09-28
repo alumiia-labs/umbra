@@ -19,6 +19,7 @@ use umbra_crypto::{
     rand_core::{TryCryptoRng, TryRng},
     rsabssa::PublicKey2048,
     secret::Secret,
+    sign::SigningKey,
     x25519::{PublicKey as XPublic, StaticSecret},
 };
 use umbra_queue::params::RECEIPT_MIN_DELAY;
@@ -110,6 +111,27 @@ impl Network {
         }
     }
 
+    /// The identity key of each relay, which signs its hello and its
+    /// receipts (Part 10 §10.4.2), and the identities of the set.
+    fn sign_relays(&mut self) {
+        let keys: Vec<SigningKey> = (1..=3u8)
+            .map(|layer| SigningKey::from_seed(Secret::new([0x30 + layer; 32])))
+            .collect();
+        let identities: BTreeMap<[u8; 32], Vec<u8>> = (1..=3u8)
+            .zip(&keys)
+            .map(|(layer, key)| {
+                (
+                    relay_static(layer).0.relay_id,
+                    key.verifying_key().to_bytes().to_vec(),
+                )
+            })
+            .collect();
+        for (relay, key) in self.relays.iter_mut().zip(keys) {
+            relay.set_challenge_signer(key, Vec::new());
+            relay.set_relay_identities(identities.clone());
+        }
+    }
+
     /// The links between the relays of two layers.
     fn wire_relays(&mut self) {
         self.peers = vec![Vec::new(), Vec::new(), Vec::new()];
@@ -147,6 +169,7 @@ impl Network {
                 RelayNode::restored(Self::relay_config(layer), store.load().unwrap())
             })
             .collect();
+        self.sign_relays();
         self.wire_relays();
         for (client, seed) in seeds.iter().enumerate() {
             self.restart(client, *seed);
@@ -176,6 +199,7 @@ impl Network {
             rng: Rng(7),
             now: 1_000,
         };
+        network.sign_relays();
         network.wire_relays();
         for client in 0..2usize {
             network.peers[0].push((network.links[client], Peer::Client(client)));
@@ -1545,4 +1569,25 @@ fn a_stored_contact_of_the_first_version_continues() {
     network.settle();
     assert_eq!(messages_of(network.take_events(ALICE)), [b"and still"]);
     assert!(network.clients[ALICE].contacts().count() == 1);
+}
+
+/// Part 10 §10.4.2: each relay link carries receipts both ways. The dialing
+/// relay names itself in its hello, the end of an epoch closes each window,
+/// and each side keeps the receipt of the other over the cells it sent.
+#[test]
+fn each_relay_link_returns_receipts_for_its_cells() {
+    let mut network = Network::new();
+    network.settle();
+    for relay in 0..3 {
+        assert_eq!(network.relays[relay].receipts_held(), (0, 0));
+    }
+    network.now += 3_600;
+    for relay in 0..3 {
+        let outputs = network.relays[relay].push_tick(network.now, &mut Rng(200 + relay as u64));
+        network.route(relay, outputs);
+    }
+    network.settle();
+    // The middle relay has two relay links, the other two have one.
+    let held: Vec<(usize, usize)> = (0..3).map(|relay| network.relays[relay].receipts_held()).collect();
+    assert_eq!(held, [(1, 1), (2, 2), (1, 1)], "{held:?}");
 }

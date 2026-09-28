@@ -218,6 +218,12 @@ pub struct RelayLink {
 }
 
 impl RelayLink {
+    /// The identifier of the session, which a `RelayHello` binds (Part 10
+    /// `REL-173`).
+    pub fn session_id(&self) -> [u8; 8] {
+        self.id
+    }
+
     /// Accepts a `SessionOpen` (`WIR-232`). The caller checks that no live
     /// session holds the identifier (`WIR-233`).
     pub fn open(control: SessionControl) -> Result<Self, Error> {
