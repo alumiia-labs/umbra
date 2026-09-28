@@ -805,6 +805,19 @@ pub struct MsgInfo {
     pub sender: Option<u16>,
 }
 
+/// One change of the roster of a group, as the conversation shows it.
+#[derive(uniffi::Record)]
+pub struct FfiRosterNote {
+    /// The time of the application, in milliseconds.
+    pub at_ms: u64,
+    /// 1 joined, 2 left, 3 removed for silence, 4 a new role, 5 a fork.
+    pub kind: u8,
+    /// The member index, or 0xFFFF for a fork that names nobody.
+    pub index: u16,
+    /// The new role of kind 4, with the values of [`FfiRole`], else 0.
+    pub role: u8,
+}
+
 /// One moderation epoch that this device applied (`GRP-089`).
 #[derive(uniffi::Record)]
 pub struct FfiModNote {
@@ -1536,19 +1549,9 @@ impl Inner {
         }
         if let Ok(silent) = self.client.members_to_evict(now_ms, &mut OsRng) {
             for (conversation, index, action) in silent {
-                let _ = match action {
-                    crate::client::Silence::Remove => {
-                        self.client
-                            .remove_from_group(conversation, index, now_ms, &mut OsRng)
-                    }
-                    crate::client::Silence::Demote => self.client.set_group_role(
-                        conversation,
-                        index,
-                        umbra_wire::group::control::Role::Member,
-                        now_ms,
-                        &mut OsRng,
-                    ),
-                };
+                let _ = self
+                    .client
+                    .act_on_silence(conversation, index, action, now_ms, &mut OsRng);
             }
         }
         // GRP-401, GRP-402: an admin that left its role or the group
@@ -4561,6 +4564,21 @@ impl Handle {
         drop(inner);
         self.changed.notify_all();
         Ok(())
+    }
+
+    /// The changes of the roster of a group that this device applied.
+    pub fn roster_notes(&self, conversation: Vec<u8>) -> Result<Vec<FfiRosterNote>, FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        let notes = locked(&self.inner).client.roster_notes(conversation)?;
+        Ok(notes
+            .into_iter()
+            .map(|note| FfiRosterNote {
+                at_ms: note.at_ms,
+                kind: note.kind,
+                index: note.index,
+                role: note.role,
+            })
+            .collect())
     }
 
     /// The moderation epochs that this device applied in a conversation.

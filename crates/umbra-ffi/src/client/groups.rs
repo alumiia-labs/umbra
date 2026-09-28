@@ -9,7 +9,7 @@
 //! `GRP-191` wait in a work list, and each answer of a relay fills one
 //! replica. The group is ready when both answered.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use umbra_core::{
     group::{
@@ -431,6 +431,12 @@ pub(super) struct GroupQueues {
     /// admins that count one silence draw two delays, and the removal of
     /// the first reaches the second before its own (`GRP-133`).
     pub evictions: BTreeMap<(ConversationId, u16), u64>,
+    /// The member that this admin removes for its silence now, thus the
+    /// note of the removal says why (`GRP-050`).
+    pub evicting: Option<(ConversationId, u16)>,
+    /// Each group with a new note of its roster, for one event after the
+    /// others.
+    pub noted: BTreeSet<ConversationId>,
     /// The instant at which this admin may draw new owner credentials for
     /// each group that owes them, after the backoff of `GRP-358`.
     pub owner_backoff: BTreeMap<ConversationId, u64>,
@@ -2739,9 +2745,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     ) -> Result<Applied, Error> {
         let mut group = self.group_of(conversation)?;
         let control = GroupControl::parse(object)?;
-        let applied = group
-            .apply_control(&control, group.own_index(), now_ms / 1_000)
-            .map_err(|_| Error::Malformed)?;
+        let forks = group.roster().forks().len();
+        let applied = group.apply_control(&control, group.own_index(), now_ms / 1_000);
+        self.note_forks(conversation, &group, forks, now_ms, rng)?;
+        let applied = applied.map_err(|_| Error::Malformed)?;
         self.save_group(conversation, &group, rng)?;
         if matches!(applied, Applied::Granted { .. }) {
             self.note_grant(conversation, object, rng)?;
@@ -3782,7 +3789,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     // (`GRP-318`), and a record that waited for it opens.
                     if parsed.kind == AppKind::GroupControl {
                         if let Ok(control) = GroupControl::parse(parsed.body) {
-                            if let Ok(applied) = group.apply_control(&control, sender, now) {
+                            let forks = group.roster().forks().len();
+                            let applied = group.apply_control(&control, sender, now);
+                            // GRP-070, GRP-071: a fork shows, and the member
+                            // picks no successor in silence.
+                            self.note_forks(conversation, &group, forks, now_ms, rng)?;
+                            if let Ok(applied) = applied {
                                 if let Some(head) = group.take_displaced() {
                                     displaced.push(head);
                                 }
@@ -4090,6 +4102,35 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
+        let at_ms = now.saturating_mul(1_000);
+        let note = match applied {
+            Applied::Added(index) => Some((super::NOTE_JOINED, *index, 0)),
+            Applied::Removed(umbra_core::group::roster::Trigger {
+                excluded: Some(index),
+                ..
+            }) => {
+                let kind = if self.groups.evicting == Some((conversation, *index)) {
+                    super::NOTE_EVICTED
+                } else {
+                    super::NOTE_LEFT
+                };
+                Some((kind, *index, 0))
+            }
+            Applied::Granted { index, role } => Some((super::NOTE_ROLE, *index, *role as u8)),
+            _ => None,
+        };
+        if let Some((kind, index, role)) = note {
+            self.put_roster_note(
+                conversation,
+                super::RosterNote {
+                    at_ms,
+                    kind,
+                    index,
+                    role,
+                },
+                rng,
+            )?;
+        }
         match applied {
             Applied::Added(index) => self.put_clock(
                 conversation,

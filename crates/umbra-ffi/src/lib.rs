@@ -986,6 +986,42 @@ mod tests {
         assert!(other.summaries().unwrap().iter().any(|summary| summary.conversation == member));
     }
 
+    #[test]
+    fn each_change_of_a_roster_leaves_a_note_and_an_eviction_says_why() {
+        use crate::client::{Silence, NOTE_EVICTED, NOTE_ROLE};
+
+        let mut rng = Rng(95);
+        let mut client = new_client(&mut rng);
+        let mut other = new_client(&mut rng);
+        let (conversation, _) = ready_pair(&mut client, &mut other, &mut rng);
+        let now = 1_700_000_500u64;
+        let kinds = |client: &Client<MemoryBackend, Element>| -> Vec<(u8, u16)> {
+            client
+                .roster_notes(conversation)
+                .unwrap()
+                .iter()
+                .map(|note| (note.kind, note.index))
+                .collect()
+        };
+        // The helper adds the member on the group itself, thus no note yet.
+        assert!(kinds(&client).is_empty());
+        client
+            .set_group_role(conversation, 1, umbra_wire::group::control::Role::Moderator, now * 1_000, &mut rng)
+            .unwrap();
+        let notes = client.roster_notes(conversation).unwrap();
+        assert_eq!((notes[0].kind, notes[0].index, notes[0].role), (NOTE_ROLE, 1, 3));
+        // GRP-166: a silent moderator steps down first. GRP-050: the removal
+        // for silence says so.
+        client
+            .act_on_silence(conversation, 1, Silence::Demote, (now + 1) * 1_000, &mut rng)
+            .unwrap();
+        assert_eq!(kinds(&client).last(), Some(&(NOTE_ROLE, 1)));
+        client
+            .act_on_silence(conversation, 1, Silence::Remove, (now + 2) * 1_000, &mut rng)
+            .unwrap();
+        assert_eq!(kinds(&client).last(), Some(&(NOTE_EVICTED, 1)));
+    }
+
     /// A group of `client` with both queues, and `other` in it at index 1.
     fn ready_pair(
         client: &mut Client<MemoryBackend, Element>,

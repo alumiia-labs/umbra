@@ -20,6 +20,7 @@ import uniffi.umbra_ffi.Connection
 import uniffi.umbra_ffi.ContactRequestInfo
 import uniffi.umbra_ffi.ConversationTimer
 import uniffi.umbra_ffi.FfiModNote
+import uniffi.umbra_ffi.FfiRosterNote
 import uniffi.umbra_ffi.FfiPoll
 import uniffi.umbra_ffi.FfiEvent
 import uniffi.umbra_ffi.FfiException
@@ -973,6 +974,8 @@ object Core {
             // Another device of the set added a conversation, named one, or
             // changed the set.
             is FfiEvent.Conversations -> {
+                // A note of a roster shows in an open conversation too.
+                revision++
                 refreshChats()
                 readDevices()
                 readDirectory()
@@ -1403,6 +1406,12 @@ object Core {
     fun moderate(message: MsgHandle, action: UByte) = call { client ->
         client.moderate(message, action)
         main.post { revision++ }
+    }
+
+    /** The changes of the roster of a group that this device applied. */
+    fun rosterNotes(conversation: Conversation, onLoaded: (List<FfiRosterNote>) -> Unit) = call { client ->
+        val notes = client.rosterNotes(conversation.id)
+        main.post { onLoaded(notes) }
     }
 
     /** The moderation epochs that this device applied in a conversation. */

@@ -90,6 +90,7 @@ import android.content.ClipboardManager
 import android.content.ClipData
 import uniffi.umbra_ffi.FfiModNote
 import uniffi.umbra_ffi.FfiRole
+import uniffi.umbra_ffi.FfiRosterNote
 import uniffi.umbra_ffi.MsgReaction
 import androidx.compose.ui.unit.sp
 
@@ -186,6 +187,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
     // The name of each member, for the bubbles of a group.
     var memberNames by remember(conversation) { mutableStateOf(emptyMap<UShort, String>()) }
     var modNotes by remember(conversation) { mutableStateOf(emptyList<FfiModNote>()) }
+    var rosterNotes by remember(conversation) { mutableStateOf(emptyList<FfiRosterNote>()) }
     var removing by remember(conversation) { mutableStateOf<Line?>(null) }
     val revealed = remember(conversation) { mutableStateListOf<List<Byte>>() }
     LaunchedEffect(conversation, Core.revision) {
@@ -196,10 +198,11 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                     val title = member.contact?.let { contact ->
                         Core.chats.firstOrNull { it.conversation.id.contentEquals(contact) }?.title
                     }
-                    member.index to (title ?: "Member ${member.index}")
+                    member.index to (if (member.isSelf) YOU else title ?: "Member ${member.index}")
                 }
             }
             Core.moderationNotes(conversation) { modNotes = it }
+            Core.rosterNotes(conversation) { rosterNotes = it }
         }
     }
     var notice by remember(conversation) { mutableStateOf<String?>(null) }
@@ -398,6 +401,8 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
             },
         )
         BlockedLine(chat)
+        // GRP-050, GRP-070, GRP-089: each change of a group shows at its time.
+        val notes = remember(modNotes, rosterNotes, memberNames) { chatNotes(modNotes, rosterNotes, memberNames) }
         LazyColumn(
             state = listState,
             modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp),
@@ -430,7 +435,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                 if (!line.info.outgoing && line.info.storedAtMs == newFrom) NewLabel()
                 // GRP-089: each moderation epoch shows at its time.
                 if (index == 0) {
-                    for (note in modNotes.filter { it.atMs < line.info.storedAtMs }) ModLine(note)
+                    for (note in notes.filter { it.atMs < line.info.storedAtMs }) NoteLine(note)
                 }
                 // DEV-207: a timer change is a row of the conversation.
                 if (line.info.timer != null) {
@@ -473,9 +478,9 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                 // sits under it and under no other, as a read marker does.
                 if (index == readUpTo) ReadMark(chat)
                 val next = lines.getOrNull(index + 1)
-                for (note in modNotes) {
+                for (note in notes) {
                     if (note.atMs >= line.info.storedAtMs && (next == null || note.atMs < next.info.storedAtMs)) {
-                        ModLine(note)
+                        NoteLine(note)
                     }
                 }
             }

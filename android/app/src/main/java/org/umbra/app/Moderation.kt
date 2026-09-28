@@ -16,6 +16,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import uniffi.umbra_ffi.FfiModNote
+import uniffi.umbra_ffi.FfiRosterNote
 
 /** The moderator actions of Part 11 §11.9.6, as the core numbers them. */
 const val MOD_HIDE: UByte = 1u
@@ -47,11 +48,56 @@ fun modNoteText(note: FfiModNote): String {
     }.joinToString(" ")
 }
 
-/** One moderation epoch in the conversation, centred as a notice. */
+/** One line of a conversation that no member wrote: a change of the group. */
+class ChatNote(val atMs: ULong, val text: String, val icon: String)
+
+/** The role of a roster note, in words. */
+private fun roleName(role: UByte): String = when (role.toInt()) {
+    1 -> "an observer"
+    3 -> "a moderator"
+    4 -> "an admin"
+    5 -> "an owner"
+    else -> "a member"
+}
+
+/**
+ * The words of one change of the roster. A removal for silence says so
+ * (`GRP-050`). A fork names the member that a signature names, and a fork
+ * of plain epochs names nobody (`GRP-072` to `GRP-074`).
+ */
+fun rosterNoteText(note: FfiRosterNote, names: Map<UShort, String>): String {
+    val who = names[note.index] ?: "Member ${note.index}"
+    val isYou = who == YOU
+    return when (note.kind.toInt()) {
+        1 -> "$who joined"
+        2 -> if (isYou) "You left the group" else "$who is no longer in the group"
+        3 -> "You removed $who after 30 days of silence"
+        4 -> if (isYou) "You are now ${roleName(note.role)}" else "$who is now ${roleName(note.role)}"
+        5 -> if (note.index == NOBODY) {
+            "The members disagree on a change to the group"
+        } else {
+            "$who made two different changes to the group"
+        }
+        else -> ""
+    }
+}
+
+private val NOBODY: UShort = 0xFFFFu
+
+/** The name of this member among the names of a group. */
+const val YOU = "You"
+
+/** The notes of a group, in the order of time. */
+fun chatNotes(mods: List<FfiModNote>, roster: List<FfiRosterNote>, names: Map<UShort, String>): List<ChatNote> =
+    (mods.map { ChatNote(it.atMs, modNoteText(it), "ban") } +
+        roster.map { ChatNote(it.atMs, rosterNoteText(it, names), if (it.kind.toInt() == 5) "triangle-exclamation" else "user-group") })
+        .filter { it.text.isNotEmpty() }
+        .sortedBy { it.atMs }
+
+/** One change of the group in the conversation, centred as a notice. */
 @Composable
-fun ModLine(note: FfiModNote) {
-    val text = modNoteText(note)
-    if (text.isEmpty()) return
+fun NoteLine(note: ChatNote) {
+    val text = note.text
     Box(Modifier.fillMaxWidth().padding(vertical = 6.dp), contentAlignment = Alignment.Center) {
         Row(
             Modifier
@@ -59,7 +105,7 @@ fun ModLine(note: FfiModNote) {
                 .padding(horizontal = 12.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            FaIcon("ban", size = 10.dp, tint = Palette.TextSecondary)
+            FaIcon(note.icon, size = 10.dp, tint = Palette.TextSecondary)
             Spacer(Modifier.width(6.dp))
             Text(
                 text,

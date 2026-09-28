@@ -25,6 +25,7 @@ mod notify;
 mod sync;
 mod moderation;
 mod polls;
+mod roster_notes;
 mod timers;
 mod tokens;
 
@@ -44,6 +45,9 @@ pub use notify::NdrCall;
 pub use sync::SyncSend;
 pub use moderation::{ModNote, MOD_HIDE, MOD_REMOVE, MOD_UNHIDE};
 pub use polls::PollView;
+pub use roster_notes::{
+    RosterNote, NOTE_EVICTED, NOTE_FORK, NOTE_JOINED, NOTE_LEFT, NOTE_NOBODY, NOTE_ROLE,
+};
 pub use timers::{timer_body, TimerSetting, TIMER_VALUES};
 use umbra_core::{
     devset::edits::Deadline,
@@ -2825,12 +2829,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
     /// Whether the stream holds an event.
     pub fn has_event(&self) -> bool {
-        !self.events.is_empty()
+        !self.events.is_empty() || !self.groups.noted.is_empty()
     }
 
     /// The next event of the one stream from Rust to the platform.
     pub fn next_event(&mut self) -> Option<Event> {
-        self.events.pop_front()
+        // A note of a roster comes after each event of the change that made
+        // it, thus it takes no place before them.
+        self.events
+            .pop_front()
+            .or_else(|| self.groups.noted.pop_first().map(|_| Event::Conversations))
     }
 
     /// Renders the text of a message into a sink of the platform, as
