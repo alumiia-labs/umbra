@@ -88,6 +88,21 @@ pub struct Device {
     pub added_epoch: u64,
 }
 
+/// A fork of the roster that waits for the user (Part 7 §7.7).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FfiRosterFork {
+    /// The row, for the dismissal.
+    pub id: Vec<u8>,
+    /// The index of the two epochs.
+    pub epoch: u64,
+    /// The label of the device that signed the other epoch.
+    pub label: String,
+    /// 1: one device signed two epochs (`DEV-170`). 2: two devices removed
+    /// different devices (`DEV-178`). 3: another device holds another
+    /// epoch (`DEV-182`).
+    pub kind: u8,
+}
+
 /// What one transfer of a link does.
 pub(super) enum LinkStep {
     WriteOffer,
@@ -879,6 +894,29 @@ impl Handle {
     /// can offer a link (`DEV-287`).
     pub fn owns_channels(&self) -> Result<bool, FfiError> {
         Ok(locked(&self.inner).client.owns_channels()?)
+    }
+
+    /// Each fork of the roster that the user did not dismiss.
+    pub fn roster_forks(&self) -> Result<Vec<FfiRosterFork>, FfiError> {
+        Ok(locked(&self.inner)
+            .client
+            .roster_forks()?
+            .into_iter()
+            .map(|fork| FfiRosterFork {
+                id: fork.id.to_vec(),
+                epoch: fork.epoch,
+                label: fork.label,
+                kind: fork.kind,
+            })
+            .collect())
+    }
+
+    /// The user saw a fork of the roster.
+    pub fn dismiss_roster_fork(&self, id: Vec<u8>) -> Result<(), FfiError> {
+        let id: [u8; 16] = id.try_into().map_err(|_| FfiError::Malformed)?;
+        Ok(locked(&self.inner)
+            .client
+            .dismiss_roster_fork(&id, &mut OsRng)?)
     }
 
     /// The devices of the set, or none when this device has no set.

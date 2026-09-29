@@ -4070,6 +4070,101 @@ mod tests {
     }
 
     #[test]
+    fn a_rival_roster_takes_the_order_and_a_fork_shows_and_names_its_signer() {
+        use crate::client::{FORK_ONE_SIGNER, FORK_PEER, FORK_REVOKED};
+        use umbra_core::devset::{
+            link::{sign_roster, DeviceIdentity, LinkHello},
+            roster::Roster,
+        };
+
+        let mut rng = Rng(111);
+        let mut phone = new_client(&mut rng);
+        phone.ensure_device_set("Phone", &mut rng).unwrap();
+        let own = phone.device_identity().unwrap().unwrap();
+        let hello = |identity: &DeviceIdentity| LinkHello {
+            device_id: identity.device_id,
+            device_pk: identity.device_key().public().clone(),
+            roster_pk: identity.roster_key().verifying_key().to_bytes().to_vec(),
+            label: identity.label,
+            ct: umbra_crypto::kem::Ciphertext::from_bytes(&[0; umbra_crypto::kem::CIPHERTEXT_LEN])
+                .unwrap(),
+        };
+        let laptop = DeviceIdentity::generate("Laptop", &mut rng);
+        let tablet = DeviceIdentity::generate("Tablet", &mut rng);
+        let e1 = phone.sign_linked_device(&hello(&laptop), &mut rng).unwrap();
+        phone.commit_roster(&e1, &mut rng).unwrap();
+        let e2 = phone.sign_linked_device(&hello(&tablet), &mut rng).unwrap();
+        phone.commit_roster(&e2, &mut rng).unwrap();
+
+        // An epoch 2 over epoch 1, with the devices of epoch 1 and the
+        // tombstones given, under the key of `signer`.
+        let parent = Roster::parse(&e1).unwrap();
+        let rival = |signer: &DeviceIdentity, revoked: Vec<[u8; 16]>, rng: &mut Rng| {
+            let next = Roster {
+                epoch: 2,
+                devices: parent.devices.clone(),
+                revoked,
+                claims: Vec::new(),
+                prev_hash: Roster::hash(&e1),
+                signer_id: signer.device_id,
+                sig: parent.sig,
+            };
+            sign_roster(&next, &signer.roster_key(), rng).unwrap()
+        };
+
+        // DEV-170, DEV-171: the signer of the head signs a second epoch 2,
+        // and the device shows the fork and keeps the head.
+        let twin = rival(&own, Vec::new(), &mut rng);
+        assert!(!phone.apply_roster(&twin, &mut rng).unwrap());
+        assert_eq!(phone.roster_bytes().unwrap().unwrap(), e2);
+        let forks = phone.roster_forks().unwrap();
+        assert_eq!(forks.len(), 1);
+        assert_eq!(
+            (forks[0].epoch, forks[0].device, forks[0].kind),
+            (2, own.device_id, FORK_ONE_SIGNER)
+        );
+        assert_eq!(forks[0].label, "Phone");
+        // The next publish of the same epoch shows nothing new.
+        assert!(!phone.apply_roster(&twin, &mut rng).unwrap());
+        assert_eq!(phone.roster_forks().unwrap().len(), 1);
+
+        // An epoch that no device of the parent signed changes nothing.
+        let stranger = rival(&tablet, Vec::new(), &mut rng);
+        assert!(!phone.apply_roster(&stranger, &mut rng).unwrap());
+        assert_eq!(phone.roster_forks().unwrap().len(), 1);
+
+        // DEV-177, DEV-178: the laptop revokes a device at epoch 2. The
+        // order selects it, and the fork shows since the lists differ.
+        // DEV-179: the phone adds the tablet again at epoch 3.
+        let revoking = rival(&laptop, vec![[0xEE; 16]], &mut rng);
+        assert!(phone.apply_roster(&revoking, &mut rng).unwrap());
+        let head = phone.roster_bytes().unwrap().unwrap();
+        let head = Roster::parse(&head).unwrap();
+        assert_eq!(head.epoch, 3);
+        assert_eq!(head.signer_id, own.device_id);
+        assert!(head.entry(&tablet.device_id).is_some());
+        assert_eq!(head.revoked, vec![[0xEE; 16]]);
+        assert_eq!(head.prev_hash, Roster::hash(&revoking));
+        assert!(phone
+            .roster_forks()
+            .unwrap()
+            .iter()
+            .any(|fork| fork.kind == FORK_REVOKED && fork.device == laptop.device_id));
+
+        // DEV-182: a peer that still holds the epoch 2 that lost.
+        assert!(!phone.apply_roster(&e2, &mut rng).unwrap());
+        let forks = phone.roster_forks().unwrap();
+        assert_eq!(forks.len(), 3);
+        assert!(forks.iter().any(|fork| fork.kind == FORK_PEER));
+
+        // A dismissed fork leaves the view and does not come back.
+        phone.dismiss_roster_fork(&forks[0].id, &mut rng).unwrap();
+        assert_eq!(phone.roster_forks().unwrap().len(), 2);
+        assert!(!phone.apply_roster(&twin, &mut rng).unwrap());
+        assert_eq!(phone.roster_forks().unwrap().len(), 2);
+    }
+
+    #[test]
     fn a_screenshot_block_is_off_by_default_and_holds_for_one_conversation() {
         let mut rng = Rng(106);
         let mut alice = new_client(&mut rng);

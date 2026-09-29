@@ -41,6 +41,38 @@ import kotlinx.coroutines.delay
 import uniffi.umbra_ffi.Device
 import uniffi.umbra_ffi.LinkStatus
 
+/**
+ * A fork of the roster (Part 7 §7.7): the view names the device that signed
+ * the other epoch (`DEV-170`), and it selects nothing in silence (`DEV-171`).
+ */
+@Composable
+fun RosterForkPrompt() {
+    val fork = Core.rosterForks.firstOrNull() ?: return
+    val name = fork.label.ifEmpty { "A removed device" }
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .background(Palette.Incoming)
+            .padding(horizontal = 20.dp, vertical = 12.dp),
+    ) {
+        Text(
+            when (fork.kind.toInt()) {
+                1 -> "$name signed two versions of your device list"
+                2 -> "$name removed a different device than another of your devices did"
+                else -> "$name holds a different device list than this device"
+            },
+        )
+        Text(
+            "If you did not make this change, remove $name and reset your identity.",
+            style = MaterialTheme.typography.labelMedium,
+            color = Palette.TextSecondary,
+            modifier = Modifier.subline(),
+        )
+        Spacer(Modifier.height(8.dp))
+        InlineButton("Dismiss") { Core.dismissRosterFork(fork) }
+    }
+}
+
 /** The devices of the set (Part 7), and the start of a link. */
 @Composable
 fun DevicesScreen(onBack: () -> Unit, push: (Screen) -> Unit) {

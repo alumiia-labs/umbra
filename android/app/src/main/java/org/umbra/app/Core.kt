@@ -292,6 +292,7 @@ object Core {
             // screen, and the platform permits the start.
             DeliveryService.start(app)
             refreshJoinFlow()
+            readDevices()
             // Part 8 §8.3: the carriers of the mode of this device.
             Modes.apply(app)
             readTyping()
@@ -305,14 +306,25 @@ object Core {
     var ownsChannels by mutableStateOf(true)
         private set
 
+    /** The forks of the roster that wait for the user (Part 7 §7.7). */
+    val rosterForks = mutableStateListOf<uniffi.umbra_ffi.FfiRosterFork>()
+
     fun readDevices() = call { client ->
         val list = client.devices()
         val owns = client.ownsChannels()
+        val forks = client.rosterForks()
         main.post {
             devices.clear()
             devices.addAll(list)
             ownsChannels = owns
+            rosterForks.clear()
+            rosterForks.addAll(forks)
         }
+    }
+
+    fun dismissRosterFork(fork: uniffi.umbra_ffi.FfiRosterFork) = call { client ->
+        client.dismissRosterFork(fork.id)
+        readDevices()
     }
 
     /** Whether the contact of a conversation is blocked (Part 13 §13.12). */

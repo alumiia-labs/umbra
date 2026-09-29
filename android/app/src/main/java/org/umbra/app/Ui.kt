@@ -469,6 +469,7 @@ private fun ChatsTab(push: (Screen) -> Unit) {
         ConnectionNote()
         GroupOfferPrompt()
         IntroductionPrompt()
+        RosterForkPrompt()
         RequestsPrompt(push)
         TabTitle("Chats")
         // A group with no message still shows: the user made it, and its

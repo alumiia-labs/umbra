@@ -9,7 +9,7 @@
 use umbra_core::{
     devset::{
         link::{sign_roster, DeviceIdentity, EntryKeys, LinkHello, LABEL_LEN},
-        roster::{Roster, SyncScope},
+        roster::{Parent, Roster, SyncScope},
         DeviceId,
     },
     identity::backup::BackupRow,
@@ -22,7 +22,10 @@ use umbra_core::{
 use umbra_crypto::rand_core::CryptoRng;
 use zeroize::Zeroizing;
 
-use super::{Client, SETTINGS};
+use super::{
+    roster_fork::{FORK_PEER, PARENT_KEY, ROSTER_HASHES, ROSTER_PARENT},
+    Client, SETTINGS,
+};
 use crate::{ConversationId, Error};
 
 /// The identity of this device, with the flag of its channels.
@@ -104,15 +107,31 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(store.get(DEVICE_ROSTER, &row)?)
     }
 
-    fn put_roster<R: CryptoRng + ?Sized>(
+    /// Keeps a roster epoch as the head, with its hash (`DEV-228`). The
+    /// head before it becomes the parent when the new epoch follows it; an
+    /// epoch at the index of the head keeps the parent.
+    pub(super) fn put_roster<R: CryptoRng + ?Sized>(
         &mut self,
         bytes: &[u8],
         rng: &mut R,
     ) -> Result<(), Error> {
+        let epoch = Roster::parse(bytes)?.epoch;
+        let parent = match self.roster_bytes()? {
+            Some(current) if Roster::parse(&current)?.epoch.saturating_add(1) == epoch => {
+                Some(Parent::of(&current)?.encode()?)
+            }
+            _ => None,
+        };
         let open = self.open_mut()?;
         let row = open.store.row_id(DEVICE_ROSTER, ROSTER_KEY);
+        let hash_row = open.store.row_id(ROSTER_HASHES, &epoch.to_be_bytes());
+        let parent_row = open.store.row_id(ROSTER_PARENT, PARENT_KEY);
         let mut batch = open.store.begin();
         batch.put(DEVICE_ROSTER, row, None, bytes, rng)?;
+        batch.put(ROSTER_HASHES, hash_row, None, &Roster::hash(bytes), rng)?;
+        if let Some(parent) = parent {
+            batch.put(ROSTER_PARENT, parent_row, None, &parent, rng)?;
+        }
         Ok(batch.commit()?)
     }
 
@@ -285,7 +304,40 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let current = self.roster_bytes()?.ok_or(Error::NotFound)?;
         let previous = Roster::parse(&current)?;
         let next = Roster::parse(bytes)?;
-        if next.epoch <= previous.epoch {
+        let hash = Roster::hash(bytes);
+        let signer = |rosters: &[&Roster<'_>]| {
+            rosters
+                .iter()
+                .find_map(|roster| roster.entry(&next.signer_id).map(|entry| entry.label))
+                .unwrap_or([0; 32])
+        };
+        // DEV-182: a peer applied another epoch at an index that this
+        // device applied.
+        if next.epoch < previous.epoch {
+            if self
+                .roster_hash_at(next.epoch)?
+                .is_some_and(|held| held != hash)
+            {
+                let label = signer(&[&next, &previous]);
+                self.put_roster_fork(next.epoch, next.signer_id, label, FORK_PEER, rng)?;
+            }
+            return Ok(false);
+        }
+        if next.epoch == previous.epoch {
+            if hash == Roster::hash(&current) {
+                return Ok(false);
+            }
+            return self.on_rival_roster(identity.device_id, &current, bytes, rng);
+        }
+        if next.epoch == previous.epoch.saturating_add(1)
+            && next.prev_hash != Roster::hash(&current)
+        {
+            // The peer chains to another epoch at the index of the head. A
+            // signer of the head with a valid signature makes it a fork.
+            if next.verify_successor(&previous, &next.prev_hash).is_ok() {
+                let label = signer(&[&next, &previous]);
+                self.put_roster_fork(previous.epoch, next.signer_id, label, FORK_PEER, rng)?;
+            }
             return Ok(false);
         }
         next.verify_successor(&previous, &Roster::hash(&current))?;
@@ -309,7 +361,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// no view shows it, no later run reads its queue, and a record on it
     /// changes nothing (`DEV-255` to `DEV-257`). No `DEL` goes to its queue
     /// (§7.7).
-    fn end_sync_channel<R: CryptoRng + ?Sized>(
+    pub(super) fn end_sync_channel<R: CryptoRng + ?Sized>(
         &mut self,
         device: DeviceId,
         rng: &mut R,
@@ -430,6 +482,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         sync_bundle: &[u8],
     ) -> Result<Vec<BackupRow>, Error> {
         let identity = self.device_identity()?.ok_or(Error::NotFound)?;
+        // The head of this device is the parent of the epoch that adds the
+        // new one, thus the new device verifies a rival of it.
+        let parent = self
+            .roster_bytes()?
+            .map(|current| Parent::of(&current)?.encode())
+            .transpose()?;
+        let epoch = Roster::parse(roster)?.epoch;
         let store = &self.open_ref()?.store;
         let put = |table: TableId, key: &[u8], plain: Vec<u8>| BackupRow::Put {
             table,
@@ -438,11 +497,20 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             plain: Zeroizing::new(plain),
         };
         let peer = [identity.device_id.as_slice(), &identity.label].concat();
-        Ok(vec![
+        let mut rows = vec![
             put(DEVICE_ROSTER, ROSTER_KEY, roster.to_vec()),
+            put(
+                ROSTER_HASHES,
+                &epoch.to_be_bytes(),
+                Roster::hash(roster).to_vec(),
+            ),
             put(SETTINGS, SYNC_BUNDLE_SETTING, sync_bundle.to_vec()),
             put(SETTINGS, PENDING_PEER_SETTING, peer),
-        ])
+        ];
+        if let Some(parent) = parent {
+            rows.push(put(ROSTER_PARENT, PARENT_KEY, parent));
+        }
+        Ok(rows)
     }
 
     /// Takes the identity of this device into a store that a link snapshot

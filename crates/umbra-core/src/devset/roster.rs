@@ -330,6 +330,26 @@ impl<'a> Roster<'a> {
         self.verify_with(entry.mldsa_pk)
     }
 
+    /// Verifies an epoch at the index of the head against the parent of the
+    /// head, which the device keeps as [`Parent`] alone (`DEV-229`). A rival
+    /// of the head verifies as the head did (`DEV-150` to `DEV-157`).
+    pub fn verify_rival(&self, parent: &Parent) -> Result<(), Error> {
+        if self.epoch != parent.epoch.saturating_add(1) || self.prev_hash != parent.hash {
+            return Err(Error::Unverified);
+        }
+        if parent.revoked.contains(&self.signer_id)
+            || !parent.revoked.iter().all(|t| self.revoked.contains(t))
+        {
+            return Err(Error::Unverified);
+        }
+        let (_, key) = parent
+            .signers
+            .iter()
+            .find(|(device, _)| *device == self.signer_id)
+            .ok_or(Error::Unverified)?;
+        self.verify_with(key)
+    }
+
     /// Whether the roster revokes `own`, which a device must not apply and
     /// must show (`DEV-180`, `DEV-181`).
     pub fn revokes(&self, own: &DeviceId) -> bool {
@@ -337,14 +357,100 @@ impl<'a> Roster<'a> {
     }
 }
 
+/// The part of the parent of the head that verifies a rival of the head:
+/// its index, its hash, its tombstones, and the `DeviceRosterKey` of each
+/// device. It carries no claim and no signature, thus it is no roster epoch
+/// (`DEV-229`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Parent {
+    /// The index of the parent.
+    pub epoch: u64,
+    /// The SHA3-256 of the parent.
+    pub hash: [u8; 32],
+    /// The tombstones of the parent.
+    pub revoked: Vec<DeviceId>,
+    /// Each device of the parent and its `mldsa_pk`.
+    pub signers: Vec<(DeviceId, Vec<u8>)>,
+}
+
+impl Parent {
+    /// The parent data of the roster `bytes`.
+    pub fn of(bytes: &[u8]) -> Result<Self, Error> {
+        let roster = Roster::parse(bytes)?;
+        Ok(Parent {
+            epoch: roster.epoch,
+            hash: Roster::hash(bytes),
+            revoked: roster.revoked.clone(),
+            signers: roster
+                .devices
+                .iter()
+                .map(|d| (d.device_id, d.mldsa_pk.to_vec()))
+                .collect(),
+        })
+    }
+
+    /// The encoding for the store.
+    pub fn encode(&self) -> Result<Vec<u8>, Error> {
+        let len =
+            8 + 32 + 2 + self.revoked.len() * 16 + self.signers.len() * (16 + VERIFYING_KEY_LEN);
+        let mut out = alloc::vec![0u8; len];
+        let mut w = Writer::new(&mut out);
+        w.put(&self.epoch.to_be_bytes())?;
+        w.put(&self.hash)?;
+        w.u8(u8::try_from(self.revoked.len()).map_err(|_| Error::Malformed)?)?;
+        for t in &self.revoked {
+            w.put(t)?;
+        }
+        w.u8(u8::try_from(self.signers.len()).map_err(|_| Error::Malformed)?)?;
+        for (device, key) in &self.signers {
+            if key.len() != VERIFYING_KEY_LEN {
+                return Err(Error::Malformed);
+            }
+            w.put(device)?;
+            w.put(key)?;
+        }
+        Ok(out)
+    }
+
+    /// Reads [`Parent::encode`].
+    pub fn parse(bytes: &[u8]) -> Result<Self, Error> {
+        let mut r = Reader::new(bytes);
+        let epoch = u64::from_be_bytes(r.array()?);
+        let hash = r.array()?;
+        let mut revoked = Vec::new();
+        for _ in 0..r.u8()? {
+            revoked.push(r.array()?);
+        }
+        let mut signers = Vec::new();
+        for _ in 0..r.u8()? {
+            let device = r.array()?;
+            signers.push((device, r.take(VERIFYING_KEY_LEN)?.to_vec()));
+        }
+        r.finish()?;
+        Ok(Parent {
+            epoch,
+            hash,
+            revoked,
+            signers,
+        })
+    }
+}
+
 /// What two verified epochs at one index mean (`DEV-170`, `DEV-177`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Competing {
-    /// One signer made two epochs: a fork the device shows and names.
+    /// One signer made two epochs: a fork the device shows and names, and
+    /// it selects neither (`DEV-170`, `DEV-171`).
     Fork,
-    /// Two signers raced: apply the epoch at the index given, and the other
-    /// signer publishes its claims again (`DEV-179`).
-    Select(usize),
+    /// Two signers raced: apply the epoch at `index`, and the other signer
+    /// publishes its claims again (`DEV-179`).
+    Select {
+        /// The epoch that the order selects, 0 or 1.
+        index: usize,
+        /// The two `revoked` lists differ, thus the device shows the fork
+        /// as well (`DEV-178`).
+        fork: bool,
+    },
 }
 
 /// Resolves two verified successors of one predecessor.
@@ -355,18 +461,15 @@ pub fn resolve(a: &Roster<'_>, b: &Roster<'_>) -> Result<Competing, Error> {
     if a.signer_id == b.signer_id {
         return Ok(Competing::Fork);
     }
-    let same_revoked =
-        a.revoked.len() == b.revoked.len() && a.revoked.iter().all(|t| b.revoked.contains(t));
-    if !same_revoked && a.revoked.len() == b.revoked.len() {
-        // Different tombstones at one count: the device shows the fork (DEV-178).
-        return Ok(Competing::Fork);
-    }
-    if a.revoked.len() != b.revoked.len() {
-        return Ok(Competing::Select(usize::from(
-            b.revoked.len() > a.revoked.len(),
-        )));
-    }
-    Ok(Competing::Select(usize::from(b.signer_id < a.signer_id)))
+    // DEV-178: the fork shows in each case but two equal lists.
+    let fork =
+        a.revoked.len() != b.revoked.len() || !a.revoked.iter().all(|t| b.revoked.contains(t));
+    let index = if a.revoked.len() == b.revoked.len() {
+        usize::from(b.signer_id < a.signer_id)
+    } else {
+        usize::from(b.revoked.len() > a.revoked.len())
+    };
+    Ok(Competing::Select { index, fork })
 }
 
 #[cfg(test)]
@@ -465,6 +568,13 @@ pub(crate) mod tests {
         e1.encode(&mut bytes1).unwrap();
         let r1 = Roster::parse(&bytes1).unwrap();
         r1.verify_successor(&g, &h0).unwrap();
+        // DEV-229: the parent data alone verifies a rival of the head.
+        let parent = Parent::parse(&Parent::of(&bytes0).unwrap().encode().unwrap()).unwrap();
+        assert_eq!(parent.hash, h0);
+        r1.verify_rival(&parent).unwrap();
+        let mut wrong = parent.clone();
+        wrong.signers.retain(|(device, _)| *device != [2; 16]);
+        assert!(r1.verify_rival(&wrong).is_err());
         assert!(r1.revokes(&[1; 16]));
         assert!(r1.verify_successor(&g, &[1; 32]).is_err());
 
@@ -507,13 +617,38 @@ pub(crate) mod tests {
             signer_id: [2; 16],
             ..base.clone()
         };
-        assert_eq!(resolve(&base, &by_two).unwrap(), Competing::Select(0));
+        assert_eq!(
+            resolve(&base, &by_two).unwrap(),
+            Competing::Select {
+                index: 0,
+                fork: false
+            }
+        );
         let more_revoked = Roster {
             signer_id: [2; 16],
             revoked: alloc::vec![[3; 16]],
             ..base.clone()
         };
-        assert_eq!(resolve(&base, &more_revoked).unwrap(), Competing::Select(1));
+        // DEV-178: the order selects the revocation, and the fork shows.
+        assert_eq!(
+            resolve(&base, &more_revoked).unwrap(),
+            Competing::Select {
+                index: 1,
+                fork: true
+            }
+        );
+        let other_revoked = Roster {
+            signer_id: [0; 16],
+            revoked: alloc::vec![[4; 16]],
+            ..base.clone()
+        };
+        assert_eq!(
+            resolve(&more_revoked, &other_revoked).unwrap(),
+            Competing::Select {
+                index: 1,
+                fork: true
+            }
+        );
         assert_eq!(resolve(&base, &base).unwrap(), Competing::Fork);
         let other_epoch = Roster {
             epoch: 4,

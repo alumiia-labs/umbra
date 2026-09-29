@@ -31,6 +31,7 @@ mod own_delete;
 mod polls;
 mod quota;
 mod reset;
+mod roster_fork;
 mod roster_notes;
 mod screenshots;
 mod social;
@@ -59,6 +60,7 @@ pub use notify::NdrCall;
 pub use polls::PollView;
 pub use quota::HOLD_RETRY;
 pub use reset::ResetSummary;
+pub use roster_fork::{RosterFork, FORK_ONE_SIGNER, FORK_PEER, FORK_REVOKED};
 pub use roster_notes::{
     RosterNote, NOTE_EVICTED, NOTE_FORK, NOTE_GAP, NOTE_JOINED, NOTE_LEFT, NOTE_NOBODY, NOTE_ROLE,
 };
