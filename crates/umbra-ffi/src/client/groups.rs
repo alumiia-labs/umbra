@@ -214,6 +214,13 @@ pub(super) const GROUP_NOTIFY: TableId = TableId(0x1C);
 /// (Part 11 §11.11), under the row of the message. The mention list itself
 /// stays in the record, and no view shows it (`GRP-141`).
 pub(super) const MENTIONED: TableId = TableId(0x38);
+/// Each roster object and epoch-key record of this device that no replica
+/// accepted yet, as it was sealed, with its credentials and its place in
+/// the order of the posts. The next session sends the same bytes
+/// (`GRP-392`). A record of a message waits in the outbox, and its row
+/// there gives it again. A roster object has no such row, and the group of
+/// this device moves at its seal, thus a lost one splits the group.
+const GROUP_UNSENT: TableId = TableId(0x41);
 const GROUP_NOTIFY_LEN_V1: usize = 32 + umbra_wire::address::LEN + 16;
 const GROUP_NOTIFY_LEN: usize = GROUP_NOTIFY_LEN_V1 + 8 + 1 + 32 + umbra_wire::address::LEN;
 /// A registration lives 7 days plus `CLOCK_SKEW` at a group-queue relay
@@ -397,6 +404,9 @@ pub struct GroupPost {
     /// Whether the record starts an epoch. A `GKEY` follows it at the
     /// replica that accepted it, and never before (`GRP-362`).
     pub is_rotation: bool,
+    /// The row that keeps the record until a replica accepts it, for a
+    /// record that carries no message.
+    pub unsent: Option<[u8; 16]>,
 }
 
 /// One `GKEY` at one replica, which moves that replica to the credentials
@@ -2170,15 +2180,19 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let write = group.credentials().ok_or(Error::Integrity)?.write_secret();
         let fallback = group.previous_credentials().map(|held| held.write_secret());
         self.save_group(conversation, &group, rng)?;
-        self.groups.posts.push_back(GroupPost {
-            message,
-            conversation,
-            replicas,
-            write,
-            fallback,
-            record,
-            is_rotation: false,
-        });
+        self.keep_post(
+            GroupPost {
+                message,
+                conversation,
+                replicas,
+                write,
+                fallback,
+                record,
+                is_rotation: false,
+                unsent: None,
+            },
+            rng,
+        )?;
         self.put_clock(conversation, sent_key(conversation), now_ms / 1_000, rng)?;
         // A record of the member carries no tag for its own index, thus
         // another device of the set cannot read it on the group queue. It
@@ -2467,15 +2481,19 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         };
         let write = group.credentials().ok_or(Error::Integrity)?.write_secret();
         let fallback = group.previous_credentials().map(|held| held.write_secret());
-        self.groups.posts.push_back(GroupPost {
-            message: None,
-            conversation,
-            replicas,
-            write,
-            fallback,
-            record,
-            is_rotation: false,
-        });
+        self.keep_post(
+            GroupPost {
+                message: None,
+                conversation,
+                replicas,
+                write,
+                fallback,
+                record,
+                is_rotation: false,
+                unsent: None,
+            },
+            rng,
+        )?;
         self.put_clock(conversation, sent_key(conversation), now_ms / 1_000, rng)
     }
 
@@ -2791,15 +2809,19 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         };
         self.save_group(conversation, &group, rng)?;
         match rotation.carrier {
-            EpochCarrier::Inline(record) => self.groups.posts.push_back(GroupPost {
-                message: None,
-                conversation,
-                replicas,
-                write: rotation.write,
-                fallback,
-                record,
-                is_rotation: true,
-            }),
+            EpochCarrier::Inline(record) => self.keep_post(
+                GroupPost {
+                    message: None,
+                    conversation,
+                    replicas,
+                    write: rotation.write,
+                    fallback,
+                    record,
+                    is_rotation: true,
+                    unsent: None,
+                },
+                rng,
+            )?,
             // GRP-283: the slots go on the chunk path, and the record that
             // names them follows the upload.
             EpochCarrier::Chunked(chunked) => self.groups.epoch_uploads.push_back(EpochUpload {
@@ -2836,18 +2858,22 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let record = group
             .chunked_record(upload.epoch, &upload.chunked, descriptor)
             .map_err(|_| Error::Malformed)?;
-        self.groups.posts.push_back(GroupPost {
-            message: None,
-            conversation: upload.conversation,
-            replicas,
-            write: Secret::new(*upload.write.expose()),
-            fallback: upload
-                .fallback
-                .as_ref()
-                .map(|held| Secret::new(*held.expose())),
-            record,
-            is_rotation: true,
-        });
+        self.keep_post(
+            GroupPost {
+                message: None,
+                conversation: upload.conversation,
+                replicas,
+                write: Secret::new(*upload.write.expose()),
+                fallback: upload
+                    .fallback
+                    .as_ref()
+                    .map(|held| Secret::new(*held.expose())),
+                record,
+                is_rotation: true,
+                unsent: None,
+            },
+            rng,
+        )?;
         self.put_clock(
             upload.conversation,
             sent_key(upload.conversation),
@@ -3676,6 +3702,45 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         self.groups.posts.pop_front()
     }
 
+    /// Queues a record for the run of the group queues. A record with no
+    /// message stays in the store until a replica accepts it, thus a new
+    /// run or a new start sends it again in its order.
+    fn keep_post<R: CryptoRng + ?Sized>(
+        &mut self,
+        mut post: GroupPost,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        if post.message.is_none() {
+            let open = self.open_mut()?;
+            let mut order = 0u64;
+            for (_, plain) in open.store.list(GROUP_UNSENT, None)? {
+                if let Some(held) = plain.get(..8).and_then(|b| <[u8; 8]>::try_from(b).ok()) {
+                    order = order.max(u64::from_be_bytes(held).saturating_add(1));
+                }
+            }
+            let mut row = [0u8; 16];
+            rng.fill_bytes(&mut row);
+            let value = unsent_row(order, &post);
+            let mut batch = open.store.begin();
+            batch.put(GROUP_UNSENT, row, Some(post.conversation.0), &value, rng)?;
+            batch.commit()?;
+            post.unsent = Some(row);
+        }
+        self.groups.posts.push_back(post);
+        Ok(())
+    }
+
+    /// A replica accepted a record that the store kept (`GRP-195`).
+    pub fn group_post_accepted(&mut self, row: &[u8; 16]) -> Result<(), Error> {
+        let open = self.open_mut()?;
+        if open.store.get(GROUP_UNSENT, row)?.is_none() {
+            return Ok(());
+        }
+        let mut batch = open.store.begin();
+        batch.delete(GROUP_UNSENT, *row);
+        Ok(batch.commit()?)
+    }
+
     /// One record that a `GMSG` carried. A record of this device, a
     /// duplicate, and a record that waits for a roster give no message.
     pub fn on_group_record<R: CryptoRng + ?Sized>(
@@ -4236,6 +4301,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let write = group.credentials().ok_or(Error::Integrity)?.write_secret();
         let fallback = group.previous_credentials().map(|held| held.write_secret());
         self.save_group(conversation, &group, rng)?;
+        // A presence is a signal of activity alone, and a later one takes
+        // its place, thus no row keeps it.
         self.groups.posts.push_back(GroupPost {
             message: None,
             conversation,
@@ -4244,6 +4311,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             fallback,
             record,
             is_rotation: false,
+            unsent: None,
         });
         self.put_clock(conversation, sent_key(conversation), now_ms / 1_000, rng)
     }
@@ -4391,6 +4459,39 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// work list.
     fn requeue_group_posts<R: CryptoRng + ?Sized>(&mut self, rng: &mut R) -> Result<(), Error> {
         self.groups.posts.clear();
+        // The roster objects and the epoch keys go first, in the order of
+        // their seal. A group that is gone or closed takes none of them.
+        let mut kept = Vec::new();
+        let mut dropped = Vec::new();
+        for (row, plain) in self.open_ref()?.store.list(GROUP_UNSENT, None)? {
+            let plain = Zeroizing::new(plain);
+            let Some((order, post)) = read_unsent_row(&plain, row) else {
+                dropped.push(row);
+                continue;
+            };
+            let is_held = self
+                .open_ref()?
+                .store
+                .get(GROUP, &post.conversation.0)?
+                .is_some();
+            if !is_held || self.group_closed(post.conversation)? {
+                dropped.push(row);
+                continue;
+            }
+            kept.push((order, post));
+        }
+        if !dropped.is_empty() {
+            let open = self.open_mut()?;
+            let mut batch = open.store.begin();
+            for row in dropped {
+                batch.delete(GROUP_UNSENT, row);
+            }
+            batch.commit()?;
+        }
+        kept.sort_by_key(|(order, _)| *order);
+        self.groups
+            .posts
+            .extend(kept.into_iter().map(|(_, post)| post));
         let store = &self.open_ref()?.store;
         let mut waiting = Vec::new();
         for (row, _) in store.list(OUTBOX, None)? {
@@ -4453,4 +4554,63 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
         Ok(())
     }
+}
+
+/// The row of a kept record: its order, the conversation, whether it
+/// starts an epoch, the credentials, the two replicas, and the record.
+fn unsent_row(order: u64, post: &GroupPost) -> Zeroizing<Vec<u8>> {
+    let mut value = Zeroizing::new(Vec::with_capacity(UNSENT_HEAD + post.record.len()));
+    value.extend_from_slice(&order.to_be_bytes());
+    value.extend_from_slice(&post.conversation.0);
+    value.push(u8::from(post.is_rotation));
+    value.push(u8::from(post.fallback.is_some()));
+    value.extend_from_slice(post.write.expose());
+    value.extend_from_slice(
+        post.fallback
+            .as_ref()
+            .map_or(&[0u8; 32], |held| held.expose()),
+    );
+    for replica in &post.replicas {
+        value.extend_from_slice(&replica.relay);
+        value.extend_from_slice(&replica.group_queue_id);
+    }
+    value.extend_from_slice(&post.record);
+    value
+}
+
+/// The fixed part of a kept record ahead of the record.
+const UNSENT_HEAD: usize = 8 + 16 + 1 + 1 + 32 + 32 + GROUP_REPLICAS * 64;
+
+fn read_unsent_row(plain: &[u8], row: [u8; 16]) -> Option<(u64, GroupPost)> {
+    let take = |from: usize| -> Option<[u8; 32]> { plain.get(from..from + 32)?.try_into().ok() };
+    let order = u64::from_be_bytes(plain.get(..8)?.try_into().ok()?);
+    let conversation = ConversationId(plain.get(8..24)?.try_into().ok()?);
+    let is_rotation = *plain.get(24)? == 1;
+    let has_fallback = *plain.get(25)? == 1;
+    let write = Secret::new(take(26)?);
+    let fallback = has_fallback.then(|| take(58)).flatten().map(Secret::new);
+    let replica = |at: usize| -> Option<GroupReplica> {
+        Some(GroupReplica {
+            relay: take(at)?,
+            group_queue_id: take(at + 32)?,
+        })
+    };
+    let replicas = [replica(90)?, replica(154)?];
+    let record = plain.get(UNSENT_HEAD..)?.to_vec();
+    if record.is_empty() {
+        return None;
+    }
+    Some((
+        order,
+        GroupPost {
+            message: None,
+            conversation,
+            replicas,
+            write,
+            fallback,
+            record,
+            is_rotation,
+            unsent: Some(row),
+        },
+    ))
 }

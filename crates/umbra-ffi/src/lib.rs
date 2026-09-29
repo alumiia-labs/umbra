@@ -651,6 +651,49 @@ mod tests {
     }
 
     #[test]
+    fn a_roster_object_that_no_replica_took_goes_again_after_a_new_start() {
+        let mut rng = Rng(52);
+        let mut client = new_client(&mut rng);
+        let relays = [[0xA1; 32], [0xB2; 32]];
+        let conversation = client
+            .create_group("Kept", relays, 1_700_000_000, &mut rng)
+            .unwrap();
+        let group_id = client.group_info(conversation).unwrap().group_id;
+        client
+            .group_queue_made(&group_id, 0, relays[0], [0xC3; 32], &mut rng)
+            .unwrap();
+        client
+            .group_queue_made(&group_id, 1, relays[1], [0xD4; 32], &mut rng)
+            .unwrap();
+        while let Some(post) = client.take_group_post() {
+            if let Some(row) = post.unsent {
+                client.group_post_accepted(&row).unwrap();
+            }
+        }
+
+        // GRP-392: the re-key moved the group of this device at its seal,
+        // thus its record stays in the store until a replica takes it, and
+        // a new start sends the same bytes.
+        client.rekey_groups(1_700_000_010_000, &mut rng).unwrap();
+        let sent = client.take_group_post().unwrap();
+        assert!(sent.message.is_none() && sent.unsent.is_some());
+        client.lock();
+        client
+            .unlock(&units("correct horse"), 1_700_000_020)
+            .unwrap();
+        client.resume_group_work(&mut rng).unwrap();
+        let again = client.take_group_post().unwrap();
+        assert_eq!(again.record, sent.record);
+        assert_eq!(again.replicas[1].group_queue_id, [0xD4; 32]);
+        assert_eq!(again.write.expose(), sent.write.expose());
+
+        // A replica took it, and the next start sends it no more.
+        client.group_post_accepted(&again.unsent.unwrap()).unwrap();
+        client.resume_group_work(&mut rng).unwrap();
+        assert!(client.take_group_post().is_none());
+    }
+
+    #[test]
     fn a_rival_rekey_takes_the_index_and_the_seed_before_comes_back() {
         use umbra_core::group::join::JoinKeys;
         use umbra_wire::group::control::{GroupControl, RekeyRecord};

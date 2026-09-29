@@ -1493,6 +1493,9 @@ enum GroupWork {
         /// Whether the record starts an epoch, thus a `GKEY` follows it
         /// at the replica that accepted it (`GRP-362`).
         is_rotation: bool,
+        /// The row that keeps a record with no message until a replica
+        /// accepts it.
+        unsent: Option<[u8; 16]>,
     },
 }
 
@@ -1721,6 +1724,7 @@ impl Inner {
                     conversation: job.conversation,
                     relay: replica.relay,
                     is_rotation: job.is_rotation,
+                    unsent: job.unsent,
                 });
                 commands.push(GroupCommand::Post {
                     tag,
@@ -1956,12 +1960,16 @@ impl Inner {
                     message,
                     conversation,
                     is_rotation,
+                    unsent,
                     ..
                 }) = self.group_tags.remove(&tag)
                 else {
                     return;
                 };
                 self.group_refusals.remove(&(conversation, relay));
+                if let Some(row) = unsent {
+                    let _ = self.client.group_post_accepted(&row);
+                }
                 if let Some(message) = message {
                     let _ =
                         self.client
@@ -4421,9 +4429,11 @@ impl Handle {
     /// roster, and the re-key of each group. The network runs again under
     /// the new root. A set of more than one device takes none.
     pub fn reset_identity(self: Arc<Self>) -> Result<ResetCounts, FfiError> {
-        let summary = locked(&self.inner)
-            .client
-            .reset_identity(unix_now_ms(), &mut OsRng)?;
+        let mut inner = locked(&self.inner);
+        let summary = inner.client.reset_identity(unix_now_ms(), &mut OsRng)?;
+        // DEV-263: the re-key of each group goes to the run at once.
+        inner.pump_groups();
+        drop(inner);
         self.changed.notify_all();
         Ok(ResetCounts {
             contacts: summary.contacts,

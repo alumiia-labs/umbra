@@ -1716,6 +1716,114 @@ fn group_update(updates: &mut tokio::sync::mpsc::UnboundedReceiver<GroupUpdate>)
 }
 
 #[test]
+fn a_contact_that_reset_its_identity_joins_a_group_and_reads_it() {
+    let relays = tokio::runtime::Runtime::new().unwrap();
+    let network = start_signed_network(&relays);
+    let directory = std::env::temp_dir().join(format!("umbra-reset-join-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    for name in ["alice.db", "bob.db"] {
+        let _ = std::fs::remove_file(directory.join(name));
+    }
+    let alice = launch(&directory, "alice.db", 1);
+    let bob = launch(&directory, "bob.db", 2);
+    let mut networks = Vec::new();
+    for handle in [&alice, &bob] {
+        let verified = handle
+            .network_of_manifest(
+                network.manifest.clone(),
+                network.keyset.clone(),
+                0,
+                HOST.into(),
+                Some(CA.into()),
+            )
+            .unwrap();
+        networks.push(verified.network.clone());
+        handle.clone().connect(verified.network).unwrap();
+    }
+    alice.invite().unwrap();
+    let link = wait_for(&alice, |event| match event {
+        FfiEvent::Invitation { link } => Some(link),
+        _ => None,
+    });
+    bob.accept(link).unwrap();
+    let alice_conversation = wait_for_contact(&alice);
+    wait_for_contact(&bob);
+
+    // DEV-263: Bob resets, and his run starts again under the new root.
+    bob.clone().reset_identity().unwrap();
+    bob.disconnect();
+    bob.clone().connect(networks[1].clone()).unwrap();
+
+    let group = alice.create_group("Summit".into()).unwrap();
+    let start = Instant::now();
+    while start.elapsed() < STEP && !alice.group_info(group.clone()).unwrap().is_ready {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    alice
+        .offer_group(group.clone(), alice_conversation.clone())
+        .unwrap();
+    wait_for(&bob, |event| match event {
+        FfiEvent::GroupOffer => Some(()),
+        _ => None,
+    });
+    let offers = bob.group_offers().unwrap();
+    bob.accept_group_offer(offers[0].from.clone(), offers[0].group_id.clone())
+        .unwrap();
+    wait_for(&alice, |event| match event {
+        FfiEvent::GroupJoiner => Some(()),
+        _ => None,
+    });
+    let joiners = alice.group_joiners().unwrap();
+    alice
+        .admit_joiner(joiners[0].from.clone(), joiners[0].group_id.clone())
+        .unwrap();
+    let start = Instant::now();
+    let mut joined = None;
+    while start.elapsed() < Duration::from_secs(60) {
+        if let Some(summary) = bob
+            .summaries()
+            .unwrap()
+            .into_iter()
+            .find(|summary| bob.is_group(summary.conversation.clone()).unwrap_or(false))
+        {
+            joined = Some(summary.conversation);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let joined = joined.expect("Bob did not come into the group");
+    let draft = alice.new_draft(group.clone()).unwrap();
+    draft.set_text(units("we leave at six")).unwrap();
+    alice.send_draft(draft).unwrap();
+    let (conversation, message) = wait_for_message(&bob);
+    assert_eq!(conversation, joined);
+    assert_eq!(rendered(&bob, message), "we leave at six");
+
+    // DEV-263: a reset of a member re-keys the group that it holds, and the
+    // group carries on in both directions.
+    let counts = bob.clone().reset_identity().unwrap();
+    assert_eq!(counts.groups, 1);
+    bob.disconnect();
+    bob.clone().connect(networks[1].clone()).unwrap();
+    let draft = bob.new_draft(joined.clone()).unwrap();
+    draft.set_text(units("after my reset")).unwrap();
+    bob.send_draft(draft).unwrap();
+    let (conversation, message) = wait_for_message(&alice);
+    assert_eq!(conversation, group);
+    assert_eq!(rendered(&alice, message), "after my reset");
+    let draft = alice.new_draft(group.clone()).unwrap();
+    draft.set_text(units("seen it")).unwrap();
+    alice.send_draft(draft).unwrap();
+    let (conversation, message) = wait_for_message(&bob);
+    assert_eq!(conversation, joined);
+    assert_eq!(rendered(&bob, message), "seen it");
+
+    alice.disconnect();
+    bob.disconnect();
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[test]
 fn one_app_offers_a_group_and_the_other_app_joins_it() {
     let relays = tokio::runtime::Runtime::new().unwrap();
     let network = start_signed_network(&relays);
