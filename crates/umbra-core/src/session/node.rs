@@ -1145,6 +1145,12 @@ pub struct ClientNode {
     /// Each contact whose queue this device acknowledged above a hole
     /// (`WIR-116`), for the gap that its conversation shows.
     gaps: Vec<ContactId>,
+    /// The `send_index` of each record of the user that this node sealed,
+    /// by the handle of the call, for a later key request (`WIR-339`).
+    sent_indices: Vec<(u64, u16)>,
+    /// The `send_index` of each record of a contact that did not open
+    /// (`WIR-254`), for the key request of `WIR-455`.
+    lost: Vec<(ContactId, u16)>,
     changes: Vec<StateChange>,
 }
 
@@ -1267,6 +1273,8 @@ impl ClientNode {
             rendezvous_at: None,
             moved: BTreeSet::new(),
             gaps: Vec::new(),
+            sent_indices: Vec::new(),
+            lost: Vec::new(),
             changes: Vec::new(),
         }
     }
@@ -3723,6 +3731,7 @@ impl ClientNode {
         self.current = slot;
         let session_pk = self.session_pk()?;
         let held = self.contacts.get_mut(&contact).ok_or(Error::NoPath)?;
+        let send_index = held.channel.next_send_index();
         let (_, encoded) =
             held.channel
                 .send(app, &session_pk, random(rng), random(rng), now, rng)?;
@@ -3731,6 +3740,9 @@ impl ClientNode {
             Waiting::UserSend(handle) => Some(handle),
             _ => None,
         };
+        if let Some(handle) = user {
+            self.sent_indices.push((handle, send_index));
+        }
         self.queue_command(encoded, Waiting::Contact { contact, user })?;
         self.pump()
     }
@@ -4005,6 +4017,18 @@ impl ClientNode {
         } else {
             Err(Error::NoPath)
         }
+    }
+
+    /// The `send_index` of each record of the user sealed since the last
+    /// call, by the handle of its send.
+    pub fn take_send_indices(&mut self) -> Vec<(u64, u16)> {
+        core::mem::take(&mut self.sent_indices)
+    }
+
+    /// Each record of a contact that did not open since the last call, by
+    /// its `send_index` (`WIR-254`).
+    pub fn take_lost(&mut self) -> Vec<(ContactId, u16)> {
+        core::mem::take(&mut self.lost)
     }
 
     /// Each contact whose queue this device acknowledged above a hole
@@ -4810,6 +4834,14 @@ impl ClientNode {
             let received = held
                 .channel
                 .receive_on(&queue_id, payload, bucket, now, rng)?;
+            // WIR-254: a record that did not open names its hole.
+            if let Received::Undecryptable {
+                send_index: Some(index),
+                ..
+            } = &received
+            {
+                self.lost.push((ContactId(contact), *index));
+            }
             if let Received::Renewal { bundle, .. } = &received {
                 out.extend(self.on_renewal(contact, bundle, rng)?);
                 return Ok(out);

@@ -19,6 +19,7 @@
     <string name="umbra_ui_dev_218">Anyone in this chat can copy, photograph, or save a message before it disappears.</string>
     <string name="umbra_ui_ntf_009">A message arrives at once. Google learns when each one arrives.</string>
     <string name="umbra_ui_dis_084">A different party now holds %1$s.</string>
+    <string name="umbra_ui_wir_341">A message did not open, and its sender holds it no more.</string>
     <string name="umbra_ui_net_103">Some messages did not arrive.</string>
     <string name="umbra_ui_rel_116">The clock of this device differs from the network time by more than one hour.</string>
     <string name="umbra_ui_rel_126">The relay directory is provisional.</string>

@@ -311,6 +311,21 @@ pub enum Update {
     /// This device acknowledged the queue of a contact above a hole, and
     /// the records in that hole are lost (Part 6 `WIR-116`).
     DeliveryGap(ContactId),
+    /// The node sealed the record of a tag under this `send_index`.
+    SendIndex {
+        /// The tag of the send.
+        tag: u64,
+        /// The `send_index` of the record.
+        index: u16,
+    },
+    /// A record of a contact did not open, and its context names this
+    /// `send_index` (`WIR-254`).
+    Lost {
+        /// The contact.
+        contact: ContactId,
+        /// The `send_index` of the record.
+        index: u16,
+    },
     /// The relay took the record of a tag and named the room of the queue.
     Room {
         /// The tag of the send.
@@ -515,6 +530,16 @@ pub async fn run_client(
     // screen or of the carrier.
     let mut wake_end: Option<tokio::time::Instant> = None;
     let ended = 'run: loop {
+        // WIR-254, WIR-339: the indices of the records of the user, and the
+        // holes of the records of the contacts.
+        for (handle, index) in node.take_send_indices() {
+            if let Some(tag) = tags.get(&handle) {
+                let _ = updates.send(Update::SendIndex { tag: *tag, index });
+            }
+        }
+        for (contact, index) in node.take_lost() {
+            let _ = updates.send(Update::Lost { contact, index });
+        }
         for capsule in node.take_capsules() {
             if link.send(&capsule).await.is_err() {
                 break 'run Ended::LinkClosed;

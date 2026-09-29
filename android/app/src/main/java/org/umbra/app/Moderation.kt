@@ -79,6 +79,7 @@ fun rosterNoteText(note: FfiRosterNote, names: Map<UShort, String>): String {
             "$who made two different changes to the group"
         }
         6 -> UiText.get(R.string.umbra_ui_net_103)
+        7 -> UiText.get(R.string.umbra_ui_wir_341)
         else -> ""
     }
 }

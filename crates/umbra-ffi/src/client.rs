@@ -24,6 +24,7 @@ mod groups;
 mod held_handles;
 mod intros;
 mod key_changes;
+mod key_supply;
 mod moderation;
 mod notify;
 mod own_delete;
@@ -52,6 +53,7 @@ pub use groups::{
 };
 pub use intros::Introduction;
 pub use key_changes::PendingKeyChange;
+pub use key_supply::NOTE_LOST;
 pub use moderation::{ModNote, MOD_HIDE, MOD_REMOVE, MOD_UNHIDE};
 pub use notify::NdrCall;
 pub use polls::PollView;
@@ -79,7 +81,7 @@ use umbra_crypto::{hierarchy::RootIdentity, rand_core::CryptoRng, secret::Secret
 use umbra_queue::client::receipts::ReceiptHold;
 use umbra_wire::app::{
     edit::{DeleteBody, DeleteScope, EditBody},
-    keys::DigestBody,
+    keys::{DigestBody, KeyRequest, KeyScope},
     msg_ref,
     poll::Poll,
     rich::RichRecord,
@@ -807,6 +809,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut key_changes: Vec<(ConversationId, Vec<u8>)> = Vec::new();
         let mut shares: Vec<(ConversationId, Zeroizing<Vec<u8>>)> = Vec::new();
         let mut intros: Vec<(ConversationId, Zeroizing<Vec<u8>>)> = Vec::new();
+        let mut supplies: Vec<(ConversationId, Vec<u8>)> = Vec::new();
         for change in changes {
             planned.push(match change {
                 StateChange::Contact { contact, state } => Planned::Put(
@@ -1017,6 +1020,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if parsed.kind == AppKind::KeyRequest {
                 if !record.synced {
                     key_requests.push((conversation, parsed.body.to_vec()));
+                }
+                continue;
+            }
+            // WIR-459: the supply of a request of scope 0x01 comes on the
+            // channel of the request, and it is no message.
+            if parsed.kind == AppKind::KeySupply {
+                if !from_user && !record.synced {
+                    supplies.push((conversation, parsed.body.to_vec()));
                 }
                 continue;
             }
@@ -1467,8 +1478,19 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for (conversation, body) in control {
             self.on_pairwise_control(conversation, &body, now_ms, rng)?;
         }
-        for (_, body) in key_requests {
-            self.on_pairwise_key_request(&body, now_ms, rng)?;
+        for (conversation, body) in key_requests {
+            // WIR-455: a request of scope 0x01 names a record of this
+            // device on this channel, and the others name a group.
+            let is_session =
+                KeyRequest::parse(&body).is_ok_and(|request| request.scope == KeyScope::Session);
+            if is_session {
+                self.on_session_key_request(conversation, &body, now_ms, rng)?;
+            } else {
+                self.on_pairwise_key_request(&body, now_ms, rng)?;
+            }
+        }
+        for (conversation, body) in supplies {
+            self.on_key_supply(conversation, &body, now_ms, rng)?;
         }
         for (conversation, body) in shares {
             self.take_share(conversation, &body, now_ms, rng)?;

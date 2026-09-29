@@ -524,6 +524,9 @@ pub enum Received {
     Undecryptable {
         /// The sequence number of the `MSG`.
         seq: u32,
+        /// The `send_index` of a ratchet record that did not open, from its
+        /// context field that no key covers (`WIR-252`, `WIR-254`).
+        send_index: Option<u16>,
     },
 }
 
@@ -728,7 +731,12 @@ impl PairwiseChannel {
         let inbound = self.inbound_on_mut(queue).ok_or(Error::NoPath)?;
         let (seq, inner) = match inbound.open(msg_payload, bucket, now)? {
             Opened::Duplicate => return Ok(Received::Duplicate),
-            Opened::Undecryptable { seq } => return Ok(Received::Undecryptable { seq }),
+            Opened::Undecryptable { seq } => {
+                return Ok(Received::Undecryptable {
+                    seq,
+                    send_index: None,
+                })
+            }
             Opened::Record {
                 seq,
                 kind: L6Kind::Ratchet,
@@ -739,7 +747,12 @@ impl PairwiseChannel {
                 kind: L6Kind::Renewal,
                 inner,
             } => return Ok(Received::Renewal { seq, bundle: inner }),
-            Opened::Record { seq, .. } => return Ok(Received::Undecryptable { seq }),
+            Opened::Record { seq, .. } => {
+                return Ok(Received::Undecryptable {
+                    seq,
+                    send_index: None,
+                })
+            }
         };
         let mut app = alloc::vec![0u8; bucket.l7_record()];
         match self.ratchet.receive(&inner, now, rng, &mut app) {
@@ -747,8 +760,18 @@ impl PairwiseChannel {
                 app.truncate(opened.len);
                 Ok(Received::App { seq, bytes: app })
             }
-            Err(_) => Ok(Received::Undecryptable { seq }),
+            Err(_) => Ok(Received::Undecryptable {
+                seq,
+                send_index: umbra_crypto::ratchet::dr::Session::peek_ctx(&inner)
+                    .ok()
+                    .map(|ctx| ctx.send_index),
+            }),
         }
+    }
+
+    /// The `send_index` of the next record that this channel sends.
+    pub fn next_send_index(&self) -> u16 {
+        self.ratchet.next_ctx().send_index
     }
 
     /// The `SUB` of the inbound queue.

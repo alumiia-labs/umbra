@@ -3984,6 +3984,92 @@ mod tests {
     }
 
     #[test]
+    fn a_record_that_did_not_open_is_asked_for_and_comes_again_or_is_a_note() {
+        use crate::client::NOTE_LOST;
+        use umbra_wire::app::{
+            keys::{KeyRequest, KeySupply, SupplyStatus, SUPPLY_LEN},
+            AppKind, AppMessage, Channel,
+        };
+
+        // The sender sealed a message under `send_index` 5.
+        let (mut bob, bob_peer, bob_chat) = client_with_contact(108);
+        let mut rng = Rng(109);
+        let mut draft = bob.new_draft(bob_chat);
+        draft.set_text(&units("the lost one")).unwrap();
+        let lost = bob.send_draft(draft, 1_000_000, &mut rng).unwrap();
+        let first = bob.take_outgoing().unwrap();
+        bob.note_send_index(&lost, 5, &mut rng).unwrap();
+
+        // WIR-455: the reader asks once for the hole.
+        let (mut alice, alice_peer, alice_chat) = client_with_contact(110);
+        assert!(alice
+            .lost_record(alice_chat, 5, 2_000_000, &mut rng)
+            .unwrap());
+        assert!(!alice
+            .lost_record(alice_chat, 5, 2_001_000, &mut rng)
+            .unwrap());
+        let asked = alice.take_outgoing().unwrap();
+        assert!(alice.take_outgoing().is_none());
+        let parsed = AppMessage::parse(&asked.app, Channel::Pairwise).unwrap();
+        assert_eq!(parsed.kind, AppKind::KeyRequest);
+        let request = KeyRequest::parse(parsed.body).unwrap();
+        assert_eq!(request.index, 5);
+
+        // WIR-339, WIR-348: the sender sends the same record again, and the
+        // supply says so.
+        deliver(&mut bob, &bob_peer, &asked.app, 2_100_000, &mut rng);
+        let again = bob.take_outgoing().unwrap();
+        assert_eq!(again.app, first.app);
+        let supply = bob.take_outgoing().unwrap();
+        let parsed = AppMessage::parse(&supply.app, Channel::Pairwise).unwrap();
+        assert_eq!(parsed.kind, AppKind::KeySupply);
+        assert_eq!(
+            KeySupply::parse(parsed.body).unwrap().status,
+            SupplyStatus::Resent
+        );
+
+        // WIR-340: an index that names no message is not held.
+        let mut other = request;
+        other.index = 6;
+        let mut body = vec![0u8; umbra_wire::app::keys::REQUEST_LEN];
+        other.encode(&mut body).unwrap();
+        let ask = record(AppKind::KeyRequest, [0x31; 16], &body);
+        deliver(&mut bob, &bob_peer, &ask, 2_200_000, &mut rng);
+        let supply = bob.take_outgoing().unwrap();
+        let parsed = AppMessage::parse(&supply.app, Channel::Pairwise).unwrap();
+        let not_held = KeySupply::parse(parsed.body).unwrap();
+        assert_eq!(not_held.status, SupplyStatus::NotHeld);
+        assert!(bob.take_outgoing().is_none());
+
+        // WIR-347: a supply that answers no request of the reader goes.
+        let mut out = vec![0u8; SUPPLY_LEN];
+        let n = not_held.encode(&mut out).unwrap();
+        out.truncate(n);
+        let answer = record(AppKind::KeySupply, [0x32; 16], &out);
+        deliver(&mut alice, &alice_peer, &answer, 2_300_000, &mut rng);
+        assert!(alice.roster_notes(alice_chat).unwrap().is_empty());
+
+        // WIR-341: a supply that says "not held" to a request of the reader
+        // leaves a note of a delivery failure.
+        let answer_five = KeySupply {
+            request: KeyRequest {
+                index: 5,
+                ..not_held.request
+            },
+            status: SupplyStatus::NotHeld,
+            body: &[],
+        };
+        let mut out = vec![0u8; SUPPLY_LEN];
+        let n = answer_five.encode(&mut out).unwrap();
+        out.truncate(n);
+        let answer = record(AppKind::KeySupply, [0x33; 16], &out);
+        deliver(&mut alice, &alice_peer, &answer, 2_400_000, &mut rng);
+        let notes = alice.roster_notes(alice_chat).unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].kind, NOTE_LOST);
+    }
+
+    #[test]
     fn a_screenshot_block_is_off_by_default_and_holds_for_one_conversation() {
         let mut rng = Rng(106);
         let mut alice = new_client(&mut rng);

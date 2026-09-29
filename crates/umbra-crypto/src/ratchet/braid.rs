@@ -449,6 +449,12 @@ impl Ratchet {
         Session::overhead(FRAME_FIXED + self.braid.width.bytes())
     }
 
+    /// The context field of the next record this party sends: its
+    /// `send_index` names the record in a later key request (`WIR-254`).
+    pub fn next_ctx(&self) -> super::dr::Ctx {
+        self.session.ctx()
+    }
+
     /// Encrypts `plaintext` into `out`. `frame_allowed` says whether the
     /// bucket has room for this epoch's frame; a chain-start record needs it.
     pub fn send<R: CryptoRng + ?Sized>(

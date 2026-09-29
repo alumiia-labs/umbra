@@ -392,6 +392,21 @@ impl Bridge {
                 }
                 None
             }
+            Update::SendIndex { tag, index } => {
+                // A message that the user deleted since takes no index.
+                if let Some(message) = self.sent.get(&tag) {
+                    let _ = client.note_send_index(message, index, rng);
+                }
+                None
+            }
+            // WIR-455: a hole of a contact asks it for the record.
+            Update::Lost { contact, index } => {
+                let conversation = client.conversation_for(&contact.0)?;
+                if client.lost_record(conversation, index, now_ms, rng)? {
+                    self.flush(client, rng)?;
+                }
+                None
+            }
             Update::Room { tag, remaining } => {
                 if let Some(message) = self.sent.get(&tag) {
                     client.queue_room(message, remaining)?;
