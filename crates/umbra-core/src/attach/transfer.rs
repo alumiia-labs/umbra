@@ -788,7 +788,11 @@ pub struct Download {
     chunk_key: Secret<32>,
     chunk_ids: Vec<[u8; 32]>,
     wanted: Vec<Wanted>,
-    waiting: BTreeMap<u64, usize>,
+    /// Each `CGET` that waits for its answer: the chunk, and the tick of
+    /// its send.
+    waiting: BTreeMap<u64, (usize, u32)>,
+    /// The ticks of the caller since the start.
+    ticks: u32,
     /// The data phase of a file of level `0x01`, while its manifest comes.
     then: Option<DataPlan>,
 }
@@ -898,6 +902,7 @@ impl Download {
             chunk_ids: chunks.iter().map(|chunk| chunk.chunk_id).collect(),
             wanted: plan(&chunks, relays, rng),
             waiting: BTreeMap::new(),
+            ticks: 0,
             then,
         })
     }
@@ -935,7 +940,7 @@ impl Download {
             u32::try_from(index).map_err(|_| Error::Malformed)?,
         );
         let handle = node.chunk(relay, chunk_id, ChunkJob::Fetch { read }, rng)?;
-        self.waiting.insert(handle, index);
+        self.waiting.insert(handle, (index, self.ticks));
         Ok(())
     }
 
@@ -957,8 +962,35 @@ impl Download {
         })
     }
 
-    /// Asks for each chunk that has room under `MAX_CONCURRENT_DOWN`.
+    /// Moves the clock of the download one tick: a `CGET` past
+    /// `STEP_TIMEOUT_TICKS` goes to the next replica (`ATT-019`), and each
+    /// chunk that has room is asked for. The caller calls it at the start
+    /// and at each tick of its clock, and an answer moves no clock. A lost
+    /// answer thus holds no download until its circuit ends.
     pub fn tick<R: CryptoRng + ?Sized>(
+        &mut self,
+        node: &mut ClientNode,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        self.ticks = self.ticks.saturating_add(1);
+        let late: Vec<(u64, usize)> = self
+            .waiting
+            .iter()
+            .filter(|(_, (_, sent))| self.ticks.saturating_sub(*sent) >= STEP_TIMEOUT_TICKS)
+            .map(|(handle, (index, _))| (*handle, *index))
+            .collect();
+        for (handle, index) in late {
+            self.waiting.remove(&handle);
+            // No answer is no statement that the relay lacks the chunk.
+            let wanted = self.wanted.get_mut(index).ok_or(Error::Malformed)?;
+            wanted.answers = wanted.answers.saturating_add(1);
+            self.ask(node, index, rng)?;
+        }
+        self.fill(node, rng)
+    }
+
+    /// Asks for each chunk that has room under `MAX_CONCURRENT_DOWN`.
+    fn fill<R: CryptoRng + ?Sized>(
         &mut self,
         node: &mut ClientNode,
         rng: &mut R,
@@ -989,7 +1021,7 @@ impl Download {
                 return Ok(Progress::Done(plain));
             }
             self.start_data(&plain, rng)?;
-            self.tick(node, rng)?;
+            self.fill(node, rng)?;
         }
         let assembler = self.assembler.as_ref().ok_or(Error::Stale)?;
         Ok(Progress::Running(
@@ -1005,7 +1037,7 @@ impl Download {
         outcome: ChunkOutcome,
         rng: &mut R,
     ) -> Result<bool, Error> {
-        let Some(index) = self.waiting.remove(&handle) else {
+        let Some((index, _)) = self.waiting.remove(&handle) else {
             return Ok(false);
         };
         let wanted = self.wanted.get_mut(index).ok_or(Error::Malformed)?;
@@ -1030,7 +1062,7 @@ impl Download {
             assembler.accept(&bytes)?;
         }
         let is_complete = assembler.is_complete();
-        self.tick(node, rng)?;
+        self.fill(node, rng)?;
         Ok(is_complete)
     }
 }
@@ -1046,7 +1078,10 @@ pub struct ChunkFetch {
     chunk_id: [u8; 32],
     /// The replicas that this fetch did not ask yet, the next one last.
     order: Vec<[u8; 32]>,
-    waiting: Option<u64>,
+    /// The `CGET` that waits for its answer, and the tick of its send.
+    waiting: Option<(u64, u32)>,
+    /// The ticks of the caller since the start.
+    ticks: u32,
 }
 
 impl ChunkFetch {
@@ -1086,16 +1121,35 @@ impl ChunkFetch {
             chunk_id: chunk_ref.chunk_id,
             order,
             waiting: None,
+            ticks: 0,
         })
     }
 
     /// Whether the answer with this handle belongs to this fetch.
     pub fn owns(&self, handle: u64) -> bool {
-        self.waiting == Some(handle)
+        self.waiting.is_some_and(|(held, _)| held == handle)
+    }
+
+    /// Moves the clock one tick, and asks the next replica when no
+    /// question waits or when the one that waits is past
+    /// `STEP_TIMEOUT_TICKS`. An answer moves no clock.
+    pub fn tick<R: CryptoRng + ?Sized>(
+        &mut self,
+        node: &mut ClientNode,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        self.ticks = self.ticks.saturating_add(1);
+        if self
+            .waiting
+            .is_some_and(|(_, sent)| self.ticks.saturating_sub(sent) >= STEP_TIMEOUT_TICKS)
+        {
+            self.waiting = None;
+        }
+        self.ask(node, rng)
     }
 
     /// Asks the next replica, when no question waits.
-    pub fn tick<R: CryptoRng + ?Sized>(
+    fn ask<R: CryptoRng + ?Sized>(
         &mut self,
         node: &mut ClientNode,
         rng: &mut R,
@@ -1107,7 +1161,7 @@ impl ChunkFetch {
         let relay = self.order.pop().ok_or(Error::NoPath)?;
         let read = read_secret(&self.file_key, self.index);
         let handle = node.chunk(relay, self.chunk_id, ChunkJob::Fetch { read }, rng)?;
-        self.waiting = Some(handle);
+        self.waiting = Some((handle, self.ticks));
         Ok(())
     }
 
@@ -1119,7 +1173,7 @@ impl ChunkFetch {
         outcome: ChunkOutcome,
         rng: &mut R,
     ) -> Result<Progress<Vec<u8>>, Error> {
-        if self.waiting != Some(handle) {
+        if !self.owns(handle) {
             return Ok(Progress::Running(0, 1));
         }
         self.waiting = None;
@@ -1135,7 +1189,7 @@ impl ChunkFetch {
             }
         }
         // ATT-019: the next replica.
-        self.tick(node, rng)?;
+        self.ask(node, rng)?;
         Ok(Progress::Running(0, 1))
     }
 }

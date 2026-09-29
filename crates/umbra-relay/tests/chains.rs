@@ -883,6 +883,35 @@ fn a_file_goes_up_from_one_client_and_comes_down_at_another() {
     }
     assert!(ended, "the download ends");
     assert!(download.is_gone());
+
+    // ATT-190: a `CGET` with no answer in STEP_TIMEOUT_TICKS goes to the
+    // next replica. The answers wait here, thus each chunk asks twice, and
+    // the download still ends with the file.
+    let mut download = Download::new(&received, &relays, &mut rng).unwrap();
+    for _ in 0..=umbra_core::attach::transfer::STEP_TIMEOUT_TICKS {
+        download
+            .tick(&mut mesh.clients[RECEIVER], &mut rng)
+            .unwrap();
+    }
+    let mut answers = 0;
+    let mut fetched = None;
+    for _ in 0..400 {
+        for (handle, outcome) in chunk_answers(&mut mesh, RECEIVER) {
+            answers += 1;
+            let node = &mut mesh.clients[RECEIVER];
+            if let Progress::Done(bytes) = download
+                .on_outcome(node, handle, outcome, &mut rng)
+                .unwrap()
+            {
+                fetched = Some(bytes);
+            }
+        }
+        if fetched.is_some() {
+            break;
+        }
+    }
+    assert_eq!(fetched.expect("the download ends"), plain);
+    assert!(answers > received.refs.len(), "{answers} answers");
 }
 
 fn holder(index: usize) -> AttachmentRelay {
