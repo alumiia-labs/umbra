@@ -27,6 +27,7 @@ mod notify;
 mod polls;
 mod reset;
 mod roster_notes;
+mod screenshots;
 mod social;
 mod sync;
 mod timers;

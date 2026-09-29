@@ -4895,6 +4895,28 @@ impl Handle {
         Ok(())
     }
 
+    /// Whether this device blocks a screenshot of a conversation. Off by
+    /// default (Part 14 `IMP-059`).
+    pub fn screenshot_blocked(&self, conversation: Vec<u8>) -> Result<bool, FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        Ok(locked(&self.inner)
+            .client
+            .screenshot_blocked(conversation)?)
+    }
+
+    /// Turns the screenshot block of one conversation on or off
+    /// (`IMP-058`).
+    pub fn set_screenshot_blocked(
+        &self,
+        conversation: Vec<u8>,
+        is_on: bool,
+    ) -> Result<(), FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        Ok(locked(&self.inner)
+            .client
+            .set_screenshot_blocked(conversation, is_on, &mut OsRng)?)
+    }
+
     /// The notification setting of a conversation: 0 each record, 1 the
     /// mentions of the user, 2 none (Part 7 §7.5.9).
     pub fn alert_setting(&self, conversation: Vec<u8>) -> Result<u8, FfiError> {

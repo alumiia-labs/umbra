@@ -90,9 +90,11 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
     val isAdmin = members.any { it.isSelf && it.role >= FfiRole.ADMIN }
     var timer by remember { mutableStateOf<UInt?>(null) }
     var alert by remember { mutableStateOf<UByte?>(null) }
+    var isSecure by remember { mutableStateOf<Boolean?>(null) }
     LaunchedEffect(chat.conversation, Core.revision) {
         Core.timer(chat.conversation) { timer = it.seconds }
         Core.alertSetting(chat.conversation) { alert = it }
+        Core.screenshotBlocked(chat.conversation) { isSecure = it }
     }
     Column(Modifier.fillMaxSize()) {
         BackBar("Group details", onBack = onBack)
@@ -144,6 +146,9 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                 } else {
                     FactRow("clock", "Disappearing messages", timerLabel(it))
                 }
+            }
+            isSecure?.let {
+                ToggleRow("Block screenshots", it) { on -> Core.blockScreenshots(chat.conversation, on) }
             }
             if (chat.isMember) {
                 if (isAdmin) {

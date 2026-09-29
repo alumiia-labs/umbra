@@ -1,5 +1,7 @@
 package org.umbra.app
 
+import android.app.Activity
+import android.view.WindowManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -157,6 +159,15 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
     }
     val readUpTo = lines.indexOfLast { it.info.outgoing && it.info.delivery.toInt() == READ }
     val composer = rememberPlatformField()
+    // IMP-058: the window of a conversation with the block takes no screenshot.
+    var isSecure by remember { mutableStateOf(false) }
+    LaunchedEffect(conversation, Core.revision) { Core.screenshotBlocked(conversation) { isSecure = it } }
+    val activity = LocalContext.current as? Activity
+    DisposableEffect(isSecure) {
+        val window = activity?.window
+        if (isSecure) window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        onDispose { if (isSecure) window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE) }
+    }
     // Part 6 §6.6.9: the text of the field starts and ends a typing state.
     LaunchedEffect(conversation) {
         composer.onChange = { if (!chat.isGroup) Core.typing(conversation, !composer.isEmpty) }

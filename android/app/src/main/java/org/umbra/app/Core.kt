@@ -1562,6 +1562,17 @@ object Core {
 
     fun setAlert(conversation: Conversation, value: UByte) = call { it.setAlertSetting(conversation.id, value) }
 
+    fun screenshotBlocked(conversation: Conversation, onLoaded: (Boolean) -> Unit) = call { client ->
+        val value = client.screenshotBlocked(conversation.id)
+        main.post { onLoaded(value) }
+    }
+
+    /** Part 14 `IMP-058`: the block of one conversation, on this device. */
+    fun blockScreenshots(conversation: Conversation, isOn: Boolean) = call { client ->
+        client.setScreenshotBlocked(conversation.id, isOn)
+        main.post { revision++ }
+    }
+
     /** Hides, removes, or puts back a message of a group (Part 11 §11.9.6). */
     fun moderate(message: MsgHandle, action: UByte) = call { client ->
         client.moderate(message, action)

@@ -3576,6 +3576,22 @@ mod tests {
     }
 
     #[test]
+    fn a_screenshot_block_is_off_by_default_and_holds_for_one_conversation() {
+        let mut rng = Rng(106);
+        let mut alice = new_client(&mut rng);
+        let one = ConversationId([7; 16]);
+        let other = ConversationId([8; 16]);
+        // IMP-059: no conversation blocks a screenshot by default.
+        assert!(!alice.screenshot_blocked(one).unwrap());
+        // IMP-058: the block is a setting of one conversation.
+        alice.set_screenshot_blocked(one, true, &mut rng).unwrap();
+        assert!(alice.screenshot_blocked(one).unwrap());
+        assert!(!alice.screenshot_blocked(other).unwrap());
+        alice.set_screenshot_blocked(one, false, &mut rng).unwrap();
+        assert!(!alice.screenshot_blocked(one).unwrap());
+    }
+
+    #[test]
     fn a_typing_record_is_off_by_default_and_goes_once_in_its_interval() {
         use crate::client::EPHEMERAL;
 

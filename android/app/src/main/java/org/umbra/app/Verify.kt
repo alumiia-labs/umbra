@@ -110,7 +110,9 @@ fun ConversationSettingsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) ->
     var receipts by remember { mutableStateOf<Receipts?>(null) }
     var timer by remember { mutableStateOf<UInt?>(null) }
     var alert by remember { mutableStateOf<UByte?>(null) }
+    var isSecure by remember { mutableStateOf<Boolean?>(null) }
     LaunchedEffect(chat.conversation) { Core.receipts(chat.conversation) { receipts = it } }
+    LaunchedEffect(chat.conversation, Core.revision) { Core.screenshotBlocked(chat.conversation) { isSecure = it } }
     LaunchedEffect(chat.conversation, Core.revision) { Core.alertSetting(chat.conversation) { alert = it } }
     LaunchedEffect(chat.conversation, Core.revision) { Core.timer(chat.conversation) { timer = it.seconds } }
     val change = { next: Receipts ->
@@ -134,6 +136,10 @@ fun ConversationSettingsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) ->
                         push(Screen.Disappearing(chat.conversation))
                     },
                 )
+                HorizontalDivider(color = Palette.Divider)
+            }
+            isSecure?.let {
+                ToggleRow("Block screenshots", it) { on -> Core.blockScreenshots(chat.conversation, on) }
                 HorizontalDivider(color = Palette.Divider)
             }
             receipts?.let { now ->
