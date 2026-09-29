@@ -447,6 +447,18 @@ private fun ConnectionNote() {
         Core.degraded?.let { add(it) }
         if (BuildNetwork.isProvisional) add(UiText.get(R.string.umbra_ui_rel_126))
         if (Core.online && BuildNetwork.isClockCorrected) add(UiText.get(R.string.umbra_ui_rel_116))
+        // DEV-076 to DEV-079: a hole of the synced history shows, and a gap
+        // takes no dismissal.
+        for (hole in Core.historyHoles) {
+            val name = hole.label.ifEmpty { "a removed device" }
+            add(
+                if (hole.isArriving) {
+                    "History from $name is still arriving."
+                } else {
+                    "History from $name has a gap: ${hole.count} items did not arrive."
+                },
+            )
+        }
     }
     if (Core.connection?.admissionSurge == true) {
         LinearProgressIndicator(

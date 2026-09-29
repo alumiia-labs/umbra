@@ -88,6 +88,17 @@ pub struct Device {
     pub added_epoch: u64,
 }
 
+/// A hole in the history that the other devices sync (Part 7 §7.5.5).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FfiHistoryHole {
+    /// The label of the source device.
+    pub label: String,
+    /// How many records of that device the hole holds.
+    pub count: u64,
+    /// The device can still send them (`DEV-076`); else a gap (`DEV-077`).
+    pub is_arriving: bool,
+}
+
 /// A fork of the roster that waits for the user (Part 7 §7.7).
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct FfiRosterFork {
@@ -894,6 +905,21 @@ impl Handle {
     /// can offer a link (`DEV-287`).
     pub fn owns_channels(&self) -> Result<bool, FfiError> {
         Ok(locked(&self.inner).client.owns_channels()?)
+    }
+
+    /// Each hole in the synced history, which the view shows and does not
+    /// hide (`DEV-076` to `DEV-079`).
+    pub fn history_holes(&self) -> Result<Vec<FfiHistoryHole>, FfiError> {
+        Ok(locked(&self.inner)
+            .client
+            .history_holes(super::unix_now())?
+            .into_iter()
+            .map(|hole| FfiHistoryHole {
+                label: hole.label,
+                count: hole.count,
+                is_arriving: hole.is_arriving,
+            })
+            .collect())
     }
 
     /// Each fork of the roster that the user did not dismiss.

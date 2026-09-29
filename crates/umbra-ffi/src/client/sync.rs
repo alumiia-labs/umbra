@@ -646,7 +646,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .map(|(device, channel)| (channel, device))
             .collect();
         let mut out = Vec::new();
-        let mut acked = false;
+        // DEV-075: a record past `SYNC_MAX_AGE` waits for no resend.
+        let floor = engine.retained_floor();
+        engine.expire(now);
+        let mut acked = engine.retained_floor() != floor;
         for (channel, body) in bodies {
             let Some(source) = devices.get(&channel) else {
                 continue;
@@ -690,8 +693,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
         self.put_engine(&engine, None, rng)?;
         if acked {
-            self.prune_sync_sent(engine.acked_by_all())?;
+            let below = engine.retained_floor().saturating_sub(1);
+            self.prune_sync_sent(below.max(engine.acked_by_all()))?;
         }
+        self.keep_history_holes(&engine, now, rng)?;
         Ok(out)
     }
 

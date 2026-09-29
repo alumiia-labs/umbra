@@ -4165,6 +4165,72 @@ mod tests {
     }
 
     #[test]
+    fn a_hole_in_the_synced_history_arrives_then_shows_as_a_gap() {
+        use umbra_core::devset::{
+            engine::SyncEngine,
+            link::{DeviceIdentity, LinkHello},
+            sync::{Origin, AUTHOR_PEER, SCOPE_PAIRWISE},
+            SYNC_MAX_AGE,
+        };
+        use umbra_wire::app::AppKind;
+
+        let mut rng = Rng(112);
+        let mut phone = new_client(&mut rng);
+        phone.ensure_device_set("Phone", &mut rng).unwrap();
+        let own = phone.device_identity().unwrap().unwrap();
+        let laptop = DeviceIdentity::generate("Laptop", &mut rng);
+        let hello = LinkHello {
+            device_id: laptop.device_id,
+            device_pk: laptop.device_key().public().clone(),
+            roster_pk: laptop.roster_key().verifying_key().to_bytes().to_vec(),
+            label: laptop.label,
+            ct: umbra_crypto::kem::Ciphertext::from_bytes(&[0; umbra_crypto::kem::CIPHERTEXT_LEN])
+                .unwrap(),
+        };
+        let roster = phone.sign_linked_device(&hello, &mut rng).unwrap();
+        phone.commit_roster(&roster, &mut rng).unwrap();
+        let channel = ContactId([0x77; 32]);
+        let conversation = phone.conversation_for(&channel.0).unwrap();
+        phone
+            .set_pending_peer(laptop.device_id, &laptop.label, &mut rng)
+            .unwrap();
+        phone.mark_device_peer(conversation, &mut rng).unwrap();
+
+        // The laptop publishes three records, and the second one is lost.
+        let mut engine = SyncEngine::new(laptop.device_id, &[own.device_id]).unwrap();
+        let origin = Origin {
+            scope: SCOPE_PAIRWISE,
+            subject: [0x42; 32],
+            author: AUTHOR_PEER,
+        };
+        let bodies: Vec<Vec<u8>> = (0u8..3)
+            .map(|n| {
+                let inner = record(AppKind::Text, [n; 16], b"hi");
+                let published = engine.publish(&inner, origin, [n; 16], 0, 100).unwrap();
+                record(AppKind::DeviceSet, [0x60 + n; 16], &published.body)
+            })
+            .collect();
+        let now = 1_000;
+        deliver(&mut phone, &channel, &bodies[0], now * 1_000, &mut rng);
+        assert!(phone.history_holes(now).unwrap().is_empty());
+        deliver(&mut phone, &channel, &bodies[2], now * 1_000, &mut rng);
+
+        // DEV-076: the laptop can still send it, thus it is arriving.
+        let holes = phone.history_holes(now).unwrap();
+        assert_eq!(holes.len(), 1);
+        assert_eq!((holes[0].label.as_str(), holes[0].count), ("Laptop", 1));
+        assert!(holes[0].is_arriving);
+        // DEV-077: after `SYNC_MAX_AGE` no device holds it, and the gap
+        // shows.
+        let later = phone.history_holes(now + SYNC_MAX_AGE).unwrap();
+        assert!(!later[0].is_arriving);
+
+        // The resend fills it, and the hole leaves.
+        deliver(&mut phone, &channel, &bodies[1], now * 1_000, &mut rng);
+        assert!(phone.history_holes(now).unwrap().is_empty());
+    }
+
+    #[test]
     fn a_screenshot_block_is_off_by_default_and_holds_for_one_conversation() {
         let mut rng = Rng(106);
         let mut alice = new_client(&mut rng);

@@ -428,6 +428,11 @@ impl RetainedLog {
         self.records.retain(|r| r.counter > self.acked);
     }
 
+    /// The lowest counter that the log still retains.
+    pub fn oldest(&self) -> Option<u64> {
+        self.records.iter().map(|r| r.counter).min()
+    }
+
     /// Drops what passed `SYNC_MAX_AGE` (`DEV-075`).
     pub fn expire(&mut self, now: u64) {
         self.records

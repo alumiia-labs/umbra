@@ -22,6 +22,7 @@ mod group_changes;
 mod group_sync;
 mod groups;
 mod held_handles;
+mod history;
 mod intros;
 mod key_changes;
 mod key_supply;
@@ -52,6 +53,7 @@ pub use groups::{
     EpochUpload, GroupAdmitWaiting, GroupInfo, GroupJoiner, GroupOffer, GroupPost, GroupQueueJob,
     GroupSubscription, Silence, GROUP_NAME_MAX,
 };
+pub use history::HistoryHole;
 pub use intros::Introduction;
 pub use key_changes::PendingKeyChange;
 pub use key_supply::NOTE_LOST;

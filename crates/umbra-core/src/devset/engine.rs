@@ -437,6 +437,17 @@ impl SyncEngine {
         }
     }
 
+    /// The lowest counter that the log of a peer still retains, or the
+    /// next counter when no log retains one: each stored body below it
+    /// waits for no resend.
+    pub fn retained_floor(&self) -> u64 {
+        self.peers
+            .values()
+            .filter_map(|peer| peer.log.oldest())
+            .min()
+            .unwrap_or_else(|| self.counter.saturating_add(1))
+    }
+
     /// The peers of the engine.
     pub fn peers(&self) -> impl Iterator<Item = &DeviceId> {
         self.peers.keys()
@@ -795,7 +806,9 @@ mod tests {
         }
         assert!(phone.needs_catch_up(&LAPTOP));
         assert!(phone.interactive(&LAPTOP, 60));
+        let floor = phone.retained_floor();
         phone.expire(50 + SYNC_MAX_AGE);
+        assert!(phone.retained_floor() > floor);
         phone.new_queue(&LAPTOP);
         assert_eq!(phone.next_resend(&LAPTOP), None);
 
