@@ -529,7 +529,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             return Err(Error::Integrity);
         }
         self.put_device_identity(identity, false, rng)?;
-        // IDN-183 is for a restore: a linked device renews no contact.
+        // IDN-183 is for a restore: a linked device renews no contact, and
+        // DEV-117 holds no deletion of the other devices.
+        self.remove_setting(super::own_delete::HOLDS_DELETIONS)?;
         self.remove_setting(super::backup::RESTORE_STALE_SETTING)
     }
 
