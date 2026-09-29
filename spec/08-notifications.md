@@ -816,13 +816,24 @@ the user reads:
 
 - **[NTF-028]** The NDR of the nonprofit and its core queue relays MUST be in different legal
   jurisdictions.
-- **[NTF-029]** The client MUST let the user pin an NDR independently of the relays of that
-  user.
+- **[NTF-029]** The client MUST take the route to the NDR from the pin of its
+  build (`NTF-127`) and from no relay. Thus the NDR does not follow the relays
+  that the user chose, and a relay cannot point the client at another NDR.
 - **[NTF-030]** The NDR MUST publish a no-logging policy, a warrant canary, and a transparency
   log of its software builds.
 - **[NTF-109]** A deployment MAY operate its own Notification Delivery Relay.
   The NDR of the nonprofit is one such deployment, and a self-hosted build that
   operates no NDR points at it.
+
+> *Cause of `NTF-029`.* An earlier draft let the user pin an NDR. A
+> deployment operates one NDR (Part 10 §10.10), thus the user had no second NDR
+> to pin. The carrier also forbids one: on FCM the holder of the service
+> account of the project of the build alone can wake the app, thus an NDR of a
+> third party cannot serve that build. What the pin protected stays: the
+> choice of relays gives no party a route to the push token. A revision that
+> lets a third party operate an NDR beside the one of the deployment gives the
+> user the choice between the two, and §10.10 then enters that NDR in the
+> relay reputation.
 
 > *Cause.* An earlier draft stated in §8.7.1 that a third party cannot operate
 > the notification delivery of a platform whose push certificates are not

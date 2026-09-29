@@ -1643,7 +1643,7 @@ Source: `spec/08-notifications.md`
 | `NTF-019` | §8.5 | MUST | A queue relay | A queue relay MUST apply the window to each handle, whatever the class of the conversation behind it. |  |  |
 | `NTF-027` | §8.7 | MUST | This text is normative, and it | The text of §8.7 is normative, and it MUST appear in the security documentation that the user reads. |  |  |
 | `NTF-028` | §8.7 | MUST | (unstated) | The NDR of the nonprofit and its core queue relays MUST be in different legal jurisdictions. |  |  |
-| `NTF-029` | §8.7 | MUST | The client | The client MUST let the user pin an NDR independently of the relays of that user. |  |  |
+| `NTF-029` | §8.7 | MUST | The client | The client MUST take the route to the NDR from the pin of its build (`NTF-127`) and from no relay. |  |  |
 | `NTF-030` | §8.7 | MUST | The NDR | The NDR MUST publish a no-logging policy, a warrant canary, and a transparency log of its software builds. |  |  |
 | `NTF-031` | §8.2.1 | MUST | A device | A device MUST make one `k_tok` and one `handle` for each group of at most `MAX_QUEUES_PER_HANDLE` queues. |  |  |
 | `NTF-032` | §8.2.1 | MUST NOT | A device | A device MUST NOT put more than `MAX_QUEUES_PER_HANDLE` queues under one handle. |  |  |

@@ -3616,7 +3616,7 @@ impl Handle {
                 root_ca_path,
                 invitation_host,
                 // The build pins the route to the NDR (`NTF-127`), thus no
-                // manifest carries it.
+                // manifest carries it and no relay chooses it (`NTF-029`).
                 ndr_relay_url: None,
                 ndr_key_config: None,
                 ndr_relay_ipv4: None,
