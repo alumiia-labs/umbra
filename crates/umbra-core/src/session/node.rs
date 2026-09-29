@@ -1133,6 +1133,9 @@ pub struct ClientNode {
     /// The contacts whose channel moved since the last
     /// [`ClientNode::take_changes`].
     moved: BTreeSet<[u8; 32]>,
+    /// Each contact whose queue this device acknowledged above a hole
+    /// (`WIR-116`), for the gap that its conversation shows.
+    gaps: Vec<ContactId>,
     changes: Vec<StateChange>,
 }
 
@@ -1254,6 +1257,7 @@ impl ClientNode {
             reports: BTreeSet::new(),
             rendezvous_at: None,
             moved: BTreeSet::new(),
+            gaps: Vec::new(),
             changes: Vec::new(),
         }
     }
@@ -3953,6 +3957,10 @@ impl ClientNode {
                 continue;
             };
             channel.acknowledged_on(&queue, point);
+            // WIR-117: the conversation shows a gap from this point on.
+            if point.crosses_hole {
+                self.gaps.push(*contact);
+            }
             self.moved.insert(contact.0);
             self.queue_command(encoded, Waiting::Other)?;
             self.pump()?;
@@ -3963,6 +3971,12 @@ impl ClientNode {
         } else {
             Err(Error::NoPath)
         }
+    }
+
+    /// Each contact whose queue this device acknowledged above a hole
+    /// since the last call (`NET-103`, `WIR-117`).
+    pub fn take_gaps(&mut self) -> Vec<ContactId> {
+        core::mem::take(&mut self.gaps)
     }
 
     /// Acknowledges the digests of a notify queue under the floor of

@@ -52,7 +52,7 @@ pub use notify::NdrCall;
 pub use polls::PollView;
 pub use reset::ResetSummary;
 pub use roster_notes::{
-    RosterNote, NOTE_EVICTED, NOTE_FORK, NOTE_JOINED, NOTE_LEFT, NOTE_NOBODY, NOTE_ROLE,
+    RosterNote, NOTE_EVICTED, NOTE_FORK, NOTE_GAP, NOTE_JOINED, NOTE_LEFT, NOTE_NOBODY, NOTE_ROLE,
 };
 pub use social::{GivenShare, HeldShare};
 pub use sync::SyncSend;

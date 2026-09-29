@@ -78,6 +78,7 @@ fun rosterNoteText(note: FfiRosterNote, names: Map<UShort, String>): String {
         } else {
             "$who made two different changes to the group"
         }
+        6 -> UiText.get(R.string.umbra_ui_net_103)
         else -> ""
     }
 }
@@ -90,7 +91,7 @@ const val YOU = "You"
 /** The notes of a group, in the order of time. */
 fun chatNotes(mods: List<FfiModNote>, roster: List<FfiRosterNote>, names: Map<UShort, String>): List<ChatNote> =
     (mods.map { ChatNote(it.atMs, modNoteText(it), "ban") } +
-        roster.map { ChatNote(it.atMs, rosterNoteText(it, names), if (it.kind.toInt() == 5) "triangle-exclamation" else "user-group") })
+        roster.map { ChatNote(it.atMs, rosterNoteText(it, names), if (it.kind.toInt() >= 5) "triangle-exclamation" else "user-group") })
         .filter { it.text.isNotEmpty() }
         .sortedBy { it.atMs }
 

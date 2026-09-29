@@ -3620,6 +3620,25 @@ mod tests {
     }
 
     #[test]
+    fn a_delivery_gap_is_a_note_of_the_conversation() {
+        use crate::client::{NOTE_GAP, NOTE_NOBODY};
+
+        let mut rng = Rng(107);
+        let mut alice = new_client(&mut rng);
+        let peer = ContactId([0x56; 32]);
+        let conversation = alice.conversation_for(&peer.0).unwrap();
+        assert!(alice.roster_notes(conversation).unwrap().is_empty());
+        // NET-103, WIR-118: the conversation shows the gap, and it stays.
+        alice
+            .delivery_gap(conversation, 1_000_000, &mut rng)
+            .unwrap();
+        let notes = alice.roster_notes(conversation).unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!((notes[0].kind, notes[0].index), (NOTE_GAP, NOTE_NOBODY));
+        assert_eq!(notes[0].at_ms, 1_000_000);
+    }
+
+    #[test]
     fn a_screenshot_block_is_off_by_default_and_holds_for_one_conversation() {
         let mut rng = Rng(106);
         let mut alice = new_client(&mut rng);

@@ -1,7 +1,9 @@
 //! The changes of the roster of a group, as the conversation shows them: a
 //! member that joins, one that leaves, one that an admin removed for its
 //! silence (`GRP-050`), a new role, and a fork of the chain (`GRP-070` to
-//! `GRP-074`). A note is local state of this device and no record.
+//! `GRP-074`). A note is local state of this device and no record. A
+//! pairwise conversation takes one kind of note, the delivery gap of Part 3
+//! `NET-103`.
 
 use umbra_core::{
     group::{roster::Fork, state::Group},
@@ -29,6 +31,10 @@ pub const NOTE_ROLE: u8 = 4;
 /// that member where a signature names it (`GRP-072`), and it is `0xFFFF`
 /// for plain epochs, which name nobody (`GRP-073`, `GRP-074`).
 pub const NOTE_FORK: u8 = 5;
+
+/// This device acknowledged the queue of the contact above a hole, thus
+/// the records in that hole are lost (Part 3 `NET-103`, Part 6 `WIR-117`).
+pub const NOTE_GAP: u8 = 6;
 
 /// The index of a note that names no member.
 pub const NOTE_NOBODY: u16 = 0xFFFF;
@@ -72,6 +78,27 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         batch.commit()?;
         self.groups.noted.insert(conversation);
         Ok(())
+    }
+
+    /// Keeps a delivery gap in a conversation (`NET-103`). The
+    /// conversation shows it, thus it is never complete to the view
+    /// (`WIR-118`).
+    pub fn delivery_gap<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        self.put_roster_note(
+            conversation,
+            RosterNote {
+                at_ms: now_ms,
+                kind: NOTE_GAP,
+                index: NOTE_NOBODY,
+                role: 0,
+            },
+            rng,
+        )
     }
 
     /// Keeps each fork that the roster found since `before` of them

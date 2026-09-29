@@ -251,6 +251,9 @@ pub enum Update {
     QueueEnded([u8; 32]),
     /// A relay refused a record to a contact with `REJECTED` (`NET-182`).
     ChannelDead(ContactId),
+    /// This device acknowledged the queue of a contact above a hole, and
+    /// the records in that hole are lost (Part 6 `WIR-116`).
+    DeliveryGap(ContactId),
     /// A contact reads a new queue, at this address.
     QueueRotated {
         /// The contact.
@@ -478,6 +481,9 @@ pub async fn run_client(
                     Ok(CoverSlot::Receipt) => persist.receipt_sent(),
                     Ok(CoverSlot::Digest) => persist.digest_sent(),
                     _ => {}
+                }
+                for contact in node.take_gaps() {
+                    let _ = updates.send(Update::DeliveryGap(contact));
                 }
                 Vec::new()
             }

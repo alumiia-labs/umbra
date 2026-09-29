@@ -307,6 +307,7 @@ impl Bridge {
             | Update::Queues(_)
             | Update::QueueEnded(_)
             | Update::ChannelDead(_)
+            | Update::DeliveryGap(_)
             | Update::QueueRotated { .. }
             | Update::PeerMoved(_)
             | Update::ChannelRenewed(_)

@@ -3278,6 +3278,13 @@ impl Handle {
                     let _ = running.rotate_now(*contact);
                 }
             }
+            // NET-103: the records in the hole are lost, and the
+            // conversation says so.
+            Update::DeliveryGap(contact) => {
+                if let Ok(conversation) = client.conversation_for(&contact.0) {
+                    let _ = client.delivery_gap(conversation, unix_now_ms(), &mut OsRng);
+                }
+            }
             Update::QueueRotated { contact, address } => {
                 if let Ok(conversation) = client.conversation_for(&contact.0) {
                     let _ = client.dead_queue_rotated(conversation, address, &mut OsRng);

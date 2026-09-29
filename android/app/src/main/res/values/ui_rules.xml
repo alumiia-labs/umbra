@@ -16,6 +16,7 @@
     <string name="umbra_ui_dev_218">Anyone in this chat can copy, photograph, or save a message before it disappears.</string>
     <string name="umbra_ui_ntf_009">A message arrives at once. Google learns when each one arrives.</string>
     <string name="umbra_ui_dis_084">A different party now holds %1$s.</string>
+    <string name="umbra_ui_net_103">Some messages did not arrive.</string>
     <string name="umbra_ui_grp_050">You removed %1$s after 30 days of silence</string>
     <string name="umbra_ui_grp_087">This deletes the message on the device of each member. You cannot undo this. Each member sees that you removed a message.</string>
     <string name="umbra_ui_grp_090">A restore from a backup that predates today brings them back.</string>

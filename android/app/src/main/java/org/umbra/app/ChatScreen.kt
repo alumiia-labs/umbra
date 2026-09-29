@@ -223,8 +223,9 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                 }
             }
             Core.moderationNotes(conversation) { modNotes = it }
-            Core.rosterNotes(conversation) { rosterNotes = it }
         }
+        // NET-103: a pairwise conversation takes the note of a delivery gap.
+        Core.rosterNotes(conversation) { rosterNotes = it }
     }
     var notice by remember(conversation) { mutableStateOf<String?>(null) }
     val save = rememberSave()
