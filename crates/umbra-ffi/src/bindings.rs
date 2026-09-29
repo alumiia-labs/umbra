@@ -1254,6 +1254,9 @@ struct Inner {
     /// The loop count and the forced replacements of the last run, which
     /// the next run continues (Part 10 `REL-172`).
     faults: umbra_core::session::faults::LinkFaults,
+    /// The reports of a transfer run or a group run, which the next run of
+    /// the queues takes (`ATT-119`, `GRP-197`).
+    pending_faults: umbra_core::session::faults::LinkFaults,
     /// The report queues of the manifest of the last run.
     report_queue_count: u32,
     /// The relays of the run, for the view of the connection.
@@ -1970,6 +1973,10 @@ impl Inner {
 
     /// Takes one answer of the group task into the store.
     fn end_group(&mut self, update: GroupUpdate) {
+        if let GroupUpdate::Faults(held) = update {
+            self.pending_faults.absorb(*held);
+            return;
+        }
         match &update {
             GroupUpdate::Posted { tag, .. } => crate::devlog::line(format!("group {tag}: posted")),
             GroupUpdate::Failed { tag, reason } => {
@@ -2122,6 +2129,7 @@ impl Inner {
                 self.group_lost.clear();
                 self.pump_groups();
             }
+            GroupUpdate::Faults(_) => {}
             GroupUpdate::Ended => {
                 self.groups = None;
                 self.group_tags.clear();
@@ -2425,6 +2433,10 @@ impl Inner {
     /// Takes the end of one transfer into the store. A message that a
     /// deletion took since has no row, and its result goes nowhere.
     fn end_transfer(&mut self, update: TransferUpdate) {
+        if let TransferUpdate::Faults(held) = update {
+            self.pending_faults.absorb(*held);
+            return;
+        }
         crate::devlog::line(match &update {
             TransferUpdate::Progress { tag, done, total } => {
                 format!("transfer {tag}: {done} of {total}")
@@ -2435,6 +2447,7 @@ impl Inner {
             TransferUpdate::HandleRead { tag, .. } => format!("transfer {tag}: handle read"),
             TransferUpdate::Failed { tag } => format!("transfer {tag}: failed"),
             TransferUpdate::Gone { tag } => format!("transfer {tag}: gone"),
+            TransferUpdate::Faults(_) => return,
         });
         // ATT-052: a file whose chunk each replica lost ends there. Each
         // other transfer takes the loss as a failure.
@@ -2638,7 +2651,7 @@ impl Inner {
                 _ => {}
             },
             // The top of this function took each such update as a failure.
-            TransferUpdate::Gone { .. } => {}
+            TransferUpdate::Gone { .. } | TransferUpdate::Faults(_) => {}
             TransferUpdate::Failed { tag } => match transfer_tags.remove(&tag) {
                 Some(TransferWork::RestoreRoot { .. } | TransferWork::RestoreObject(_)) => {
                     restore_step = Some(RestoreStep::Failed);
@@ -3148,6 +3161,7 @@ fn handle_of(database_path: String, client: Client<SqliteBackend, ForeignElement
             guard: None,
             uses_second_pin: false,
             faults: Default::default(),
+            pending_faults: Default::default(),
             report_queue_count: 0,
             relays: Vec::new(),
             circuits: Vec::new(),
@@ -3344,6 +3358,7 @@ impl Handle {
             rendezvous_refused,
             pending_grants,
             invitation_host,
+            pending_faults,
             ..
         } = &mut *inner;
         let ended = matches!(update, Update::Offline(_));
@@ -3460,7 +3475,10 @@ impl Handle {
                     }
                 }
             }
-            Update::Faults(held) => *faults = (**held).clone(),
+            Update::Faults(held) => {
+                *faults = (**held).clone();
+                faults.absorb(core::mem::take(pending_faults));
+            }
             // NET-178: the push binding of a queue that ended goes with it.
             Update::QueueEnded(queue) => {
                 let _ = client.unbind_queue(queue, &mut OsRng);
@@ -3908,12 +3926,14 @@ impl Handle {
                 net_events,
                 owns_channels,
                 faults: inner_faults,
+                pending_faults,
                 ..
             } = &mut *inner;
             // The node continues each contact and each invitation of the
             // earlier runs. A linked device runs its sync channels alone:
             // the device that owns a channel reads its queue (`DEV-287`).
             let mut node = ClientNode::with_relays(ingress, candidates, client.root_identity()?);
+            inner_faults.absorb(core::mem::take(pending_faults));
             node.set_faults(core::mem::take(inner_faults));
             // REL-185: no chain of this run holds a removed link.
             node.set_removed_links(

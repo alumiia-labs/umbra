@@ -2543,6 +2543,7 @@ fn update_name(update: &GroupUpdate) -> &'static str {
         GroupUpdate::SubscriptionLost { .. } => "subscription lost",
         GroupUpdate::Reset => "reset",
         GroupUpdate::Ended => "ended",
+        GroupUpdate::Faults(_) => "faults",
     }
 }
 

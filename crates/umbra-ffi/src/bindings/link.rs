@@ -400,6 +400,7 @@ impl Inner {
             | TransferUpdate::HandleRead { tag, .. }
             | TransferUpdate::Failed { tag }
             | TransferUpdate::Gone { tag } => *tag,
+            TransferUpdate::Faults(_) => return Some(update),
         };
         if !matches!(
             self.transfer_tags.get(&tag),

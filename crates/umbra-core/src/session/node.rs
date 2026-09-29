@@ -3854,6 +3854,21 @@ impl ClientNode {
         core::mem::take(&mut self.faults)
     }
 
+    /// The exit `relay` of a circuit of this run failed a task (Part 12
+    /// `ATT-119`, Part 11 `GRP-197`): the chain of that circuit takes a
+    /// link-fault report.
+    pub fn report_relay(&mut self, relay: &[u8; 32]) {
+        let chain = self
+            .slots
+            .iter()
+            .filter_map(|slot| slot.chain)
+            .find(|chain| chain.last() == Some(relay));
+        if let Some(chain) = chain {
+            let now = self.clock;
+            self.faults.relay_failed(&chain, now);
+        }
+    }
+
     /// Continues the counts of an earlier run.
     pub fn set_faults(&mut self, faults: LinkFaults) {
         self.faults = faults;

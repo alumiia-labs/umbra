@@ -431,6 +431,10 @@ impl Upload {
         match step {
             Step::Verify(at) | Step::RegisterFresh(at) | Step::PutFresh(at) => {
                 let bad = *chunk.relays.get(at).ok_or(Error::Malformed)?;
+                // ATT-119: a replica that failed its proof is a link fault.
+                if matches!(step, Step::Verify(_)) {
+                    node.report_relay(&bad);
+                }
                 chunk.failed.push(bad);
                 let others: Vec<[u8; 32]> = chunk
                     .relays

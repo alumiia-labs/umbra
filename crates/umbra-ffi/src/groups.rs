@@ -267,6 +267,9 @@ impl GroupCommand {
 
 /// What the task tells the caller.
 pub enum GroupUpdate {
+    /// A replica that never accepted a record made a link-fault report,
+    /// which the next run of the queues sends (`GRP-197`).
+    Faults(Box<umbra_core::session::faults::LinkFaults>),
     /// The relay made the group queue.
     Created {
         /// The tag of the command.
@@ -520,10 +523,17 @@ async fn session(
                             reason: Some(reason),
                         },
                         // GRP-390: the other replica takes the same record.
-                        GroupOutcome::Unreachable => GroupUpdate::Failed {
-                            tag: held.tag,
-                            reason: None,
-                        },
+                        // GRP-197: the replica that never accepted it is a
+                        // link fault.
+                        GroupOutcome::Unreachable => {
+                            node.report_relay(&held.relay);
+                            let faults = Box::new(node.take_faults());
+                            let _ = updates.send(GroupUpdate::Faults(faults));
+                            GroupUpdate::Failed {
+                                tag: held.tag,
+                                reason: None,
+                            }
+                        }
                     };
                     let _ = updates.send(update);
                 }

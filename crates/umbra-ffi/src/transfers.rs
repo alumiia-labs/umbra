@@ -175,6 +175,9 @@ pub enum TransferUpdate {
         /// The tag of the command.
         tag: u64,
     },
+    /// A chunk relay failed its proof, and the report of its chain goes
+    /// in the next run of the queues (`ATT-119`).
+    Faults(Box<umbra_core::session::faults::LinkFaults>),
 }
 
 enum Active {
@@ -406,6 +409,10 @@ pub async fn run_transfers(
                         active.remove(&tag);
                     }
                     let _ = updates.send(update);
+                    if node.faults().due().is_some() {
+                        let faults = Box::new(node.take_faults());
+                        let _ = updates.send(TransferUpdate::Faults(faults));
+                    }
                 }
                 _ => {}
             }

@@ -120,6 +120,28 @@ impl LinkFaults {
         }
     }
 
+    /// The exit of `chain` failed a task that it took: a chunk relay whose
+    /// proof was wrong or that held no chunk (Part 12 `ATT-119`), or a group
+    /// replica that never accepted a record (Part 11 `GRP-197`). A report
+    /// of the chain goes, once in an epoch.
+    pub fn relay_failed(&mut self, chain: &Chain, now: u64) {
+        self.report(epoch_of(now), chain, 1, 1, now);
+    }
+
+    /// Takes the reports that another run made, as a transfer run or a
+    /// group run, thus the next run of the queues sends them.
+    pub fn absorb(&mut self, other: LinkFaults) {
+        for (report, since) in other.due {
+            if !self.reported.insert((report.epoch, report.hops)) {
+                continue;
+            }
+            if self.due.len() >= DUE_MAX {
+                self.due.pop_front();
+            }
+            self.due.push_back((report, since));
+        }
+    }
+
     fn report(&mut self, epoch: u64, chain: &Chain, loops_sent: u16, loops_lost: u16, now: u64) {
         if !self.reported.insert((epoch, *chain)) {
             return;
@@ -213,6 +235,26 @@ mod tests {
     use super::*;
 
     const A: Chain = [[1; 32], [2; 32], [3; 32]];
+
+    #[test]
+    fn a_failed_relay_reports_its_chain_once_and_another_run_hands_it_on() {
+        let now = 10 * EPOCH_SECONDS;
+        let mut transfer = LinkFaults::default();
+        // ATT-119, GRP-197: one report for the chain in the epoch.
+        transfer.relay_failed(&A, now);
+        transfer.relay_failed(&A, now + 5);
+        assert_eq!(transfer.summary(now).reports_waiting, 1);
+        let report = transfer.due().unwrap();
+        assert_eq!((report.hops, report.loops_lost), (A, 1));
+        // The run of the queues takes it, and one it made already stays one.
+        let mut queues = LinkFaults::default();
+        queues.relay_failed(&A, now);
+        queues.absorb(transfer.clone());
+        assert_eq!(queues.summary(now).reports_waiting, 1);
+        let mut fresh = LinkFaults::default();
+        fresh.absorb(transfer);
+        assert_eq!(fresh.due().map(|report| report.hops), Some(A));
+    }
     const B: Chain = [[1; 32], [4; 32], [5; 32]];
     const T0: u64 = 1_700_000_000 - 1_700_000_000 % EPOCH_SECONDS;
 
