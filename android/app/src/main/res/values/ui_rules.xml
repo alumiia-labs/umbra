@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Part 14 §14.9.3: each string that a rule of the specification requires the
+  interface to show. The stable identifier is `umbra.ui.` and the rule in
+  lower case (IMP-084); a resource name holds no dot and no hyphen, thus
+  `umbra.ui.idn-024` is the resource `umbra_ui_idn_024`. A revision changes
+  no name (IMP-085), and scripts/uistrings.py checks each locale (IMP-086).
+-->
+<resources>
+    <string name="umbra_ui_idn_024">Each person with the link can send a request, and you accept each one. A reusable link has no first-open lock. Your device ends a timed link when it is online.</string>
+    <string name="umbra_ui_idn_087">The pieces alone restore nothing.</string>
+    <string name="umbra_ui_idn_088">Each contact gets one piece of the social half of your recovery code. You keep the user half.</string>
+    <string name="umbra_ui_idn_089">If you accept, this chat no longer recovers from an earlier break-in.</string>
+    <string name="umbra_ui_idn_152">These digits do not check.</string>
+    <string name="umbra_ui_dev_137">Revocation acts on the future only. A revoked device keeps the data that it synced.</string>
+    <string name="umbra_ui_dev_218">Anyone in this chat can copy, photograph, or save a message before it disappears.</string>
+    <string name="umbra_ui_ntf_009">A message arrives at once. Google learns when each one arrives.</string>
+    <string name="umbra_ui_dis_084">A different party now holds %1$s.</string>
+    <string name="umbra_ui_grp_050">You removed %1$s after 30 days of silence</string>
+    <string name="umbra_ui_grp_087">This deletes the message on the device of each member. You cannot undo this. Each member sees that you removed a message.</string>
+    <string name="umbra_ui_grp_090">A restore from a backup that predates today brings them back.</string>
+    <string name="umbra_ui_grp_374">A removed device took your place in this group. Ask an admin for a new invitation.</string>
+    <string name="umbra_ui_att_157">The original keeps its metadata, such as a place and a time.</string>
+    <string name="umbra_ui_abu_040">They can still send. Their messages reach this device and are dropped unread.</string>
+    <string name="umbra_ui_abu_041">They are not told.</string>
+    <string name="umbra_ui_imp_047">The file leaves the encrypted store. Each app and service of this device can read it there.</string>
+    <string name="umbra_ui_imp_050">The backup of Android carries no UMBRA data.</string>
+</resources>

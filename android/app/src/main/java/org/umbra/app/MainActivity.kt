@@ -25,6 +25,7 @@ class MainActivity : ComponentActivity() {
         // mode of the system.
         val clear = Color.TRANSPARENT
         enableEdgeToEdge(SystemBarStyle.light(clear, clear), SystemBarStyle.light(clear, clear))
+        UiText.start(this)
         Notifier.makeChannels(this)
         // NTF-052: a network change draws a new phase of the Private clock.
         Modes.watchNetwork(this)

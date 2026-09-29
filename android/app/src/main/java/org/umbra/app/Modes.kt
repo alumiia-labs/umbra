@@ -41,10 +41,16 @@ import java.security.SecureRandom
  * moves. Off drains when the user opens the app. The mode is a setting of
  * this device.
  */
-enum class NotifyMode(val label: String, val trade: String) {
-    Instant("Instant", "A message arrives at once. Google learns when each one arrives."),
+enum class NotifyMode(val label: String, private val words: String?) {
+    // NTF-009: the trade of the default mode, in one honest line.
+    Instant("Instant", null),
     Private("Private", "A message arrives on a fixed clock of about 30 minutes. Google learns nothing about arrivals."),
     Off("Off", "A message arrives when you open UMBRA."),
+    ;
+
+    /** The trade of the mode in one line. */
+    val trade: String
+        get() = words ?: UiText.get(R.string.umbra_ui_ntf_009)
 }
 
 object Modes {

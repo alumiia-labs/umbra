@@ -46,8 +46,7 @@ fun BlockScreen(
                 PrimaryButton("Unblock") { onSet(false) }
             } else {
                 Note(
-                    "They can still send. Their messages reach this device and are dropped " +
-                        "unread. They are not told.",
+                    UiText.get(R.string.umbra_ui_abu_040) + " " + UiText.get(R.string.umbra_ui_abu_041),
                 )
                 Spacer(Modifier.height(16.dp))
                 DangerButton("Block") { onSet(true) }

@@ -780,7 +780,8 @@ object Core {
             if (kind != wanted) {
                 restoreFailed(
                     if (kind == 0) {
-                        "These digits do not check."
+                        // IDN-152: a check that fails says so.
+                        UiText.get(R.string.umbra_ui_idn_152)
                     } else {
                         "These are the digits of ${names[kind]}. This field takes ${names[wanted]}."
                     },

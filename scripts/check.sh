@@ -64,4 +64,8 @@ python scripts/vectors.py --check
 step "specification consistency"
 python scripts/speccheck.py --quiet
 
+step "interface strings"
+# Part 14 §14.9.3: each string that a rule requires, in each locale.
+python scripts/uistrings.py
+
 printf '\nall checks passed\n'

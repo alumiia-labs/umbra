@@ -339,7 +339,7 @@ fun KeyChangePanel(chat: Chat, pending: uniffi.umbra_ffi.FfiKeyChange) {
         Spacer(Modifier.height(6.dp))
         Text(
             "Compare this number with ${chat.title} in person or over a call that you trust. " +
-                "If you accept, this chat no longer recovers from an earlier break-in.",
+                UiText.get(R.string.umbra_ui_idn_089),
             style = MaterialTheme.typography.bodyMedium,
             color = Palette.TextSecondary,
         )

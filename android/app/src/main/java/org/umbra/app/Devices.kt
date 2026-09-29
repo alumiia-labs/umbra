@@ -54,9 +54,8 @@ fun DevicesScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
             entries = listOf(
                 RowEntry("trash-can", "Remove") { Core.removeDevice(device.deviceId) },
             ),
-            note = "Revocation acts on the future only. A revoked device keeps the data " +
-                "that it synced. For a device in hostile hands, reset the identity from " +
-                "the recovery phrase.",
+            note = UiText.get(R.string.umbra_ui_dev_137) +
+                " For a device in hostile hands, reset the identity in the settings.",
             onDismiss = { removing = null },
         )
     }

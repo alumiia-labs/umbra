@@ -191,11 +191,7 @@ fun PublicLinksScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
             DirectoryState("Publishing the link.")
             Spacer(Modifier.height(14.dp))
             // IDN-024: the UI states the limit of a reusable link.
-            Note(
-                "Each person with the link can send a request, and you accept each one. " +
-                    "A reusable link has no first-open lock. Your device ends a timed link " +
-                    "when it is online.",
-            )
+            Note(UiText.get(R.string.umbra_ui_idn_024))
             if (Core.publicLinks.isNotEmpty()) {
                 Spacer(Modifier.height(20.dp))
                 SectionLabel("Your links")

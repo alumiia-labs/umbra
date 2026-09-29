@@ -41,7 +41,7 @@ fun modNoteText(note: FfiModNote): String {
     val who = roleWord(note.actorRole)
     return buildList {
         if (note.removed > 0u) {
-            add("$who removed ${messages(note.removed)}. A restore from a backup that predates today brings them back.")
+            add("$who removed ${messages(note.removed)}. " + UiText.get(R.string.umbra_ui_grp_090))
         }
         if (note.hidden > 0u) add("$who hid ${messages(note.hidden)}.")
         if (note.shown > 0u) add("$who put back ${messages(note.shown)}.")
@@ -71,7 +71,7 @@ fun rosterNoteText(note: FfiRosterNote, names: Map<UShort, String>): String {
     return when (note.kind.toInt()) {
         1 -> "$who joined"
         2 -> if (isYou) "You left the group" else "$who is no longer in the group"
-        3 -> "You removed $who after 30 days of silence"
+        3 -> UiText.get(R.string.umbra_ui_grp_050, who)
         4 -> if (isYou) "You are now ${roleName(note.role)}" else "$who is now ${roleName(note.role)}"
         5 -> if (note.index == NOBODY) {
             "The members disagree on a change to the group"

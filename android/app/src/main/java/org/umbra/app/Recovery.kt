@@ -142,8 +142,11 @@ fun RecoveryCodeScreen(onBack: () -> Unit, push: (Screen) -> Unit = {}) {
             }
             Spacer(Modifier.height(16.dp))
             Note(backupLine(context, Core.lastBackupAt))
+            Spacer(Modifier.height(8.dp))
+            // IMP-050: the backup of the platform holds nothing of UMBRA.
+            Note(UiText.get(R.string.umbra_ui_imp_050))
             Spacer(Modifier.height(16.dp))
-            EntryRow(RowEntry("user-group", "Recovery with contacts", "Part 4 §4.7.3") { push(Screen.SocialRecovery) })
+            EntryRow(RowEntry("user-group", "Recovery with contacts") { push(Screen.SocialRecovery) })
         }
     }
 }
@@ -203,9 +206,11 @@ fun SocialRecoveryScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
         BackBar("Recovery with contacts", onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
             Spacer(Modifier.height(8.dp))
+            // IDN-087, IDN-088: which half each holder takes, and what the
+            // pieces do alone.
             Note(
-                "Each contact gets one piece of the social half of your recovery code. You keep the user " +
-                    "half. $needed pieces and your user half restore your account. The pieces alone restore nothing.",
+                UiText.get(R.string.umbra_ui_idn_088) + " $needed pieces and your user half restore your account. " +
+                    UiText.get(R.string.umbra_ui_idn_087),
             )
             if (given.isNotEmpty()) {
                 val names = given.map { share ->

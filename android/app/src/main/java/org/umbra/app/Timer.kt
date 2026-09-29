@@ -148,7 +148,7 @@ fun DisappearingScreen(chat: Chat, onBack: () -> Unit) {
                 }
                 Spacer(Modifier.height(14.dp))
                 // DEV-218: a fact that the interface must state.
-                Note("Anyone in this chat can copy, photograph, or save a message before it disappears.")
+                Note(UiText.get(R.string.umbra_ui_dev_218))
             }
         }
     }

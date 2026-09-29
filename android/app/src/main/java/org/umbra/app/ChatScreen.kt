@@ -343,7 +343,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
             if (pending.bytes > LARGE_FILE_WARN) {
                 add("Sending uses about ${Files.uplink(context, pending.bytes)} of data.")
             }
-            if (pending.isOriginal) add("The original keeps its metadata, such as a place and a time.")
+            if (pending.isOriginal) add(UiText.get(R.string.umbra_ui_att_157))
         }
         ActionSheet(
             if (pending.bytes > 0) "Send ${Files.size(context, pending.bytes)}?" else "Send this file?",
@@ -357,8 +357,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
             "Remove this message?",
             listOf(RowEntry("ban", "Remove for everyone") { Core.moderate(line.handle, MOD_REMOVE) }),
             // GRP-087: a remove is not reversible, and the sheet says so.
-            note = "This deletes the message on the device of each member. You cannot undo this. " +
-                "Each member sees that you removed a message.",
+            note = UiText.get(R.string.umbra_ui_grp_087),
             onDismiss = { removing = null },
         )
     }
@@ -575,8 +574,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
             // GRP-373, GRP-374: a removed device took the index of this member.
             chat.isReturning ->
                 "A removed device took your place in this group. Your request to an admin waits."
-            chat.needsInvitation ->
-                "A removed device took your place in this group. Ask an admin for a new invitation."
+            chat.needsInvitation -> UiText.get(R.string.umbra_ui_grp_374)
             chat.isGroup && !chat.isMember ->
                 "You are no longer a member of this group. The messages here stay on this device."
             else -> null

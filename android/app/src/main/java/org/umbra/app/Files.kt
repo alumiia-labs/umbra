@@ -1014,7 +1014,7 @@ fun rememberSave(): (Line) -> Unit {
                     start(line)
                 },
             ),
-            note = "The file leaves the encrypted store. Each app and service of this device can read it there.",
+            note = UiText.get(R.string.umbra_ui_imp_047),
             onDismiss = { warning = null },
         )
     }

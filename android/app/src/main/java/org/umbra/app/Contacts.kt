@@ -287,7 +287,7 @@ fun UseInvitationScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                     }
                 } else if (Core.takeoverOf == pasted.trim()) {
                     // DIS-084, DIS-085: the hello goes only after a confirmation.
-                    Note("A different party now holds ${pasted.trim()}.", isError = true)
+                    Note(UiText.get(R.string.umbra_ui_dis_084, pasted.trim()), isError = true)
                     Spacer(Modifier.height(12.dp))
                     SecondaryButton("Send anyway", enabled = Core.online) {
                         Core.sendRequest(pasted.trim(), name, note, confirmed = true)
