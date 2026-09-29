@@ -1430,6 +1430,12 @@ enum RestoreStep {
 
 /// What one command of the transfer task belongs to.
 enum TransferWork {
+    /// The catch-up object of a peer that lags, by its sync channel
+    /// (`DEV-237`).
+    CatchUpOut(crate::ConversationId),
+    /// The catch-up object that a peer sent, by its sync channel
+    /// (`DEV-239`).
+    CatchUpIn(crate::ConversationId),
     /// The snapshot that this admin writes for a member behind the roster
     /// of a group, at its roster epoch (`GRP-330`).
     RecoverySnapshot {
@@ -2232,6 +2238,47 @@ impl Inner {
         if client.resend_one(now, &mut OsRng).unwrap_or(false) {
             let _ = running.flush(client, &mut OsRng);
         }
+        self.pump_catch_up(now);
+    }
+
+    /// The catch-up object of each peer that lags goes on the chunk path,
+    /// and each one that a peer sent comes from it (`DEV-236` to `DEV-239`).
+    fn pump_catch_up(&mut self, now: u64) {
+        let is_moving = |tags: &BTreeMap<u64, TransferWork>| {
+            tags.values().any(|work| {
+                matches!(
+                    work,
+                    TransferWork::CatchUpOut(_) | TransferWork::CatchUpIn(_)
+                )
+            })
+        };
+        if is_moving(&self.transfer_tags) {
+            return;
+        }
+        if let Ok(Some(job)) = self.client.take_catch_up(now, &mut OsRng) {
+            let tag = self.next_tag(TransferWork::CatchUpOut(job.channel));
+            self.send_transfer(TransferCommand::Upload {
+                tag,
+                plain: job.object,
+                // A catch-up object is no media of the user (Part 12 §12.3).
+                shape: Shape::default(),
+            });
+            return;
+        }
+        let Ok(fetches) = self.client.catch_up_fetches() else {
+            return;
+        };
+        if let Some((channel, descriptor)) = fetches.into_iter().next() {
+            let Ok(descriptor) = umbra_wire::descriptor::FileDescriptor::parse(&descriptor) else {
+                let _ = self.client.catch_up_failed(channel);
+                return;
+            };
+            let tag = self.next_tag(TransferWork::CatchUpIn(channel));
+            self.send_transfer(TransferCommand::Download {
+                tag,
+                descriptor: Box::new(descriptor),
+            });
+        }
     }
 
     /// The events of the network that belong to the link of a device.
@@ -2662,6 +2709,19 @@ impl Inner {
                             .is_ok();
                     }
                 }
+                Some(TransferWork::CatchUpOut(channel)) => {
+                    // DEV-238: the descriptor goes on the sync channel.
+                    let mut descriptor = vec![0u8; uploaded.descriptor.len()];
+                    if uploaded.descriptor.encode(&mut descriptor).is_ok()
+                        && client
+                            .catch_up_uploaded(channel, &descriptor, &mut OsRng)
+                            .is_ok()
+                    {
+                        if let Some(running) = bridge {
+                            let _ = running.flush(client, &mut OsRng);
+                        }
+                    }
+                }
                 Some(TransferWork::GroupState(conversation)) => {
                     let mut descriptor = vec![0u8; uploaded.descriptor.len()];
                     if uploaded.descriptor.encode(&mut descriptor).is_ok()
@@ -2697,6 +2757,16 @@ impl Inner {
                     moved = client
                         .apply_group_state(&subject, &plain, &mut OsRng)
                         .is_ok();
+                }
+                // DEV-239: each record of the object counts as a record of
+                // the sync channel.
+                Some(TransferWork::CatchUpIn(channel)) => {
+                    moved = client
+                        .catch_up_fetched(channel, &plain, unix_now_ms(), &mut OsRng)
+                        .is_ok();
+                    if let Some(running) = bridge {
+                        let _ = running.flush(client, &mut OsRng);
+                    }
                 }
                 // GRP-329: the member takes the roster of the snapshot.
                 Some(TransferWork::RecoveryFetch(conversation)) => {
@@ -2756,6 +2826,10 @@ impl Inner {
                 Some(TransferWork::EpochSlots(upload)) => client.epoch_upload_failed(*upload),
                 Some(TransferWork::GroupState(conversation)) => {
                     client.group_state_failed(conversation);
+                }
+                // DEV-240: the paced resend brings each record.
+                Some(TransferWork::CatchUpIn(channel)) => {
+                    let _ = client.catch_up_failed(channel);
                 }
                 // The gap asks again later.
                 Some(TransferWork::RecoveryFetch(conversation)) => {

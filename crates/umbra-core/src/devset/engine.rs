@@ -437,6 +437,20 @@ impl SyncEngine {
         }
     }
 
+    /// The counter at or below which `peer` acknowledged each record.
+    pub fn acked_of(&self, peer: &DeviceId) -> Option<u64> {
+        self.peers.get(peer).map(|state| state.log.acked())
+    }
+
+    /// Each counter that `peer` did not acknowledge and that the log
+    /// retains, in order: the records of a catch-up object (`DEV-236`).
+    pub fn retained_counters(&self, peer: &DeviceId) -> Vec<u64> {
+        self.peers
+            .get(peer)
+            .map(|state| state.log.to_resend().map(|held| held.counter).collect())
+            .unwrap_or_default()
+    }
+
     /// The lowest counter that the log of a peer still retains, or the
     /// next counter when no log retains one: each stored body below it
     /// waits for no resend.

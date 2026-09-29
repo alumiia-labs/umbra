@@ -4231,6 +4231,117 @@ mod tests {
     }
 
     #[test]
+    fn a_peer_that_lags_takes_a_catch_up_object_and_applies_each_record() {
+        use umbra_core::devset::{
+            engine::SyncEngine,
+            link::{DeviceIdentity, LinkHello},
+            sync::{Origin, AUTHOR_PEER, SCOPE_PAIRWISE},
+            SYNC_CATCHUP_LAG,
+        };
+        use umbra_core::session::node::StateChange;
+        use umbra_wire::app::{
+            devset::{ControlType, DeviceSetBody},
+            AppKind,
+        };
+
+        let mut rng = Rng(115);
+        let mut phone = new_client(&mut rng);
+        phone.ensure_device_set("Phone", &mut rng).unwrap();
+        let own = phone.device_identity().unwrap().unwrap();
+        let laptop = DeviceIdentity::generate("Laptop", &mut rng);
+        let hello = LinkHello {
+            device_id: laptop.device_id,
+            device_pk: laptop.device_key().public().clone(),
+            roster_pk: laptop.roster_key().verifying_key().to_bytes().to_vec(),
+            label: laptop.label,
+            ct: umbra_crypto::kem::Ciphertext::from_bytes(&[0; umbra_crypto::kem::CIPHERTEXT_LEN])
+                .unwrap(),
+        };
+        let roster = phone.sign_linked_device(&hello, &mut rng).unwrap();
+        phone.commit_roster(&roster, &mut rng).unwrap();
+        let channel = ContactId([0x78; 32]);
+        let change = StateChange::Contact {
+            contact: channel,
+            state: zeroize::Zeroizing::new(vec![1, 2, 3]),
+        };
+        phone
+            .commit_network(&[change], &[], 1_000_000, &mut rng)
+            .unwrap();
+        let conversation = phone.conversation_for(&channel.0).unwrap();
+        phone
+            .set_pending_peer(laptop.device_id, &laptop.label, &mut rng)
+            .unwrap();
+        phone.mark_device_peer(conversation, &mut rng).unwrap();
+
+        // DEV-236: the laptop acknowledged nothing of more records than
+        // `SYNC_CATCHUP_LAG`, thus one object holds each of them.
+        let group = phone
+            .create_group("Many", [[0xA1; 32], [0xB2; 32]], 1_000, &mut rng)
+            .unwrap();
+        assert!(phone.take_catch_up(2_000, &mut rng).unwrap().is_none());
+        let count = SYNC_CATCHUP_LAG + 2;
+        for n in 0..count {
+            phone
+                .set_draft(group, &units(&format!("draft {n}")), &mut rng)
+                .unwrap();
+        }
+        let job = phone.take_catch_up(2_000, &mut rng).unwrap().unwrap();
+        assert_eq!(job.channel, conversation);
+        let mut records = 0;
+        let mut rest = job.object.as_slice();
+        while !rest.is_empty() {
+            let len = u32::from_be_bytes(rest[..4].try_into().unwrap()) as usize;
+            rest = &rest[4 + len..];
+            records += 1;
+        }
+        assert!(records as u64 >= count);
+        // One lag makes one object.
+        assert!(phone.take_catch_up(2_000, &mut rng).unwrap().is_none());
+
+        // DEV-238, DEV-239: the object of the laptop fills a hole of the
+        // phone, and each record counts as a record of the sync channel.
+        let mut engine = SyncEngine::new(laptop.device_id, &[own.device_id]).unwrap();
+        let origin = Origin {
+            scope: SCOPE_PAIRWISE,
+            subject: [0x42; 32],
+            author: AUTHOR_PEER,
+        };
+        let bodies: Vec<Vec<u8>> = (0u8..3)
+            .map(|n| {
+                let inner = record(AppKind::Text, [n; 16], b"hi");
+                engine
+                    .publish(&inner, origin, [n; 16], 0, 100)
+                    .unwrap()
+                    .body
+            })
+            .collect();
+        let now = 3_000;
+        let third = record(AppKind::DeviceSet, [0x70; 16], &bodies[2]);
+        deliver(&mut phone, &channel, &third, now * 1_000, &mut rng);
+        assert_eq!(phone.history_holes(now).unwrap().len(), 1);
+        let control = DeviceSetBody::Control {
+            control_type: ControlType::CatchUpDescriptor,
+            payload: b"a descriptor",
+        };
+        let mut encoded = vec![0u8; 64];
+        let n = control.encode(&mut encoded).unwrap();
+        let notice = record(AppKind::DeviceSet, [0x71; 16], &encoded[..n]);
+        deliver(&mut phone, &channel, &notice, now * 1_000, &mut rng);
+        let fetches = phone.catch_up_fetches().unwrap();
+        assert_eq!(fetches, vec![(conversation, b"a descriptor".to_vec())]);
+        let mut object = Vec::new();
+        for body in &bodies[..2] {
+            object.extend_from_slice(&(body.len() as u32).to_be_bytes());
+            object.extend_from_slice(body);
+        }
+        phone
+            .catch_up_fetched(conversation, &object, now * 1_000, &mut rng)
+            .unwrap();
+        assert!(phone.history_holes(now).unwrap().is_empty());
+        assert!(phone.catch_up_fetches().unwrap().is_empty());
+    }
+
+    #[test]
     fn a_hole_in_the_synced_history_arrives_then_shows_as_a_gap() {
         use umbra_core::devset::{
             engine::SyncEngine,

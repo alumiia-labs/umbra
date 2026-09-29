@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 mod alerts;
 mod backup;
 mod block;
+mod catch_up;
 mod dead;
 mod devices;
 mod discovery;
@@ -46,6 +47,7 @@ mod typing;
 
 pub use alerts::{ALERT_ALL, ALERT_MENTIONS, ALERT_NONE};
 pub use backup::{BackupUpload, PendingBackup, RestoredBackup, RootWrite};
+pub use catch_up::CatchUp;
 pub use dead::DeadWork;
 pub use devices::DeviceInfo;
 pub use discovery::{ContactRequest, EntryKind, Published, PROFILE_NAME_MAX};

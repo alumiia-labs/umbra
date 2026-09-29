@@ -78,7 +78,7 @@ pub(super) struct Synced {
     pub expires_in: u32,
 }
 
-fn counter_key(counter: u64) -> [u8; 8] {
+pub(super) fn counter_key(counter: u64) -> [u8; 8] {
     counter.to_be_bytes()
 }
 
@@ -499,7 +499,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(())
     }
 
-    fn queue_sync<R: CryptoRng + ?Sized>(
+    pub(super) fn queue_sync<R: CryptoRng + ?Sized>(
         &mut self,
         peer: ConversationId,
         body: &[u8],
@@ -692,6 +692,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }) if self.apply_roster(&payload, rng).unwrap_or(false) => {
                     self.events.push_back(Event::Conversations);
                 }
+                // DEV-238: the object of a peer waits for its fetch.
+                Ok(Taken::Control {
+                    control_type: ControlType::CatchUpDescriptor,
+                    payload,
+                }) => self.keep_catch_up(channel, &payload, rng)?,
                 _ => {}
             }
         }
@@ -706,7 +711,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
     /// A body for a resend at `now`: a timed record carries the period that
     /// remains then (`DEV-243`), and one whose period ended goes nowhere.
-    fn restamped(&mut self, mut body: Vec<u8>, now: u64) -> Result<Option<Vec<u8>>, Error> {
+    pub(super) fn restamped(
+        &mut self,
+        mut body: Vec<u8>,
+        now: u64,
+    ) -> Result<Option<Vec<u8>>, Error> {
         let (subject, inner) = match SyncedRecord::parse(&body) {
             Ok(record) if record.context.expires_in > 0 => {
                 (record.origin.subject, Zeroizing::new(record.inner.to_vec()))
