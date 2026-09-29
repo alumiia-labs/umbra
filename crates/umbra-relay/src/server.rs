@@ -243,6 +243,11 @@ pub async fn run_node(
                         *due = instant + Duration::from_millis(wait.max(1));
                     }
                 }
+                // Part 3 §3.9: each forward cell whose per-hop delay ended.
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX));
+                outputs.extend(node.release_delayed(now_ms, now, &mut rng));
                 // NTF-049, NTF-066: the end of a coalescing window and
                 // each re-push, once each second.
                 if now > last_push_tick {

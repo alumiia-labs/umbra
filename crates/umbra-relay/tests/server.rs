@@ -21,7 +21,7 @@ use umbra_crypto::{
     x25519::{PublicKey as XPublic, StaticSecret},
 };
 use umbra_onion::{
-    build::{build_cell_body, read_cell_body, Pending, BUILD_BUCKET, HELLO_LEN},
+    build::{build_cell_body, read_cell_body, DelayClass, Pending, BUILD_BUCKET, HELLO_LEN},
     circuit::CircuitBuild,
 };
 use umbra_relay::{
@@ -107,7 +107,8 @@ async fn a_client_upgrades_opens_a_session_and_builds_one_hop() {
     // One hop of a build.
     let mut build = CircuitBuild::new([0xA0; 16]);
     let mut hello = [0u8; HELLO_LEN];
-    let pending = Pending::hello(&relay_for_client, &mut OsRng, &mut hello).unwrap();
+    let pending =
+        Pending::hello(&relay_for_client, DelayClass::Fast, &mut OsRng, &mut hello).unwrap();
     let mut body = vec![0u8; BUILD_BUCKET.body_len()];
     build_cell_body(CellCommand::Extend, &hello, &mut body).unwrap();
     let tag = build.seal(&mut body).unwrap();

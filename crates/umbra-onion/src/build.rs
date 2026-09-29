@@ -24,13 +24,50 @@ use umbra_wire::{
 use crate::Error;
 
 /// The length of a `HopHello`.
-pub const HELLO_LEN: usize = 32 + FLIGHT1_LEN;
+pub const HELLO_LEN: usize = 32 + FLIGHT1_LEN + 1;
 /// The length of a `HopReply`.
 pub const REPLY_LEN: usize = FLIGHT2_LEN;
 /// The bucket of every build cell (`NET-150`, `NET-151`).
 pub const BUILD_BUCKET: Bucket = Bucket::B1;
 
-const _: () = assert!(HELLO_LEN == 1_264);
+const _: () = assert!(HELLO_LEN == 1_265);
+
+/// The privacy mode of a circuit (Part 3 §3.9): the mean of the delay that
+/// each hop takes for each forward cell. A circuit carries one mode
+/// (`NET-028`), and the mode is in no cell size, cell count, or chain length
+/// (`NET-080`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+#[repr(u8)]
+pub enum DelayClass {
+    /// No per-hop delay.
+    Fast = 0,
+    /// An exponential delay with a mean of 150 ms at each hop.
+    #[default]
+    Balanced = 1,
+    /// An exponential delay with a mean of 700 ms at each hop.
+    Private = 2,
+}
+
+impl DelayClass {
+    /// Reads the byte of a hello.
+    pub const fn from_byte(b: u8) -> Result<Self, Error> {
+        match b {
+            0 => Ok(DelayClass::Fast),
+            1 => Ok(DelayClass::Balanced),
+            2 => Ok(DelayClass::Private),
+            _ => Err(Error::Build),
+        }
+    }
+
+    /// The mean of the per-hop delay, in milliseconds.
+    pub const fn mean_ms(self) -> u64 {
+        match self {
+            DelayClass::Fast => 0,
+            DelayClass::Balanced => 150,
+            DelayClass::Private => 700,
+        }
+    }
+}
 const _: () = assert!(REPLY_LEN == 1_136);
 
 /// The payload of an `EXTEND` cell.
@@ -39,6 +76,8 @@ pub struct HopHello<'a> {
     pub relay_id: [u8; 32],
     /// Flight 1 of Part 5 §5.4.9.
     pub flight1: &'a [u8],
+    /// The privacy mode of the circuit (§3.9).
+    pub delay_class: DelayClass,
 }
 
 impl<'a> HopHello<'a> {
@@ -50,6 +89,7 @@ impl<'a> HopHello<'a> {
         let mut w = Writer::new(out);
         w.put(&self.relay_id)?;
         w.put(self.flight1)?;
+        w.u8(self.delay_class as u8)?;
         Ok(w.position())
     }
 
@@ -58,8 +98,13 @@ impl<'a> HopHello<'a> {
         let mut r = Reader::new(bytes);
         let relay_id = r.array()?;
         let flight1 = r.take(FLIGHT1_LEN)?;
+        let delay_class = DelayClass::from_byte(r.u8()?)?;
         r.finish()?;
-        Ok(HopHello { relay_id, flight1 })
+        Ok(HopHello {
+            relay_id,
+            flight1,
+            delay_class,
+        })
     }
 }
 
@@ -88,16 +133,22 @@ pub fn read_cell_body(body: &[u8]) -> Result<(CellCommand, &[u8]), Error> {
 pub struct Pending(nk::Client);
 
 impl Pending {
-    /// Makes the hello to `relay`, written into `out` at `HELLO_LEN` bytes.
+    /// Makes the hello to `relay` for a circuit of `class`, written into
+    /// `out` at `HELLO_LEN` bytes.
     pub fn hello<R: CryptoRng + ?Sized>(
         relay: &RelayStatic,
+        class: DelayClass,
         rng: &mut R,
         out: &mut [u8],
     ) -> Result<Self, Error> {
         let out = out.get_mut(..HELLO_LEN).ok_or(Error::Length)?;
-        let (id, flight) = out.split_at_mut(32);
+        let (id, rest) = out.split_at_mut(32);
         id.copy_from_slice(&relay.relay_id);
+        let (flight, mode) = rest.split_at_mut(FLIGHT1_LEN);
         let client = nk::Client::flight1(relay, rng, flight, &mut NoTrace)?;
+        if let Some(byte) = mode.first_mut() {
+            *byte = class as u8;
+        }
         Ok(Pending(client))
     }
 
@@ -196,7 +247,14 @@ mod tests {
             relay_id: [6; 32],
         };
         let mut hello = [0u8; HELLO_LEN];
-        let pending = Pending::hello(&relay, &mut Rng(1), &mut hello).unwrap();
+        let pending = Pending::hello(&relay, DelayClass::Private, &mut Rng(1), &mut hello).unwrap();
+        // The mode rides at the end of the hello (Part 3 §3.9).
+        assert_eq!(
+            HopHello::parse(&hello).unwrap().delay_class,
+            DelayClass::Private
+        );
+        assert_eq!(DelayClass::Private.mean_ms(), 700);
+        assert!(DelayClass::from_byte(3).is_err());
         let mut body = [0u8; BUILD_BUCKET.body_len()];
         build_cell_body(CellCommand::Extend, &hello, &mut body).unwrap();
         let (cmd, payload) = read_cell_body(&body).unwrap();
@@ -209,7 +267,7 @@ mod tests {
         // The queue relay keeps the private half of `er`, and the client
         // reads the public half from the reply.
         let mut hello_q = [0u8; HELLO_LEN];
-        let pending = Pending::hello(&relay, &mut Rng(4), &mut hello_q).unwrap();
+        let pending = Pending::hello(&relay, DelayClass::Fast, &mut Rng(4), &mut hello_q).unwrap();
         let (ss_relay, session_sk) =
             answer_at_queue_relay(&relay, &s_sk, &hello_q, &mut Rng(5), &mut reply).unwrap();
         let (ss_client, session_pk) = pending.finish_at_queue_relay(&reply).unwrap();

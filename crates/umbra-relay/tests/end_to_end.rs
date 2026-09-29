@@ -30,7 +30,7 @@ use umbra_crypto::{
     x25519::{PublicKey as XPublic, StaticSecret},
 };
 use umbra_onion::{
-    build::{build_cell_body, read_cell_body, Pending, BUILD_BUCKET, HELLO_LEN},
+    build::{build_cell_body, read_cell_body, DelayClass, Pending, BUILD_BUCKET, HELLO_LEN},
     circuit::CircuitBuild,
 };
 use umbra_relay::{
@@ -213,7 +213,7 @@ impl Client {
         for hop in 0..3usize {
             let relay = network.statics[hop].clone_static();
             let mut hello = [0u8; HELLO_LEN];
-            let pending = Pending::hello(&relay, &mut rng, &mut hello).unwrap();
+            let pending = Pending::hello(&relay, DelayClass::Fast, &mut rng, &mut hello).unwrap();
             let mut body = vec![0u8; BUILD_BUCKET.body_len()];
             build_cell_body(CellCommand::Extend, &hello, &mut body).unwrap();
             let tag = build.seal(&mut body).unwrap();

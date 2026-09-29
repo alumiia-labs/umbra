@@ -902,11 +902,13 @@ travels in an `EXTENDED` cell. Part 6 §6.3 gives the two command bytes, and
 Part 1 §1.8 lists the two payloads. The payloads follow the command byte.
 
 ```
-HopHello {                        // the EXTEND payload, 1 264 bytes
+HopHello {                        // the EXTEND payload, 1 265 bytes
     relay_id        [32]u8        // the relay_id of the hop that answers
     e               [32]u8        // flight 1 of Part 5 §5.4.9
     e1              [1184]u8
     tag1            [16]u8
+    delay_class     u8            // the privacy mode of §3.9: 0x00 Fast,
+                                  // 0x01 Balanced, 0x02 Private
 }
 
 HopReply {                        // the EXTENDED payload, 1 136 bytes
@@ -916,7 +918,7 @@ HopReply {                        // the EXTENDED payload, 1 136 bytes
 }
 ```
 
-With the command byte the two bodies are 1 265 bytes and 1 137 bytes. Each one
+With the command byte the two bodies are 1 266 bytes and 1 137 bytes. Each one
 fits the `B1` command area of 2 014 bytes (Part 6 §6.9), and each one exceeds
 the `B0` command area. Thus a build costs six `B1` cells.
 
@@ -1903,6 +1905,29 @@ per-hop delay.
 | Send batching | no | no | no |
 | Expected p50 delivery | ~1.1 s | ~1.6 s | ~3.3 s |
 | Expected p95 delivery | ~3.4 s | ~3.9 s | ~6.5 s |
+
+**Where the per-hop delay applies.** Each hop of a circuit reads the mode of
+that circuit from the `delay_class` of its own `HopHello` (§3.4.3).
+
+- **[NET-336]** A client MUST put the same `delay_class` in the `HopHello` of
+  each hop of one circuit. **[NET-337]** A relay MUST drop an `EXTEND` whose
+  `delay_class` is not one of the three values above.
+- **[NET-338]** A relay MUST hold each forward cell of a built circuit for a
+  delay that it draws from an exponential distribution with the mean of the
+  mode of that circuit, before it moves the cell on or serves it. **[NET-339]**
+  A relay MUST NOT release a forward cell of a circuit before an earlier
+  forward cell of that circuit. A build cell and a `DESTROY` go at once.
+- The delay of the third hop is the delay of `NET-039`. The backward
+  direction takes the inbound pacing of §3.5.2 and no per-hop delay.
+
+> *Cause.* An earlier draft named a per-hop delay for each mode and no field
+> that told a relay the mode. The field rides in the build cell of each hop,
+> which the relay of that hop reads, and which reaches it under the layers
+> of the hops before it (§3.4.3). A relay on the circuit learns the mode of
+> that circuit, as it learns the timing of its cells. No cell of the steady
+> state carries the mode, thus `NET-080` holds. The field is outside the
+> handshake: a hop before the last can change it, and that hop can delay
+> each cell itself already.
 
 **`PACING_MEAN` is 1 s.** **[NET-077]** A relay MUST use this one mean in each privacy mode.
 **[NET-078]** A relay MUST NOT change the mean because of the mode. §3.9.1 forbids a mode that

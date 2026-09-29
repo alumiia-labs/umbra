@@ -66,7 +66,7 @@ each column when a crate implements the requirement and a test covers it.
 | --- | --- | --- | --- | --- | --- | --- |
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
-| `NET` | 239 | 85 | 1 | 0 | 8 | **333** |
+| `NET` | 242 | 86 | 1 | 0 | 8 | **337** |
 | `IDN` | 133 | 46 | 1 | 0 | 5 | **185** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
 | `WIR` | 398 | 85 | 0 | 0 | 7 | **490** |
@@ -79,7 +79,7 @@ each column when a crate implements the requirement and a test covers it.
 | `ABU` | 71 | 30 | 1 | 0 | 0 | **102** |
 | `IMP` | 119 | 41 | 0 | 0 | 2 | **162** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2053 | 623 | 7 | 0 | 53 | **2736** |
+| **All** | 2056 | 624 | 7 | 0 | 53 | **2740** |
 
 ## SCP — Scope and Conventions
 
@@ -470,6 +470,10 @@ Source: `spec/03-network-architecture.md`
 | `NET-333` | §3.4.3 | MUST | A relay | A relay MUST close a new connection at once when it holds `RELAY_CONN_MAX` connections. |  |  |
 | `NET-334` | §3.4.3 | MUST | An ingress relay | An ingress relay MUST close a new connection at once when its address holds `RELAY_CONN_PER_IP` connections. |  |  |
 | `NET-335` | §3.4.3 | MUST | A relay | A relay MUST run at most `RELAY_HANDSHAKES_MAX` TLS handshakes at once, and it MUST close a connection that holds no upgrade request of Part 6 §6.2.1 at `RELAY_HANDSHAKE_TIMEOUT` from its accept. |  |  |
+| `NET-336` | §3.9 | MUST | A client | A client MUST put the same `delay_class` in the `HopHello` of each hop of one circuit. |  |  |
+| `NET-337` | §3.9 | MUST | A relay | A relay MUST drop an `EXTEND` whose `delay_class` is not one of the three values above. |  |  |
+| `NET-338` | §3.9 | MUST | A relay | A relay MUST hold each forward cell of a built circuit for a delay that it draws from an exponential distribution with the mean of the mode of that circuit, before it moves the cell on or serves it. |  |  |
+| `NET-339` | §3.9 | MUST NOT | A relay | A relay MUST NOT release a forward cell of a circuit before an earlier forward cell of that circuit. |  |  |
 
 ## IDN — Identity
 

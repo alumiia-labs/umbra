@@ -33,7 +33,7 @@ use umbra_crypto::{
     zeroize::Zeroizing,
 };
 use umbra_onion::{
-    build::{build_cell_body, read_cell_body, Pending, BUILD_BUCKET, HELLO_LEN},
+    build::{build_cell_body, read_cell_body, DelayClass, Pending, BUILD_BUCKET, HELLO_LEN},
     circuit::CircuitBuild,
     CIRCUIT_BUILD_TIMEOUT, CIRCUIT_MAX_AGE, CIRCUIT_MAX_CELLS, HOPS,
 };
@@ -1148,6 +1148,10 @@ pub struct ClientNode {
     /// A `DEL` went in this run, which is one transport session: no second
     /// one goes (`WIR-045`).
     del_sent: bool,
+    /// The privacy mode of each circuit that this node builds (Part 3
+    /// §3.9). A node carries one mode, thus one circuit carries one mode
+    /// (`NET-028`), and each hop of it reads that mode (`NET-336`).
+    delay_class: DelayClass,
     /// The `send_index` of each record of the user that this node sealed,
     /// by the handle of the call, for a later key request (`WIR-339`).
     sent_indices: Vec<(u64, u16)>,
@@ -1277,6 +1281,7 @@ impl ClientNode {
             moved: BTreeSet::new(),
             gaps: Vec::new(),
             del_sent: false,
+            delay_class: DelayClass::default(),
             sent_indices: Vec::new(),
             lost: Vec::new(),
             changes: Vec::new(),
@@ -2763,7 +2768,8 @@ impl ClientNode {
         let hop = chain.get(build.built()).ok_or(Error::NoPath)?;
         let relay = self.key_of(hop).ok_or(Error::NoPath)?;
         let mut hello = [0u8; HELLO_LEN];
-        let pending = Pending::hello(relay, rng, &mut hello).map_err(|_| Error::NoPath)?;
+        let pending =
+            Pending::hello(relay, self.delay_class, rng, &mut hello).map_err(|_| Error::NoPath)?;
         let mut body = alloc::vec![0u8; BUILD_BUCKET.body_len()];
         build_cell_body(CellCommand::Extend, &hello, &mut body).map_err(|_| Error::NoPath)?;
         let tag = build.seal(&mut body).map_err(|_| Error::NoPath)?;
@@ -3867,6 +3873,12 @@ impl ClientNode {
             let now = self.clock;
             self.faults.relay_failed(&chain, now);
         }
+    }
+
+    /// Sets the privacy mode of each circuit that this node builds from now
+    /// on (Part 3 §3.9, `NET-028`).
+    pub fn set_delay_class(&mut self, class: DelayClass) {
+        self.delay_class = class;
     }
 
     /// Continues the counts of an earlier run.

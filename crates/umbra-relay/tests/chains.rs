@@ -279,6 +279,26 @@ impl Mesh {
         }
     }
 
+    /// Runs each forward cell that waits for its per-hop delay (Part 3
+    /// §3.9) at once, until no relay holds one: the mesh has no clock of
+    /// milliseconds.
+    fn flush_delayed(&mut self) {
+        for _ in 0..64 {
+            let mut any = false;
+            for relay in 0..self.relays.len() {
+                if !self.relays[relay].has_delayed() {
+                    continue;
+                }
+                any = true;
+                let outputs = self.relays[relay].release_delayed(u64::MAX, self.now, &mut self.rng);
+                self.route(relay, outputs);
+            }
+            if !any {
+                return;
+            }
+        }
+    }
+
     /// One turn of each party.
     fn step(&mut self) {
         {
@@ -299,6 +319,7 @@ impl Mesh {
                     self.route(0, outputs);
                 }
             }
+            self.flush_delayed();
             for relay in (0..LAYERS.len()).filter(|relay| LAYERS[*relay] == 3) {
                 let circuits: Vec<_> = self.relays[relay].paced_circuits().copied().collect();
                 for circuit in circuits {

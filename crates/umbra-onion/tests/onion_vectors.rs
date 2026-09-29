@@ -22,7 +22,7 @@ use umbra_crypto::{
     x25519::{PublicKey as XPublic, StaticSecret},
 };
 use umbra_onion::{
-    build::{answer, Pending, HELLO_LEN, REPLY_LEN},
+    build::{answer, DelayClass, Pending, HELLO_LEN, REPLY_LEN},
     circuit::{Circuit, Position, RelayHop},
     layer::KeySet,
     Error, CIRCUIT_MAX_CELLS, HOPS,
@@ -218,7 +218,7 @@ fn build_exchange() -> Value {
         relay_id: [0x42; 32],
     };
     let mut hello = [0u8; HELLO_LEN];
-    let pending = Pending::hello(&relay, &mut Rng(1), &mut hello).unwrap();
+    let pending = Pending::hello(&relay, DelayClass::Balanced, &mut Rng(1), &mut hello).unwrap();
     let mut reply = [0u8; REPLY_LEN];
     let at_relay = answer(&relay, &s_sk, &hello, &mut Rng(2), &mut reply).unwrap();
     let at_client = pending.finish(&reply).unwrap();

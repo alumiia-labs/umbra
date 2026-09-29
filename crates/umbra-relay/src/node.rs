@@ -8,6 +8,15 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
+/// The wall clock in milliseconds, for the per-hop delay of Part 3 §3.9.
+fn unix_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
 use umbra_core::{
     abuse::{
         admission::{Accepts, RelayGate},
@@ -209,6 +218,10 @@ pub struct RelayNode {
     /// The `EXTEND` bodies that wait for a link to their next relay
     /// (`NET-319`).
     extending: BTreeMap<[u8; 32], Vec<Waiting>>,
+    /// The actions of forward cells that wait for the per-hop delay of
+    /// their circuit, by release time and arrival (Part 3 §3.9).
+    delayed: BTreeMap<(u64, u64), (CircuitKey, Action)>,
+    delayed_seq: u64,
     circuits: CircuitTable,
     endpoints: BTreeMap<CircuitKey, Endpoint>,
     gate: RelayGate,
@@ -257,6 +270,8 @@ impl RelayNode {
             links: BTreeMap::new(),
             next_hops: BTreeMap::new(),
             extending: BTreeMap::new(),
+            delayed: BTreeMap::new(),
+            delayed_seq: 0,
             circuits: CircuitTable::new(config.relay, config.static_secret, config.layer),
             endpoints: BTreeMap::new(),
             gate: RelayGate::new(relay_id),
@@ -688,6 +703,7 @@ impl RelayNode {
                                 outputs.extend(capsule_output(link, CapsuleType::Receipt, &signed));
                             }
                         }
+                        self.circuits.set_clock_ms(unix_now_ms());
                         let actions = self.circuits.on_cell(link, &cell, now, rng);
                         outputs.extend(self.run(actions, now, rng));
                         outputs
@@ -716,6 +732,7 @@ impl RelayNode {
             (SessionControl::Destroy { circ_id }, Some(framing)) => {
                 let circ_id = *circ_id;
                 self.links.insert(link, framing);
+                self.circuits.set_clock_ms(unix_now_ms());
                 let actions = self.circuits.on_destroy(link, circ_id);
                 self.finish(actions, now)
             }
@@ -823,9 +840,50 @@ impl RelayNode {
                     self.queues.circuit_closed(&circuit, now);
                     self.groups.circuit_closed(&circuit);
                 }
+                // NET-339: the end of a circuit after its delayed cells.
+                Action::End { key, from } => work.extend(self.circuits.end_now(key, from)),
+                // Part 3 §3.9: the cell waits for the per-hop delay of its
+                // circuit.
+                Action::Delayed {
+                    at_ms,
+                    circuit,
+                    action,
+                } => {
+                    self.delayed_seq = self.delayed_seq.wrapping_add(1);
+                    self.delayed
+                        .insert((at_ms, self.delayed_seq), (circuit, *action));
+                }
             }
         }
         outputs
+    }
+
+    /// Whether a forward cell waits for its per-hop delay.
+    pub fn has_delayed(&self) -> bool {
+        !self.delayed.is_empty()
+    }
+
+    /// Runs each delayed action whose time came at `now_ms`, in the order
+    /// of its time (Part 3 §3.9).
+    pub fn release_delayed<R: CryptoRng + ?Sized>(
+        &mut self,
+        now_ms: u64,
+        now: u64,
+        rng: &mut R,
+    ) -> Vec<Output> {
+        let mut due = Vec::new();
+        while let Some(entry) = self.delayed.first_entry() {
+            if entry.key().0 > now_ms {
+                break;
+            }
+            let (circuit, action) = entry.remove();
+            self.circuits.released(&circuit);
+            due.push(action);
+        }
+        if due.is_empty() {
+            return Vec::new();
+        }
+        self.run(due, now, rng)
     }
 
     /// Makes the endpoint state of a circuit that ends here, at its first
@@ -996,6 +1054,7 @@ impl RelayNode {
         self.links.remove(&link);
         self.receipts.link_closed(link);
         self.next_hops.retain(|_, held| *held != link);
+        self.circuits.set_clock_ms(unix_now_ms());
         let actions = self.circuits.link_closed(link);
         let mut outputs = self.finish(actions, now);
         outputs.push(Output::Close { link });
@@ -1016,6 +1075,17 @@ impl RelayNode {
                 Action::Destroy { link, circ_id } => {
                     outputs.extend(destroy_output(link, circ_id));
                 }
+                // NET-339: an end that waits for the delayed cells of its
+                // circuit.
+                Action::Delayed {
+                    at_ms,
+                    circuit,
+                    action,
+                } => {
+                    self.delayed_seq = self.delayed_seq.wrapping_add(1);
+                    self.delayed
+                        .insert((at_ms, self.delayed_seq), (circuit, *action));
+                }
                 _ => {}
             }
         }
@@ -1031,6 +1101,7 @@ impl RelayNode {
             waiting.retain(|held| held.is_live(now));
         }
         self.extending.retain(|_, waiting| !waiting.is_empty());
+        self.circuits.set_clock_ms(unix_now_ms());
         let aged = self.circuits.expire(now);
         let mut ended = self.finish(aged, now);
         self.queues.sweep(now);

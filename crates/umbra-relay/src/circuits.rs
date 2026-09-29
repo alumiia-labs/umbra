@@ -129,6 +129,27 @@ pub enum Action {
         /// The circuit on that link.
         circ_id: [u8; 16],
     },
+    /// The end of a circuit that waited for its delayed cells: the node
+    /// hands it to [`CircuitTable::end_now`] (`NET-339`).
+    End {
+        /// The circuit.
+        key: CircuitKey,
+        /// The link that told this relay of the end, which gets no
+        /// `Destroy`.
+        from: Option<LinkId>,
+    },
+    /// An action of a forward cell that waits for the per-hop delay of its
+    /// circuit (Part 3 §3.9). The time never goes below the one of an
+    /// earlier cell of the circuit, thus the delay keeps the order.
+    Delayed {
+        /// The release time, in milliseconds of the node clock.
+        at_ms: u64,
+        /// The circuit of the cell, which the node names to
+        /// [`CircuitTable::released`] at the release.
+        circuit: CircuitKey,
+        /// The action.
+        action: Box<Action>,
+    },
 }
 
 struct Held {
@@ -142,6 +163,14 @@ struct Held {
     /// The cells toward the queue relay and toward the client, against
     /// `CIRCUIT_MAX_CELLS` (`NET-321`).
     cells: (u32, u32),
+    /// The mean of the per-hop delay of the mode of the circuit (§3.9).
+    delay_mean_ms: u64,
+    /// The release time of the last delayed cell of the circuit.
+    released_at_ms: u64,
+    /// The end of the circuit waits for its delayed cells.
+    ending: bool,
+    /// The delayed actions of the circuit that the node holds.
+    delayed_out: u32,
 }
 
 impl Held {
@@ -178,6 +207,8 @@ pub struct CircuitTable {
     /// The chains that this relay opened as one hop since the last take
     /// (`REL-189`).
     builds: u64,
+    /// The clock of the per-hop delay, in milliseconds.
+    clock_ms: u64,
 }
 
 impl CircuitTable {
@@ -196,7 +227,13 @@ impl CircuitTable {
             back: BTreeMap::new(),
             budgets: BTreeMap::new(),
             builds: 0,
+            clock_ms: 0,
         }
+    }
+
+    /// Sets the clock of the per-hop delay before a call.
+    pub fn set_clock_ms(&mut self, now_ms: u64) {
+        self.clock_ms = now_ms;
     }
 
     /// The count of the held circuits.
@@ -239,7 +276,8 @@ impl CircuitTable {
             return self.backward(client_side, parsed.tag, body);
         }
         if self.held.contains_key(&key) {
-            return self.forward(key, bucket, parsed.tag, &mut body);
+            let actions = self.forward(key, bucket, parsed.tag, &mut body);
+            return self.delay(key, actions, rng);
         }
         self.build(key, parsed.tag, &body, now, rng)
     }
@@ -289,6 +327,8 @@ impl CircuitTable {
         } else {
             Position::Middle
         };
+        // NET-337: a hello with no known mode failed its parse above.
+        let delay_mean_ms = HopHello::parse(hello).map_or(0, |held| held.delay_class.mean_ms());
         self.held.insert(
             key,
             Held {
@@ -298,6 +338,10 @@ impl CircuitTable {
                 session_secret,
                 created_at: now,
                 cells: (1, 1),
+                delay_mean_ms,
+                released_at_ms: 0,
+                ending: false,
+                delayed_out: 0,
             },
         );
         self.builds = self.builds.saturating_add(1);
@@ -309,6 +353,43 @@ impl CircuitTable {
             link: key.link,
             cell: cell_bytes(&key.circ_id, &[0u8; 16], &out),
         }]
+    }
+
+    /// Holds the actions of a forward cell for the per-hop delay of its
+    /// circuit: an exponential draw with the mean of its mode (`NET-338`),
+    /// at or after the release of the cell before it (`NET-339`). A build
+    /// cell and an end of the circuit go at once.
+    fn delay<R: CryptoRng + ?Sized>(
+        &mut self,
+        key: CircuitKey,
+        actions: Vec<Action>,
+        rng: &mut R,
+    ) -> Vec<Action> {
+        let now_ms = self.clock_ms;
+        let Some(held) = self.held.get_mut(&key) else {
+            return actions;
+        };
+        if held.delay_mean_ms == 0 {
+            return actions;
+        }
+        actions
+            .into_iter()
+            .map(|action| match action {
+                Action::Send { .. } | Action::Serve { .. } | Action::Loop { .. } => {
+                    let draw = rng.next_u32();
+                    let wait = umbra_core::group::backoff::exponential(held.delay_mean_ms, draw);
+                    let at_ms = now_ms.saturating_add(wait).max(held.released_at_ms);
+                    held.released_at_ms = at_ms;
+                    held.delayed_out = held.delayed_out.saturating_add(1);
+                    Action::Delayed {
+                        at_ms,
+                        circuit: key,
+                        action: Box::new(action),
+                    }
+                }
+                other => other,
+            })
+            .collect()
     }
 
     fn forward(
@@ -453,6 +534,34 @@ impl CircuitTable {
     /// `from` with a `Destroy` (`NET-322`). The client side of a circuit
     /// is its key, and the next hop is `next`.
     fn end(&mut self, key: CircuitKey, from: Option<LinkId>) -> Vec<Action> {
+        // NET-339: a forward cell that waits for its delay goes before the
+        // end of its circuit, and the endpoint serves it under the key of
+        // the circuit. The end waits until the last one left.
+        if let Some(held) = self.held.get_mut(&key) {
+            if held.ending {
+                return Vec::new();
+            }
+            if held.delayed_out > 0 {
+                held.ending = true;
+                return vec![Action::Delayed {
+                    at_ms: held.released_at_ms,
+                    circuit: key,
+                    action: Box::new(Action::End { key, from }),
+                }];
+            }
+        }
+        self.end_now(key, from)
+    }
+
+    /// The node ran a delayed action of `circuit`.
+    pub fn released(&mut self, circuit: &CircuitKey) {
+        if let Some(held) = self.held.get_mut(circuit) {
+            held.delayed_out = held.delayed_out.saturating_sub(1);
+        }
+    }
+
+    /// Ends a circuit at once: the node runs it for an [`Action::End`].
+    pub fn end_now(&mut self, key: CircuitKey, from: Option<LinkId>) -> Vec<Action> {
         let Some(held) = self.held.remove(&key) else {
             return Vec::new();
         };
