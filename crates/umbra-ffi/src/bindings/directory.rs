@@ -14,8 +14,8 @@ use umbra_core::discovery::{RENDEZVOUS_ROTATE, ROTATE_GRACE};
 use umbra_core::{
     abuse::{
         epoch_number,
-        issuer::{issuer_label_input, IssuerKeyEntry, IssuerKeys},
-        token::{TYPE_CROSS_RELAY, TYPE_FIRST_PARTY},
+        issuer::{issuer_label_input, IssuerKeys},
+        token::TYPE_FIRST_PARTY,
     },
     discovery::{
         challenge::{answer, Purpose},
@@ -25,9 +25,10 @@ use umbra_core::{
             address_label_input, parse_profile_link, username_case_mapped, Handle as DirHandle,
             PROFILE_LINK_PREFIX,
         },
-        head::{AcceptedHead, HeadState, LogKeySet, SignedTreeHead},
+        head::{AcceptedHead, LogKeySet},
         lifecycle::{assess, Takeover, Version},
         profile::ProfilePlain,
+        reader::{self, HeldHead, LogChannel, ReadError},
         translog::LookupProof,
         HANDLE_HISTORY_MAX, HANDLE_LEASE, LEASE_MIN,
     },
@@ -61,13 +62,6 @@ pub struct DirectoryLink {
     held: Arc<std::sync::Mutex<Option<HeldHead>>>,
 }
 
-/// A head that this device accepted: its size, its root, and its timestamp.
-type HeldHead = (u64, [u8; 32], u64);
-
-/// The tries of a lookup whose head and consistency proof name two epochs,
-/// since an epoch closed between the two requests.
-const HEAD_TRIES: usize = 3;
-
 impl From<DirError> for FfiError {
     fn from(error: DirError) -> Self {
         match error {
@@ -80,14 +74,56 @@ impl From<DirError> for FfiError {
     }
 }
 
-/// An entry as the log shows it under a head that verified.
-pub struct Found {
-    /// The entry bytes, or none for a label with no version.
-    pub entry: Option<Vec<u8>>,
-    /// The newest version of the label.
-    pub version: Option<u32>,
-    /// The sealed profile blob that the directory keeps beside the label.
-    pub blob: Option<Vec<u8>>,
+pub use umbra_core::discovery::reader::Found;
+
+impl From<ReadError> for FfiError {
+    fn from(error: ReadError) -> Self {
+        match error {
+            ReadError::Offline => FfiError::Offline,
+            ReadError::Busy => FfiError::Busy,
+            ReadError::Stale => FfiError::Stale,
+            ReadError::Unverified => FfiError::Unverified,
+            ReadError::NotFound => FfiError::NotFound,
+            ReadError::Malformed => FfiError::Malformed,
+            ReadError::TooLong => FfiError::TooLong,
+        }
+    }
+}
+
+/// The client reads the log over the pinned route, and each device keeps
+/// the newest head that it accepted.
+impl LogChannel for DirectoryLink {
+    fn call(&self, request: &[u8]) -> Result<Vec<u8>, ReadError> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|_| ReadError::Offline)?;
+        runtime
+            .block_on(call(&self.route, request, self.tls.clone(), &mut OsRng))
+            .map_err(|_| ReadError::Offline)
+    }
+
+    fn pins(&self) -> &DirectoryPins {
+        &self.pins
+    }
+
+    fn held(&self) -> Option<HeldHead> {
+        *self
+            .held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn set_held(&self, head: HeldHead) {
+        *self
+            .held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(head);
+    }
+
+    fn now(&self) -> u64 {
+        unix_now()
+    }
 }
 
 impl DirectoryLink {
@@ -126,48 +162,15 @@ impl DirectoryLink {
         }
     }
 
-    fn held(&self) -> Option<HeldHead> {
-        *self
-            .held
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    /// Verifies a head under the pinned key set and the clock (`DIS-054` to
-    /// `DIS-062`).
-    fn verify_head<'a>(&self, bytes: &'a [u8], now: u64) -> Result<SignedTreeHead<'a>, FfiError> {
-        let head = SignedTreeHead::parse(bytes).map_err(|_| FfiError::Malformed)?;
-        let (keyset, _) = LogKeySet::parse(&self.pins.keyset).map_err(|_| FfiError::Malformed)?;
-        let mut heads = HeadState::new(keyset).map_err(|_| FfiError::Malformed)?;
-        heads.accept(&head, now).map_err(|error| match error {
-            umbra_core::Error::Stale => FfiError::Stale,
-            _ => FfiError::Unverified,
-        })?;
-        Ok(head)
-    }
-
     /// Sends one request and returns the body of a done answer.
     fn send(&self, kind: Kind, body: &[u8]) -> Result<Vec<u8>, FfiError> {
-        let request = dirclient::request(kind, body).map_err(|_| FfiError::TooLong)?;
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|_| FfiError::Offline)?;
-        let response = runtime
-            .block_on(call(&self.route, &request, self.tls.clone(), &mut OsRng))
-            .map_err(|_| FfiError::Offline)?;
-        Ok(dirclient::done(&response)?)
+        Ok(reader::send(self, kind, body)?)
     }
 
     /// The search key of a label input, under a proof of work at the floor
     /// (`DIS-164`).
     fn search_key(&self, input: &[u8]) -> Result<[u8; 64], FfiError> {
-        let pk = &self.pins.voprf_public;
-        let (state, body) =
-            dirclient::evaluate_request(input, pk, epoch_number(unix_now()), None, &mut OsRng)
-                .map_err(|_| FfiError::Malformed)?;
-        let evaluated = self.send(Kind::Evaluate, &body)?;
-        dirclient::evaluate_finish(&state, &evaluated, pk).map_err(|_| FfiError::Unverified)
+        Ok(reader::search_key(self, input, &mut OsRng)?)
     }
 
     /// The lookup proof of a search key under the newest head, after the
@@ -176,55 +179,19 @@ impl DirectoryLink {
         &self,
         search_key: &[u8; 64],
     ) -> Result<(LookupProof, AcceptedHead, Option<Vec<u8>>), FfiError> {
-        for _ in 0..HEAD_TRIES {
-            let looked = self.send(Kind::Lookup, search_key)?;
-            let (bytes, blob, proof) =
-                dirclient::parse_lookup(&looked).map_err(|_| FfiError::Malformed)?;
-            // None: an epoch closed between the lookup and the proof.
-            if let Some(head) = self.accept_head(&bytes)? {
-                return Ok((proof, head, blob));
-            }
-        }
-        Err(FfiError::Busy)
+        Ok(reader::lookup(self, search_key)?)
     }
 
     /// Verifies the head of an answer and holds it when it extends the held
     /// head, or gives none for a head whose proof names another epoch.
     fn accept_head(&self, bytes: &[u8]) -> Result<Option<AcceptedHead>, FfiError> {
-        let now = unix_now();
-        let head = self.verify_head(bytes, now)?;
-        if !self.extends_held(&head, now)? {
-            return Ok(None);
-        }
-        *self
-            .held
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            Some((head.tree_size, head.root, head.timestamp));
-        Ok(Some(AcceptedHead {
-            tree_size: head.tree_size,
-            root: head.root,
-            timestamp: head.timestamp,
-            accepted_at: now,
-        }))
+        Ok(reader::accept_head(self, bytes)?)
     }
 
     /// The entry of one version of a label, verified under the log
     /// (`DIS-183`, `DIS-184`).
     fn version_entry(&self, search_key: &[u8; 64], version: u32) -> Result<Vec<u8>, FfiError> {
-        let body = dirclient::version_body(search_key, version);
-        for _ in 0..HEAD_TRIES {
-            let answer = self.send(Kind::Version, &body)?;
-            let (bytes, proof) =
-                dirclient::parse_version(&answer).map_err(|_| FfiError::Malformed)?;
-            if let Some(head) = self.accept_head(&bytes)? {
-                return proof
-                    .verify(search_key, version, &self.vrf_key()?, &head)
-                    .map(<[u8]>::to_vec)
-                    .map_err(|_| FfiError::Unverified);
-            }
-        }
-        Err(FfiError::Busy)
+        Ok(reader::version_entry(self, search_key, version)?)
     }
 
     /// Whether the tree head of a contact at `tree_size` lies in the log
@@ -297,44 +264,8 @@ impl DirectoryLink {
         assess(held, &between).map_err(|_| FfiError::Unverified)
     }
 
-    /// Whether a head extends the newest held head: a smaller log is a
-    /// rollback (`DIS-061`), a second root at one size is a split view, and
-    /// a larger log proves that it holds the held one. `false` is a proof
-    /// that names another head, which a new lookup settles.
-    fn extends_held(&self, head: &SignedTreeHead<'_>, now: u64) -> Result<bool, FfiError> {
-        let Some((size, root, _)) = self.held() else {
-            return Ok(true);
-        };
-        if head.tree_size < size {
-            return Err(FfiError::Stale);
-        }
-        if head.tree_size == size {
-            return if head.root == root {
-                Ok(true)
-            } else {
-                Err(FfiError::Unverified)
-            };
-        }
-        let answer = self.send(Kind::Head, &size.to_be_bytes())?;
-        let (newest, consistency) =
-            dirclient::parse_head(&answer).map_err(|_| FfiError::Malformed)?;
-        let newest = self.verify_head(&newest, now)?;
-        if newest.tree_size != head.tree_size || newest.root != head.root {
-            return Ok(false);
-        }
-        umbra_core::discovery::logtree::verify_consistency(
-            size,
-            &root,
-            head.tree_size,
-            &head.root,
-            &consistency,
-        )
-        .map_err(|_| FfiError::Unverified)?;
-        Ok(true)
-    }
-
     fn vrf_key(&self) -> Result<vrf::PublicKey, FfiError> {
-        vrf::PublicKey::from_bytes(&self.pins.vrf_public).map_err(|_| FfiError::Malformed)
+        Ok(reader::vrf_key(self)?)
     }
 
     /// The newest entry of a label input, verified under the log.
@@ -344,18 +275,7 @@ impl DirectoryLink {
 
     /// The newest entry of a label input and its search key.
     fn find_keyed(&self, input: &[u8]) -> Result<(Found, [u8; 64]), FfiError> {
-        let search_key = self.search_key(input)?;
-        let (proof, head, blob) = self.lookup(&search_key)?;
-        let entry = proof
-            .verify(&search_key, &self.vrf_key()?, &head)
-            .map_err(|_| FfiError::Unverified)?
-            .map(<[u8]>::to_vec);
-        let found = Found {
-            entry,
-            version: proof.newest,
-            blob,
-        };
-        Ok((found, search_key))
+        Ok(reader::find_keyed(self, input, &mut OsRng)?)
     }
 
     /// One first-party token of this epoch, under a proof of work
@@ -421,14 +341,7 @@ impl DirectoryLink {
     /// The key of the cross-relay issuer of `epoch` from the log: version
     /// 0 of its label, of that type and that epoch (`ABU-099` to `ABU-101`).
     pub fn cross_relay_key(&self, epoch: u32) -> Result<PublicKey2048, FfiError> {
-        let found = self.find(&issuer_label_input(TYPE_CROSS_RELAY, epoch))?;
-        let bytes = found.entry.ok_or(FfiError::NotFound)?;
-        let entry = IssuerKeyEntry::parse(&bytes).map_err(|_| FfiError::Unverified)?;
-        if found.version != Some(0) || entry.token_type != TYPE_CROSS_RELAY || entry.epoch != epoch
-        {
-            return Err(FfiError::Unverified);
-        }
-        PublicKey2048::from_modulus(&entry.public_key).map_err(|_| FfiError::Unverified)
+        Ok(reader::cross_relay_key(self, epoch, &mut OsRng)?)
     }
 
     /// `count` cross-relay tokens of `epoch`, each paid with a proof of work
