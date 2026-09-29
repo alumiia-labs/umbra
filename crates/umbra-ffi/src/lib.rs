@@ -4439,6 +4439,101 @@ mod tests {
     }
 
     #[test]
+    fn a_deletion_of_another_device_counts_and_waits_for_the_user_after_a_restore() {
+        use umbra_core::devset::{
+            engine::SyncEngine,
+            link::{DeviceIdentity, LinkHello},
+            sync::{Origin, AUTHOR_USER, SCOPE_GROUP},
+        };
+        use umbra_wire::app::{
+            edit::{DeleteBody, DeleteScope},
+            AppKind,
+        };
+
+        let mut rng = Rng(117);
+        let mut phone = new_client(&mut rng);
+        phone.ensure_device_set("Phone", &mut rng).unwrap();
+        let own = phone.device_identity().unwrap().unwrap();
+        let laptop = DeviceIdentity::generate("Laptop", &mut rng);
+        let hello = LinkHello {
+            device_id: laptop.device_id,
+            device_pk: laptop.device_key().public().clone(),
+            roster_pk: laptop.roster_key().verifying_key().to_bytes().to_vec(),
+            label: laptop.label,
+            ct: umbra_crypto::kem::Ciphertext::from_bytes(&[0; umbra_crypto::kem::CIPHERTEXT_LEN])
+                .unwrap(),
+        };
+        let roster = phone.sign_linked_device(&hello, &mut rng).unwrap();
+        phone.commit_roster(&roster, &mut rng).unwrap();
+        let channel = ContactId([0x7A; 32]);
+        let peer = phone.conversation_for(&channel.0).unwrap();
+        phone
+            .set_pending_peer(laptop.device_id, &laptop.label, &mut rng)
+            .unwrap();
+        phone.mark_device_peer(peer, &mut rng).unwrap();
+        let relays = [[0xA1; 32], [0xB2; 32]];
+        let group = phone.create_group("Kept", relays, 1_000, &mut rng).unwrap();
+        let group_id = phone.group_info(group).unwrap().group_id;
+        phone
+            .group_queue_made(&group_id, 0, relays[0], [0xC3; 32], &mut rng)
+            .unwrap();
+        phone
+            .group_queue_made(&group_id, 1, relays[1], [0xD4; 32], &mut rng)
+            .unwrap();
+        let subject = phone.sync_subject(group).unwrap().unwrap();
+        let mut engine = SyncEngine::new(laptop.device_id, &[own.device_id]).unwrap();
+        let origin = Origin {
+            scope: SCOPE_GROUP,
+            subject,
+            author: AUTHOR_USER,
+        };
+        let now = 5_000;
+        let mut send = |phone: &mut Client<MemoryBackend, Element>, inner: Vec<u8>, n: u8| {
+            let body = engine
+                .publish(&inner, origin, [n; 16], 0, now)
+                .unwrap()
+                .body;
+            let app = record(AppKind::DeviceSet, [0x90 + n; 16], &body);
+            deliver(
+                phone,
+                &channel,
+                &app,
+                now * 1_000,
+                &mut Rng(200 + u64::from(n)),
+            );
+        };
+        send(&mut phone, record(AppKind::Text, [1; 16], b"one"), 1);
+        send(&mut phone, record(AppKind::Text, [2; 16], b"two"), 2);
+        while phone.take_group_post().is_some() {}
+        assert_eq!(phone.messages(group).unwrap().len(), 2);
+        let deletion = |target: [u8; 16], n: u8| {
+            let body = DeleteBody {
+                scope: DeleteScope::OwnDevices,
+                targets: vec![target],
+            };
+            let mut encoded = vec![0u8; body.len()];
+            body.encode(&mut encoded).unwrap();
+            record(AppKind::Delete, [0xA0 + n; 16], &encoded)
+        };
+
+        // A deletion of the laptop applies here, and it counts (DEV-119).
+        send(&mut phone, deletion([1; 16], 3), 3);
+        assert_eq!(phone.messages(group).unwrap().len(), 1);
+        assert_eq!(phone.deletions_from(&laptop.device_id).unwrap(), 1);
+        assert_eq!(phone.held_deletions().unwrap(), 0);
+
+        // DEV-117, DEV-118: after a restore a deletion waits for the user.
+        phone.hold_deletions(&mut rng).unwrap();
+        send(&mut phone, deletion([2; 16], 4), 4);
+        assert_eq!(phone.messages(group).unwrap().len(), 1);
+        assert_eq!(phone.held_deletions().unwrap(), 1);
+        phone.apply_held_deletions().unwrap();
+        assert!(phone.messages(group).unwrap().is_empty());
+        assert_eq!(phone.held_deletions().unwrap(), 0);
+        assert_eq!(phone.deletions_from(&laptop.device_id).unwrap(), 2);
+    }
+
+    #[test]
     fn a_hole_in_the_synced_history_arrives_then_shows_as_a_gap() {
         use umbra_core::devset::{
             engine::SyncEngine,

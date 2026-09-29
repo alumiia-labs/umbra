@@ -1530,7 +1530,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !sync_bodies.is_empty() {
             let synced = self.take_sync_bodies(sync_bodies, now_ms / 1_000, rng)?;
             // DEV-126: a deletion of the user on another device of the set.
-            let synced = self.take_own_deletions(synced)?;
+            let synced = self.take_own_deletions(synced, rng)?;
             // DEV-015: each synced message keeps its source and counter.
             let origins: Vec<(ConversationId, Vec<u8>, umbra_core::devset::DeviceId, u64)> = synced
                 .iter()

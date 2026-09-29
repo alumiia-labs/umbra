@@ -923,6 +923,33 @@ impl Handle {
             .collect())
     }
 
+    /// The deletions that `device_id` made on this device since the last
+    /// roster epoch, which the removal of that device shows (`DEV-119`).
+    pub fn deletions_from(&self, device_id: Vec<u8>) -> Result<u32, FfiError> {
+        let device: umbra_core::devset::DeviceId = device_id
+            .as_slice()
+            .try_into()
+            .map_err(|_| FfiError::Malformed)?;
+        Ok(locked(&self.inner).client.deletions_from(&device)?)
+    }
+
+    /// The messages that deletions of the other devices name after a
+    /// restore, which wait for the user (`DEV-117`).
+    pub fn held_deletions(&self) -> Result<u32, FfiError> {
+        let count = locked(&self.inner).client.held_deletions()?;
+        Ok(u32::try_from(count).unwrap_or(u32::MAX))
+    }
+
+    /// The user confirmed those deletions (`DEV-118`).
+    pub fn apply_held_deletions(&self) -> Result<(), FfiError> {
+        Ok(locked(&self.inner).client.apply_held_deletions()?)
+    }
+
+    /// The user keeps the messages that the restore brought back.
+    pub fn keep_restored_messages(&self) -> Result<(), FfiError> {
+        Ok(locked(&self.inner).client.keep_restored_messages()?)
+    }
+
     /// Each fork of the roster that the user did not dismiss.
     pub fn roster_forks(&self) -> Result<Vec<FfiRosterFork>, FfiError> {
         Ok(locked(&self.inner)

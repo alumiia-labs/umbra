@@ -311,6 +311,22 @@ object Core {
     /** The forks of the roster that wait for the user (Part 7 §7.7). */
     val rosterForks = mutableStateListOf<uniffi.umbra_ffi.FfiRosterFork>()
 
+    /** The deletions of the other devices that wait after a restore (`DEV-117`). */
+    var heldDeletions by mutableStateOf(0)
+        private set
+
+    fun applyHeldDeletions(apply: Boolean) = call { client ->
+        if (apply) client.applyHeldDeletions() else client.keepRestoredMessages()
+        readDevices()
+        refreshChats()
+    }
+
+    /** The deletions that a device made here since the last change of the set. */
+    fun deletionsFrom(deviceId: ByteArray, onCount: (Int) -> Unit) = call { client ->
+        val count = client.deletionsFrom(deviceId).toInt()
+        main.post { onCount(count) }
+    }
+
     /** The holes in the synced history (Part 7 §7.5.5). */
     val historyHoles = mutableStateListOf<uniffi.umbra_ffi.FfiHistoryHole>()
 
@@ -319,7 +335,9 @@ object Core {
         val owns = client.ownsChannels()
         val forks = client.rosterForks()
         val holes = client.historyHoles()
+        val held = client.heldDeletions().toInt()
         main.post {
+            heldDeletions = held
             historyHoles.clear()
             historyHoles.addAll(holes)
             devices.clear()

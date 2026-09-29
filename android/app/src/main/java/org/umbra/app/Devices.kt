@@ -73,12 +73,54 @@ fun RosterForkPrompt() {
     }
 }
 
+/**
+ * The deletions of the other devices that postdate a restore (Part 7
+ * `DEV-117`, `DEV-118`): the count shows, and none applies before the user
+ * says so.
+ */
+@Composable
+fun HeldDeletionsPrompt() {
+    val count = Core.heldDeletions
+    if (count == 0) return
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .background(Palette.Incoming)
+            .padding(horizontal = 20.dp, vertical = 12.dp),
+    ) {
+        Text(
+            if (count == 1) {
+                "Your other devices deleted 1 message that this restore brought back"
+            } else {
+                "Your other devices deleted $count messages that this restore brought back"
+            },
+        )
+        Spacer(Modifier.height(8.dp))
+        Row {
+            InlineButton("Delete") { Core.applyHeldDeletions(apply = true) }
+            Spacer(Modifier.width(12.dp))
+            InlineButton("Keep") { Core.applyHeldDeletions(apply = false) }
+        }
+    }
+}
+
 /** The devices of the set (Part 7), and the start of a link. */
 @Composable
 fun DevicesScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
     LaunchedEffect(Unit) { Core.readDevices() }
     var removing by remember { mutableStateOf<Device?>(null) }
     removing?.let { device ->
+        // DEV-119, DEV-120: the deletions of that device since the last
+        // change of the set, and what brings them back.
+        var deletions by remember(device) { mutableStateOf(0) }
+        LaunchedEffect(device) { Core.deletionsFrom(device.deviceId) { deletions = it } }
+        val removed = when (deletions) {
+            0 -> ""
+            1 -> " It deleted 1 message here since the last change of your devices." +
+                " A restore from a backup made before now brings it back."
+            else -> " It deleted $deletions messages here since the last change of your devices." +
+                " A restore from a backup made before now brings them back."
+        }
         // Part 7 DEV-137 and DEV-138: the two limits of a removal, in
         // those words.
         ActionSheet(
@@ -87,7 +129,7 @@ fun DevicesScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                 RowEntry("trash-can", "Remove") { Core.removeDevice(device.deviceId) },
             ),
             note = UiText.get(R.string.umbra_ui_dev_137) +
-                " For a device in hostile hands, reset the identity in the settings.",
+                " For a device in hostile hands, reset the identity in the settings." + removed,
             onDismiss = { removing = null },
         )
     }

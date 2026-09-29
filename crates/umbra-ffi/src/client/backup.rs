@@ -757,6 +757,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     ) -> Result<(), Error> {
         let open = self.open_mut()?;
         let listed = open.store.row_id(super::SETTINGS, RESTORE_STALE_SETTING);
+        let holds = open
+            .store
+            .row_id(super::SETTINGS, super::own_delete::HOLDS_DELETIONS);
         let mut batch = open.store.begin();
         for row in &restored.rows {
             if let BackupRow::Put {
@@ -776,6 +779,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             &restored.contacts.concat(),
             rng,
         )?;
+        // DEV-117: the deletions of the other devices wait for the user.
+        batch.put(super::SETTINGS, holds, None, &[1], rng)?;
         Ok(batch.commit()?)
     }
 

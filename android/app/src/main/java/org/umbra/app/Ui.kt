@@ -482,6 +482,7 @@ private fun ChatsTab(push: (Screen) -> Unit) {
         GroupOfferPrompt()
         IntroductionPrompt()
         RosterForkPrompt()
+        HeldDeletionsPrompt()
         RequestsPrompt(push)
         TabTitle("Chats")
         // A group with no message still shows: the user made it, and its

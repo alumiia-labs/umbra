@@ -2,8 +2,18 @@
 //! "delete for me" removes the message on this device and asks each other
 //! device of the set to remove it too, with a `Delete` record of scope
 //! `0x01` on the sync channel (`WIR-084`). The other party keeps its copy.
+//!
+//! After a restore the other devices send each deletion again, and one
+//! that postdates the backup would remove a message that the restore
+//! brought back. Those wait, the view shows their count, and the user
+//! confirms them (`DEV-117`, `DEV-118`). Each device counts the deletions
+//! of each other device since the last roster epoch, which the removal of
+//! that device shows (`DEV-119`, `DEV-120`).
 
-use umbra_core::store::{engine::Backend, record::TableId, wrap::SecureElement};
+use umbra_core::{
+    devset::{roster::Roster, DeviceId},
+    store::{engine::Backend, record::TableId, wrap::SecureElement},
+};
 use umbra_crypto::rand_core::CryptoRng;
 use umbra_wire::app::{
     edit::{DeleteBody, DeleteScope},
@@ -12,7 +22,19 @@ use umbra_wire::app::{
 use zeroize::Zeroizing;
 
 use super::{conversation_of, msg_ref, sync::Synced, Client, MESSAGE_PREFIX};
-use crate::{Error, Event, MsgRef};
+use crate::{ConversationId, Error, Event, MsgRef};
+
+/// Each message that a deletion of another device names after a restore,
+/// by its row, with its conversation. It waits for the user (`DEV-118`).
+const HELD_DELETIONS: TableId = TableId(0x4D);
+/// A restore made this store, thus the deletions of the other devices wait.
+pub(super) const HOLDS_DELETIONS: &[u8] = b"restore-holds-deletions";
+/// The roster epoch and the count of the deletions of each other device.
+const DELETIONS_FROM: &[u8] = b"deletions-from/";
+
+fn count_key(device: &DeviceId) -> Vec<u8> {
+    [DELETIONS_FROM, device.as_slice()].concat()
+}
 
 impl<B: Backend, E: SecureElement> Client<B, E> {
     /// Asks each other device of the set to remove `message`. The caller
@@ -57,9 +79,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// Takes each deletion for the devices of this user out of the records
     /// that another device of the set sent, and removes its targets here.
     /// The other records go on.
-    pub(super) fn take_own_deletions(&mut self, synced: Vec<Synced>) -> Result<Vec<Synced>, Error> {
+    pub(super) fn take_own_deletions<R: CryptoRng + ?Sized>(
+        &mut self,
+        synced: Vec<Synced>,
+        rng: &mut R,
+    ) -> Result<Vec<Synced>, Error> {
         let mut kept = Vec::with_capacity(synced.len());
         let mut gone = Vec::new();
+        let mut sources = Vec::new();
         for record in synced {
             let targets = AppMessage::parse(&record.app, Channel::Pairwise)
                 .ok()
@@ -71,6 +98,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 kept.push(record);
                 continue;
             };
+            sources.push(record.origin.0);
             let open = self.open_ref()?;
             for target in targets {
                 let reference = msg_ref(&open.device_set_key, &target);
@@ -81,6 +109,23 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
             }
         }
+        for source in sources {
+            self.count_deletion(&source, rng)?;
+        }
+        // DEV-118: after a restore each one waits for the user.
+        if self.setting(HOLDS_DELETIONS)?.is_some() {
+            if gone.is_empty() {
+                return Ok(kept);
+            }
+            let open = self.open_mut()?;
+            let mut batch = open.store.begin();
+            for (conversation, message) in &gone {
+                batch.put(HELD_DELETIONS, message.0, None, &conversation.0, rng)?;
+            }
+            batch.commit()?;
+            self.events.push_back(Event::Conversations);
+            return Ok(kept);
+        }
         for (conversation, message) in gone {
             self.delete_for_me(&message)?;
             self.events.push_back(Event::Deleted {
@@ -89,5 +134,94 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             });
         }
         Ok(kept)
+    }
+
+    fn roster_epoch(&self) -> Result<u64, Error> {
+        Ok(match self.roster_bytes()? {
+            Some(bytes) => Roster::parse(&bytes)?.epoch,
+            None => 0,
+        })
+    }
+
+    /// Counts one deletion of `source` in the current roster epoch.
+    fn count_deletion<R: CryptoRng + ?Sized>(
+        &mut self,
+        source: &DeviceId,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let epoch = self.roster_epoch()?;
+        let count = self.deletions_from(source)?.saturating_add(1);
+        let value = [epoch.to_be_bytes().as_slice(), &count.to_be_bytes()].concat();
+        self.put_setting(&count_key(source), &value, rng)
+    }
+
+    /// The deletions that `device` made on this device since the last
+    /// roster epoch (`DEV-119`).
+    pub fn deletions_from(&self, device: &DeviceId) -> Result<u32, Error> {
+        let Some(held) = self.setting(&count_key(device))? else {
+            return Ok(0);
+        };
+        let epoch = held
+            .get(..8)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u64::from_be_bytes);
+        if epoch != Some(self.roster_epoch()?) {
+            return Ok(0);
+        }
+        Ok(held
+            .get(8..12)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map_or(0, u32::from_be_bytes))
+    }
+
+    /// The messages that the deletions of the other devices name after a
+    /// restore, which wait for the user (`DEV-117`).
+    pub fn held_deletions(&self) -> Result<usize, Error> {
+        Ok(self.open_ref()?.store.list(HELD_DELETIONS, None)?.len())
+    }
+
+    /// The user confirmed the deletions that wait (`DEV-118`), and later
+    /// deletions apply at once.
+    pub fn apply_held_deletions(&mut self) -> Result<(), Error> {
+        let held = self.open_ref()?.store.list(HELD_DELETIONS, None)?;
+        for (row, conversation) in held {
+            let message = MsgRef(row);
+            let _ = self.delete_for_me(&message);
+            if let Ok(conversation) = <[u8; 16]>::try_from(conversation.as_slice()) {
+                self.events.push_back(Event::Deleted {
+                    conversation: ConversationId(conversation),
+                    message,
+                });
+            }
+        }
+        self.end_held_deletions()
+    }
+
+    /// Marks the store as a restore does, for a test.
+    #[doc(hidden)]
+    pub fn hold_deletions<R: CryptoRng + ?Sized>(&mut self, rng: &mut R) -> Result<(), Error> {
+        self.put_setting(HOLDS_DELETIONS, &[1], rng)
+    }
+
+    /// The user keeps the messages that the restore brought back.
+    pub fn keep_restored_messages(&mut self) -> Result<(), Error> {
+        self.end_held_deletions()
+    }
+
+    fn end_held_deletions(&mut self) -> Result<(), Error> {
+        let rows: Vec<_> = self
+            .open_ref()?
+            .store
+            .list(HELD_DELETIONS, None)?
+            .into_iter()
+            .map(|(row, _)| row)
+            .collect();
+        let open = self.open_mut()?;
+        let mut batch = open.store.begin();
+        for row in rows {
+            batch.delete(HELD_DELETIONS, row);
+        }
+        batch.commit()?;
+        self.remove_setting(HOLDS_DELETIONS)
     }
 }
