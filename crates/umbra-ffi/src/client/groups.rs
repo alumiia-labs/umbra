@@ -214,12 +214,11 @@ pub(super) const GROUP_NOTIFY: TableId = TableId(0x1C);
 /// (Part 11 §11.11), under the row of the message. The mention list itself
 /// stays in the record, and no view shows it (`GRP-141`).
 pub(super) const MENTIONED: TableId = TableId(0x38);
-/// Each roster object and epoch-key record of this device that no replica
-/// accepted yet, as it was sealed, with its credentials and its place in
-/// the order of the posts. The next session sends the same bytes
-/// (`GRP-392`). A record of a message waits in the outbox, and its row
-/// there gives it again. A roster object has no such row, and the group of
-/// this device moves at its seal, thus a lost one splits the group.
+/// Each record of this device that no replica accepted yet, as it was
+/// sealed, with its credentials, its message, and its place in the order
+/// of the posts. The next session sends the same bytes (`GRP-392`). A
+/// roster object moves the group of this device at its seal, thus a lost
+/// one splits the group. A presence is no such record.
 const GROUP_UNSENT: TableId = TableId(0x41);
 const GROUP_NOTIFY_LEN_V1: usize = 32 + umbra_wire::address::LEN + 16;
 const GROUP_NOTIFY_LEN: usize = GROUP_NOTIFY_LEN_V1 + 8 + 1 + 32 + umbra_wire::address::LEN;
@@ -3748,22 +3747,30 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         mut post: GroupPost,
         rng: &mut R,
     ) -> Result<(), Error> {
-        if post.message.is_none() {
-            let open = self.open_mut()?;
-            let mut order = 0u64;
-            for (_, plain) in open.store.list(GROUP_UNSENT, None)? {
-                if let Some(held) = plain.get(..8).and_then(|b| <[u8; 8]>::try_from(b).ok()) {
-                    order = order.max(u64::from_be_bytes(held).saturating_add(1));
-                }
+        let open = self.open_mut()?;
+        let mut order = 0u64;
+        let mut replaced = Vec::new();
+        for (row, plain) in open.store.list(GROUP_UNSENT, None)? {
+            let Some((held, earlier)) = read_unsent_row(&plain, row) else {
+                continue;
+            };
+            order = order.max(held.saturating_add(1));
+            // A message that goes again under a new seal (`IMP-075`) takes
+            // the place of its earlier seal.
+            if post.message.is_some() && earlier.message == post.message {
+                replaced.push(row);
             }
-            let mut row = [0u8; 16];
-            rng.fill_bytes(&mut row);
-            let value = unsent_row(order, &post);
-            let mut batch = open.store.begin();
-            batch.put(GROUP_UNSENT, row, Some(post.conversation.0), &value, rng)?;
-            batch.commit()?;
-            post.unsent = Some(row);
         }
+        let mut row = [0u8; 16];
+        rng.fill_bytes(&mut row);
+        let value = unsent_row(order, &post);
+        let mut batch = open.store.begin();
+        for earlier in replaced {
+            batch.delete(GROUP_UNSENT, earlier);
+        }
+        batch.put(GROUP_UNSENT, row, Some(post.conversation.0), &value, rng)?;
+        batch.commit()?;
+        post.unsent = Some(row);
         self.groups.posts.push_back(post);
         Ok(())
     }
@@ -4497,24 +4504,30 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// work list.
     fn requeue_group_posts<R: CryptoRng + ?Sized>(&mut self, rng: &mut R) -> Result<(), Error> {
         self.groups.posts.clear();
-        // The roster objects and the epoch keys go first, in the order of
-        // their seal. A group that is gone or closed takes none of them.
+        // GRP-392: each sealed record goes again as it was, in the order of
+        // its seal. A group that is gone or closed takes none, and a message
+        // that no longer waits in the outbox takes none.
         let mut kept = Vec::new();
         let mut dropped = Vec::new();
+        let mut sealed = BTreeSet::new();
         for (row, plain) in self.open_ref()?.store.list(GROUP_UNSENT, None)? {
             let plain = Zeroizing::new(plain);
             let Some((order, post)) = read_unsent_row(&plain, row) else {
                 dropped.push(row);
                 continue;
             };
-            let is_held = self
-                .open_ref()?
-                .store
-                .get(GROUP, &post.conversation.0)?
-                .is_some();
-            if !is_held || self.group_closed(post.conversation)? {
+            let store = &self.open_ref()?.store;
+            let is_held = store.get(GROUP, &post.conversation.0)?.is_some();
+            let waits = match post.message {
+                Some(message) => store.get(OUTBOX, &message.0)?.is_some(),
+                None => true,
+            };
+            if !is_held || !waits || self.group_closed(post.conversation)? {
                 dropped.push(row);
                 continue;
+            }
+            if let Some(message) = post.message {
+                sealed.insert(message);
             }
             kept.push((order, post));
         }
@@ -4538,7 +4551,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             };
             let plain = Zeroizing::new(plain);
             let conversation = super::conversation_of(&plain)?;
-            if store.get(GROUP, &conversation.0)?.is_none() {
+            if store.get(GROUP, &conversation.0)?.is_none() || sealed.contains(&MsgRef(row)) {
                 continue;
             }
             let info = super::info_of(&plain)?;
@@ -4598,6 +4611,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 /// starts an epoch, the credentials, the two replicas, and the record.
 fn unsent_row(order: u64, post: &GroupPost) -> Zeroizing<Vec<u8>> {
     let mut value = Zeroizing::new(Vec::with_capacity(UNSENT_HEAD + post.record.len()));
+    value.push(UNSENT_VERSION);
     value.extend_from_slice(&order.to_be_bytes());
     value.extend_from_slice(&post.conversation.0);
     value.push(u8::from(post.is_rotation));
@@ -4612,19 +4626,33 @@ fn unsent_row(order: u64, post: &GroupPost) -> Zeroizing<Vec<u8>> {
         value.extend_from_slice(&replica.relay);
         value.extend_from_slice(&replica.group_queue_id);
     }
+    value.push(u8::from(post.message.is_some()));
+    value.extend_from_slice(&post.message.map_or([0u8; 16], |message| message.0));
     value.extend_from_slice(&post.record);
     value
 }
 
+/// The first byte of a kept record that names its message. A row of the
+/// first form starts with its order, whose first byte is zero.
+const UNSENT_VERSION: u8 = 2;
+
 /// The fixed part of a kept record ahead of the record.
-const UNSENT_HEAD: usize = 8 + 16 + 1 + 1 + 32 + 32 + GROUP_REPLICAS * 64;
+const UNSENT_HEAD: usize = 1 + 8 + 16 + 1 + 1 + 32 + 32 + GROUP_REPLICAS * 64 + 1 + 16;
+
+/// The fixed part of a row of the first form, which names no message.
+const UNSENT_HEAD_V1: usize = 8 + 16 + 1 + 1 + 32 + 32 + GROUP_REPLICAS * 64;
 
 fn read_unsent_row(plain: &[u8], row: [u8; 16]) -> Option<(u64, GroupPost)> {
-    let take = |from: usize| -> Option<[u8; 32]> { plain.get(from..from + 32)?.try_into().ok() };
-    let order = u64::from_be_bytes(plain.get(..8)?.try_into().ok()?);
-    let conversation = ConversationId(plain.get(8..24)?.try_into().ok()?);
-    let is_rotation = *plain.get(24)? == 1;
-    let has_fallback = *plain.get(25)? == 1;
+    let (body, head) = if plain.first() == Some(&UNSENT_VERSION) {
+        (plain.get(1..)?, UNSENT_HEAD - 1)
+    } else {
+        (plain, UNSENT_HEAD_V1)
+    };
+    let take = |from: usize| -> Option<[u8; 32]> { body.get(from..from + 32)?.try_into().ok() };
+    let order = u64::from_be_bytes(body.get(..8)?.try_into().ok()?);
+    let conversation = ConversationId(body.get(8..24)?.try_into().ok()?);
+    let is_rotation = *body.get(24)? == 1;
+    let has_fallback = *body.get(25)? == 1;
     let write = Secret::new(take(26)?);
     let fallback = has_fallback.then(|| take(58)).flatten().map(Secret::new);
     let replica = |at: usize| -> Option<GroupReplica> {
@@ -4634,14 +4662,21 @@ fn read_unsent_row(plain: &[u8], row: [u8; 16]) -> Option<(u64, GroupPost)> {
         })
     };
     let replicas = [replica(90)?, replica(154)?];
-    let record = plain.get(UNSENT_HEAD..)?.to_vec();
+    let message = if head == UNSENT_HEAD_V1 {
+        None
+    } else {
+        let has_message = *body.get(218)? == 1;
+        let id: [u8; 16] = body.get(219..235)?.try_into().ok()?;
+        has_message.then_some(MsgRef(id))
+    };
+    let record = body.get(head..)?.to_vec();
     if record.is_empty() {
         return None;
     }
     Some((
         order,
         GroupPost {
-            message: None,
+            message,
             conversation,
             replicas,
             write,

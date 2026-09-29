@@ -692,6 +692,25 @@ mod tests {
         client.group_post_accepted(&again.unsent.unwrap()).unwrap();
         client.resume_group_work(&mut rng).unwrap();
         assert!(client.take_group_post().is_none());
+
+        // GRP-392: a message goes again with the bytes of its first seal.
+        let mut draft = client.new_draft(conversation);
+        draft.set_text(&units("same bytes")).unwrap();
+        let message = client
+            .send_draft(draft, 1_700_000_030_000, &mut rng)
+            .unwrap();
+        let first = client.take_group_post().unwrap();
+        assert_eq!(first.message, Some(message));
+        client.resume_group_work(&mut rng).unwrap();
+        let second = client.take_group_post().unwrap();
+        assert_eq!(second.record, first.record);
+        assert!(client.take_group_post().is_none());
+        // A message that a relay took waits no more.
+        client
+            .set_delivery(&message, Delivery::Accepted, &mut rng)
+            .unwrap();
+        client.resume_group_work(&mut rng).unwrap();
+        assert!(client.take_group_post().is_none());
     }
 
     #[test]
