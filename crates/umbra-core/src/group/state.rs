@@ -416,6 +416,41 @@ impl Group {
         )
     }
 
+    /// Builds one content record under an earlier roster epoch that the
+    /// roster history holds, for a member behind the roster (`GRP-330`).
+    pub fn post_at_roster<R: CryptoRng + ?Sized>(
+        &mut self,
+        app: &[u8],
+        roster_epoch: u32,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<Vec<u8>, Error> {
+        if self.own_role().is_none() || roster_epoch > self.roster.epoch_index() {
+            return Err(Error::NoPath);
+        }
+        self.epochs.expire(now);
+        let members = self
+            .roster
+            .active_at(roster_epoch)
+            .ok_or(Error::NoPath)?
+            .len();
+        let bucket = bucket_for(members, app.len()).ok_or(Error::NoPath)?;
+        let mut nonce = [0u8; 12];
+        rng.fill_bytes(&mut nonce);
+        self.sender.build_at(
+            self.own_index,
+            &self.keys,
+            &self.roster,
+            &mut self.epochs,
+            &mut self.pairs,
+            app,
+            bucket,
+            nonce,
+            now,
+            roster_epoch,
+        )
+    }
+
     /// Builds one `GroupPresence` record (§11.9.7). The caller sends it in
     /// each `PRESENCE_INTERVAL` in which it posted nothing else
     /// (`GRP-128`).
@@ -482,6 +517,45 @@ impl Group {
         let second = self.receiver.receive(record, bucket, &mut ctx, now);
         self.receiver.set_own_index(current);
         second
+    }
+
+    /// Takes the roster of a snapshot that an admin wrote at the current
+    /// roster epoch for this member (`GRP-329`, `GRP-330`). A member that a
+    /// restore left behind the roster reads the members it lacks from it.
+    /// The path verifies from the creator key that this roster holds, the
+    /// snapshot is ahead of this roster, and it holds this member under its
+    /// own keys. The `chain_hash` comes from the admin that wrote it: no
+    /// record of this member names that epoch.
+    pub fn recover_roster(&mut self, bytes: &[u8], now: u64) -> Result<(), Error> {
+        let snapshot = RosterSnapshot::parse(bytes)?;
+        if snapshot.group_id != *self.group_id()
+            || snapshot.roster_epoch <= self.roster.epoch_index()
+        {
+            return Err(Error::Unverified);
+        }
+        // Each owner whose key this roster holds can be the creator of the
+        // path, and this member is the creator when it holds no other.
+        let mut keys: Vec<Vec<u8>> = self
+            .roster
+            .active()
+            .filter(|member| member.role == Role::Owner)
+            .filter_map(|member| member.roster_pk.clone())
+            .collect();
+        keys.push(self.own_roster_pk());
+        let roster = keys
+            .iter()
+            .find_map(|key| Roster::from_snapshot(&snapshot, &snapshot.chain_hash, key, now).ok())
+            .ok_or(Error::Unverified)?;
+        let own = roster
+            .member(self.own_index)
+            .filter(|member| member.active)
+            .ok_or(Error::Unverified)?;
+        let own_kem = sha3_256(&[&self.keys.kem().public().to_bytes()]);
+        if own.pair_pk != self.keys.pair_public() || own.kem_pk_hash != own_kem {
+            return Err(Error::Unverified);
+        }
+        self.roster = roster;
+        Ok(())
     }
 
     /// Tries each held record again, after a roster object or a clock
@@ -2200,6 +2274,43 @@ mod tests {
             Applied::Rekeyed { old: 1, new: 3, .. }
         ));
         assert_eq!(member.roster().chain_hash(), creator.roster().chain_hash());
+    }
+
+    #[test]
+    fn a_member_behind_the_roster_takes_the_snapshot_of_an_admin() {
+        let now = 1_700_000_000;
+        let (mut creator, mut member, _) = pair(now);
+        // The member misses the add of a third member, as a restore from
+        // an old backup does.
+        const THIRD_SEED: Secret<32> = Secret::new([0x33; 32]);
+        let keys = MemberKeys::from_seed(&THIRD_SEED);
+        let kem_pk = keys.kem().public().to_bytes();
+        let join = JoinKeys {
+            seed: THIRD_SEED,
+            keys,
+        };
+        let record = JoinRecord {
+            group_id: *creator.group_id(),
+            keys: join.wire_keys(&kem_pk),
+        };
+        let add = creator.add_object(&record).unwrap();
+        creator
+            .apply_control(&GroupControl::parse(&add).unwrap(), 0, now)
+            .unwrap();
+        assert_eq!(member.roster().active_count(), 2);
+
+        // GRP-330: the admin writes a snapshot at its epoch, and GRP-329:
+        // the member takes the members that it lacked.
+        let snapshot = creator.snapshot(&[]).unwrap();
+        member.recover_roster(&snapshot, now).unwrap();
+        assert_eq!(member.roster().active_count(), 3);
+        assert_eq!(
+            member.roster().epoch_index(),
+            creator.roster().epoch_index()
+        );
+        assert!(member.roster().member(2).unwrap().kem_pk.is_some());
+        // A snapshot at the epoch it holds already changes nothing.
+        assert!(member.recover_roster(&snapshot, now).is_err());
     }
 
     #[test]

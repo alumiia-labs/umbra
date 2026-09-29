@@ -1430,6 +1430,18 @@ enum RestoreStep {
 
 /// What one command of the transfer task belongs to.
 enum TransferWork {
+    /// The snapshot that this admin writes for a member behind the roster
+    /// of a group, at its roster epoch (`GRP-330`).
+    RecoverySnapshot {
+        /// The group.
+        conversation: crate::ConversationId,
+        /// The roster epoch of the snapshot.
+        roster_epoch: u32,
+        /// The roster epoch of the member that asked.
+        behind: u32,
+    },
+    /// The snapshot that this member fetches after a restore (`GRP-329`).
+    RecoveryFetch(crate::ConversationId),
     /// The state of a group that goes to the other devices of the set
     /// (`DEV-298`).
     GroupState(crate::ConversationId),
@@ -1583,6 +1595,7 @@ impl Inner {
         if self.bridge.is_none() {
             return;
         }
+        self.pump_recovery();
         // GRP-343: each device of a member reads each group on its own
         // circuit with its own cursor. A device that does not own the
         // channels writes nothing to a group queue (GRP-338).
@@ -1946,6 +1959,45 @@ impl Inner {
         let Inner { client, bridge, .. } = self;
         if let Some(running) = bridge {
             let _ = running.flush(client, &mut OsRng);
+        }
+    }
+
+    /// Puts each snapshot that this admin owes a member behind the roster
+    /// on the chunk path, and fetches each one that a notice named for this
+    /// member (`GRP-329`, `GRP-330`).
+    fn pump_recovery(&mut self) {
+        while let Some(job) = self.client.take_snapshot_job() {
+            let tag = self.next_tag(TransferWork::RecoverySnapshot {
+                conversation: job.conversation,
+                roster_epoch: job.roster_epoch,
+                behind: job.behind,
+            });
+            self.send_transfer(TransferCommand::Upload {
+                tag,
+                plain: Zeroizing::new(job.snapshot),
+                // A snapshot is no media of the user (Part 12 §12.3).
+                shape: Shape::default(),
+            });
+        }
+        let Ok(fetches) = self.client.recovery_fetches() else {
+            return;
+        };
+        for (conversation, descriptor) in fetches {
+            let is_running = self.transfer_tags.values().any(
+                |work| matches!(work, TransferWork::RecoveryFetch(held) if *held == conversation),
+            );
+            if is_running {
+                continue;
+            }
+            let Ok(descriptor) = umbra_wire::descriptor::FileDescriptor::parse(&descriptor) else {
+                let _ = self.client.recovery_failed(conversation, &mut OsRng);
+                continue;
+            };
+            let tag = self.next_tag(TransferWork::RecoveryFetch(conversation));
+            self.send_transfer(TransferCommand::Download {
+                tag,
+                descriptor: Box::new(descriptor),
+            });
         }
     }
 
@@ -2590,6 +2642,26 @@ impl Inner {
                         }
                     }
                 }
+                Some(TransferWork::RecoverySnapshot {
+                    conversation,
+                    roster_epoch,
+                    behind,
+                }) => {
+                    // GRP-330: the notice names the snapshot on the path.
+                    let mut descriptor = vec![0u8; uploaded.descriptor.len()];
+                    if uploaded.descriptor.encode(&mut descriptor).is_ok() {
+                        moved = client
+                            .post_snapshot_notice(
+                                conversation,
+                                roster_epoch,
+                                behind,
+                                &descriptor,
+                                unix_now_ms(),
+                                &mut OsRng,
+                            )
+                            .is_ok();
+                    }
+                }
                 Some(TransferWork::GroupState(conversation)) => {
                     let mut descriptor = vec![0u8; uploaded.descriptor.len()];
                     if uploaded.descriptor.encode(&mut descriptor).is_ok()
@@ -2624,6 +2696,12 @@ impl Inner {
                 Some(TransferWork::GroupFetch(subject)) => {
                     moved = client
                         .apply_group_state(&subject, &plain, &mut OsRng)
+                        .is_ok();
+                }
+                // GRP-329: the member takes the roster of the snapshot.
+                Some(TransferWork::RecoveryFetch(conversation)) => {
+                    moved = client
+                        .recovery_fetched(conversation, &plain, unix_now_ms(), &mut OsRng)
                         .is_ok();
                 }
                 Some(TransferWork::Admit { from, group_id }) => {
@@ -2678,6 +2756,10 @@ impl Inner {
                 Some(TransferWork::EpochSlots(upload)) => client.epoch_upload_failed(*upload),
                 Some(TransferWork::GroupState(conversation)) => {
                     client.group_state_failed(conversation);
+                }
+                // The gap asks again later.
+                Some(TransferWork::RecoveryFetch(conversation)) => {
+                    let _ = client.recovery_failed(conversation, &mut OsRng);
                 }
                 // A chunk that did not move leaves the epoch missing, and
                 // the member asks for it (§11.4.3).

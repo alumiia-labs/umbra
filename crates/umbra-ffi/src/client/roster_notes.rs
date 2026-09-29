@@ -135,6 +135,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     },
                     rng,
                 )?;
+                // GRP-329: the roster objects of that period are gone too.
+                self.request_roster_snapshot(conversation, now_ms, rng)?;
             }
             if last.is_none_or(|at| now.saturating_sub(at) >= READ_CLOCK_STEP) {
                 self.put_clock(conversation, key, now, rng)?;

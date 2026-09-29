@@ -122,6 +122,40 @@ impl Sender {
         nonce: [u8; 12],
         now: u64,
     ) -> Result<Vec<u8>, Error> {
+        let roster_epoch = roster.epoch_index();
+        self.build_at(
+            own_index,
+            own,
+            roster,
+            epochs,
+            pairs,
+            app,
+            bucket,
+            nonce,
+            now,
+            roster_epoch,
+        )
+    }
+
+    /// As [`Sender::build`], under an earlier `roster_epoch` that the roster
+    /// history holds: the tags go to the members active at it. A member
+    /// behind the roster checks such a record under the epoch it holds
+    /// (`GRP-330`). A member whose pair key this roster lost since takes a
+    /// tag of zeros.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_at(
+        &mut self,
+        own_index: u16,
+        own: &MemberKeys,
+        roster: &Roster,
+        epochs: &mut EpochStore,
+        pairs: &mut PairCache,
+        app: &[u8],
+        bucket: Bucket,
+        nonce: [u8; 12],
+        now: u64,
+        roster_epoch: u32,
+    ) -> Result<Vec<u8>, Error> {
         let epoch = epochs.epoch();
         if epoch == 0 {
             return Err(Error::NoPath);
@@ -129,7 +163,7 @@ impl Sender {
         let slot = slot_of(now);
         let keys = epochs.record_keys(epoch, slot, now)?;
         let (record_key, _) = keys.first().ok_or(Error::NoPath)?;
-        let roster_epoch = roster.epoch_index();
+        let is_head = roster_epoch == roster.epoch_index();
         let active = roster
             .active_at(roster_epoch)
             .ok_or(Error::NoPath)?
@@ -142,7 +176,14 @@ impl Sender {
                 tags.extend_from_slice(&[0u8; TAG_LEN]);
                 continue;
             }
-            let key = pairs.get(*index, roster, own)?;
+            let key = match pairs.get(*index, roster, own) {
+                Ok(key) => key,
+                Err(_) if !is_head => {
+                    tags.extend_from_slice(&[0u8; TAG_LEN]);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             tags.extend_from_slice(&key.record_tag(&RecordTag {
                 group_id: roster.group_id(),
                 epoch,

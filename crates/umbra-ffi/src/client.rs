@@ -36,6 +36,8 @@ mod reset;
 mod roster_fork;
 mod roster_notes;
 mod screenshots;
+mod snapshot_recovery;
+pub use snapshot_recovery::SnapshotJob;
 mod social;
 mod sync;
 mod timers;

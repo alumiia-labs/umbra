@@ -478,6 +478,9 @@ pub(super) struct GroupQueues {
     /// The group states that this device fetches, by the subject of each
     /// group.
     pub state_in: VecDeque<([u8; 32], Box<umbra_wire::descriptor::FileDescriptor>)>,
+    /// The groups for which this admin writes a snapshot for a member
+    /// behind the roster, with the roster epoch of that member (`GRP-330`).
+    pub snapshot_jobs: VecDeque<(ConversationId, u32)>,
 }
 
 /// The facts of a group before an arrival, which tell what it changed.
@@ -1164,7 +1167,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
     /// Sends one `AppMessage` of `kind` that no view shows on a pairwise
     /// channel.
-    fn send_pairwise_app<R: CryptoRng + ?Sized>(
+    pub(super) fn send_pairwise_app<R: CryptoRng + ?Sized>(
         &mut self,
         conversation: ConversationId,
         kind: AppKind,
@@ -2252,6 +2255,20 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
+        self.queue_group_post_at(conversation, message, app, None, now_ms, rng)
+    }
+
+    /// As [`Client::queue_group_post`], under `roster_epoch` when one is
+    /// given (`GRP-330`).
+    pub(super) fn queue_group_post_at<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        message: Option<MsgRef>,
+        app: &[u8],
+        roster_epoch: Option<u32>,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
         // GRP-338, GRP-340: the device that owns the channels posts each
         // record of the member. Another device hands a record of the user to
         // it, and makes no record of the group itself.
@@ -2288,9 +2305,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         ];
         // GRP-246: the counter of this device moves with the record, thus
         // the group goes back to the store before the record leaves.
-        let record = group
-            .post(app, now_ms / 1_000, rng)
-            .map_err(|_| Error::Malformed)?;
+        let record = match roster_epoch {
+            Some(held) => group.post_at_roster(app, held, now_ms / 1_000, rng),
+            None => group.post(app, now_ms / 1_000, rng),
+        }
+        .map_err(|_| Error::Malformed)?;
         let write = group.credentials().ok_or(Error::Integrity)?.write_secret();
         let fallback = group.previous_credentials().map(|held| held.write_secret());
         self.save_group(conversation, &group, rng)?;
@@ -3132,7 +3151,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// The contacts of this device that are members of a group, as far as
     /// this device knows them: the one that brought it in, and the ones
     /// that an admin of this device added.
-    fn contacts_in(&self, conversation: ConversationId) -> Result<Vec<ConversationId>, Error> {
+    pub(super) fn contacts_in(
+        &self,
+        conversation: ConversationId,
+    ) -> Result<Vec<ConversationId>, Error> {
         let store = &self.open_ref()?.store;
         let mut out = Vec::new();
         for (_, value) in store.list(GROUP_MEMBER, Some(&conversation.0))? {
@@ -3232,7 +3254,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     }
 
     /// Seals one `AppMessage` of `kind` that no view shows, and queues it.
-    fn post_group_app<R: CryptoRng + ?Sized>(
+    pub(super) fn post_group_app<R: CryptoRng + ?Sized>(
         &mut self,
         conversation: ConversationId,
         kind: AppKind,
@@ -3330,6 +3352,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Ok(request) = KeyRequest::parse(body) else {
             return;
         };
+        // GRP-330: a member behind the roster asks for a snapshot.
+        if request.scope == KeyScope::RosterSnapshot {
+            self.on_snapshot_request(conversation, group, &request, now);
+            return;
+        }
         // WIR-523: 0 names the sender, and any other value names the
         // member that another member carries the request for.
         let target = match request.index {
@@ -3438,6 +3465,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Ok(request) = KeyRequest::parse(body) else {
             return Ok(());
         };
+        // GRP-329: a contact behind the roster of a group asks for a
+        // snapshot on the pairwise channel.
+        if request.scope == KeyScope::RosterSnapshot {
+            let conversation = self.conversation_of_group(&request.id)?;
+            if self.is_group(conversation)? && !self.group_closed(conversation)? {
+                let group = self.group_of(conversation)?;
+                self.on_snapshot_request(conversation, &group, &request, now_ms / 1_000);
+            }
+            return Ok(());
+        }
         if request.scope != KeyScope::GroupEpoch || request.index == 0 {
             return Ok(());
         }
@@ -4009,6 +4046,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     // (`GRP-318`), and a record that waited for it opens.
                     if parsed.kind == AppKind::GroupControl {
                         if let Ok(control) = GroupControl::parse(parsed.body) {
+                            // GRP-330: a notice names a snapshot, and it
+                            // moves no roster.
+                            if control.control_type == ControlType::SnapshotNotice {
+                                self.on_snapshot_notice(
+                                    conversation,
+                                    &group,
+                                    sender,
+                                    control.payload,
+                                    rng,
+                                )?;
+                                continue;
+                            }
                             let forks = group.roster().forks().len();
                             let applied = group.apply_control(&control, sender, now);
                             // GRP-070, GRP-071: a fork shows, and the member

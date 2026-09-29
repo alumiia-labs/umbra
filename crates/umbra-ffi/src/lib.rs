@@ -1199,6 +1199,72 @@ mod tests {
     }
 
     #[test]
+    fn a_member_behind_the_roster_asks_an_admin_for_a_snapshot() {
+        let mut rng = Rng(114);
+        let mut admin = new_client(&mut rng);
+        let mut member_client = new_client(&mut rng);
+        let (conversation, member) = ready_pair(&mut admin, &mut member_client, &mut rng);
+        // A third member comes in, and the member misses the add, as a
+        // restore from an old backup does.
+        let mut third = new_client(&mut rng);
+        join_group(&mut admin, &mut third, conversation, &mut rng);
+        assert_eq!(member_client.group_info(member).unwrap().members, 2);
+
+        // GRP-208, GRP-329: the gap asks for a snapshot on the group queue.
+        let later = 1_700_000_010;
+        let t0 = later - umbra_queue::params::GROUP_RETENTION - 1;
+        member_client
+            .group_reads(&[member], t0 * 1_000, &mut rng)
+            .unwrap();
+        member_client
+            .group_reads(&[member], later * 1_000, &mut rng)
+            .unwrap();
+        let mut seq = 10;
+        let mut asked = false;
+        while let Some(post) = member_client.take_group_post() {
+            seq += 1;
+            admin
+                .on_group_record(&[0xC3; 32], seq, &post.record, later * 1_000, &mut rng)
+                .unwrap();
+            asked = true;
+        }
+        assert!(asked);
+
+        // GRP-330: the admin writes a snapshot at its epoch, and the notice
+        // names it.
+        let job = admin.take_snapshot_job().unwrap();
+        assert_eq!(job.conversation, conversation);
+        assert!(job.behind < job.roster_epoch);
+        assert!(admin.take_snapshot_job().is_none());
+        let snapshot = job.snapshot;
+        admin
+            .post_snapshot_notice(
+                conversation,
+                job.roster_epoch,
+                job.behind,
+                b"the descriptor",
+                later * 1_000,
+                &mut rng,
+            )
+            .unwrap();
+        while let Some(post) = admin.take_group_post() {
+            seq += 1;
+            member_client
+                .on_group_record(&[0xC3; 32], seq, &post.record, later * 1_000, &mut rng)
+                .unwrap();
+        }
+        let fetches = member_client.recovery_fetches().unwrap();
+        assert_eq!(fetches, vec![(member, b"the descriptor".to_vec())]);
+
+        // The member takes the members that it lacked.
+        member_client
+            .recovery_fetched(member, &snapshot, later * 1_000, &mut rng)
+            .unwrap();
+        assert_eq!(member_client.group_info(member).unwrap().members, 3);
+        assert!(member_client.recovery_fetches().unwrap().is_empty());
+    }
+
+    #[test]
     fn a_quiet_member_sends_presence_and_a_silent_one_is_removed() {
         const DAY: u64 = 86_400;
         let mut rng = Rng(61);
