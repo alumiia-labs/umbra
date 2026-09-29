@@ -297,6 +297,7 @@ object Core {
             Modes.apply(app)
             readTyping()
             readDraftSync()
+            readHistoryAge()
         }
     }
 
@@ -1269,6 +1270,20 @@ object Core {
 
     /** Each conversation whose contact types, until `TYPING_TTL` (`WIR-286`). */
     val typingNow = mutableStateMapOf<List<Byte>, Long>()
+
+    /** The period of the history on this device, in seconds (Part 7 §7.5.2). */
+    var historyAge by mutableStateOf(365L * 86_400)
+        private set
+
+    fun readHistoryAge() = call { client ->
+        val seconds = client.historyAge().toLong()
+        main.post { historyAge = seconds }
+    }
+
+    fun keepHistoryFor(seconds: Long) = call { client ->
+        client.setHistoryAge(seconds.toULong())
+        main.post { historyAge = seconds }
+    }
 
     /** Whether the drafts go to the other devices of the set (Part 7 §7.5.3). */
     var draftSync by mutableStateOf(true)

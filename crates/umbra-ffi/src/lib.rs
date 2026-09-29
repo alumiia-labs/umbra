@@ -4342,6 +4342,103 @@ mod tests {
     }
 
     #[test]
+    fn the_history_leaves_after_its_period_and_the_watermark_stops_below_a_held_record() {
+        use crate::client::{HISTORY_AGE_ALL, HISTORY_AGE_MIN};
+        use umbra_core::devset::{
+            engine::SyncEngine,
+            link::{DeviceIdentity, LinkHello},
+            sync::{Origin, AUTHOR_USER, SCOPE_GROUP},
+            SYNC_MAX_AGE,
+        };
+        use umbra_wire::app::AppKind;
+
+        let mut rng = Rng(116);
+        let mut phone = new_client(&mut rng);
+        phone.ensure_device_set("Phone", &mut rng).unwrap();
+        let own = phone.device_identity().unwrap().unwrap();
+        let laptop = DeviceIdentity::generate("Laptop", &mut rng);
+        let hello = LinkHello {
+            device_id: laptop.device_id,
+            device_pk: laptop.device_key().public().clone(),
+            roster_pk: laptop.roster_key().verifying_key().to_bytes().to_vec(),
+            label: laptop.label,
+            ct: umbra_crypto::kem::Ciphertext::from_bytes(&[0; umbra_crypto::kem::CIPHERTEXT_LEN])
+                .unwrap(),
+        };
+        let roster = phone.sign_linked_device(&hello, &mut rng).unwrap();
+        phone.commit_roster(&roster, &mut rng).unwrap();
+        let channel = ContactId([0x79; 32]);
+        let peer = phone.conversation_for(&channel.0).unwrap();
+        phone
+            .set_pending_peer(laptop.device_id, &laptop.label, &mut rng)
+            .unwrap();
+        phone.mark_device_peer(peer, &mut rng).unwrap();
+        let relays = [[0xA1; 32], [0xB2; 32]];
+        let group = phone.create_group("Old", relays, 1_000, &mut rng).unwrap();
+        let group_id = phone.group_info(group).unwrap().group_id;
+        phone
+            .group_queue_made(&group_id, 0, relays[0], [0xC3; 32], &mut rng)
+            .unwrap();
+        phone
+            .group_queue_made(&group_id, 1, relays[1], [0xD4; 32], &mut rng)
+            .unwrap();
+        let subject = phone.sync_subject(group).unwrap().unwrap();
+
+        // DEV-020: the default is `SYNC_MAX_AGE`, and one day is the least.
+        assert_eq!(phone.history_age().unwrap(), SYNC_MAX_AGE);
+        assert!(phone
+            .set_history_age(HISTORY_AGE_MIN - 1, &mut rng)
+            .is_err());
+        phone.set_history_age(HISTORY_AGE_MIN, &mut rng).unwrap();
+
+        // The laptop syncs two messages of the user: one old, one new.
+        let mut engine = SyncEngine::new(laptop.device_id, &[own.device_id]).unwrap();
+        let origin = Origin {
+            scope: SCOPE_GROUP,
+            subject,
+            author: AUTHOR_USER,
+        };
+        let day = 86_400;
+        let old_at = 10 * day;
+        let new_at = old_at + 2 * day;
+        for (n, at) in [(1u8, old_at), (2u8, new_at)] {
+            let inner = record(AppKind::Text, [n; 16], b"from the laptop");
+            let body = engine.publish(&inner, origin, [n; 16], 0, at).unwrap().body;
+            let app = record(AppKind::DeviceSet, [0x80 + n; 16], &body);
+            deliver(&mut phone, &channel, &app, at * 1_000, &mut rng);
+        }
+        // The phone posted them for the laptop, and a replica took each.
+        while let Some(post) = phone.take_group_post() {
+            if let Some(message) = post.message {
+                phone
+                    .set_delivery(&message, Delivery::Accepted, &mut rng)
+                    .unwrap();
+            }
+        }
+        let held = |client: &Client<MemoryBackend, Element>| client.messages(group).unwrap().len();
+        assert_eq!(held(&phone), 2);
+
+        // The old one leaves, and DEV-016: the watermark of the laptop
+        // stops below the counter of the message that the phone holds.
+        let removed = phone.sweep_history(old_at + day + 10, &mut rng).unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(held(&phone), 1);
+        assert_eq!(phone.sync_watermark(&laptop.device_id).unwrap(), 1);
+        // One sweep in a day.
+        assert_eq!(
+            phone.sweep_history(old_at + day + 100, &mut rng).unwrap(),
+            0
+        );
+        // "Forever" removes nothing.
+        phone.set_history_age(HISTORY_AGE_ALL, &mut rng).unwrap();
+        assert_eq!(
+            phone.sweep_history(new_at + 400 * day, &mut rng).unwrap(),
+            0
+        );
+        assert_eq!(held(&phone), 1);
+    }
+
+    #[test]
     fn a_hole_in_the_synced_history_arrives_then_shows_as_a_gap() {
         use umbra_core::devset::{
             engine::SyncEngine,

@@ -34,10 +34,12 @@ mod own_delete;
 mod polls;
 mod quota;
 mod reset;
+mod retention;
 mod roster_fork;
 mod roster_notes;
 mod screenshots;
 mod snapshot_recovery;
+pub use retention::{HISTORY_AGE_ALL, HISTORY_AGE_MIN};
 pub use snapshot_recovery::SnapshotJob;
 mod social;
 mod sync;
@@ -1529,6 +1531,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let synced = self.take_sync_bodies(sync_bodies, now_ms / 1_000, rng)?;
             // DEV-126: a deletion of the user on another device of the set.
             let synced = self.take_own_deletions(synced)?;
+            // DEV-015: each synced message keeps its source and counter.
+            let origins: Vec<(ConversationId, Vec<u8>, umbra_core::devset::DeviceId, u64)> = synced
+                .iter()
+                .map(|record| {
+                    (
+                        record.conversation,
+                        record.app.clone(),
+                        record.origin.0,
+                        record.origin.1,
+                    )
+                })
+                .collect();
             let (groups, synced): (Vec<_>, Vec<_>) =
                 synced.into_iter().partition(|synced| synced.is_group);
             for record in groups {
@@ -1553,6 +1567,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .collect();
             if !records.is_empty() {
                 self.commit_records(&[], &records, now_ms, rng)?;
+            }
+            for (conversation, app, source, counter) in origins {
+                let Ok(parsed) = AppMessage::parse(&app, Channel::Pairwise) else {
+                    continue;
+                };
+                let open = self.open_ref()?;
+                let reference = msg_ref(&open.device_set_key, &parsed.msg_id);
+                let natural = [conversation.0.as_slice(), &reference].concat();
+                let row = open.store.row_id(TableId::MESSAGE, &natural);
+                self.keep_sync_origin(row, &source, counter, rng)?;
             }
         }
         Ok(())

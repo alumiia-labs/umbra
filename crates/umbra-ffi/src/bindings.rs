@@ -5406,6 +5406,19 @@ impl Handle {
         Ok(())
     }
 
+    /// The period of the history on this device, in seconds. The largest
+    /// value keeps each message (Part 7 §7.5.2).
+    pub fn history_age(&self) -> Result<u64, FfiError> {
+        Ok(locked(&self.inner).client.history_age()?)
+    }
+
+    /// Sets the period of the history, at one day or more (`DEV-020`).
+    pub fn set_history_age(&self, seconds: u64) -> Result<(), FfiError> {
+        Ok(locked(&self.inner)
+            .client
+            .set_history_age(seconds, &mut OsRng)?)
+    }
+
     /// Whether the drafts go to the other devices of the set.
     pub fn draft_sync(&self) -> Result<bool, FfiError> {
         Ok(locked(&self.inner).client.draft_sync()?)
@@ -5721,6 +5734,9 @@ impl Handle {
         inner.pump_sync_resend(now);
         // DEV-210: a timed message goes at its deadline, on each device.
         let _ = inner.client.sweep_timed(now);
+        // Part 7 §7.5.2: the history older than its period leaves, once a
+        // day at most.
+        let _ = inner.client.sweep_history(now, &mut OsRng);
         // IDN-063: each key-change notice of a reset goes at its delay.
         if inner.client.send_due_notices(now, &mut OsRng).unwrap_or(0) > 0 {
             let Inner { client, bridge, .. } = &mut *inner;

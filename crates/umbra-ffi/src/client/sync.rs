@@ -70,6 +70,8 @@ pub struct SyncSend {
 /// A conversation record that the sync channel gave, for the commit path.
 pub(super) struct Synced {
     pub conversation: ConversationId,
+    /// The source device and its causal counter (`DEV-015`).
+    pub origin: (DeviceId, u64),
     pub app: Vec<u8>,
     pub from_user: bool,
     /// Whether the conversation is a private group (`DEV-296`).
@@ -136,7 +138,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let row = store.row_id(SYNC_STATE, ENGINE_KEY);
         let mut engine = match store.get(SYNC_STATE, &row)? {
             Some(bytes) => SyncEngine::restore(&Zeroizing::new(bytes))?,
-            None => SyncEngine::new(identity.device_id, &[])?,
+            // DEV-019: a restored store takes the watermarks of its backup.
+            None => {
+                let mut fresh = SyncEngine::new(identity.device_id, &[])?;
+                self.seed_watermarks(&mut fresh)?;
+                fresh
+            }
         };
         // A device that left the roster leaves the engine, with its
         // retained records (`DEV-257`).
@@ -154,7 +161,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(Some(engine))
     }
 
-    fn put_engine<R: CryptoRng + ?Sized>(
+    pub(super) fn put_engine<R: CryptoRng + ?Sized>(
         &mut self,
         engine: &SyncEngine,
         sent: Option<(u64, &[u8])>,
@@ -663,12 +670,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             match engine.receive(source, &body, now) {
                 Ok(Taken::Record {
                     origin,
+                    counter,
                     inner,
                     expires_in,
                 }) => {
                     if let Some(conversation) = self.conversation_of_subject(&origin.subject)? {
                         out.push(Synced {
                             conversation,
+                            origin: (*source, counter),
                             app: inner,
                             from_user: origin.author == AUTHOR_USER,
                             is_group: origin.scope == SCOPE_GROUP,

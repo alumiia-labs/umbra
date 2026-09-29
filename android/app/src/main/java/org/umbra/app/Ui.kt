@@ -611,6 +611,23 @@ private fun SettingsTab(push: (Screen) -> Unit) {
         SettingRow("comment", "Typing indicators", if (Core.typingEnabled) "On" else "Off") {
             Core.turnTyping(!Core.typingEnabled)
         }
+        // DEV-020: the setting states its trade where the user sets it.
+        var isChoosingAge by remember { mutableStateOf(false) }
+        SettingRow("clock", "Keep history", historyLabel(Core.historyAge)) { isChoosingAge = true }
+        if (isChoosingAge) {
+            ActionSheet(
+                title = "Keep history",
+                entries = HISTORY_AGES.map { seconds ->
+                    RowEntry("clock", historyLabel(seconds)) {
+                        Core.keepHistoryFor(seconds)
+                        isChoosingAge = false
+                    }
+                },
+                note = "Older messages leave this device. With a short period, this device also " +
+                    "drops older messages that your other devices send it.",
+                onDismiss = { isChoosingAge = false },
+            )
+        }
         // DEV-202: a draft on the other devices is text that no one sent.
         if (Core.devices.size > 1) {
             SettingRow("pen", "Draft sync", if (Core.draftSync) "On" else "Off") {
@@ -650,6 +667,17 @@ private fun SettingsTab(push: (Screen) -> Unit) {
 }
 
 /** The line of the devices row: the count of the other devices. */
+/** The periods of the history that the settings offer, in seconds. */
+private val HISTORY_AGES = listOf(86_400L, 30L * 86_400, 365L * 86_400, -1L)
+
+private fun historyLabel(seconds: Long): String = when {
+    seconds < 0 -> "Forever"
+    seconds <= 86_400 -> "1 day"
+    seconds <= 30L * 86_400 -> "30 days"
+    seconds <= 365L * 86_400 -> "1 year"
+    else -> "Forever"
+}
+
 private fun devicesLabel(count: Int): String = when (count) {
     0, 1 -> "No other device"
     2 -> "1 other device"

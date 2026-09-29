@@ -66,6 +66,9 @@ pub enum Taken {
     Record {
         /// The conversation and the author.
         origin: Origin,
+        /// The causal counter of the source, which the retention of
+        /// §7.5.2 names in a watermark (`DEV-015`).
+        counter: u64,
         /// The `AppMessage` bytes of the peer.
         inner: Vec<u8>,
         /// The `expires_in` of the context, or zero.
@@ -299,6 +302,7 @@ impl SyncEngine {
                 }
                 Ok(Taken::Record {
                     origin: record.origin,
+                    counter,
                     inner: record.inner.to_vec(),
                     expires_in: record.context.expires_in,
                 })
@@ -649,6 +653,7 @@ mod tests {
             laptop.receive(&PHONE, &published.body, 110).unwrap(),
             Taken::Record {
                 origin: ORIGIN,
+                counter: 1,
                 inner: text.clone(),
                 expires_in: 0
             }
