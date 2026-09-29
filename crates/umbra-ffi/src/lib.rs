@@ -285,6 +285,13 @@ pub enum Event {
     /// Another device of the set added a conversation or named one.
     Conversations,
     /// A contact offered a group of Part 11. The user sees the offers of
+    /// A contact asks to introduce the user to a third party, or it
+    /// introduces the user to one (Part 6 §6.6.7). The view reads
+    /// [`client::Client::introductions`].
+    Introduction {
+        /// The pairwise conversation that carried it.
+        from: ConversationId,
+    },
     /// [`client::Client::group_offers`] and answers one of them
     /// (`GRP-170`).
     GroupOffer {

@@ -22,6 +22,7 @@ mod group_changes;
 mod group_sync;
 mod groups;
 mod held_handles;
+mod intros;
 mod key_changes;
 mod moderation;
 mod notify;
@@ -49,6 +50,7 @@ pub use groups::{
     EpochUpload, GroupAdmitWaiting, GroupInfo, GroupJoiner, GroupOffer, GroupPost, GroupQueueJob,
     GroupSubscription, Silence, GROUP_NAME_MAX,
 };
+pub use intros::Introduction;
 pub use key_changes::PendingKeyChange;
 pub use moderation::{ModNote, MOD_HIDE, MOD_REMOVE, MOD_UNHIDE};
 pub use notify::NdrCall;
@@ -785,6 +787,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut votes: Vec<(ConversationId, Vec<u8>, u16)> = Vec::new();
         let mut key_changes: Vec<(ConversationId, Vec<u8>)> = Vec::new();
         let mut shares: Vec<(ConversationId, Zeroizing<Vec<u8>>)> = Vec::new();
+        let mut intros: Vec<(ConversationId, Zeroizing<Vec<u8>>)> = Vec::new();
         for change in changes {
             planned.push(match change {
                 StateChange::Contact { contact, state } => Planned::Put(
@@ -1016,6 +1019,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if parsed.kind == AppKind::KeyChange {
                 if !from_user {
                     key_changes.push((conversation, parsed.body.to_vec()));
+                }
+                continue;
+            }
+            // WIR-196, WIR-358: a contact share is no message, and a request
+            // or an offer waits for the user.
+            if parsed.kind == AppKind::ContactShare {
+                if !from_user && !record.synced {
+                    intros.push((conversation, Zeroizing::new(parsed.body.to_vec())));
                 }
                 continue;
             }
@@ -1442,6 +1453,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
         for (conversation, body) in shares {
             self.take_share(conversation, &body, now_ms, rng)?;
+        }
+        for (conversation, body) in intros {
+            self.take_intro(conversation, &body, now_ms, rng)?;
         }
         for (conversation, body) in key_changes {
             self.take_key_change(conversation, &body, now_ms, rng)?;

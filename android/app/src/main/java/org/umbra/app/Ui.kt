@@ -468,6 +468,7 @@ private fun ChatsTab(push: (Screen) -> Unit) {
         // Mockup 153: a degraded state has its one line above the title.
         ConnectionNote()
         GroupOfferPrompt()
+        IntroductionPrompt()
         RequestsPrompt(push)
         TabTitle("Chats")
         // A group with no message still shows: the user made it, and its

@@ -237,6 +237,20 @@ pub struct Config {
     pub argon2_floor_ms: u64,
 }
 
+/// One introduction that waits for the user (Part 6 §6.6.7).
+#[derive(uniffi::Record)]
+pub struct FfiIntroduction {
+    /// The row, for the answer.
+    pub id: Vec<u8>,
+    /// An offer: the contact introduces the user to `name`. Else a
+    /// request: the contact asks to introduce the user to `name`.
+    pub is_offer: bool,
+    /// The pairwise conversation of the contact.
+    pub from: Vec<u8>,
+    /// The petname of the third party, as that contact uses it.
+    pub name: String,
+}
+
 /// One offer of a group, or one contact that asked to come into one.
 #[derive(uniffi::Record)]
 pub struct FfiGroupOffer {
@@ -1004,6 +1018,9 @@ pub enum FfiEvent {
     Circuits,
     /// A contact offered a group. [`Handle::group_offers`] gives it.
     GroupOffer,
+    /// A contact asks to introduce the user, or introduces the user to a
+    /// third party. [`Handle::introductions`] gives it.
+    Introduction,
     /// A contact asked to come into a group of this device.
     /// [`Handle::group_joiners`] gives it.
     GroupJoiner,
@@ -1292,6 +1309,9 @@ struct Inner {
     /// The tags of the rendezvous queues that no relay made.
     rendezvous_refused: BTreeSet<u64>,
     next_rendezvous_tag: u64,
+    /// The introductions that the user allowed, each of which takes the
+    /// next fresh invitation of the run (`WIR-199`).
+    pending_grants: VecDeque<[u8; 16]>,
     /// The handle groups whose NDR call runs.
     ndr_in_flight: BTreeSet<[u8; 16]>,
     /// The group of each notify queue that the run makes, by tag.
@@ -2840,6 +2860,7 @@ impl Inner {
                     message: Arc::new(MsgHandle(message)),
                 },
                 Event::GroupOffer { .. } => FfiEvent::GroupOffer,
+                Event::Introduction { .. } => FfiEvent::Introduction,
                 Event::GroupJoiner { .. } => FfiEvent::GroupJoiner,
                 // The snapshot of an admit is already on its way: the
                 // commit of the record asked for it.
@@ -3149,6 +3170,7 @@ fn handle_of(database_path: String, client: Client<SqliteBackend, ForeignElement
             rendezvous_ready: BTreeMap::new(),
             rendezvous_refused: BTreeSet::new(),
             next_rendezvous_tag: 0,
+            pending_grants: VecDeque::new(),
             ndr_in_flight: BTreeSet::new(),
             notify_pending: BTreeMap::new(),
             next_notify_tag: 0,
@@ -3317,6 +3339,8 @@ impl Handle {
             dead_work,
             rendezvous_ready,
             rendezvous_refused,
+            pending_grants,
+            invitation_host,
             ..
         } = &mut *inner;
         let ended = matches!(update, Update::Offline(_));
@@ -3466,7 +3490,27 @@ impl Handle {
             // A fault of the store shows in the event stream of the client,
             // and such an update gives no event of the network.
             if let Ok(Some(event)) = running.on_update(client, update, unix_now_ms(), &mut OsRng) {
-                net_events.push_back(event);
+                match event {
+                    // WIR-199: a fresh invitation of an allowed introduction
+                    // goes in its grant, and the view gets no link.
+                    NetEvent::Invitation(bundle) if !pending_grants.is_empty() => {
+                        let bytes: Result<&[u8; FRAGMENT_LEN], _> = bundle.as_slice().try_into();
+                        let link = bytes
+                            .ok()
+                            .and_then(|b| Fragment::from_bytes(b).ok())
+                            .map(|fragment| fragment.link(invitation_host));
+                        if let (Some(id), Some(link)) = (pending_grants.pop_front(), link) {
+                            let _ = client.grant_introduction(
+                                &id,
+                                link.as_bytes(),
+                                unix_now_ms(),
+                                &mut OsRng,
+                            );
+                            let _ = running.flush(client, &mut OsRng);
+                        }
+                    }
+                    other => net_events.push_back(other),
+                }
             }
         } else if let Update::Offline(cause) = update {
             net_events.push_back(NetEvent::Offline(cause));
@@ -4130,6 +4174,71 @@ impl Handle {
         }
         let bridge = inner.bridge.as_ref().ok_or(FfiError::Offline)?;
         Ok(bridge.invite()?)
+    }
+
+    /// Asks the contact of `to` to be introduced to the contact of
+    /// `about`, by the petnames of this user (Part 6 §6.6.7).
+    pub fn request_introduction(
+        &self,
+        to: Vec<u8>,
+        about: Vec<u8>,
+        about_name: String,
+        to_name: String,
+    ) -> Result<(), FfiError> {
+        let to = conversation_of(&to)?;
+        let about = conversation_of(&about)?;
+        let mut inner = locked(&self.inner);
+        let Inner { client, bridge, .. } = &mut *inner;
+        client.request_introduction(to, about, &about_name, &to_name, unix_now_ms(), &mut OsRng)?;
+        if let Some(running) = bridge {
+            running.flush(client, &mut OsRng)?;
+        }
+        Ok(())
+    }
+
+    /// Each request and each offer of a contact that waits for the user.
+    pub fn introductions(&self) -> Result<Vec<FfiIntroduction>, FfiError> {
+        Ok(locked(&self.inner)
+            .client
+            .introductions()?
+            .into_iter()
+            .map(|intro| FfiIntroduction {
+                id: intro.id.to_vec(),
+                is_offer: intro.is_offer,
+                from: intro.from.0.to_vec(),
+                name: intro.name,
+            })
+            .collect())
+    }
+
+    /// The user allowed a request: a fresh one-time invitation goes to the
+    /// introducer in the grant (`WIR-196`, `WIR-199`).
+    pub fn allow_introduction(&self, id: Vec<u8>) -> Result<(), FfiError> {
+        let id: [u8; 16] = id.try_into().map_err(|_| FfiError::Malformed)?;
+        let mut inner = locked(&self.inner);
+        if !inner.owns_channels {
+            return Err(FfiError::NotFound);
+        }
+        let bridge = inner.bridge.as_ref().ok_or(FfiError::Offline)?;
+        bridge.invite()?;
+        inner.pending_grants.push_back(id);
+        Ok(())
+    }
+
+    /// The user accepted an offer: this device opens the invitation, and
+    /// the result is the petname that the introducer uses (`WIR-358`).
+    pub fn accept_introduction(&self, id: Vec<u8>) -> Result<String, FfiError> {
+        let id: [u8; 16] = id.try_into().map_err(|_| FfiError::Malformed)?;
+        let (link, name) = locked(&self.inner).client.take_offer(&id)?;
+        let link = String::from_utf8(link.to_vec()).map_err(|_| FfiError::Malformed)?;
+        self.accept(link)?;
+        Ok(name)
+    }
+
+    /// The user declined a request or an offer.
+    pub fn decline_introduction(&self, id: Vec<u8>) -> Result<(), FfiError> {
+        let id: [u8; 16] = id.try_into().map_err(|_| FfiError::Malformed)?;
+        Ok(locked(&self.inner).client.decline_introduction(&id)?)
     }
 
     /// Accepts the link of an inviter. The client makes the first fetch of

@@ -1063,7 +1063,7 @@ object Core {
             // The file of a message arrived, left, or failed.
             is FfiEvent.File -> revision++
             // The join flow of a group moved.
-            is FfiEvent.GroupOffer, is FfiEvent.GroupJoiner -> {
+            is FfiEvent.GroupOffer, is FfiEvent.GroupJoiner, is FfiEvent.Introduction -> {
                 refreshJoinFlow()
                 refreshChats()
             }
@@ -1430,6 +1430,33 @@ object Core {
     /** The offers of a group that wait for this user (`GRP-170`). */
     val groupOffers = mutableStateListOf<FfiGroupOffer>()
 
+    /** The introductions that wait for the user (Part 6 §6.6.7). */
+    val introductions = mutableStateListOf<uniffi.umbra_ffi.FfiIntroduction>()
+
+    /** Asks `to` to be introduced to `about`, by the names of this user. */
+    fun requestIntroduction(to: Chat, about: Chat, onDone: () -> Unit) = call { client ->
+        client.requestIntroduction(to.conversation.id, about.conversation.id, about.title, to.title)
+        main.post(onDone)
+    }
+
+    /** WIR-196: a fresh invitation goes to the introducer in the grant. */
+    fun allowIntroduction(intro: uniffi.umbra_ffi.FfiIntroduction) = call { client ->
+        client.allowIntroduction(intro.id)
+        refreshJoinFlow()
+    }
+
+    /** WIR-358: the offer opens its invitation, and the name comes with it. */
+    fun acceptIntroduction(intro: uniffi.umbra_ffi.FfiIntroduction) = call { client ->
+        val name = client.acceptIntroduction(intro.id)
+        suggestedName = name.ifBlank { null }
+        refreshJoinFlow()
+    }
+
+    fun declineIntroduction(intro: uniffi.umbra_ffi.FfiIntroduction) = call { client ->
+        client.declineIntroduction(intro.id)
+        refreshJoinFlow()
+    }
+
     /** The admissions whose roster did not verify (`GRP-328`). */
     val failedAdmissions = mutableStateListOf<FfiGroupOffer>()
 
@@ -1493,7 +1520,10 @@ object Core {
         val offers = client.groupOffers()
         val joiners = client.groupJoiners()
         val failed = client.failedAdmissions()
+        val intros = client.introductions()
         main.post {
+            introductions.clear()
+            introductions.addAll(intros)
             groupOffers.clear()
             groupOffers.addAll(offers)
             failedAdmissions.clear()

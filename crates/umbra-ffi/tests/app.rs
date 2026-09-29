@@ -1715,6 +1715,87 @@ fn group_update(updates: &mut tokio::sync::mpsc::UnboundedReceiver<GroupUpdate>)
     panic!("the group run gave no update in time");
 }
 
+/// Part 6 §6.6.7, goal S3: Alice introduces Bob to Carol. Bob allows it,
+/// Carol accepts it, and no record carries an address of a third party.
+#[test]
+fn a_contact_introduces_two_of_its_contacts_with_the_consent_of_each() {
+    let relays = tokio::runtime::Runtime::new().unwrap();
+    let network = start_signed_network(&relays);
+    let directory = std::env::temp_dir().join(format!("umbra-intro-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    for name in ["alice.db", "bob.db", "carol.db"] {
+        let _ = std::fs::remove_file(directory.join(name));
+    }
+    let alice = launch(&directory, "alice.db", 1);
+    let bob = launch(&directory, "bob.db", 2);
+    let carol = launch(&directory, "carol.db", 3);
+    for handle in [&alice, &bob, &carol] {
+        let verified = handle
+            .network_of_manifest(
+                network.manifest.clone(),
+                network.keyset.clone(),
+                0,
+                HOST.into(),
+                Some(CA.into()),
+            )
+            .unwrap();
+        handle.clone().connect(verified.network).unwrap();
+    }
+    let befriend = |other: &Arc<Handle>| {
+        alice.invite().unwrap();
+        let link = wait_for(&alice, |event| match event {
+            FfiEvent::Invitation { link } => Some(link),
+            _ => None,
+        });
+        other.accept(link).unwrap();
+        let at_alice = wait_for_contact(&alice);
+        wait_for_contact(other);
+        at_alice
+    };
+    let bob_at_alice = befriend(&bob);
+    let carol_at_alice = befriend(&carol);
+
+    // Step 1: the request names Carol by the petname of Alice, and Bob acts.
+    alice
+        .request_introduction(
+            bob_at_alice.clone(),
+            carol_at_alice.clone(),
+            "Carol".into(),
+            "Bob".into(),
+        )
+        .unwrap();
+    wait_for(&bob, |event| {
+        matches!(event, FfiEvent::Introduction).then_some(())
+    });
+    let asked = bob.introductions().unwrap();
+    assert_eq!(asked.len(), 1);
+    assert!(!asked[0].is_offer);
+    assert_eq!(asked[0].name, "Carol");
+
+    // Steps 2 and 3: the grant carries a fresh invitation of Bob, and the
+    // offer reaches Carol, who acts.
+    bob.allow_introduction(asked[0].id.clone()).unwrap();
+    wait_for(&carol, |event| {
+        matches!(event, FfiEvent::Introduction).then_some(())
+    });
+    let offered = carol.introductions().unwrap();
+    assert_eq!(offered.len(), 1);
+    assert!(offered[0].is_offer);
+    assert_eq!(offered[0].name, "Bob");
+    assert!(bob.introductions().unwrap().is_empty());
+    assert_eq!(
+        carol.accept_introduction(offered[0].id.clone()).unwrap(),
+        "Bob"
+    );
+    wait_for_contact(&carol);
+    wait_for_contact(&bob);
+    assert!(carol.introductions().unwrap().is_empty());
+    for handle in [&alice, &bob, &carol] {
+        handle.disconnect();
+    }
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
 #[test]
 fn a_push_wake_session_ends_after_six_seconds_unless_the_app_comes_to_the_screen() {
     let relays = tokio::runtime::Runtime::new().unwrap();

@@ -79,6 +79,27 @@ fun ContactDetailsScreen(chat: Chat, onBack: () -> Unit, onMessage: () -> Unit, 
                     push(Screen.ConversationSettings(chat.conversation))
                 },
             )
+            // Part 6 §6.6.7: an introduction asks the other contact first.
+            var isIntroducing by remember { mutableStateOf(false) }
+            var introduced by remember { mutableStateOf<String?>(null) }
+            HorizontalDivider(color = Palette.Divider)
+            EntryRow(
+                RowEntry("user-plus", "Introduce to a contact", introduced) { isIntroducing = true },
+            )
+            if (isIntroducing) {
+                ActionSheet(
+                    "Introduce ${chat.title} to",
+                    Core.chats.filter { !it.isGroup && !it.conversation.id.contentEquals(chat.conversation.id) }
+                        .map { other ->
+                            RowEntry("comment", other.title) {
+                                Core.requestIntroduction(to = other, about = chat) {
+                                    introduced = "Asked ${other.title}"
+                                }
+                            }
+                        },
+                    onDismiss = { isIntroducing = false },
+                )
+            }
             // Part 4 §4.7.3: a piece of the recovery of this contact.
             var held by remember { mutableStateOf<uniffi.umbra_ffi.FfiHeldShare?>(null) }
             LaunchedEffect(chat.conversation, Core.revision) { Core.heldShare(chat.conversation) { held = it } }

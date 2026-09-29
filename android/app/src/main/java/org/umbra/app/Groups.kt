@@ -519,6 +519,46 @@ fun InviteToGroupScreen(chat: Chat, onBack: () -> Unit) {
     }
 }
 
+/**
+ * The introductions that wait for the user (Part 6 §6.6.7): a contact asks
+ * to introduce the user, or it introduces the user to a third party. Each
+ * one waits for an act of the user (`WIR-196`, `WIR-358`).
+ */
+@Composable
+fun IntroductionPrompt() {
+    val intro = Core.introductions.firstOrNull() ?: return
+    val from = Core.chats
+        .firstOrNull { it.conversation.id.contentEquals(intro.from) }?.title ?: "A contact"
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .background(Palette.Incoming)
+            .padding(horizontal = 20.dp, vertical = 12.dp),
+    ) {
+        if (intro.isOffer) {
+            Text("$from introduces you to ${intro.name}")
+        } else {
+            Text("$from asks to introduce you to ${intro.name}")
+            Text(
+                "Your app makes a new invitation for them. It carries no address of yours.",
+                style = MaterialTheme.typography.labelMedium,
+                color = Palette.TextSecondary,
+                modifier = Modifier.subline(),
+            )
+        }
+        Spacer(Modifier.height(8.dp))
+        Row {
+            if (intro.isOffer) {
+                InlineButton("Accept") { Core.acceptIntroduction(intro) }
+            } else {
+                InlineButton("Allow") { Core.allowIntroduction(intro) }
+            }
+            Spacer(Modifier.width(12.dp))
+            InlineButton("Decline") { Core.declineIntroduction(intro) }
+        }
+    }
+}
+
 /** The offers of a group that wait for the user (mockup 050). */
 @Composable
 fun GroupOfferPrompt() {
