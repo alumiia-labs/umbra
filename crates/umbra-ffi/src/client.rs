@@ -2622,6 +2622,20 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(())
     }
 
+    /// `K_rng_harden` of this store (Part 5 §5.2, Part 14 `IMP-093`). It
+    /// comes from the storage seed, thus a reset of the identity keeps it.
+    pub fn rng_harden_key(&self) -> Result<Secret<32>, Error> {
+        let store = &self.open_ref()?.store;
+        let row = store.row_id(TableId::LOCAL_IDENTITY, ROOT_KEY);
+        let seed = Zeroizing::new(
+            store
+                .get(TableId::LOCAL_IDENTITY, &row)?
+                .ok_or(Error::Integrity)?,
+        );
+        let seed: [u8; 32] = seed.as_slice().try_into().map_err(|_| Error::Integrity)?;
+        Ok(RootIdentity::new(Secret::new(seed)).rng_harden_key())
+    }
+
     /// The root identity of the device, for the network runtime.
     pub fn root_identity(&self) -> Result<RootIdentity, Error> {
         // Part 7 §7.7.1: a reset gives an identity root of its own.

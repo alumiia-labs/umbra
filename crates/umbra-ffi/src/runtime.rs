@@ -17,7 +17,11 @@ use umbra_core::{
         node::{ClientEvent, ClientNode, ContactId, CoverSlot, StateChange},
     },
 };
-use umbra_crypto::rand_core::{TryCryptoRng, TryRng};
+use umbra_crypto::{
+    rand_core::{TryCryptoRng, TryRng},
+    rng::HardenedRng,
+    secret::Secret,
+};
 use umbra_transport::{
     native::{self, ClientConfig},
     race::{Plan, Wire},
@@ -25,11 +29,30 @@ use umbra_transport::{
 };
 use zeroize::Zeroizing;
 
-/// The entropy of the operating system. A client that cannot draw a random
-/// value stops, because each key and each identifier needs one.
+/// The entropy of the operating system, hardened under `K_rng_harden` once a
+/// store is open (Part 5 §5.9, Part 14 `IMP-093`). A client that cannot draw
+/// a random value stops, because each key and each identifier needs one.
 pub struct OsRng;
 
-impl TryRng for OsRng {
+/// `K_rng_harden` of the store that this process opened. It stays until the
+/// process ends, thus a platform generator that fails after the first
+/// unlock shows no raw output on the wire.
+static HARDEN: std::sync::Mutex<Option<Secret<32>>> = std::sync::Mutex::new(None);
+
+/// The context of each value of this process under the hardening.
+const HARDEN_CONTEXT: &[u8] = b"umbra/v1/client-rng";
+
+/// Hardens each later value of [`OsRng`] under `key`.
+pub fn harden_with(key: Secret<32>) {
+    *HARDEN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(key);
+}
+
+/// The platform source alone.
+struct PlatformRng;
+
+impl TryRng for PlatformRng {
     type Error = core::convert::Infallible;
 
     fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
@@ -49,6 +72,36 @@ impl TryRng for OsRng {
             std::process::abort();
         }
         Ok(())
+    }
+}
+
+impl TryCryptoRng for PlatformRng {}
+
+impl TryRng for OsRng {
+    type Error = core::convert::Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        let mut bytes = [0u8; 4];
+        self.try_fill_bytes(&mut bytes)?;
+        Ok(u32::from_le_bytes(bytes))
+    }
+
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        let mut bytes = [0u8; 8];
+        self.try_fill_bytes(&mut bytes)?;
+        Ok(u64::from_le_bytes(bytes))
+    }
+
+    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+        let held = HARDEN
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match held.as_ref() {
+            Some(key) => {
+                HardenedRng::new(&mut PlatformRng, key, HARDEN_CONTEXT).try_fill_bytes(dst)
+            }
+            None => PlatformRng.try_fill_bytes(dst),
+        }
     }
 }
 

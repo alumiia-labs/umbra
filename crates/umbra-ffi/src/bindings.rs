@@ -2925,6 +2925,14 @@ impl Drop for Handle {
     }
 }
 
+/// Hardens each later random value of this process under the key of the
+/// store that is open (`IMP-093`).
+fn harden(client: &Client<SqliteBackend, ForeignElement>) {
+    if let Ok(key) = client.rng_harden_key() {
+        crate::runtime::harden_with(key);
+    }
+}
+
 /// The lines of the run for the developer, in a debug build. A release
 /// build gives none.
 #[uniffi::export]
@@ -2957,6 +2965,7 @@ pub fn init(
             headers
                 .set_header(client.header())
                 .map_err(|_| FfiError::Storage)?;
+            harden(&client);
             client
         }
     };
@@ -3013,6 +3022,7 @@ fn init_store_from(
         .set_header(client.header())
         .map_err(|_| FfiError::Storage)?;
     fill(&mut client)?;
+    harden(&client);
     Ok(handle_of(config.database_path, client))
 }
 
@@ -5166,7 +5176,9 @@ impl Handle {
     pub fn unlock(&self, passphrase: Vec<u16>) -> Result<(), FfiError> {
         let passphrase = Zeroizing::new(passphrase);
         let mut inner = locked(&self.inner);
-        Ok(inner.client.unlock(&passphrase, unix_now())?)
+        inner.client.unlock(&passphrase, unix_now())?;
+        harden(&inner.client);
+        Ok(())
     }
 
     /// The idle time of the auto-lock, in seconds. Zero means that the

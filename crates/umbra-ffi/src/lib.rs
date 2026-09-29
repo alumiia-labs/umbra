@@ -3639,6 +3639,23 @@ mod tests {
     }
 
     #[test]
+    fn the_hardening_key_comes_from_the_storage_seed_and_outlives_a_reset() {
+        let mut rng = Rng(108);
+        let mut alice = new_client(&mut rng);
+        let before = alice.rng_harden_key().unwrap();
+        // IMP-093: K_rng_harden is not the identity root, thus a reset of
+        // the identity (DEV-305) keeps it.
+        assert_ne!(
+            before.expose(),
+            &alice.root_identity().unwrap().storage_key().expose()[..]
+        );
+        alice.reset_identity(1_000_000, &mut rng).unwrap();
+        assert_eq!(alice.rng_harden_key().unwrap().expose(), before.expose());
+        alice.lock();
+        assert!(alice.rng_harden_key().is_err());
+    }
+
+    #[test]
     fn a_delivery_gap_is_a_note_of_the_conversation() {
         use crate::client::{NOTE_GAP, NOTE_NOBODY};
 
