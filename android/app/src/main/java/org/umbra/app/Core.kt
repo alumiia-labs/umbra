@@ -228,6 +228,7 @@ object Core {
     private const val STOPPED = 0
     private const val DIAL_FAILED = 1
     private const val AGED = 6
+    private const val WAKE_DONE = 7
 
     /**
      * Opens the client under the passphrase. The first launch makes the
@@ -933,7 +934,11 @@ object Core {
                 isStarting = false
                 online = false
                 readConnection()
-                if (event.cause.toInt() == AGED) {
+                if (event.cause.toInt() == WAKE_DONE) {
+                    // NET-100: the push-wake session ended on time. A view
+                    // on the screen takes a full run.
+                    if (wantsNetwork()) connect(app)
+                } else if (event.cause.toInt() == AGED) {
                     // NET-320: the circuits reached their age, and new ones
                     // build now. Nothing failed.
                     if (wantsNetwork()) connect(app)
@@ -1226,7 +1231,7 @@ object Core {
     /** A push came: an open client with no run starts one and drains. */
     fun wake(context: Context) {
         val app = context.applicationContext
-        main.post { if (isOpen() && !online) connect(app) }
+        main.post { if (isOpen() && !online) connect(app, isWake = !isVisible && !carrierHolds) }
     }
 
     /**
@@ -1331,7 +1336,7 @@ object Core {
     }
 
     /** Starts the network again after it ended. */
-    fun connect(context: Context, force: Boolean = false) {
+    fun connect(context: Context, force: Boolean = false, isWake: Boolean = false) {
         val app = context.applicationContext
         // The open, the carrier, and the screen each ask for a run in the
         // first second. A second run replaces the first, and the handshake
@@ -1352,7 +1357,8 @@ object Core {
                 return@call
             }
             try {
-                client.connect(network)
+                // NET-100: a push wake is a session of 6 s at most.
+                if (isWake) client.connectWake(network) else client.connect(network)
             } catch (failure: FfiException) {
                 main.post { isStarting = false }
                 throw failure
@@ -2099,6 +2105,8 @@ object Core {
             } catch (locked: FfiException.Locked) {
                 // A read that the lock overtook is no fault of the user.
             } catch (failure: FfiException) {
+                // A debug build names the call that failed.
+                if (BuildConfig.DEBUG) android.util.Log.w("umbra-core", "a call failed", failure)
                 main.post { fault = "That did not work: ${failure.javaClass.simpleName}." }
             }
         }

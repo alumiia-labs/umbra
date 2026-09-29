@@ -4125,9 +4125,26 @@ impl Handle {
     pub fn set_foreground(&self, is_foreground: bool) {
         let mut inner = locked(&self.inner);
         inner.is_foreground = is_foreground;
-        if let Some(bridge) = inner.bridge.as_ref() {
-            let _ = bridge.set_foreground(is_foreground);
+        let Inner { client, bridge, .. } = &mut *inner;
+        if let Some(running) = bridge.as_mut() {
+            let _ = running.set_foreground(is_foreground);
+            // The records that a push-wake session held go now.
+            if is_foreground {
+                let _ = running.flush(client, &mut OsRng);
+            }
         }
+    }
+
+    /// Starts a push-wake session (Part 3 §3.9, Part 8 §8.4.1): a run that
+    /// drains and acknowledges, carries no record on a sync channel, and
+    /// ends after `WAKE_SESSION_MAX` unless the app enters the screen
+    /// (`NET-097`, `NET-100`).
+    pub fn connect_wake(self: Arc<Self>, network: Network) -> Result<(), FfiError> {
+        self.clone().connect(network)?;
+        if let Some(running) = locked(&self.inner).bridge.as_mut() {
+            running.wake()?;
+        }
+        Ok(())
     }
 
     /// The 60-digit safety number of a conversation, in groups of five. It

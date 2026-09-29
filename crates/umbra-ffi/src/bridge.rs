@@ -62,6 +62,9 @@ pub struct Bridge {
     contacts: BTreeMap<ConversationId, ContactId>,
     sent: BTreeMap<u64, MsgRef>,
     next_tag: u64,
+    /// Whether the run is a push-wake session, which carries no record on
+    /// a sync channel (Part 3 `NET-097`).
+    is_wake: bool,
 }
 
 impl Bridge {
@@ -76,6 +79,7 @@ impl Bridge {
             contacts,
             sent: BTreeMap::new(),
             next_tag: 0,
+            is_wake: false,
         }
     }
 
@@ -172,8 +176,17 @@ impl Bridge {
 
     /// Tells the runtime whether a view of the app is on the screen. The
     /// cover clock makes a cover cell in the foreground only.
-    pub fn set_foreground(&self, is_foreground: bool) -> Result<(), Error> {
+    pub fn set_foreground(&mut self, is_foreground: bool) -> Result<(), Error> {
+        if is_foreground {
+            self.is_wake = false;
+        }
         self.command(Command::Foreground(is_foreground))
+    }
+
+    /// Makes the run a push-wake session (`NET-097`, `NET-100`).
+    pub fn wake(&mut self) -> Result<(), Error> {
+        self.is_wake = true;
+        self.command(Command::Wake)
     }
 
     /// The contact of each conversation of the run.
@@ -272,7 +285,13 @@ impl Bridge {
                 client.set_delivery(&outgoing.message, Delivery::Failed, rng)?;
             }
         }
-        while let Some(send) = client.take_sync_send() {
+        // NET-097: the records of a sync channel wait for a session of the
+        // screen or of the carrier.
+        while let Some(send) = if self.is_wake {
+            None
+        } else {
+            client.take_sync_send()
+        } {
             let Some(contact) = self.contacts.get(&send.peer).copied() else {
                 continue;
             };

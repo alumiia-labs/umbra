@@ -1716,6 +1716,54 @@ fn group_update(updates: &mut tokio::sync::mpsc::UnboundedReceiver<GroupUpdate>)
 }
 
 #[test]
+fn a_push_wake_session_ends_after_six_seconds_unless_the_app_comes_to_the_screen() {
+    let relays = tokio::runtime::Runtime::new().unwrap();
+    let network = start_signed_network(&relays);
+    let directory = std::env::temp_dir().join(format!("umbra-wake-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let _ = std::fs::remove_file(directory.join("alice.db"));
+    let alice = launch(&directory, "alice.db", 1);
+    let verified = alice
+        .network_of_manifest(
+            network.manifest.clone(),
+            network.keyset.clone(),
+            0,
+            HOST.into(),
+            Some(CA.into()),
+        )
+        .unwrap();
+    let offline_cause = |within: Duration| {
+        let start = Instant::now();
+        while start.elapsed() < within {
+            if let Some(FfiEvent::Offline { cause }) = alice.wait_event(200) {
+                return Some((cause, start.elapsed()));
+            }
+        }
+        None
+    };
+
+    // NET-100: a wake ends by itself, and the cause is no fault.
+    alice.set_foreground(false);
+    alice
+        .clone()
+        .connect_wake(verified.network.clone())
+        .unwrap();
+    let (cause, after) = offline_cause(Duration::from_secs(20)).expect("the wake did not end");
+    assert_eq!(cause, 7);
+    assert!(after >= Duration::from_secs(5), "ended after {after:?}");
+
+    // A wake that the screen takes is a full run.
+    alice
+        .clone()
+        .connect_wake(verified.network.clone())
+        .unwrap();
+    alice.set_foreground(true);
+    assert_eq!(offline_cause(Duration::from_secs(9)), None);
+    alice.disconnect();
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[test]
 fn a_contact_that_reset_its_identity_joins_a_group_and_reads_it() {
     let relays = tokio::runtime::Runtime::new().unwrap();
     let network = start_signed_network(&relays);

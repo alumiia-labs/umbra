@@ -133,8 +133,12 @@ pub enum Command {
         tag: u64,
     },
     /// The app entered or left the screen. A client in the background
-    /// makes no cover cell (Part 3 §3.6.2, tier C).
+    /// makes no cover cell (Part 3 §3.6.2, tier C). A run that enters the
+    /// screen is a push-wake session no more.
     Foreground(bool),
+    /// The run is a push-wake session: it ends after `WAKE_SESSION_MAX`
+    /// unless the app enters the screen first (Part 3 `NET-100`).
+    Wake,
     /// Start a verification ceremony with a contact (Part 4 §4.5.2). An
     /// [`Update::VerificationCode`] follows at the two devices.
     Verify(ContactId),
@@ -411,6 +415,8 @@ pub enum Ended {
     /// A circuit came near `CIRCUIT_MAX_AGE` (`NET-320`). The next run
     /// starts at once, and the view shows no fault.
     Aged = 6,
+    /// A push-wake session reached `WAKE_SESSION_MAX` (`NET-100`). No fault.
+    WakeDone = 7,
 }
 
 /// Commits what the last call of the node gave. The caller writes the
@@ -505,6 +511,9 @@ pub async fn run_client(
     // counts in days, thus a check each minute is on time.
     let mut next_rotation_check = unix_now();
     let mut last_faults = LinkFaults::default();
+    // NET-100: the end of a push-wake session, or none for a run of the
+    // screen or of the carrier.
+    let mut wake_end: Option<tokio::time::Instant> = None;
     let ended = 'run: loop {
         for capsule in node.take_capsules() {
             if link.send(&capsule).await.is_err() {
@@ -523,6 +532,16 @@ pub async fn run_client(
                 None => break 'run Ended::Stopped,
                 Some(Command::Foreground(now_foreground)) => {
                     is_foreground = now_foreground;
+                    if now_foreground {
+                        wake_end = None;
+                    }
+                    Vec::new()
+                }
+                Some(Command::Wake) => {
+                    wake_end = Some(
+                        tokio::time::Instant::now()
+                            + Duration::from_secs(umbra_core::notify::WAKE_SESSION_MAX),
+                    );
                     Vec::new()
                 }
                 Some(command) => {
@@ -530,6 +549,12 @@ pub async fn run_client(
                     Vec::new()
                 }
             },
+            () = async {
+                match wake_end {
+                    Some(end) => tokio::time::sleep_until(end).await,
+                    None => core::future::pending().await,
+                }
+            } => break 'run Ended::WakeDone,
             // The clock is memoryless, and it fires whether or not a cell
             // waits (`NET-049`). A fault of one slot ends no run.
             () = tokio::time::sleep_until(next_slot) => {
@@ -704,8 +729,8 @@ pub async fn run_client(
             // A value of the user ends no runtime: a bad bundle and a send
             // to no contact fail that one command.
             match command {
-                // The loop above takes this command.
-                Command::Foreground(_) => {}
+                // The loop above takes these commands.
+                Command::Foreground(_) | Command::Wake => {}
                 Command::Invite => {
                     if node.invite_link(&mut rng).is_err() {
                         let _ = updates.send(Update::Refused);
