@@ -1,5 +1,6 @@
 package org.umbra.app
 
+import androidx.activity.compose.BackHandler
 import android.app.Activity
 import android.view.WindowManager
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -102,6 +103,9 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
     var lines by remember { mutableStateOf(emptyList<Line>()) }
     val listState = rememberLazyListState()
     val conversation = chat.conversation
+    // WIR-273: the records of one thread show together, under their root.
+    var threadOf by remember(conversation) { mutableStateOf<List<Byte>?>(null) }
+    BackHandler(enabled = threadOf != null) { threadOf = null }
     // The count of the messages that the user did not see, at the moment the
     // view opened. The read marker moves at once, and the line stays where
     // it was for this visit.
@@ -158,6 +162,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
         }
     }
     val readUpTo = lines.indexOfLast { it.info.outgoing && it.info.delivery.toInt() == READ }
+    val replyCounts = remember(lines) { lines.mapNotNull { it.threadKey }.groupingBy { it }.eachCount() }
     val composer = rememberPlatformField()
     // IMP-058: the window of a conversation with the block takes no screenshot.
     var isSecure by remember { mutableStateOf(false) }
@@ -474,11 +479,12 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
         BackBar(
             chat.title,
             subtitle = when {
+                threadOf != null -> "Thread"
                 chat.isGroup -> groupSubtitle(chat)
                 conversation.id.toList() in Core.typingNow -> "typing…"
                 else -> null
             },
-            onBack = onBack,
+            onBack = { if (threadOf != null) threadOf = null else onBack() },
             isVerified = chat.isVerified,
             onTitle = {
                 push(
@@ -523,6 +529,8 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                 }
             }
             itemsIndexed(lines) { index, line ->
+                // A thread shows its root and its replies alone.
+                if (threadOf != null && line.key != threadOf && line.threadKey != threadOf) return@itemsIndexed
                 val before = lines.getOrNull(index - 1)
                 if (before == null || !isSameDay(before.info.storedAtMs, line.info.storedAtMs)) {
                     DayLabel(line.info.storedAtMs.toLong())
@@ -571,6 +579,18 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                         chat.isGroup && (before == null || before.info.outgoing || before.info.sender != it)
                     }?.let { memberNames[it] ?: "Member $it" },
                 )
+                // WIR-273: a root names its replies, and a tap opens them.
+                val replies = replyCounts[line.key] ?: 0
+                if (replies > 0 && threadOf == null) {
+                    Text(
+                        if (replies == 1) "1 reply" else "$replies replies",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = Palette.Action,
+                        modifier = Modifier
+                            .padding(start = 12.dp, bottom = 4.dp)
+                            .press(role = Role.Button) { threadOf = line.key },
+                    )
+                }
                 // The contact saw each message up to this one. The mark
                 // sits under it and under no other, as a read marker does.
                 if (index == readUpTo) ReadMark(chat)

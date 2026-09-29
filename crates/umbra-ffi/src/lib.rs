@@ -169,6 +169,9 @@ pub struct MessageInfo {
     /// How many forwards lie behind the text, or zero for an original
     /// (`WIR-177`).
     pub forward_depth: u8,
+    /// The root of the thread of a group record that this device holds, or
+    /// none (`WIR-271`, `WIR-273`).
+    pub thread: Option<MsgRef>,
     /// The moderator action on the message: 0 none, 1 hidden, 2 removed
     /// (Part 11 §11.9.6).
     pub moderation: u8,
@@ -2699,6 +2702,58 @@ mod tests {
             .dismiss_failed_admission(pair_at_joiner, &group_id)
             .unwrap();
         assert!(joiner.failed_admissions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_reply_in_a_group_joins_the_thread_of_its_root() {
+        let mut rng = Rng(114);
+        let mut admin = new_client(&mut rng);
+        let mut joiner = new_client(&mut rng);
+        let (group, member, _, _) = group_of_two(&mut admin, &mut joiner, &mut rng);
+        let mut seq = 10u32;
+        let mut pass = |from: &mut Client<MemoryBackend, Element>,
+                        to: &mut Client<MemoryBackend, Element>,
+                        rng: &mut Rng| {
+            let post = from.take_group_post().unwrap();
+            seq += 1;
+            to.on_group_record(&[0xC3; 32], seq, &post.record, 1_700_000_100_000, rng)
+                .unwrap()
+                .unwrap()
+        };
+        // The root answers nothing.
+        let mut draft = admin.new_draft(group);
+        draft.set_text(&units("where do we meet")).unwrap();
+        let root = admin
+            .send_draft(draft, 1_700_000_050_000, &mut rng)
+            .unwrap();
+        let root_at_joiner = pass(&mut admin, &mut joiner, &mut rng);
+        assert_eq!(admin.info(&root).unwrap().thread, None);
+
+        // WIR-267: a reply to the root takes the root as its thread.
+        let mut draft = joiner.new_draft(member);
+        draft.set_text(&units("at the gate")).unwrap();
+        draft.set_reply_to(Some(root_at_joiner));
+        let reply = joiner
+            .send_draft(draft, 1_700_000_060_000, &mut rng)
+            .unwrap();
+        assert_eq!(joiner.info(&reply).unwrap().thread, Some(root_at_joiner));
+        let reply_at_admin = pass(&mut joiner, &mut admin, &mut rng);
+        // WIR-271, WIR-272: the admin resolves the root in the group.
+        assert_eq!(admin.info(&reply_at_admin).unwrap().thread, Some(root));
+
+        // A reply to that reply stays in the same thread.
+        let mut draft = admin.new_draft(group);
+        draft.set_text(&units("which gate")).unwrap();
+        draft.set_reply_to(Some(reply_at_admin));
+        let second = admin
+            .send_draft(draft, 1_700_000_070_000, &mut rng)
+            .unwrap();
+        assert_eq!(admin.info(&second).unwrap().thread, Some(root));
+        let second_at_joiner = pass(&mut admin, &mut joiner, &mut rng);
+        assert_eq!(
+            joiner.info(&second_at_joiner).unwrap().thread,
+            Some(root_at_joiner)
+        );
     }
 
     #[test]

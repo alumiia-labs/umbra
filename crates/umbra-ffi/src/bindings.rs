@@ -821,6 +821,9 @@ pub struct MsgInfo {
     pub recovered: bool,
     /// How many forwards lie behind the text, or zero for an original.
     pub forward_depth: u8,
+    /// The root of the thread of a group record, or none. The view groups
+    /// the records of one root (`WIR-273`).
+    pub thread: Option<Arc<MsgHandle>>,
     /// The moderator action on the message: 0 none, 1 hidden, 2 removed.
     pub moderation: u8,
     /// The role of the member that acted, with the values of [`FfiRole`],
@@ -5082,6 +5085,7 @@ impl Handle {
             mentions_me: info.mentions_me,
             recovered: info.recovered,
             forward_depth: info.forward_depth,
+            thread: info.thread.map(|root| Arc::new(MsgHandle(root))),
             moderation: info.moderation,
             moderator_role: info.moderator_role,
             sender: info.sender,

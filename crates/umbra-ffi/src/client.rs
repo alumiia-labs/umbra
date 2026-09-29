@@ -451,18 +451,37 @@ fn reply_field(app: &[u8]) -> Result<Option<core::ops::Range<usize>>, Error> {
 /// WIR-170: a stored record holds `reply_target` as the keyed reference, and
 /// not as the raw `msg_id` of the wire.
 fn keep_reply_as_reference(app: &mut [u8], key: &Secret<32>) -> Result<(), Error> {
-    let Some(field) = reply_field(app)? else {
-        return Ok(());
-    };
-    let raw: [u8; 16] = app
-        .get(field.clone())
-        .and_then(|bytes| bytes.try_into().ok())
-        .ok_or(Error::Integrity)?;
-    let reference = msg_ref(key, &raw);
-    app.get_mut(field)
-        .ok_or(Error::Integrity)?
-        .copy_from_slice(&reference);
+    // WIR-272: the thread root of a group takes the stored form too.
+    for field in [reply_field(app)?, thread_field(app)?]
+        .into_iter()
+        .flatten()
+    {
+        let raw: [u8; 16] = app
+            .get(field.clone())
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or(Error::Integrity)?;
+        let reference = msg_ref(key, &raw);
+        app.get_mut(field)
+            .ok_or(Error::Integrity)?
+            .copy_from_slice(&reference);
+    }
     Ok(())
+}
+
+/// The place of `thread_root` in an encoded record with a rich body, or
+/// `None` for a record in no thread. The field follows `reply_target`.
+fn thread_field(app: &[u8]) -> Result<Option<core::ops::Range<usize>>, Error> {
+    let parsed = AppMessage::parse(app, Channel::Pairwise)?;
+    if parsed.kind != AppKind::Rich {
+        return Ok(None);
+    }
+    let rich = RichRecord::parse(parsed.body, Channel::Group)?;
+    if rich.thread_root == [0; 16] {
+        return Ok(None);
+    }
+    let body_at = app.len().saturating_sub(parsed.body.len());
+    let at = body_at.saturating_add(17);
+    Ok(Some(at..at.saturating_add(16)))
 }
 
 /// The held receipts of one peer and one kind: the conversation, the hold,
@@ -2798,12 +2817,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     return Err(Error::Malformed);
                 }
                 let held = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
+                // WIR-269: a pairwise record is in no thread.
+                let thread_root = if is_group {
+                    self.thread_root_for(&plain, &info_of(&plain)?)?
+                } else {
+                    [0; 16]
+                };
                 // The row of a message of this device holds the raw
                 // `msg_id` of its answer while no relay took it, and the
                 // raw `msg_id` of the message itself at each time.
                 let record = RichRecord {
                     reply_target: AppMessage::parse(held, Channel::Group)?.msg_id,
-                    thread_root: [0; 16],
+                    thread_root,
                     forward_depth: 0,
                     mentions,
                     inner_kind: AppKind::Text,
@@ -3146,7 +3171,58 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 None => ReplyTarget::Absent,
             };
         }
+        // WIR-271, WIR-273: the root of the thread of a group record, in
+        // its conversation alone.
+        if let Some(field) = thread_field(app)? {
+            let held: [u8; 16] = app
+                .get(field)
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or(Error::Integrity)?;
+            let reference =
+                if info.outgoing && matches!(info.delivery, Delivery::Queued | Delivery::Failed) {
+                    msg_ref(&open.device_set_key, &held)
+                } else {
+                    held
+                };
+            let natural = [conversation_of(&plain)?.0.as_slice(), &reference].concat();
+            let row = open.store.row_id(TableId::MESSAGE, &natural);
+            info.thread = open.store.get(TableId::MESSAGE, &row)?.map(|_| MsgRef(row));
+        }
         Ok(info)
+    }
+
+    /// The raw `msg_id` of the root of the thread that a reply to `target`
+    /// joins (`WIR-266` to `WIR-268`): the root of the target, or the
+    /// target itself when it answers nothing, or none when the target is a
+    /// reply outside each thread.
+    fn thread_root_for(&self, target: &[u8], target_info: &MessageInfo) -> Result<[u8; 16], Error> {
+        let app = target.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
+        let parsed = AppMessage::parse(app, Channel::Group)?;
+        if let Some(field) = thread_field(app)? {
+            let held: [u8; 16] = app
+                .get(field)
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or(Error::Integrity)?;
+            // A record that waits for its relay holds the raw root.
+            if target_info.outgoing
+                && matches!(target_info.delivery, Delivery::Queued | Delivery::Failed)
+            {
+                return Ok(held);
+            }
+            let natural = [conversation_of(target)?.0.as_slice(), &held].concat();
+            let store = &self.open_ref()?.store;
+            let row = store.row_id(TableId::MESSAGE, &natural);
+            let Some(root) = store.get(TableId::MESSAGE, &row)? else {
+                return Ok([0; 16]);
+            };
+            let root = Zeroizing::new(root);
+            let root_app = root.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
+            return Ok(AppMessage::parse(root_app, Channel::Group)?.msg_id);
+        }
+        if reply_field(app)?.is_none() {
+            return Ok(parsed.msg_id);
+        }
+        Ok([0; 16])
     }
 
     /// The messages of one conversation, as handles, in the order in which
@@ -3234,6 +3310,8 @@ fn info_of(plain: &[u8]) -> Result<MessageInfo, Error> {
         // The store holds the mark: see `Client::info`.
         mentions_me: false,
         recovered: false,
+        // The store resolves the root: see `Client::info`.
+        thread: None,
         // WIR-177: the depth of a forward, and zero for an original.
         forward_depth: plain.get(MESSAGE_PREFIX..).map_or(0, forward::depth_of),
         // The store holds the state: see `Client::info`.

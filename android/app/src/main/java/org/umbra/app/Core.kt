@@ -81,6 +81,9 @@ class Line(
      */
     val key: List<Byte> = handle.key().toList()
 
+    /** The key of the root of the thread of a group record, or null (`WIR-273`). */
+    val threadKey: List<Byte>? = info.thread?.key()?.toList()
+
     val isReply: Boolean
         get() = info.isReply
 }
