@@ -1918,6 +1918,10 @@ fn one_app_offers_a_group_and_the_other_app_joins_it() {
     assert_eq!(at_bob.group_id, info.group_id);
     assert_eq!((at_bob.own_index, at_bob.members), (1, 2));
     assert!(at_bob.is_ready);
+    // The admin that offered the group shows under the name of its contact.
+    let members = bob.group_members(joined.clone()).unwrap();
+    let admin = members.iter().find(|member| member.index == 0).unwrap();
+    assert_eq!(admin.contact.as_deref(), Some(bob_conversation.as_slice()));
     assert_eq!(alice.group_info(group.clone()).unwrap().members, 2);
     assert!(alice.group_joiners().unwrap().is_empty());
 

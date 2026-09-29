@@ -1379,8 +1379,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 };
                 let InvitationStage::Offer {
                     name,
+                    admin_roster_pk,
                     creator_roster_pk,
-                    ..
                 } = invitation.stage
                 else {
                     return self.on_admit(from, &invitation, control.payload, rng);
@@ -1399,8 +1399,21 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 entry.extend_from_slice(name.as_bytes());
                 let row = self.join_row(from, &invitation.group_id)?;
                 let open = self.open_mut()?;
+                // The admin that offers is the contact that sent the offer,
+                // thus the group can name it once this device holds the
+                // roster.
+                let admin_row = open
+                    .store
+                    .row_id(GROUP_MEMBER, &Self::admin_key(conversation));
                 let mut batch = open.store.begin();
                 batch.put(GROUP_JOIN, row, Some(from.0), &entry, rng)?;
+                batch.put(
+                    GROUP_MEMBER,
+                    admin_row,
+                    Some(conversation.0),
+                    &sha3_256(&[admin_roster_pk]),
+                    rng,
+                )?;
                 batch.commit()?;
                 self.events.push_back(Event::GroupOffer { from });
                 Ok(())
@@ -1817,6 +1830,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // GRP-290: the contact that brought this device in is a member it
         // can ask on a pairwise channel when the group queue refuses it.
         self.note_contact_in(conversation, b"via", from, rng)?;
+        // That admin shows under the name of the contact.
+        if let Some(index) = self.offering_admin(conversation)? {
+            self.note_contact_in(conversation, &index.to_be_bytes(), from, rng)?;
+        }
         // GRP-068: this member may build a snapshot later, thus it keeps
         // the path that admitted it.
         for grant in umbra_core::group::roster::split_path(snapshot.path)? {
@@ -2976,6 +2993,27 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         key.extend_from_slice(&conversation.0);
         key.extend_from_slice(&index.to_be_bytes());
         key
+    }
+
+    fn admin_key(conversation: ConversationId) -> Vec<u8> {
+        [conversation.0.as_slice(), b"offer-admin"].concat()
+    }
+
+    /// The index of the admin whose offer brought this device into a
+    /// group, by the hash of its roster key.
+    fn offering_admin(&self, conversation: ConversationId) -> Result<Option<u16>, Error> {
+        let store = &self.open_ref()?.store;
+        let row = store.row_id(GROUP_MEMBER, &Self::admin_key(conversation));
+        let Some(hash) = store.get(GROUP_MEMBER, &row)? else {
+            return Ok(None);
+        };
+        let group = self.group_of(conversation)?;
+        let index = group
+            .roster()
+            .active()
+            .find(|member| member.roster_pk_hash.as_slice() == hash.as_slice())
+            .map(|member| member.index);
+        Ok(index)
     }
 
     /// Keeps a contact that is a member of a group under a key of its own.
