@@ -1057,7 +1057,8 @@ that table.
   client MUST divide a backup object into chunks of `CHUNK_SIZE`. **[IDN-117]**
   A client MUST write those chunks under the attachment commands of that
   section, with `BNEW` as the registration. **[IDN-076]** A client MUST write each chunk to
-  `BACKUP_REPLICAS` relays under different operators. **[IDN-077]** A client
+  `BACKUP_REPLICAS` relays under different operators. Part 3 rule `NET-344`
+  relaxes that bound in a provisional directory. **[IDN-077]** A client
   MUST send a backup chunk on the separate connection of Part 12 §12.8.
 
   > *Cause.* An earlier draft put a backup write in a scheduled `B0` cover slot.

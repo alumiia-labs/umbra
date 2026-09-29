@@ -447,6 +447,9 @@ pub struct Network {
     /// The removed links of the manifest that verified: the epoch and the
     /// two `relay_id` values, 72 bytes each (Part 10 `REL-185`).
     pub removed_links: Vec<Vec<u8>>,
+    /// Whether the key set of the directory stands below `AUTHORITY_FLOOR`,
+    /// which permits the bootstrap relaxation of Part 3 `NET-340`.
+    pub is_provisional: bool,
 }
 
 /// Reads the relay manifest from an HTTPS carrier of Part 3 §3.10: the host
@@ -519,6 +522,9 @@ pub struct Connection {
     /// Whether a relay asks for a proof of work above the floor: the
     /// `admission surge` state of Part 14 §14.9.2 (`ABU-008`).
     pub admission_surge: bool,
+    /// For each circuit, whether two of its relays share an operator or a
+    /// family under the bootstrap relaxation (Part 3 `NET-343`).
+    pub one_operator: Vec<bool>,
 }
 
 /// A network that a signed relay manifest gave.
@@ -682,6 +688,7 @@ pub fn parse_network(text: String, root_ca_path: Option<String>) -> Result<Netwo
         directory_relay_ipv4: None,
         report_queues: Vec::new(),
         removed_links: Vec::new(),
+        is_provisional: false,
     })
 }
 
@@ -1248,6 +1255,8 @@ struct Inner {
     net_events: VecDeque<NetEvent>,
     /// The ingress relay that the run dials, for the confirmation of its pin.
     guard: Option<[u8; 32]>,
+    /// Whether the directory of the run is provisional (`NET-340`).
+    bootstrap: bool,
     /// Whether the next run dials the second pinned ingress relay. A dial
     /// that failed turns it, thus the loss of one relay stops no delivery.
     uses_second_pin: bool,
@@ -1905,9 +1914,15 @@ impl Inner {
         let mut candidates = Vec::new();
         for endpoint in self.relays.iter().filter(|relay| relay.layer == 3) {
             let info = relay_info(endpoint)?;
+            // NET-344: a provisional directory counts each relay as its own
+            // operator, and the bloc still counts.
             candidates.push(GroupRelay {
                 relay_id: info.candidate.relay_id,
-                operator_id: info.candidate.operator_id,
+                operator_id: if self.bootstrap {
+                    info.candidate.relay_id
+                } else {
+                    info.candidate.operator_id
+                },
                 bloc: info.candidate.bloc,
             });
         }
@@ -1963,7 +1978,9 @@ impl Inner {
             None => native::tls_config(),
         }
         .ok()?;
-        let node = ClientNode::for_groups(ingress, candidates, self.client.root_identity().ok()?);
+        let mut node =
+            ClientNode::for_groups(ingress, candidates, self.client.root_identity().ok()?);
+        node.set_bootstrap(self.bootstrap);
         let (commands, task_commands) = mpsc::unbounded_channel();
         let (task_updates, mut updates) = mpsc::unbounded_channel();
         spawner.spawn(run_groups(node, dial, tls, task_commands, task_updates));
@@ -2546,10 +2563,18 @@ impl Inner {
         for relay in self.relays.iter().filter(|relay| relay.layer != 1) {
             let info = relay_info(relay).ok()?;
             if relay.holds_files {
+                // NET-344: a provisional directory counts each relay as its
+                // own operator and its own family, for the chunk relays and
+                // the backup relays.
+                let (operator_id, family_id) = if self.bootstrap {
+                    (info.candidate.relay_id, info.candidate.relay_id)
+                } else {
+                    (info.candidate.operator_id, info.candidate.family_id)
+                };
                 holders.push(AttachmentRelay {
                     relay_id: info.candidate.relay_id,
-                    operator_id: info.candidate.operator_id,
-                    family_id: info.candidate.family_id,
+                    operator_id,
+                    family_id,
                 });
             }
             candidates.push(info);
@@ -2559,8 +2584,9 @@ impl Inner {
             None => native::tls_config(),
         }
         .ok()?;
-        let node =
+        let mut node =
             ClientNode::for_transfers(ingress, candidates, self.client.root_identity().ok()?);
+        node.set_bootstrap(self.bootstrap);
         let (commands, task_commands) = mpsc::unbounded_channel();
         let (task_updates, mut updates) = mpsc::unbounded_channel();
         spawner.spawn(run_transfers(
@@ -3369,6 +3395,7 @@ fn handle_of(database_path: String, client: Client<SqliteBackend, ForeignElement
             bridge: None,
             net_events: VecDeque::new(),
             guard: None,
+            bootstrap: false,
             uses_second_pin: false,
             faults: Default::default(),
             pending_faults: Default::default(),
@@ -3953,7 +3980,7 @@ impl Handle {
         eligible.sort_by_key(|(draw, _)| *draw);
         let eligible: Vec<Candidate> = eligible.into_iter().map(|(_, relay)| relay).collect();
         let mut pins = inner.client.ingress_pins()?;
-        if pins.refresh(&eligible, now) {
+        if pins.refresh(&eligible, now, is_provisional) {
             inner.client.set_ingress_pins(&pins, &mut OsRng)?;
         }
         // The network holds the pinned ingress relays, the first pin first,
@@ -4001,6 +4028,7 @@ impl Handle {
                         [&link.epoch.to_be_bytes()[..], &link.relay_a, &link.relay_b].concat()
                     })
                     .collect(),
+                is_provisional,
             },
             epoch: set.epoch,
             is_clock_corrected: consensus.clock_state() == ClockState::Corrected,
@@ -4060,6 +4088,27 @@ impl Handle {
             standby: pins.iter().find(|relay| !is_guard(relay)).map(as_hop),
             directory_epoch: inner.client.directory_epoch()?,
             admission_surge: inner.challenges.is_surge(unix_now()),
+            one_operator: inner
+                .circuits
+                .iter()
+                .map(|chain| {
+                    let hops: Vec<_> = chain
+                        .iter()
+                        .filter_map(|relay_id| {
+                            let endpoint = inner
+                                .relays
+                                .iter()
+                                .find(|relay| relay.relay_id.as_slice() == relay_id.as_slice())?;
+                            relay_info(endpoint).ok().map(|info| info.candidate)
+                        })
+                        .collect();
+                    hops.iter().enumerate().any(|(index, hop)| {
+                        hops.iter()
+                            .skip(index.saturating_add(1))
+                            .any(|other| !hop.apart_operator(other))
+                    })
+                })
+                .collect(),
         })
     }
 
@@ -4114,6 +4163,7 @@ impl Handle {
             run = inner.run;
             inner.invitation_host.clone_from(&network.invitation_host);
             inner.guard = Some(ingress.key.relay_id);
+            inner.bootstrap = network.is_provisional;
             inner.relays.clone_from(&network.relays);
             inner.report_queue_count =
                 u32::try_from(network.report_queues.len()).unwrap_or(u32::MAX);
@@ -4154,6 +4204,7 @@ impl Handle {
             let mut node = ClientNode::with_relays(ingress, candidates, client.root_identity()?);
             inner_faults.absorb(core::mem::take(pending_faults));
             node.set_faults(core::mem::take(inner_faults));
+            node.set_bootstrap(network.is_provisional);
             // REL-185: no chain of this run holds a removed link.
             node.set_removed_links(
                 network

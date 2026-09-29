@@ -1165,6 +1165,9 @@ pub struct ClientNode {
     /// The removed links of the manifest that verified, which no chain
     /// holds (Part 10 `REL-185`).
     removed_links: Vec<LinkRemoval>,
+    /// Whether the directory is provisional, which permits a chain of one
+    /// operator (`NET-340`).
+    bootstrap: bool,
     /// The report queues of the manifest that verified: the address, and
     /// the key that a report seals to (`REL-168`).
     report_queues: Vec<([u8; QUEUE_ADDRESS_LEN], [u8; 32])>,
@@ -1314,6 +1317,7 @@ impl ClientNode {
             faults: LinkFaults::default(),
             report_queues: Vec::new(),
             removed_links: Vec::new(),
+            bootstrap: false,
             background_report: false,
             report_build: None,
             clock: 0,
@@ -2736,10 +2740,20 @@ impl ClientNode {
             .collect();
         // A set with no exit outside those relays still gives a chain: a
         // queue at a shared relay is better than no request path at all.
-        let chain =
-            select_avoiding(&self.ingress.candidate, &kept, &self.removed_links).or_else(|_| {
-                select_avoiding(&self.ingress.candidate, &candidates, &self.removed_links)
-            })?;
+        let chain = select_avoiding(
+            &self.ingress.candidate,
+            &kept,
+            &self.removed_links,
+            self.bootstrap,
+        )
+        .or_else(|_| {
+            select_avoiding(
+                &self.ingress.candidate,
+                &candidates,
+                &self.removed_links,
+                self.bootstrap,
+            )
+        })?;
         self.slot_mut()?.chain = Some(chain.hops);
         Ok(())
     }
@@ -4146,6 +4160,12 @@ impl ClientNode {
     /// Takes the removed links of the manifest that verified (`REL-185`).
     pub fn set_removed_links(&mut self, removed: Vec<LinkRemoval>) {
         self.removed_links = removed;
+    }
+
+    /// Takes whether the key set of the directory is provisional, which
+    /// permits the bootstrap relaxation (`NET-340`, `NET-341`).
+    pub fn set_bootstrap(&mut self, bootstrap: bool) {
+        self.bootstrap = bootstrap;
     }
 
     /// Takes the report queues of the manifest that verified (`REL-168`).

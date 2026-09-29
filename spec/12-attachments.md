@@ -608,7 +608,8 @@ Each chunk lives at `REPLICAS` relays under **different operators**. §12.4.1
 gives the flow that puts it there, and the client uploads one copy.
 
 **[ATT-017]** A client MUST register each chunk at **three or more relays under
-different `operator_id` values** of Part 10 §10.5.3. **[ATT-018]** The
+different `operator_id` values** of Part 10 §10.5.3. Part 3 rule `NET-344`
+relaxes the operator part in a provisional directory. **[ATT-018]** The
 descriptor MUST carry the three references. **[ATT-123]** A client MUST NOT
 upload more than one copy of a chunk, and §12.4.1 makes the relay push the
 others.

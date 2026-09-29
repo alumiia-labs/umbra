@@ -146,7 +146,8 @@ relay-side name, and it carries no relation to `group_id`.
   invariant 1 and invariant 2 of Part 3 §3.4.6. Part 10 §10.6.3 gives the bloc
   list. **[GRP-192]** A creator that finds no such pair MAY relax the bloc
   invariant in the manner of Part 3 rule `NET-200`, and Part 3 rule `NET-201`
-  makes it show that relaxation.
+  makes it show that relaxation. Part 3 rule `NET-344` relaxes the operator
+  part in a provisional directory.
 - **[GRP-193]** A `GNEW` MUST end with an `Admission` of Part 13 §13.2. A
   group-queue creation is a gated path of that table.
 - **[GRP-194]** A sender MUST send the same record bytes to each replica, each

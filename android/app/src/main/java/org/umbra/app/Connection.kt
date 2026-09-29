@@ -132,7 +132,10 @@ fun ConnectionScreen(onBack: () -> Unit) {
                 HorizontalDivider(color = Palette.Divider)
             }
             circuits.forEachIndexed { index, hops ->
-                FactRow("route", "Circuit ${index + 1}", hops.joinToString(" → ") { it.country })
+                // NET-343: a chain of one operator under a provisional directory.
+                val shared = connection?.oneOperator?.getOrNull(index) == true
+                val path = hops.joinToString(" → ") { it.country }
+                FactRow("route", "Circuit ${index + 1}", if (shared) "$path · one operator" else path)
                 HorizontalDivider(color = Palette.Divider)
             }
             val epoch = connection?.directoryEpoch?.toLong() ?: 0L

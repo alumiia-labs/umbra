@@ -1355,11 +1355,47 @@ invariant, a client MAY relax invariant 2 at hop 2 alone. Under that relaxation
 hop 2 may share a bloc with hop 1 or with hop 3. Hop 1 and hop 3 stay in
 different blocs. **[NET-201]** A client that relaxes invariant 2 MUST show the
 user that relaxation. **[NET-202]** A client MUST NOT relax invariant 1,
-invariant 3, invariant 4, or invariant 2 between hop 1 and hop 3.
+invariant 3, invariant 4, or invariant 2 between hop 1 and hop 3. The bootstrap
+relaxation below is the one exception for invariant 1.
 
 **[NET-033]** If no conformant chain is available under `NET-200`, the client
 MUST **fail closed** and show the cause. **[NET-034]**
 The client MUST NOT degrade silently to a single-operator path.
+
+**The bootstrap relaxation.** A network starts with the relays of one operator,
+and invariant 1 then holds no chain.
+
+- **[NET-340]** While the accepted `DirectoryKeySet` holds `independent_count`
+  below `AUTHORITY_FLOOR`, the `provisional directory` state of Part 10 rule
+  `REL-126`, a client MAY relax invariant 1 when no chain satisfies it under
+  `NET-200`. **[NET-341]** A client MUST NOT relax invariant 1 while
+  `independent_count` is `AUTHORITY_FLOOR` or above.
+- **[NET-342]** A client MUST select a chain that satisfies invariant 1 when one
+  exists, with or without the relaxation of `NET-200`. Under the bootstrap
+  relaxation, invariants 3 and 4 and the bound of `NET-202` on invariant 2
+  still hold.
+- **[NET-343]** A client MUST show the user each circuit whose chain holds two
+  relays of one operator or of one family. That display makes the path visible
+  under `NET-034`.
+- **[NET-344]** The same relaxation, under the same state, applies to each
+  placement that needs different operators or families: the group replicas of
+  Part 11 rule `GRP-191`, the chunk relays of Part 12 rule `ATT-017`, the
+  backup relays of Part 4 rule `IDN-076`, and the two ingress pins of Part 10
+  rule `REL-154`. A client that relaxes one of them counts each relay as its
+  own operator and its own family. **[NET-345]** A client MUST end a pin that
+  shares an operator or a family with the other pin when the relaxation ends,
+  and it fills the place under `REL-154`.
+
+> *Cause.* The authorities of a provisional directory stand under fewer than
+> `AUTHORITY_FLOOR` controls, and those controls already decide the relay set.
+> Invariant 1 then adds little against them, while it blocks each chain of a
+> network that one operator starts. Invariants 2 and 3 still bind the hosting
+> providers and the states: one order to one provider or to one bloc reaches
+> one hop. The signed key set sets the state, thus no party on the path turns
+> the relaxation on, and it ends at the first key set at the floor. The rule
+> for a chain prefers a relay of another operator from its first listing. A
+> backup written under the relaxation may lose its second place when the
+> relaxation ends, and the writes of `IDN-078` place it again.
 
 > **Deviation note.** An earlier draft gave invariant 3 an IPv4 /24 here and an
 > IPv4 /16 in Part 10 §10.6. It also gave invariant 2 a jurisdiction code here

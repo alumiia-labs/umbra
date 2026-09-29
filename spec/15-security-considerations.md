@@ -485,7 +485,10 @@ Onion-chained relays multiply that cost.
   % of each population.
 - Seat the seven directory authorities under seven legal persons before the
   launch, under Part 10 §10.5.1. A launch below `AUTHORITY_FLOOR` shows a
-  `provisional directory` state on each client under `REL-126`.
+  `provisional directory` state on each client under `REL-126`. Under that
+  state Part 3 rule `NET-340` lets a client build a chain of one operator,
+  thus a launch can start with the relays of the project alone, in three
+  blocs and three autonomous systems.
 - Note that the EU NGI and NLnet funding stream paid for much of this ecosystem.
   The Horizon Europe 2025 work programme cut that stream, and the stream stopped
   fully in June 2026. Do not plan for it.

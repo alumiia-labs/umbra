@@ -76,11 +76,16 @@ impl Candidate {
         self.layer == 3 && self.chain && self.queue && !self.ingress
     }
 
-    /// Whether two relays may share a chain under invariants 1 and 3.
-    fn disjoint_hard(&self, other: &Candidate) -> bool {
-        self.operator_id != other.operator_id
-            && self.family_id != other.family_id
-            && self.asn != other.asn
+    /// Whether two relays stand under different operators and families:
+    /// invariant 1.
+    pub fn apart_operator(&self, other: &Candidate) -> bool {
+        self.operator_id != other.operator_id && self.family_id != other.family_id
+    }
+
+    /// Whether two relays share no autonomous system and no prefix:
+    /// invariant 3.
+    fn apart_network(&self, other: &Candidate) -> bool {
+        self.asn != other.asn
             && !(self.v4_prefix.is_some() && self.v4_prefix == other.v4_prefix)
             && !(self.v6_prefix.is_some() && self.v6_prefix == other.v6_prefix)
     }
@@ -94,15 +99,19 @@ pub struct Chain {
     /// Whether invariant 2 was relaxed at hop 2 (`NET-200`), which the
     /// client shows (`NET-201`).
     pub relaxed: bool,
+    /// Whether two hops share an operator or a family under the bootstrap
+    /// relaxation (`NET-340`), which the client shows (`NET-343`).
+    pub one_operator: bool,
 }
 
 /// Checks a chain against the invariants (`NET-032`). `relax` permits the
-/// relaxation of `NET-200`.
+/// relaxation of `NET-200`, and `bootstrap` the one of `NET-340`.
 pub fn check(
     hop1: &Candidate,
     hop2: &Candidate,
     hop3: &Candidate,
     relax: bool,
+    bootstrap: bool,
 ) -> Result<Chain, Error> {
     // Invariant 4: the ingress at hop 1, then layer 2, then layer 3, and no
     // ingress-flagged relay at hop 2 or 3 (REL-133, REL-134).
@@ -112,8 +121,14 @@ pub fn check(
     if hop2.layer != 2 || hop3.layer != 3 || !hop3.queue {
         return Err(Error::NoPath);
     }
-    // Invariants 1 and 3 at every pair.
-    if !hop1.disjoint_hard(hop2) || !hop1.disjoint_hard(hop3) || !hop2.disjoint_hard(hop3) {
+    // Invariant 3 at every pair, and invariant 1 unless the bootstrap
+    // relaxation holds (NET-340, NET-342).
+    if !hop1.apart_network(hop2) || !hop1.apart_network(hop3) || !hop2.apart_network(hop3) {
+        return Err(Error::NoPath);
+    }
+    let one_operator =
+        !hop1.apart_operator(hop2) || !hop1.apart_operator(hop3) || !hop2.apart_operator(hop3);
+    if one_operator && !bootstrap {
         return Err(Error::NoPath);
     }
     // Invariant 2: hops 1 and 3 always; hop 2 unless relaxed (NET-202).
@@ -127,6 +142,7 @@ pub fn check(
     Ok(Chain {
         hops: [hop1.relay_id, hop2.relay_id, hop3.relay_id],
         relaxed: hop2_shares,
+        one_operator,
     })
 }
 
@@ -135,22 +151,30 @@ pub fn check(
 /// under the relaxation, then failure (`NET-033`). The caller gives the
 /// candidates in a consensus-random order (`REL-015`).
 pub fn select(ingress: &Candidate, candidates: &[Candidate]) -> Result<Chain, Error> {
-    select_avoiding(ingress, candidates, &[])
+    select_avoiding(ingress, candidates, &[], false)
 }
 
 /// As [`select`], and no two adjacent relays of the chain form a link of
-/// `removed` (Part 10 `REL-185`).
+/// `removed` (Part 10 `REL-185`). `bootstrap` says that the directory is
+/// provisional, and a chain of one operator then follows each chain that
+/// satisfies invariant 1 (`NET-340` to `NET-342`).
 pub fn select_avoiding(
     ingress: &Candidate,
     candidates: &[Candidate],
     removed: &[LinkRemoval],
+    bootstrap: bool,
 ) -> Result<Chain, Error> {
     let is_removed = |one: &Candidate, other: &Candidate| {
         removed
             .iter()
             .any(|link| link.names(&one.relay_id, &other.relay_id))
     };
-    for relax in [false, true] {
+    let levels: &[(bool, bool)] = if bootstrap {
+        &[(false, false), (true, false), (false, true), (true, true)]
+    } else {
+        &[(false, false), (true, false)]
+    };
+    for &(relax, one_operator) in levels {
         for hop2 in candidates
             .iter()
             .filter(|c| c.layer == 2 && !is_removed(ingress, c))
@@ -159,7 +183,7 @@ pub fn select_avoiding(
                 .iter()
                 .filter(|c| c.is_exit() && !is_removed(hop2, c))
             {
-                if let Ok(chain) = check(ingress, hop2, hop3, relax) {
+                if let Ok(chain) = check(ingress, hop2, hop3, relax, one_operator) {
                     return Ok(chain);
                 }
             }
@@ -212,33 +236,50 @@ impl IngressPins {
     /// Brings the pins in line with a relay set at `now`. A pin stays while
     /// its relay is ingress eligible and its lifetime runs (`REL-153`). An
     /// open place takes the first relay of `eligible` that shares no
-    /// operator and no family with the other pin (`REL-154`). The caller
-    /// gives `eligible` in a random order. The function reads no measure of
-    /// speed (`REL-014`). It returns whether a pin changed.
-    pub fn refresh(&mut self, eligible: &[Candidate], now: u64) -> bool {
+    /// operator and no family with the other pin (`REL-154`). In a
+    /// provisional directory, `bootstrap`, a place with no such relay takes
+    /// another relay of the same operator, and a pin of that kind ends when
+    /// the relaxation ends (`NET-344`, `NET-345`). The caller gives
+    /// `eligible` in a random order. The function reads no measure of speed
+    /// (`REL-014`). It returns whether a pin changed.
+    pub fn refresh(&mut self, eligible: &[Candidate], now: u64, bootstrap: bool) -> bool {
         let before = self.pins.clone();
-        let listed = |pin: &IngressPin| {
-            eligible
-                .iter()
-                .any(|relay| relay.ingress && relay.relay_id == pin.relay_id)
-        };
+        let of = |relay_id: &[u8; 32]| eligible.iter().find(|c| c.relay_id == *relay_id);
+        let listed = |pin: &IngressPin| of(&pin.relay_id).is_some_and(|relay| relay.ingress);
         self.pins.retain(|pin| listed(pin) && !pin.expired(now));
-        for relay in eligible.iter().filter(|relay| relay.ingress) {
-            if self.pins.len() >= INGRESS_PINS {
+        if !bootstrap {
+            if let [first, second] = &self.pins[..] {
+                let shared = of(&first.relay_id)
+                    .zip(of(&second.relay_id))
+                    .is_some_and(|(a, b)| !a.apart_operator(b));
+                if shared {
+                    self.pins.truncate(1);
+                }
+            }
+        }
+        for one_operator in [false, true] {
+            if one_operator && !bootstrap {
                 break;
             }
-            let of = |pin: &IngressPin| eligible.iter().find(|c| c.relay_id == pin.relay_id);
-            let is_apart = self.pins.iter().filter_map(of).all(|held| {
-                held.relay_id != relay.relay_id
-                    && held.operator_id != relay.operator_id
-                    && held.family_id != relay.family_id
-            });
-            if is_apart {
-                self.pins.push(IngressPin {
-                    relay_id: relay.relay_id,
-                    pinned_at: now,
-                    confirmed: false,
-                });
+            for relay in eligible.iter().filter(|relay| relay.ingress) {
+                if self.pins.len() >= INGRESS_PINS {
+                    break;
+                }
+                let is_apart = self
+                    .pins
+                    .iter()
+                    .filter_map(|pin| of(&pin.relay_id))
+                    .all(|held| {
+                        held.relay_id != relay.relay_id
+                            && (one_operator || held.apart_operator(relay))
+                    });
+                if is_apart {
+                    self.pins.push(IngressPin {
+                        relay_id: relay.relay_id,
+                        pinned_at: now,
+                        confirmed: false,
+                    });
+                }
             }
         }
         self.pins != before
@@ -373,13 +414,15 @@ mod tests {
         // REL-185: the link 2-3 goes, in the order the removal names it.
         let removed = [LinkRemoval::of(7, [3; 32], [2; 32])];
         assert_eq!(
-            select_avoiding(&ingress, &all, &removed).unwrap().hops,
+            select_avoiding(&ingress, &all, &removed, false)
+                .unwrap()
+                .hops,
             [[1; 32], [2; 32], [5; 32]]
         );
         // The link 1-2 goes too: relay 2 serves no chain from this ingress.
         let both = [removed[0], LinkRemoval::of(7, [1; 32], [2; 32])];
         assert_eq!(
-            select_avoiding(&ingress, &all, &both).unwrap().hops,
+            select_avoiding(&ingress, &all, &both, false).unwrap().hops,
             [[1; 32], [4; 32], [3; 32]]
         );
     }
@@ -394,29 +437,59 @@ mod tests {
         let good2 = cand(2, five, 2, false);
         let good3 = cand(3, ch, 3, false);
         assert_eq!(
-            check(&ingress, &good2, &good3, false).unwrap(),
+            check(&ingress, &good2, &good3, false, false).unwrap(),
             Chain {
                 hops: [[1; 32], [2; 32], [3; 32]],
-                relaxed: false
+                relaxed: false,
+                one_operator: false,
             }
         );
         // Wrong layer order, an ingress at hop 2, a shared ASN.
-        assert!(check(&ingress, &good3, &good2, false).is_err());
-        assert!(check(&ingress, &cand(2, five, 2, true), &good3, false).is_err());
+        assert!(check(&ingress, &good3, &good2, false, false).is_err());
+        assert!(check(&ingress, &cand(2, five, 2, true), &good3, false, false).is_err());
         let mut same_asn = good3;
         same_asn.asn = 2;
-        assert!(check(&ingress, &good2, &same_asn, false).is_err());
+        assert!(check(&ingress, &good2, &same_asn, false, false).is_err());
         // Hop 1 and hop 3 in one bloc never pass; hop 2 sharing passes only relaxed.
-        assert!(check(&ingress, &good2, &cand(4, eu, 3, false), true).is_err());
+        assert!(check(&ingress, &good2, &cand(4, eu, 3, false), true, false).is_err());
         let shared2 = cand(5, eu, 2, false);
-        assert!(check(&ingress, &shared2, &good3, false).is_err());
-        assert!(check(&ingress, &shared2, &good3, true).unwrap().relaxed);
+        assert!(check(&ingress, &shared2, &good3, false, false).is_err());
+        assert!(
+            check(&ingress, &shared2, &good3, true, false)
+                .unwrap()
+                .relaxed
+        );
         // Selection prefers the strict chain over the relaxed one.
         let chosen = select(&ingress, &[shared2, good3, good2]).unwrap();
         assert!(!chosen.relaxed);
         let only_relaxed = select(&ingress, &[shared2, good3]).unwrap();
         assert!(only_relaxed.relaxed);
         assert_eq!(select(&ingress, &[good2]), Err(Error::NoPath));
+
+        // NET-340: one operator at hop 2 and hop 3 passes only under the
+        // bootstrap relaxation, and a chain of other operators comes first
+        // (NET-342).
+        let mut own2 = good2;
+        own2.operator_id = ingress.operator_id;
+        assert!(check(&ingress, &own2, &good3, false, false).is_err());
+        assert!(
+            check(&ingress, &own2, &good3, false, true)
+                .unwrap()
+                .one_operator
+        );
+        assert_eq!(
+            select_avoiding(&ingress, &[own2, good3], &[], false),
+            Err(Error::NoPath)
+        );
+        let bootstrap = select_avoiding(&ingress, &[own2, good3], &[], true).unwrap();
+        assert!(bootstrap.one_operator);
+        // A strict chain with the bloc relaxed comes before one operator.
+        let first = select_avoiding(&ingress, &[own2, shared2, good3], &[], true).unwrap();
+        assert!(!first.one_operator && first.relaxed);
+        // Invariant 3 holds under the relaxation.
+        let mut own_asn = own2;
+        own_asn.asn = good3.asn;
+        assert!(check(&ingress, &own_asn, &good3, true, true).is_err());
     }
 
     #[test]
@@ -450,12 +523,12 @@ mod tests {
         // The first relay, and then the first one of another operator. A
         // relay with no ingress flag takes no place.
         let mut pins = IngressPins::empty();
-        assert!(pins.refresh(&set, 100));
+        assert!(pins.refresh(&set, 100, false));
         assert_eq!(ids(&pins), [1, 3]);
         // The same set in another order changes nothing.
         let mut turned = set;
         turned.reverse();
-        assert!(!pins.refresh(&turned, 200));
+        assert!(!pins.refresh(&turned, 200, false));
         assert_eq!(ids(&pins), [1, 3]);
 
         // The stored form gives the same pins.
@@ -471,12 +544,30 @@ mod tests {
         assert!(IngressPins::parse(&wrong).is_err());
 
         // The confirmed pin ends at 60 days, and the other one stays.
-        assert!(pins.refresh(&set, 100 + INGRESS_PIN_CONFIRMED));
+        assert!(pins.refresh(&set, 100 + INGRESS_PIN_CONFIRMED, false));
         assert_eq!(ids(&pins), [3, 1]);
         assert_eq!(pins.pins()[1].pinned_at, 100 + INGRESS_PIN_CONFIRMED);
         // A relay that left the set loses its pin, and one relay gives one pin.
-        assert!(pins.refresh(&set[..1], 100 + INGRESS_PIN_CONFIRMED + 1));
+        assert!(pins.refresh(&set[..1], 100 + INGRESS_PIN_CONFIRMED + 1, false));
         assert_eq!(ids(&pins), [1]);
-        assert!(!pins.refresh(&set[..1], 100 + INGRESS_PIN_CONFIRMED + 2));
+        assert!(!pins.refresh(&set[..1], 100 + INGRESS_PIN_CONFIRMED + 2, false));
+
+        // NET-344: a provisional directory with one operator gives two pins
+        // of that operator, and the second one ends with the relaxation
+        // (NET-345).
+        let one = [cand(1, eu, 0, true), same_operator];
+        let mut pins = IngressPins::empty();
+        assert!(pins.refresh(&one, 100, false));
+        assert_eq!(ids(&pins), [1]);
+        assert!(pins.refresh(&one, 101, true));
+        assert_eq!(ids(&pins), [1, 2]);
+        assert!(!pins.refresh(&one, 102, true));
+        assert!(pins.refresh(&one, 103, false));
+        assert_eq!(ids(&pins), [1]);
+        // A relay of another operator comes first under the relaxation too.
+        let mixed = [cand(1, eu, 0, true), same_operator, cand(3, eu, 0, true)];
+        let mut pins = IngressPins::empty();
+        assert!(pins.refresh(&mixed, 100, true));
+        assert_eq!(ids(&pins), [1, 3]);
     }
 }

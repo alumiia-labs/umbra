@@ -66,7 +66,7 @@ each column when a crate implements the requirement and a test covers it.
 | --- | --- | --- | --- | --- | --- | --- |
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
-| `NET` | 242 | 86 | 1 | 0 | 8 | **337** |
+| `NET` | 246 | 87 | 1 | 0 | 9 | **343** |
 | `IDN` | 133 | 46 | 1 | 0 | 5 | **185** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
 | `WIR` | 398 | 85 | 0 | 0 | 7 | **490** |
@@ -79,7 +79,7 @@ each column when a crate implements the requirement and a test covers it.
 | `ABU` | 71 | 30 | 1 | 0 | 0 | **102** |
 | `IMP` | 119 | 41 | 0 | 0 | 2 | **162** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2056 | 624 | 7 | 0 | 53 | **2740** |
+| **All** | 2060 | 625 | 7 | 0 | 54 | **2746** |
 
 ## SCP — Scope and Conventions
 
@@ -474,6 +474,12 @@ Source: `spec/03-network-architecture.md`
 | `NET-337` | §3.9 | MUST | A relay | A relay MUST drop an `EXTEND` whose `delay_class` is not one of the three values above. |  |  |
 | `NET-338` | §3.9 | MUST | A relay | A relay MUST hold each forward cell of a built circuit for a delay that it draws from an exponential distribution with the mean of the mode of that circuit, before it moves the cell on or serves it. |  |  |
 | `NET-339` | §3.9 | MUST NOT | A relay | A relay MUST NOT release a forward cell of a circuit before an earlier forward cell of that circuit. |  |  |
+| `NET-340` | §3.4.6 | MAY | (unstated) | While the accepted `DirectoryKeySet` holds `independent_count` below `AUTHORITY_FLOOR`, the `provisional directory` state of Part 10 rule `REL-126`, a client MAY relax invariant 1 when no chain satisfies it under `NET-200`. |  |  |
+| `NET-341` | §3.4.6 | MUST NOT | A client | A client MUST NOT relax invariant 1 while `independent_count` is `AUTHORITY_FLOOR` or above. |  |  |
+| `NET-342` | §3.4.6 | MUST | A client | A client MUST select a chain that satisfies invariant 1 when one exists, with or without the relaxation of `NET-200`. |  |  |
+| `NET-343` | §3.4.6 | MUST | A client | A client MUST show the user each circuit whose chain holds two relays of one operator or of one family. |  |  |
+| `NET-344` | §3.4.6 | MUST | (unstated) | The same relaxation, under the same state, applies to each placement that needs different operators or families: the group replicas of Part 11 rule `GRP-191`, the chunk relays of Part 12 rule `ATT-017`, and the backup relays of Part 4 rule `IDN-076`. |  |  |
+| `NET-345` | §3.4.6 | MUST | A client | A client MUST end a pin that shares an operator or a family with the other pin when the relaxation ends, and it fills the place under `REL-154`. |  |  |
 
 ## IDN — Identity
 

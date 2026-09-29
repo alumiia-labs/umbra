@@ -22,7 +22,10 @@ use tokio::net::TcpListener;
 use umbra_core::{
     attach::{place::AttachmentRelay, transfer::Shape},
     directory::{
-        authority::{entry_of, keyset_bytes, sign_manifest, Admission, Listing, GENESIS_ROOT},
+        authority::{
+            entry_of, keyset_bytes, keyset_bytes_with, sign_manifest, sign_manifest_under,
+            Admission, Listing, GENESIS_ROOT,
+        },
         bloc::BlocList,
         descriptor::{roles, RelayDescriptor, RelayEntry, HOST_LEN},
         manifest::{ListedRelay, RelayManifest, RelaySet},
@@ -333,6 +336,7 @@ fn network_of(ports: &[u16]) -> Network {
         directory_relay_ipv4: None,
         report_queues: Vec::new(),
         removed_links: Vec::new(),
+        is_provisional: false,
     }
 }
 
@@ -768,7 +772,7 @@ fn a_group_record_wakes_a_member_that_went_away_through_its_notify_queue() {
         None,
     ));
     let relays = tokio::runtime::Runtime::new().unwrap();
-    let network = start_signed_network_with(&relays, None, Some(&ndr), None);
+    let network = start_signed_network_with(&relays, None, Some(&ndr), None, false);
 
     let directory = std::env::temp_dir().join(format!("umbra-gpush-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&directory);
@@ -986,7 +990,7 @@ fn start_signed_network(relays: &tokio::runtime::Runtime) -> SignedNetwork {
 /// process and starts it again. The keys come from fixed seeds, thus a
 /// client of the first network knows each relay of the second.
 fn start_signed_network_at(relays: &tokio::runtime::Runtime, at: Option<&[u16]>) -> SignedNetwork {
-    start_signed_network_with(relays, at, None, None)
+    start_signed_network_with(relays, at, None, None, false)
 }
 
 /// A directory of Part 9 with its issuer, on loopback, with an epoch of one
@@ -1055,13 +1059,17 @@ fn start_test_directory(relays: &tokio::runtime::Runtime) -> (u16, Vec<u8>) {
 }
 
 /// The signed network with an NDR: the ingress relays carry its OHTTP
-/// requests, and each queue relay pushes through the first of them.
+/// requests, and each queue relay pushes through the first of them. A
+/// `provisional` network has one operator and one family for each relay,
+/// under a key set of one independent authority (Part 3 `NET-340`).
 fn start_signed_network_with(
     relays: &tokio::runtime::Runtime,
     at: Option<&[u16]>,
     ndr: Option<&TestNdr>,
     directory: Option<u16>,
+    provisional: bool,
 ) -> SignedNetwork {
+    let owner = |number: u8| if provisional { [1; 32] } else { [number; 32] };
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -1094,7 +1102,7 @@ fn start_signed_network_with(
             host,
             asn: 64_500 + u32::from(number),
             jurisdiction: [b'Z', b'A' + number],
-            family_id: [number; 32],
+            family_id: owner(number),
             capacity_class: 2,
             roles: if is_ingress {
                 roles::INGRESS_OFFERED | roles::CHAIN
@@ -1110,7 +1118,7 @@ fn start_signed_network_with(
         .unwrap();
         let listing = Listing {
             descriptor: &descriptor,
-            operator_id: [number; 32],
+            operator_id: owner(number),
             class: 2,
             is_ingress,
         };
@@ -1130,17 +1138,17 @@ fn start_signed_network_with(
     let authorities: Vec<SigningKey> = (0..7u8)
         .map(|index| SigningKey::from_seed(Secret::new([0xD0 + index; 32])))
         .collect();
-    let manifest = sign_manifest(
+    let keyset = keyset_bytes_with(&authorities, 1, if provisional { 1 } else { 7 }).unwrap();
+    let manifest = sign_manifest_under(
         &authorities,
+        &keyset,
         &[0, 1, 2, 4, 6],
-        1,
         epoch,
         entries.clone(),
         &BlocList::v1(),
         &mut OsRng,
     )
     .unwrap();
-    let keyset = keyset_bytes(&authorities, 1).unwrap();
 
     // Each relay reads its layer and its next hops from the manifest.
     let client_tls = native::tls_config_with_root_file(CA).unwrap();
@@ -1399,6 +1407,96 @@ fn two_apps_take_their_network_from_a_signed_manifest() {
     assert_eq!(network_of(&carol, &older, 0).unwrap().epoch, epoch - 1);
     alice.disconnect();
     bob.disconnect();
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[test]
+fn a_network_of_one_operator_carries_a_contact_while_the_directory_is_provisional() {
+    let relays = tokio::runtime::Runtime::new().unwrap();
+    let SignedNetwork {
+        manifest,
+        keyset,
+        entries,
+        authorities,
+        epoch,
+        ..
+    } = start_signed_network_with(&relays, None, None, None, true);
+    let directory = std::env::temp_dir().join(format!("umbra-bootstrap-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let alice = launch(&directory, "alice.db", 1);
+    let bob = launch(&directory, "bob.db", 2);
+    let carol = launch(&directory, "carol.db", 3);
+    let network_of = |handle: &Handle, manifest: &[u8], keyset: &[u8]| {
+        handle
+            .network_of_manifest(
+                manifest.to_vec(),
+                keyset.to_vec(),
+                0,
+                HOST.into(),
+                Some(CA.into()),
+            )
+            .unwrap()
+    };
+
+    // REL-126: the key set names one independent authority, thus the
+    // directory is provisional, and NET-344 gives two pins of one operator.
+    let verified = network_of(&alice, &manifest, &keyset);
+    assert!(verified.is_provisional && verified.network.is_provisional);
+    assert!(verified.network.relays[..2]
+        .iter()
+        .all(|relay| relay.layer == 1));
+    alice.clone().connect(verified.network).unwrap();
+    bob.clone()
+        .connect(network_of(&bob, &manifest, &keyset).network)
+        .unwrap();
+    alice.invite().unwrap();
+    let link = wait_for(&alice, |event| match event {
+        FfiEvent::Invitation { link } => Some(link),
+        _ => None,
+    });
+    bob.accept(link).unwrap();
+    let alice_conversation = wait_for_contact(&alice);
+    let bob_conversation = wait_for_contact(&bob);
+    for (from, to, conversation, text) in [
+        (&bob, &alice, &bob_conversation, "over one operator"),
+        (&alice, &bob, &alice_conversation, "and back"),
+    ] {
+        let draft = from.new_draft(conversation.clone()).unwrap();
+        draft.set_text(units(text)).unwrap();
+        from.send_draft(draft).unwrap();
+        let (_, message) = wait_for_message(to);
+        assert_eq!(rendered(to, message), text);
+    }
+    // NET-343: the view names each circuit of one operator.
+    let connection = alice.connection().unwrap();
+    assert!(connection.standby.is_some());
+    assert_eq!(connection.one_operator.len(), connection.circuits.len());
+    assert!(connection.one_operator.iter().all(|shared| *shared));
+    alice.disconnect();
+    bob.disconnect();
+
+    // NET-341: the same relays under a key set at the floor give no chain,
+    // and the client fails closed (NET-033).
+    let full = keyset_bytes(&authorities, 1).unwrap();
+    let strict = sign_manifest_under(
+        &authorities,
+        &full,
+        &[0, 1, 2, 4, 6],
+        epoch,
+        entries,
+        &BlocList::v1(),
+        &mut OsRng,
+    )
+    .unwrap();
+    let verified = network_of(&carol, &strict, &full);
+    assert!(!verified.is_provisional);
+    carol.clone().connect(verified.network).unwrap();
+    wait_past_faults(&carol, |event| match event {
+        FfiEvent::Offline { .. } => Some(()),
+        _ => None,
+    });
+    carol.disconnect();
     let _ = std::fs::remove_dir_all(&directory);
 }
 
@@ -3690,7 +3788,7 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let relays = tokio::runtime::Runtime::new().unwrap();
     let (directory_port, pins) = start_test_directory(&relays);
-    let network = start_signed_network_with(&relays, None, None, Some(directory_port));
+    let network = start_signed_network_with(&relays, None, None, Some(directory_port), false);
     let directory = std::env::temp_dir().join(format!("umbra-dir-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).unwrap();

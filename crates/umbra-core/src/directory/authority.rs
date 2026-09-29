@@ -93,15 +93,30 @@ pub fn entry_of(listing: &Listing<'_>, admission: Admission) -> Result<Vec<u8>, 
     Ok(out)
 }
 
-/// The canonical key set of `keys`.
+/// The canonical key set of `keys`, each under a control of its own.
 pub fn keyset_bytes(keys: &[SigningKey], keyset_epoch: u64) -> Result<Vec<u8>, Error> {
+    keyset_bytes_with(
+        keys,
+        keyset_epoch,
+        u8::try_from(keys.len()).map_err(|_| Error::Malformed)?,
+    )
+}
+
+/// The canonical key set of `keys`, with `independent_count` authorities
+/// under different beneficial control (`REL-125`). A count below
+/// `AUTHORITY_FLOOR` makes the directory provisional (`REL-126`).
+pub fn keyset_bytes_with(
+    keys: &[SigningKey],
+    keyset_epoch: u64,
+    independent_count: u8,
+) -> Result<Vec<u8>, Error> {
     let public: Vec<[u8; VERIFYING_KEY_LEN]> = keys
         .iter()
         .map(|key| key.verifying_key().to_bytes())
         .collect();
     let keyset = DirectoryKeySet {
         keyset_epoch,
-        independent_count: u8::try_from(keys.len()).map_err(|_| Error::Malformed)?,
+        independent_count,
         keys: public.iter().map(|key| key.as_slice()).collect(),
     };
     let mut out = alloc::vec![0u8; keyset.len()];
@@ -115,6 +130,21 @@ pub fn sign_manifest<R: TryCryptoRng + ?Sized>(
     keys: &[SigningKey],
     signers: &[u8],
     keyset_epoch: u64,
+    epoch: u64,
+    entries: Vec<Vec<u8>>,
+    blocs: &BlocList,
+    rng: &mut R,
+) -> Result<Vec<u8>, Error> {
+    let keyset = keyset_bytes(keys, keyset_epoch)?;
+    sign_manifest_under(keys, &keyset, signers, epoch, entries, blocs, rng)
+}
+
+/// As [`sign_manifest`], under the key set bytes `keyset` of `keys`, as
+/// [`keyset_bytes_with`] gives them.
+pub fn sign_manifest_under<R: TryCryptoRng + ?Sized>(
+    keys: &[SigningKey],
+    keyset: &[u8],
+    signers: &[u8],
     epoch: u64,
     mut entries: Vec<Vec<u8>>,
     blocs: &BlocList,
@@ -130,8 +160,7 @@ pub fn sign_manifest<R: TryCryptoRng + ?Sized>(
         return Err(Error::Malformed);
     }
     let leaves: Vec<[u8; 32]> = entries.iter().map(|entry| tree::leaf(entry)).collect();
-    let keyset = keyset_bytes(keys, keyset_epoch)?;
-    let (keyset, _) = DirectoryKeySet::parse(&keyset)?;
+    let (keyset, _) = DirectoryKeySet::parse(keyset)?;
     let mut root = DirectoryRoot {
         epoch,
         epoch_start_unix: epoch.saturating_mul(EPOCH_SECONDS),
