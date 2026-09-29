@@ -25,6 +25,7 @@ mod key_changes;
 mod moderation;
 mod notify;
 mod polls;
+mod quota;
 mod reset;
 mod roster_notes;
 mod screenshots;
@@ -50,6 +51,7 @@ pub use key_changes::PendingKeyChange;
 pub use moderation::{ModNote, MOD_HIDE, MOD_REMOVE, MOD_UNHIDE};
 pub use notify::NdrCall;
 pub use polls::PollView;
+pub use quota::HOLD_RETRY;
 pub use reset::ResetSummary;
 pub use roster_notes::{
     RosterNote, NOTE_EVICTED, NOTE_FORK, NOTE_GAP, NOTE_JOINED, NOTE_LEFT, NOTE_NOBODY, NOTE_ROLE,
@@ -278,6 +280,11 @@ pub struct Client<B: Backend, E: SecureElement> {
     subjects: BTreeMap<ConversationId, [u8; 32]>,
     /// The time of the last typing record to each peer (`WIR-285`).
     typing_sent: BTreeMap<ConversationId, u64>,
+    /// The conversations whose queue a relay named full (Part 14 §14.9.2).
+    full_queues: BTreeSet<ConversationId>,
+    /// Each record that a full queue refused, with its conversation and the
+    /// time of the refusal, in seconds.
+    held_sends: BTreeMap<MsgRef, (ConversationId, u64)>,
 }
 
 /// One record for the commit path: of a contact, or of the sync channel.
@@ -557,6 +564,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             synced_out: BTreeSet::new(),
             subjects: BTreeMap::new(),
             typing_sent: BTreeMap::new(),
+            full_queues: BTreeSet::new(),
+            held_sends: BTreeMap::new(),
             files: FileQueues::default(),
             groups: groups::GroupQueues::default(),
             auto_lock: AutoLock::new(now),
@@ -578,6 +587,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             synced_out: BTreeSet::new(),
             subjects: BTreeMap::new(),
             typing_sent: BTreeMap::new(),
+            full_queues: BTreeSet::new(),
+            held_sends: BTreeMap::new(),
             files: FileQueues::default(),
             groups: groups::GroupQueues::default(),
             auto_lock: AutoLock::new(now),

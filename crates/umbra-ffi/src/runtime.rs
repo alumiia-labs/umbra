@@ -307,6 +307,16 @@ pub enum Update {
     /// This device acknowledged the queue of a contact above a hole, and
     /// the records in that hole are lost (Part 6 `WIR-116`).
     DeliveryGap(ContactId),
+    /// The relay took the record of a tag and named the room of the queue.
+    Room {
+        /// The tag of the send.
+        tag: u64,
+        /// The records that the queue can still take.
+        remaining: u32,
+    },
+    /// The queue of the contact is full, and the record of the tag waits
+    /// for room (`NET-016`, `IMP-082`).
+    Held(u64),
     /// A contact reads a new queue, at this address.
     QueueRotated {
         /// The contact.
@@ -593,6 +603,21 @@ pub async fn run_client(
                 }
                 ClientEvent::Accepted { handle } => match tags.remove(&handle) {
                     Some(tag) => Update::Sent(tag),
+                    None => continue,
+                },
+                ClientEvent::Room { handle, remaining } => match tags.get(&handle) {
+                    Some(tag) => Update::Room {
+                        tag: *tag,
+                        remaining,
+                    },
+                    None => continue,
+                },
+                // NET-218: a `LIMIT` of a full queue ends no send.
+                ClientEvent::Rejected {
+                    handle,
+                    reason: umbra_queue::Reject::Limit,
+                } if tags.contains_key(&handle) => match tags.remove(&handle) {
+                    Some(tag) => Update::Held(tag),
                     None => continue,
                 },
                 ClientEvent::Rejected { handle, .. } => match tags.remove(&handle) {

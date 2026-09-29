@@ -70,6 +70,10 @@ object BuildNetwork {
     var isClockCorrected = false
         private set
 
+    /** Whether the key set of the directory stands below `AUTHORITY_FLOOR` (`REL-126`). */
+    var isProvisional = false
+        private set
+
     private fun descriptorFile(context: Context) = File(context.filesDir, DESCRIPTOR)
 
     /** The descriptor of a deployed test network, or null for the local one. */
@@ -123,6 +127,7 @@ object BuildNetwork {
             }
             if (manifest === fresh) kept.writeBytes(manifest)
             isClockCorrected = verified.isClockCorrected
+            isProvisional = verified.isProvisional
             // NTF-127: the build pins the route to the NDR.
             val ndrKey = context.assets.open(NDR_KEY).use { it.readBytes() }
             // DIS-163: the build pins the directory.

@@ -207,6 +207,11 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
     var removing by remember(conversation) { mutableStateOf<Line?>(null) }
     // Part 4 §4.5.1: a new key of the contact waits for the answer.
     var keyChange by remember(conversation) { mutableStateOf<FfiKeyChange?>(null) }
+    // IMP-082: the records to a full queue stay queued, and the chat says why.
+    var isQueueFull by remember(conversation) { mutableStateOf(false) }
+    LaunchedEffect(conversation, Core.revision, Core.chats.size) {
+        if (!chat.isGroup) Core.queueFull(conversation) { isQueueFull = it }
+    }
     LaunchedEffect(conversation, Core.revision) {
         if (!chat.isGroup) Core.keyChange(conversation) { keyChange = it }
     }
@@ -434,6 +439,11 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
             },
         )
         BlockedLine(chat)
+        if (isQueueFull) {
+            Box(Modifier.padding(start = 20.dp, end = 20.dp, top = 8.dp)) {
+                Note(UiText.get(R.string.umbra_ui_imp_082))
+            }
+        }
         // GRP-050, GRP-070, GRP-089: each change of a group shows at its time.
         val notes = remember(modNotes, rosterNotes, memberNames) { chatNotes(modNotes, rosterNotes, memberNames) }
         LazyColumn(

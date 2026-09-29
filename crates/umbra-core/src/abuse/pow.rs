@@ -364,6 +364,14 @@ impl ChallengeBook {
             .filter(|held| is_live(held.issued_at, now))
     }
 
+    /// Whether a live challenge asks for an effort above 0: the
+    /// `admission surge` state of Part 14 §14.9.2 (`ABU-008`).
+    pub fn is_surge(&self, now: u64) -> bool {
+        self.held
+            .values()
+            .any(|held| is_live(held.issued_at, now) && held.effort > 0)
+    }
+
     /// Drops each challenge past two periods.
     pub fn expire(&mut self, now: u64) {
         self.held.retain(|_, held| is_live(held.issued_at, now));
@@ -573,6 +581,11 @@ mod tests {
             Err(Error::Stale)
         );
         assert_eq!(book.get(&[5; 32], now).unwrap().issued_at, now);
+        // ABU-008: a live challenge above effort 0 is the surge state, and
+        // it ends with its period.
+        assert!(book.is_surge(now));
+        assert!(!book.is_surge(now + 2 * POW_CHALLENGE_PERIOD));
+        assert!(!ChallengeBook::default().is_surge(now));
         // The bundle carries each live challenge, and it reads back.
         let bundle = book.encode(now).unwrap();
         assert_eq!(bundle.len(), CHALLENGE_LEN);

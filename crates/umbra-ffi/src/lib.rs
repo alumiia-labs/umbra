@@ -2594,6 +2594,97 @@ mod tests {
     }
 
     #[test]
+    fn a_snapshot_that_fails_its_check_is_a_failed_admission() {
+        let mut rng = Rng(110);
+        let mut admin = new_client(&mut rng);
+        let mut joiner = new_client(&mut rng);
+        let peer_at_admin = ContactId([0x51; 32]);
+        let peer_at_joiner = ContactId([0x52; 32]);
+        let pair_at_admin = admin.conversation_for(&peer_at_admin.0).unwrap();
+        let pair_at_joiner = joiner.conversation_for(&peer_at_joiner.0).unwrap();
+        let relays = [[0xA1; 32], [0xB2; 32]];
+        let group = admin
+            .create_group("Summit", relays, 1_700_000_000, &mut rng)
+            .unwrap();
+        let group_id = admin.group_info(group).unwrap().group_id;
+        admin
+            .group_queue_made(&group_id, 0, relays[0], [0xC3; 32], &mut rng)
+            .unwrap();
+        admin
+            .group_queue_made(&group_id, 1, relays[1], [0xD4; 32], &mut rng)
+            .unwrap();
+        admin
+            .offer_group(group, pair_at_admin, 1_700_000_001_000, &mut rng)
+            .unwrap();
+        let offer = admin.take_outgoing().unwrap();
+        deliver(
+            &mut joiner,
+            &peer_at_joiner,
+            &offer.app,
+            1_700_000_001_500,
+            &mut rng,
+        );
+        let held = joiner.group_offers().unwrap();
+        joiner
+            .accept_group_offer(&held[0], 1_700_000_002_000, &mut rng)
+            .unwrap();
+        let asked = joiner.take_outgoing().unwrap();
+        deliver(
+            &mut admin,
+            &peer_at_admin,
+            &asked.app,
+            1_700_000_002_500,
+            &mut rng,
+        );
+        let joiners = admin.group_joiners().unwrap();
+        let admission = admin
+            .add_joiner(&joiners[0], 1_700_000_003_000, &mut rng)
+            .unwrap();
+        admin
+            .admit_joiner(
+                &joiners[0],
+                admission.index,
+                b"a descriptor",
+                1_700_000_004_000,
+                &mut rng,
+            )
+            .unwrap();
+        let admit = admin.take_outgoing().unwrap();
+        deliver(
+            &mut joiner,
+            &peer_at_joiner,
+            &admit.app,
+            1_700_000_004_500,
+            &mut rng,
+        );
+        assert_eq!(joiner.group_admits().unwrap().len(), 1);
+        while joiner.next_event().is_some() {}
+
+        // GRP-327: one flipped byte fails the check of the snapshot.
+        let mut forged = admission.snapshot.clone();
+        let last = forged.len() - 1;
+        forged[last] ^= 1;
+        assert!(joiner
+            .accept_group_admit(pair_at_joiner, &group_id, &forged, 1_700_000_005, &mut rng)
+            .is_err());
+        // GRP-328: a failed admission shows, and no fetch asks again.
+        assert_eq!(
+            joiner.next_event(),
+            Some(Event::GroupOffer {
+                from: pair_at_joiner
+            })
+        );
+        let failed = joiner.failed_admissions().unwrap();
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].name, "Summit");
+        assert!(joiner.group_admits().unwrap().is_empty());
+        joiner
+            .dismiss_failed_admission(pair_at_joiner, &group_id)
+            .unwrap();
+        assert!(joiner.failed_admissions().unwrap().is_empty());
+    }
+
+    #[test]
     fn a_member_whose_index_a_rival_took_comes_back_through_an_admin() {
         use umbra_core::group::join::JoinKeys;
         use umbra_wire::group::control::GroupControl;
@@ -3636,6 +3727,49 @@ mod tests {
         assert_eq!(rebuilt.bytes().expose(), held.bytes().expose());
         // IDN-087: a share alone is no code.
         assert!(from_digits(&digits[0], DigitsType::Code).is_err());
+    }
+
+    #[test]
+    fn a_full_queue_holds_the_record_queued_and_room_sends_it_again() {
+        use crate::client::HOLD_RETRY;
+        use umbra_core::session::node::StateChange;
+
+        let mut rng = Rng(109);
+        let mut alice = new_client(&mut rng);
+        let peer = ContactId([0x57; 32]);
+        let state = [&[0x01][..], &[5; 16], &[7; 32], &[0; 8]].concat();
+        alice
+            .commit_network(
+                &[StateChange::Contact {
+                    contact: peer,
+                    state: zeroize::Zeroizing::new(state),
+                }],
+                &[],
+                1_000_000,
+                &mut rng,
+            )
+            .unwrap();
+        while alice.next_event().is_some() {}
+        let conversation = alice.conversation_for(&peer.0).unwrap();
+        let mut draft = alice.new_draft(conversation);
+        draft.set_text(&units("waits for room")).unwrap();
+        let message = alice.send_draft(draft, 1_001_000, &mut rng).unwrap();
+        assert_eq!(alice.take_outgoing().unwrap().message, message);
+        while alice.next_event().is_some() {}
+
+        // NET-016: the relay refused the record, and the queue is full.
+        alice.hold_for_room(&message, 2_000).unwrap();
+        assert!(alice.queue_full(conversation));
+        assert_eq!(alice.next_event(), Some(Event::Conversations));
+        // IMP-082: the record stays queued.
+        assert_eq!(alice.info(&message).unwrap().delivery, Delivery::Queued);
+        // NET-218: it goes again after HOLD_RETRY and not before.
+        assert!(!alice.resend_held(2_000 + HOLD_RETRY - 1).unwrap());
+        assert!(alice.resend_held(2_000 + HOLD_RETRY).unwrap());
+        assert_eq!(alice.take_outgoing().unwrap().message, message);
+        // A QUOTA with room ends the state.
+        alice.queue_room(&message, 5).unwrap();
+        assert!(!alice.queue_full(conversation));
     }
 
     #[test]

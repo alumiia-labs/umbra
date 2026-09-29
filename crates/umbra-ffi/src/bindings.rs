@@ -502,6 +502,9 @@ pub struct Connection {
     /// The highest epoch of the relay directory that this device verified,
     /// or zero for a network with no signed directory.
     pub directory_epoch: u64,
+    /// Whether a relay asks for a proof of work above the floor: the
+    /// `admission surge` state of Part 14 §14.9.2 (`ABU-008`).
+    pub admission_surge: bool,
 }
 
 /// A network that a signed relay manifest gave.
@@ -514,6 +517,9 @@ pub struct VerifiedNetwork {
     /// Whether the time of the root is more than one hour from the clock of
     /// the device. The interface shows that state (`REL-116`).
     pub is_clock_corrected: bool,
+    /// Whether fewer authorities than `AUTHORITY_FLOOR` stand under
+    /// different control: the `provisional directory` state (`REL-126`).
+    pub is_provisional: bool,
 }
 
 fn random_u64() -> u64 {
@@ -3577,6 +3583,7 @@ impl Handle {
         let mut inner = locked(&self.inner);
         let floor = inner.client.directory_epoch()?.max(shipped_epoch);
         let (keyset, _) = DirectoryKeySet::parse(&keyset).map_err(|_| FfiError::Malformed)?;
+        let is_provisional = keyset.independent_count < umbra_core::directory::AUTHORITY_FLOOR;
         let mut consensus = Consensus::new(keyset, floor).map_err(|_| FfiError::Malformed)?;
         let manifest = RelayManifest::parse(&manifest).map_err(|_| FfiError::Malformed)?;
         let set = RelaySet::accept(&mut consensus, &manifest, &BlocList::v1(), unix_now())
@@ -3648,6 +3655,7 @@ impl Handle {
             },
             epoch: set.epoch,
             is_clock_corrected: consensus.clock_state() == ClockState::Corrected,
+            is_provisional,
         })
     }
 
@@ -3702,6 +3710,7 @@ impl Handle {
                 .map(as_hop),
             standby: pins.iter().find(|relay| !is_guard(relay)).map(as_hop),
             directory_epoch: inner.client.directory_epoch()?,
+            admission_surge: inner.challenges.is_surge(unix_now()),
         })
     }
 
@@ -3990,6 +3999,7 @@ impl Handle {
         };
         let now = unix_now();
         let mut inner = locked(&self.inner);
+        let was_surge = inner.challenges.is_surge(now);
         for challenge in challenges {
             let identity = inner
                 .relays
@@ -4002,7 +4012,11 @@ impl Handle {
                 let _ = inner.challenges.take(challenge, &identity, now);
             }
         }
+        // The view of the connection reads the surge state again.
         inner.challenges_at = now;
+        if inner.challenges.is_surge(now) != was_surge {
+            inner.circuits_changed = true;
+        }
         // A transfer task that runs takes the new challenges at once.
         if let Some(sender) = &inner.transfers {
             let _ = sender.send(TransferCommand::Challenges {
@@ -4191,6 +4205,35 @@ impl Handle {
             .offer_group(group, to, unix_now_ms(), &mut OsRng)?;
         inner.flush_outgoing();
         Ok(())
+    }
+
+    /// Each admission whose snapshot did not verify (`GRP-328`).
+    pub fn failed_admissions(&self) -> Result<Vec<FfiGroupOffer>, FfiError> {
+        Ok(locked(&self.inner)
+            .client
+            .failed_admissions()?
+            .into_iter()
+            .map(|offer| FfiGroupOffer {
+                from: offer.from.0.to_vec(),
+                group_id: offer.group_id.to_vec(),
+                name: offer.name,
+                is_added: false,
+                is_moving: false,
+            })
+            .collect())
+    }
+
+    /// The user saw a failed admission, and it leaves the store.
+    pub fn dismiss_failed_admission(
+        &self,
+        from: Vec<u8>,
+        group_id: Vec<u8>,
+    ) -> Result<(), FfiError> {
+        let from = conversation_of(&from)?;
+        let group_id: [u8; 32] = group_id.try_into().map_err(|_| FfiError::Malformed)?;
+        Ok(locked(&self.inner)
+            .client
+            .dismiss_failed_admission(from, &group_id)?)
     }
 
     /// The offers of a group that wait for the user (`GRP-170`).
@@ -4441,6 +4484,13 @@ impl Handle {
         drop(inner);
         self.changed.notify_all();
         Ok(Arc::new(MsgHandle(message)))
+    }
+
+    /// Whether a relay named the queue of the contact of a conversation full
+    /// (Part 14 §14.9.2). Its records stay queued.
+    pub fn queue_full(&self, conversation: Vec<u8>) -> Result<bool, FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        Ok(locked(&self.inner).client.queue_full(conversation))
     }
 
     /// The key-change notice that waits in a conversation, or none. While

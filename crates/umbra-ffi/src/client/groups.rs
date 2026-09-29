@@ -72,6 +72,9 @@ const SENT: u8 = 6;
 const JOINED: u8 = 7;
 /// The byte of such a second admit, which waits for its snapshot.
 const READMITTED: u8 = 8;
+/// An admit whose snapshot this device rejected (`GRP-327`). The row holds
+/// the name of the group for the view (`GRP-328`).
+const REFUSED: u8 = 9;
 
 /// The length of `GroupRosterKey_g.pk`, an ML-DSA-65 verifying key.
 const ROSTER_PK_LEN: usize = 1_952;
@@ -103,6 +106,12 @@ enum JoinEntry {
         group_id: [u8; 32],
         index: u16,
         add_epoch: u32,
+    },
+    /// An admit whose snapshot failed a check (`GRP-327`, `GRP-328`).
+    Refused {
+        from: ConversationId,
+        group_id: [u8; 32],
+        name: String,
     },
     /// A group that this device joined, while its add is the head.
     Joined {
@@ -1818,12 +1827,25 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         };
         let control = GroupControl::parse(&admit)?;
         let invitation = GroupInvitation::parse(control.payload)?;
-        let snapshot = umbra_wire::group::control::RosterSnapshot::parse(snapshot)?;
         // GRP-326: the snapshot verifies against the hash of the add and
         // the roster key of the creator, which the offer carried.
-        let add_hash = Self::add_hash_of(&invitation, &snapshot)?;
-        let admitted = accept_admit(&invitation, &snapshot, &add_hash, &creator_roster_pk, now)
-            .map_err(|_| Error::Integrity)?;
+        let checked = umbra_wire::group::control::RosterSnapshot::parse(snapshot)
+            .map_err(Error::from)
+            .and_then(|snapshot| {
+                let add_hash = Self::add_hash_of(&invitation, &snapshot)?;
+                accept_admit(&invitation, &snapshot, &add_hash, &creator_roster_pk, now)
+                    .map(|admitted| (admitted, snapshot))
+                    .map_err(|_| Error::Integrity)
+            });
+        let (admitted, snapshot) = match checked {
+            Ok(checked) => checked,
+            // GRP-327, GRP-328: the snapshot does not verify, thus this
+            // device is in no group, and the view shows a failed admission.
+            Err(error) => {
+                self.refuse_admit(&row, from, group_id, &name, rng)?;
+                return Err(error);
+            }
+        };
         let add_epoch = snapshot.roster_epoch;
         let conversation = self.adopt_group(admitted, &seed, &name, again, rng)?;
         // GRP-290: the contact that brought this device in is a member it
@@ -1892,6 +1914,65 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
         }
         Ok(out)
+    }
+
+    /// Keeps an admit whose snapshot failed a check, in place of the admit
+    /// that waited. No fetch asks for its snapshot again.
+    fn refuse_admit<R: CryptoRng + ?Sized>(
+        &mut self,
+        row: &RowId,
+        from: ConversationId,
+        group_id: &[u8; 32],
+        name: &str,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let mut entry = vec![REFUSED];
+        entry.extend_from_slice(&from.0);
+        entry.extend_from_slice(group_id);
+        entry.extend_from_slice(name.as_bytes());
+        let open = self.open_mut()?;
+        let mut batch = open.store.begin();
+        batch.put(GROUP_JOIN, *row, Some(from.0), &entry, rng)?;
+        batch.commit()?;
+        self.events.push_back(Event::GroupOffer { from });
+        Ok(())
+    }
+
+    /// Each admission that failed because its snapshot did not verify
+    /// (`GRP-328`).
+    pub fn failed_admissions(&self) -> Result<Vec<GroupOffer>, Error> {
+        let mut out = Vec::new();
+        for row in self.join_rows()? {
+            if let Some(JoinEntry::Refused {
+                from,
+                group_id,
+                name,
+            }) = self.join_entry(&row)?
+            {
+                out.push(GroupOffer {
+                    from,
+                    group_id,
+                    name,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// The user saw a failed admission, and it leaves the store.
+    pub fn dismiss_failed_admission(
+        &mut self,
+        from: ConversationId,
+        group_id: &[u8; 32],
+    ) -> Result<(), Error> {
+        let row = self.join_row(from, group_id)?;
+        if !matches!(self.join_entry(&row)?, Some(JoinEntry::Refused { .. })) {
+            return Err(Error::NotFound);
+        }
+        let open = self.open_mut()?;
+        let mut batch = open.store.begin();
+        batch.delete(GROUP_JOIN, row);
+        Ok(batch.commit()?)
     }
 
     /// The joiners that wait for an admin of this device (`GRP-310`).
@@ -1978,6 +2059,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .ok_or(Error::Integrity)?;
         let rest = plain.get(49..).ok_or(Error::Integrity)?;
         Ok(Some(match kind {
+            REFUSED => JoinEntry::Refused {
+                from,
+                group_id,
+                name: core::str::from_utf8(rest)
+                    .map_err(|_| Error::Integrity)?
+                    .to_owned(),
+            },
             OFFERED => {
                 let (key, name) = rest
                     .split_at_checked(ROSTER_PK_LEN)

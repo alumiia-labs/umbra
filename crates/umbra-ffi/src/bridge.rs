@@ -311,7 +311,6 @@ impl Bridge {
             | Update::QueueRotated { .. }
             | Update::PeerMoved(_)
             | Update::ChannelRenewed(_)
-            | Update::Tick
             | Update::NotifyKey { .. }
             | Update::NotifyQueue { .. }
             | Update::RendezvousQueue { .. }
@@ -371,6 +370,27 @@ impl Bridge {
             Update::Failed(tag) => {
                 if let Some(message) = self.sent.remove(&tag) {
                     client.set_delivery(&message, Delivery::Failed, rng)?;
+                }
+                None
+            }
+            Update::Room { tag, remaining } => {
+                if let Some(message) = self.sent.get(&tag) {
+                    client.queue_room(message, remaining)?;
+                    self.flush(client, rng)?;
+                }
+                None
+            }
+            // IMP-082: the record stays queued while the queue is full.
+            Update::Held(tag) => {
+                if let Some(message) = self.sent.remove(&tag) {
+                    client.hold_for_room(&message, now_ms / 1_000)?;
+                }
+                None
+            }
+            // NET-218: a record that a full queue refused goes again.
+            Update::Tick => {
+                if client.resend_held(now_ms / 1_000)? {
+                    self.flush(client, rng)?;
                 }
                 None
             }

@@ -522,6 +522,26 @@ fun InviteToGroupScreen(chat: Chat, onBack: () -> Unit) {
 /** The offers of a group that wait for the user (mockup 050). */
 @Composable
 fun GroupOfferPrompt() {
+    // GRP-328: an admission whose roster did not verify shows as failed.
+    Core.failedAdmissions.firstOrNull()?.let { failed ->
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .background(Palette.Incoming)
+                .padding(horizontal = 20.dp, vertical = 12.dp),
+        ) {
+            Text("Joining ${failed.name} failed")
+            Text(
+                "The roster of the group did not verify.",
+                style = MaterialTheme.typography.labelMedium,
+                color = Palette.TextSecondary,
+                modifier = Modifier.subline(),
+            )
+            Spacer(Modifier.height(8.dp))
+            InlineButton("Dismiss") { Core.dismissFailedAdmission(failed) }
+        }
+        return
+    }
     val offer = Core.groupOffers.firstOrNull() ?: return
     val from = Core.chats
         .firstOrNull { it.conversation.id.contentEquals(offer.from) }?.title ?: "A contact"

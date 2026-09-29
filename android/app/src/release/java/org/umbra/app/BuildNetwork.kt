@@ -12,6 +12,8 @@ import uniffi.umbra_ffi.Network
 object BuildNetwork {
     const val isClockCorrected = false
 
+    const val isProvisional = false
+
     fun network(context: Context, client: Handle): Network? = null
 
     /** The release build takes no descriptor from the user. */

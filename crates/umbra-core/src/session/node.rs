@@ -157,6 +157,15 @@ pub enum ClientEvent {
         /// The reason of the `NACK`.
         reason: Reject,
     },
+    /// The `QUOTA` that accepted a `SEND` named the room that stays in the
+    /// queue (Part 3 `NET-017`). An [`ClientEvent::Accepted`] with the same
+    /// handle follows it.
+    Room {
+        /// The handle of the call.
+        handle: u64,
+        /// The records that the queue can still take.
+        remaining: u32,
+    },
     /// The answer to a chunk command of [`ClientNode::chunk`].
     Chunk {
         /// The handle of the call.
@@ -4274,6 +4283,12 @@ impl ClientNode {
                         }),
                         Cmd::Quota,
                     ) => {
+                        if let Ok(room) = <[u8; 4]>::try_from(payload.as_slice()) {
+                            out.push(ClientEvent::Room {
+                                handle: user,
+                                remaining: u32::from_be_bytes(room),
+                            });
+                        }
                         out.push(ClientEvent::Accepted { handle: user });
                     }
                     // NTF-112: the `NPK` comes first. The `NID` after it

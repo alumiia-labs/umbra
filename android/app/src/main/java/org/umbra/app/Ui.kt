@@ -426,22 +426,31 @@ private fun TabTitle(title: String) {
 }
 
 /**
- * The one line of each degraded state of Part 14 §14.9.2. A client that
- * connects shows no line: the top bar holds that state.
+ * One line for each current degraded state of Part 14 §14.9.2 (`IMP-077`).
+ * A client that connects shows no line: the top bar holds that state. The
+ * `admission surge` shows as a progress bar (`ABU-008`).
  */
 @Composable
 private fun ConnectionNote() {
     val fault = Core.fault
     // A degraded state stops nothing, thus it is no error (`IMP-078`).
-    val line = when {
-        fault != null -> fault
-        Core.degraded != null -> Core.degraded
-        Core.online && BuildNetwork.isClockCorrected ->
-            "The clock of this device differs from the network time by more than one hour."
-        else -> null
-    } ?: return
-    Box(Modifier.padding(start = 20.dp, end = 20.dp, top = 12.dp)) {
-        Note(line, isError = fault != null)
+    val lines = buildList {
+        fault?.let { add(it) }
+        Core.degraded?.let { add(it) }
+        if (BuildNetwork.isProvisional) add(UiText.get(R.string.umbra_ui_rel_126))
+        if (Core.online && BuildNetwork.isClockCorrected) add(UiText.get(R.string.umbra_ui_rel_116))
+    }
+    if (Core.connection?.admissionSurge == true) {
+        LinearProgressIndicator(
+            modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 12.dp).height(3.dp),
+            color = Palette.Action,
+            trackColor = Palette.Pressed,
+        )
+    }
+    for (line in lines) {
+        Box(Modifier.padding(start = 20.dp, end = 20.dp, top = 12.dp)) {
+            Note(line, isError = line == fault)
+        }
     }
 }
 

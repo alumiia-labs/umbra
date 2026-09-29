@@ -1382,6 +1382,9 @@ object Core {
     /** The offers of a group that wait for this user (`GRP-170`). */
     val groupOffers = mutableStateListOf<FfiGroupOffer>()
 
+    /** The admissions whose roster did not verify (`GRP-328`). */
+    val failedAdmissions = mutableStateListOf<FfiGroupOffer>()
+
     /** The contacts that asked to come into a group of this device. */
     val groupJoiners = mutableStateListOf<FfiGroupOffer>()
 
@@ -1433,12 +1436,20 @@ object Core {
         main.post { then() }
     }
 
+    fun dismissFailedAdmission(offer: FfiGroupOffer) = call { client ->
+        client.dismissFailedAdmission(offer.from, offer.groupId)
+        refreshJoinFlow()
+    }
+
     private fun refreshJoinFlow() = call { client ->
         val offers = client.groupOffers()
         val joiners = client.groupJoiners()
+        val failed = client.failedAdmissions()
         main.post {
             groupOffers.clear()
             groupOffers.addAll(offers)
+            failedAdmissions.clear()
+            failedAdmissions.addAll(failed)
             groupJoiners.clear()
             groupJoiners.addAll(joiners)
         }
@@ -1871,6 +1882,12 @@ object Core {
     }
 
     /** Asks again for the file of a message that did not arrive. */
+    /** Whether a relay named the queue of the contact full (Part 14 §14.9.2). */
+    fun queueFull(conversation: Conversation, onLoaded: (Boolean) -> Unit) = call { client ->
+        val isFull = client.queueFull(conversation.id)
+        main.post { onLoaded(isFull) }
+    }
+
     fun resendFile(message: MsgHandle) = call { client ->
         client.resendFile(message)
         main.post { revision++ }
