@@ -2609,6 +2609,21 @@ impl ClientNode {
     /// With no conformant chain the build fails closed (`NET-033`).
     fn choose_chain<R: CryptoRng + ?Sized>(&mut self, rng: &mut R) -> Result<(), Error> {
         let exit = self.slot()?.exit;
+        // IDN-007: a circuit with no fixed exit makes its queue at the exit
+        // it takes, thus the request queues of an address and the pairwise
+        // queues keep apart. A rendezvous circuit leaves out the relays of
+        // pairwise queues, and a circuit of the contacts leaves out the
+        // relays of request queues.
+        let apart: BTreeSet<[u8; 32]> = if exit.is_some() {
+            BTreeSet::new()
+        } else if self.slot()?.rendezvous {
+            self.contacts
+                .values()
+                .map(|contact| contact.inbound_relay)
+                .collect()
+        } else {
+            self.rendezvous.values().map(|held| held.relay).collect()
+        };
         let uses = |relay: &[u8; 32]| {
             self.slots
                 .iter()
@@ -2630,7 +2645,17 @@ impl ClientNode {
             .collect();
         order.sort_by_key(|(used, draw, _)| (*used, *draw));
         let candidates: Vec<Candidate> = order.into_iter().map(|(_, _, c)| c).collect();
-        let chain = select_avoiding(&self.ingress.candidate, &candidates, &self.removed_links)?;
+        let kept: Vec<Candidate> = candidates
+            .iter()
+            .filter(|candidate| !candidate.is_exit() || !apart.contains(&candidate.relay_id))
+            .copied()
+            .collect();
+        // A set with no exit outside those relays still gives a chain: a
+        // queue at a shared relay is better than no request path at all.
+        let chain =
+            select_avoiding(&self.ingress.candidate, &kept, &self.removed_links).or_else(|_| {
+                select_avoiding(&self.ingress.candidate, &candidates, &self.removed_links)
+            })?;
         self.slot_mut()?.chain = Some(chain.hops);
         Ok(())
     }
