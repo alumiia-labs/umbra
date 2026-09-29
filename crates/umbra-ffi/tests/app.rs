@@ -3573,6 +3573,16 @@ fn a_group_made_after_the_link_reaches_each_linked_device() {
         std::thread::sleep(Duration::from_millis(200));
     }
 
+    // The test can outlive `CIRCUIT_MAX_AGE` on a loaded machine, and the
+    // app starts a new run at the end of an aged one (NET-320).
+    for handle in [&alice, &bob, &laptop] {
+        Arc::clone(handle).connect(network_for(handle)).unwrap();
+        wait_for(handle, |event| match event {
+            FfiEvent::Online => Some(()),
+            _ => None,
+        });
+    }
+
     // DEV-300, DEV-301: the phone removes the tablet and re-keys, and the
     // laptop moves to the same index and reads the group on.
     let tablet_id = tablet
