@@ -539,13 +539,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         self.setting(SYNC_BUNDLE_SETTING)
     }
 
-    fn setting(&self, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
+    pub(super) fn setting(&self, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
         let store = &self.open_ref()?.store;
         let row = store.row_id(SETTINGS, key);
         Ok(store.get(SETTINGS, &row)?)
     }
 
-    fn put_setting<R: CryptoRng + ?Sized>(
+    pub(super) fn put_setting<R: CryptoRng + ?Sized>(
         &mut self,
         key: &[u8],
         value: &[u8],
@@ -558,7 +558,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(batch.commit()?)
     }
 
-    fn remove_setting(&mut self, key: &[u8]) -> Result<(), Error> {
+    pub(super) fn remove_setting(&mut self, key: &[u8]) -> Result<(), Error> {
         let open = self.open_mut()?;
         let row = open.store.row_id(SETTINGS, key);
         let mut batch = open.store.begin();

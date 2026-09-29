@@ -15,6 +15,7 @@ mod block;
 mod dead;
 mod devices;
 mod discovery;
+mod drafts;
 mod files;
 mod forward;
 mod gossip;
@@ -2788,6 +2789,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut msg_id = [0u8; 16];
         rng.fill_bytes(&mut msg_id);
         let conversation = draft.conversation();
+        // DEV-201: a send erases the draft from the set.
+        self.clear_draft(conversation, rng)?;
         if let Some(file) = draft.take_file() {
             // The record of a file answers nothing, and its text is a
             // caption of CAPTION_MAX at most (WIR-535).

@@ -611,6 +611,12 @@ private fun SettingsTab(push: (Screen) -> Unit) {
         SettingRow("comment", "Typing indicators", if (Core.typingEnabled) "On" else "Off") {
             Core.turnTyping(!Core.typingEnabled)
         }
+        // DEV-202: a draft on the other devices is text that no one sent.
+        if (Core.devices.size > 1) {
+            SettingRow("pen", "Draft sync", if (Core.draftSync) "On" else "Off") {
+                Core.turnDraftSync(!Core.draftSync)
+            }
+        }
         SettingRow("download", "Automatic download", autoDownloadLabel(Core.autoDownloadLimit, Core.autoDownloadWifiOnly)) {
             push(Screen.AutoDownload)
         }

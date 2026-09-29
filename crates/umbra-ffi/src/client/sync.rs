@@ -486,6 +486,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
             ITEM_GROUP_STATE => self.on_group_state_item(subject, value)?,
             super::alerts::ITEM_ALERT => self.apply_alert_item(&subject, value, rng)?,
+            super::drafts::ITEM_DRAFT => self.apply_draft_item(&subject, value, rng)?,
             ITEM_GROUP_REKEY => {
                 self.on_group_rekey_item(subject, value, unix_now() * 1_000, rng)?
             }

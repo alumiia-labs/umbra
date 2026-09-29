@@ -4231,6 +4231,39 @@ mod tests {
     }
 
     #[test]
+    fn a_draft_stays_until_its_send_and_its_sync_turns_off() {
+        let mut rng = Rng(113);
+        let mut client = new_client(&mut rng);
+        let conversation = ConversationId([0x31; 16]);
+        assert!(client.draft(conversation).unwrap().is_empty());
+        client
+            .set_draft(conversation, &units("half a thought"), &mut rng)
+            .unwrap();
+        assert_eq!(
+            *client.draft(conversation).unwrap(),
+            units("half a thought")
+        );
+        // The draft lives through a lock.
+        client.lock();
+        client.unlock(&units("correct horse"), 1_000).unwrap();
+        assert_eq!(
+            *client.draft(conversation).unwrap(),
+            units("half a thought")
+        );
+        // DEV-201: a send erases it.
+        let mut draft = client.new_draft(conversation);
+        draft.set_text(&units("the whole thought")).unwrap();
+        client.send_draft(draft, 2_000_000, &mut rng).unwrap();
+        assert!(client.draft(conversation).unwrap().is_empty());
+        // DEV-202: the sync is on by default, and the user turns it off.
+        assert!(client.draft_sync().unwrap());
+        client.set_draft_sync(false, &mut rng).unwrap();
+        assert!(!client.draft_sync().unwrap());
+        client.set_draft_sync(true, &mut rng).unwrap();
+        assert!(client.draft_sync().unwrap());
+    }
+
+    #[test]
     fn a_screenshot_block_is_off_by_default_and_holds_for_one_conversation() {
         let mut rng = Rng(106);
         let mut alice = new_client(&mut rng);

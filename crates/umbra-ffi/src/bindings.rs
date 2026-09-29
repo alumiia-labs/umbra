@@ -5209,6 +5209,39 @@ impl Handle {
         Ok(locked(&self.inner).client.typing_enabled()?)
     }
 
+    /// The draft of a conversation, as UTF-16 code units (Part 7 §7.5.3).
+    pub fn draft(&self, conversation: Vec<u8>) -> Result<Vec<u16>, FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        let held = locked(&self.inner).client.draft(conversation)?;
+        Ok(held.to_vec())
+    }
+
+    /// Keeps the draft of a conversation, and an empty one erases it. The
+    /// other devices of the set take it while the draft sync is on.
+    pub fn set_draft(&self, conversation: Vec<u8>, code_units: Vec<u16>) -> Result<(), FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        let code_units = Zeroizing::new(code_units);
+        let mut inner = locked(&self.inner);
+        let Inner { client, bridge, .. } = &mut *inner;
+        client.set_draft(conversation, &code_units, &mut OsRng)?;
+        if let Some(running) = bridge {
+            running.flush(client, &mut OsRng)?;
+        }
+        Ok(())
+    }
+
+    /// Whether the drafts go to the other devices of the set.
+    pub fn draft_sync(&self) -> Result<bool, FfiError> {
+        Ok(locked(&self.inner).client.draft_sync()?)
+    }
+
+    /// Turns the draft sync on or off (Part 7 `DEV-202`).
+    pub fn set_draft_sync(&self, is_on: bool) -> Result<(), FfiError> {
+        Ok(locked(&self.inner)
+            .client
+            .set_draft_sync(is_on, &mut OsRng)?)
+    }
+
     /// Turns the typing indicator on or off.
     pub fn set_typing_enabled(&self, is_on: bool) -> Result<(), FfiError> {
         Ok(locked(&self.inner)

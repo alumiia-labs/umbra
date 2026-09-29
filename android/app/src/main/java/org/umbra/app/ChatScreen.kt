@@ -270,6 +270,24 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
         owner.lifecycle.addObserver(watcher)
         onDispose { owner.lifecycle.removeObserver(watcher) }
     }
+    // Part 7 §7.5.3: the draft comes back at the open, and it stays when
+    // the view closes or the app leaves the screen. An edit is no draft.
+    LaunchedEffect(conversation) {
+        Core.readDraft(conversation) { chars ->
+            composer.set(chars)
+            chars.fill(' ')
+        }
+    }
+    DisposableEffect(owner, conversation) {
+        val keeper = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP && edited == null) Core.keepDraft(conversation, composer.copy())
+        }
+        owner.lifecycle.addObserver(keeper)
+        onDispose {
+            owner.lifecycle.removeObserver(keeper)
+            if (edited == null) Core.keepDraft(conversation, composer.copy())
+        }
+    }
     val askMicrophone = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { allowed ->
         if (allowed) startRecording() else notice = "UMBRA has no access to the microphone."
     }

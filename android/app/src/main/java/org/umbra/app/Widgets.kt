@@ -121,6 +121,14 @@ class PlatformFieldState {
             .showSoftInput(field, InputMethodManager.SHOW_IMPLICIT)
     }
 
+    /** A copy of the text, which the caller overwrites. The field keeps it. */
+    fun copy(): CharArray {
+        val editable = view?.editableText ?: return CharArray(0)
+        val chars = CharArray(editable.length)
+        TextUtils.getChars(editable, 0, editable.length, chars, 0)
+        return chars
+    }
+
     /** The text, or null for an empty field. The field is empty after the call. */
     fun take(): CharArray? {
         val editable = view?.editableText ?: return null

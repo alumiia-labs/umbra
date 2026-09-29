@@ -296,6 +296,7 @@ object Core {
             // Part 8 §8.3: the carriers of the mode of this device.
             Modes.apply(app)
             readTyping()
+            readDraftSync()
         }
     }
 
@@ -1268,6 +1269,35 @@ object Core {
 
     /** Each conversation whose contact types, until `TYPING_TTL` (`WIR-286`). */
     val typingNow = mutableStateMapOf<List<Byte>, Long>()
+
+    /** Whether the drafts go to the other devices of the set (Part 7 §7.5.3). */
+    var draftSync by mutableStateOf(true)
+        private set
+
+    fun readDraftSync() = call { client ->
+        val isOn = client.draftSync()
+        main.post { draftSync = isOn }
+    }
+
+    fun turnDraftSync(isOn: Boolean) = call { client ->
+        client.setDraftSync(isOn)
+        main.post { draftSync = isOn }
+    }
+
+    /** The draft of a conversation, as characters that `onDraft` overwrites. */
+    fun readDraft(conversation: Conversation, onDraft: (CharArray) -> Unit) = call { client ->
+        val units = client.draft(conversation.id)
+        if (units.isEmpty()) return@call
+        val chars = CharArray(units.size) { units[it].toInt().toChar() }
+        main.post { onDraft(chars) }
+    }
+
+    /** Keeps the draft of a conversation; the characters are overwritten. */
+    fun keepDraft(conversation: Conversation, text: CharArray) {
+        val units = text.map { it.code.toUShort() }
+        text.fill('\u0000')
+        call { client -> client.setDraft(conversation.id, units) }
+    }
 
     fun readTyping() = call { client ->
         val isOn = client.typingEnabled()
