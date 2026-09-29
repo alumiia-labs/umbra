@@ -1094,6 +1094,8 @@ private fun BubbleContent(line: Line, chat: Chat, isRevealed: Boolean = false, a
             buildString {
                 if (line.info.edited) append("Edited · ")
                 append(clock)
+                // WIR-463: a record that a key supply opened says so.
+                if (line.info.recovered) append(" · Recovered")
                 // A timed message says when it goes.
                 line.info.expiresAt?.let { at ->
                     append(" · ").append(leftLabel(at.toLong() - System.currentTimeMillis() / 1_000))

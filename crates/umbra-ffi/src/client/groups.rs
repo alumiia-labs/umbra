@@ -517,6 +517,16 @@ pub struct EpochUpload {
 const EPOCH_UPLOAD_TRIES: u8 = 3;
 
 /// The key of the clock of the last record of this device in a group.
+/// The mark of an epoch that a key supply gave (`WIR-462`).
+fn recovered_key(conversation: ConversationId, epoch: u32) -> Vec<u8> {
+    [
+        conversation.0.as_slice(),
+        b"recovered",
+        &epoch.to_be_bytes(),
+    ]
+    .concat()
+}
+
 fn sent_key(conversation: ConversationId) -> Vec<u8> {
     [conversation.0.as_slice(), b"sent"].concat()
 }
@@ -3948,11 +3958,21 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         }
                         continue;
                     }
+                    let before = group.epoch();
+                    let is_one_slot = group.slot_indices(&body).len() == 1;
                     if group
                         .install_epoch_key(epoch, start_slot, &body, now)
                         .is_ok()
                     {
                         installed = true;
+                        // WIR-462: a one-slot record that brings the next
+                        // epoch is a key supply for a rotation that this
+                        // device missed. A delivery of owner credentials
+                        // names the epoch that the device holds.
+                        if is_one_slot && epoch == before.saturating_add(1) {
+                            let key = recovered_key(conversation, epoch);
+                            self.put_clock(conversation, key, now, rng)?;
+                        }
                         // GRP-252: a record of the new epoch that arrived
                         // before its key waited, and it opens now.
                         outcomes.extend(group.retry_held(now));
@@ -3970,6 +3990,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     sender,
                     app,
                     counter,
+                    epoch,
                     ..
                 } => {
                     self.note_seen(conversation, &group, sender, now, rng)?;
@@ -4060,7 +4081,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     };
                     let stored = self.store_group_message(conversation, &app, now_ms, rng)?;
                     if let Some(message) = stored {
-                        self.put_group_sender(conversation, message, sender, rng)?;
+                        let is_recovered =
+                            self.clock(&recovered_key(conversation, epoch))?.is_some();
+                        self.put_group_sender(conversation, message, sender, is_recovered, rng)?;
                         self.after_group_store(conversation, &group, message, &app, now, rng)?;
                         match timer {
                             Some(seconds) => {

@@ -30,9 +30,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         conversation: ConversationId,
         message: MsgRef,
         sender: u16,
+        is_recovered: bool,
         rng: &mut R,
     ) -> Result<(), Error> {
-        let value = [conversation.0.as_slice(), &sender.to_be_bytes()].concat();
+        // WIR-462: a record that opened under the secret of a key supply
+        // keeps that mark after the sender.
+        let value = [
+            conversation.0.as_slice(),
+            &sender.to_be_bytes(),
+            if is_recovered { &[1u8][..] } else { &[] },
+        ]
+        .concat();
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         batch.put(GROUP_SENDER, message.0, Some(conversation.0), &value, rng)?;
@@ -50,6 +58,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .and_then(|b| b.try_into().ok())
             .ok_or(Error::Integrity)?;
         Ok(Some(u16::from_be_bytes(index)))
+    }
+
+    /// Whether a message of a group opened under an epoch secret that a
+    /// one-slot epoch-key record gave (`WIR-462`). The view shows it apart
+    /// from a record whose counter this device tracked (`WIR-463`).
+    pub fn is_recovered(&self, message: &MsgRef) -> Result<bool, Error> {
+        Ok(self
+            .open_ref()?
+            .store
+            .get(GROUP_SENDER, &message.0)?
+            .is_some_and(|value| value.get(18) == Some(&1)))
     }
 
     /// The row of a target of a group, when the author of the change sent

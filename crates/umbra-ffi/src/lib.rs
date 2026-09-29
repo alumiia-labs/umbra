@@ -163,6 +163,9 @@ pub struct MessageInfo {
     pub poll: bool,
     /// Whether a message of a group names this member (Part 11 §11.11).
     pub mentions_me: bool,
+    /// Whether a message of a group opened under the secret of a key supply
+    /// (`WIR-462`), thus its sender counter had a gap here.
+    pub recovered: bool,
     /// The moderator action on the message: 0 none, 1 hidden, 2 removed
     /// (Part 11 §11.9.6).
     pub moderation: u8,
@@ -1490,6 +1493,8 @@ mod tests {
                 message
             })
         );
+        // WIR-462: the record opened under the secret of the supply.
+        assert!(other.info(&message).unwrap().recovered);
         assert!(other
             .on_group_record(&[0xC3; 32], 5, &notice.record, ms(later + 3_600), &mut rng)
             .unwrap()
@@ -1609,6 +1614,8 @@ mod tests {
             })
         );
         assert_eq!(other.group_info(member).unwrap().epoch, 2);
+        // WIR-463: a rotation of each member is no key supply.
+        assert!(!other.info(&message).unwrap().recovered);
     }
 
     #[test]

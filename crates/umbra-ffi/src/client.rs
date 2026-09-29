@@ -3054,6 +3054,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         info.expires_at = self.deadline_of(message)?.map(|deadline| deadline.at);
         info.mentions_me = open.store.get(groups::MENTIONED, &message.0)?.is_some();
         info.sender = self.group_sender(message)?;
+        info.recovered = self.is_recovered(message)?;
         if let Some((state, role)) = self.moderation_of(message)? {
             info.moderation = state;
             info.moderator_role = role;
@@ -3171,6 +3172,7 @@ fn info_of(plain: &[u8]) -> Result<MessageInfo, Error> {
         poll: parsed.kind == AppKind::Poll,
         // The store holds the mark: see `Client::info`.
         mentions_me: false,
+        recovered: false,
         // The store holds the state: see `Client::info`.
         moderation: 0,
         moderator_role: 0,

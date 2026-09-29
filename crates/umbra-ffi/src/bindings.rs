@@ -802,6 +802,9 @@ pub struct MsgInfo {
     pub poll: bool,
     /// Whether a message of a group names this member (Part 11 §11.11).
     pub mentions_me: bool,
+    /// Whether a message of a group opened under the secret of a key supply
+    /// (`WIR-462`). The view shows it apart (`WIR-463`).
+    pub recovered: bool,
     /// The moderator action on the message: 0 none, 1 hidden, 2 removed.
     pub moderation: u8,
     /// The role of the member that acted, with the values of [`FfiRole`],
@@ -4915,6 +4918,7 @@ impl Handle {
             expires_at: info.expires_at,
             poll: info.poll,
             mentions_me: info.mentions_me,
+            recovered: info.recovered,
             moderation: info.moderation,
             moderator_role: info.moderator_role,
             sender: info.sender,
