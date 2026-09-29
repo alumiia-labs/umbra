@@ -100,6 +100,11 @@ use crate::{
     MessageInfo, MsgRef, Reaction, ReceiptSettings, ReplyTarget, Sink, CONTACT_NAME_MAX,
 };
 
+/// The row of the read marker in the mutable state of Part 7 §7.5.3, the
+/// first row of its table.
+pub(crate) const ITEM_READ_MARKER: u8 = 1;
+/// The row of the verification state, the fifth row of that table.
+pub(crate) const ITEM_VERIFICATION: u8 = 5;
 const ROOT_KEY: &[u8] = b"root";
 const OUTGOING: u8 = 1;
 const INCOMING: u8 = 2;
@@ -1813,6 +1818,26 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
+        self.put_verified(conversation, peer_static, now_ms, rng)?;
+        // DEV-197: each other device of the set takes the state.
+        if self.has_sync_peers()? {
+            let Some(subject) = self.subject_of(conversation)? else {
+                return Ok(());
+            };
+            let value = [peer_static.as_slice(), &now_ms.to_be_bytes()].concat();
+            self.publish_mutable(ITEM_VERIFICATION, &subject, &value, rng)?;
+        }
+        Ok(())
+    }
+
+    /// Keeps the verification state of a conversation.
+    fn put_verified<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        peer_static: &[u8; 32],
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
         let open = self.open_mut()?;
         let row = open.store.row_id(TableId::VERIFICATION, &conversation.0);
         let plain = [
@@ -1951,6 +1976,58 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
         self.put_conversation_meta(conversation, now_ms, &name, rng)?;
         self.auto_lock.touch(now_ms / 1_000);
+        // DEV-197: the read marker converges across the set.
+        if self.has_sync_peers()? {
+            let Some(subject) = self.subject_of(conversation)? else {
+                return Ok(());
+            };
+            self.publish_mutable(ITEM_READ_MARKER, &subject, &now_ms.to_be_bytes(), rng)?;
+        }
+        Ok(())
+    }
+
+    /// Whether the set holds another device, thus a mutable item goes on.
+    fn has_sync_peers(&self) -> Result<bool, Error> {
+        Ok(self.sync_engine()?.is_some())
+    }
+
+    /// Takes the read marker or the verification state of another device
+    /// of the set. A read marker moves forward alone, and it sends no read
+    /// receipt, since the device that read sent it.
+    pub(super) fn apply_converged_item<R: CryptoRng + ?Sized>(
+        &mut self,
+        item: u8,
+        subject: &[u8; 32],
+        value: &[u8],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let Some(conversation) = self.conversation_of_subject(subject)? else {
+            return Ok(());
+        };
+        match item {
+            ITEM_READ_MARKER => {
+                let at: [u8; 8] = value.try_into().map_err(|_| Error::Malformed)?;
+                let at = u64::from_be_bytes(at);
+                let (read_up_to, name) = self.conversation_meta(conversation)?;
+                if at > read_up_to {
+                    self.put_conversation_meta(conversation, at, &name, rng)?;
+                    self.events.push_back(Event::Conversations);
+                }
+            }
+            ITEM_VERIFICATION => {
+                let peer_static: [u8; 32] = value
+                    .get(..32)
+                    .and_then(|bytes| bytes.try_into().ok())
+                    .ok_or(Error::Malformed)?;
+                let at: [u8; 8] = value
+                    .get(32..)
+                    .and_then(|bytes| bytes.try_into().ok())
+                    .ok_or(Error::Malformed)?;
+                self.put_verified(conversation, &peer_static, u64::from_be_bytes(at), rng)?;
+                self.events.push_back(Event::Conversations);
+            }
+            _ => {}
+        }
         Ok(())
     }
 
