@@ -35,7 +35,7 @@ use umbra_core::{
         roster::Applied,
         state::{EpochCarrier, Group},
     },
-    session::node::{ClientNode, RelayInfo},
+    session::node::{ClientNode, Payment, RelayInfo},
 };
 use umbra_crypto::{
     handshake::nk::RelayStatic,
@@ -2196,7 +2196,7 @@ fn two_members_talk_in_a_group_over_the_relays_of_a_signed_network() {
                 read_pk,
                 write_pk,
                 own: Secret::new(*creator.owner(index).unwrap().expose()),
-                token: None,
+                payment: Payment::Free,
             })
             .ok()
             .unwrap();
@@ -2607,7 +2607,7 @@ fn the_group_run_outlives_its_relays_and_carries_its_commands_on() {
         read_pk: [0x11; 32],
         write_pk: [0x12; 32],
         own: Secret::new([0x13; 32]),
-        token: None,
+        payment: Payment::Free,
     };
     commands.send(create(1)).ok().unwrap();
     let GroupUpdate::Created {

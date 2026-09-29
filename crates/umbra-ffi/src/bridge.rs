@@ -193,6 +193,15 @@ impl Bridge {
         self.command(Command::Foreground(is_foreground))
     }
 
+    /// Gives the run the challenges of the last fetch (`ABU-014`).
+    pub fn set_challenges(
+        &self,
+        book: umbra_core::abuse::pow::ChallengeBook,
+        now: u64,
+    ) -> Result<(), Error> {
+        self.command(Command::Challenges { book, now })
+    }
+
     /// Makes the run a push-wake session (`NET-097`, `NET-100`).
     pub fn wake(&mut self) -> Result<(), Error> {
         self.is_wake = true;

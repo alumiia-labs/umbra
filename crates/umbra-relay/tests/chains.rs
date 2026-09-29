@@ -26,7 +26,7 @@ use umbra_core::{
     directory::{bloc::BlocId, path::Candidate},
     session::node::{
         ChunkJob, ChunkOutcome, ClientEvent, ClientNode, ContactId, GroupJob, GroupOutcome,
-        RelayInfo, StateChange,
+        Payment, RelayInfo, StateChange,
     },
 };
 use umbra_crypto::{
@@ -1178,7 +1178,7 @@ fn group_records(mesh: &mut Mesh, client: usize, turns: usize) -> Vec<(u32, Vec<
 }
 
 #[test]
-fn a_relay_under_load_makes_a_group_queue_for_a_cross_relay_token() {
+fn a_relay_under_load_makes_a_group_queue_for_a_token_or_a_proof_of_work() {
     use umbra_core::abuse::{
         epoch_number,
         pow::Verifier,
@@ -1217,25 +1217,78 @@ fn a_relay_under_load_makes_a_group_queue_for_a_cross_relay_token() {
 
     // The GNEW with no credential is refused for one, and the GNEW with
     // the token makes the group queue.
-    let create = |token: Option<Vec<u8>>| GroupJob::Create {
+    let create = |payment: Payment| GroupJob::Create {
         read_pk: [0x11; 32],
         write_pk: [0x12; 32],
         own: StaticSecret::from(own.to_bytes()),
-        token,
+        payment,
     };
     mesh.clients[CREATOR]
-        .group(relay, [0; 32], create(None), &mut Rng(21))
+        .group(relay, [0; 32], create(Payment::Free), &mut Rng(21))
         .unwrap();
     assert_eq!(
         one_answer(&mut mesh, CREATOR),
         GroupOutcome::Refused(umbra_queue::Reject::Admission)
     );
     mesh.clients[CREATOR]
-        .group(relay, [0; 32], create(Some(token)), &mut Rng(22))
+        .group(relay, [0; 32], create(Payment::Token(token)), &mut Rng(22))
         .unwrap();
     let GroupOutcome::Created(_) = one_answer(&mut mesh, CREATOR) else {
         panic!("the relay made no group queue");
     };
+
+    // ABU-014: a device with no token pays with a proof of work at the
+    // challenge that it holds. With no challenge the relay refuses again.
+    mesh.clients[CREATOR]
+        .group(relay, [0; 32], create(Payment::Work), &mut Rng(23))
+        .unwrap();
+    assert_eq!(
+        one_answer(&mut mesh, CREATOR),
+        GroupOutcome::Refused(umbra_queue::Reject::Admission)
+    );
+    mesh.issue_challenges();
+    mesh.clients[CREATOR]
+        .group(relay, [0; 32], create(Payment::Work), &mut Rng(24))
+        .unwrap();
+    let GroupOutcome::Created(_) = one_answer(&mut mesh, CREATOR) else {
+        panic!("the relay made no group queue for the proof of work");
+    };
+}
+
+#[test]
+fn a_relay_under_load_makes_a_queue_for_a_proof_of_work() {
+    use umbra_core::abuse::pow::Verifier;
+
+    const ALICE: usize = 0;
+    let mut mesh = Mesh::new(&[0x61]);
+    mesh.settle();
+    mesh.take_events(ALICE);
+    // ABU-048: each relay raises its effort, and the device takes the new
+    // challenges.
+    for node in &mut mesh.relays {
+        let gate = node.gate_mut();
+        gate.pow = Verifier::new(gate.relay_id, 4);
+    }
+    mesh.issue_challenges();
+
+    // The NEW with no credential asks for one, and with no token the
+    // device solves the challenge of the relay (ABU-014).
+    let invite = mesh.clients[ALICE].invite(&mut Rng(1)).unwrap();
+    mesh.settle();
+    assert_eq!(
+        mesh.take_events(ALICE),
+        [ClientEvent::AdmissionAsked { handle: invite }]
+    );
+    let events = mesh.clients[ALICE]
+        .admit_queue(invite, None, &mut Rng(2))
+        .unwrap();
+    assert!(events.is_empty());
+    mesh.settle();
+    let events = mesh.take_events(ALICE);
+    let [ClientEvent::Invitation { handle, .. }] = &events[..] else {
+        panic!("{events:?}");
+    };
+    assert_eq!(*handle, invite);
 }
 
 #[test]
@@ -1263,7 +1316,7 @@ fn a_group_queue_takes_a_record_at_one_client_and_gives_it_at_another() {
                 read_pk: public(&read),
                 write_pk: public(&write),
                 own: StaticSecret::from(own.to_bytes()),
-                token: None,
+                payment: Payment::Free,
             },
             &mut Rng(21),
         )
@@ -1348,7 +1401,7 @@ fn a_group_queue_takes_a_record_at_one_client_and_gives_it_at_another() {
                 read_pk: public(&read),
                 write_pk: public(&write),
                 own: StaticSecret::from(own.to_bytes()),
-                token: None,
+                payment: Payment::Free,
             },
             &mut Rng(26),
         )

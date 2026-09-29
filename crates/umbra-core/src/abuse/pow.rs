@@ -459,6 +459,12 @@ impl ChunkAdmissions {
         Some(solution)
     }
 
+    /// The newest challenge of `relay` that this device holds, live at the
+    /// clock of the last call.
+    pub fn challenge(&self, relay: &[u8; 32]) -> Option<&PowChallenge> {
+        self.book.get(relay, self.now)
+    }
+
     /// Drops the solution of a relay that refused it, thus the next
     /// registration solves again.
     pub fn forget(&mut self, relay: &[u8; 32]) {

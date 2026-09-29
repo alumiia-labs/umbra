@@ -1837,7 +1837,7 @@ fn a_relay_under_load_makes_a_queue_for_a_cross_relay_token_once() {
         }]
     );
 
-    // A device with no token ends the call.
+    // A device with no token and no challenge ends the call.
     let third = network.clients[ALICE].invite(&mut Rng(6)).unwrap();
     network.settle();
     assert_eq!(

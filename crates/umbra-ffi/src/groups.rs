@@ -19,7 +19,7 @@
 use std::{sync::Arc, time::Duration};
 
 use tokio::sync::mpsc;
-use umbra_core::session::node::{ClientEvent, ClientNode, GroupJob, GroupOutcome};
+use umbra_core::session::node::{ClientEvent, ClientNode, GroupJob, GroupOutcome, Payment};
 use umbra_crypto::{rand_core::TryRng, secret::Secret, x25519::StaticSecret};
 use umbra_queue::Reject;
 use umbra_transport::{
@@ -48,6 +48,14 @@ const SETTLED: Duration = Duration::from_secs(30);
 /// What the caller asks of the task. Each command names one replica: the
 /// caller sends the same record to each of the two (`GRP-194`).
 pub enum GroupCommand {
+    /// The challenges of the relays of the last fetch, for a `GNEW` that
+    /// pays with a proof of work (`ABU-014`). It has no answer.
+    Challenges {
+        /// The challenges.
+        book: umbra_core::abuse::pow::ChallengeBook,
+        /// The time of the fetch.
+        now: u64,
+    },
     /// `GNREG` or `GNUNREG`: the notify queue of this device at one
     /// replica (Part 8 `NTF-093`, `NTF-103`). It has no answer.
     Notify {
@@ -75,9 +83,9 @@ pub enum GroupCommand {
         write_pk: [u8; 32],
         /// The owner credential of this replica (`GRP-190`).
         own: Secret<32>,
-        /// A cross-relay token, after a relay under load refused the
-        /// `GNEW` with none (`ABU-048`).
-        token: Option<Vec<u8>>,
+        /// The credential: none, and a token or a proof of work after a
+        /// relay under load refused the `GNEW` with none (`ABU-048`).
+        payment: Payment,
     },
     /// `GPOST` at one replica.
     Post {
@@ -167,14 +175,18 @@ impl GroupCommand {
                 read_pk,
                 write_pk,
                 own,
-                token,
+                payment,
             } => GroupCommand::Create {
                 tag: *tag,
                 relay: *relay,
                 read_pk: *read_pk,
                 write_pk: *write_pk,
                 own: Secret::new(*own.expose()),
-                token: token.clone(),
+                payment: payment.clone(),
+            },
+            GroupCommand::Challenges { book, now } => GroupCommand::Challenges {
+                book: book.clone(),
+                now: *now,
             },
             GroupCommand::Post {
                 tag,
@@ -398,6 +410,7 @@ pub async fn run_groups(
             tokio::select! {
                 () = &mut wait => break false,
                 command = commands.recv() => match command {
+                    Some(GroupCommand::Challenges { book, now }) => node.set_challenges(book, now),
                     Some(command) => carried.early.push(command),
                     None => break true,
                 },
@@ -469,6 +482,10 @@ async fn session(
                 Err(_) => break 'run End::Lost,
             },
             command = commands.recv() => match command {
+                Some(GroupCommand::Challenges { book, now }) => {
+                    node.set_challenges(book, now);
+                    Vec::new()
+                }
                 Some(command) => {
                     carried.early.push(command);
                     Vec::new()
@@ -480,7 +497,9 @@ async fn session(
                     carried.quiet.clear();
                 }
                 // CIRCUIT_BUILD_TIMEOUT: a build that no relay answers ends.
-                node.on_tick(crate::runtime::unix_now())
+                let now = crate::runtime::unix_now();
+                node.set_challenge_clock(now);
+                node.on_tick(now)
             }
         };
         // A group node holds no contact, thus it commits nothing.
@@ -567,7 +586,7 @@ async fn session(
                     read_pk,
                     write_pk,
                     own,
-                    token,
+                    payment,
                 } => (
                     Some(*tag),
                     *relay,
@@ -576,9 +595,11 @@ async fn session(
                         read_pk: *read_pk,
                         write_pk: *write_pk,
                         own: StaticSecret::from(*own.expose()),
-                        token: token.clone(),
+                        payment: payment.clone(),
                     },
                 ),
+                // The receive arms take the challenges.
+                GroupCommand::Challenges { .. } => continue,
                 GroupCommand::Post {
                     tag,
                     relay,

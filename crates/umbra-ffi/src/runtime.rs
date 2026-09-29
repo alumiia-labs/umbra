@@ -110,6 +110,14 @@ impl TryCryptoRng for OsRng {}
 /// What the application asks of the runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
+    /// The challenges of the relays of the last fetch, for a `NEW` that
+    /// pays with a proof of work (`ABU-014`).
+    Challenges {
+        /// The challenges.
+        book: umbra_core::abuse::pow::ChallengeBook,
+        /// The time of the fetch.
+        now: u64,
+    },
     /// Sets the privacy mode of the conversation of a contact (Part 3
     /// §3.9, `NET-028`).
     SetClass {
@@ -576,6 +584,10 @@ pub async fn run_client(
                     }
                     Vec::new()
                 }
+                Some(Command::Challenges { book, now }) => {
+                    node.set_challenges(book, now);
+                    Vec::new()
+                }
                 Some(Command::Wake) => {
                     wake_end = Some(
                         tokio::time::Instant::now()
@@ -618,6 +630,7 @@ pub async fn run_client(
             // ends with its last circuit.
             _ = tick.tick() => {
                 let now = unix_now();
+                node.set_challenge_clock(now);
                 let mut events = node.on_tick(now);
                 // DIS-015: the rendezvous circuits start on their own delay.
                 let _ = node.start_rendezvous_due(now, &mut rng);
@@ -638,7 +651,7 @@ pub async fn run_client(
             }
         };
         // ABU-048: each `NEW` that a relay under load refused goes once
-        // more with a token of this device.
+        // more with a token of this device, or with a proof of work.
         let mut events = events;
         let asked: Vec<u64> = events
             .iter()
@@ -786,7 +799,7 @@ pub async fn run_client(
             // to no contact fail that one command.
             match command {
                 // The loop above takes these commands.
-                Command::Foreground(_) | Command::Wake => {}
+                Command::Foreground(_) | Command::Wake | Command::Challenges { .. } => {}
                 Command::SetClass { contact, class } => node.set_contact_class(&contact, class),
                 Command::Invite => {
                     if node.invite_link(&mut rng).is_err() {

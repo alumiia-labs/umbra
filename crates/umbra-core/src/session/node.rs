@@ -366,6 +366,18 @@ pub enum ChunkJob {
     },
 }
 
+/// The credential of a `GNEW` (Part 13 §13.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Payment {
+    /// No credential, which a relay with an effort of 0 takes (`ABU-047`).
+    Free,
+    /// A cross-relay token of §13.3.1.
+    Token(Vec<u8>),
+    /// A proof of work at the challenge of the relay that this device
+    /// holds (`ABU-014`).
+    Work,
+}
+
 /// One group-queue command of Part 6 §6.4.5 for one relay. Each command
 /// carries the credential that authorizes it (`NET-229`).
 pub enum GroupJob {
@@ -378,9 +390,10 @@ pub enum GroupJob {
         write_pk: [u8; 32],
         /// The owner credential, which the creator drew (`NET-231`).
         own: StaticSecret,
-        /// A cross-relay token for a relay under load, which refused the
-        /// `GNEW` with no credential (`ABU-048`).
-        token: Option<Vec<u8>>,
+        /// What the `GNEW` carries: nothing in the steady state, and a
+        /// token or a proof of work after a relay under load refused it
+        /// (`ABU-048`).
+        payment: Payment,
     },
     /// `GPOST`.
     Post {
@@ -2970,8 +2983,10 @@ impl ClientNode {
 
     /// Answers an [`ClientEvent::AdmissionAsked`]: the `NEW` goes once
     /// more on its circuit with `token`, a cross-relay token of §13.3.1
-    /// that answers any relay (`WIR-325`, `ABU-014`). With no token, or
-    /// with its circuit gone, the call ends as a rejection.
+    /// that answers any relay, or with no token a proof of work at the
+    /// challenge of the relay that this device holds (`WIR-325`,
+    /// `ABU-014`). With neither, or with its circuit gone, the call ends as
+    /// a rejection.
     pub fn admit_queue<R: CryptoRng + ?Sized>(
         &mut self,
         handle: u64,
@@ -2981,8 +2996,22 @@ impl ClientNode {
         let Some(mut keys) = self.admitting.remove(&handle) else {
             return Ok(Vec::new());
         };
-        let is_ready = self.slots.get(keys.slot).is_some_and(Slot::is_ready);
-        let (Some(token), true) = (token, is_ready) else {
+        let relay = self
+            .slots
+            .get(keys.slot)
+            .filter(|slot| slot.is_ready())
+            .and_then(|slot| slot.chain)
+            .and_then(|chain| chain.last().copied());
+        let paid = match (relay, token) {
+            (Some(_), Some(token)) => {
+                Some((umbra_wire::admission::AdmissionKind::Token, token.to_vec()))
+            }
+            (Some(relay), None) => self
+                .work_for(&relay, rng)
+                .map(|body| (umbra_wire::admission::AdmissionKind::Pow, body)),
+            (None, _) => None,
+        };
+        let Some((kind, body)) = paid else {
             if let Purpose::Rotate { contact, .. } = keys.purpose {
                 self.rotating.remove(&contact);
                 return Ok(Vec::new());
@@ -2994,12 +3023,23 @@ impl ClientNode {
         };
         keys.paid = true;
         self.current = keys.slot;
-        let admission = Admission {
-            kind: umbra_wire::admission::AdmissionKind::Token,
-            body: token,
-        };
-        self.send_new(keys, admission, rng)?;
+        self.send_new(keys, Admission { kind, body: &body }, rng)?;
         Ok(Vec::new())
+    }
+
+    /// A proof of work at the newest challenge of `relay` that this device
+    /// holds, as the body of an `Admission` of kind `0x03` (`ABU-014`). A
+    /// relay takes a solution to its newest challenge and to the one
+    /// before (`ABU-058`), thus a book of the last fetch serves.
+    fn work_for<R: CryptoRng + ?Sized>(&self, relay: &[u8; 32], rng: &mut R) -> Option<Vec<u8>> {
+        let challenge = self.chunk_admissions.challenge(relay)?;
+        let effort = challenge.effort.clamp(1, crate::abuse::POW_EFFORT_MAX);
+        let solution =
+            crate::abuse::pow::PowSolution::solve(relay, &challenge.seed, effort, rng).ok()?;
+        let mut body = alloc::vec![0u8; crate::abuse::pow::SOLUTION_LEN];
+        let used = solution.encode(&mut body).ok()?;
+        body.truncate(used);
+        Some(body)
     }
 
     /// Each inbound queue that a ready circuit serves, with the relay that
@@ -3314,14 +3354,24 @@ impl ClientNode {
                 read_pk,
                 write_pk,
                 own,
-                token,
+                payment,
             } => {
-                let admission = match &token {
-                    Some(token) => Admission {
+                let work = match payment {
+                    Payment::Work => self.work_for(&held.relay, rng),
+                    Payment::Free | Payment::Token(_) => None,
+                };
+                // A proof of work with no challenge goes as no credential,
+                // and the relay refuses it again.
+                let admission = match (&payment, &work) {
+                    (Payment::Token(token), _) => Admission {
                         kind: umbra_wire::admission::AdmissionKind::Token,
                         body: token,
                     },
-                    None => Admission::NONE,
+                    (_, Some(body)) => Admission {
+                        kind: umbra_wire::admission::AdmissionKind::Pow,
+                        body,
+                    },
+                    _ => Admission::NONE,
                 };
                 let new = GnewPayload {
                     read_pk,

@@ -32,7 +32,7 @@ use umbra_core::{
         GROUP_REPLICAS,
     },
     identity::invitation::{Fragment, FRAGMENT_LEN},
-    session::node::{ClientNode, ContactId, RelayInfo, StateChange},
+    session::node::{ClientNode, ContactId, Payment, RelayInfo, StateChange},
     store::wrap::{Cost, SecureElement, WrapHeader, M_KIB_FLOOR, T_FLOOR},
 };
 use umbra_crypto::handshake::nk::RelayStatic;
@@ -1639,7 +1639,7 @@ impl Inner {
                 read_pk: job.read_pk,
                 write_pk: job.write_pk,
                 own: job.own,
-                token: None,
+                payment: Payment::Free,
             });
         }
         if let Ok(subscriptions) = self.client.group_subscriptions(&mut OsRng) {
@@ -2074,7 +2074,7 @@ impl Inner {
             let sent = self.group_sent.remove(&tag);
             // ABU-048: a relay under load refused a `GNEW` with no
             // credential, and it goes once more with a token of this
-            // device. With none the creation waits for the next run.
+            // device, or with a proof of work (`ABU-014`).
             if let (
                 GroupUpdate::Failed {
                     reason: Some(umbra_queue::Reject::Admission),
@@ -2086,26 +2086,26 @@ impl Inner {
                     read_pk,
                     write_pk,
                     own,
-                    token: None,
+                    payment: Payment::Free,
                 }),
             ) = (&update, sent)
             {
                 let now = crate::runtime::unix_now();
-                if let Ok(Some(token)) =
-                    self.client.take_token(umbra_core::abuse::epoch_number(now))
-                {
-                    let command = GroupCommand::Create {
-                        tag,
-                        relay,
-                        read_pk,
-                        write_pk,
-                        own,
-                        token: Some(token),
-                    };
-                    self.group_sent.insert(tag, command.copy());
-                    self.send_group(command);
-                    return;
-                }
+                let payment = match self.client.take_token(umbra_core::abuse::epoch_number(now)) {
+                    Ok(Some(token)) => Payment::Token(token),
+                    _ => Payment::Work,
+                };
+                let command = GroupCommand::Create {
+                    tag,
+                    relay,
+                    read_pk,
+                    write_pk,
+                    own,
+                    payment,
+                };
+                self.group_sent.insert(tag, command.copy());
+                self.send_group(command);
+                return;
             }
         }
         match update {
@@ -4374,6 +4374,17 @@ impl Handle {
         inner.challenges_at = now;
         if inner.challenges.is_surge(now) != was_surge {
             inner.circuits_changed = true;
+        }
+        // The run of the queues and the group task take them too, for a
+        // `NEW` or a `GNEW` that pays with a proof of work (`ABU-014`).
+        if let Some(running) = &inner.bridge {
+            let _ = running.set_challenges(inner.challenges.clone(), now);
+        }
+        if let Some(sender) = &inner.groups {
+            let _ = sender.send(GroupCommand::Challenges {
+                book: inner.challenges.clone(),
+                now,
+            });
         }
         // A transfer task that runs takes the new challenges at once.
         if let Some(sender) = &inner.transfers {
