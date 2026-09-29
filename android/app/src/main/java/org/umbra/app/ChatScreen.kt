@@ -197,6 +197,9 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
     // The message that the user wants to delete, and a word for a user who
     // deletes faster than the rate limit permits.
     var deleting by remember(conversation) { mutableStateOf<Line?>(null) }
+    // DEV-127: each of the two deletions has a confirmation of its own.
+    var deletingOwn by remember(conversation) { mutableStateOf<Line?>(null) }
+    var deletingAll by remember(conversation) { mutableStateOf<Line?>(null) }
     // Part 11 §11.9.6: the role of this member, the epochs of the moderators,
     // a remove that waits for its second confirmation, and each hidden
     // message that the user opened.
@@ -399,33 +402,56 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
         )
     }
     deleting?.let { line ->
+        // DEV-127, DEV-128: two labels, and neither looks the safer one.
         val entries = buildList {
-            add(RowEntry("trash-can", "Delete for me") { Core.deleteForMe(line.handle) })
+            add(RowEntry("trash-can", "Delete on my devices") { deletingOwn = line })
             // A contact takes a deletion for a message of this device alone.
-            if (line.info.outgoing) {
-                add(
-                    RowEntry("trash-can", "Delete for everyone") {
-                        if (answered?.key == line.key) answered = null
-                        Core.deleteForEveryone(line.handle) {
-                            notice = "Wait 10 seconds between two deletions for everyone."
-                        }
-                    },
-                )
-            }
+            if (line.info.outgoing) add(RowEntry("trash-can", "Delete for everyone") { deletingAll = line })
         }
+        ActionSheet("Delete this message?", entries, onDismiss = { deleting = null })
+    }
+    deletingOwn?.let { line ->
         ActionSheet(
-            "Delete this message?",
-            entries,
-            // A fact that a user cannot know, and that decides the choice.
-            note = when {
-                !line.info.outgoing -> null
-                // The text of Part 7 §7.5.6 for a deletion in a group.
-                chat.isGroup -> "This asks the app of each member to delete the message. A member who left " +
+            "Delete on my devices?",
+            listOf(
+                RowEntry("trash-can", "Delete on my devices") {
+                    Core.deleteForMe(line.handle)
+                    // DEV-129: the view says which deletion ran.
+                    notice = "Deleted on your devices."
+                },
+            ),
+            note = "This removes the message from your devices. The other person keeps their copy.",
+            onDismiss = { deletingOwn = null },
+        )
+    }
+    deletingAll?.let { line ->
+        ActionSheet(
+            "Delete for everyone?",
+            listOf(
+                RowEntry("trash-can", "Delete for everyone") {
+                    if (answered?.key == line.key) answered = null
+                    Core.deleteForEveryone(line.handle) {
+                        notice = "Wait 10 seconds between two deletions for everyone."
+                    }
+                    // DEV-129: the view says which deletion ran.
+                    notice = if (chat.isGroup) {
+                        "Asked the app of each member to delete the message."
+                    } else {
+                        "Asked the app of ${chat.title} to delete the message."
+                    }
+                },
+            ),
+            // DEV-126: each limit of a deletion for the other party. The
+            // spread of a sweep (DEV-107) has no action here, since one
+            // deletion goes to one conversation at once.
+            note = if (chat.isGroup) {
+                "This asks the app of each member to delete the message. A member who left " +
                     "the group never gets the request. A member who sends nothing for more than 30 days " +
                     "leaves the group and never gets the request. A member can keep a copy."
-                else -> "${chat.title} can hold a copy."
+            } else {
+                UiText.get(R.string.umbra_ui_dev_126)
             },
-            onDismiss = { deleting = null },
+            onDismiss = { deletingAll = null },
         )
     }
     Column(Modifier.fillMaxSize()) {

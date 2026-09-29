@@ -192,6 +192,9 @@ fun PublicLinksScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
             Spacer(Modifier.height(14.dp))
             // IDN-024: the UI states the limit of a reusable link.
             Note(UiText.get(R.string.umbra_ui_idn_024))
+            Spacer(Modifier.height(8.dp))
+            // IDN-010 to IDN-013: a published address against an invitation.
+            Note(UiText.get(R.string.umbra_ui_idn_010))
             if (Core.publicLinks.isNotEmpty()) {
                 Spacer(Modifier.height(20.dp))
                 SectionLabel("Your links")
@@ -289,6 +292,9 @@ fun HandleScreen(onBack: () -> Unit) {
                     "The directory lists each handle. A number after the name keeps it apart " +
                         "from the same name of another person.",
                 )
+                Spacer(Modifier.height(8.dp))
+                // IDN-010 to IDN-013: a published address against an invitation.
+                Note(UiText.get(R.string.umbra_ui_idn_010))
             } else {
                 Headline(handle)
                 TakeoverWarning(handle)

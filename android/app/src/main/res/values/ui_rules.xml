@@ -7,11 +7,14 @@
   no name (IMP-085), and scripts/uistrings.py checks each locale (IMP-086).
 -->
 <resources>
+    <string name="umbra_ui_idn_010">A public link or handle stays the same, thus a party that holds it can watch it over time. A one-time invitation cannot be watched in this way.</string>
+    <string name="umbra_ui_idn_014">A handle proves no person. Check it with the person on a path that you trust before you rely on it.</string>
     <string name="umbra_ui_idn_024">Each person with the link can send a request, and you accept each one. A reusable link has no first-open lock. Your device ends a timed link when it is online.</string>
     <string name="umbra_ui_idn_087">The pieces alone restore nothing.</string>
     <string name="umbra_ui_idn_088">Each contact gets one piece of the social half of your recovery code. You keep the user half.</string>
     <string name="umbra_ui_idn_089">If you accept, this chat no longer recovers from an earlier break-in.</string>
     <string name="umbra_ui_idn_152">These digits do not check.</string>
+    <string name="umbra_ui_dev_126">This asks the app of the other person to delete the message. The other person can keep a copy. A person who is offline gets the request later. UMBRA cannot delete a message on a device that you do not control.\n\nUMBRA does not tell you whether the request arrived. A relay can hold the request back, and you do not learn that it did.\n\nA message that waits at a relay can reach the other person before your request does. The relay holds an undelivered message for up to 45 days.\n\nThe app of the other person keeps a note that you deleted a message here. The other person can remove that note. You cannot.</string>
     <string name="umbra_ui_dev_137">Revocation acts on the future only. A revoked device keeps the data that it synced.</string>
     <string name="umbra_ui_dev_218">Anyone in this chat can copy, photograph, or save a message before it disappears.</string>
     <string name="umbra_ui_ntf_009">A message arrives at once. Google learns when each one arrives.</string>

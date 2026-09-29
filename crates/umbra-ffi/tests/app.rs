@@ -3331,6 +3331,23 @@ fn a_linked_device_reads_and_writes_a_group() {
     // GRP-338: the tablet makes no group of its own.
     assert!(tablet.create_group("Other".into()).is_err());
 
+    // DEV-126: a delete for me removes the message on each device of the
+    // set, and Bob keeps his copy.
+    let from_bob = alice
+        .messages(group.clone())
+        .unwrap()
+        .into_iter()
+        .find(|message| rendered(&alice, message.clone()) == "from bob")
+        .unwrap();
+    assert!(holds_text(&tablet, &group, "from bob"));
+    alice.delete_for_me(from_bob).unwrap();
+    assert!(!holds_text(&alice, &group, "from bob"));
+    let start = Instant::now();
+    while holds_text(&tablet, &group, "from bob") {
+        assert!(start.elapsed() < STEP, "the tablet kept the message");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
     // GRP-345: the phone removes the tablet, and it moves to new keys in the
     // group under a new index. Bob and the phone still talk.
     let own_before = alice.group_info(group.clone()).unwrap().own_index;

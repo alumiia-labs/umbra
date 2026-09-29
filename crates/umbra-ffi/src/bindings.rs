@@ -5191,11 +5191,18 @@ impl Handle {
         Ok(())
     }
 
-    /// Removes a message, or the placeholder of a deleted one, from this
-    /// device. No record leaves the device.
+    /// Removes a message, or the placeholder of a deleted one, from the
+    /// devices of this user (`DEV-126`). The other party keeps its copy.
     pub fn delete_for_me(&self, message: Arc<MsgHandle>) -> Result<(), FfiError> {
         let mut inner = locked(&self.inner);
-        inner.client.delete_for_me(&message.0)?;
+        let Inner { client, bridge, .. } = &mut *inner;
+        // A set of one device has no sync channel, and nothing leaves. A
+        // record that does not parse, as a placeholder, goes here alone.
+        let _ = client.publish_own_deletion(&message.0, unix_now_ms(), &mut OsRng);
+        client.delete_for_me(&message.0)?;
+        if let Some(running) = bridge {
+            running.flush(client, &mut OsRng)?;
+        }
         // ATT-161: the chunks of a file that this device uploaded go too.
         inner.pump_transfers();
         inner.pump_groups();

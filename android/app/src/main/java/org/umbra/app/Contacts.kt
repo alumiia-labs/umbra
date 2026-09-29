@@ -343,6 +343,11 @@ private fun ProfilePreview(preview: uniffi.umbra_ffi.ContactPreview) {
             Spacer(Modifier.height(8.dp))
             Text(preview.welcome, style = MaterialTheme.typography.bodyMedium)
         }
+        // SCP-006, IDN-014: a handle is no proof of a person.
+        if (preview.handle.isNotBlank()) {
+            Spacer(Modifier.height(8.dp))
+            Note(UiText.get(R.string.umbra_ui_idn_014))
+        }
         Spacer(Modifier.height(12.dp))
         HorizontalDivider(color = Palette.Divider)
     }

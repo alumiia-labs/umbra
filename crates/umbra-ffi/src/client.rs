@@ -24,6 +24,7 @@ mod held_handles;
 mod key_changes;
 mod moderation;
 mod notify;
+mod own_delete;
 mod polls;
 mod quota;
 mod reset;
@@ -1456,6 +1457,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
         if !sync_bodies.is_empty() {
             let synced = self.take_sync_bodies(sync_bodies, now_ms / 1_000, rng)?;
+            // DEV-126: a deletion of the user on another device of the set.
+            let synced = self.take_own_deletions(synced)?;
             let (groups, synced): (Vec<_>, Vec<_>) =
                 synced.into_iter().partition(|synced| synced.is_group);
             for record in groups {
