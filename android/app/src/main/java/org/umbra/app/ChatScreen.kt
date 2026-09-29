@@ -157,6 +157,10 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
     }
     val readUpTo = lines.indexOfLast { it.info.outgoing && it.info.delivery.toInt() == READ }
     val composer = rememberPlatformField()
+    // Part 6 §6.6.9: the text of the field starts and ends a typing state.
+    LaunchedEffect(conversation) {
+        composer.onChange = { if (!chat.isGroup) Core.typing(conversation, !composer.isEmpty) }
+    }
     // The message under the finger, and the message that the composer answers.
     var chosen by remember(conversation) { mutableStateOf<Line?>(null) }
     var answered by remember(conversation) { mutableStateOf<Line?>(null) }
@@ -396,7 +400,11 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
         // each action of a conversation. The bar needs no menu beside it.
         BackBar(
             chat.title,
-            subtitle = if (chat.isGroup) groupSubtitle(chat) else null,
+            subtitle = when {
+                chat.isGroup -> groupSubtitle(chat)
+                conversation.id.toList() in Core.typingNow -> "typing…"
+                else -> null
+            },
             onBack = onBack,
             isVerified = chat.isVerified,
             onTitle = {

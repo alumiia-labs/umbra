@@ -1063,6 +1063,13 @@ pub enum FfiEvent {
         /// The conversation.
         conversation: Vec<u8>,
     },
+    /// A contact started or stopped typing in a conversation.
+    Typing {
+        /// The conversation.
+        conversation: Vec<u8>,
+        /// Whether the contact types.
+        is_typing: bool,
+    },
     /// A vote moved the count of a poll of a conversation.
     Voted {
         /// The conversation.
@@ -2741,6 +2748,13 @@ impl Inner {
                 },
                 Event::Reacted { conversation, .. } => FfiEvent::Reacted {
                     conversation: conversation.0.to_vec(),
+                },
+                Event::Typing {
+                    conversation,
+                    is_typing,
+                } => FfiEvent::Typing {
+                    conversation: conversation.0.to_vec(),
+                    is_typing,
                 },
                 Event::Voted { conversation, .. } => FfiEvent::Voted {
                     conversation: conversation.0.to_vec(),
@@ -4851,6 +4865,33 @@ impl Handle {
         inner.pump_groups();
         drop(inner);
         self.changed.notify_all();
+        Ok(())
+    }
+
+    /// Whether this device sends typing records and shows those of its
+    /// contacts. Off by default (Part 6 `WIR-077`).
+    pub fn typing_enabled(&self) -> Result<bool, FfiError> {
+        Ok(locked(&self.inner).client.typing_enabled()?)
+    }
+
+    /// Turns the typing indicator on or off.
+    pub fn set_typing_enabled(&self, is_on: bool) -> Result<(), FfiError> {
+        Ok(locked(&self.inner)
+            .client
+            .set_typing_enabled(is_on, &mut OsRng)?)
+    }
+
+    /// The user typed in a conversation, or stopped. A record goes at most
+    /// once in `TYPING_INTERVAL` to one peer (`WIR-285`).
+    pub fn typing(&self, conversation: Vec<u8>, started: bool) -> Result<(), FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        let mut inner = locked(&self.inner);
+        let Inner { client, bridge, .. } = &mut *inner;
+        if client.typing(conversation, started, unix_now_ms(), &mut OsRng)? {
+            if let Some(running) = bridge {
+                running.flush(client, &mut OsRng)?;
+            }
+        }
         Ok(())
     }
 

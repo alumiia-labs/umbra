@@ -10,6 +10,7 @@ import android.os.SystemClock
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import java.io.File
@@ -61,6 +62,9 @@ class Conversation(val id: ByteArray) {
  * is the text of the message that this one answers. An answer to a message
  * that this device does not hold has `isReply` and no quote.
  */
+/** `TYPING_TTL` of Part 6 §6.6.9, in milliseconds. */
+const val TYPING_TTL_MS = 15_000L
+
 class Line(
     val handle: MsgHandle,
     val text: CharArray,
@@ -272,6 +276,7 @@ object Core {
             refreshJoinFlow()
             // Part 8 §8.3: the carriers of the mode of this device.
             Modes.apply(app)
+            readTyping()
         }
     }
 
@@ -965,6 +970,8 @@ object Core {
             }
             is FfiEvent.Message -> {
                 revision++
+                // The message that the contact typed ends its typing state.
+                typingNow.remove(event.conversation.toList())
                 refreshChats()
                 // DEV-223: the device woke on its mode, and the setting of the
                 // conversation decides what it shows.
@@ -1004,6 +1011,17 @@ object Core {
             // raise no alert.
             is FfiEvent.Reacted -> revision++
             is FfiEvent.Voted -> revision++
+            is FfiEvent.Typing -> if (typingEnabled) {
+                val key = event.conversation.toList()
+                if (event.isTyping) {
+                    val until = System.currentTimeMillis() + TYPING_TTL_MS
+                    typingNow[key] = until
+                    // WIR-286: the state clears TYPING_TTL after the record.
+                    main.postDelayed({ if (typingNow[key] == until) typingNow.remove(key) }, TYPING_TTL_MS)
+                } else {
+                    typingNow.remove(key)
+                }
+            }
             is FfiEvent.Edited -> {
                 revision++
                 refreshChats()
@@ -1161,6 +1179,32 @@ object Core {
     fun sendAgain(message: MsgHandle) = call { client ->
         client.sendAgain(message)
         main.post { revision++ }
+    }
+
+    /** Whether this device sends and shows typing indicators (Part 6 `WIR-077`). */
+    var typingEnabled by mutableStateOf(false)
+        private set
+
+    /** Each conversation whose contact types, until `TYPING_TTL` (`WIR-286`). */
+    val typingNow = mutableStateMapOf<List<Byte>, Long>()
+
+    fun readTyping() = call { client ->
+        val isOn = client.typingEnabled()
+        main.post { typingEnabled = isOn }
+    }
+
+    fun turnTyping(isOn: Boolean) = call { client ->
+        client.setTypingEnabled(isOn)
+        main.post {
+            typingEnabled = isOn
+            if (!isOn) typingNow.clear()
+        }
+    }
+
+    /** The user typed in a conversation, or emptied the field. */
+    fun typing(conversation: Conversation, started: Boolean) {
+        if (!typingEnabled) return
+        call { it.typing(conversation.id, started) }
     }
 
     /** Private mode and Off hold no token, thus the NDR holds no handle. */

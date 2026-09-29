@@ -31,6 +31,7 @@ mod social;
 mod sync;
 mod timers;
 mod tokens;
+mod typing;
 
 pub use alerts::{ALERT_ALL, ALERT_MENTIONS, ALERT_NONE};
 pub use backup::{BackupUpload, PendingBackup, RestoredBackup, RootWrite};
@@ -55,6 +56,7 @@ pub use roster_notes::{
 pub use social::{GivenShare, HeldShare};
 pub use sync::SyncSend;
 pub use timers::{timer_body, TimerSetting, TIMER_VALUES};
+pub use typing::{EPHEMERAL, TYPING_INTERVAL_MS, TYPING_TTL_MS};
 use umbra_core::{
     devset::edits::Deadline,
     directory::path::IngressPins,
@@ -74,7 +76,7 @@ use umbra_wire::app::{
     msg_ref,
     poll::Poll,
     rich::RichRecord,
-    signal::{ReactionAction, ReactionBody, ReceiptBody},
+    signal::{ReactionAction, ReactionBody, ReceiptBody, TypingState},
     AppKind, AppMessage, Channel,
 };
 use zeroize::Zeroizing;
@@ -273,6 +275,8 @@ pub struct Client<B: Backend, E: SecureElement> {
     synced_out: BTreeSet<MsgRef>,
     /// The blinded subject of each contact conversation (`DEV-292`).
     subjects: BTreeMap<ConversationId, [u8; 32]>,
+    /// The time of the last typing record to each peer (`WIR-285`).
+    typing_sent: BTreeMap<ConversationId, u64>,
 }
 
 /// One record for the commit path: of a contact, or of the sync channel.
@@ -551,6 +555,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             sync_out: VecDeque::new(),
             synced_out: BTreeSet::new(),
             subjects: BTreeMap::new(),
+            typing_sent: BTreeMap::new(),
             files: FileQueues::default(),
             groups: groups::GroupQueues::default(),
             auto_lock: AutoLock::new(now),
@@ -571,6 +576,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             sync_out: VecDeque::new(),
             synced_out: BTreeSet::new(),
             subjects: BTreeMap::new(),
+            typing_sent: BTreeMap::new(),
             files: FileQueues::default(),
             groups: groups::GroupQueues::default(),
             auto_lock: AutoLock::new(now),
@@ -975,6 +981,19 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if parsed.kind == AppKind::KeyRequest {
                 if !record.synced {
                     key_requests.push((conversation, parsed.body.to_vec()));
+                }
+                continue;
+            }
+            // WIR-287: a typing record of the contact moves a state of the
+            // view, and no store holds it. A group takes none (GRP-300).
+            if parsed.kind == AppKind::Typing {
+                if !from_user && !record.synced {
+                    if let Ok(state) = TypingState::parse(parsed.body) {
+                        events.push(Event::Typing {
+                            conversation,
+                            is_typing: state == TypingState::Started,
+                        });
+                    }
                 }
                 continue;
             }

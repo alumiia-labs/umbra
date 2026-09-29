@@ -577,6 +577,9 @@ private fun SettingsTab(push: (Screen) -> Unit) {
         // itself is the icon of the bar.
         SettingRow("lock", "App lock", "Passphrase and auto-lock") { push(Screen.AppLock) }
         SettingRow("bell", "Notifications", Modes.mode(LocalContext.current).label) { push(Screen.Notifications) }
+        SettingRow("comment", "Typing indicators", if (Core.typingEnabled) "On" else "Off") {
+            Core.turnTyping(!Core.typingEnabled)
+        }
         SettingRow("download", "Automatic download", autoDownloadLabel(Core.autoDownloadLimit, Core.autoDownloadWifiOnly)) {
             push(Screen.AutoDownload)
         }

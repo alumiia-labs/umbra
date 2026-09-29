@@ -221,6 +221,17 @@ impl Bridge {
         while let Some(outgoing) = client.take_outgoing() {
             let tag = self.next_tag;
             self.next_tag = self.next_tag.wrapping_add(1);
+            // An ephemeral record takes no delivery state and no sync copy.
+            if outgoing.message == crate::client::EPHEMERAL {
+                if let Some(contact) = self.contacts.get(&outgoing.conversation) {
+                    let _ = self.commands.send(Command::Send {
+                        contact: *contact,
+                        app: outgoing.app.clone(),
+                        tag,
+                    });
+                }
+                continue;
+            }
             let taken = self
                 .contacts
                 .get(&outgoing.conversation)

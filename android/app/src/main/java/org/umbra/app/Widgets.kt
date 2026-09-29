@@ -91,6 +91,9 @@ class PlatformFieldState {
     var isEmpty by mutableStateOf(true)
         internal set
 
+    /** Each change of the text, with no text: the typing indicator reads it. */
+    var onChange: (() -> Unit)? = null
+
     /**
      * Puts a text into the field, with the cursor at its end. The field
      * copies the characters into its own buffer.
@@ -167,6 +170,7 @@ fun PlatformInput(
 
                     override fun afterTextChanged(text: android.text.Editable?) {
                         state.isEmpty = text.isNullOrEmpty()
+                        state.onChange?.invoke()
                     }
                 })
                 state.view = this

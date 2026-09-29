@@ -240,6 +240,14 @@ pub enum Event {
         /// The message.
         message: MsgRef,
     },
+    /// A contact started or stopped typing (Part 6 §6.6.9). The view
+    /// clears the state after `TYPING_TTL` (`WIR-286`).
+    Typing {
+        /// The conversation.
+        conversation: ConversationId,
+        /// Whether the contact types.
+        is_typing: bool,
+    },
     /// A vote moved the count of a poll.
     Voted {
         /// The conversation.
@@ -3565,6 +3573,47 @@ mod tests {
         assert_eq!(rebuilt.bytes().expose(), held.bytes().expose());
         // IDN-087: a share alone is no code.
         assert!(from_digits(&digits[0], DigitsType::Code).is_err());
+    }
+
+    #[test]
+    fn a_typing_record_is_off_by_default_and_goes_once_in_its_interval() {
+        use crate::client::EPHEMERAL;
+
+        let mut rng = Rng(105);
+        let mut alice = new_client(&mut rng);
+        let mut bob = new_client(&mut rng);
+        let conversation = ConversationId([6; 16]);
+        // WIR-077: off by default.
+        assert!(!alice
+            .typing(conversation, true, 1_000_000, &mut rng)
+            .unwrap());
+        alice.set_typing_enabled(true, &mut rng).unwrap();
+        assert!(alice
+            .typing(conversation, true, 1_000_000, &mut rng)
+            .unwrap());
+        // WIR-285: one record in TYPING_INTERVAL.
+        assert!(!alice
+            .typing(conversation, false, 1_005_000, &mut rng)
+            .unwrap());
+        let sent = alice.take_outgoing().unwrap();
+        assert_eq!(sent.message, EPHEMERAL);
+        assert!(alice.take_outgoing().is_none());
+        assert!(alice
+            .typing(conversation, false, 1_010_000, &mut rng)
+            .unwrap());
+
+        let peer = ContactId([0x55; 32]);
+        let with_alice = bob.conversation_for(&peer.0).unwrap();
+        deliver(&mut bob, &peer, &sent.app, 1_001_000, &mut rng);
+        assert_eq!(
+            bob.next_event(),
+            Some(Event::Typing {
+                conversation: with_alice,
+                is_typing: true
+            })
+        );
+        // WIR-287: no store holds it.
+        assert!(bob.messages(with_alice).unwrap().is_empty());
     }
 
     #[test]
