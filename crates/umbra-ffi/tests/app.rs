@@ -3754,6 +3754,27 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
     request_with_note(&carol, &handle, "Again.");
     wait_for_requests(&alice, 3);
 
+    // IDN-109, IDN-118: a restore from a backup before the rotation holds
+    // the first key. The upkeep finds the current one and holds the handle
+    // as its own, with no warning of another party (IDN-111).
+    alice.rewind_handle().unwrap();
+    let start = Instant::now();
+    loop {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let _ = alice.maintain_directory_at(now);
+        if alice.handle_rotation().unwrap() == Some((1, false)) {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(40),
+            "the handle key did not come back"
+        );
+        std::thread::sleep(Duration::from_millis(500));
+    }
+
     // DIS-171: a retired link takes no request.
     let start = Instant::now();
     loop {

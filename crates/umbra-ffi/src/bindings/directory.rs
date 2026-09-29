@@ -930,6 +930,104 @@ impl Handle {
         Ok(())
     }
 
+    /// Finds the key of a handle that a restore holds at a stale rotation
+    /// (Part 4 `IDN-109`, `IDN-110`): each `r` from the held one to it plus
+    /// `HANDLE_KEY_LOOKAHEAD` against the newest `HK_pub` of the entry
+    /// (`IDN-118`). The first match sets `r` (`IDN-111`), and a new version
+    /// under that key names a rendezvous queue that this device holds,
+    /// since the queue of the newest version came after the backup. A
+    /// tombstone and no match give false, and the entry shows as held by
+    /// another party (`IDN-112`).
+    fn resync_handle(
+        &self,
+        link: &DirectoryLink,
+        entry: &mut Published,
+        now: u64,
+    ) -> Result<bool, FfiError> {
+        let found = link.find(&entry.label)?;
+        let (Some(bytes), Some(version)) = (found.entry, found.version) else {
+            return Ok(false);
+        };
+        let Ok(shown) = DirectoryEntry::parse(&bytes) else {
+            return Ok(false);
+        };
+        let last = entry
+            .rotation
+            .saturating_add(umbra_core::identity::HANDLE_KEY_LOOKAHEAD);
+        let mut matched = None;
+        for rotation in entry.rotation..=last {
+            let key =
+                locked(&self.inner)
+                    .client
+                    .entry_key(EntryKind::Handle, entry.index, rotation)?;
+            if key.public().to_bytes() == shown.hk_pub {
+                matched = Some((rotation, key));
+                break;
+            }
+        }
+        let Some((rotation, key)) = matched else {
+            return Ok(false);
+        };
+        let next_version = version.checked_add(1).ok_or(FfiError::TooLong)?;
+        let (queue, rendezvous) = self.new_rendezvous()?;
+        let written = (|| {
+            let next = DirectoryEntry {
+                handle: entry.name.clone(),
+                hk_pub: key.public().to_bytes(),
+                rendezvous: Some(
+                    QueueAddress::parse(&rendezvous).map_err(|_| FfiError::Integrity)?,
+                ),
+                version: next_version,
+            };
+            let mut out = vec![0u8; next.len()];
+            let used = next.encode(&mut out).map_err(|_| FfiError::Malformed)?;
+            out.truncate(used);
+            link.write(&entry.label, &entry.name, &key, version, &out)
+        })();
+        if let Err(error) = written {
+            self.end_rendezvous(queue);
+            return Err(error);
+        }
+        entry.rotation = rotation;
+        entry.version = next_version;
+        entry.queue = queue;
+        entry.rendezvous = rendezvous;
+        entry.queue_since = now;
+        entry.previous = None;
+        locked(&self.inner)
+            .client
+            .put_published(entry, &mut OsRng)?;
+        Ok(true)
+    }
+
+    /// The rotation of the handle key of this device and whether the
+    /// directory shows the handle as held by another party, for a test.
+    #[doc(hidden)]
+    pub fn handle_rotation(&self) -> Result<Option<(u32, bool)>, FfiError> {
+        Ok(locked(&self.inner)
+            .client
+            .published()?
+            .into_iter()
+            .find(|entry| entry.kind == EntryKind::Handle)
+            .map(|entry| (entry.rotation, entry.foreign)))
+    }
+
+    /// Sets the handle back to its first key and version, as a restore from
+    /// a backup before a rotation holds it, for a test.
+    #[doc(hidden)]
+    pub fn rewind_handle(&self) -> Result<(), FfiError> {
+        let mut inner = locked(&self.inner);
+        let mut entry = inner
+            .client
+            .published()?
+            .into_iter()
+            .find(|entry| entry.kind == EntryKind::Handle)
+            .ok_or(FfiError::NotFound)?;
+        entry.rotation = 0;
+        entry.version = 0;
+        Ok(inner.client.put_published(&entry, &mut OsRng)?)
+    }
+
     /// Whether the directory shows the entry as this device wrote it
     /// (`DIS-137`): the newest version is its version, with its key and its
     /// queue. A version below it is a write of this device that waits for
@@ -986,8 +1084,13 @@ impl Handle {
                 let _ = self.retire(&link, &entry);
                 continue;
             }
-            // DIS-137, DIS-138: the holder reads its own entry.
+            // DIS-137, DIS-138: the holder reads its own entry. IDN-109:
+            // a restored handle finds its current key before it shows as
+            // held by another party.
             if let Ok(own) = self.is_own_entry(&link, &entry) {
+                let own = own
+                    || (entry.kind == EntryKind::Handle
+                        && self.resync_handle(&link, &mut entry, now).unwrap_or(false));
                 if own == entry.foreign {
                     entry.foreign = !own;
                     locked(&self.inner)
