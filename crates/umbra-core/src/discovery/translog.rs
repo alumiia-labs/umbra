@@ -22,7 +22,7 @@ use umbra_wire::codec::{Reader, Writer};
 use super::{
     entry::DirectoryEntry,
     head::AcceptedHead,
-    logtree::{epoch_leaf, log_root, prove_consistency, prove_newest, verify_newest},
+    logtree::{epoch_leaf, prove_consistency, prove_newest, verify_newest, LogFrontier},
     prefix::{PrefixProof, PrefixTree},
 };
 use crate::{directory::tree::Step, Error};
@@ -462,6 +462,7 @@ pub struct LogOperator {
     staged: BTreeMap<Vec<u8>, Stored>,
     epochs: Vec<([u8; 32], [u8; 32])>,
     log_leaves: Vec<[u8; 32]>,
+    log_frontier: LogFrontier,
     used_nonces: BTreeSet<[u8; 32]>,
 }
 
@@ -476,6 +477,7 @@ impl LogOperator {
             staged: BTreeMap::new(),
             epochs: Vec::new(),
             log_leaves: Vec::new(),
+            log_frontier: LogFrontier::default(),
             used_nonces: BTreeSet::new(),
         }
     }
@@ -487,7 +489,7 @@ impl LogOperator {
 
     /// The `tree_size` and the root of the log, for the next head.
     pub fn head(&self) -> Option<(u64, [u8; 32])> {
-        Some((self.log_leaves.len() as u64, log_root(&self.log_leaves)?))
+        Some((self.log_frontier.size(), self.log_frontier.root()?))
     }
 
     /// Whether a version of the label waits for the close of the open
@@ -539,8 +541,10 @@ impl LogOperator {
         }
         let prefix_root = self.tree.root(&nonce);
         self.epochs.push((nonce, prefix_root));
-        self.log_leaves.push(epoch_leaf(&nonce, &prefix_root));
-        let log_root = log_root(&self.log_leaves).ok_or(Error::NoPath)?;
+        let leaf_hash = epoch_leaf(&nonce, &prefix_root);
+        self.log_leaves.push(leaf_hash);
+        self.log_frontier.push(leaf_hash);
+        let log_root = self.log_frontier.root().ok_or(Error::NoPath)?;
         Ok(EpochUpdate {
             tree_size: self.log_leaves.len() as u64,
             nonce,
@@ -609,12 +613,12 @@ impl LogOperator {
     }
 }
 
-/// The state of one auditor: the leaves of the prefix tree and of the log
-/// tree that it verified.
+/// The state of one auditor: the leaves of the prefix tree, and the full
+/// subtrees of the log tree, that it verified.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Auditor {
     tree: PrefixTree,
-    log_leaves: Vec<[u8; 32]>,
+    log: LogFrontier,
     used_nonces: BTreeSet<[u8; 32]>,
 }
 
@@ -625,7 +629,7 @@ impl Auditor {
     /// grew by one leaf over the log that the auditor holds (`DIS-049`). A
     /// failed check changes no state.
     pub fn audit(&mut self, update: &EpochUpdate) -> Result<[u8; 32], Error> {
-        let expected_size = (self.log_leaves.len() as u64).saturating_add(1);
+        let expected_size = self.log.size().saturating_add(1);
         if update.tree_size != expected_size || self.used_nonces.contains(&update.nonce) {
             return Err(Error::Unverified);
         }
@@ -634,13 +638,13 @@ impl Auditor {
             tree.insert(*index, *leaf_commitment)
                 .map_err(|_| Error::Unverified)?;
         }
-        let mut log_leaves = self.log_leaves.clone();
-        log_leaves.push(epoch_leaf(&update.nonce, &tree.root(&update.nonce)));
-        if log_root(&log_leaves) != Some(update.log_root) {
+        let mut log = self.log.clone();
+        log.push(epoch_leaf(&update.nonce, &tree.root(&update.nonce)));
+        if log.root() != Some(update.log_root) {
             return Err(Error::Unverified);
         }
         self.tree = tree;
-        self.log_leaves = log_leaves;
+        self.log = log;
         self.used_nonces.insert(update.nonce);
         Ok(update.log_root)
     }

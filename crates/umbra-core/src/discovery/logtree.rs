@@ -26,6 +26,49 @@ pub fn log_root(leaves: &[[u8; 32]]) -> Option<[u8; 32]> {
     root(leaves)
 }
 
+/// The roots of the full subtrees of a log, from the largest on the left:
+/// the root of the next size comes from these and one leaf, thus a close
+/// of an epoch hashes a few nodes and not each leaf.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LogFrontier {
+    size: u64,
+    /// Each full subtree: its height, then its root.
+    subtrees: Vec<(u32, [u8; 32])>,
+}
+
+impl LogFrontier {
+    /// The number of leaves.
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
+    /// Appends one leaf hash. Two full subtrees of one height join.
+    pub fn push(&mut self, leaf_hash: [u8; 32]) {
+        let mut height = 0u32;
+        let mut hash = leaf_hash;
+        while let Some((last_height, last_hash)) = self.subtrees.last().copied() {
+            if last_height != height {
+                break;
+            }
+            self.subtrees.pop();
+            hash = node(&last_hash, &hash);
+            height = height.saturating_add(1);
+        }
+        self.subtrees.push((height, hash));
+        self.size = self.size.saturating_add(1);
+    }
+
+    /// The root, as [`log_root`] gives it over the same leaves.
+    pub fn root(&self) -> Option<[u8; 32]> {
+        let mut subtrees = self.subtrees.iter().rev();
+        let (_, mut hash) = *subtrees.next()?;
+        for (_, left) in subtrees {
+            hash = node(left, &hash);
+        }
+        Some(hash)
+    }
+}
+
 /// The inclusion proof of the newest leaf.
 pub fn prove_newest(leaves: &[[u8; 32]]) -> Option<Vec<Step>> {
     prove(leaves, leaves.len().checked_sub(1)?)
@@ -196,6 +239,18 @@ mod tests {
         assert!(prove_consistency(&leaves(3), 0).is_none());
         assert!(prove_consistency(&leaves(3), 4).is_none());
         assert!(verify_consistency(3, &[0; 32], 2, &[0; 32], &[]).is_err());
+    }
+
+    #[test]
+    fn the_frontier_gives_the_root_of_each_size() {
+        let all = leaves(70);
+        let mut frontier = LogFrontier::default();
+        assert!(frontier.root().is_none());
+        for (count, leaf_hash) in all.iter().enumerate() {
+            frontier.push(*leaf_hash);
+            assert_eq!(frontier.size(), count as u64 + 1);
+            assert_eq!(frontier.root(), log_root(&all[..=count]));
+        }
     }
 
     #[test]
