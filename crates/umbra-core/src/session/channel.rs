@@ -22,7 +22,7 @@ use umbra_crypto::{
 use umbra_queue::client::ack::{AckCursor, AckPoint};
 use umbra_wire::{
     address::QueueAddress,
-    admission::{Admission, AdmissionKind},
+    admission::Admission,
     bucket::Bucket,
     command::{blob_bucket, iput_payload, Cmd, Command, NewPayload, IGET_LEN, LINK_ID_LEN},
     queue::{self, L6Kind},
@@ -55,23 +55,23 @@ fn signed(
     Ok(out)
 }
 
-/// The `NEW` of a queue under the two auth keys of its owner, with no
-/// credential. A relay under load asks for one with a `NACK` (`WIR-325`).
+/// The `NEW` of a queue under the two auth keys of its owner. The
+/// `admission` is none in the steady state. A relay under load asks for a
+/// credential with a `NACK`, and the `NEW` then goes again with a token
+/// (`WIR-325`, `ABU-048`).
 pub fn new_queue_command(
     qr_auth_secret: &StaticSecret,
     qs_auth_secret: &StaticSecret,
+    admission: Admission<'_>,
     relay_session_pk: &[u8; 32],
     corr_id: [u8; 16],
 ) -> Result<Vec<u8>, Error> {
     let new = NewPayload {
         qr_auth_pk: *XPublic::from(qr_auth_secret).as_bytes(),
         qs_auth_pk: *XPublic::from(qs_auth_secret).as_bytes(),
-        admission: Admission {
-            kind: AdmissionKind::None,
-            body: &[],
-        },
+        admission,
     };
-    let mut payload = [0u8; 67];
+    let mut payload = alloc::vec![0u8; 64usize.saturating_add(admission.len())];
     let used = new.encode(&mut payload)?;
     signed(
         Cmd::New,

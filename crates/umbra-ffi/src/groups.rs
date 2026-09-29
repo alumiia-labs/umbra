@@ -75,6 +75,9 @@ pub enum GroupCommand {
         write_pk: [u8; 32],
         /// The owner credential of this replica (`GRP-190`).
         own: Secret<32>,
+        /// A cross-relay token, after a relay under load refused the
+        /// `GNEW` with none (`ABU-048`).
+        token: Option<Vec<u8>>,
     },
     /// `GPOST` at one replica.
     Post {
@@ -164,12 +167,14 @@ impl GroupCommand {
                 read_pk,
                 write_pk,
                 own,
+                token,
             } => GroupCommand::Create {
                 tag: *tag,
                 relay: *relay,
                 read_pk: *read_pk,
                 write_pk: *write_pk,
                 own: Secret::new(*own.expose()),
+                token: token.clone(),
             },
             GroupCommand::Post {
                 tag,
@@ -562,6 +567,7 @@ async fn session(
                     read_pk,
                     write_pk,
                     own,
+                    token,
                 } => (
                     Some(*tag),
                     *relay,
@@ -570,6 +576,7 @@ async fn session(
                         read_pk: *read_pk,
                         write_pk: *write_pk,
                         own: StaticSecret::from(*own.expose()),
+                        token: token.clone(),
                     },
                 ),
                 GroupCommand::Post {

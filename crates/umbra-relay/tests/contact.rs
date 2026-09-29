@@ -1760,3 +1760,97 @@ fn a_probe_cell_is_covered_by_the_receipts_of_each_link() {
         .receipt_answer(&query, at + umbra_core::directory::EPOCH_SECONDS)
         .is_some());
 }
+
+#[test]
+fn a_relay_under_load_makes_a_queue_for_a_cross_relay_token_once() {
+    use umbra_core::abuse::{
+        epoch_number,
+        pow::Verifier,
+        token::{issue_cross_relay, CrossRelayRequest, TokenChallenge, TYPE_CROSS_RELAY},
+    };
+    use umbra_crypto::rsabssa::SecretKey2048;
+    use umbra_queue::Reject;
+
+    const ALICE: usize = 0;
+    let mut network = Network::new();
+    network.settle();
+    assert_eq!(network.take_events(ALICE), [ClientEvent::CircuitReady]);
+
+    // ABU-048: each relay raises its effort, and holds the key of the
+    // cross-relay issuer of this epoch from the log.
+    let now = network.now;
+    let epoch = epoch_number(now);
+    let key = SecretKey2048::from_seed(&Secret::new([0x71; 32]), &epoch.to_be_bytes()).unwrap();
+    for relay in &mut network.relays {
+        relay.set_issuer_key(epoch, key.public().clone());
+        let gate = relay.gate_mut();
+        gate.pow = Verifier::new(gate.relay_id, 4);
+        gate.pow.issue(0, now, &mut Rng(9)).unwrap();
+    }
+    let challenge = TokenChallenge {
+        token_type: TYPE_CROSS_RELAY,
+        epoch,
+        redemption_context: [0; 32],
+    };
+    let (state, blinded) =
+        CrossRelayRequest::new(1, &challenge, key.public(), &mut Rng(3)).unwrap();
+    let signed = issue_cross_relay(&key, &blinded).unwrap();
+    let token = state.finalize(&signed, key.public()).unwrap().remove(0);
+    let token = umbra_core::discovery::dirclient::token_bytes(&token).unwrap();
+
+    // The NEW with no credential asks for one, and the NEW with the token
+    // makes the queue.
+    let invite = network.clients[ALICE].invite(&mut Rng(1)).unwrap();
+    network.settle();
+    assert_eq!(
+        network.take_events(ALICE),
+        [ClientEvent::AdmissionAsked { handle: invite }]
+    );
+    let events = network.clients[ALICE]
+        .admit_queue(invite, Some(&token), &mut Rng(2))
+        .unwrap();
+    assert!(events.is_empty());
+    network.settle();
+    let events = network.take_events(ALICE);
+    let [ClientEvent::Invitation { handle, .. }] = &events[..] else {
+        panic!("{events:?}");
+    };
+    assert_eq!(*handle, invite);
+
+    // ABU-006: the relay spends the token once, and a paid NEW asks no
+    // more.
+    let again = network.clients[ALICE].invite(&mut Rng(4)).unwrap();
+    network.settle();
+    assert_eq!(
+        network.take_events(ALICE),
+        [ClientEvent::AdmissionAsked { handle: again }]
+    );
+    network.clients[ALICE]
+        .admit_queue(again, Some(&token), &mut Rng(5))
+        .unwrap();
+    network.settle();
+    assert_eq!(
+        network.take_events(ALICE),
+        [ClientEvent::Rejected {
+            handle: again,
+            reason: Reject::Admission,
+        }]
+    );
+
+    // A device with no token ends the call.
+    let third = network.clients[ALICE].invite(&mut Rng(6)).unwrap();
+    network.settle();
+    assert_eq!(
+        network.take_events(ALICE),
+        [ClientEvent::AdmissionAsked { handle: third }]
+    );
+    assert_eq!(
+        network.clients[ALICE]
+            .admit_queue(third, None, &mut Rng(7))
+            .unwrap(),
+        [ClientEvent::Rejected {
+            handle: third,
+            reason: Reject::Admission,
+        }]
+    );
+}

@@ -231,6 +231,12 @@ pub trait Persist: Send {
     /// the store erases it (`NET-054`).
     fn receipt_sent(&mut self) {}
 
+    /// One cross-relay token for a `NEW` that a relay under load refused
+    /// (`ABU-048`), or none, and the store holds it no more.
+    fn admission_token(&mut self, _now: u64) -> Option<Vec<u8>> {
+        None
+    }
+
     /// A transparency digest that may leave at `now`, and the contact that
     /// gets it (Part 9 §9.5.3, Part 10 `REL-008`).
     fn due_digest(&mut self, _now: u64) -> Option<(ContactId, Vec<u8>)> {
@@ -631,6 +637,23 @@ pub async fn run_client(
                 events
             }
         };
+        // ABU-048: each `NEW` that a relay under load refused goes once
+        // more with a token of this device.
+        let mut events = events;
+        let asked: Vec<u64> = events
+            .iter()
+            .filter_map(|event| match event {
+                ClientEvent::AdmissionAsked { handle } => Some(*handle),
+                _ => None,
+            })
+            .collect();
+        for handle in asked {
+            let token = persist.admission_token(unix_now());
+            match node.admit_queue(handle, token.as_deref(), &mut rng) {
+                Ok(more) => events.extend(more),
+                Err(_) => break 'run Ended::NodeFault,
+            }
+        }
         if let Err(ended) = settle(&mut node, persist.as_mut(), &events) {
             break 'run ended;
         }
@@ -723,7 +746,7 @@ pub async fn run_client(
                 ClientEvent::ReportQueue { address, .. } => Update::ReportQueue { address },
                 ClientEvent::LinkFault { sealed, .. } => Update::LinkFault(sealed),
                 // The contact follows flight 1 of the addressee.
-                ClientEvent::HelloSent { .. } => continue,
+                ClientEvent::HelloSent { .. } | ClientEvent::AdmissionAsked { .. } => continue,
                 ClientEvent::NotifyKey {
                     recipient_id,
                     relay_ntf_pk,

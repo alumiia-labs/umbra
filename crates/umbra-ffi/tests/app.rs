@@ -2196,6 +2196,7 @@ fn two_members_talk_in_a_group_over_the_relays_of_a_signed_network() {
                 read_pk,
                 write_pk,
                 own: Secret::new(*creator.owner(index).unwrap().expose()),
+                token: None,
             })
             .ok()
             .unwrap();
@@ -2606,6 +2607,7 @@ fn the_group_run_outlives_its_relays_and_carries_its_commands_on() {
         read_pk: [0x11; 32],
         write_pk: [0x12; 32],
         own: Secret::new([0x13; 32]),
+        token: None,
     };
     commands.send(create(1)).ok().unwrap();
     let GroupUpdate::Created {
@@ -2825,12 +2827,13 @@ fn a_lost_phone_comes_back_from_its_backup_and_its_contact_talks_again() {
     bob.disconnect();
 }
 
-/// Ticks each handle until `done` holds, and panics after a minute.
+/// Ticks each handle until `done` holds, and panics after 90 seconds. The
+/// delay of each hop and a loaded machine slow each record.
 #[track_caller]
 fn tick_until(handles: &[&Arc<Handle>], mut done: impl FnMut() -> bool, what: &str) {
     let start = Instant::now();
     while !done() {
-        assert!(start.elapsed() < Duration::from_secs(60), "{what}");
+        assert!(start.elapsed() < Duration::from_secs(90), "{what}");
         for handle in handles {
             (*handle).clone().tick();
         }

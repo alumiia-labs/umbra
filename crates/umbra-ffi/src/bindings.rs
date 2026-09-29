@@ -1639,6 +1639,7 @@ impl Inner {
                 read_pk: job.read_pk,
                 write_pk: job.write_pk,
                 own: job.own,
+                token: None,
             });
         }
         if let Ok(subscriptions) = self.client.group_subscriptions(&mut OsRng) {
@@ -2070,7 +2071,42 @@ impl Inner {
             _ => None,
         };
         if let Some(tag) = answered {
-            self.group_sent.remove(&tag);
+            let sent = self.group_sent.remove(&tag);
+            // ABU-048: a relay under load refused a `GNEW` with no
+            // credential, and it goes once more with a token of this
+            // device. With none the creation waits for the next run.
+            if let (
+                GroupUpdate::Failed {
+                    reason: Some(umbra_queue::Reject::Admission),
+                    ..
+                },
+                Some(GroupCommand::Create {
+                    tag,
+                    relay,
+                    read_pk,
+                    write_pk,
+                    own,
+                    token: None,
+                }),
+            ) = (&update, sent)
+            {
+                let now = crate::runtime::unix_now();
+                if let Ok(Some(token)) =
+                    self.client.take_token(umbra_core::abuse::epoch_number(now))
+                {
+                    let command = GroupCommand::Create {
+                        tag,
+                        relay,
+                        read_pk,
+                        write_pk,
+                        own,
+                        token: Some(token),
+                    };
+                    self.group_sent.insert(tag, command.copy());
+                    self.send_group(command);
+                    return;
+                }
+            }
         }
         match update {
             GroupUpdate::Created {
@@ -3450,6 +3486,15 @@ impl Persist for HandleStore {
         let app = due.app.clone();
         self.given = Some(Given::Receipt(due));
         Some((contact, app))
+    }
+
+    fn admission_token(&mut self, now: u64) -> Option<Vec<u8>> {
+        let handle = self.handle.upgrade()?;
+        let mut inner = locked(&handle.inner);
+        inner
+            .client
+            .take_token(umbra_core::abuse::epoch_number(now))
+            .ok()?
     }
 
     fn due_digest(&mut self, now: u64) -> Option<(ContactId, Vec<u8>)> {

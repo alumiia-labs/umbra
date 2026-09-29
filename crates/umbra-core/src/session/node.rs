@@ -152,6 +152,13 @@ pub enum ClientEvent {
         /// The handle of the send.
         handle: u64,
     },
+    /// A relay under load asked for a credential for the `NEW` of this
+    /// handle (`ABU-048`). The runtime answers with
+    /// [`ClientNode::admit_queue`].
+    AdmissionAsked {
+        /// The handle of the call that made the queue.
+        handle: u64,
+    },
     /// A relay rejected a command.
     Rejected {
         /// The handle of the call.
@@ -371,6 +378,9 @@ pub enum GroupJob {
         write_pk: [u8; 32],
         /// The owner credential, which the creator drew (`NET-231`).
         own: StaticSecret,
+        /// A cross-relay token for a relay under load, which refused the
+        /// `GNEW` with no credential (`ABU-048`).
+        token: Option<Vec<u8>>,
     },
     /// `GPOST`.
     Post {
@@ -712,6 +722,8 @@ struct QueueKeys {
     handle: u64,
     /// The circuit that carries the `NEW`.
     slot: usize,
+    /// Whether the `NEW` carried a token, thus a second `ADMISSION` ends it.
+    paid: bool,
 }
 
 /// What a command of this node waits for.
@@ -1126,6 +1138,9 @@ pub struct ClientNode {
     rendezvous_at: Option<u64>,
     /// The contacts whose new queue the relay makes now.
     rotating: BTreeSet<[u8; 32]>,
+    /// Each `NEW` that a relay under load refused, under the handle of its
+    /// call, until the runtime gives a token or none.
+    admitting: BTreeMap<u64, Box<QueueKeys>>,
     /// The contacts with a renewal handshake that runs, in either role.
     renewing: BTreeSet<[u8; 32]>,
     /// The contacts that take a new queue at the next check, whatever the
@@ -1280,6 +1295,7 @@ impl ClientNode {
             halves: BTreeMap::new(),
             contacts: BTreeMap::new(),
             rotating: BTreeSet::new(),
+            admitting: BTreeMap::new(),
             renewing: BTreeSet::new(),
             forced: BTreeSet::new(),
             faults: LinkFaults::default(),
@@ -2919,12 +2935,6 @@ impl ClientNode {
     ) -> Result<(), Error> {
         let qr_auth = StaticSecret::from(random::<32, _>(rng));
         let qs_auth: [u8; 32] = random(rng);
-        let encoded = new_queue_command(
-            &qr_auth,
-            &StaticSecret::from(qs_auth),
-            &self.session_pk()?,
-            random(rng),
-        )?;
         let keys = QueueKeys {
             qr_auth,
             qs_auth,
@@ -2933,11 +2943,63 @@ impl ClientNode {
             purpose,
             handle: user_handle,
             slot: self.current,
+            paid: false,
         };
-        self.queue_command(encoded, Waiting::Queue(Box::new(keys)))?;
+        self.send_new(Box::new(keys), Admission::NONE, rng)
+    }
+
+    /// Sends the `NEW` of `keys` on the current circuit.
+    fn send_new<R: CryptoRng + ?Sized>(
+        &mut self,
+        keys: Box<QueueKeys>,
+        admission: Admission<'_>,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let encoded = new_queue_command(
+            &keys.qr_auth,
+            &StaticSecret::from(keys.qs_auth),
+            admission,
+            &self.session_pk()?,
+            random(rng),
+        )?;
+        self.queue_command(encoded, Waiting::Queue(keys))?;
         let slot = self.slot_mut()?;
         slot.reserved = slot.reserved.saturating_add(1);
         self.pump()
+    }
+
+    /// Answers an [`ClientEvent::AdmissionAsked`]: the `NEW` goes once
+    /// more on its circuit with `token`, a cross-relay token of §13.3.1
+    /// that answers any relay (`WIR-325`, `ABU-014`). With no token, or
+    /// with its circuit gone, the call ends as a rejection.
+    pub fn admit_queue<R: CryptoRng + ?Sized>(
+        &mut self,
+        handle: u64,
+        token: Option<&[u8]>,
+        rng: &mut R,
+    ) -> Result<Vec<ClientEvent>, Error> {
+        let Some(mut keys) = self.admitting.remove(&handle) else {
+            return Ok(Vec::new());
+        };
+        let is_ready = self.slots.get(keys.slot).is_some_and(Slot::is_ready);
+        let (Some(token), true) = (token, is_ready) else {
+            if let Purpose::Rotate { contact, .. } = keys.purpose {
+                self.rotating.remove(&contact);
+                return Ok(Vec::new());
+            }
+            return Ok(alloc::vec![ClientEvent::Rejected {
+                handle,
+                reason: Reject::Admission,
+            }]);
+        };
+        keys.paid = true;
+        self.current = keys.slot;
+        let admission = Admission {
+            kind: umbra_wire::admission::AdmissionKind::Token,
+            body: token,
+        };
+        self.send_new(keys, admission, rng)?;
+        Ok(Vec::new())
     }
 
     /// Each inbound queue that a ready circuit serves, with the relay that
@@ -3252,14 +3314,27 @@ impl ClientNode {
                 read_pk,
                 write_pk,
                 own,
+                token,
             } => {
+                let admission = match &token {
+                    Some(token) => Admission {
+                        kind: umbra_wire::admission::AdmissionKind::Token,
+                        body: token,
+                    },
+                    None => Admission::NONE,
+                };
                 let new = GnewPayload {
                     read_pk,
                     write_pk,
                     own_pk: *umbra_crypto::x25519::PublicKey::from(&own).as_bytes(),
-                    admission: Admission::NONE,
+                    admission,
                 };
-                let mut payload = alloc::vec![0u8; GNEW_NONE_LEN];
+                let mut payload = alloc::vec![
+                    0u8;
+                    GNEW_NONE_LEN
+                        .saturating_sub(umbra_wire::admission::NONE_LEN)
+                        .saturating_add(admission.len())
+                ];
                 let used = new.encode(&mut payload)?;
                 payload.truncate(used);
                 (GroupCmd::Gnew, own, payload)
@@ -4496,6 +4571,15 @@ impl ClientNode {
                         Some(Waiting::Queue(keys)) => {
                             if let Some(slot) = self.slots.get_mut(keys.slot) {
                                 slot.reserved = slot.reserved.saturating_sub(1);
+                            }
+                            // ABU-048: a relay under load asks for a
+                            // credential, and a paid `NEW` asks no more.
+                            if reason == Reject::Admission && !keys.paid {
+                                out.push(ClientEvent::AdmissionAsked {
+                                    handle: keys.handle,
+                                });
+                                self.admitting.insert(keys.handle, keys);
+                                continue;
                             }
                             // A rotation that the relay refused runs again
                             // at a later check.

@@ -1178,6 +1178,67 @@ fn group_records(mesh: &mut Mesh, client: usize, turns: usize) -> Vec<(u32, Vec<
 }
 
 #[test]
+fn a_relay_under_load_makes_a_group_queue_for_a_cross_relay_token() {
+    use umbra_core::abuse::{
+        epoch_number,
+        pow::Verifier,
+        token::{issue_cross_relay, CrossRelayRequest, TokenChallenge, TYPE_CROSS_RELAY},
+    };
+    use umbra_crypto::rsabssa::SecretKey2048;
+
+    const CREATOR: usize = 0;
+    let mut mesh = Mesh::new(&[0x71]);
+    use_group_node(&mut mesh, CREATOR, 0x71);
+    mesh.settle();
+    let relay = relay_info(3).candidate.relay_id;
+    let own = StaticSecret::from([0x33u8; 32]);
+
+    // ABU-048: each relay raises its effort, and holds the key of the
+    // cross-relay issuer of this epoch from the log.
+    let now = mesh.now;
+    let epoch = epoch_number(now);
+    let key = SecretKey2048::from_seed(&Secret::new([0x71; 32]), &epoch.to_be_bytes()).unwrap();
+    for node in &mut mesh.relays {
+        node.set_issuer_key(epoch, key.public().clone());
+        let gate = node.gate_mut();
+        gate.pow = Verifier::new(gate.relay_id, 4);
+        gate.pow.issue(0, now, &mut Rng(9)).unwrap();
+    }
+    let challenge = TokenChallenge {
+        token_type: TYPE_CROSS_RELAY,
+        epoch,
+        redemption_context: [0; 32],
+    };
+    let (state, blinded) =
+        CrossRelayRequest::new(1, &challenge, key.public(), &mut Rng(3)).unwrap();
+    let signed = issue_cross_relay(&key, &blinded).unwrap();
+    let token = state.finalize(&signed, key.public()).unwrap().remove(0);
+    let token = umbra_core::discovery::dirclient::token_bytes(&token).unwrap();
+
+    // The GNEW with no credential is refused for one, and the GNEW with
+    // the token makes the group queue.
+    let create = |token: Option<Vec<u8>>| GroupJob::Create {
+        read_pk: [0x11; 32],
+        write_pk: [0x12; 32],
+        own: StaticSecret::from(own.to_bytes()),
+        token,
+    };
+    mesh.clients[CREATOR]
+        .group(relay, [0; 32], create(None), &mut Rng(21))
+        .unwrap();
+    assert_eq!(
+        one_answer(&mut mesh, CREATOR),
+        GroupOutcome::Refused(umbra_queue::Reject::Admission)
+    );
+    mesh.clients[CREATOR]
+        .group(relay, [0; 32], create(Some(token)), &mut Rng(22))
+        .unwrap();
+    let GroupOutcome::Created(_) = one_answer(&mut mesh, CREATOR) else {
+        panic!("the relay made no group queue");
+    };
+}
+
+#[test]
 fn a_group_queue_takes_a_record_at_one_client_and_gives_it_at_another() {
     const CREATOR: usize = 0;
     const READER: usize = 1;
@@ -1202,6 +1263,7 @@ fn a_group_queue_takes_a_record_at_one_client_and_gives_it_at_another() {
                 read_pk: public(&read),
                 write_pk: public(&write),
                 own: StaticSecret::from(own.to_bytes()),
+                token: None,
             },
             &mut Rng(21),
         )
@@ -1286,6 +1348,7 @@ fn a_group_queue_takes_a_record_at_one_client_and_gives_it_at_another() {
                 read_pk: public(&read),
                 write_pk: public(&write),
                 own: StaticSecret::from(own.to_bytes()),
+                token: None,
             },
             &mut Rng(26),
         )
