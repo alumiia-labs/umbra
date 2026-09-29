@@ -174,6 +174,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
     }
     // The message under the finger, and the message that the composer answers.
     var chosen by remember(conversation) { mutableStateOf<Line?>(null) }
+    var linksOf by remember(conversation) { mutableStateOf<Line?>(null) }
     var answered by remember(conversation) { mutableStateOf<Line?>(null) }
     // The message that a jump from an answer shows for a moment.
     var flashed by remember(conversation) { mutableStateOf<List<Byte>?>(null) }
@@ -275,6 +276,17 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
             delay(4_000)
             notice = null
         }
+    }
+    linksOf?.let { line ->
+        ActionSheet(
+            "Links",
+            Links.of(line.text).map { url ->
+                RowEntry(if (url.startsWith("umbra:", ignoreCase = true)) "link" else "globe", url) {
+                    Links.open(context, url)
+                }
+            },
+            onDismiss = { linksOf = null },
+        )
     }
     chosen?.let { line ->
         val entries = if (line.info.deleted) {
@@ -506,6 +518,8 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                             CLASS_VOICE, CLASS_AUDIO -> ({ VoicePlayer.toggle(line) })
                             else -> ({ save(line) })
                         }
+                        // NET-146: a tap shows the links of the message.
+                        Links.ranges(line.text).isNotEmpty() -> ({ linksOf = line })
                         else -> line.quote?.let { quote -> { jumpTo(quote.key) } }
                     },
                     onLongPress = { chosen = line },
@@ -1037,7 +1051,7 @@ private fun BubbleContent(line: Line, chat: Chat, isRevealed: Boolean = false, a
                     modifier = Modifier.align(Alignment.Start).padding(bottom = 2.dp),
                 )
             }
-            PlatformText(line.text, Palette.Text, modifier = Modifier.align(Alignment.Start))
+            PlatformText(line.text, Palette.Text, modifier = Modifier.align(Alignment.Start), showsLinks = true)
         }
         Spacer(Modifier.height(2.dp))
         val clock = DateUtils.formatDateTime(

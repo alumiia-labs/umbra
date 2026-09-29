@@ -1,5 +1,9 @@
 package org.umbra.app
 
+import android.text.SpannableStringBuilder
+import android.text.style.ForegroundColorSpan
+import android.text.style.UnderlineSpan
+import java.nio.CharBuffer
 import android.graphics.drawable.GradientDrawable
 import android.text.InputType
 import android.text.TextUtils
@@ -231,8 +235,10 @@ fun PlatformText(
     sizeSp: Float = 16f,
     maxLines: Int = Int.MAX_VALUE,
     prefix: String = "",
+    showsLinks: Boolean = false,
 ) {
     val argb = color.toArgb()
+    val linkArgb = Palette.Action.toArgb()
     AndroidView(
         modifier = modifier,
         factory = { context ->
@@ -245,7 +251,18 @@ fun PlatformText(
             view.setTextColor(argb)
             view.setTextSize(TypedValue.COMPLEX_UNIT_SP, sizeSp)
             view.maxLines = maxLines
-            if (prefix.isEmpty()) {
+            val links = if (showsLinks && prefix.isEmpty()) Links.ranges(chars) else emptyList()
+            if (links.isNotEmpty()) {
+                // NET-146: a link shows as a link, and a tap on the message
+                // shows its URL before it opens. The spans take the text in a
+                // buffer of the view, and in no `String`.
+                val text = SpannableStringBuilder(CharBuffer.wrap(chars))
+                for (range in links) {
+                    text.setSpan(ForegroundColorSpan(linkArgb), range.first, range.last + 1, 0)
+                    text.setSpan(UnderlineSpan(), range.first, range.last + 1, 0)
+                }
+                view.text = text
+            } else if (prefix.isEmpty()) {
                 view.setText(chars, 0, chars.size)
             } else {
                 // The prefix is a word of the interface. The message text

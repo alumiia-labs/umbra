@@ -71,14 +71,17 @@ class MainActivity : ComponentActivity() {
             ?.let { Core.linkedInvitation = it.value }
     }
 
-    private companion object {
-        val INVITATION_LINK = Regex("""https://[A-Za-z0-9.-]+/i#[A-Za-z0-9_-]+""")
+    companion object {
+        /** Whether a web link is an invitation link of this app (Part 4 §4.3). */
+        fun isInvitation(url: String) = INVITATION_LINK.matches(url)
+
+        private val INVITATION_LINK = Regex("""https://[A-Za-z0-9.-]+/i#[A-Za-z0-9_-]+""")
 
         // Part 4 §4.3.2: the address in the Crockford alphabet.
-        val REUSABLE_LINK = Regex("""umbra://p/[0-9A-Za-z]{32}""")
+        private val REUSABLE_LINK = Regex("""umbra://p/[0-9A-Za-z]{32}""")
 
         // Part 9 §9.3.1: the handle, then the fragment of its profile.
-        val PROFILE_LINK = Regex("""umbra://h/[^\s#]+(%23|#)[0-9]+#[0-9A-Za-z]{26}""")
+        private val PROFILE_LINK = Regex("""umbra://h/[^\s#]+(%23|#)[0-9]+#[0-9A-Za-z]{26}""")
     }
 
     override fun onUserInteraction() {
