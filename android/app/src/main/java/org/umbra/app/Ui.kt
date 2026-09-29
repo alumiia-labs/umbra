@@ -60,6 +60,9 @@ sealed interface Screen {
     data object AutoLock : Screen
     data object Notifications : Screen
     data object ResetIdentity : Screen
+    data object SocialRecovery : Screen
+    data object UserHalf : Screen
+    data class HeldShare(val conversation: Conversation) : Screen
     data object AutoDownload : Screen
     data object ChangePassphrase : Screen
     data object RecoveryCode : Screen
@@ -111,6 +114,7 @@ sealed interface Screen {
             is BlockContact -> conversation
             is BlockMember -> conversation
             is ConversationSettings -> conversation
+            is HeldShare -> conversation
             is Disappearing -> conversation
             is NewPoll -> conversation
             is Alerts -> conversation
@@ -199,9 +203,15 @@ private fun OpenApp() {
             Screen.AutoLock -> AutoLockScreen(pop)
             Screen.Notifications -> NotificationsScreen(pop)
             Screen.ResetIdentity -> ResetIdentityScreen(pop)
+            Screen.SocialRecovery -> SocialRecoveryScreen(pop, push)
+            Screen.UserHalf -> SecretDigitsScreen(
+                "Your user half",
+                "Keep this half yourself. With the pieces of your contacts it restores your account.",
+                pop,
+            ) { Core.userHalf(it) }
             Screen.AutoDownload -> AutoDownloadScreen(pop)
             Screen.ChangePassphrase -> ChangePassphraseScreen(pop)
-            Screen.RecoveryCode -> RecoveryCodeScreen(pop)
+            Screen.RecoveryCode -> RecoveryCodeScreen(pop, push)
             Screen.Devices -> DevicesScreen(pop, push)
             Screen.LinkDevice -> LinkDeviceScreen(pop)
             Screen.PublicLinks -> PublicLinksScreen(pop, push)
@@ -244,6 +254,11 @@ private fun ContactView(
         is Screen.BlockContact -> BlockContactScreen(chat, pop)
         is Screen.BlockMember -> BlockMemberScreen(chat, top.index, top.name, pop)
         is Screen.ConversationSettings -> ConversationSettingsScreen(chat, pop, push)
+        is Screen.HeldShare -> SecretDigitsScreen(
+            "Share of ${chat.title}",
+            "Read these digits only to ${chat.title}, in person or over a call that you trust.",
+            pop,
+        ) { Core.heldShareDigits(chat.conversation, it) }
         is Screen.Disappearing -> DisappearingScreen(chat, pop)
         is Screen.NewPoll -> NewPollScreen(chat, pop)
         is Screen.Alerts -> AlertsScreen(chat, pop)

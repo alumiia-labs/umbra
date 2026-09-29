@@ -804,7 +804,7 @@ class in Part 6 §6.6. **[DEV-022]** A client MUST NOT process a kind that decla
 | Peer signal | `0x06`, `0x07` | Part 3 §3.5.4 gives the rules. **[DEV-023]** A client MUST NOT put a peer signal on a sync channel |
 | Mutable state | `0x20` sub-kind `0x01` | The last writer wins, under `DEV-270` |
 | Ephemeral | `0x08` | The client does not store it |
-| Control | `0x10`, `0x20` sub-kind `0x02`, `0x30`, `0x31`, `0x32`, `0x33`, `0x34`, `0x35` | Part 11 gives `0x10`. §7.5.5 gives `0x20` sub-kind `0x02`, which is the sync acknowledgment. Part 4 §4.5.1 gives `0x30`. Part 9 §9.5.3 gives `0x31`. §7.5.8 gives `0x32`. Part 6 §6.6.10 gives `0x33`. Part 6 §6.6.11 gives `0x34` and `0x35` |
+| Control | `0x0D`, `0x10`, `0x20` sub-kind `0x02`, `0x30`, `0x31`, `0x32`, `0x33`, `0x34`, `0x35` | Part 4 §4.7.3 gives `0x0D`. Part 11 gives `0x10`. §7.5.5 gives `0x20` sub-kind `0x02`, which is the sync acknowledgment. Part 4 §4.5.1 gives `0x30`. Part 9 §9.5.3 gives `0x31`. §7.5.8 gives `0x32`. Part 6 §6.6.10 gives `0x33`. Part 6 §6.6.11 gives `0x34` and `0x35` |
 | Wrapper | `0x09`, and `0x20` sub-kind `0x03` | Part 6 §6.6.5 gives the rich record, and `DEV-268` gives the synced record. Kind `0x12` of Part 6 §6.6.2 is retired; a group content record is the `app` of a group record of Part 11 §11.3, and its own kind gives its class. **[DEV-174]** A client MUST take the class from `inner_kind`. **[DEV-175]** A client MUST NOT give a wrapper a class of its own |
 
 - **Insertion** is commutative. **[DEV-024]** A client MUST identify each message by the

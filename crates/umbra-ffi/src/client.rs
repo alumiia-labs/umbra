@@ -28,6 +28,7 @@ mod moderation;
 mod polls;
 mod reset;
 mod roster_notes;
+mod social;
 mod timers;
 mod tokens;
 
@@ -49,6 +50,7 @@ pub use moderation::{ModNote, MOD_HIDE, MOD_REMOVE, MOD_UNHIDE};
 pub use key_changes::PendingKeyChange;
 pub use polls::PollView;
 pub use reset::ResetSummary;
+pub use social::{GivenShare, HeldShare};
 pub use roster_notes::{
     RosterNote, NOTE_EVICTED, NOTE_FORK, NOTE_JOINED, NOTE_LEFT, NOTE_NOBODY, NOTE_ROLE,
 };
@@ -760,6 +762,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut key_requests: Vec<(ConversationId, Vec<u8>)> = Vec::new();
         let mut votes: Vec<(ConversationId, Vec<u8>, u16)> = Vec::new();
         let mut key_changes: Vec<(ConversationId, Vec<u8>)> = Vec::new();
+        let mut shares: Vec<(ConversationId, Zeroizing<Vec<u8>>)> = Vec::new();
         for change in changes {
             planned.push(match change {
                 StateChange::Contact { contact, state } => Planned::Put(
@@ -978,6 +981,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if parsed.kind == AppKind::KeyChange {
                 if !from_user {
                     key_changes.push((conversation, parsed.body.to_vec()));
+                }
+                continue;
+            }
+            // IDN-189: a share of a contact is no message, and this device
+            // holds it for the day that contact needs it.
+            if parsed.kind == AppKind::RecoveryShare {
+                if !from_user {
+                    shares.push((conversation, Zeroizing::new(parsed.body.to_vec())));
                 }
                 continue;
             }
@@ -1393,6 +1404,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
         for (_, body) in key_requests {
             self.on_pairwise_key_request(&body, now_ms, rng)?;
+        }
+        for (conversation, body) in shares {
+            self.take_share(conversation, &body, now_ms, rng)?;
         }
         for (conversation, body) in key_changes {
             self.take_key_change(conversation, &body, now_ms, rng)?;
@@ -3108,6 +3122,7 @@ fn is_request(plain: &[u8]) -> Result<bool, Error> {
             | AppKind::Reaction
             | AppKind::PollVote
             | AppKind::KeyChange
+            | AppKind::RecoveryShare
             | AppKind::GroupControl
             | AppKind::KeyRequest
     ) || tombstone_of(&parsed)? == Some(Tombstone::Request))

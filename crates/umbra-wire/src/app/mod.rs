@@ -8,6 +8,7 @@ pub mod devset;
 pub mod edit;
 pub mod keys;
 pub mod poll;
+pub mod recovery;
 pub mod rich;
 pub mod share;
 pub mod signal;
@@ -73,6 +74,8 @@ pub enum AppKind {
     PollVote = 0x0B,
     /// A `ContactShare`.
     ContactShare = 0x0C,
+    /// A `RecoveryShare` of Part 4 §4.7.3.
+    RecoveryShare = 0x0D,
     /// A `GroupControl`.
     GroupControl = 0x10,
     /// A device-set sync record.
@@ -111,6 +114,7 @@ impl AppKind {
             0x0A => AppKind::Poll,
             0x0B => AppKind::PollVote,
             0x0C => AppKind::ContactShare,
+            0x0D => AppKind::RecoveryShare,
             0x10 => AppKind::GroupControl,
             0x20 => AppKind::DeviceSet,
             0x30 => AppKind::KeyChange,
@@ -142,6 +146,7 @@ impl AppKind {
             AppKind::DeviceSet => Class::BySubKind,
             AppKind::GroupControl
             | AppKind::KeyChange
+            | AppKind::RecoveryShare
             | AppKind::TransparencyDigest
             | AppKind::ConversationTimer
             | AppKind::QueueAddress
@@ -222,6 +227,12 @@ impl<'a> AppMessage<'a> {
             }
             AppKind::QueueAddress
                 if body.len() != crate::address::LEN || channel != Channel::Pairwise =>
+            {
+                return Err(Error::Malformed);
+            }
+            // IDN-187: a share goes on a pairwise channel alone.
+            AppKind::RecoveryShare
+                if body.len() != recovery::RECOVERY_SHARE_LEN || channel != Channel::Pairwise =>
             {
                 return Err(Error::Malformed);
             }

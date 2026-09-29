@@ -1517,6 +1517,7 @@ client MUST NOT copy that raw value into a different row.
 | `0x0A` | Poll (§6.6.6) | Insertion |
 | `0x0B` | Poll vote (§6.6.6) | Insertion |
 | `0x0C` | Contact share (§6.6.7) | Insertion |
+| `0x0D` | Recovery share (Part 4 §4.7.3) | Control |
 | `0x10` | Group control (§6.6.3, Part 11) | Control |
 | `0x12` | Retired; it was the group record wrapper (§6.6.2) | — |
 | `0x20` | Device-set sync (Part 7) | Mutable state or control, by the sub-kind |

@@ -431,7 +431,7 @@ side channel that the user selects, such as a QR code scan.
 | Reusable contact link (Part 4 §4.3.2) | none | Out of band | Client |
 | `KeyChangeNotice` | Part 4 §4.5.1 | `AppMessage`, kind `0x30` | Client |
 | Backup object, `BackupRootChunk`, `BackupRoot`, `BackupEntry` | Part 4 §4.7.2 | Backup-class chunks under `BNEW`, Part 12 §12.3.3, and the handle-addressed chunk of Part 12 §12.4.2 | Client |
-| Recovery share (Part 4 §4.7.3) | none | none | Client |
+| `RecoveryShare` | Part 4 §4.7.3 | `AppMessage`, kind `0x0D` | Client |
 | Handshake flights 1 to 3 | Part 5 §5.4.2 | none | Client |
 | `Roster`, `DeviceEntry`, `OwnerClaim`, `OwnerClaimRecord` | Part 7 §7.3.1 | none | Client |
 | Link QR code and provisioning payload (Part 7 §7.4) | none | none | Client |

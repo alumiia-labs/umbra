@@ -79,6 +79,17 @@ fun ContactDetailsScreen(chat: Chat, onBack: () -> Unit, onMessage: () -> Unit, 
                     push(Screen.ConversationSettings(chat.conversation))
                 },
             )
+            // Part 4 §4.7.3: a piece of the recovery of this contact.
+            var held by remember { mutableStateOf<uniffi.umbra_ffi.FfiHeldShare?>(null) }
+            LaunchedEffect(chat.conversation, Core.revision) { Core.heldShare(chat.conversation) { held = it } }
+            held?.let { share ->
+                HorizontalDivider(color = Palette.Divider)
+                EntryRow(
+                    RowEntry("key", "Recovery share", "Piece ${share.index} of ${share.count}, ${share.threshold} needed") {
+                        push(Screen.HeldShare(chat.conversation))
+                    },
+                )
+            }
             HorizontalDivider(color = Palette.Divider)
             var isBlocked by remember { mutableStateOf(false) }
             LaunchedEffect(chat.conversation, Core.revision) {

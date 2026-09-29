@@ -109,7 +109,7 @@ const INDEX_VALUE_LEN: usize = 1 + 16 + 32;
 /// backup itself stay on the device (`IDN-180`). The state of each file goes
 /// as one that waits for a tap (`IDN-186`). A timed record stays, and the
 /// timer of its conversation goes (`DEV-215`).
-const BACKED_UP: [TableId; 31] = [
+const BACKED_UP: [TableId; 33] = [
     super::files::FILE_STATE,
     TableId::MESSAGE,
     TableId::TOMBSTONE,
@@ -141,6 +141,8 @@ const BACKED_UP: [TableId; 31] = [
     super::roster_notes::ROSTER_NOTES,
     super::key_changes::KEY_CHANGES,
     super::reset::RESET_NOTICES,
+    super::social::SHARES_HELD,
+    super::social::SHARES_GIVEN,
 ];
 
 /// A backup object that is due: its bytes, which go up as a file of the

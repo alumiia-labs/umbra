@@ -38,6 +38,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 
@@ -108,7 +111,7 @@ fun RecoveryPromptLine(push: (Screen) -> Unit) {
  * screenshot while it shows, and no copy goes to the clipboard.
  */
 @Composable
-fun RecoveryCodeScreen(onBack: () -> Unit) {
+fun RecoveryCodeScreen(onBack: () -> Unit, push: (Screen) -> Unit = {}) {
     val context = LocalContext.current
     var digits by remember { mutableStateOf<CharArray?>(null) }
     LaunchedEffect(Unit) {
@@ -139,6 +142,120 @@ fun RecoveryCodeScreen(onBack: () -> Unit) {
             }
             Spacer(Modifier.height(16.dp))
             Note(backupLine(context, Core.lastBackupAt))
+            Spacer(Modifier.height(16.dp))
+            EntryRow(RowEntry("user-group", "Recovery with contacts", "Part 4 §4.7.3") { push(Screen.SocialRecovery) })
+        }
+    }
+}
+
+/**
+ * Digits that a view shows once, with no screenshot and no clipboard, and
+ * that it wipes when it leaves: the user half, or a share of a contact.
+ */
+@Composable
+fun SecretDigitsScreen(title: String, note: String, onBack: () -> Unit, load: ((CharArray) -> Unit) -> Unit) {
+    val context = LocalContext.current
+    var digits by remember { mutableStateOf<CharArray?>(null) }
+    LaunchedEffect(Unit) { load { digits = it } }
+    DisposableEffect(Unit) {
+        val window = (context as? Activity)?.window
+        window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        onDispose {
+            window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            digits?.fill('\u0000')
+        }
+    }
+    Column(Modifier.fillMaxSize()) {
+        BackBar(title, onBack = onBack)
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .background(Color.White, RoundedCornerShape(24.dp))
+                    .border(1.dp, Palette.Divider, RoundedCornerShape(24.dp))
+                    .padding(vertical = 20.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                digits?.let { DigitRows(it) }
+            }
+            Spacer(Modifier.height(16.dp))
+            Note(note)
+        }
+    }
+}
+
+/**
+ * Social recovery of Part 4 §4.7.3: one share of the social half for each
+ * chosen contact. The view states which half each holder takes, and that
+ * the shares alone recover nothing (`IDN-087`, `IDN-088`).
+ */
+@Composable
+fun SocialRecoveryScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
+    val contacts = Core.chats.filter { !it.isGroup }
+    val chosen = remember { mutableStateListOf<List<Byte>>() }
+    var threshold by remember { mutableStateOf(3) }
+    var given by remember { mutableStateOf(emptyList<uniffi.umbra_ffi.FfiGivenShare>()) }
+    var isSent by remember { mutableStateOf(false) }
+    LaunchedEffect(isSent) { Core.sharesGiven { given = it } }
+    val count = chosen.size
+    val needed = threshold.coerceIn(2, maxOf(2, count))
+    Column(Modifier.fillMaxSize()) {
+        BackBar("Recovery with contacts", onBack = onBack)
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
+            Spacer(Modifier.height(8.dp))
+            Note(
+                "Each contact gets one piece of the social half of your recovery code. You keep the user " +
+                    "half. $needed pieces and your user half restore your account. The pieces alone restore nothing.",
+            )
+            if (given.isNotEmpty()) {
+                val names = given.map { share ->
+                    contacts.firstOrNull { it.conversation.id.contentEquals(share.conversation) }?.title ?: "A contact"
+                }
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    "Held by ${names.joinToString(", ")}, ${given.first().threshold} of ${given.first().count} needed",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Palette.TextSecondary,
+                    modifier = Modifier.subline(),
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            for (chat in contacts) {
+                val key = chat.conversation.id.toList()
+                ToggleRow(chat.title, key in chosen) { on -> if (on) chosen.add(key) else chosen.remove(key) }
+                HorizontalDivider(color = Palette.Divider)
+            }
+            if (count >= 2) {
+                Text(
+                    "Pieces needed",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = Palette.TextSecondary,
+                    modifier = Modifier.padding(top = 16.dp, bottom = 4.dp).subline(),
+                )
+                for (k in 2..count) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .pressShadeInColumn()
+                            .press(role = Role.RadioButton) { threshold = k }
+                            .padding(horizontal = PressInset, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioMark(isChosen = needed == k)
+                        Spacer(Modifier.width(14.dp))
+                        Text("$k of $count")
+                    }
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+            PrimaryButton("Send the pieces", enabled = count >= 2) {
+                val holders = contacts.filter { it.conversation.id.toList() in chosen }.map { it.conversation }
+                Core.splitSocial(holders, needed) { isSent = !isSent }
+                chosen.clear()
+            }
+            Spacer(Modifier.height(8.dp))
+            SecondaryButton("Show your user half") { push(Screen.UserHalf) }
+            Spacer(Modifier.height(20.dp))
         }
     }
 }
@@ -191,25 +308,45 @@ fun RestoreForm(onCancel: () -> Unit) {
     val context = LocalContext.current
     val passphrase = rememberPlatformField()
     val code = rememberPlatformField()
+    // Part 4 §4.7.3: the user half and the shares of contacts, in the place
+    // of the whole code.
+    var withShares by remember { mutableStateOf(false) }
+    var shareCount by remember { mutableStateOf(3) }
+    val shares = remember { List(8) { PlatformFieldState() } }
     val isRunning = Core.restoreNote != null
     Column(Modifier.fillMaxWidth()) {
         if (isRunning) {
             Text(Core.restoreNote.orEmpty(), color = Palette.TextSecondary)
             return@Column
         }
-        FramedPlatformField(code, "Recovery code", isPassphrase = false)
+        FramedPlatformField(code, if (withShares) "User half" else "Recovery code", isPassphrase = false)
+        if (withShares) {
+            for (index in 0 until shareCount) {
+                Spacer(Modifier.height(8.dp))
+                FramedPlatformField(shares[index], "Share ${index + 1}", isPassphrase = false)
+            }
+            if (shareCount < shares.size) {
+                InlineButton("Add a share") { shareCount++ }
+            }
+        }
         Spacer(Modifier.height(12.dp))
         FramedPlatformField(passphrase, "New passphrase", isPassphrase = true)
         Spacer(Modifier.height(14.dp))
         PrimaryButton("Restore") {
             val digits = code.take()
             val phrase = passphrase.take()
+            val taken = if (withShares) shares.take(shareCount).mapNotNull { it.take() } else emptyList()
             if (digits != null && phrase != null) {
-                Core.restore(context, phrase, digits)
+                Core.restore(context, phrase, digits, taken)
             } else {
                 digits?.fill('\u0000')
                 phrase?.fill('\u0000')
+                taken.forEach { it.fill('\u0000') }
             }
+        }
+        Spacer(Modifier.height(8.dp))
+        SecondaryButton(if (withShares) "Use the recovery code" else "Use shares of contacts") {
+            withShares = !withShares
         }
         Spacer(Modifier.height(8.dp))
         SecondaryButton("Back", onClick = onCancel)

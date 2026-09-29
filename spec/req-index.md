@@ -67,7 +67,7 @@ each column when a crate implements the requirement and a test covers it.
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
 | `NET` | 239 | 85 | 1 | 0 | 8 | **333** |
-| `IDN` | 129 | 44 | 1 | 0 | 5 | **179** |
+| `IDN` | 133 | 46 | 1 | 0 | 5 | **185** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
 | `WIR` | 398 | 85 | 0 | 0 | 7 | **490** |
 | `DEV` | 200 | 90 | 0 | 0 | 7 | **297** |
@@ -79,7 +79,7 @@ each column when a crate implements the requirement and a test covers it.
 | `ABU` | 71 | 30 | 1 | 0 | 0 | **102** |
 | `IMP` | 119 | 41 | 0 | 0 | 2 | **162** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2049 | 621 | 7 | 0 | 53 | **2730** |
+| **All** | 2053 | 623 | 7 | 0 | 53 | **2736** |
 
 ## SCP — Scope and Conventions
 
@@ -656,6 +656,12 @@ Source: `spec/04-identity.md`
 | `IDN-184` | §4.7.2 | MUST | A client | A client MUST write a delta object at its time when no row changed since the object before it. |  |  |
 | `IDN-185` | §4.7.2 | MUST | (unstated) | For `BACKUP_EARLY_WINDOW` after its first backup write, a client MUST use `BACKUP_EARLY_INTERVAL` in the place of `BACKUP_INTERVAL`. |  |  |
 | `IDN-186` | §4.7.2 | MUST | A file stays on the device, and a backup object | A file stays on the device, and a backup object MUST carry the state of each file as one that waits for a tap (Part 14 `IMP-167`), or as one that failed when no descriptor names it. |  |  |
+| `IDN-187` | §4.7.3 | MUST | A client | A client MUST send each share on the pairwise channel of its holder, one share to each holder. |  |  |
+| `IDN-188` | §4.7.3 | MUST NOT | A client | A client MUST NOT send a share on a group channel or to more than one holder. |  |  |
+| `IDN-189` | §4.7.3 | MUST | A holder | A holder MUST keep the last share of each contact, and it MUST give a share back only as `RecoveryDigits` of type `0x0003` on its screen. |  |  |
+| `IDN-190` | §4.7.3 | MUST NOT | A holder | A holder MUST NOT send a share on any channel. |  |  |
+| `IDN-191` | §4.7.3 | MUST | A restore with shares | A restore with shares MUST take `C_user` as `RecoveryDigits` of type `0x0002` and `threshold` shares of type `0x0003`, and it MUST join the shares before the KDF of §4.7.1. |  |  |
+| `IDN-192` | §4.7.3 | MUST | A new split | A new split MUST draw a new `set_id`, and the interface MUST show the holders of the current split alone. |  |  |
 
 ## CRY — Cryptographic Core
 

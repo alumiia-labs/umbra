@@ -3246,6 +3246,66 @@ mod tests {
     }
 
     #[test]
+    fn two_shares_and_the_user_half_rebuild_the_recovery_code() {
+        use umbra_core::{
+            identity::recovery::{from_digits, join_social, DigitsType, RecoveryCode},
+            session::node::StateChange,
+        };
+
+        let mut rng = Rng(103);
+        let mut alice = new_client(&mut rng);
+        let store = |client: &mut Client<MemoryBackend, Element>, contact: ContactId, rng: &mut Rng| {
+            let state = [&[0x01][..], &contact.0[..16], &[7; 32], &[0; 8]].concat();
+            let change = StateChange::Contact {
+                contact,
+                state: zeroize::Zeroizing::new(state),
+            };
+            client.commit_network(&[change], &[], 1_000_000, rng).unwrap();
+            client.conversation_for(&contact.0).unwrap()
+        };
+        let contacts = [ContactId([0x71; 32]), ContactId([0x72; 32]), ContactId([0x73; 32])];
+        let holders: Vec<ConversationId> = contacts.iter().map(|c| store(&mut alice, *c, &mut rng)).collect();
+        // IDN-188: one share to each holder, and no holder twice.
+        assert!(alice.split_social(&[holders[0], holders[0]], 2, 2_000_000, &mut rng).is_err());
+        assert!(alice.split_social(&holders[..1], 2, 2_000_000, &mut rng).is_err());
+        alice.split_social(&holders, 2, 2_000_000, &mut rng).unwrap();
+        let given = alice.shares_given().unwrap();
+        assert_eq!(given.len(), 3);
+        assert!(given.iter().all(|share| (share.threshold, share.count) == (2, 3)));
+        // The records are no rows of the view.
+        assert!(holders.iter().all(|holder| alice.messages(*holder).unwrap().is_empty()));
+
+        let mut digits = Vec::new();
+        for holder_id in 0..3 {
+            let sent = alice.take_outgoing().unwrap();
+            let mut holder = new_client(&mut rng);
+            let from = ContactId([0x80 + holder_id; 32]);
+            let at_holder = store(&mut holder, from, &mut rng);
+            deliver(&mut holder, &from, &sent.app, 3_000_000, &mut rng);
+            let held = holder.held_share(at_holder).unwrap().unwrap();
+            assert_eq!((held.threshold, held.count), (2, 3));
+            assert!(holder.messages(at_holder).unwrap().is_empty());
+            let mut view = View::default();
+            holder.render_held_share(at_holder, &mut view).unwrap();
+            digits.push(String::from_utf16(&view.0).unwrap());
+        }
+        let mut user = View::default();
+        alice.render_user_half(&mut user, &mut rng).unwrap();
+        let user = from_digits(&String::from_utf16(&user.0).unwrap(), DigitsType::User).unwrap();
+        // IDN-191: two shares join, and the halves give the recovery code.
+        let shares: Vec<[u8; 17]> = digits[1..]
+            .iter()
+            .map(|text| from_digits(text, DigitsType::Share).unwrap().as_slice().try_into().unwrap())
+            .collect();
+        let social = join_social(&shares).unwrap();
+        let rebuilt = RecoveryCode::new(umbra_crypto::secret::Secret::new(user.as_slice().try_into().unwrap()), social);
+        let held = alice.recovery_code(&mut rng).unwrap();
+        assert_eq!(rebuilt.bytes().expose(), held.bytes().expose());
+        // IDN-087: a share alone is no code.
+        assert!(from_digits(&digits[0], DigitsType::Code).is_err());
+    }
+
+    #[test]
     fn a_failed_message_goes_again_at_the_action_of_the_user() {
         let mut rng = Rng(97);
         let mut client = new_client(&mut rng);

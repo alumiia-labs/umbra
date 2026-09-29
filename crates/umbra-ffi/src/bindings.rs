@@ -805,6 +805,32 @@ pub struct MsgInfo {
     pub sender: Option<u16>,
 }
 
+/// A share of the social half that a holder took (Part 4 §4.7.3).
+#[derive(uniffi::Record)]
+pub struct FfiGivenShare {
+    /// The holder.
+    pub conversation: Vec<u8>,
+    /// The index of the share.
+    pub index: u8,
+    /// The shares that a recovery needs.
+    pub threshold: u8,
+    /// The shares of the split.
+    pub count: u8,
+}
+
+/// A share that a contact gave to this user.
+#[derive(uniffi::Record)]
+pub struct FfiHeldShare {
+    /// The shares that a recovery of that contact needs.
+    pub threshold: u8,
+    /// The shares of that split.
+    pub count: u8,
+    /// The index of this share.
+    pub index: u8,
+    /// The time of its arrival, in milliseconds.
+    pub at_ms: u64,
+}
+
 /// What a reset started.
 #[derive(uniffi::Record)]
 pub struct ResetCounts {
@@ -4407,32 +4433,35 @@ impl Handle {
     /// `IDN-116`), and each object that it names. `restore_status` shows
     /// the progress. The KDF of the code runs in this call.
     pub fn restore_backup(&self, digits: Vec<u16>) -> Result<(), FfiError> {
-        use umbra_core::{
-            identity::recovery::{from_digits, DigitsType, RecoveryCode},
-            session::dead::week_of,
-        };
+        use umbra_core::identity::recovery::{from_digits, DigitsType, RecoveryCode};
         let text = Zeroizing::new(String::from_utf16_lossy(&Zeroizing::new(digits)));
         // IDN-151, IDN-154: the check and the type come before the KDF.
         let code = from_digits(&text, DigitsType::Code).map_err(|_| FfiError::Malformed)?;
         let key = RecoveryCode::from_bytes(&code)
             .and_then(|code| code.backup_root_key())
             .map_err(|error| FfiError::from(Error::from(error)))?;
-        let mut inner = locked(&self.inner);
-        let epoch = inner.client.directory_epoch()?;
-        if inner.bridge.is_none() || epoch == 0 {
-            return Err(FfiError::Offline);
+        self.start_restore(key)
+    }
+
+    /// Starts a restore from `C_user` and shares of `C_social` that the
+    /// holders read from their screens (Part 4 §4.7.3). The shares join
+    /// before the KDF (`IDN-191`).
+    pub fn restore_backup_with_shares(&self, user: Vec<u16>, shares: Vec<Vec<u16>>) -> Result<(), FfiError> {
+        use umbra_core::identity::recovery::{from_digits, join_social, DigitsType, RecoveryCode};
+        let text = Zeroizing::new(String::from_utf16_lossy(&Zeroizing::new(user)));
+        let user = from_digits(&text, DigitsType::User).map_err(|_| FfiError::Malformed)?;
+        let mut held = Vec::with_capacity(shares.len());
+        for share in shares {
+            let text = Zeroizing::new(String::from_utf16_lossy(&Zeroizing::new(share)));
+            let bytes = from_digits(&text, DigitsType::Share).map_err(|_| FfiError::Malformed)?;
+            held.push(<[u8; 17]>::try_from(bytes.as_slice()).map_err(|_| FfiError::Malformed)?);
         }
-        let week = week_of(epoch);
-        inner.restore = Some(RestoreJob {
-            key,
-            first_week: week,
-            week,
-            objects: Vec::new(),
-            status: RestoreStatus::Searching { weeks_back: 0 },
-            restored: None,
-        });
-        inner.ask_restore_root(week);
-        Ok(())
+        let social = join_social(&held).map_err(|error| FfiError::from(Error::from(error)))?;
+        let user: [u8; 16] = user.as_slice().try_into().map_err(|_| FfiError::Malformed)?;
+        let key = RecoveryCode::new(umbra_crypto::secret::Secret::new(user), social)
+            .backup_root_key()
+            .map_err(|error| FfiError::from(Error::from(error)))?;
+        self.start_restore(key)
     }
 
     /// Where the restore stands.
@@ -4464,6 +4493,66 @@ impl Handle {
         Ok(locked(&self.inner)
             .client
             .render_recovery_code(&mut sink, &mut OsRng)?)
+    }
+
+    /// Splits the social half into one share for each holder, `threshold`
+    /// of them for a recovery, and sends each on its pairwise channel
+    /// (Part 4 §4.7.3).
+    pub fn split_social(&self, holders: Vec<Vec<u8>>, threshold: u8) -> Result<(), FfiError> {
+        let holders = holders
+            .iter()
+            .map(|holder| conversation_of(holder))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut inner = locked(&self.inner);
+        let Inner { client, bridge, .. } = &mut *inner;
+        client.split_social(&holders, threshold, unix_now_ms(), &mut OsRng)?;
+        if let Some(running) = bridge {
+            running.flush(client, &mut OsRng)?;
+        }
+        drop(inner);
+        self.changed.notify_all();
+        Ok(())
+    }
+
+    /// The holders of the current split of this user.
+    pub fn shares_given(&self) -> Result<Vec<FfiGivenShare>, FfiError> {
+        Ok(locked(&self.inner)
+            .client
+            .shares_given()?
+            .into_iter()
+            .map(|share| FfiGivenShare {
+                conversation: share.conversation.0.to_vec(),
+                index: share.index,
+                threshold: share.threshold,
+                count: share.count,
+            })
+            .collect())
+    }
+
+    /// The share that a contact gave to this user, or none.
+    pub fn held_share(&self, conversation: Vec<u8>) -> Result<Option<FfiHeldShare>, FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        Ok(locked(&self.inner).client.held_share(conversation)?.map(|share| FfiHeldShare {
+            threshold: share.threshold,
+            count: share.count,
+            index: share.index,
+            at_ms: share.at_ms,
+        }))
+    }
+
+    /// Writes the share that a contact gave to this user as 51 digits of
+    /// Part 4 §4.7.7, for its holder to read to that contact.
+    pub fn held_share_digits(&self, conversation: Vec<u8>, sink: Arc<dyn TextSink>) -> Result<(), FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        let mut sink = ForeignSink(sink);
+        Ok(locked(&self.inner).client.render_held_share(conversation, &mut sink)?)
+    }
+
+    /// Writes the user half of the recovery code as 49 digits of Part 4
+    /// §4.7.7.
+    pub fn user_half(&self, sink: Arc<dyn TextSink>) -> Result<(), FfiError> {
+        let mut sink = ForeignSink(sink);
+        Ok(locked(&self.inner).client.render_user_half(&mut sink, &mut OsRng)?)
     }
 
     /// Renders the text of a message into a sink of the platform.
@@ -4978,6 +5067,29 @@ impl Handle {
             self.fetch_challenges();
         }
         self.changed.notify_all();
+    }
+}
+
+impl Handle {
+    /// Starts the search for the root of a backup under `key`.
+    fn start_restore(&self, key: umbra_core::identity::recovery::BackupRootKey) -> Result<(), FfiError> {
+        use umbra_core::session::dead::week_of;
+        let mut inner = locked(&self.inner);
+        let epoch = inner.client.directory_epoch()?;
+        if inner.bridge.is_none() || epoch == 0 {
+            return Err(FfiError::Offline);
+        }
+        let week = week_of(epoch);
+        inner.restore = Some(RestoreJob {
+            key,
+            first_week: week,
+            week,
+            objects: Vec::new(),
+            status: RestoreStatus::Searching { weeks_back: 0 },
+            restored: None,
+        });
+        inner.ask_restore_root(week);
+        Ok(())
     }
 }
 

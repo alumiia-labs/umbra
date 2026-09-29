@@ -19,6 +19,8 @@ import uniffi.umbra_ffi.Config
 import uniffi.umbra_ffi.Connection
 import uniffi.umbra_ffi.ContactRequestInfo
 import uniffi.umbra_ffi.ConversationTimer
+import uniffi.umbra_ffi.FfiGivenShare
+import uniffi.umbra_ffi.FfiHeldShare
 import uniffi.umbra_ffi.FfiKeyChange
 import uniffi.umbra_ffi.FfiModNote
 import uniffi.umbra_ffi.FfiRosterNote
@@ -710,6 +712,38 @@ object Core {
     }
 
     /** The recovery code as digits, in an array that the caller wipes. */
+    /** The user half of the recovery code as its 49 digits (Part 4 §4.7.7). */
+    fun userHalf(onLoaded: (CharArray) -> Unit) = call { client ->
+        val sink = CharSink()
+        client.userHalf(sink)
+        main.post { onLoaded(sink.chars) }
+    }
+
+    /** The share that a contact gave to this user, as its 51 digits. */
+    fun heldShareDigits(conversation: Conversation, onLoaded: (CharArray) -> Unit) = call { client ->
+        val sink = CharSink()
+        client.heldShareDigits(conversation.id, sink)
+        main.post { onLoaded(sink.chars) }
+    }
+
+    /** The share that a contact gave to this user, or none. */
+    fun heldShare(conversation: Conversation, onLoaded: (FfiHeldShare?) -> Unit) = call { client ->
+        val held = client.heldShare(conversation.id)
+        main.post { onLoaded(held) }
+    }
+
+    /** The holders of the current split of the social half. */
+    fun sharesGiven(onLoaded: (List<FfiGivenShare>) -> Unit) = call { client ->
+        val given = client.sharesGiven()
+        main.post { onLoaded(given) }
+    }
+
+    /** Sends one share of the social half to each holder (Part 4 §4.7.3). */
+    fun splitSocial(holders: List<Conversation>, threshold: Int, onDone: () -> Unit) = call { client ->
+        client.splitSocial(holders.map { it.id }, threshold.toUByte())
+        main.post { onDone() }
+    }
+
     fun recoveryCode(onLoaded: (CharArray) -> Unit) = call { client ->
         val sink = CharSink()
         client.recoveryCode(sink)
@@ -722,7 +756,12 @@ object Core {
      * code, and then the store of the restored seed in its place. This
      * call overwrites both arrays.
      */
-    fun restore(context: Context, passphrase: CharArray, digits: CharArray) {
+    fun restore(
+        context: Context,
+        passphrase: CharArray,
+        digits: CharArray,
+        shares: List<CharArray> = emptyList(),
+    ) {
         val app = context.applicationContext
         fault = null
         restoreNote = "Looking for the backup…"
@@ -731,17 +770,25 @@ object Core {
             passphrase.fill('\u0000')
             val code = digits.map { it.code.toUShort() }
             digits.fill('\u0000')
+            val shareUnits = shares.map { share -> share.map { it.code.toUShort() }.also { share.fill('\u0000') } }
             // IDN-151 to IDN-154: the check and the type come first, and a
-            // wrong type names both types.
+            // wrong type names both types. A restore with shares takes the
+            // user half (IDN-191).
+            val wanted = if (shareUnits.isEmpty()) 1 else 2
             val kind = recoveryDigitsKind(code).toInt()
-            if (kind != 1) {
+            val names = mapOf(1 to "the recovery code", 2 to "the user half", 3 to "a share")
+            if (kind != wanted) {
                 restoreFailed(
-                    when (kind) {
-                        2 -> "These are the digits of the user half. The restore takes the recovery code."
-                        3 -> "These are the digits of a share. The restore takes the recovery code."
-                        else -> "These digits do not check."
+                    if (kind == 0) {
+                        "These digits do not check."
+                    } else {
+                        "These are the digits of ${names[kind]}. This field takes ${names[wanted]}."
                     },
                 )
+                return@execute
+            }
+            if (shareUnits.any { recoveryDigitsKind(it).toInt() != 3 }) {
+                restoreFailed("One share does not check.")
                 return@execute
             }
             var opened: Handle? = null
@@ -756,7 +803,11 @@ object Core {
                     return@execute
                 }
                 first.connect(network)
-                first.restoreBackup(code)
+                if (shareUnits.isEmpty()) {
+                    first.restoreBackup(code)
+                } else {
+                    first.restoreBackupWithShares(code, shareUnits)
+                }
                 val deadline = System.currentTimeMillis() + RESTORE_WAIT_MS
                 var failure: String? = null
                 var isReady = false

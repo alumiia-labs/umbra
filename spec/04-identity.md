@@ -1133,6 +1133,41 @@ Android Block Store. **[IDN-086]** If a client puts
 account. **[IDN-088]** The interface MUST state which half each share holder
 receives.
 
+**The share on the wire.** A share goes to its holder as an `AppMessage` of
+kind `0x0D` (Part 6 §6.6) with this body.
+
+```
+RecoveryShare {
+    version      u8          // 0x01
+    set_id       [16]u8      // one split, from the CSPRNG
+    threshold    u8          // k, 2 or more
+    count        u8          // n, at or above k
+    share        [17]u8      // the share index, 1 to n, and 16 bytes
+}
+```
+
+The body is **36 bytes**. The `share` field is the payload of the
+`RecoveryDigits` of type `0x0003` of §4.7.7.
+
+- **[IDN-187]** A client MUST send each share on the pairwise channel of its
+  holder, one share to each holder. **[IDN-188]** A client MUST NOT send a
+  share on a group channel or to more than one holder.
+- **[IDN-189]** A holder MUST keep the last share of each contact, and it MUST
+  give a share back only as `RecoveryDigits` of type `0x0003` on its screen.
+  **[IDN-190]** A holder MUST NOT send a share on any channel. The user that
+  lost a device has no channel, and a channel that an attacker took gives the
+  share to the attacker.
+- **[IDN-191]** A restore with shares MUST take `C_user` as `RecoveryDigits`
+  of type `0x0002` and `threshold` shares of type `0x0003`, and it MUST join
+  the shares before the KDF of §4.7.1. **[IDN-192]** A new split MUST draw a
+  new `set_id`, and the interface MUST show the holders of the current split
+  alone.
+
+> *Cause.* An earlier draft said that the shares go over pairwise queues and
+> gave them no layout, thus no holder could tell a share from a message. The
+> return path is the screen of the holder, because the device of the owner is
+> the thing that was lost.
+
 This method adds no dependency, no server, and no trusted party. It also
 degrades gracefully, because the share holders are authenticated contacts.
 
