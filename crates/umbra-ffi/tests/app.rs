@@ -142,9 +142,10 @@ fn wait_for<T>(handle: &Handle, mut pick: impl FnMut(FfiEvent) -> Option<T>) -> 
         let Some(event) = handle.wait_event(500) else {
             continue;
         };
-        // A stop by the application is no fault of the network.
+        // A stop by the application is no fault of the network, and an
+        // aged circuit ends a run with nothing failed (NET-320).
         if let FfiEvent::Offline { cause } = event {
-            assert_eq!(cause, 0, "the client went offline");
+            assert!(cause == 0 || cause == 6, "the client went offline");
             continue;
         }
         if let Some(found) = pick(event) {
@@ -3701,13 +3702,19 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
     let alice = launch(&directory, "alice.db", 1);
     let bob = launch(&directory, "bob.db", 2);
     let carol = launch(&directory, "carol.db", 3);
-    for handle in [&alice, &bob, &carol] {
-        handle.clone().connect(network_for(handle)).unwrap();
-        wait_for(handle, |event| match event {
-            FfiEvent::Online => Some(()),
-            _ => None,
-        });
-    }
+    // The test outlives `CIRCUIT_MAX_AGE`, and the app starts a new run at
+    // the end of an aged one (NET-320). A new run at each phase does the
+    // same.
+    let renew = |handles: &[&Arc<Handle>]| {
+        for handle in handles {
+            Arc::clone(handle).connect(network_for(handle)).unwrap();
+            wait_for(handle, |event| match event {
+                FfiEvent::Online => Some(()),
+                _ => None,
+            });
+        }
+    };
+    renew(&[&alice, &bob, &carol]);
     assert!(alice.has_directory());
 
     // A reusable link, and the request of Bob to it.
@@ -3760,6 +3767,8 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
     // DIS-137: the device reads its own entries, and each one is its own.
     assert!(alice.directory_warnings().unwrap().is_empty());
 
+    renew(&[&alice, &bob, &carol]);
+
     // A handle, and the request of Carol to it.
     let handle = alice.claim_handle("Alice".into()).unwrap();
     assert!(handle.starts_with("@alice#"), "{handle}");
@@ -3808,6 +3817,8 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
         }
     }
 
+    renew(&[&alice, &bob, &carol]);
+
     // §9.3: one tap moves the handle to its next key, and a request reaches
     // the new key.
     let start = Instant::now();
@@ -3834,6 +3845,8 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
     // hello goes with no warning.
     request_with_note(&carol, &handle, "Again.");
     wait_for_requests(&alice, 3);
+
+    renew(&[&alice, &bob, &carol]);
 
     // IDN-109, IDN-118: a restore from a backup before the rotation holds
     // the first key. The upkeep finds the current one and holds the handle
