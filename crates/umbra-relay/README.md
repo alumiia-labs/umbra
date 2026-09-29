@@ -54,7 +54,6 @@ relay_id=<from keygen>
 static_secret=<from keygen>
 cert=/etc/letsencrypt/live/relay1.example.org/fullchain.pem
 key=/etc/letsencrypt/live/relay1.example.org/privkey.pem
-issuer_modulus=<512 hex characters; a test network uses ff repeated 256 times>
 store=/var/lib/umbra/relay.db
 public=relay1.example.org,203.0.113.7,443
 next=<relay_id of the layer 2 relay>,relay2.example.org,203.0.113.8,443
@@ -70,6 +69,12 @@ next=<relay_id of the layer 2 relay>,relay2.example.org,203.0.113.8,443
   port that a client dials.
 - `trust` names one test authority in place of the web roots. A deployed
   relay has no such line.
+- A relay that creates queues or holds files takes the key of the
+  cross-relay token issuer of each epoch from the log, over a
+  `directory_route=https://relay1.example.org/directory` line under a
+  `directory_pins=<hex>` line, which `umbra-directory pins` prints. A relay
+  with neither line admits no token, and each client pays with a proof of
+  work.
 
 ### 5. A service
 

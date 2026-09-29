@@ -174,8 +174,6 @@ pub struct Config {
     pub static_secret: StaticSecret,
     /// The layer of the relay, from 1 to 3.
     pub layer: u8,
-    /// The key of the token issuer for the current epoch.
-    pub issuer_key: PublicKey2048,
     /// The bytes of the chunk store of Part 12, or zero for a relay with no
     /// attachment role.
     pub chunk_capacity: u64,
@@ -212,7 +210,9 @@ impl Waiting {
 
 /// One relay.
 pub struct RelayNode {
-    issuer_key: PublicKey2048,
+    /// The key of the cross-relay issuer of each epoch, from the log
+    /// (Part 13 §13.5).
+    issuer_keys: BTreeMap<u32, PublicKey2048>,
     links: BTreeMap<LinkId, Framing>,
     next_hops: BTreeMap<[u8; 32], LinkId>,
     /// The `EXTEND` bodies that wait for a link to their next relay
@@ -266,7 +266,7 @@ impl RelayNode {
             queues.set_notify_key(pair);
         }
         RelayNode {
-            issuer_key: config.issuer_key,
+            issuer_keys: BTreeMap::new(),
             links: BTreeMap::new(),
             next_hops: BTreeMap::new(),
             extending: BTreeMap::new(),
@@ -858,6 +858,15 @@ impl RelayNode {
         outputs
     }
 
+    /// Takes the key of the cross-relay issuer of `epoch` from the log.
+    /// The keys of epochs before the one before `epoch` leave, since no
+    /// token answers them (`ABU-095`).
+    pub fn set_issuer_key(&mut self, epoch: u32, key: PublicKey2048) {
+        self.issuer_keys.insert(epoch, key);
+        let floor = crate::issuer_floor(epoch);
+        self.issuer_keys.retain(|held, _| *held >= floor);
+    }
+
     /// Whether a forward cell waits for its per-hop delay.
     pub fn has_delayed(&self) -> bool {
         !self.delayed.is_empty()
@@ -962,7 +971,7 @@ impl RelayNode {
         if !self.ensure_endpoint(circuit) {
             return Err(Reject::Rejected);
         }
-        let accepts = Accepts::CrossRelay(&self.issuer_key);
+        let accepts = Accepts::CrossRelay(&self.issuer_keys);
         let endpoint = self.endpoints.get_mut(&circuit).ok_or(Reject::Rejected)?;
         // WIR-309, WIR-363: one circuit carries one range.
         if *endpoint.range.get_or_insert(range) != range {
@@ -1176,7 +1185,6 @@ mod tests {
             },
             static_secret,
             layer: 3,
-            issuer_key: PublicKey2048::from_modulus(&[0xFF; 256]).unwrap(),
             chunk_capacity: 1 << 24,
         });
         assert!(node.on_capsule(2, &capsule, 1_000, &mut Rng).is_empty());
@@ -1196,7 +1204,6 @@ mod tests {
             },
             static_secret,
             layer: 3,
-            issuer_key: PublicKey2048::from_modulus(&[0xFF; 256]).unwrap(),
             chunk_capacity: 0,
         }
     }

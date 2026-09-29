@@ -22,7 +22,6 @@ use umbra_core::session::node::{ClientNode, ContactId};
 use umbra_crypto::{
     handshake::nk::RelayStatic,
     hierarchy::RootIdentity,
-    rsabssa::PublicKey2048,
     secret::Secret,
     x25519::{PublicKey as XPublic, StaticSecret},
 };
@@ -141,7 +140,6 @@ async fn two_clients_meet_and_talk_over_real_sockets() {
             relay,
             static_secret,
             layer,
-            issuer_key: PublicKey2048::from_modulus(&[0xFF; 256]).unwrap(),
             chunk_capacity: 1 << 26,
         });
         let mut next_hops = BTreeMap::new();

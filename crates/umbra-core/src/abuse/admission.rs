@@ -17,8 +17,9 @@ use crate::Error;
 
 /// The token type a relay advertises, with what verifies it.
 pub enum Accepts<'a> {
-    /// The cross-relay token, verified with the issuer public key alone.
-    CrossRelay(&'a umbra_crypto::rsabssa::PublicKey2048),
+    /// The cross-relay token, verified with the issuer public key of its
+    /// epoch alone, which the relay took from the log (Part 13 §13.5).
+    CrossRelay(&'a BTreeMap<u32, umbra_crypto::rsabssa::PublicKey2048>),
     /// The first-party token, verified with the issuer secret.
     FirstParty(&'a FirstPartyIssuer),
 }
@@ -31,9 +32,12 @@ impl Accepts<'_> {
         }
     }
 
-    fn verify(&self, token: &Token) -> Result<(), Error> {
+    fn verify(&self, token: &Token, epoch: u32) -> Result<(), Error> {
         match self {
-            Accepts::CrossRelay(pk) => token::verify_cross_relay(pk, token),
+            // ABU-002: a key that the log does not name admits nothing.
+            Accepts::CrossRelay(keys) => {
+                token::verify_cross_relay(keys.get(&epoch).ok_or(Error::Unverified)?, token)
+            }
             Accepts::FirstParty(issuer) => issuer.verify(token),
         }
     }
@@ -129,7 +133,9 @@ impl RelayGate {
                     return Err(Reject::Admission);
                 }
                 let epoch = self.token_epoch(&token, now).ok_or(Reject::Admission)?;
-                accepts.verify(&token).map_err(|_| Reject::Admission)?;
+                accepts
+                    .verify(&token, epoch)
+                    .map_err(|_| Reject::Admission)?;
                 self.spent
                     .spend(epoch_number(now), epoch, token.nonce)
                     .map_err(|_| Reject::Admission)?;
@@ -321,6 +327,46 @@ mod tests {
         };
         assert_eq!(gate.admit(&pow, &accepts, now), Ok(Admitted::Pow));
         assert_eq!(gate.admit(&pow, &accepts, now), Err(Reject::Admission));
+    }
+
+    #[test]
+    fn a_relay_verifies_a_cross_relay_token_under_the_key_of_its_epoch() {
+        use crate::abuse::token::{issue_cross_relay, CrossRelayRequest};
+        use umbra_crypto::rsabssa::SecretKey2048;
+
+        let now = 40 * EPOCH_SECONDS + 1;
+        let secret =
+            SecretKey2048::from_seed(&Secret::new([0x4B; 32]), &40u32.to_be_bytes()).unwrap();
+        let pk = secret.public();
+        let (request, blinded) =
+            CrossRelayRequest::new(1, &challenge(TYPE_CROSS_RELAY, 40), pk, &mut Rng(3)).unwrap();
+        let signed = issue_cross_relay(&secret, &blinded).unwrap();
+        let token = request.finalize(&signed, pk).unwrap().remove(0);
+        let bytes = crate::discovery::dirclient::token_bytes(&token).unwrap();
+        let admission = Admission {
+            kind: AdmissionKind::Token,
+            body: &bytes,
+        };
+        let mut gate = RelayGate::new([1; 32]);
+        // ABU-002: a relay that holds no key of the log for the epoch of the
+        // token admits nothing, and the key of another epoch does not do.
+        let mut keys = BTreeMap::new();
+        assert!(gate
+            .admit(&admission, &Accepts::CrossRelay(&keys), now)
+            .is_err());
+        keys.insert(41, pk.clone());
+        assert!(gate
+            .admit(&admission, &Accepts::CrossRelay(&keys), now)
+            .is_err());
+        keys.insert(40, pk.clone());
+        assert_eq!(
+            gate.admit(&admission, &Accepts::CrossRelay(&keys), now),
+            Ok(Admitted::Token { epoch: 40 })
+        );
+        // A token spends once.
+        assert!(gate
+            .admit(&admission, &Accepts::CrossRelay(&keys), now)
+            .is_err());
     }
 
     #[test]

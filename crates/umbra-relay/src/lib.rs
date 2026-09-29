@@ -14,6 +14,15 @@
 
 pub mod circuits;
 #[cfg(feature = "native")]
+pub mod issuer_keys;
+
+/// The oldest epoch whose issuer key a relay keeps when it takes the key
+/// of `epoch`: the one before the epoch before, since a token names the
+/// current epoch or the one before (`ABU-095`).
+pub const fn issuer_floor(epoch: u32) -> u32 {
+    epoch.saturating_sub(2)
+}
+#[cfg(feature = "native")]
 pub mod directory_server;
 #[cfg(feature = "native")]
 pub mod fcm;

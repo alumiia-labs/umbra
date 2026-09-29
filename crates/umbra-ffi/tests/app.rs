@@ -40,7 +40,6 @@ use umbra_core::{
 use umbra_crypto::{
     handshake::nk::RelayStatic,
     hmac::{digest::KeyInit, Hmac, Mac},
-    rsabssa::PublicKey2048,
     secret::Secret,
     sha2::Sha256,
     sign::SigningKey,
@@ -229,7 +228,6 @@ fn start_relays_with(
             relay,
             static_secret,
             layer,
-            issuer_key: PublicKey2048::from_modulus(&[0xFF; 256]).unwrap(),
             chunk_capacity: 1 << 26,
         };
         let mut store: Box<dyn RelayStore> = match directory {
@@ -1163,7 +1161,6 @@ fn start_signed_network_with(
             },
             static_secret,
             layer: placed.layer,
-            issuer_key: PublicKey2048::from_modulus(&[0xFF; 256]).unwrap(),
             chunk_capacity: 1 << 26,
         };
         let mut store: Box<dyn RelayStore> = Box::new(MemoryStore::default());

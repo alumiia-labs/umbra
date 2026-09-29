@@ -33,7 +33,6 @@ use umbra_crypto::{
     handshake::nk::RelayStatic,
     hierarchy::RootIdentity,
     rand_core::{TryCryptoRng, TryRng},
-    rsabssa::PublicKey2048,
     secret::Secret,
     x25519::{PublicKey as XPublic, StaticSecret},
 };
@@ -158,7 +157,6 @@ impl Mesh {
                     relay,
                     static_secret,
                     layer: LAYERS[index],
-                    issuer_key: PublicKey2048::from_modulus(&[0xFF; 256]).unwrap(),
                     chunk_capacity: if index == FULL_RELAY { 0 } else { 1 << 26 },
                 })
             })

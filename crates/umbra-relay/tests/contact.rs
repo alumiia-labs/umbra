@@ -17,7 +17,6 @@ use umbra_crypto::{
     handshake::nk::RelayStatic,
     hierarchy::RootIdentity,
     rand_core::{TryCryptoRng, TryRng},
-    rsabssa::PublicKey2048,
     secret::Secret,
     sign::SigningKey,
     x25519::{PublicKey as XPublic, StaticSecret},
@@ -106,7 +105,6 @@ impl Network {
             relay,
             static_secret,
             layer,
-            issuer_key: PublicKey2048::from_modulus(&[0xFF; 256]).unwrap(),
             chunk_capacity: 1 << 26,
         }
     }

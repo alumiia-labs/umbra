@@ -307,7 +307,7 @@ mod tests {
         service: ChunkService,
         session: Session,
         gate: RelayGate,
-        issuer: PublicKey2048,
+        issuer: std::collections::BTreeMap<u32, PublicKey2048>,
         rng: Rng,
         corr: u8,
     }
@@ -323,7 +323,7 @@ mod tests {
                 service: ChunkService::new(1 << 24),
                 session: Session::for_circuit(&[7; 16], StaticSecret::from([9; 32])),
                 gate: RelayGate::new([1; 32]),
-                issuer: PublicKey2048::from_modulus(&[0xFF; 256]).unwrap(),
+                issuer: std::collections::BTreeMap::new(),
                 rng: Rng(0),
                 corr: 0,
             }

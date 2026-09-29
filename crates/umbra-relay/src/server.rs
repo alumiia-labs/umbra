@@ -117,6 +117,13 @@ pub enum Input {
         /// The link.
         link: LinkId,
     },
+    /// The key of the cross-relay issuer of one epoch, from the log.
+    IssuerKey {
+        /// The epoch.
+        epoch: u32,
+        /// The key.
+        key: Box<umbra_crypto::rsabssa::PublicKey2048>,
+    },
     /// The NDR answered `gone` for a handle of a push of this relay.
     NdrGone {
         /// The handle.
@@ -208,6 +215,10 @@ pub async fn run_node(
                 }
                 Some(Input::NdrGone { handle }) => {
                     node.ndr_gone(&handle);
+                    Vec::new()
+                }
+                Some(Input::IssuerKey { epoch, key }) => {
+                    node.set_issuer_key(epoch, *key);
                     Vec::new()
                 }
                 Some(Input::ReceiptQuery { query, reply }) => {
@@ -425,6 +436,9 @@ pub struct Carried {
     pub challenges: std::sync::Mutex<Vec<u8>>,
     /// The limits of the connections (`NET-333` to `NET-335`).
     pub limits: ConnectionLimits,
+    /// The pinned route to the log, from which the relay takes the key of
+    /// the cross-relay issuer of each epoch (Part 13 §13.5).
+    pub issuer_reader: std::sync::Mutex<Option<crate::issuer_keys::IssuerReader>>,
 }
 
 /// The file that the authorities write each new manifest to, with the key
@@ -891,6 +905,17 @@ pub async fn run_relay(
     let (inputs, node_inputs) = mpsc::channel::<Input>(1_024);
     let (requests, mut node_requests) = mpsc::unbounded_channel::<Request>();
     let node_task = tokio::spawn(run_node(node, node_inputs, requests, pacing_mean_ms, store));
+    // ABU-099: the keys of the issuer come from the log, on a thread of
+    // their own, since each read blocks.
+    let reader = carried
+        .issuer_reader
+        .lock()
+        .ok()
+        .and_then(|mut held| held.take());
+    if let Some(reader) = reader {
+        let key_inputs = inputs.clone();
+        tokio::task::spawn_blocking(move || crate::issuer_keys::keep_reading(reader, key_inputs));
+    }
 
     let dial_inputs = inputs.clone();
     tokio::spawn(async move {

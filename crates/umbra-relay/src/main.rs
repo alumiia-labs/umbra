@@ -11,7 +11,6 @@
 //! static_secret=<64 hex characters>
 //! cert=/etc/umbra/cert.pem
 //! key=/etc/umbra/key.pem
-//! issuer_modulus=<512 hex characters>
 //! chunk_capacity=107374182400
 //! next=<relay_id hex>,<host name>,<IPv4 address>,<port>
 //! trust=/etc/umbra/test-authority.pem
@@ -71,6 +70,12 @@
 //! an `ndr_key_config=<hex>` line, which `umbra-ndr key-config` prints.
 //! A relay with neither line sends no push.
 //!
+//! A relay takes the key of the cross-relay issuer of each epoch from the
+//! log of Part 9 §9.5 through the directory route of a
+//! `directory_route=https://relay1.example/directory` line, under the pins
+//! of a `directory_pins=<hex>` line, which `umbra-directory pins` prints. A
+//! relay with neither line admits no cross-relay token (Part 13 §13.5).
+//!
 //! The `next` line repeats, one for each relay of the next layer. The
 //! `trust` line is for a test network: the dialer then trusts that one
 //! authority and not the web roots. A deployment leaves it out.
@@ -88,7 +93,6 @@ use umbra_crypto::{
     handshake::nk::RelayStatic,
     hash::sha3_256,
     ohttp,
-    rsabssa::PublicKey2048,
     secret::Secret,
     sign::SigningKey,
     x25519::{PublicKey as XPublic, StaticSecret},
@@ -156,6 +160,8 @@ struct Settings {
     directory_gateway: Option<https::Url>,
     /// The pinned route to the NDR, for the pushes of a queue relay.
     ndr_route: Option<NdrRoute>,
+    /// The route to the log and its pins, for the keys of the issuer.
+    directory_read: Option<(https::Url, umbra_core::discovery::dirclient::DirectoryPins)>,
     /// What this relay declares of itself for a network descriptor: the
     /// operator, the country, the autonomous system, and the IPv4 /16.
     facts: BTreeMap<String, String>,
@@ -305,7 +311,6 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
             relay,
             static_secret,
             layer,
-            issuer_key: PublicKey2048::from_modulus(&hex(values.get("issuer_modulus")?)?).ok()?,
             // A relay with no such line has no attachment role.
             chunk_capacity: match values.get("chunk_capacity") {
                 Some(bytes) => bytes.parse().ok()?,
@@ -351,6 +356,14 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
                     gateway,
                 })
             }
+            (None, None) => None,
+            _ => return None,
+        },
+        directory_read: match (values.get("directory_route"), values.get("directory_pins")) {
+            (Some(url), Some(pins)) => Some((
+                https::Url::parse(url)?,
+                umbra_core::discovery::dirclient::DirectoryPins::parse(&hex(pins)?).ok()?,
+            )),
             (None, None) => None,
             _ => return None,
         },
@@ -613,6 +626,21 @@ async fn run() -> ExitCode {
             }),
             // NTF-127: the route of the pushes of this queue relay.
             ndr: settings.ndr_route.map(|route| (route, client_tls.clone())),
+            issuer_reader: std::sync::Mutex::new(settings.directory_read.and_then(
+                |(relay, pins)| {
+                    let (key_id, gateway) = ohttp::parse_key_config(&pins.key_config).ok()?;
+                    let route = NdrRoute {
+                        relay,
+                        key_id,
+                        gateway,
+                    };
+                    Some(umbra_relay::issuer_keys::IssuerReader::new(
+                        route,
+                        pins,
+                        client_tls.clone(),
+                    ))
+                },
+            )),
             limits: settings.limits,
             ..Carried::default()
         },

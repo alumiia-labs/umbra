@@ -16,7 +16,6 @@ use tokio::{
 };
 use umbra_crypto::{
     handshake::nk::RelayStatic,
-    rsabssa::PublicKey2048,
     secret::Secret,
     x25519::{PublicKey as XPublic, StaticSecret},
 };
@@ -71,7 +70,6 @@ async fn a_client_upgrades_opens_a_session_and_builds_one_hop() {
         relay,
         static_secret,
         layer: 1,
-        issuer_key: PublicKey2048::from_modulus(&[0xFF; 256]).unwrap(),
         chunk_capacity: 1 << 26,
     });
     let (inputs, node_inputs) = mpsc::channel(64);

@@ -25,7 +25,6 @@ use umbra_crypto::{
     },
     rand_core::{TryCryptoRng, TryRng},
     ratchet::{braid::Ratchet, codeword::Width, dr::Role},
-    rsabssa::PublicKey2048,
     secret::Secret,
     x25519::{PublicKey as XPublic, StaticSecret},
 };
@@ -116,7 +115,6 @@ impl Network {
                 relay,
                 static_secret,
                 layer,
-                issuer_key: PublicKey2048::from_modulus(&[0xFF; 256]).unwrap(),
                 chunk_capacity: 1 << 26,
             }));
         }
