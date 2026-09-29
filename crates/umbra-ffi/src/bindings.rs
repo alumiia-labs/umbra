@@ -1578,6 +1578,12 @@ impl Inner {
                 if !self.group_reading.insert(subscription.conversation) {
                     continue;
                 }
+                // GRP-208: a subscription after a long absence shows a gap.
+                let _ = self.client.group_reads(
+                    &[subscription.conversation],
+                    unix_now_ms(),
+                    &mut OsRng,
+                );
                 commands.push(GroupCommand::Subscribe {
                     relay: subscription.relay,
                     group_queue_id: subscription.group_queue_id,
@@ -1769,6 +1775,12 @@ impl Inner {
                 if !self.group_reading.insert(subscription.conversation) {
                     continue;
                 }
+                // GRP-208: a subscription after a long absence shows a gap.
+                let _ = self.client.group_reads(
+                    &[subscription.conversation],
+                    unix_now_ms(),
+                    &mut OsRng,
+                );
                 commands.push(GroupCommand::Subscribe {
                     relay: subscription.relay,
                     group_queue_id: subscription.group_queue_id,
@@ -3429,6 +3441,11 @@ impl Handle {
         if is_tick {
             inner.pump_dead_channels();
             inner.pump_backup();
+            // GRP-208: the read time of each group that a subscription reads.
+            let reading: Vec<crate::ConversationId> = inner.group_reading.iter().copied().collect();
+            let _ = inner
+                .client
+                .group_reads(&reading, unix_now_ms(), &mut OsRng);
             // DEV-057: an acknowledgment that its period made due.
             let Inner { client, bridge, .. } = &mut *inner;
             if client.queue_sync_acks(unix_now(), &mut OsRng).is_ok() {

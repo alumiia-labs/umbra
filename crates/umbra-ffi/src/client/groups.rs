@@ -4257,7 +4257,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     }
 
     /// Writes one activity clock of §11.9.7.
-    fn put_clock<R: CryptoRng + ?Sized>(
+    pub(super) fn put_clock<R: CryptoRng + ?Sized>(
         &mut self,
         conversation: ConversationId,
         key: Vec<u8>,
@@ -4278,7 +4278,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     }
 
     /// Reads one activity clock of §11.9.7.
-    fn clock(&self, key: &[u8]) -> Result<Option<u64>, Error> {
+    pub(super) fn clock(&self, key: &[u8]) -> Result<Option<u64>, Error> {
         let store = &self.open_ref()?.store;
         let row = store.row_id(GROUP_PRESENCE, key);
         Ok(store

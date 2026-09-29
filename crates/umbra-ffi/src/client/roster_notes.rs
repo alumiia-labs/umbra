@@ -33,8 +33,14 @@ pub const NOTE_ROLE: u8 = 4;
 pub const NOTE_FORK: u8 = 5;
 
 /// This device acknowledged the queue of the contact above a hole, thus
-/// the records in that hole are lost (Part 3 `NET-103`, Part 6 `WIR-117`).
+/// the records in that hole are lost (Part 3 `NET-103`, Part 6 `WIR-117`),
+/// or it read no replica of a group for longer than `GROUP_RETENTION`
+/// (Part 11 `GRP-208`).
 pub const NOTE_GAP: u8 = 6;
+
+/// The least time between two moves of the read time of a group, in
+/// seconds.
+const READ_CLOCK_STEP: u64 = 86_400;
 
 /// The index of a note that names no member.
 pub const NOTE_NOBODY: u16 = 0xFFFF;
@@ -99,6 +105,42 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             },
             rng,
         )
+    }
+
+    /// Takes the reads of the groups that this device subscribes to now
+    /// (`GRP-208`). A group that no subscription read for more than
+    /// `GROUP_RETENTION` shows a gap: the replicas erased the records of
+    /// that period, and no party holds them. The read time moves once in
+    /// `READ_CLOCK_STEP` at most, thus a subscription that runs costs no
+    /// write at each tick.
+    pub fn group_reads<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversations: &[ConversationId],
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let now = now_ms / 1_000;
+        for &conversation in conversations {
+            let key = [conversation.0.as_slice(), b"read"].concat();
+            let last = self.clock(&key)?;
+            if last.is_some_and(|at| now.saturating_sub(at) > umbra_queue::params::GROUP_RETENTION)
+            {
+                self.put_roster_note(
+                    conversation,
+                    RosterNote {
+                        at_ms: now_ms,
+                        kind: NOTE_GAP,
+                        index: NOTE_NOBODY,
+                        role: 0,
+                    },
+                    rng,
+                )?;
+            }
+            if last.is_none_or(|at| now.saturating_sub(at) >= READ_CLOCK_STEP) {
+                self.put_clock(conversation, key, now, rng)?;
+            }
+        }
+        Ok(())
     }
 
     /// Keeps each fork that the roster found since `before` of them

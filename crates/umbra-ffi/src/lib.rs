@@ -3790,6 +3790,45 @@ mod tests {
     }
 
     #[test]
+    fn a_group_that_no_subscription_read_for_its_retention_shows_a_gap() {
+        use crate::client::NOTE_GAP;
+
+        let mut rng = Rng(111);
+        let mut client = new_client(&mut rng);
+        let group = client
+            .create_group("Away", [[0xA1; 32], [0xB2; 32]], 1_700_000_000, &mut rng)
+            .unwrap();
+        let day: u64 = 86_400_000;
+        let start = 1_700_000_000_000;
+        let gaps = |client: &Client<MemoryBackend, Element>| {
+            client
+                .roster_notes(group)
+                .unwrap()
+                .iter()
+                .filter(|note| note.kind == NOTE_GAP)
+                .count()
+        };
+        client.group_reads(&[group], start, &mut rng).unwrap();
+        // A read each day keeps the group whole.
+        client
+            .group_reads(&[group], start + 20 * day, &mut rng)
+            .unwrap();
+        client
+            .group_reads(&[group], start + 40 * day, &mut rng)
+            .unwrap();
+        assert_eq!(gaps(&client), 0);
+        // GRP-208: more than GROUP_RETENTION with no read is a gap.
+        client
+            .group_reads(&[group], start + 71 * day, &mut rng)
+            .unwrap();
+        assert_eq!(gaps(&client), 1);
+        client
+            .group_reads(&[group], start + 72 * day, &mut rng)
+            .unwrap();
+        assert_eq!(gaps(&client), 1);
+    }
+
+    #[test]
     fn a_delivery_gap_is_a_note_of_the_conversation() {
         use crate::client::{NOTE_GAP, NOTE_NOBODY};
 
