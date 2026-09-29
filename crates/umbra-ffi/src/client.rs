@@ -2804,7 +2804,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // A group record goes to the two replicas of its group queue and
         // on no pairwise channel (Part 11 §11.2).
         if is_group {
-            let message = self.post_to_group(conversation, msg_id, &app, now_ms, rng)?;
+            let message = self.post_to_group(conversation, msg_id, app, now_ms, rng)?;
             self.auto_lock.touch(now_ms / 1_000);
             return Ok(message);
         }
