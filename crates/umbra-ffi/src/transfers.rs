@@ -224,14 +224,25 @@ pub async fn run_transfers(
     let _ = rng.try_fill_bytes(&mut mask);
     let plan = Plan::Only(Wire::Tcp);
     let connected = native::connect(&guard, tls, plan, key, mask, Duration::from_secs(10)).await;
-    let Ok(mut link) = connected else {
+    // Each exit closes the channel first and fails each command in it, thus
+    // no command waits for an answer that no task gives.
+    let drain = |commands: &mut mpsc::UnboundedReceiver<TransferCommand>,
+                 early: &mut Vec<TransferCommand>| {
+        commands.close();
         while let Ok(command) = commands.try_recv() {
             early.push(command);
         }
+    };
+    let Ok(mut link) = connected else {
+        crate::devlog::line("transfers: the dial failed");
+        drain(&mut commands, &mut early);
         fail_each(&active, &early);
         return;
     };
     if node.connected(&mut rng).is_err() {
+        crate::devlog::line("transfers: the node did not start");
+        drain(&mut commands, &mut early);
+        fail_each(&active, &early);
         return;
     }
 
@@ -291,6 +302,7 @@ pub async fn run_transfers(
                     }
                 }
                 for tag in failed {
+                    crate::devlog::line(format!("transfers: tag {tag} failed at a tick"));
                     active.remove(&tag);
                     let _ = updates.send(TransferUpdate::Failed { tag });
                 }
@@ -308,8 +320,14 @@ pub async fn run_transfers(
         let _ = node.take_changes();
         for event in events {
             match event {
-                ClientEvent::CircuitReady => is_ready = true,
-                ClientEvent::CircuitLost | ClientEvent::CircuitAged => break 'run,
+                ClientEvent::CircuitReady => {
+                    crate::devlog::line("transfers: circuit ready");
+                    is_ready = true;
+                }
+                ClientEvent::CircuitLost | ClientEvent::CircuitAged => {
+                    crate::devlog::line("transfers: circuit lost or aged");
+                    break 'run;
+                }
                 ClientEvent::Chunk { handle, outcome } => {
                     let owner = active.iter().find_map(|(tag, transfer)| {
                         let owns = match transfer {
@@ -380,7 +398,10 @@ pub async fn run_transfers(
                                 Progress::Done(chunk) => TransferUpdate::HandleRead { tag, chunk },
                             }),
                     };
-                    let update = step.unwrap_or(TransferUpdate::Failed { tag });
+                    let update = step.unwrap_or_else(|error| {
+                        crate::devlog::line(format!("transfers: tag {tag} failed: {error:?}"));
+                        TransferUpdate::Failed { tag }
+                    });
                     if !matches!(update, TransferUpdate::Progress { .. }) {
                         active.remove(&tag);
                     }
@@ -538,5 +559,11 @@ pub async fn run_transfers(
             }
         }
     }
+    crate::devlog::line(format!(
+        "transfers: the run ended with {} open and {} waiting",
+        active.len(),
+        early.len()
+    ));
+    drain(&mut commands, &mut early);
     fail_each(&active, &early);
 }

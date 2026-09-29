@@ -15,6 +15,7 @@
 #[cfg(feature = "runtime")]
 pub mod bridge;
 pub mod client;
+pub mod devlog;
 pub mod draft;
 #[cfg(feature = "runtime")]
 pub mod groups;

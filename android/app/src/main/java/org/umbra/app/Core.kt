@@ -199,6 +199,19 @@ object Core {
     private var handle: Handle? = null
     private var draining = false
 
+    init {
+        // A debug build moves the lines of the core into the log of the
+        // platform. A release build has none to move.
+        if (BuildConfig.DEBUG) {
+            Thread({
+                while (true) {
+                    uniffi.umbra_ffi.takeDebugLines().forEach { android.util.Log.d("umbra-core", it) }
+                    SystemClock.sleep(1_000)
+                }
+            }, "umbra-debug-lines").apply { isDaemon = true }.start()
+        }
+    }
+
     /** Whether a run started and did not report its first state yet. */
     private var isStarting = false
 

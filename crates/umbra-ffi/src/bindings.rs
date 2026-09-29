@@ -1924,6 +1924,16 @@ impl Inner {
 
     /// Takes one answer of the group task into the store.
     fn end_group(&mut self, update: GroupUpdate) {
+        match &update {
+            GroupUpdate::Posted { tag, .. } => crate::devlog::line(format!("group {tag}: posted")),
+            GroupUpdate::Failed { tag, reason } => {
+                crate::devlog::line(format!("group {tag}: failed {reason:?}"));
+            }
+            GroupUpdate::Created { tag, .. } => {
+                crate::devlog::line(format!("group {tag}: created"))
+            }
+            _ => {}
+        }
         let answered = match &update {
             GroupUpdate::Created { tag, .. }
             | GroupUpdate::Posted { tag, .. }
@@ -2369,6 +2379,17 @@ impl Inner {
     /// Takes the end of one transfer into the store. A message that a
     /// deletion took since has no row, and its result goes nowhere.
     fn end_transfer(&mut self, update: TransferUpdate) {
+        crate::devlog::line(match &update {
+            TransferUpdate::Progress { tag, done, total } => {
+                format!("transfer {tag}: {done} of {total}")
+            }
+            TransferUpdate::Uploaded { tag, .. } => format!("transfer {tag}: uploaded"),
+            TransferUpdate::Downloaded { tag, .. } => format!("transfer {tag}: downloaded"),
+            TransferUpdate::HandleWritten { tag, .. } => format!("transfer {tag}: handle written"),
+            TransferUpdate::HandleRead { tag, .. } => format!("transfer {tag}: handle read"),
+            TransferUpdate::Failed { tag } => format!("transfer {tag}: failed"),
+            TransferUpdate::Gone { tag } => format!("transfer {tag}: gone"),
+        });
         // ATT-052: a file whose chunk each replica lost ends there. Each
         // other transfer takes the loss as a failure.
         let (update, is_gone) = match update {
@@ -2902,6 +2923,13 @@ impl Drop for Handle {
             runtime.shutdown_background();
         }
     }
+}
+
+/// The lines of the run for the developer, in a debug build. A release
+/// build gives none.
+#[uniffi::export]
+pub fn take_debug_lines() -> Vec<String> {
+    crate::devlog::take()
 }
 
 /// Opens the client. The first launch makes the store under `passphrase`,
