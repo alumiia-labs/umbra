@@ -418,6 +418,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             return Ok(());
         }
         self.store_rekeyed(conversation, &group, &seed, rng)?;
+        // DEV-303: an epoch key of the new index that came on the group
+        // queue before the seed waits, and it installs now.
+        self.retry_epoch_keys(conversation, now_ms, rng)?;
         self.events.push_back(super::Event::Conversations);
         Ok(())
     }
