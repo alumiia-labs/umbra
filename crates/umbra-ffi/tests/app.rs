@@ -1555,7 +1555,8 @@ fn a_file_goes_through_the_relays_of_a_signed_network() {
     };
     assert_eq!(*fetched, plain);
 
-    // A descriptor whose chunks no relay holds ends with no file.
+    // A descriptor whose chunks no relay holds ends with no file, and the
+    // end says that each replica lacks a chunk (Part 12 `ATT-052`).
     let mut unknown = umbra_wire::descriptor::FileDescriptor::parse(&encoded).unwrap();
     for chunk_ref in &mut unknown.refs {
         chunk_ref.chunk_id[0] ^= 1;
@@ -1569,7 +1570,7 @@ fn a_file_goes_through_the_relays_of_a_signed_network() {
         .unwrap();
     assert!(matches!(
         transfer_end(&mut receiver_updates),
-        TransferUpdate::Failed { tag: 10 }
+        TransferUpdate::Gone { tag: 10 }
     ));
 }
 
