@@ -887,6 +887,24 @@ object Core {
 
     private const val RESTORE_WAIT_MS = 10 * 60_000L
 
+    /**
+     * The local wipe of Part 7 `DEV-008`: the run ends, and the platform
+     * deletes each file, preference, and key of the app, and it ends the
+     * process. The next start is a first launch.
+     */
+    fun eraseDevice(context: Context) {
+        val app = context.applicationContext
+        worker.execute {
+            handle?.let {
+                it.disconnect()
+                it.close()
+            }
+            handle = null
+            (app.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager)
+                .clearApplicationUserData()
+        }
+    }
+
     /** Whether this device holds a store, thus the unlock view says so. */
     fun hasStore(context: Context) = File(context.filesDir, "umbra.db").exists()
 

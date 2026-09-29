@@ -605,6 +605,18 @@ private fun SettingsTab(push: (Screen) -> Unit) {
         if (Core.ownsChannels) {
             SettingRow("rotate", "Reset identity", "For a device in hostile hands") { push(Screen.ResetIdentity) }
         }
+        // DEV-008: a device leaves each set by an explicit local wipe.
+        var isErasing by remember { mutableStateOf(false) }
+        SettingRow("trash-can", "Erase this device", "Each key and message on it") { isErasing = true }
+        if (isErasing) {
+            ActionSheet(
+                "Erase this device?",
+                listOf(RowEntry("trash-can", "Erase this device") { Core.eraseDevice(context) }),
+                note = "This deletes each message, contact, and key on this device. A backup, and each " +
+                    "other device of your set, keeps what it holds. The app then starts as new.",
+                onDismiss = { isErasing = false },
+            )
+        }
         LaunchedEffect(Unit) { Core.readDevices() }
     }
 }
