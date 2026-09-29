@@ -185,7 +185,7 @@ Algorithm 16 of FIPS 203, and it takes the two 32-byte seeds `d` and `z`.
 
 > *Cause.* An earlier draft wrote each line as `KDF(Root, label)`, with no salt,
 > no output length, and no split of the output into the two keypairs. Two
-> clients could restore one recovery phrase to two different identities, and the
+> clients could restore one root seed to two different identities, and the
 > user reached no contact after a restore. Part 9 §9.9.1 and Part 12 §12.3.3
 > already write the full call, and CRY-034 to CRY-037 pin the `UMBRA-KEM`
 > encoding to the byte. This section now holds the same rigor.
@@ -208,10 +208,10 @@ directly from its CSPRNG.
   the labels of §5.11.
 
 The client stores each `GroupRosterSeed_g` in the **local identity table**, together
-with the pairwise salts of Part 4 §4.2.2. The recovery phrase restores the
+with the pairwise salts of Part 4 §4.2.2. The root seed restores the
 hierarchy in the diagram above. The encrypted backup of Part 4 §4.7.2 restores
 the local identity table. Thus the Recovery Code restores the full account, and
-the recovery phrase alone does not.
+the root seed alone does not.
 
 ## 5.3 The hybrid KEM: `UMBRA-KEM`
 

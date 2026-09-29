@@ -20,7 +20,7 @@ Two demands pull in opposite directions:
 
 UMBRA solves this problem with a **layered identity**. There is one root secret,
 three different public faces, and a one-way derivation between them. The user
-gets one recovery phrase and one sense of "my account". The network sees
+gets one root seed and one sense of "my account". The network sees
 unrelated keys.
 
 ## 4.2 The three layers
@@ -147,7 +147,7 @@ read `o` as `0` and `i` and `l` as `1`, as that alphabet permits.
 
 This property holds because the two keys are outputs of a one-way KDF under
 different domain-separation labels. The derivation from one root gives the user
-one recovery phrase. The KDF keeps the two keys unlinkable. An adversary that
+one root seed. The KDF keeps the two keys unlinkable. An adversary that
 holds the `RootIdentity` can link all the keys. But such an adversary has won
 against each other measure in this specification.
 
@@ -906,7 +906,7 @@ The **local identity table** holds the pairwise salts of §4.2.2. That table
 also holds the group roster seed `GroupRosterSeed_g` of each group, and the
 three group keys of Part 11 §11.9.1 (the roster key, the pair key, and the KEM
 key) derive from that seed. The client makes each of these values from the
-device CSPRNG, thus the recovery phrase alone does not rebuild them. The local
+device CSPRNG, thus the root seed alone does not rebuild them. The local
 identity table is not history. **[IDN-047]** A retention limit MUST NOT remove an entry from
 that table.
 

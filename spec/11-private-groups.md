@@ -1923,7 +1923,7 @@ The re-key below is that move, and it needs no admin.
   identity table of Part 7 §7.5.1, as any group seed does.
 
 **A single device.** A user with one phone restores onto a new phone from the
-recovery phrase and the backup of Part 4 §4.7.2. That backup carries the group
+root seed and the backup of Part 4 §4.7.2. That backup carries the group
 seeds, thus the new phone posts the same `RekeyRecord`. Without a backup the
 new phone holds no group key, and the user tells an admin out of band; the
 admin posts a plain epoch that removes the index, any member rotates, and the

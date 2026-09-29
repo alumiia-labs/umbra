@@ -1454,7 +1454,7 @@ Source: `spec/07-device-sets.md`
 | `DEV-135` | §7.6.1 | MUST | That client | That client MUST then start the re-establishment of the queue over the pairwise identity. |  |  |
 | `DEV-136` | §7.6.1 | MUST NOT | A client | A client MUST NOT upload the archive to UMBRA infrastructure. |  |  |
 | `DEV-137` | §7.7 | MUST | The UI | The UI MUST state this limit in those words. |  |  |
-| `DEV-138` | §7.7 | MUST | The UI | The UI MUST also recommend the identity reset from the recovery phrase for a device in hostile hands. |  |  |
+| `DEV-138` | §7.7 | MUST | The UI | The UI MUST also recommend the full identity reset of §7.7.1 for a device in hostile hands. |  |  |
 | `DEV-143` | §7.3 | MUST | A device | A device MUST make `DeviceRosterKey_i` from its own CSPRNG. |  |  |
 | `DEV-144` | §7.3 | MUST NOT | A device | A device MUST NOT derive that keypair from the `RootIdentity`, from `K_devset`, or from `SyncChannelSeed`. |  |  |
 | `DEV-145` | §7.3 | MUST NOT | A device | A device MUST NOT transmit the private half of `DeviceRosterKey_i`. |  |  |

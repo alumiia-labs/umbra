@@ -84,7 +84,7 @@ pub const REVOCATION_LIMIT_TEXT: &str =
     "Revocation acts on the future only. A revoked device keeps the data that it synced.";
 /// The recommendation for a device in hostile hands.
 pub const HOSTILE_DEVICE_TEXT: &str =
-    "For a device in hostile hands, reset the identity from the recovery phrase.";
+    "For a device in hostile hands, reset the identity in the settings.";
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]

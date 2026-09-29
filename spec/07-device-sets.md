@@ -1682,7 +1682,7 @@ A `SyncSeedUpdate` is 40 bytes. With the sub-kind, the version, and the
 - **Revocation acts on the future only.** A revoked device keeps the data that
   it synced. Revocation cannot reach a device that the user does not control.
   **[DEV-137]** The UI MUST state this limit in those words. **[DEV-138]** The UI MUST also recommend the
-  identity reset from the recovery phrase for a device in hostile hands.
+  full identity reset of §7.7.1 for a device in hostile hands.
 - **Revocation removes the roster signing authority.** §7.3.1 rule 3 takes that
   authority from the `devices` list of the previous epoch and from the `revoked`
   list of that epoch. §7.3 makes each `DeviceRosterKey` local to one device.
