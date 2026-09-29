@@ -2651,6 +2651,38 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(RootIdentity::new(Secret::new(seed)).rng_harden_key())
     }
 
+    /// The seed of the root identity: the identity root of a reset, or the
+    /// seed of the store.
+    fn root_seed(&self) -> Result<Zeroizing<[u8; 32]>, Error> {
+        if let Some(seed) = self.identity_seed()? {
+            return Ok(Zeroizing::new(seed));
+        }
+        let store = &self.open_ref()?.store;
+        let row = store.row_id(TableId::LOCAL_IDENTITY, ROOT_KEY);
+        let seed = Zeroizing::new(
+            store
+                .get(TableId::LOCAL_IDENTITY, &row)?
+                .ok_or(Error::Integrity)?,
+        );
+        Ok(Zeroizing::new(
+            seed.as_slice().try_into().map_err(|_| Error::Integrity)?,
+        ))
+    }
+
+    /// Gives the root seed to `sink` as `RecoveryDigits` of type `0x0004`
+    /// (Part 4 `IDN-003`, `IDN-149`). It rebuilds the root identity and no
+    /// contact.
+    pub fn render_root_seed(&self, sink: &mut dyn Sink) -> Result<(), Error> {
+        let seed = self.root_seed()?;
+        let digits = umbra_core::identity::recovery::to_digits(
+            umbra_core::identity::recovery::DigitsType::Root,
+            seed.as_slice(),
+        )?;
+        let units: Zeroizing<Vec<u16>> = Zeroizing::new(digits.encode_utf16().collect());
+        sink.put(&units);
+        Ok(())
+    }
+
     /// The root identity of the device, for the network runtime.
     pub fn root_identity(&self) -> Result<RootIdentity, Error> {
         // Part 7 §7.7.1: a reset gives an identity root of its own.

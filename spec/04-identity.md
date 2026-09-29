@@ -57,13 +57,21 @@ recoverable form, and no field is a commitment to it.
 - **[IDN-002]** A device MUST transfer the Root Identity to a different device of the same
   user only on the device-link channel. Part 7 gives that channel, which is an
   in-person flow or an authenticated side-channel flow.
-- **[IDN-003]** The client MUST let the user recover the Root Identity as a **24-word recovery
-  phrase**. The phrase uses the BIP-39 wordlist and holds 256 bits of entropy.
+- **[IDN-003]** The client MUST let the user recover the Root Identity from its
+  **root seed**, which the client exports as `RecoveryDigits` of type `0x0004`
+  of §4.7.7. The seed holds 256 bits of entropy.
 
-The phrase rebuilds the `RootIdentity`. The phrase alone does not rebuild the
+The root seed rebuilds the `RootIdentity`. The seed alone does not rebuild the
 local identity table. The encrypted backup of §4.7.2 holds the `RootIdentity`
-and that table. Thus the Recovery Code recovers the full account, and the phrase
-alone recovers the `RootIdentity` only. Refer to §4.7.
+and that table. Thus the Recovery Code recovers the full account, and the root
+seed alone recovers the `RootIdentity` only. Refer to §4.7.
+
+> *Cause of `IDN-003`.* An earlier draft gave the seed as a 24-word BIP-39
+> phrase. §4.7.7 then took each other secret of the user from words to
+> digits, on the cause of the transcription error rate, and `IDN-150` forbids
+> a word list for those secrets. One word list beside three digit strings
+> gave the user two forms and two error rates. The seed now takes the form of
+> the other secrets, with its type and its check.
 
 ### 4.2.2 Pairwise Identity — the default
 
@@ -1217,7 +1225,7 @@ again.
 
 ### 4.7.7 The recovery digits
 
-A user holds three secrets as digits. The Recovery Code of §4.7.1, the user
+A user holds four secrets as digits. The root seed of `IDN-003`, the Recovery Code of §4.7.1, the user
 half `C_user` of §4.7.3, and a share of `C_social` of §4.7.3 are each a string
 of decimal digits. An earlier draft let two of them take a word list, and no
 value told a screen which secret the user typed. The encoding below tags each
@@ -1229,6 +1237,7 @@ RecoveryDigits {
                            // 0x0002 C_user, 16 bytes
                            // 0x0003 a share of C_social, 17 bytes,
                            //        the share index first
+                           // 0x0004 the root seed of IDN-003, 32 bytes
     payload   [n]u8
     check     u16          // SHA3-256( BE16(type) || payload )[0..2]
 }
@@ -1237,13 +1246,14 @@ digits = the bytes of RecoveryDigits as one big-endian integer, in decimal,
          with leading zeros to the fixed width of the type, in groups of five
 ```
 
-The Recovery Code is 36 bytes and 87 digits. `C_user` is 20 bytes and 49
+The Recovery Code is 36 bytes and 87 digits, and so is the root seed: its
+`type` tells the two apart. `C_user` is 20 bytes and 49
 digits. A share is 21 bytes and 51 digits. A screen reads the first digits,
 decodes `type`, and knows the width.
 
-- **[IDN-149]** A client MUST export each of the three secrets as
+- **[IDN-149]** A client MUST export each of the four secrets as
   `RecoveryDigits` in decimal, in groups of five digits. **[IDN-150]** A client
-  MUST NOT export any of the three as a word list. Rule `IDN-041` keeps the
+  MUST NOT export any of the four as a word list. Rule `IDN-041` keeps the
   hexadecimal form out on the same cause, which is the transcription error
   rate.
 - **[IDN-151]** A client MUST verify `check` before it uses an entered secret.

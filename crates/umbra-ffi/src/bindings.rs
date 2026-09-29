@@ -3049,8 +3049,50 @@ fn init_store_from(
     Ok(handle_of(config.database_path, client))
 }
 
+/// Makes the store of a device from a root seed (Part 4 `IDN-003`): the
+/// root identity comes back, and no contact, no message, and no group. The
+/// digits are `RecoveryDigits` of type `0x0004`, and a check that fails, or
+/// another type, is `Malformed` or `Unverified` (`IDN-151`, `IDN-154`).
+#[uniffi::export]
+pub fn init_from_root_seed(
+    config: Config,
+    element: Arc<dyn SecureElementCallback>,
+    passphrase: Vec<u16>,
+    digits: Vec<u16>,
+) -> Result<Arc<Handle>, FfiError> {
+    use umbra_core::identity::recovery::{from_digits, DigitsType};
+    let passphrase = Zeroizing::new(passphrase);
+    let text = Zeroizing::new(String::from_utf16_lossy(&Zeroizing::new(digits)));
+    let seed = from_digits(&text, DigitsType::Root).map_err(|cause| match cause {
+        umbra_core::Error::Unverified => FfiError::Unverified,
+        _ => FfiError::Malformed,
+    })?;
+    let seed: [u8; 32] = seed
+        .as_slice()
+        .try_into()
+        .map_err(|_| FfiError::Malformed)?;
+    let backend = SqliteBackend::open(&config.database_path).map_err(|_| FfiError::Storage)?;
+    let headers = SqliteBackend::open(&config.database_path).map_err(|_| FfiError::Storage)?;
+    let cost = Cost::calibrate(config.argon2_floor_ms);
+    let client = Client::create_with_seed(
+        backend,
+        ForeignElement(element),
+        &passphrase,
+        cost,
+        unix_now(),
+        umbra_crypto::secret::Secret::new(seed),
+        &mut OsRng,
+    )?;
+    headers
+        .set_header(client.header())
+        .map_err(|_| FfiError::Storage)?;
+    harden(&client);
+    Ok(handle_of(config.database_path, client))
+}
+
 /// The type of entered recovery digits (Part 4 §4.7.7): 1 for the
 /// recovery code, 2 for the user half, 3 for a share of the social half,
+/// 4 for the root seed,
 /// and 0 for digits whose check fails (`IDN-151`). A screen names the type
 /// that the user entered and the one that it asks for (`IDN-153`).
 #[uniffi::export]
@@ -3061,6 +3103,7 @@ pub fn recovery_digits_kind(digits: Vec<u16>) -> u8 {
         (DigitsType::Code, 1),
         (DigitsType::User, 2),
         (DigitsType::Share, 3),
+        (DigitsType::Root, 4),
     ];
     kinds
         .into_iter()
@@ -4679,6 +4722,14 @@ impl Handle {
             .ok_or(FfiError::NotFound)?;
         inner.restore = None;
         Ok(Arc::new(Restored(Mutex::new(Some(restored)))))
+    }
+
+    /// Renders the root seed into a sink of the platform, as the 87 digits
+    /// of `RecoveryDigits` of type `0x0004` (Part 4 `IDN-003`). The platform
+    /// overwrites its buffer when the view ends (`IMP-037`).
+    pub fn root_seed(&self, sink: Arc<dyn TextSink>) -> Result<(), FfiError> {
+        let mut sink = ForeignSink(sink);
+        Ok(locked(&self.inner).client.render_root_seed(&mut sink)?)
     }
 
     /// Renders the recovery code into a sink of the platform, as the 87

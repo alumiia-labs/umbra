@@ -66,6 +66,7 @@ sealed interface Screen {
     data object AutoDownload : Screen
     data object ChangePassphrase : Screen
     data object RecoveryCode : Screen
+    data object RootSeed : Screen
     data object Devices : Screen
     data object LinkDevice : Screen
     data object PublicLinks : Screen
@@ -212,6 +213,13 @@ private fun OpenApp() {
             Screen.AutoDownload -> AutoDownloadScreen(pop)
             Screen.ChangePassphrase -> ChangePassphraseScreen(pop)
             Screen.RecoveryCode -> RecoveryCodeScreen(pop, push)
+            // IDN-003: the seed that rebuilds the identity and no contact.
+            Screen.RootSeed -> SecretDigitsScreen(
+                "Root seed",
+                "These digits rebuild your identity on a new device, with no contact and no message. " +
+                    "The recovery code restores the backup.",
+                pop,
+            ) { loaded -> Core.rootSeed(loaded) }
             Screen.Devices -> DevicesScreen(pop, push)
             Screen.LinkDevice -> LinkDeviceScreen(pop)
             Screen.PublicLinks -> PublicLinksScreen(pop, push)

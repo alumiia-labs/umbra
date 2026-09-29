@@ -256,12 +256,14 @@ pub enum DigitsType {
     User = 0x0002,
     /// A share of `C_social`, 17 bytes, 51 digits.
     Share = 0x0003,
+    /// The root seed of `IDN-003`, 32 bytes, 87 digits.
+    Root = 0x0004,
 }
 
 impl DigitsType {
     const fn payload_len(self) -> usize {
         match self {
-            DigitsType::Code => 32,
+            DigitsType::Code | DigitsType::Root => 32,
             DigitsType::User => 16,
             DigitsType::Share => 17,
         }
@@ -270,7 +272,7 @@ impl DigitsType {
     /// The fixed digit width of the type.
     pub const fn width(self) -> usize {
         match self {
-            DigitsType::Code => 87,
+            DigitsType::Code | DigitsType::Root => 87,
             DigitsType::User => 49,
             DigitsType::Share => 51,
         }
@@ -281,6 +283,7 @@ impl DigitsType {
             0x0001 => Ok(DigitsType::Code),
             0x0002 => Ok(DigitsType::User),
             0x0003 => Ok(DigitsType::Share),
+            0x0004 => Ok(DigitsType::Root),
             _ => Err(Error::Malformed),
         }
     }
@@ -320,14 +323,14 @@ pub fn to_digits(kind: DigitsType, payload: &[u8]) -> Result<Zeroizing<String>, 
 pub fn from_digits(text: &str, expected: DigitsType) -> Result<Zeroizing<Vec<u8>>, Error> {
     let digits: Zeroizing<Vec<u8>> =
         Zeroizing::new(text.bytes().filter(|b| b.is_ascii_digit()).collect());
-    // The digit count names the type the user entered (IDN-153).
-    let entered = match digits.len() {
-        87 => DigitsType::Code,
-        49 => DigitsType::User,
-        51 => DigitsType::Share,
+    // The digit count names the length. The root seed and the recovery
+    // code share a width, and `type` tells them apart (IDN-153).
+    let total_len = 4 + match digits.len() {
+        87 => DigitsType::Code.payload_len(),
+        49 => DigitsType::User.payload_len(),
+        51 => DigitsType::Share.payload_len(),
         _ => return Err(Error::Malformed),
     };
-    let total_len = 4 + entered.payload_len();
     // Decimal to big-endian bytes by repeated multiply-add.
     let mut bytes = Zeroizing::new(alloc::vec![0u8; total_len]);
     for d in digits.iter() {
@@ -343,7 +346,7 @@ pub fn from_digits(text: &str, expected: DigitsType) -> Result<Zeroizing<Vec<u8>
     }
     let mut r = Reader::new(&bytes);
     let kind = DigitsType::from_u16(r.u16()?)?;
-    if kind != entered {
+    if kind.width() != digits.len() {
         return Err(Error::Malformed);
     }
     let payload = Zeroizing::new(r.take(kind.payload_len())?.to_vec());
@@ -492,6 +495,13 @@ mod tests {
                 .count(),
             51
         );
+        // IDN-003: the root seed takes the width of the code, and its type
+        // tells the two apart (IDN-153).
+        let seed = to_digits(DigitsType::Root, &[9; 32]).unwrap();
+        assert_eq!(seed.bytes().filter(|b| b.is_ascii_digit()).count(), 87);
+        assert_eq!(*from_digits(&seed, DigitsType::Root).unwrap(), [9; 32]);
+        assert_eq!(from_digits(&seed, DigitsType::Code), Err(Error::Unverified));
+        assert_eq!(from_digits(&text, DigitsType::Root), Err(Error::Unverified));
     }
 
     #[test]

@@ -42,6 +42,7 @@ import uniffi.umbra_ffi.initLinked
 import uniffi.umbra_ffi.initRestored
 import uniffi.umbra_ffi.Device
 import uniffi.umbra_ffi.LinkStatus
+import uniffi.umbra_ffi.initFromRootSeed
 import uniffi.umbra_ffi.recoveryDigitsKind
 import uniffi.umbra_ffi.measureArgon2FloorMs
 import uniffi.umbra_ffi.MsgHandle
@@ -763,6 +764,12 @@ object Core {
         main.post { onDone() }
     }
 
+    fun rootSeed(onLoaded: (CharArray) -> Unit) = call { client ->
+        val sink = CharSink()
+        client.rootSeed(sink)
+        main.post { onLoaded(sink.chars) }
+    }
+
     fun recoveryCode(onLoaded: (CharArray) -> Unit) = call { client ->
         val sink = CharSink()
         client.recoveryCode(sink)
@@ -795,7 +802,24 @@ object Core {
             // user half (IDN-191).
             val wanted = if (shareUnits.isEmpty()) 1 else 2
             val kind = recoveryDigitsKind(code).toInt()
-            val names = mapOf(1 to "the recovery code", 2 to "the user half", 3 to "a share")
+            val names = mapOf(1 to "the recovery code", 2 to "the user half", 3 to "a share", 4 to "the root seed")
+            // IDN-003: the root seed makes a store with the identity alone.
+            if (kind == 4 && shareUnits.isEmpty()) {
+                try {
+                    val database = File(app.filesDir, "umbra.db")
+                    val made = initFromRootSeed(
+                        Config(database.absolutePath, measureArgon2FloorMs()),
+                        KeystoreElement(app),
+                        units,
+                        code,
+                    )
+                    main.post { restoreNote = null }
+                    begin(app, made)
+                } catch (failure: FfiException) {
+                    restoreFailed("The root seed did not open: ${failure.javaClass.simpleName}.")
+                }
+                return@execute
+            }
             if (kind != wanted) {
                 restoreFailed(
                     if (kind == 0) {

@@ -3866,6 +3866,43 @@ mod tests {
     }
 
     #[test]
+    fn the_root_seed_digits_rebuild_the_same_root_identity() {
+        use umbra_core::identity::recovery::{from_digits, DigitsType};
+
+        let mut rng = Rng(113);
+        let alice = new_client(&mut rng);
+        let mut view = View::default();
+        alice.render_root_seed(&mut view).unwrap();
+        let text = String::from_utf16(&view.0).unwrap();
+        // IDN-003, IDN-149: 87 digits in groups of five.
+        assert_eq!(text.bytes().filter(u8::is_ascii_digit).count(), 87);
+        let seed = from_digits(&text, DigitsType::Root).unwrap();
+        let seed: [u8; 32] = seed.as_slice().try_into().unwrap();
+        let back = Client::create_with_seed(
+            MemoryBackend::default(),
+            Element([2; 32]),
+            &units("another passphrase"),
+            CHEAP,
+            2_000,
+            umbra_crypto::secret::Secret::new(seed),
+            &mut rng,
+        )
+        .unwrap();
+        let salt = [4; 16];
+        assert_eq!(
+            back.root_identity()
+                .unwrap()
+                .pairwise_identity(&salt)
+                .x25519_public(),
+            alice
+                .root_identity()
+                .unwrap()
+                .pairwise_identity(&salt)
+                .x25519_public()
+        );
+    }
+
+    #[test]
     fn a_delivery_gap_is_a_note_of_the_conversation() {
         use crate::client::{NOTE_GAP, NOTE_NOBODY};
 

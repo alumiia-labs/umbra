@@ -479,7 +479,7 @@ Source: `spec/04-identity.md`
 | --- | --- | --- | --- | --- | --- | --- |
 | `IDN-001` | §4.2.1 | MUST NOT | A device | A device MUST NOT send the Root Identity to a relay. |  |  |
 | `IDN-002` | §4.2.1 | MUST | A device | A device MUST transfer the Root Identity to a different device of the same user only on the device-link channel. |  |  |
-| `IDN-003` | §4.2.1 | MUST | The client | The client MUST let the user recover the Root Identity as a **24-word recovery phrase**. |  |  |
+| `IDN-003` | §4.2.1 | MUST | The client | The client MUST let the user recover the Root Identity from its **root seed**, which the client exports as `RecoveryDigits` of type `0x0004` of §4.7.7. |  |  |
 | `IDN-004` | §4.2.3 | MAY | A user | A user MAY hold more than one Public Address at the index `j`. |  |  |
 | `IDN-005` | §4.2.3 | MAY | A user | A user MAY hold a professional address and a personal address. |  |  |
 | `IDN-006` | §4.2.3 | MAY | A user | A user MAY retire an address and move to the index `j+1`. |  |  |
@@ -618,8 +618,8 @@ Source: `spec/04-identity.md`
 | `IDN-146` | §4.5.2 | MUST NOT | A client | A client MUST NOT show a code from an earlier ceremony. |  |  |
 | `IDN-147` | §4.5.2 | MUST | A client | A client MUST set the verification state of §4.5 at a user confirmation that the two codes match. |  |  |
 | `IDN-148` | §4.5.2 | MUST NOT | A client | A client MUST NOT set that state from the exchange alone. |  |  |
-| `IDN-149` | §4.7.7 | MUST | A client | A client MUST export each of the three secrets as `RecoveryDigits` in decimal, in groups of five digits. |  |  |
-| `IDN-150` | §4.7.7 | MUST NOT | A client | A client MUST NOT export any of the three as a word list. |  |  |
+| `IDN-149` | §4.7.7 | MUST | A client | A client MUST export each of the four secrets as `RecoveryDigits` in decimal, in groups of five digits. |  |  |
+| `IDN-150` | §4.7.7 | MUST NOT | A client | A client MUST NOT export any of the four as a word list. |  |  |
 | `IDN-151` | §4.7.7 | MUST | A client | A client MUST verify `check` before it uses an entered secret. |  |  |
 | `IDN-152` | §4.7.7 | MUST | (unstated) | If `check` fails, the client MUST say so and MUST NOT run the KDF. |  |  |
 | `IDN-153` | §4.7.7 | MUST | (unstated) | If `type` differs from the type that the screen asks for, the client MUST name the type that the user entered and the type that the screen asks for. |  |  |

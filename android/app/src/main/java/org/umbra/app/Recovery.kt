@@ -147,6 +147,7 @@ fun RecoveryCodeScreen(onBack: () -> Unit, push: (Screen) -> Unit = {}) {
             Note(UiText.get(R.string.umbra_ui_imp_050))
             Spacer(Modifier.height(16.dp))
             EntryRow(RowEntry("user-group", "Recovery with contacts") { push(Screen.SocialRecovery) })
+            EntryRow(RowEntry("key", "Root seed") { push(Screen.RootSeed) })
         }
     }
 }
