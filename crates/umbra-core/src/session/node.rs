@@ -18,6 +18,8 @@ use alloc::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     vec::Vec,
 };
+/// The privacy mode of a circuit (Part 3 §3.9).
+pub use umbra_onion::build::DelayClass;
 
 use umbra_crypto::{
     auth::CommandAuthKey,
@@ -33,7 +35,7 @@ use umbra_crypto::{
     zeroize::Zeroizing,
 };
 use umbra_onion::{
-    build::{build_cell_body, read_cell_body, DelayClass, Pending, BUILD_BUCKET, HELLO_LEN},
+    build::{build_cell_body, read_cell_body, Pending, BUILD_BUCKET, HELLO_LEN},
     circuit::CircuitBuild,
     CIRCUIT_BUILD_TIMEOUT, CIRCUIT_MAX_AGE, CIRCUIT_MAX_CELLS, HOPS,
 };
@@ -488,6 +490,9 @@ struct Slot {
     /// Whether the circuit serves rendezvous queues of Part 9 §9.6 and no
     /// other queue or record (`DIS-014`).
     rendezvous: bool,
+    /// The privacy mode of the circuit (Part 3 §3.9). A circuit carries the
+    /// traffic of one mode (`NET-028`).
+    class: DelayClass,
 }
 
 /// The time before `CIRCUIT_MAX_AGE` at which a client ends a circuit
@@ -524,6 +529,7 @@ impl Slot {
             building_since: None,
             born: None,
             rendezvous: false,
+            class: DelayClass::default(),
         }
     }
 
@@ -729,6 +735,8 @@ struct HeldChunk {
     chunk_id: [u8; 32],
     handle: u64,
     job: ChunkJob,
+    /// The privacy mode of the circuit that takes it (Part 12 `ATT-167`).
+    class: DelayClass,
 }
 
 struct HeldGroup {
@@ -1148,10 +1156,17 @@ pub struct ClientNode {
     /// A `DEL` went in this run, which is one transport session: no second
     /// one goes (`WIR-045`).
     del_sent: bool,
-    /// The privacy mode of each circuit that this node builds (Part 3
-    /// §3.9). A node carries one mode, thus one circuit carries one mode
-    /// (`NET-028`), and each hop of it reads that mode (`NET-336`).
+    /// The privacy mode of each circuit that this node builds for no
+    /// contact of another mode (Part 3 §3.9). Each hop of a circuit reads
+    /// its mode (`NET-336`).
     delay_class: DelayClass,
+    /// The privacy mode of the conversation of each contact whose mode is
+    /// not the one of the node: its records go on circuits of that mode
+    /// (`NET-028`).
+    contact_classes: BTreeMap<[u8; 32], DelayClass>,
+    /// The privacy mode of the chunk commands from now on: the mode of the
+    /// conversation of the file (Part 12 `ATT-167`).
+    chunk_class: DelayClass,
     /// The `send_index` of each record of the user that this node sealed,
     /// by the handle of the call, for a later key request (`WIR-339`).
     sent_indices: Vec<(u64, u16)>,
@@ -1282,6 +1297,8 @@ impl ClientNode {
             gaps: Vec::new(),
             del_sent: false,
             delay_class: DelayClass::default(),
+            contact_classes: BTreeMap::new(),
+            chunk_class: DelayClass::default(),
             sent_indices: Vec::new(),
             lost: Vec::new(),
             changes: Vec::new(),
@@ -2563,14 +2580,30 @@ impl ClientNode {
         exit: Option<[u8; 32]>,
         rng: &mut R,
     ) -> Result<(), Error> {
-        self.slots.push(Slot::empty(exit));
+        self.add_circuit_in(exit, self.delay_class, rng)
+    }
+
+    /// As [`ClientNode::add_circuit`], for a circuit of `class`.
+    fn add_circuit_in<R: CryptoRng + ?Sized>(
+        &mut self,
+        exit: Option<[u8; 32]>,
+        class: DelayClass,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        self.slots.push(Slot {
+            class,
+            ..Slot::empty(exit)
+        });
         self.current = self.slots.len().saturating_sub(1);
         self.build_current(rng)
     }
 
     /// Adds one rendezvous circuit, and starts its build.
     fn add_rendezvous_circuit<R: CryptoRng + ?Sized>(&mut self, rng: &mut R) -> Result<(), Error> {
-        self.slots.push(Slot::for_rendezvous(None));
+        self.slots.push(Slot {
+            class: self.delay_class,
+            ..Slot::for_rendezvous(None)
+        });
         self.current = self.slots.len().saturating_sub(1);
         self.build_current(rng)
     }
@@ -2686,9 +2719,21 @@ impl ClientNode {
     /// does not serve `avoid` comes first, thus one session shows a relay
     /// one queue of a pair where the circuits permit it.
     fn ready_slot_to(&self, relay: &[u8; 32], avoid: Option<usize>) -> Option<usize> {
+        self.ready_slot_in(relay, avoid, self.delay_class)
+    }
+
+    /// As [`ClientNode::ready_slot_to`], among the circuits of `class`
+    /// (`NET-028`).
+    fn ready_slot_in(
+        &self,
+        relay: &[u8; 32],
+        avoid: Option<usize>,
+        class: DelayClass,
+    ) -> Option<usize> {
         let ends_here = |(index, slot): (usize, &Slot)| {
             let exit = slot.chain.and_then(|chain| chain.last().copied());
-            (slot.is_general() && slot.is_ready() && exit == Some(*relay)).then_some(index)
+            (slot.is_general() && slot.is_ready() && slot.class == class && exit == Some(*relay))
+                .then_some(index)
         };
         let mut found = self.slots.iter().enumerate().filter_map(ends_here);
         let other = found.clone().find(|index| Some(*index) != avoid);
@@ -2702,8 +2747,19 @@ impl ClientNode {
         relay: [u8; 32],
         rng: &mut R,
     ) -> Result<(), Error> {
+        self.circuit_in(relay, self.delay_class, rng)
+    }
+
+    /// As [`ClientNode::circuit_to`], for a circuit of `class`.
+    fn circuit_in<R: CryptoRng + ?Sized>(
+        &mut self,
+        relay: [u8; 32],
+        class: DelayClass,
+        rng: &mut R,
+    ) -> Result<(), Error> {
         let ends_there = |slot: &Slot| {
             slot.is_general()
+                && slot.class == class
                 && match slot.chain {
                     Some(chain) => chain.last() == Some(&relay),
                     None => slot.exit == Some(relay),
@@ -2713,7 +2769,7 @@ impl ClientNode {
             return Ok(());
         }
         let current = self.current;
-        let started = self.add_circuit(Some(relay), rng);
+        let started = self.add_circuit_in(Some(relay), class, rng);
         self.current = current;
         started
     }
@@ -2768,8 +2824,8 @@ impl ClientNode {
         let hop = chain.get(build.built()).ok_or(Error::NoPath)?;
         let relay = self.key_of(hop).ok_or(Error::NoPath)?;
         let mut hello = [0u8; HELLO_LEN];
-        let pending =
-            Pending::hello(relay, self.delay_class, rng, &mut hello).map_err(|_| Error::NoPath)?;
+        let pending = Pending::hello(relay, self.slot()?.class, rng, &mut hello)
+            .map_err(|_| Error::NoPath)?;
         let mut body = alloc::vec![0u8; BUILD_BUCKET.body_len()];
         build_cell_body(CellCommand::Extend, &hello, &mut body).map_err(|_| Error::NoPath)?;
         let tag = build.seal(&mut body).map_err(|_| Error::NoPath)?;
@@ -3309,17 +3365,19 @@ impl ClientNode {
             }
         }
         let handle = self.handle();
+        let class = self.chunk_class;
         let held = HeldChunk {
             relay,
             chunk_id,
             handle,
             job,
+            class,
         };
-        if self.ready_slot_to(&relay, None).is_some() {
+        if self.ready_slot_in(&relay, None, class).is_some() {
             self.start_chunk(held, rng)?;
         } else {
             self.held_chunks.push(held);
-            self.circuit_to(relay, rng)?;
+            self.circuit_in(relay, class, rng)?;
         }
         Ok(handle)
     }
@@ -3343,7 +3401,9 @@ impl ClientNode {
         held: HeldChunk,
         rng: &mut R,
     ) -> Result<(), Error> {
-        self.current = self.ready_slot_to(&held.relay, None).ok_or(Error::NoPath)?;
+        self.current = self
+            .ready_slot_in(&held.relay, None, held.class)
+            .ok_or(Error::NoPath)?;
         let session_pk = self.session_pk()?;
         let corr_id: [u8; 16] = random(rng);
         let mut bind = [0u8; TOKEN_LEN];
@@ -3568,15 +3628,17 @@ impl ClientNode {
             return Ok(user_handle);
         }
         let relay = *held.channel.outbound().relay_id();
-        let has_circuit = self.ready_slot_to(&relay, None).is_some();
+        let class = self.class_of(&contact.0);
+        let has_circuit = self.ready_slot_in(&relay, None, class).is_some();
         if !held.channel.can_send() || !has_circuit {
             // The first record of the invitee opens the chain (`NET-292`),
-            // and a record goes on a circuit to the relay of its queue.
+            // and a record goes on a circuit to the relay of its queue, in
+            // the mode of its conversation (`NET-028`).
             let held = self.contacts.get_mut(&contact.0).ok_or(Error::NoPath)?;
             held.waiting_sends
                 .push_back((app.to_vec(), Some(user_handle)));
             if !has_circuit {
-                self.circuit_to(relay, rng)?;
+                self.circuit_in(relay, class, rng)?;
             }
             return Ok(user_handle);
         }
@@ -3731,7 +3793,8 @@ impl ClientNode {
         let channel = &self.contacts.get(&contact).ok_or(Error::NoPath)?.channel;
         let relay = *channel.outbound().relay_id();
         let inbound_slot = self.slot_of(channel.inbound().recipient_id());
-        let Some(slot) = self.ready_slot_to(&relay, inbound_slot) else {
+        let class = self.class_of(&contact);
+        let Some(slot) = self.ready_slot_in(&relay, inbound_slot, class) else {
             // No circuit ends at the relay of the queue. The record waits
             // for one, in its order, and the call is no fault: a record
             // that arrives must never end a run for the lack of a circuit.
@@ -3741,7 +3804,7 @@ impl ClientNode {
             };
             let held = self.contacts.get_mut(&contact).ok_or(Error::NoPath)?;
             held.waiting_sends.push_back((app.to_vec(), user_handle));
-            return self.circuit_to(relay, rng);
+            return self.circuit_in(relay, class, rng);
         };
         self.current = slot;
         let session_pk = self.session_pk()?;
@@ -3879,6 +3942,29 @@ impl ClientNode {
     /// on (Part 3 §3.9, `NET-028`).
     pub fn set_delay_class(&mut self, class: DelayClass) {
         self.delay_class = class;
+    }
+
+    /// Sets the privacy mode of the conversation of `contact`: each record
+    /// to it goes on a circuit of that mode (Part 3 §3.9, `NET-028`).
+    pub fn set_contact_class(&mut self, contact: &ContactId, class: DelayClass) {
+        if class == self.delay_class {
+            self.contact_classes.remove(&contact.0);
+        } else {
+            self.contact_classes.insert(contact.0, class);
+        }
+    }
+
+    /// Sets the privacy mode of the chunk commands from now on (Part 12
+    /// `ATT-167`).
+    pub fn set_chunk_class(&mut self, class: DelayClass) {
+        self.chunk_class = class;
+    }
+
+    fn class_of(&self, contact: &[u8; 32]) -> DelayClass {
+        self.contact_classes
+            .get(contact)
+            .copied()
+            .unwrap_or(self.delay_class)
     }
 
     /// Continues the counts of an earlier run.
@@ -4174,9 +4260,13 @@ impl ClientNode {
         for fetch in due {
             self.fetch_link(fetch, rng)?;
         }
+        let ready_class = self
+            .slots
+            .get(ready)
+            .map_or(self.delay_class, |slot| slot.class);
         let (due, held): (Vec<HeldChunk>, Vec<HeldChunk>) = core::mem::take(&mut self.held_chunks)
             .into_iter()
-            .partition(|held| held.relay == exit);
+            .partition(|held| held.relay == exit && held.class == ready_class);
         self.held_chunks = held;
         for held in due {
             self.start_chunk(held, rng)?;

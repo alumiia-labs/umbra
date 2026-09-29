@@ -1360,6 +1360,54 @@ fn ended_queues(events: &[ClientEvent]) -> Vec<[u8; 32]> {
 }
 
 #[test]
+fn a_conversation_in_another_mode_sends_on_a_circuit_of_that_mode() {
+    use umbra_onion::build::DelayClass;
+    const ALICE: usize = 0;
+    const BOB: usize = 1;
+    let mut mesh = Mesh::new(&[0x41, 0x61]);
+    mesh.settle();
+    mesh.take_events(ALICE);
+    mesh.take_events(BOB);
+    mesh.clients[ALICE].invite(&mut Rng(1)).unwrap();
+    mesh.settle();
+    let events = mesh.take_events(ALICE);
+    let [ClientEvent::Invitation { bundle, .. }] = &events[..] else {
+        panic!("{events:?}");
+    };
+    mesh.clients[BOB]
+        .accept(bundle.clone(), &mut Rng(2))
+        .unwrap();
+    mesh.settle();
+    mesh.settle();
+    let contacts = (
+        contact_of(&mesh.take_events(ALICE)),
+        contact_of(&mesh.take_events(BOB)),
+    );
+    let before = mesh.clients[ALICE].chains().len();
+
+    // NET-028: the record of a conversation in Private mode goes on a
+    // circuit of that mode, which the client builds for it.
+    mesh.clients[ALICE].set_contact_class(&contacts.0, DelayClass::Private);
+    let now = mesh.now;
+    mesh.clients[ALICE]
+        .send(&contacts.0, &text(51, "slow and steady"), now, &mut Rng(4))
+        .unwrap();
+    mesh.settle();
+    mesh.settle();
+    assert_eq!(texts_of(mesh.take_events(BOB)), [b"slow and steady"]);
+    assert_eq!(mesh.clients[ALICE].chains().len(), before + 1);
+
+    // A second record takes the same circuit.
+    let now = mesh.now;
+    mesh.clients[ALICE]
+        .send(&contacts.0, &text(52, "again"), now, &mut Rng(5))
+        .unwrap();
+    mesh.settle();
+    assert_eq!(texts_of(mesh.take_events(BOB)), [b"again"]);
+    assert_eq!(mesh.clients[ALICE].chains().len(), before + 1);
+}
+
+#[test]
 fn a_queue_rotates_to_another_operator_and_the_old_one_ends() {
     const ALICE: usize = 0;
     const BOB: usize = 1;

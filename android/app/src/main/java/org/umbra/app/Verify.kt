@@ -132,6 +132,9 @@ fun ConversationSettingsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) ->
     var timer by remember { mutableStateOf<UInt?>(null) }
     var alert by remember { mutableStateOf<UByte?>(null) }
     var isSecure by remember { mutableStateOf<Boolean?>(null) }
+    var mode by remember { mutableStateOf<Int?>(null) }
+    var isChoosingMode by remember { mutableStateOf(false) }
+    LaunchedEffect(chat.conversation) { Core.privacyMode(chat.conversation) { mode = it } }
     LaunchedEffect(chat.conversation) { Core.receipts(chat.conversation) { receipts = it } }
     LaunchedEffect(chat.conversation, Core.revision) { Core.screenshotBlocked(chat.conversation) { isSecure = it } }
     LaunchedEffect(chat.conversation, Core.revision) { Core.alertSetting(chat.conversation) { alert = it } }
@@ -163,6 +166,14 @@ fun ConversationSettingsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) ->
                 ToggleRow("Block screenshots", it) { on -> Core.blockScreenshots(chat.conversation, on) }
                 HorizontalDivider(color = Palette.Divider)
             }
+            // Part 3 §3.9, NET-081: the mode is a control of speed and of
+            // timing cover. A group takes the mode of the device.
+            if (!chat.isGroup) {
+                mode?.let {
+                    EntryRow(RowEntry("hourglass-half", "Delivery speed", modeLabel(it)) { isChoosingMode = true })
+                    HorizontalDivider(color = Palette.Divider)
+                }
+            }
             receipts?.let { now ->
                 ToggleRow("Send delivery receipts", now.delivery) { change(Receipts(it, now.read)) }
                 HorizontalDivider(color = Palette.Divider)
@@ -173,6 +184,28 @@ fun ConversationSettingsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) ->
             }
         }
     }
+    if (isChoosingMode) {
+        ActionSheet(
+            title = "Delivery speed",
+            entries = listOf(0, 1, 2).map { choice ->
+                RowEntry("hourglass-half", modeLabel(choice)) {
+                    mode = choice
+                    Core.keepPrivacyMode(chat.conversation, choice)
+                    isChoosingMode = false
+                }
+            },
+            note = "Each relay holds a message for a random time: none when fast, about 0.15 s when " +
+                "balanced, and about 0.7 s when slow. A longer hold makes the timing of your messages " +
+                "harder to match. Files of this conversation take the same speed.",
+            onDismiss = { isChoosingMode = false },
+        )
+    }
+}
+
+private fun modeLabel(mode: Int): String = when (mode) {
+    0 -> "Fast"
+    2 -> "Slow"
+    else -> "Balanced"
 }
 
 @Composable

@@ -1289,6 +1289,16 @@ object Core {
     /** Each conversation whose contact types, until `TYPING_TTL` (`WIR-286`). */
     val typingNow = mutableStateMapOf<List<Byte>, Long>()
 
+    /** The privacy mode of a conversation: 0 Fast, 1 Balanced, 2 Private (Part 3 §3.9). */
+    fun privacyMode(conversation: Conversation, onMode: (Int) -> Unit) = call { client ->
+        val mode = client.privacyMode(conversation.id).toInt()
+        main.post { onMode(mode) }
+    }
+
+    fun keepPrivacyMode(conversation: Conversation, mode: Int) = call { client ->
+        client.setPrivacyMode(conversation.id, mode.toUByte())
+    }
+
     /** The period of the history on this device, in seconds (Part 7 §7.5.2). */
     var historyAge by mutableStateOf(365L * 86_400)
         private set

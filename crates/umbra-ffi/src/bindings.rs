@@ -1555,6 +1555,14 @@ enum GroupWork {
 }
 
 impl Inner {
+    /// The privacy mode of the conversation of a message.
+    fn mode_of_message(&self, message: &crate::MsgRef) -> umbra_core::session::node::DelayClass {
+        self.client
+            .conversation_of_message(message)
+            .and_then(|conversation| self.client.privacy_mode(conversation))
+            .unwrap_or_default()
+    }
+
     /// Gives each file job of the store to the transfer task (Part 12
     /// §12.8). With no run of the network the jobs wait in the store.
     fn pump_transfers(&mut self) {
@@ -1567,6 +1575,12 @@ impl Inner {
                 message: job.message,
                 is_upload: true,
             });
+            // ATT-167: the circuits of a file take the mode of its
+            // conversation.
+            commands.push(TransferCommand::Mode {
+                tag,
+                class: self.mode_of_message(&job.message),
+            });
             commands.push(TransferCommand::Upload {
                 tag,
                 plain: job.plain,
@@ -1577,6 +1591,10 @@ impl Inner {
             let tag = self.next_tag(TransferWork::File {
                 message: job.message,
                 is_upload: false,
+            });
+            commands.push(TransferCommand::Mode {
+                tag,
+                class: self.mode_of_message(&job.message),
             });
             commands.push(TransferCommand::Download {
                 tag,
@@ -4201,6 +4219,13 @@ impl Handle {
                     running.accept_device(bundle)?;
                 }
             }
+            // NET-028: the records of a conversation in another mode go on
+            // circuits of that mode.
+            for (conversation, contact) in running.contacts() {
+                if let Ok(class) = client.privacy_mode(conversation) {
+                    node.set_contact_class(&contact, class);
+                }
+            }
             *bridge = Some(running);
             runtime.spawn(run_client(
                 node,
@@ -5417,6 +5442,29 @@ impl Handle {
         Ok(locked(&self.inner)
             .client
             .set_history_age(seconds, &mut OsRng)?)
+    }
+
+    /// The privacy mode of a conversation: 0 Fast, 1 Balanced, 2 Private
+    /// (Part 3 §3.9).
+    pub fn privacy_mode(&self, conversation: Vec<u8>) -> Result<u8, FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        Ok(locked(&self.inner).client.privacy_mode(conversation)? as u8)
+    }
+
+    /// Sets the privacy mode of a conversation. The run takes it at once.
+    pub fn set_privacy_mode(&self, conversation: Vec<u8>, mode: u8) -> Result<(), FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        let class = umbra_core::session::node::DelayClass::from_byte(mode)
+            .map_err(|_| FfiError::Malformed)?;
+        let mut inner = locked(&self.inner);
+        let Inner { client, bridge, .. } = &mut *inner;
+        client.set_privacy_mode(conversation, class, &mut OsRng)?;
+        if let Some(running) = bridge {
+            if let Some(contact) = running.contact_for(&conversation) {
+                running.set_class(contact, class)?;
+            }
+        }
+        Ok(())
     }
 
     /// Whether the drafts go to the other devices of the set.

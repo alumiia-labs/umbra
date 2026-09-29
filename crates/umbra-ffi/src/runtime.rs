@@ -110,6 +110,14 @@ impl TryCryptoRng for OsRng {}
 /// What the application asks of the runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
+    /// Sets the privacy mode of the conversation of a contact (Part 3
+    /// §3.9, `NET-028`).
+    SetClass {
+        /// The contact.
+        contact: ContactId,
+        /// The mode.
+        class: umbra_core::session::node::DelayClass,
+    },
     /// Make one invitation with a link. An [`Update::Invitation`] follows
     /// with the 68 bytes of the fragment of Part 4 §4.3.1.
     Invite,
@@ -756,6 +764,7 @@ pub async fn run_client(
             match command {
                 // The loop above takes these commands.
                 Command::Foreground(_) | Command::Wake => {}
+                Command::SetClass { contact, class } => node.set_contact_class(&contact, class),
                 Command::Invite => {
                     if node.invite_link(&mut rng).is_err() {
                         let _ = updates.send(Update::Refused);

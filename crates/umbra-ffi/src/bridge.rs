@@ -151,6 +151,16 @@ impl Bridge {
         })
     }
 
+    /// Sets the privacy mode of the conversation of `contact` (Part 3
+    /// §3.9).
+    pub fn set_class(
+        &self,
+        contact: ContactId,
+        class: umbra_core::session::node::DelayClass,
+    ) -> Result<(), Error> {
+        self.command(Command::SetClass { contact, class })
+    }
+
     /// Asks for one invitation. A [`NetEvent::Invitation`] follows.
     pub fn invite(&self) -> Result<(), Error> {
         self.command(Command::Invite)

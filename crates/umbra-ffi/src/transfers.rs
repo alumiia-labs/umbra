@@ -45,6 +45,15 @@ pub enum TransferCommand {
         /// The time of the fetch.
         now: u64,
     },
+    /// The privacy mode of the transfer of `tag`, which comes before its
+    /// `Upload` or `Download`: its circuits take that mode (Part 12
+    /// `ATT-167`). A transfer with none takes Balanced.
+    Mode {
+        /// The tag of the transfer.
+        tag: u64,
+        /// The mode of the conversation of the file.
+        class: umbra_core::session::node::DelayClass,
+    },
     /// Upload one file. The plaintext leaves the memory with the command.
     Upload {
         /// A value of the caller, which comes back in each update.
@@ -200,6 +209,9 @@ pub async fn run_transfers(
 ) {
     let mut rng = OsRng;
     let mut active: BTreeMap<u64, Active> = BTreeMap::new();
+    // ATT-167: the mode of each transfer, which the node takes before each
+    // call into it.
+    let mut classes: BTreeMap<u64, umbra_core::session::node::DelayClass> = BTreeMap::new();
     let mut early: Vec<TransferCommand> = Vec::new();
     let fail_each = |active: &BTreeMap<u64, Active>, early: &[TransferCommand]| {
         for tag in active.keys() {
@@ -285,6 +297,7 @@ pub async fn run_transfers(
                 let mut failed = Vec::new();
                 let mut read = Vec::new();
                 for (tag, transfer) in &mut active {
+                    node.set_chunk_class(classes.get(tag).copied().unwrap_or_default());
                     let ticked = match transfer {
                         Active::One(fetch) => fetch.tick(&mut node, &mut rng),
                         Active::Up(upload) => upload.tick(&mut node, &mut rng),
@@ -346,6 +359,7 @@ pub async fn run_transfers(
                     let Some(transfer) = active.get_mut(&tag) else {
                         continue;
                     };
+                    node.set_chunk_class(classes.get(&tag).copied().unwrap_or_default());
                     let step = match transfer {
                         Active::One(fetch) => fetch
                             .on_outcome(&mut node, handle, outcome, &mut rng)
@@ -442,7 +456,11 @@ pub async fn run_transfers(
                         }
                     }
                 }
+                TransferCommand::Mode { tag, class } => {
+                    classes.insert(tag, class);
+                }
                 TransferCommand::Upload { tag, plain, shape } => {
+                    node.set_chunk_class(classes.get(&tag).copied().unwrap_or_default());
                     let started =
                         Upload::new(&plain, shape, &relays, &mut rng).and_then(|mut upload| {
                             upload.tick(&mut node, &mut rng)?;
@@ -549,6 +567,7 @@ pub async fn run_transfers(
                     }
                 }
                 TransferCommand::Download { tag, descriptor } => {
+                    node.set_chunk_class(classes.get(&tag).copied().unwrap_or_default());
                     let started =
                         Download::new(&descriptor, &relays, &mut rng).and_then(|mut download| {
                             download.tick(&mut node, &mut rng)?;

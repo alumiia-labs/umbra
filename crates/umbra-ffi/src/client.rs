@@ -29,6 +29,7 @@ mod intros;
 mod key_changes;
 mod key_supply;
 mod moderation;
+mod modes;
 mod notify;
 mod own_delete;
 mod polls;
