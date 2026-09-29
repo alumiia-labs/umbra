@@ -1145,6 +1145,9 @@ pub struct ClientNode {
     /// Each contact whose queue this device acknowledged above a hole
     /// (`WIR-116`), for the gap that its conversation shows.
     gaps: Vec<ContactId>,
+    /// A `DEL` went in this run, which is one transport session: no second
+    /// one goes (`WIR-045`).
+    del_sent: bool,
     /// The `send_index` of each record of the user that this node sealed,
     /// by the handle of the call, for a later key request (`WIR-339`).
     sent_indices: Vec<(u64, u16)>,
@@ -1273,6 +1276,7 @@ impl ClientNode {
             rendezvous_at: None,
             moved: BTreeSet::new(),
             gaps: Vec::new(),
+            del_sent: false,
             sent_indices: Vec::new(),
             lost: Vec::new(),
             changes: Vec::new(),
@@ -1422,12 +1426,7 @@ impl ClientNode {
         });
         self.moved.remove(recipient_id);
         if let Some(slot) = self.slot_of(recipient_id) {
-            self.current = slot;
-            if let Ok(session_pk) = self.session_pk() {
-                let command = held.inbound.delete(&session_pk, random(rng))?;
-                self.queue_command(command, Waiting::Other)?;
-                self.pump()?;
-            }
+            self.send_del(slot, &held.inbound, rng)?;
             if let Some(slot) = self.slots.get_mut(slot) {
                 slot.queues.remove(recipient_id);
             }
@@ -1520,7 +1519,13 @@ impl ClientNode {
             }
         }
         let mut out = Vec::new();
+        // WIR-044, WIR-045: the grace of each rotation ends at its own
+        // jittered time, and one ends in a run. The others read their old
+        // queue until a later run.
         for contact in ended {
+            if self.del_sent {
+                break;
+            }
             out.extend(self.end_rotation(contact, rng)?);
         }
         if let Some(contact) = due {
@@ -1720,14 +1725,7 @@ impl ClientNode {
         let Some(slot) = self.slot_of(&queue) else {
             return Ok(());
         };
-        let current = self.current;
-        self.current = slot;
-        if let Ok(session_pk) = self.session_pk() {
-            let command = inbound.delete(&session_pk, random(rng))?;
-            self.queue_command(command, Waiting::Other)?;
-            self.pump()?;
-        }
-        self.current = current;
+        self.send_del(slot, inbound, rng)?;
         if let Some(slot) = self.slots.get_mut(slot) {
             slot.queues.remove(&queue);
         }
@@ -1852,11 +1850,10 @@ impl ClientNode {
             .filter(|held| held.channel.previous().is_none())
         else {
             let queue = *inbound.recipient_id();
-            let command = inbound.delete(&self.session_pk()?, random(rng))?;
             for slot in &mut self.slots {
                 slot.queues.remove(&queue);
             }
-            self.queue_command(command, Waiting::Other)?;
+            self.send_del(self.current, &inbound, rng)?;
             return Ok(Vec::new());
         };
         held.channel.rotate(inbound)?;
@@ -1893,19 +1890,36 @@ impl ClientNode {
         self.moved.insert(contact);
         let queue = *previous.recipient_id();
         if let Some(slot) = self.slot_of(&queue) {
-            let current = self.current;
-            self.current = slot;
-            if let Ok(session_pk) = self.session_pk() {
-                let command = previous.delete(&session_pk, random(rng))?;
-                self.queue_command(command, Waiting::Other)?;
-                self.pump()?;
-            }
-            self.current = current;
+            self.send_del(slot, &previous, rng)?;
             if let Some(slot) = self.slots.get_mut(slot) {
                 slot.queues.remove(&queue);
             }
         }
         Ok(alloc::vec![ClientEvent::QueueEnded { queue }])
+    }
+
+    /// Sends the `DEL` of `inbound` on the circuit of `slot`, when no other
+    /// `DEL` went in this run (`WIR-045`). A queue whose `DEL` does not go
+    /// ends at the `QUEUE_IDLE_TTL` of its relay.
+    fn send_del<R: CryptoRng + ?Sized>(
+        &mut self,
+        slot: usize,
+        inbound: &Inbound,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        if self.del_sent {
+            return Ok(());
+        }
+        let current = self.current;
+        self.current = slot;
+        if let Ok(session_pk) = self.session_pk() {
+            let command = inbound.delete(&session_pk, random(rng))?;
+            self.queue_command(command, Waiting::Other)?;
+            self.del_sent = true;
+            self.pump()?;
+        }
+        self.current = current;
+        Ok(())
     }
 
     /// Makes a notify queue of Part 8 §8.5.2 (`NTF-090`). A
@@ -1976,12 +1990,7 @@ impl ClientNode {
         });
         self.moved.remove(recipient_id);
         if let Some(slot) = self.slot_of(recipient_id) {
-            self.current = slot;
-            if let Ok(session_pk) = self.session_pk() {
-                let command = held.inbound.delete(&session_pk, random(rng))?;
-                self.queue_command(command, Waiting::Other)?;
-                self.pump()?;
-            }
+            self.send_del(slot, &held.inbound, rng)?;
             if let Some(slot) = self.slots.get_mut(slot) {
                 slot.queues.remove(recipient_id);
             }
@@ -4591,8 +4600,7 @@ impl ClientNode {
                 let Some(held) = self.contacts.get(contact) else {
                     // The contact left while the relay made the queue.
                     self.renewing.remove(contact);
-                    let command = inbound.delete(&session_pk, random(rng))?;
-                    self.queue_command(command, Waiting::Other)?;
+                    self.send_del(self.current, &inbound, rng)?;
                     return Ok(Vec::new());
                 };
                 (held.salt, Some(*contact))
