@@ -1912,6 +1912,13 @@ object Core {
         main.post { onLoaded(isFull) }
     }
 
+    /** Forwards a text to a conversation (`WIR-177`). */
+    fun forward(message: MsgHandle, to: Conversation, onDone: () -> Unit) = call { client ->
+        client.forward(message, to.id)
+        refreshChats()
+        main.post { revision++; onDone() }
+    }
+
     fun resendFile(message: MsgHandle) = call { client ->
         client.resendFile(message)
         main.post { revision++ }

@@ -16,6 +16,7 @@ mod dead;
 mod devices;
 mod discovery;
 mod files;
+mod forward;
 mod gossip;
 mod group_changes;
 mod group_sync;
@@ -2780,7 +2781,21 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut app = Zeroizing::new(vec![0u8; message.len()]);
         message.encode(&mut app)?;
         drop(rich);
+        self.send_app(conversation, msg_id, &app, is_group, now_ms, rng)
+    }
 
+    /// Stores one encoded record of this device in its conversation and
+    /// hands it to the send path: the group queue of a group, or the
+    /// pairwise channel of a contact.
+    pub(super) fn send_app<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        msg_id: [u8; 16],
+        app: &[u8],
+        is_group: bool,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<MsgRef, Error> {
         // IDN-025: a conversation with a key change that waits takes no
         // message before the answer of the user.
         if !is_group && self.key_change(conversation)?.is_some() {
@@ -2799,7 +2814,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let reference = msg_ref(&open.device_set_key, &msg_id);
         let natural = [conversation.0.as_slice(), &reference].concat();
         let row = open.store.row_id(TableId::MESSAGE, &natural);
-        let plain = stored_message(OUTGOING, Delivery::Queued, conversation, now_ms, &app);
+        let plain = stored_message(OUTGOING, Delivery::Queued, conversation, now_ms, app);
         let mut batch = open.store.begin();
         batch.put(TableId::MESSAGE, row, Some(conversation.0), &plain, rng)?;
         batch.put(OUTBOX, row, None, &outbox_row(), rng)?;
@@ -3173,6 +3188,8 @@ fn info_of(plain: &[u8]) -> Result<MessageInfo, Error> {
         // The store holds the mark: see `Client::info`.
         mentions_me: false,
         recovered: false,
+        // WIR-177: the depth of a forward, and zero for an original.
+        forward_depth: plain.get(MESSAGE_PREFIX..).map_or(0, forward::depth_of),
         // The store holds the state: see `Client::info`.
         moderation: 0,
         moderator_role: 0,

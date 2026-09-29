@@ -805,6 +805,8 @@ pub struct MsgInfo {
     /// Whether a message of a group opened under the secret of a key supply
     /// (`WIR-462`). The view shows it apart (`WIR-463`).
     pub recovered: bool,
+    /// How many forwards lie behind the text, or zero for an original.
+    pub forward_depth: u8,
     /// The moderator action on the message: 0 none, 1 hidden, 2 removed.
     pub moderation: u8,
     /// The role of the member that acted, with the values of [`FfiRole`],
@@ -4919,6 +4921,7 @@ impl Handle {
             poll: info.poll,
             mentions_me: info.mentions_me,
             recovered: info.recovered,
+            forward_depth: info.forward_depth,
             moderation: info.moderation,
             moderator_role: info.moderator_role,
             sender: info.sender,
@@ -5210,6 +5213,27 @@ impl Handle {
             running.flush(client, &mut OsRng)?;
         }
         Ok(())
+    }
+
+    /// Forwards the text of a message to a conversation, as a new message
+    /// of this device (`WIR-177`). A text at `FORWARD_MAX_DEPTH` is
+    /// `TooLong`.
+    pub fn forward(
+        &self,
+        message: Arc<MsgHandle>,
+        to: Vec<u8>,
+    ) -> Result<Arc<MsgHandle>, FfiError> {
+        let to = conversation_of(&to)?;
+        let mut inner = locked(&self.inner);
+        let Inner { client, bridge, .. } = &mut *inner;
+        let sent = client.forward(&message.0, to, unix_now_ms(), &mut OsRng)?;
+        if let Some(running) = bridge {
+            running.flush(client, &mut OsRng)?;
+        }
+        inner.pump_groups();
+        drop(inner);
+        self.changed.notify_all();
+        Ok(Arc::new(MsgHandle(sent)))
     }
 
     /// Removes a message, or the placeholder of a deleted one, from the

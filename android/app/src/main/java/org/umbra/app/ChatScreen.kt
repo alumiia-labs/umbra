@@ -175,6 +175,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
     // The message under the finger, and the message that the composer answers.
     var chosen by remember(conversation) { mutableStateOf<Line?>(null) }
     var linksOf by remember(conversation) { mutableStateOf<Line?>(null) }
+    var forwarding by remember(conversation) { mutableStateOf<Line?>(null) }
     var answered by remember(conversation) { mutableStateOf<Line?>(null) }
     // The message that a jump from an answer shows for a moment.
     var flashed by remember(conversation) { mutableStateOf<List<Byte>?>(null) }
@@ -280,6 +281,17 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
             notice = null
         }
     }
+    forwarding?.let { line ->
+        ActionSheet(
+            "Forward to",
+            Core.chats.filter { !it.conversation.id.contentEquals(conversation.id) && !it.isClosed && it.isMember }.map { target ->
+                RowEntry(if (target.isGroup) "user-group" else "comment", target.title) {
+                    Core.forward(line.handle, target.conversation) { notice = "Forwarded to ${target.title}." }
+                }
+            },
+            onDismiss = { forwarding = null },
+        )
+    }
     linksOf?.let { line ->
         ActionSheet(
             "Links",
@@ -330,6 +342,8 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                 val file = line.info.file
                 if (file == null) {
                     add(RowEntry("copy", "Copy text") { copyMessage(context, line.text) })
+                    // WIR-177: a text goes to another chat as a forward.
+                    if (line.poll == null) add(RowEntry("share-nodes", "Forward") { forwarding = line })
                 } else if (file.state.toInt() == FILE_READY || line.info.outgoing) {
                     // IMP-045: the user saves one file.
                     add(RowEntry("download", "Save to device") { save(line) })
@@ -1068,6 +1082,15 @@ private fun BubbleContent(line: Line, chat: Chat, isRevealed: Boolean = false, a
         } else if (!isGone && line.poll != null) {
             PollContent(line, line.poll, Modifier.align(Alignment.Start))
         } else if (!isGone) {
+            // WIR-177: a forward says so, and it names no earlier sender.
+            if (line.info.forwardDepth.toInt() > 0) {
+                Text(
+                    "Forwarded",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = Palette.TextSecondary,
+                    modifier = Modifier.align(Alignment.Start).padding(bottom = 2.dp),
+                )
+            }
             // A mention of this member in a group (Part 11 §11.11).
             if (line.info.mentionsMe) {
                 Text(

@@ -166,6 +166,9 @@ pub struct MessageInfo {
     /// Whether a message of a group opened under the secret of a key supply
     /// (`WIR-462`), thus its sender counter had a gap here.
     pub recovered: bool,
+    /// How many forwards lie behind the text, or zero for an original
+    /// (`WIR-177`).
+    pub forward_depth: u8,
     /// The moderator action on the message: 0 none, 1 hidden, 2 removed
     /// (Part 11 §11.9.6).
     pub moderation: u8,
@@ -3833,6 +3836,33 @@ mod tests {
             .group_reads(&[group], start + 72 * day, &mut rng)
             .unwrap();
         assert_eq!(gaps(&client), 1);
+    }
+
+    #[test]
+    fn a_forward_carries_its_depth_and_stops_at_the_limit() {
+        use umbra_core::devset::FORWARD_MAX_DEPTH;
+
+        let mut rng = Rng(112);
+        let mut alice = new_client(&mut rng);
+        let one = alice.conversation_for(&[0x58; 32]).unwrap();
+        let two = alice.conversation_for(&[0x59; 32]).unwrap();
+        let mut draft = alice.new_draft(one);
+        draft.set_text(&units("pass it on")).unwrap();
+        let mut message = alice.send_draft(draft, 1_000_000, &mut rng).unwrap();
+        // WIR-179: an original has depth zero.
+        assert_eq!(alice.info(&message).unwrap().forward_depth, 0);
+        // WIR-177: each forward adds one, and the text stays.
+        for depth in 1..=FORWARD_MAX_DEPTH {
+            let to = if depth % 2 == 1 { two } else { one };
+            message = alice.forward(&message, to, 1_000_000, &mut rng).unwrap();
+            let info = alice.info(&message).unwrap();
+            assert_eq!(info.forward_depth, depth);
+            assert!(info.outgoing);
+        }
+        assert_eq!(
+            alice.forward(&message, one, 1_000_000, &mut rng),
+            Err(Error::TooLong)
+        );
     }
 
     #[test]
