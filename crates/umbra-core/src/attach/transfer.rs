@@ -11,6 +11,7 @@
 use alloc::{collections::BTreeMap, vec::Vec};
 
 use umbra_crypto::{rand_core::CryptoRng, secret::Secret, x25519::StaticSecret};
+use umbra_queue::Reject;
 use umbra_wire::descriptor::{ChunkRef, FileDescriptor, Level};
 
 use super::{
@@ -772,6 +773,10 @@ struct Wanted {
     order: Vec<[u8; 32]>,
     bytes: Option<Vec<u8>>,
     is_asked: bool,
+    /// The answers to this chunk, and the ones that said the relay holds
+    /// no such chunk.
+    answers: u32,
+    refusals: u32,
 }
 
 /// The download of one file. A file of level `0x01` reads its manifest
@@ -824,6 +829,8 @@ fn plan<R: CryptoRng + ?Sized>(
                 order,
                 bytes: None,
                 is_asked: false,
+                answers: 0,
+                refusals: 0,
             }
         })
         .collect()
@@ -937,6 +944,19 @@ impl Download {
         self.waiting.contains_key(&handle)
     }
 
+    /// Whether each replica of one chunk answered that it holds no such
+    /// chunk (Part 12 `ATT-052`). No new attempt finds that chunk, thus
+    /// the file is lost. A download that failed for another cause, as a
+    /// circuit that fell, gives false.
+    pub fn is_gone(&self) -> bool {
+        self.wanted.iter().any(|wanted| {
+            wanted.order.is_empty()
+                && wanted.bytes.is_none()
+                && wanted.refusals > 0
+                && wanted.refusals == wanted.answers
+        })
+    }
+
     /// Asks for each chunk that has room under `MAX_CONCURRENT_DOWN`.
     pub fn tick<R: CryptoRng + ?Sized>(
         &mut self,
@@ -988,11 +1008,16 @@ impl Download {
         let Some(index) = self.waiting.remove(&handle) else {
             return Ok(false);
         };
+        let wanted = self.wanted.get_mut(index).ok_or(Error::Malformed)?;
+        wanted.answers = wanted.answers.saturating_add(1);
         match outcome {
-            ChunkOutcome::Fetched(bytes) => {
-                self.wanted.get_mut(index).ok_or(Error::Malformed)?.bytes = Some(bytes);
+            ChunkOutcome::Fetched(bytes) => wanted.bytes = Some(bytes),
+            // ATT-019: the next replica. WIR-317 gives one reason to an
+            // unknown chunk, and the read secret of a descriptor is right.
+            ChunkOutcome::Refused(Reject::Rejected) => {
+                wanted.refusals = wanted.refusals.saturating_add(1);
+                self.ask(node, index, rng)?;
             }
-            // ATT-019: the next replica.
             _ => self.ask(node, index, rng)?,
         }
         // The chunks open in their order.

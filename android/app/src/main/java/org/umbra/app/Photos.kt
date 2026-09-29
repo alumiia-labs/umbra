@@ -61,6 +61,9 @@ const val FILE_FAILED = 4
 /** A received file above the automatic download limit, which waits for a tap (`IMP-167`). */
 const val FILE_HELD = 5
 
+/** A received file whose chunk each replica lost (`ATT-052`). */
+const val FILE_GONE = 6
+
 /** The longest side of a photo after the re-encode. */
 private const val PHOTO_SIDE_MAX = 2_048
 
@@ -246,17 +249,17 @@ fun PhotoTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.matchParentSize(),
             )
-            TransferMark(file, isExpired(line))
+            TransferMark(file, lostLabel(line))
         } else if (state == FILE_HELD) {
-            TransferMark(file, isExpired(line))
+            TransferMark(file, lostLabel(line))
         } else {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 FaIcon(if (canRetry) "rotate" else "image", size = 22.dp, tint = Palette.TextSecondary)
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    when (state) {
+                    lostLabel(line) ?: when (state) {
                         FILE_WANTED -> "Receiving"
-                        FILE_FAILED -> if (isExpired(line)) "Expired" else "Not received"
+                        FILE_FAILED -> "Not received"
                         else -> "Photo"
                     },
                     style = MaterialTheme.typography.labelSmall,

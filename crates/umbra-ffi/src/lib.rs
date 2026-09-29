@@ -4463,6 +4463,27 @@ mod tests {
         );
         assert!(bob.take_download().is_none());
 
+        // ATT-052: each replica lost a chunk. The file stays gone, and no
+        // tap fetches it again.
+        bob.download_gone(&bad, &mut rng).unwrap();
+        assert_eq!(bob.next_event(), Some(Event::File { message: bad }));
+        assert_eq!(bob.info(&bad).unwrap().file.unwrap().state, FileState::Gone);
+        assert_eq!(bob.fetch_file(&bad, &mut rng), Err(Error::Malformed));
+        // ATT-054: the sender alone sends it again, as a new upload.
+        assert_eq!(
+            bob.resend_file(&got, 2_200_000, &mut rng),
+            Err(Error::Malformed)
+        );
+        let again = alice.resend_file(&sent, 1_100_000, &mut rng).unwrap();
+        assert_ne!(again, sent);
+        let job = alice.take_upload().unwrap();
+        assert_eq!(
+            (job.message, job.plain.as_slice()),
+            (again, photo.as_slice())
+        );
+        assert_eq!(job.shape, shape);
+        while alice.next_event().is_some() {}
+
         // An upload that failed makes the message fail. A second attempt
         // takes the file from the store, and the message waits again.
         let mut again = alice.new_draft(conversation);

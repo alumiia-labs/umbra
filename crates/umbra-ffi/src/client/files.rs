@@ -27,7 +27,7 @@ use umbra_wire::{
 use zeroize::Zeroizing;
 
 use super::{conversation_of, info_of, outbox_row, Client, Outgoing, MESSAGE_PREFIX, OUTBOX};
-use crate::{Delivery, Error, Event, MsgRef};
+use crate::{draft::DraftFile, Delivery, Error, Event, MsgRef};
 
 /// The state and the shape of the file of a message.
 pub(super) const FILE_STATE: TableId = TableId(0x0F);
@@ -55,6 +55,10 @@ pub enum FileState {
     /// A contact sent the file, and it is above the automatic download
     /// limit of this device. It waits for a tap (`IMP-167`).
     Held = 5,
+    /// Each replica of a chunk of the file holds none. No new attempt
+    /// finds it, and only the sender can send it again (`ATT-052`,
+    /// `ATT-054`).
+    Gone = 6,
 }
 
 impl FileState {
@@ -65,6 +69,7 @@ impl FileState {
             3 => FileState::Ready,
             4 => FileState::Failed,
             5 => FileState::Held,
+            6 => FileState::Gone,
             _ => return None,
         })
     }
@@ -242,6 +247,7 @@ pub(super) fn carried_state(row: &mut [u8]) {
     if let Some(state) = row.first_mut() {
         *state = match FileState::from_byte(*state) {
             Some(FileState::Wanted | FileState::Ready | FileState::Held) => FileState::Held,
+            Some(FileState::Gone) => FileState::Gone,
             _ => FileState::Failed,
         } as u8;
     }
@@ -547,6 +553,52 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(())
     }
 
+    /// Each replica of a chunk of the file of a received message holds
+    /// none (`ATT-052`). The view names the file and shows no part of it
+    /// (`ATT-053`), and no tap fetches it again.
+    pub fn download_gone<R: CryptoRng + ?Sized>(
+        &mut self,
+        message: &MsgRef,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        self.set_file_state(message, FileState::Gone, rng)?;
+        self.events.push_back(Event::File { message: *message });
+        Ok(())
+    }
+
+    /// Sends the file of a message of this device again, as a new message
+    /// in its conversation (`ATT-054`). It is a new upload under new
+    /// credentials, and not a lease extension. The store holds the file of
+    /// each message that this device sent.
+    pub fn resend_file<R: CryptoRng + ?Sized>(
+        &mut self,
+        message: &MsgRef,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<MsgRef, Error> {
+        let info = self.file_info(message)?.ok_or(Error::NotFound)?;
+        let plain = Zeroizing::new(
+            self.open_ref()?
+                .store
+                .get(TableId::MESSAGE, &message.0)?
+                .ok_or(Error::NotFound)?,
+        );
+        if !info_of(&plain)?.outgoing {
+            return Err(Error::Malformed);
+        }
+        let conversation = conversation_of(&plain)?;
+        let extras = self.file_extras(message)?;
+        let file = DraftFile {
+            plain: self.file_bytes(message)?,
+            shape: info.shape,
+            name: extras.name,
+            preview: extras.preview,
+        };
+        let mut msg_id = [0u8; 16];
+        rng.fill_bytes(&mut msg_id);
+        self.send_file(conversation, msg_id, file, &[], now_ms, rng)
+    }
+
     /// Starts the transfer of the file of a message again after it failed:
     /// the download of a received file, or the upload of a file of this
     /// device.
@@ -692,7 +744,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     }
                 }
                 // A held file waits for a tap and not for a new start.
-                FileState::Ready | FileState::Failed | FileState::Held => {}
+                FileState::Ready | FileState::Failed | FileState::Held | FileState::Gone => {}
             }
         }
         self.files.uploads.extend(uploads);
@@ -732,6 +784,7 @@ mod tests {
             (FileState::Held, FileState::Held),
             (FileState::Uploading, FileState::Failed),
             (FileState::Failed, FileState::Failed),
+            (FileState::Gone, FileState::Gone),
         ] {
             let mut row = state_row(from, &shape, 7, &extras);
             let rest = row[1..].to_vec();

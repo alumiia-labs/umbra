@@ -1858,6 +1858,11 @@ object Core {
     }
 
     /** Asks again for the file of a message that did not arrive. */
+    fun resendFile(message: MsgHandle) = call { client ->
+        client.resendFile(message)
+        main.post { revision++ }
+    }
+
     fun fetchFile(message: MsgHandle) = call { client ->
         client.fetchFile(message)
         main.post { revision++ }

@@ -313,6 +313,10 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                     // IMP-045: the user saves one file.
                     add(RowEntry("download", "Save to device") { save(line) })
                 }
+                // ATT-054: the sender sends a file again as a new upload.
+                if (file != null && line.info.outgoing && file.state.toInt() == FILE_READY) {
+                    add(RowEntry("rotate", "Send again") { Core.resendFile(line.handle) })
+                }
                 // GRP-085: a hide is the first act of a moderator, and a
                 // remove asks again (GRP-086).
                 if (chat.isGroup && (ownRole ?: FfiRole.MEMBER) >= FfiRole.MODERATOR) {

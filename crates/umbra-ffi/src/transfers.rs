@@ -169,6 +169,12 @@ pub enum TransferUpdate {
         /// The tag of the command.
         tag: u64,
     },
+    /// Each replica of a chunk of the download holds none. No new attempt
+    /// finds the file (Part 12 `ATT-052`).
+    Gone {
+        /// The tag of the command.
+        tag: u64,
+    },
 }
 
 enum Active {
@@ -342,17 +348,19 @@ pub async fn run_transfers(
                                     uploaded: Box::new(uploaded),
                                 },
                             }),
-                        Active::Down(download) => download
-                            .on_outcome(&mut node, handle, outcome, &mut rng)
-                            .map(|progress| match progress {
-                                Progress::Running(done, total) => {
-                                    TransferUpdate::Progress { tag, done, total }
+                        Active::Down(download) => {
+                            match download.on_outcome(&mut node, handle, outcome, &mut rng) {
+                                Ok(Progress::Running(done, total)) => {
+                                    Ok(TransferUpdate::Progress { tag, done, total })
                                 }
-                                Progress::Done(plain) => TransferUpdate::Downloaded {
+                                Ok(Progress::Done(plain)) => Ok(TransferUpdate::Downloaded {
                                     tag,
                                     plain: Zeroizing::new(plain),
-                                },
-                            }),
+                                }),
+                                Err(_) if download.is_gone() => Ok(TransferUpdate::Gone { tag }),
+                                Err(error) => Err(error),
+                            }
+                        }
                         Active::Write(write) => write
                             .on_outcome(&mut node, handle, outcome, &mut rng)
                             .map(|progress| match progress {

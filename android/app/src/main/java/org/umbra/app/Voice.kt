@@ -340,7 +340,7 @@ fun VoiceTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
                         progress != null && !line.info.outgoing -> append(" · ").append(progress).append(" %")
                         state == FILE_WANTED -> append(" · Receiving")
                         state == FILE_HELD -> append(" · ").append(Files.size(context, file.size.toLong()))
-                        isExpired(line) -> append(" · Expired")
+                        lostLabel(line) != null -> append(" · ").append(lostLabel(line))
                         state == FILE_FAILED && !line.info.outgoing -> append(" · Not received")
                     }
                 },

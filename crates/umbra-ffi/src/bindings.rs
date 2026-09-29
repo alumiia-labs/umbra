@@ -2361,6 +2361,12 @@ impl Inner {
     /// Takes the end of one transfer into the store. A message that a
     /// deletion took since has no row, and its result goes nowhere.
     fn end_transfer(&mut self, update: TransferUpdate) {
+        // ATT-052: a file whose chunk each replica lost ends there. Each
+        // other transfer takes the loss as a failure.
+        let (update, is_gone) = match update {
+            TransferUpdate::Gone { tag } => (TransferUpdate::Failed { tag }, true),
+            other => (other, false),
+        };
         let Some(update) = self.link_update(update) else {
             return;
         };
@@ -2556,6 +2562,8 @@ impl Inner {
                 }
                 _ => {}
             },
+            // The top of this function took each such update as a failure.
+            TransferUpdate::Gone { .. } => {}
             TransferUpdate::Failed { tag } => match transfer_tags.remove(&tag) {
                 Some(TransferWork::RestoreRoot { .. } | TransferWork::RestoreObject(_)) => {
                     restore_step = Some(RestoreStep::Failed);
@@ -2570,7 +2578,11 @@ impl Inner {
                     message,
                     is_upload: false,
                 }) => {
-                    let _ = client.download_failed(&message, &mut OsRng);
+                    let _ = if is_gone {
+                        client.download_gone(&message, &mut OsRng)
+                    } else {
+                        client.download_failed(&message, &mut OsRng)
+                    };
                 }
                 // A snapshot that did not move leaves the join where it
                 // was, and the view offers the press that sends it again.
@@ -4345,6 +4357,19 @@ impl Handle {
         let conversation = conversation_of(&conversation)?;
         let draft = locked(&self.inner).client.new_draft(conversation);
         Ok(Arc::new(DraftHandle(Mutex::new(Some(draft)))))
+    }
+
+    /// Sends the file of a message of this device again, as a new message:
+    /// a new upload under new credentials (Part 12 `ATT-054`).
+    pub fn resend_file(&self, message: Arc<MsgHandle>) -> Result<Arc<MsgHandle>, FfiError> {
+        let mut inner = locked(&self.inner);
+        let again = inner
+            .client
+            .resend_file(&message.0, unix_now_ms(), &mut OsRng)?;
+        inner.pump_transfers();
+        drop(inner);
+        self.changed.notify_all();
+        Ok(Arc::new(MsgHandle(again)))
     }
 
     /// Sends a draft. The handle of the draft is empty after this call.

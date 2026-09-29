@@ -674,7 +674,7 @@ fun VideoTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
                 FaIcon(icon, size = 18.dp, tint = Color.White)
             }
         } else {
-            TransferMark(file, isExpired(line))
+            TransferMark(file, lostLabel(line))
         }
         Text(
             buildString {
@@ -699,12 +699,12 @@ fun VideoTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
  * a download that runs, and a new attempt after a failure.
  */
 @Composable
-fun TransferMark(file: MsgFile, isExpired: Boolean = false) {
+fun TransferMark(file: MsgFile, lost: String? = null) {
     val context = LocalContext.current
     val state = file.state.toInt()
-    if (isExpired) {
+    if (lost != null) {
         Text(
-            "Expired",
+            lost,
             style = MaterialTheme.typography.labelSmall,
             color = Color.White,
             modifier = Modifier
@@ -744,15 +744,23 @@ fun TransferMark(file: MsgFile, isExpired: Boolean = false) {
 private const val CHUNK_TTL_MS = 14L * 86_400_000
 
 /**
- * Whether the chunks of a received file are gone: its download failed or
- * waits for a tap, and its record is older than `CHUNK_TTL`. No party
- * uploads them again, thus the view offers no new attempt (`ATT-050`).
+ * Whether the chunks of a received file are gone, thus the view offers no
+ * new attempt: each replica of a chunk said so (`ATT-052`), or the download
+ * failed or waits for a tap and the record is older than `CHUNK_TTL`
+ * (`ATT-050`). The sender alone can send the file again.
  */
-fun isExpired(line: Line): Boolean {
-    val state = line.info.file?.state?.toInt() ?: return false
-    return !line.info.outgoing &&
-        (state == FILE_FAILED || state == FILE_HELD) &&
-        System.currentTimeMillis() - line.info.sentAtMs.toLong() > CHUNK_TTL_MS
+fun isExpired(line: Line): Boolean = lostLabel(line) != null
+
+/** The word for a received file that is gone, or null. */
+fun lostLabel(line: Line): String? {
+    val state = line.info.file?.state?.toInt() ?: return null
+    if (line.info.outgoing) return null
+    val isOld = System.currentTimeMillis() - line.info.sentAtMs.toLong() > CHUNK_TTL_MS
+    return when {
+        (state == FILE_GONE || state == FILE_FAILED || state == FILE_HELD) && isOld -> "Expired"
+        state == FILE_GONE -> "Lost"
+        else -> null
+    }
 }
 
 /** The share of a transfer that runs, in percent, or null. */
@@ -803,7 +811,7 @@ fun FileTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
                         // The time line of a sent file holds its progress.
                         progress != null && !line.info.outgoing -> append(" · ").append(progress).append(" %")
                         state == FILE_WANTED -> append(" · Receiving")
-                        isExpired(line) -> append(" · Expired")
+                        lostLabel(line) != null -> append(" · ").append(lostLabel(line))
                         state == FILE_FAILED && !line.info.outgoing -> append(" · Not received")
                     }
                 },

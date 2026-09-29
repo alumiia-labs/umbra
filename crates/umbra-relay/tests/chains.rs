@@ -859,6 +859,30 @@ fn a_file_goes_up_from_one_client_and_comes_down_at_another() {
         }
     }
     assert_eq!(fetched.expect("the download ends"), plain);
+    assert!(!download.is_gone());
+
+    // ATT-052: a chunk that each replica lacks ends the download, and the
+    // download says that the file is gone.
+    let mut lost = umbra_wire::descriptor::FileDescriptor::parse(&encoded).unwrap();
+    lost.refs[1].chunk_id = [0xEE; 32];
+    let mut download = Download::new(&lost, &relays, &mut rng).unwrap();
+    download
+        .tick(&mut mesh.clients[RECEIVER], &mut rng)
+        .unwrap();
+    let mut ended = false;
+    for _ in 0..400 {
+        for (handle, outcome) in chunk_answers(&mut mesh, RECEIVER) {
+            let node = &mut mesh.clients[RECEIVER];
+            ended |= download
+                .on_outcome(node, handle, outcome, &mut rng)
+                .is_err();
+        }
+        if ended {
+            break;
+        }
+    }
+    assert!(ended, "the download ends");
+    assert!(download.is_gone());
 }
 
 fn holder(index: usize) -> AttachmentRelay {

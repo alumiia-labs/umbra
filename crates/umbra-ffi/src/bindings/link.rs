@@ -372,7 +372,8 @@ impl Inner {
             | TransferUpdate::Downloaded { tag, .. }
             | TransferUpdate::HandleWritten { tag, .. }
             | TransferUpdate::HandleRead { tag, .. }
-            | TransferUpdate::Failed { tag } => *tag,
+            | TransferUpdate::Failed { tag }
+            | TransferUpdate::Gone { tag } => *tag,
         };
         if !matches!(
             self.transfer_tags.get(&tag),
