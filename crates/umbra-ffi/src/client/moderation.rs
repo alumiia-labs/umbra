@@ -5,11 +5,7 @@
 //! unsigned local state: the count of each act, with no signature and no
 //! target list (`GRP-181`, `GRP-182`).
 
-use umbra_core::store::{
-    engine::Backend,
-    record::TableId,
-    wrap::SecureElement,
-};
+use umbra_core::store::{engine::Backend, record::TableId, wrap::SecureElement};
 use umbra_crypto::rand_core::CryptoRng;
 use umbra_wire::{
     app::{AppMessage, Channel},
@@ -174,7 +170,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let votes = self.vote_rows(&message, conversation)?;
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
-        batch.put(TableId::MESSAGE, message.0, Some(conversation.0), &placeholder, rng)?;
+        batch.put(
+            TableId::MESSAGE,
+            message.0,
+            Some(conversation.0),
+            &placeholder,
+            rng,
+        )?;
         for row in reactions {
             batch.delete(REACTION, row);
         }
@@ -204,7 +206,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         message: MsgRef,
         rng: &mut R,
     ) -> Result<(), Error> {
-        if self.moderation_of(&message)?.is_some_and(|(state, _)| state == MOD_REMOVE) {
+        if self
+            .moderation_of(&message)?
+            .is_some_and(|(state, _)| state == MOD_REMOVE)
+        {
             self.leave_placeholder(conversation, message, rng)?;
         }
         Ok(())
@@ -259,11 +264,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// the order of time (`GRP-089`).
     pub fn moderation_notes(&self, conversation: ConversationId) -> Result<Vec<ModNote>, Error> {
         let mut notes = Vec::new();
-        for (_, value) in self.open_ref()?.store.list(MOD_NOTES, Some(&conversation.0))? {
+        for (_, value) in self
+            .open_ref()?
+            .store
+            .list(MOD_NOTES, Some(&conversation.0))?
+        {
             let field = |range: core::ops::Range<usize>| value.get(range).ok_or(Error::Integrity);
             let at: [u8; 8] = field(16..24)?.try_into().map_err(|_| Error::Integrity)?;
             let count = |at: usize| -> Result<u16, Error> {
-                let bytes: [u8; 2] = field(at..at + 2)?.try_into().map_err(|_| Error::Integrity)?;
+                let bytes: [u8; 2] = field(at..at + 2)?
+                    .try_into()
+                    .map_err(|_| Error::Integrity)?;
                 Ok(u16::from_be_bytes(bytes))
             };
             notes.push(ModNote {

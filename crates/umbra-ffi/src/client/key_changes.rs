@@ -7,11 +7,7 @@
 use umbra_core::{
     identity::address::safety_number,
     session::node::{stored_contact_keys, stored_with_peer_key, ContactId},
-    store::{
-        engine::Backend,
-        record::TableId,
-        wrap::SecureElement,
-    },
+    store::{engine::Backend, record::TableId, wrap::SecureElement},
 };
 use umbra_crypto::rand_core::CryptoRng;
 use umbra_wire::app::keys::KeyChangeNotice;
@@ -64,13 +60,22 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         );
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
-        batch.put(KEY_CHANGES, conversation.0, Some(conversation.0), &value, rng)?;
+        batch.put(
+            KEY_CHANGES,
+            conversation.0,
+            Some(conversation.0),
+            &value,
+            rng,
+        )?;
         batch.commit()?;
         self.events.push_back(Event::Conversations);
         Ok(())
     }
 
-    fn held_key_change(&self, conversation: ConversationId) -> Result<Option<([u8; 32], u64)>, Error> {
+    fn held_key_change(
+        &self,
+        conversation: ConversationId,
+    ) -> Result<Option<([u8; 32], u64)>, Error> {
         let Some(value) = self.open_ref()?.store.get(KEY_CHANGES, &conversation.0)? else {
             return Ok(None);
         };
@@ -88,12 +93,19 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
     /// The notice that waits in a conversation, or none. While one waits the
     /// conversation takes no message of this device (`IDN-025`).
-    pub fn key_change(&self, conversation: ConversationId) -> Result<Option<PendingKeyChange>, Error> {
+    pub fn key_change(
+        &self,
+        conversation: ConversationId,
+    ) -> Result<Option<PendingKeyChange>, Error> {
         let Some((key, at_ms)) = self.held_key_change(conversation)? else {
             return Ok(None);
         };
         let store = &self.open_ref()?.store;
-        let plain = Zeroizing::new(store.get(TableId::CONTACT, &conversation.0)?.ok_or(Error::NotFound)?);
+        let plain = Zeroizing::new(
+            store
+                .get(TableId::CONTACT, &conversation.0)?
+                .ok_or(Error::NotFound)?,
+        );
         let state = plain.get(QUEUE_ID_LEN..).ok_or(Error::Integrity)?;
         let (own, _) = stored_contact_keys(state, &self.root_identity()?)?;
         Ok(Some(PendingKeyChange {
@@ -113,13 +125,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     ) -> Result<(ContactId, [u8; 32]), Error> {
         let (key, _) = self.held_key_change(conversation)?.ok_or(Error::NotFound)?;
         let open = self.open_mut()?;
-        let plain = Zeroizing::new(open.store.get(TableId::CONTACT, &conversation.0)?.ok_or(Error::NotFound)?);
+        let plain = Zeroizing::new(
+            open.store
+                .get(TableId::CONTACT, &conversation.0)?
+                .ok_or(Error::NotFound)?,
+        );
         let contact: [u8; 32] = plain
             .get(..QUEUE_ID_LEN)
             .and_then(|b| b.try_into().ok())
             .ok_or(Error::Integrity)?;
         let state = plain.get(QUEUE_ID_LEN..).ok_or(Error::Integrity)?;
-        let changed = Zeroizing::new([contact.as_slice(), &stored_with_peer_key(state, &key)?].concat());
+        let changed =
+            Zeroizing::new([contact.as_slice(), &stored_with_peer_key(state, &key)?].concat());
         let mut batch = open.store.begin();
         batch.put(TableId::CONTACT, conversation.0, None, &changed, rng)?;
         batch.delete(KEY_CHANGES, conversation.0);

@@ -44,20 +44,37 @@ fn find<'a>(set: &'a RelaySet, relay_id: &[u8; 32]) -> Result<&'a ListedRelay, &
 /// Sends the probe on `chain` and gives the tag of each hop and the epoch
 /// (`REL-109` to `REL-111`). The node holds that chain alone, and a fresh
 /// identity, thus the probe is an ordinary client circuit.
-async fn probe(settings: &Settings, set: &RelaySet, chain: &[[u8; 32]; 3]) -> Result<([[u8; 16]; 3], u64), &'static str> {
+async fn probe(
+    settings: &Settings,
+    set: &RelaySet,
+    chain: &[[u8; 32]; 3],
+) -> Result<([[u8; 16]; 3], u64), &'static str> {
     let [first, second, third] = chain;
     let (a, b, c) = (find(set, first)?, find(set, second)?, find(set, third)?);
     if !a.candidate.ingress {
         return Err("the chain does not start at an ingress relay");
     }
     let mut seed = [0u8; 32];
-    umbra_crypto::rand_core::TryRng::try_fill_bytes(&mut OsRng, &mut seed).map_err(|_| "no random bytes")?;
-    let node = ClientNode::with_relays(info(a), vec![info(b), info(c)], RootIdentity::new(Secret::new(seed)));
-    let tls = native::tls_config_with_root_file(&settings.ca).map_err(|_| "the root does not read")?;
+    umbra_crypto::rand_core::TryRng::try_fill_bytes(&mut OsRng, &mut seed)
+        .map_err(|_| "no random bytes")?;
+    let node = ClientNode::with_relays(
+        info(a),
+        vec![info(b), info(c)],
+        RootIdentity::new(Secret::new(seed)),
+    );
+    let tls =
+        native::tls_config_with_root_file(&settings.ca).map_err(|_| "the root does not read")?;
     let (commands, runtime_commands) = mpsc::unbounded_channel();
     let (runtime_updates, mut updates) = mpsc::unbounded_channel();
     let dial: Dial = dial_of(a);
-    let run = tokio::spawn(run_client(node, dial, tls, runtime_commands, runtime_updates, Box::new(NoStore)));
+    let run = tokio::spawn(run_client(
+        node,
+        dial,
+        tls,
+        runtime_commands,
+        runtime_updates,
+        Box::new(NoStore),
+    ));
     let _ = commands.send(Command::OpenCircuit(*third));
     let deadline = tokio::time::Instant::now() + PROBE_WAIT;
     let mut tick = tokio::time::interval(Duration::from_secs(2));
@@ -92,11 +109,20 @@ async fn ask(settings: &Settings, relay: &ListedRelay, body: &[u8]) -> Option<Re
         address: Some(std::net::IpAddr::from(relay.addr_v4)),
     };
     let tls = native::tls_config_with_root_file(&settings.ca).ok()?;
-    let (status, answer) =
-        https::post(&url, "application/octet-stream", &[], body, tls, 64 * 1024, ASK_WAIT)
-            .await
-            .ok()?;
-    (status == 200).then(|| ReceiptAnswer::parse(&answer).ok()).flatten()
+    let (status, answer) = https::post(
+        &url,
+        "application/octet-stream",
+        &[],
+        body,
+        tls,
+        64 * 1024,
+        ASK_WAIT,
+    )
+    .await
+    .ok()?;
+    (status == 200)
+        .then(|| ReceiptAnswer::parse(&answer).ok())
+        .flatten()
 }
 
 /// Runs one isolation query on `chain` and gives its verdict and the epoch
@@ -120,11 +146,20 @@ pub async fn isolate(
             epoch,
             tag,
         };
-        let body = query.sign(key, &mut OsRng).map_err(|_| "the query does not sign")?;
+        let body = query
+            .sign(key, &mut OsRng)
+            .map_err(|_| "the query does not sign")?;
         let taken = ask(settings, find(&set, &from)?, &body).await;
         let to_relay = find(&set, &to)?;
         let issued = ask(settings, to_relay, &body).await;
-        let verdict = judge_link(from, to, &query, taken.as_ref(), issued.as_ref(), &to_relay.identity_pk);
+        let verdict = judge_link(
+            from,
+            to,
+            &query,
+            taken.as_ref(),
+            issued.as_ref(),
+            &to_relay.identity_pk,
+        );
         if verdict != LinkVerdict::Held {
             return Ok((Verdict::Link(verdict), epoch));
         }
@@ -144,7 +179,11 @@ pub fn record(settings: &Settings, chain: &[[u8; 32]; 3], verdict: &Verdict, epo
         Verdict::Link(LinkVerdict::Held) => return,
     };
     println!("verdict {line}");
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&settings.verdicts) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&settings.verdicts)
+    {
         let _ = writeln!(file, "{line}");
     }
 }

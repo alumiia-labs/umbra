@@ -7,9 +7,9 @@
 use umbra_core::{
     devset::edits::Deadline,
     store::{
-    engine::Backend,
-    record::{RowId, TableId},
-    wrap::SecureElement,
+        engine::Backend,
+        record::{RowId, TableId},
+        wrap::SecureElement,
     },
 };
 use umbra_crypto::rand_core::CryptoRng;
@@ -31,7 +31,9 @@ pub(super) const DEADLINES: TableId = TableId(0x35);
 
 /// `TIMER_VALUES` of Part 7 §7.8: the only periods a timer takes, thus a
 /// period names no conversation (`WIR-201`, `WIR-202`).
-pub const TIMER_VALUES: [u32; 9] = [0, 30, 300, 3_600, 28_800, 86_400, 604_800, 2_419_200, 7_776_000];
+pub const TIMER_VALUES: [u32; 9] = [
+    0, 30, 300, 3_600, 28_800, 86_400, 604_800, 2_419_200, 7_776_000,
+];
 
 /// The timer of one conversation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,8 +57,14 @@ impl TimerSetting {
     }
 
     fn parse(bytes: &[u8]) -> Result<Self, Error> {
-        let seconds = bytes.get(..4).and_then(|b| b.try_into().ok()).ok_or(Error::Integrity)?;
-        let at = bytes.get(4..12).and_then(|b| b.try_into().ok()).ok_or(Error::Integrity)?;
+        let seconds = bytes
+            .get(..4)
+            .and_then(|b| b.try_into().ok())
+            .ok_or(Error::Integrity)?;
+        let at = bytes
+            .get(4..12)
+            .and_then(|b| b.try_into().ok())
+            .ok_or(Error::Integrity)?;
         Ok(TimerSetting {
             seconds: u32::from_be_bytes(seconds),
             set_at_ms: u64::from_be_bytes(at),
@@ -91,13 +99,19 @@ pub(super) fn deadline_row(conversation: ConversationId, at: u64) -> Zeroizing<V
 }
 
 fn deadline_at(value: &[u8]) -> Result<u64, Error> {
-    let at = value.get(16..24).and_then(|b| b.try_into().ok()).ok_or(Error::Integrity)?;
+    let at = value
+        .get(16..24)
+        .and_then(|b| b.try_into().ok())
+        .ok_or(Error::Integrity)?;
     Ok(u64::from_be_bytes(at))
 }
 
 impl<B: Backend, E: SecureElement> Client<B, E> {
     /// The timer of a conversation, or none when no party ever set one.
-    pub fn conversation_timer(&self, conversation: ConversationId) -> Result<Option<TimerSetting>, Error> {
+    pub fn conversation_timer(
+        &self,
+        conversation: ConversationId,
+    ) -> Result<Option<TimerSetting>, Error> {
         let store = &self.open_ref()?.store;
         let row = store.row_id(TIMERS, &conversation.0);
         store
@@ -108,7 +122,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
     /// The period of the timer of a conversation, or 0.
     pub(super) fn timer_seconds(&self, conversation: ConversationId) -> Result<u32, Error> {
-        Ok(self.conversation_timer(conversation)?.map_or(0, |setting| setting.seconds))
+        Ok(self
+            .conversation_timer(conversation)?
+            .map_or(0, |setting| setting.seconds))
     }
 
     /// The row of the timer of a conversation.
@@ -154,7 +170,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let store = &self.open_ref()?.store;
         store
             .get(DEADLINES, &message.0)?
-            .map(|value| Ok(Deadline { at: deadline_at(&Zeroizing::new(value))? }))
+            .map(|value| {
+                Ok(Deadline {
+                    at: deadline_at(&Zeroizing::new(value))?,
+                })
+            })
             .transpose()
     }
 
@@ -171,9 +191,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut due = Vec::new();
         for (row, value) in self.open_ref()?.store.list(DEADLINES, None)? {
             let value = Zeroizing::new(value);
-            if (Deadline { at: deadline_at(&value)? }).due(now) {
-                let conversation: [u8; 16] =
-                    value.get(..16).and_then(|b| b.try_into().ok()).ok_or(Error::Integrity)?;
+            if (Deadline {
+                at: deadline_at(&value)?,
+            })
+            .due(now)
+            {
+                let conversation: [u8; 16] = value
+                    .get(..16)
+                    .and_then(|b| b.try_into().ok())
+                    .ok_or(Error::Integrity)?;
                 due.push((ConversationId(conversation), MsgRef(row)));
             }
         }
@@ -223,7 +249,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut app = vec![0u8; record.len()];
         record.encode(&mut app)?;
         let message = if self.is_group(conversation)? {
-            if self.group_of(conversation)?.own_role().is_none_or(|role| role < Role::Admin) {
+            if self
+                .group_of(conversation)?
+                .own_role()
+                .is_none_or(|role| role < Role::Admin)
+            {
                 return Err(Error::Malformed);
             }
             self.post_to_group(conversation, msg_id, &app, now_ms, rng)?
@@ -272,7 +302,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
     /// The `expires_in` of a record of `conversation` for a sync copy at
     /// `now`: the rest of the period of its message (`DEV-242`, `DEV-243`).
-    pub(super) fn expires_in_of(&self, conversation: ConversationId, app: &[u8], now: u64) -> Result<u32, Error> {
+    pub(super) fn expires_in_of(
+        &self,
+        conversation: ConversationId,
+        app: &[u8],
+        now: u64,
+    ) -> Result<u32, Error> {
         let channel = if self.is_group(conversation)? {
             Channel::Group
         } else {

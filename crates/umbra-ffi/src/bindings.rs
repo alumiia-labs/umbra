@@ -3108,7 +3108,10 @@ impl Persist for HandleStore {
         // report, to one contact at random (DIS-029, DIS-031, REL-008).
         let (source, app) = inner.client.due_digest(now, &mut OsRng).ok()??;
         let contacts = inner.bridge.as_ref()?.contacts();
-        let all: Vec<ConversationId> = contacts.iter().map(|(conversation, _)| *conversation).collect();
+        let all: Vec<ConversationId> = contacts
+            .iter()
+            .map(|(conversation, _)| *conversation)
+            .collect();
         let open = inner.client.gossip_contacts(&all).ok()?;
         let pick = usize::try_from(random_u64() % u64::try_from(open.len()).ok()?.max(1)).ok()?;
         let conversation = open.get(pick)?;
@@ -3559,7 +3562,9 @@ impl Handle {
                 removed_links: set
                     .removed_links
                     .iter()
-                    .map(|link| [&link.epoch.to_be_bytes()[..], &link.relay_a, &link.relay_b].concat())
+                    .map(|link| {
+                        [&link.epoch.to_be_bytes()[..], &link.relay_a, &link.relay_b].concat()
+                    })
                     .collect(),
             },
             epoch: set.epoch,
@@ -3673,7 +3678,8 @@ impl Handle {
             inner.invitation_host.clone_from(&network.invitation_host);
             inner.guard = Some(ingress.key.relay_id);
             inner.relays.clone_from(&network.relays);
-            inner.report_queue_count = u32::try_from(network.report_queues.len()).unwrap_or(u32::MAX);
+            inner.report_queue_count =
+                u32::try_from(network.report_queues.len()).unwrap_or(u32::MAX);
             inner.circuits.clear();
             inner.circuits_changed = true;
             inner.me = Arc::downgrade(&self);
@@ -4446,7 +4452,11 @@ impl Handle {
     /// Starts a restore from `C_user` and shares of `C_social` that the
     /// holders read from their screens (Part 4 §4.7.3). The shares join
     /// before the KDF (`IDN-191`).
-    pub fn restore_backup_with_shares(&self, user: Vec<u16>, shares: Vec<Vec<u16>>) -> Result<(), FfiError> {
+    pub fn restore_backup_with_shares(
+        &self,
+        user: Vec<u16>,
+        shares: Vec<Vec<u16>>,
+    ) -> Result<(), FfiError> {
         use umbra_core::identity::recovery::{from_digits, join_social, DigitsType, RecoveryCode};
         let text = Zeroizing::new(String::from_utf16_lossy(&Zeroizing::new(user)));
         let user = from_digits(&text, DigitsType::User).map_err(|_| FfiError::Malformed)?;
@@ -4457,7 +4467,10 @@ impl Handle {
             held.push(<[u8; 17]>::try_from(bytes.as_slice()).map_err(|_| FfiError::Malformed)?);
         }
         let social = join_social(&held).map_err(|error| FfiError::from(Error::from(error)))?;
-        let user: [u8; 16] = user.as_slice().try_into().map_err(|_| FfiError::Malformed)?;
+        let user: [u8; 16] = user
+            .as_slice()
+            .try_into()
+            .map_err(|_| FfiError::Malformed)?;
         let key = RecoveryCode::new(umbra_crypto::secret::Secret::new(user), social)
             .backup_root_key()
             .map_err(|error| FfiError::from(Error::from(error)))?;
@@ -4532,27 +4545,38 @@ impl Handle {
     /// The share that a contact gave to this user, or none.
     pub fn held_share(&self, conversation: Vec<u8>) -> Result<Option<FfiHeldShare>, FfiError> {
         let conversation = conversation_of(&conversation)?;
-        Ok(locked(&self.inner).client.held_share(conversation)?.map(|share| FfiHeldShare {
-            threshold: share.threshold,
-            count: share.count,
-            index: share.index,
-            at_ms: share.at_ms,
-        }))
+        Ok(locked(&self.inner)
+            .client
+            .held_share(conversation)?
+            .map(|share| FfiHeldShare {
+                threshold: share.threshold,
+                count: share.count,
+                index: share.index,
+                at_ms: share.at_ms,
+            }))
     }
 
     /// Writes the share that a contact gave to this user as 51 digits of
     /// Part 4 §4.7.7, for its holder to read to that contact.
-    pub fn held_share_digits(&self, conversation: Vec<u8>, sink: Arc<dyn TextSink>) -> Result<(), FfiError> {
+    pub fn held_share_digits(
+        &self,
+        conversation: Vec<u8>,
+        sink: Arc<dyn TextSink>,
+    ) -> Result<(), FfiError> {
         let conversation = conversation_of(&conversation)?;
         let mut sink = ForeignSink(sink);
-        Ok(locked(&self.inner).client.render_held_share(conversation, &mut sink)?)
+        Ok(locked(&self.inner)
+            .client
+            .render_held_share(conversation, &mut sink)?)
     }
 
     /// Writes the user half of the recovery code as 49 digits of Part 4
     /// §4.7.7.
     pub fn user_half(&self, sink: Arc<dyn TextSink>) -> Result<(), FfiError> {
         let mut sink = ForeignSink(sink);
-        Ok(locked(&self.inner).client.render_user_half(&mut sink, &mut OsRng)?)
+        Ok(locked(&self.inner)
+            .client
+            .render_user_half(&mut sink, &mut OsRng)?)
     }
 
     /// Renders the text of a message into a sink of the platform.
@@ -4723,7 +4747,9 @@ impl Handle {
     /// moderation epoch that this member signs (Part 11 §11.9.6).
     pub fn moderate(&self, message: Arc<MsgHandle>, action: u8) -> Result<(), FfiError> {
         let mut inner = locked(&self.inner);
-        inner.client.moderate(&message.0, action, unix_now_ms(), &mut OsRng)?;
+        inner
+            .client
+            .moderate(&message.0, action, unix_now_ms(), &mut OsRng)?;
         inner.pump_groups();
         drop(inner);
         self.changed.notify_all();
@@ -4763,7 +4789,9 @@ impl Handle {
 
     /// The poll of a message with the count that this device holds.
     pub fn poll_view(&self, message: Arc<MsgHandle>) -> Result<FfiPoll, FfiError> {
-        let view = locked(&self.inner).client.poll_view(&message.0, unix_now())?;
+        let view = locked(&self.inner)
+            .client
+            .poll_view(&message.0, unix_now())?;
         Ok(FfiPoll {
             question: view.question,
             options: view.options,
@@ -4860,7 +4888,9 @@ impl Handle {
     /// The timer of a conversation.
     pub fn conversation_timer(&self, conversation: Vec<u8>) -> Result<ConversationTimer, FfiError> {
         let conversation = conversation_of(&conversation)?;
-        let setting = locked(&self.inner).client.conversation_timer(conversation)?;
+        let setting = locked(&self.inner)
+            .client
+            .conversation_timer(conversation)?;
         Ok(setting.map_or(
             ConversationTimer {
                 seconds: 0,
@@ -4886,7 +4916,8 @@ impl Handle {
         let conversation = conversation_of(&conversation)?;
         let mut inner = locked(&self.inner);
         let Inner { client, bridge, .. } = &mut *inner;
-        let message = client.set_conversation_timer(conversation, seconds, unix_now_ms(), &mut OsRng)?;
+        let message =
+            client.set_conversation_timer(conversation, seconds, unix_now_ms(), &mut OsRng)?;
         if let Some(running) = bridge {
             running.flush(client, &mut OsRng)?;
         }
@@ -5072,7 +5103,10 @@ impl Handle {
 
 impl Handle {
     /// Starts the search for the root of a backup under `key`.
-    fn start_restore(&self, key: umbra_core::identity::recovery::BackupRootKey) -> Result<(), FfiError> {
+    fn start_restore(
+        &self,
+        key: umbra_core::identity::recovery::BackupRootKey,
+    ) -> Result<(), FfiError> {
         use umbra_core::session::dead::week_of;
         let mut inner = locked(&self.inner);
         let epoch = inner.client.directory_epoch()?;

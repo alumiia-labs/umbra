@@ -24,8 +24,8 @@ use umbra_core::{
     abuse::POW_CHALLENGE_PERIOD,
     directory::{
         receipt::{ReceiptQuery, RECEIPT_QUERY_LEN},
-        stat::{StatQuery, STAT_QUERY_LEN},
         root::DirectoryKeySet,
+        stat::{StatQuery, STAT_QUERY_LEN},
     },
     group::backoff::exponential,
 };

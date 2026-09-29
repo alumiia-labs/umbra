@@ -16,8 +16,8 @@ use umbra_wire::app::{
 use zeroize::Zeroizing;
 
 use super::{
-    conversation_of, msg_ref, outbox_row, stored_message, Client, Outgoing,
-    MESSAGE_PREFIX, OUTBOX, OUTGOING,
+    conversation_of, msg_ref, outbox_row, stored_message, Client, Outgoing, MESSAGE_PREFIX, OUTBOX,
+    OUTGOING,
 };
 use crate::{ConversationId, Delivery, Error, Event, MsgRef};
 
@@ -61,7 +61,11 @@ pub struct PollView {
 }
 
 /// The close time of a poll that a device took at `now` (`WIR-187`).
-pub(super) fn poll_row(conversation: ConversationId, open_seconds: u32, now: u64) -> Zeroizing<Vec<u8>> {
+pub(super) fn poll_row(
+    conversation: ConversationId,
+    open_seconds: u32,
+    now: u64,
+) -> Zeroizing<Vec<u8>> {
     let closes_at = if open_seconds == 0 {
         0
     } else {
@@ -71,7 +75,10 @@ pub(super) fn poll_row(conversation: ConversationId, open_seconds: u32, now: u64
 }
 
 fn closes_at_of(value: &[u8]) -> Result<u64, Error> {
-    let at = value.get(16..24).and_then(|b| b.try_into().ok()).ok_or(Error::Integrity)?;
+    let at = value
+        .get(16..24)
+        .and_then(|b| b.try_into().ok())
+        .ok_or(Error::Integrity)?;
     Ok(u64::from_be_bytes(at))
 }
 
@@ -98,7 +105,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .ok_or(Error::NotFound)?,
         );
         let conversation = conversation_of(&plain)?;
-        let app = Zeroizing::new(plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?.to_vec());
+        let app = Zeroizing::new(
+            plain
+                .get(MESSAGE_PREFIX..)
+                .ok_or(Error::Integrity)?
+                .to_vec(),
+        );
         if AppMessage::parse(&app, Channel::Group)?.kind != AppKind::Poll {
             return Err(Error::Malformed);
         }
@@ -232,7 +244,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             question,
             options: options.to_vec(),
         };
-        let mut body = vec![0u8; 8usize.saturating_add(question.len()).saturating_add(options.len() * 101)];
+        let mut body = vec![
+            0u8;
+            8usize
+                .saturating_add(question.len())
+                .saturating_add(options.len() * 101)
+        ];
         let used = poll.encode(&mut body)?;
         body.truncate(used);
         let mut msg_id = [0u8; 16];
@@ -351,7 +368,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if value.get(16..32) != Some(poll.0.as_slice()) {
                 continue;
             }
-            let voter: [u8; 2] = value.get(32..34).and_then(|b| b.try_into().ok()).ok_or(Error::Integrity)?;
+            let voter: [u8; 2] = value
+                .get(32..34)
+                .and_then(|b| b.try_into().ok())
+                .ok_or(Error::Integrity)?;
             let choices = value.get(VOTE_PREFIX..).ok_or(Error::Integrity)?;
             voters = voters.saturating_add(1);
             for choice in choices {
@@ -368,7 +388,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
         Ok(PollView {
             question: question.question.to_owned(),
-            options: question.options.iter().map(|option| (*option).to_owned()).collect(),
+            options: question
+                .options
+                .iter()
+                .map(|option| (*option).to_owned())
+                .collect(),
             multiple: question.multiple,
             hidden: question.hidden,
             closes_at,
@@ -380,7 +404,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     }
 
     /// The rows of the votes on a poll, for its erasure.
-    pub(super) fn vote_rows(&self, poll: &MsgRef, conversation: ConversationId) -> Result<Vec<RowId>, Error> {
+    pub(super) fn vote_rows(
+        &self,
+        poll: &MsgRef,
+        conversation: ConversationId,
+    ) -> Result<Vec<RowId>, Error> {
         let mut rows = Vec::new();
         for (row, value) in self.open_ref()?.store.list(VOTES, Some(&conversation.0))? {
             if value.get(16..32) == Some(poll.0.as_slice()) {

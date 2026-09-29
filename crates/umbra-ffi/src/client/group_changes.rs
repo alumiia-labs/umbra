@@ -45,7 +45,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(value) = self.open_ref()?.store.get(GROUP_SENDER, &message.0)? else {
             return Ok(None);
         };
-        let index: [u8; 2] = value.get(16..18).and_then(|b| b.try_into().ok()).ok_or(Error::Integrity)?;
+        let index: [u8; 2] = value
+            .get(16..18)
+            .and_then(|b| b.try_into().ok())
+            .ok_or(Error::Integrity)?;
         Ok(Some(u16::from_be_bytes(index)))
     }
 
@@ -95,7 +98,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     _ => return Ok(()),
                 };
                 for target in targets {
-                    let Some((message, _)) = self.authored_target(conversation, &target, sender)? else {
+                    let Some((message, _)) = self.authored_target(conversation, &target, sender)?
+                    else {
                         continue;
                     };
                     self.leave_placeholder(conversation, message, rng)?;
@@ -109,7 +113,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 let Ok(edit) = EditBody::parse(parsed.body) else {
                     return Ok(());
                 };
-                let Some((message, plain)) = self.authored_target(conversation, &edit.target, sender)? else {
+                let Some((message, plain)) =
+                    self.authored_target(conversation, &edit.target, sender)?
+                else {
                     return Ok(());
                 };
                 let info = info_of(&plain)?;
@@ -129,7 +135,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 };
                 let open = self.open_mut()?;
                 let mut batch = open.store.begin();
-                batch.put(TableId::MESSAGE, message.0, Some(conversation.0), &changed, rng)?;
+                batch.put(
+                    TableId::MESSAGE,
+                    message.0,
+                    Some(conversation.0),
+                    &changed,
+                    rng,
+                )?;
                 batch.put(REVISION, message.0, None, &[count.saturating_add(1)], rng)?;
                 batch.commit()?;
                 self.events.push_back(Event::Edited {

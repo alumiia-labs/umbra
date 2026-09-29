@@ -138,7 +138,11 @@ fn read_settings(path: &str) -> Option<Settings> {
         queue: values.get("queue")?.into(),
         aggregators: values
             .get("aggregators")
-            .map(|list| list.split(',').filter_map(|index| index.trim().parse().ok()).collect())
+            .map(|list| {
+                list.split(',')
+                    .filter_map(|index| index.trim().parse().ok())
+                    .collect()
+            })
             .unwrap_or_default(),
     })
 }
@@ -279,7 +283,11 @@ fn evaluate(settings: &Arc<Settings>, key: &Arc<SigningKey>, counts: &mut Counts
             let Ok(set) = relay_set(&settings) else {
                 return;
             };
-            let Some(listed) = set.relays.iter().find(|listed| listed.candidate.relay_id == relay) else {
+            let Some(listed) = set
+                .relays
+                .iter()
+                .find(|listed| listed.candidate.relay_id == relay)
+            else {
                 return;
             };
             let Some(chains) = stats::chain_count(&settings, listed, epoch).await else {
@@ -313,8 +321,13 @@ async fn run_once(
     report_sk: &Secret<32>,
 ) -> Result<(), &'static str> {
     let (guard, dial, chain) = relays_of(settings)?;
-    let tls = native::tls_config_with_root_file(&settings.ca).map_err(|_| "the root does not read")?;
-    let mut node = ClientNode::with_relays(guard, chain, RootIdentity::new(Secret::new(settings.root_seed)));
+    let tls =
+        native::tls_config_with_root_file(&settings.ca).map_err(|_| "the root does not read")?;
+    let mut node = ClientNode::with_relays(
+        guard,
+        chain,
+        RootIdentity::new(Secret::new(settings.root_seed)),
+    );
     let (commands, runtime_commands) = mpsc::unbounded_channel();
     let (runtime_updates, mut updates) = mpsc::unbounded_channel();
     // A queue of an earlier run continues, and its address stays in the
@@ -354,7 +367,8 @@ async fn run_once(
             Update::Online => println!("authority online, queue restored={restored}"),
             Update::ReportQueue { address } => {
                 let held = [address.as_slice(), &report_pk].concat();
-                std::fs::write(&settings.queue, held).map_err(|_| "the queue file does not write")?;
+                std::fs::write(&settings.queue, held)
+                    .map_err(|_| "the queue file does not write")?;
                 println!("report queue made, written to {}", settings.queue.display());
             }
             Update::LinkFault(sealed) => match LinkFaultReport::open(report_sk, &sealed) {
@@ -397,11 +411,16 @@ fn read_chain(text: &str) -> Option<[[u8; 32]; 3]> {
 
 /// Prints the noised chain count of one relay in one epoch (§10.8).
 fn print_count(path: &str, relay: &str, epoch: &str) -> ExitCode {
-    let (Some(settings), Some(relay), Ok(epoch)) = (read_settings(path), hex32(relay), epoch.parse::<u64>()) else {
+    let (Some(settings), Some(relay), Ok(epoch)) =
+        (read_settings(path), hex32(relay), epoch.parse::<u64>())
+    else {
         eprintln!("usage: umbra-authority <settings file> count <relay> <epoch>");
         return ExitCode::from(2);
     };
-    let Ok(runtime) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
+    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
         return ExitCode::from(1);
     };
     runtime.block_on(async {
@@ -409,7 +428,11 @@ fn print_count(path: &str, relay: &str, epoch: &str) -> ExitCode {
             eprintln!("the manifest does not verify");
             return ExitCode::from(1);
         };
-        let Some(listed) = set.relays.iter().find(|listed| listed.candidate.relay_id == relay) else {
+        let Some(listed) = set
+            .relays
+            .iter()
+            .find(|listed| listed.candidate.relay_id == relay)
+        else {
             eprintln!("the manifest names no such relay");
             return ExitCode::from(1);
         };
@@ -419,7 +442,9 @@ fn print_count(path: &str, relay: &str, epoch: &str) -> ExitCode {
                 ExitCode::SUCCESS
             }
             None => {
-                eprintln!("no count: an aggregator is not this program, or the relay holds no share");
+                eprintln!(
+                    "no count: an aggregator is not this program, or the relay holds no share"
+                );
                 ExitCode::from(1)
             }
         }

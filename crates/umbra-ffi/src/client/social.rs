@@ -68,7 +68,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
         let device_peers = self.device_peers()?;
         for holder in holders {
-            if self.is_group(*holder)? || device_peers.contains(holder) || self.is_ended_channel(*holder)? {
+            if self.is_group(*holder)?
+                || device_peers.contains(holder)
+                || self.is_ended_channel(*holder)?
+            {
                 return Err(Error::Malformed);
             }
         }
@@ -114,7 +117,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .iter()
             .map(|(holder, msg_id, _, _)| {
                 let reference = msg_ref(&open.device_set_key, msg_id);
-                open.store.row_id(TableId::MESSAGE, &[holder.0.as_slice(), &reference].concat())
+                open.store.row_id(
+                    TableId::MESSAGE,
+                    &[holder.0.as_slice(), &reference].concat(),
+                )
             })
             .collect();
         let mut batch = open.store.begin();
@@ -150,7 +156,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     pub fn shares_given(&self) -> Result<Vec<GivenShare>, Error> {
         let mut given = Vec::new();
         for (row, value) in self.open_ref()?.store.list(SHARES_GIVEN, None)? {
-            let [index, threshold, count] = value.get(24..27).and_then(|b| <[u8; 3]>::try_from(b).ok()).ok_or(Error::Integrity)?;
+            let [index, threshold, count] = value
+                .get(24..27)
+                .and_then(|b| <[u8; 3]>::try_from(b).ok())
+                .ok_or(Error::Integrity)?;
             given.push(GivenShare {
                 conversation: ConversationId(row),
                 index,
@@ -174,39 +183,58 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if RecoveryShare::parse(body).is_err() {
             return Ok(());
         }
-        let value = Zeroizing::new([conversation.0.as_slice(), &now_ms.to_be_bytes(), body].concat());
+        let value =
+            Zeroizing::new([conversation.0.as_slice(), &now_ms.to_be_bytes(), body].concat());
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
-        batch.put(SHARES_HELD, conversation.0, Some(conversation.0), &value, rng)?;
+        batch.put(
+            SHARES_HELD,
+            conversation.0,
+            Some(conversation.0),
+            &value,
+            rng,
+        )?;
         batch.commit()?;
         self.events.push_back(Event::Conversations);
         Ok(())
     }
 
-    fn held_body(&self, conversation: ConversationId) -> Result<Option<(u64, RecoveryShare)>, Error> {
+    fn held_body(
+        &self,
+        conversation: ConversationId,
+    ) -> Result<Option<(u64, RecoveryShare)>, Error> {
         let Some(value) = self.open_ref()?.store.get(SHARES_HELD, &conversation.0)? else {
             return Ok(None);
         };
         let value = Zeroizing::new(value);
-        let at: [u8; 8] = value.get(16..24).and_then(|b| b.try_into().ok()).ok_or(Error::Integrity)?;
+        let at: [u8; 8] = value
+            .get(16..24)
+            .and_then(|b| b.try_into().ok())
+            .ok_or(Error::Integrity)?;
         let body = RecoveryShare::parse(value.get(24..).ok_or(Error::Integrity)?)?;
         Ok(Some((u64::from_be_bytes(at), body)))
     }
 
     /// The share that a contact gave to this user, or none.
     pub fn held_share(&self, conversation: ConversationId) -> Result<Option<HeldShare>, Error> {
-        Ok(self.held_body(conversation)?.map(|(at_ms, body)| HeldShare {
-            threshold: body.threshold,
-            count: body.count,
-            index: body.share[0],
-            at_ms,
-        }))
+        Ok(self
+            .held_body(conversation)?
+            .map(|(at_ms, body)| HeldShare {
+                threshold: body.threshold,
+                count: body.count,
+                index: body.share[0],
+                at_ms,
+            }))
     }
 
     /// Writes the share that a contact gave to this user into `sink`, as
     /// `RecoveryDigits` of type `0x0003`: the one way it goes back
     /// (`IDN-189`, `IDN-190`).
-    pub fn render_held_share(&self, conversation: ConversationId, sink: &mut dyn Sink) -> Result<(), Error> {
+    pub fn render_held_share(
+        &self,
+        conversation: ConversationId,
+        sink: &mut dyn Sink,
+    ) -> Result<(), Error> {
         let (_, body) = self.held_body(conversation)?.ok_or(Error::NotFound)?;
         let digits = to_digits(DigitsType::Share, &body.share)?;
         let units: Zeroizing<Vec<u16>> = Zeroizing::new(digits.encode_utf16().collect());
@@ -216,7 +244,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
     /// Writes `C_user` into `sink` as `RecoveryDigits` of type `0x0002`,
     /// the half that stays with the user (`IDN-149`).
-    pub fn render_user_half<R: CryptoRng + ?Sized>(&mut self, sink: &mut dyn Sink, rng: &mut R) -> Result<(), Error> {
+    pub fn render_user_half<R: CryptoRng + ?Sized>(
+        &mut self,
+        sink: &mut dyn Sink,
+        rng: &mut R,
+    ) -> Result<(), Error> {
         let code = self.recovery_code(rng)?;
         let digits = to_digits(DigitsType::User, code.user().expose())?;
         let units: Zeroizing<Vec<u16>> = Zeroizing::new(digits.encode_utf16().collect());

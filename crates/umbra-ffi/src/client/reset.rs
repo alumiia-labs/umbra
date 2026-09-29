@@ -45,7 +45,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let store = &self.open_ref()?.store;
         let row = store.row_id(TableId::LOCAL_IDENTITY, IDENTITY_ROOT_KEY);
         match store.get(TableId::LOCAL_IDENTITY, &row)? {
-            Some(seed) => Ok(Some(seed.as_slice().try_into().map_err(|_| Error::Integrity)?)),
+            Some(seed) => Ok(Some(
+                seed.as_slice().try_into().map_err(|_| Error::Integrity)?,
+            )),
             None => Ok(None),
         }
     }
@@ -115,12 +117,27 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             notices.push((conversation, due, app));
         }
         let open = self.open_mut()?;
-        let identity_row = open.store.row_id(TableId::LOCAL_IDENTITY, IDENTITY_ROOT_KEY);
+        let identity_row = open
+            .store
+            .row_id(TableId::LOCAL_IDENTITY, IDENTITY_ROOT_KEY);
         let mut batch = open.store.begin();
-        batch.put(TableId::LOCAL_IDENTITY, identity_row, None, seed.as_ref(), rng)?;
+        batch.put(
+            TableId::LOCAL_IDENTITY,
+            identity_row,
+            None,
+            seed.as_ref(),
+            rng,
+        )?;
         for (conversation, due, app) in &notices {
-            let value = Zeroizing::new([conversation.0.as_slice(), &due.to_be_bytes(), app].concat());
-            batch.put(RESET_NOTICES, conversation.0, Some(conversation.0), &value, rng)?;
+            let value =
+                Zeroizing::new([conversation.0.as_slice(), &due.to_be_bytes(), app].concat());
+            batch.put(
+                RESET_NOTICES,
+                conversation.0,
+                Some(conversation.0),
+                &value,
+                rng,
+            )?;
         }
         batch.commit()?;
         self.keep_device_set(&device, &roster, rng)?;
@@ -137,11 +154,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// Hands each notice whose delay passed at `now` to the send path. The
     /// record goes on the pairwise session that exists (`IDN-055`), and no
     /// view shows it. The result counts the notices that went.
-    pub fn send_due_notices<R: CryptoRng + ?Sized>(&mut self, now: u64, rng: &mut R) -> Result<usize, Error> {
+    pub fn send_due_notices<R: CryptoRng + ?Sized>(
+        &mut self,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<usize, Error> {
         let mut due = Vec::new();
         for (row, value) in self.open_ref()?.store.list(RESET_NOTICES, None)? {
             let value = Zeroizing::new(value);
-            let at: [u8; 8] = value.get(16..24).and_then(|b| b.try_into().ok()).ok_or(Error::Integrity)?;
+            let at: [u8; 8] = value
+                .get(16..24)
+                .and_then(|b| b.try_into().ok())
+                .ok_or(Error::Integrity)?;
             if u64::from_be_bytes(at) <= now {
                 let app = value.get(24..).ok_or(Error::Integrity)?.to_vec();
                 due.push((ConversationId(row), app));
@@ -153,7 +177,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let reference = msg_ref(&open.device_set_key, &parsed.msg_id);
             let natural = [conversation.0.as_slice(), &reference].concat();
             let row = open.store.row_id(TableId::MESSAGE, &natural);
-            let stored = stored_message(OUTGOING, Delivery::Queued, *conversation, now.saturating_mul(1_000), app);
+            let stored = stored_message(
+                OUTGOING,
+                Delivery::Queued,
+                *conversation,
+                now.saturating_mul(1_000),
+                app,
+            );
             let mut batch = open.store.begin();
             batch.put(TableId::MESSAGE, row, Some(conversation.0), &stored, rng)?;
             batch.put(OUTBOX, row, None, &outbox_row(), rng)?;

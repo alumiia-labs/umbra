@@ -123,8 +123,12 @@ fn run(settings: &str, out: &Path) -> Result<(), &'static str> {
                 }));
             }
             Some(("report_queue", value)) => {
-                let (index, file) = value.split_once(',').ok_or("a report_queue line does not parse")?;
-                let index: u8 = index.parse().map_err(|_| "a report_queue line does not parse")?;
+                let (index, file) = value
+                    .split_once(',')
+                    .ok_or("a report_queue line does not parse")?;
+                let index: u8 = index
+                    .parse()
+                    .map_err(|_| "a report_queue line does not parse")?;
                 report_queues.push((index, file.to_owned()));
             }
             _ => return Err("the settings file does not parse"),
@@ -210,11 +214,21 @@ fn run(settings: &str, out: &Path) -> Result<(), &'static str> {
         let queue = ReportQueue {
             authority_index: *index,
             epoch,
-            address: address.try_into().map_err(|_| "a report queue file does not parse")?,
-            report_pk: report_pk.try_into().map_err(|_| "a report queue file does not parse")?,
+            address: address
+                .try_into()
+                .map_err(|_| "a report queue file does not parse")?,
+            report_pk: report_pk
+                .try_into()
+                .map_err(|_| "a report queue file does not parse")?,
         };
-        let key = keys.get(usize::from(*index)).ok_or("no authority of that index")?;
-        signed_queues.push(queue.sign(key, &mut OsRng).map_err(|_| "a report queue does not sign")?);
+        let key = keys
+            .get(usize::from(*index))
+            .ok_or("no authority of that index")?;
+        signed_queues.push(
+            queue
+                .sign(key, &mut OsRng)
+                .map_err(|_| "a report queue does not sign")?,
+        );
     }
     // REL-183: each removed link of its life, under each key.
     removed.sort();
@@ -225,12 +239,17 @@ fn run(settings: &str, out: &Path) -> Result<(), &'static str> {
         .iter()
         .filter(|removal| removal.epoch <= epoch && removal.epoch + LINK_REMOVAL_EPOCHS >= epoch)
     {
-        signed_removals.push(removal.sign(&signers, &mut OsRng).map_err(|_| "a link removal does not sign")?);
+        signed_removals.push(
+            removal
+                .sign(&signers, &mut OsRng)
+                .map_err(|_| "a link removal does not sign")?,
+        );
     }
     let manifest = if signed_queues.is_empty() && signed_removals.is_empty() {
         manifest
     } else {
-        let mut parsed = RelayManifest::parse(&manifest).map_err(|_| "the manifest does not parse")?;
+        let mut parsed =
+            RelayManifest::parse(&manifest).map_err(|_| "the manifest does not parse")?;
         parsed.queues = signed_queues.iter().map(Vec::as_slice).collect();
         parsed.removals = signed_removals.iter().map(Vec::as_slice).collect();
         parsed.encode().map_err(|_| "the manifest does not build")?

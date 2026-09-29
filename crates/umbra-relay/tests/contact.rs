@@ -496,7 +496,13 @@ fn two_clients_become_contacts_and_exchange_text() {
     let now = network.now;
     for (seed, carried) in [(92, CoverSlot::Acknowledgment), (94, CoverSlot::Receipt)] {
         let slot = network.clients[BOB]
-            .on_cover_slot(false, Some((&bob_contact, &receipt)), None, now, &mut Rng(seed))
+            .on_cover_slot(
+                false,
+                Some((&bob_contact, &receipt)),
+                None,
+                now,
+                &mut Rng(seed),
+            )
             .unwrap();
         assert_eq!(slot, carried);
     }
@@ -510,7 +516,13 @@ fn two_clients_become_contacts_and_exchange_text() {
     network.now += RECEIPT_MIN_DELAY;
     let now = network.now;
     let slot = network.clients[BOB]
-        .on_cover_slot(false, Some((&bob_contact, &receipt)), None, now, &mut Rng(93))
+        .on_cover_slot(
+            false,
+            Some((&bob_contact, &receipt)),
+            None,
+            now,
+            &mut Rng(93),
+        )
         .unwrap();
     assert_eq!(slot, CoverSlot::Acknowledgment);
     network.settle();
@@ -548,8 +560,11 @@ fn two_clients_become_contacts_and_exchange_text() {
         .unwrap();
     assert_ne!(slot, CoverSlot::Report);
     assert!(network.clients[BOB].faults_mut().due().is_some());
-    network.clients[BOB]
-        .set_report_queues((1..=5).map(|layer| queue_at(relay_static(layer).0.relay_id)).collect());
+    network.clients[BOB].set_report_queues(
+        (1..=5)
+            .map(|layer| queue_at(relay_static(layer).0.relay_id))
+            .collect(),
+    );
     let slot = network.clients[BOB]
         .on_cover_slot(false, None, None, now, &mut Rng(96))
         .unwrap();
@@ -1596,7 +1611,9 @@ fn each_relay_link_returns_receipts_for_its_cells() {
     }
     network.settle();
     // The middle relay has two relay links, the other two have one.
-    let held: Vec<(usize, usize)> = (0..3).map(|relay| network.relays[relay].receipts_held()).collect();
+    let held: Vec<(usize, usize)> = (0..3)
+        .map(|relay| network.relays[relay].receipts_held())
+        .collect();
     assert_eq!(held, [(1, 1), (2, 2), (1, 1)], "{held:?}");
 }
 
@@ -1664,7 +1681,9 @@ fn a_probe_cell_is_covered_by_the_receipts_of_each_link() {
     let mut network = Network::new();
     network.settle();
     let (chain, tags) = network.clients[AUTHORITY].probe().unwrap();
-    let relays: Vec<[u8; 32]> = (1..=3u8).map(|layer| relay_static(layer).0.relay_id).collect();
+    let relays: Vec<[u8; 32]> = (1..=3u8)
+        .map(|layer| relay_static(layer).0.relay_id)
+        .collect();
     assert_eq!(chain.to_vec(), relays);
     network.settle();
     let epoch = network.now / 3_600;
@@ -1674,8 +1693,11 @@ fn a_probe_cell_is_covered_by_the_receipts_of_each_link() {
         network.route(relay, outputs);
     }
     network.settle();
-    let identity =
-        |layer: u8| SigningKey::from_seed(Secret::new([0x30 + layer; 32])).verifying_key().to_bytes();
+    let identity = |layer: u8| {
+        SigningKey::from_seed(Secret::new([0x30 + layer; 32]))
+            .verifying_key()
+            .to_bytes()
+    };
     // The link from hop k to hop k + 1 carries the tag of hop k + 1.
     for hop in 1..3usize {
         let query = ReceiptQuery {
@@ -1715,5 +1737,7 @@ fn a_probe_cell_is_covered_by_the_receipts_of_each_link() {
         ..query
     };
     assert!(network.relays[1].receipt_answer(&other, at).is_some());
-    assert!(network.relays[1].receipt_answer(&query, at + umbra_core::directory::EPOCH_SECONDS).is_some());
+    assert!(network.relays[1]
+        .receipt_answer(&query, at + umbra_core::directory::EPOCH_SECONDS)
+        .is_some());
 }

@@ -84,7 +84,12 @@ impl LinkFaultReport {
         report_pk: &[u8; 32],
         rng: &mut R,
     ) -> Result<Vec<u8>, Error> {
-        Ok(seal::seal(report_pk, labels::LINK_FAULT_SEAL, &self.encode()?, rng)?)
+        Ok(seal::seal(
+            report_pk,
+            labels::LINK_FAULT_SEAL,
+            &self.encode()?,
+            rng,
+        )?)
     }
 
     /// Opens a `SealedReport` with the secret of the queue (`REL-170`).
@@ -143,7 +148,11 @@ impl ReportQueue {
 
     /// Reads a signed queue and verifies it under `keyset` for a root of
     /// `root_epoch` (`REL-168`).
-    pub fn verify(bytes: &[u8], keyset: &DirectoryKeySet<'_>, root_epoch: u64) -> Result<Self, Error> {
+    pub fn verify(
+        bytes: &[u8],
+        keyset: &DirectoryKeySet<'_>,
+        root_epoch: u64,
+    ) -> Result<Self, Error> {
         let mut r = Reader::new(bytes);
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
@@ -180,7 +189,10 @@ mod tests {
             loops_sent: 12,
             loops_lost: 4,
         };
-        assert_eq!(LinkFaultReport::parse(&report.encode().unwrap()).unwrap(), report);
+        assert_eq!(
+            LinkFaultReport::parse(&report.encode().unwrap()).unwrap(),
+            report
+        );
         let secret = Secret::new([9; 32]);
         let pk = seal::public_of(&secret);
         let sealed = report.seal(&pk, &mut rng).unwrap();
@@ -189,7 +201,10 @@ mod tests {
         assert!(LinkFaultReport::open(&Secret::new([8; 32]), &sealed).is_err());
         let mut more = report.encode().unwrap();
         more[REPORT_LEN - 1] = 13;
-        assert!(LinkFaultReport::parse(&more).is_err(), "more lost than sent");
+        assert!(
+            LinkFaultReport::parse(&more).is_err(),
+            "more lost than sent"
+        );
     }
 
     #[test]

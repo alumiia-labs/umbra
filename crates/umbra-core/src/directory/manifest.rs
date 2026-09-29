@@ -61,7 +61,11 @@ impl<'a> RelayManifest<'a> {
         let removals = if self.removals.is_empty() {
             0
         } else {
-            2 + self.removals.iter().map(|removal| removal.len()).sum::<usize>()
+            2 + self
+                .removals
+                .iter()
+                .map(|removal| removal.len())
+                .sum::<usize>()
         };
         1 + 2 + self.root.len() + 2 + entries + queues + removals
     }

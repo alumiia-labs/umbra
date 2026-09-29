@@ -29,7 +29,12 @@ pub fn public_of(secret: &Secret<32>) -> [u8; 32] {
     PublicKey::from(&StaticSecret::from(clamp(*secret.expose()))).to_bytes()
 }
 
-fn key_of(shared: &[u8; 32], ephemeral: &[u8; 32], recipient: &[u8; 32], label: &[u8]) -> Result<Secret<32>, Error> {
+fn key_of(
+    shared: &[u8; 32],
+    ephemeral: &[u8; 32],
+    recipient: &[u8; 32],
+    label: &[u8],
+) -> Result<Secret<32>, Error> {
     // A non-contributory output names no secret.
     if shared == &[0u8; 32] {
         return Err(Error::Key);
@@ -53,7 +58,9 @@ pub fn seal<R: CryptoRng + ?Sized>(
     rng.fill_bytes(&mut scalar);
     let ephemeral = StaticSecret::from(clamp(scalar));
     let ephemeral_pk = PublicKey::from(&ephemeral).to_bytes();
-    let shared = ephemeral.diffie_hellman(&PublicKey::from(*recipient)).to_bytes();
+    let shared = ephemeral
+        .diffie_hellman(&PublicKey::from(*recipient))
+        .to_bytes();
     let key = key_of(&shared, &ephemeral_pk, recipient, label)?;
     let mut body = plain.to_vec();
     let tag = aead::seal_ietf(&key, &[0u8; aead::NONCE_LEN_IETF], &[], &mut body)?;
@@ -74,7 +81,9 @@ pub fn open(secret: &Secret<32>, label: &[u8], sealed: &[u8]) -> Result<Vec<u8>,
     let ephemeral_pk: [u8; 32] = ephemeral_pk.try_into().map_err(|_| Error::Length)?;
     let own = StaticSecret::from(clamp(*secret.expose()));
     let recipient = PublicKey::from(&own).to_bytes();
-    let shared = own.diffie_hellman(&PublicKey::from(ephemeral_pk)).to_bytes();
+    let shared = own
+        .diffie_hellman(&PublicKey::from(ephemeral_pk))
+        .to_bytes();
     let key = key_of(&shared, &ephemeral_pk, &recipient, label)?;
     let mut plain = body.to_vec();
     aead::open_ietf(&key, &[0u8; aead::NONCE_LEN_IETF], &[], &mut plain, tag)?;
@@ -94,7 +103,10 @@ mod tests {
         let pk = public_of(&secret);
         let sealed = seal(&pk, b"umbra/v1/link-fault-seal", b"report", &mut rng).unwrap();
         assert_eq!(sealed.len(), 6 + OVERHEAD);
-        assert_eq!(open(&secret, b"umbra/v1/link-fault-seal", &sealed).unwrap(), b"report");
+        assert_eq!(
+            open(&secret, b"umbra/v1/link-fault-seal", &sealed).unwrap(),
+            b"report"
+        );
         assert!(open(&secret, b"umbra/v1/other", &sealed).is_err());
         assert!(open(&Secret::new([6; 32]), b"umbra/v1/link-fault-seal", &sealed).is_err());
         let mut torn = sealed.clone();

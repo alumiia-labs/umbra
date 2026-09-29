@@ -2059,10 +2059,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // admit, and the new group takes the place of the one it held. So
         // does the second admit of `GRP-421`.
         let conversation = self.conversation_of_group(&group_id)?;
-        if !replaces
-            && self.is_group(conversation)?
-            && !self.group_of(conversation)?.lost_rekey()
-        {
+        if !replaces && self.is_group(conversation)? && !self.group_of(conversation)?.lost_rekey() {
             return Err(Error::Malformed);
         }
         let row = Self::group_row(&group, OPEN)?;
@@ -2218,7 +2215,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let open = self.open_ref()?;
         let reference = super::msg_ref(&open.device_set_key, &parsed.msg_id);
         let natural = [conversation.0.as_slice(), &reference].concat();
-        let message = MsgRef(open.store.row_id(umbra_core::store::record::TableId::MESSAGE, &natural));
+        let message = MsgRef(
+            open.store
+                .row_id(umbra_core::store::record::TableId::MESSAGE, &natural),
+        );
         // A second copy moves no timer and no deadline.
         if open
             .store
@@ -2262,7 +2262,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         } else if expires_in > 0 && super::timers::is_timed_kind(parsed.kind) {
             // DEV-244: the sync copy carries the deadline, and the owner of
             // the channels takes it from there (DEV-245).
-            let deadline = umbra_core::devset::edits::Deadline::from_sync(now_ms / 1_000, expires_in);
+            let deadline =
+                umbra_core::devset::edits::Deadline::from_sync(now_ms / 1_000, expires_in);
             self.put_deadline(conversation, message, deadline, rng)?;
         }
         Ok(())
@@ -3822,7 +3823,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     // GRP-336: a vote is one group record, and each member
                     // counts it in the order of its sender (WIR-190).
                     if parsed.kind == AppKind::PollVote {
-                        self.take_vote(conversation, parsed.body, sender, u64::from(counter), now, rng)?;
+                        self.take_vote(
+                            conversation,
+                            parsed.body,
+                            sender,
+                            u64::from(counter),
+                            now,
+                            rng,
+                        )?;
                         continue;
                     }
                     // A record that does not parse under the layout of a
@@ -3857,8 +3865,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         self.put_group_sender(conversation, message, sender, rng)?;
                         self.after_group_store(conversation, &group, message, &app, now, rng)?;
                         match timer {
-                            Some(seconds) => self.put_timer(conversation, seconds, now_ms, false, rng)?,
-                            None => self.stamp_deadline(conversation, message, parsed.kind, now, rng)?,
+                            Some(seconds) => {
+                                self.put_timer(conversation, seconds, now_ms, false, rng)?
+                            }
+                            None => {
+                                self.stamp_deadline(conversation, message, parsed.kind, now, rng)?
+                            }
                         }
                     }
                     first = first.or(stored);
@@ -3998,10 +4010,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 // GRP-335: the pair key of the roster entry. This device
                 // tests its own identifier alone, thus a mention of no
                 // member names nobody here (GRP-140).
-                let own = group
-                    .roster()
-                    .member(group.own_index())
-                    .map(|member| umbra_wire::app::rich::mention_id(group.group_id(), &member.pair_pk));
+                let own = group.roster().member(group.own_index()).map(|member| {
+                    umbra_wire::app::rich::mention_id(group.group_id(), &member.pair_pk)
+                });
                 if own.is_some_and(|own| rich.mentions.contains(&own)) {
                     let open = self.open_mut()?;
                     let mut batch = open.store.begin();
@@ -4010,8 +4021,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
             }
             AppKind::Poll => {
-                let open_seconds =
-                    umbra_wire::app::poll::Poll::parse(parsed.body).map_or(0, |poll| poll.open_seconds);
+                let open_seconds = umbra_wire::app::poll::Poll::parse(parsed.body)
+                    .map_or(0, |poll| poll.open_seconds);
                 self.open_poll(conversation, message, open_seconds, now, rng)?;
             }
             _ => {}
@@ -4021,7 +4032,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
     /// The mention identifiers of members of a group, from their roster
     /// indices, in the order of `WIR-166` (`GRP-334`).
-    pub(super) fn mention_ids(&self, conversation: ConversationId, members: &[u16]) -> Result<Vec<[u8; 16]>, Error> {
+    pub(super) fn mention_ids(
+        &self,
+        conversation: ConversationId,
+        members: &[u16],
+    ) -> Result<Vec<[u8; 16]>, Error> {
         let group = self.group_of(conversation)?;
         let mut ids = Vec::with_capacity(members.len());
         for index in members {
@@ -4030,7 +4045,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .member(*index)
                 .filter(|member| member.active)
                 .ok_or(Error::NotFound)?;
-            ids.push(umbra_wire::app::rich::mention_id(group.group_id(), &member.pair_pk));
+            ids.push(umbra_wire::app::rich::mention_id(
+                group.group_id(),
+                &member.pair_pk,
+            ));
         }
         ids.sort_unstable();
         ids.dedup();
@@ -4145,7 +4163,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             Applied::Moderated {
                 actor_role,
                 actions,
-            } => self.apply_moderation(conversation, *actor_role, actions, now.saturating_mul(1_000), rng),
+            } => self.apply_moderation(
+                conversation,
+                *actor_role,
+                actions,
+                now.saturating_mul(1_000),
+                rng,
+            ),
             Applied::Removed(trigger) => {
                 if let Some(index) = trigger.excluded {
                     self.groups.evictions.remove(&(conversation, index));

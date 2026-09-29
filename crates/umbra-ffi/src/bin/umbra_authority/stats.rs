@@ -48,12 +48,19 @@ fn laplace(b: f64) -> Option<i64> {
 
 /// The share of aggregator `index` at one relay for `epoch`, with its noise
 /// (`REL-193`).
-async fn noised_share(settings: &Settings, relay: &ListedRelay, index: u8, epoch: u64) -> Option<u64> {
+async fn noised_share(
+    settings: &Settings,
+    relay: &ListedRelay,
+    index: u8,
+    epoch: u64,
+) -> Option<u64> {
     let query = StatQuery {
         authority_index: index,
         epoch,
     };
-    let body = query.sign(&aggregator_key(settings, index), &mut OsRng).ok()?;
+    let body = query
+        .sign(&aggregator_key(settings, index), &mut OsRng)
+        .ok()?;
     let url = https::Url {
         host: relay.host.clone(),
         port: relay.port,
@@ -61,9 +68,17 @@ async fn noised_share(settings: &Settings, relay: &ListedRelay, index: u8, epoch
         address: Some(std::net::IpAddr::from(relay.addr_v4)),
     };
     let tls = native::tls_config_with_root_file(&settings.ca).ok()?;
-    let (status, answer) = https::post(&url, "application/octet-stream", &[], &body, tls, 64, ASK_WAIT)
-        .await
-        .ok()?;
+    let (status, answer) = https::post(
+        &url,
+        "application/octet-stream",
+        &[],
+        &body,
+        tls,
+        64,
+        ASK_WAIT,
+    )
+    .await
+    .ok()?;
     if status != 200 {
         return None;
     }

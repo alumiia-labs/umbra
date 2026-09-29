@@ -805,7 +805,16 @@ mod tests {
         let now = 1_700_000_100u64;
 
         let poll = client
-            .send_poll(conversation, "trail?", &["ridge", "lake"], false, false, 0, now * 1_000, &mut rng)
+            .send_poll(
+                conversation,
+                "trail?",
+                &["ridge", "lake"],
+                false,
+                false,
+                0,
+                now * 1_000,
+                &mut rng,
+            )
             .unwrap();
         assert!(client.info(&poll).unwrap().poll);
         assert_eq!(client.poll_view(&poll, now).unwrap().voters, 0);
@@ -814,10 +823,15 @@ mod tests {
             .on_group_record(&[0xC3; 32], 1, &post.record, (now + 1) * 1_000, &mut rng)
             .unwrap()
             .unwrap();
-        assert_eq!(other.poll_view(&held, now + 1).unwrap().options, ["ridge", "lake"]);
+        assert_eq!(
+            other.poll_view(&held, now + 1).unwrap().options,
+            ["ridge", "lake"]
+        );
 
         // GRP-336: the vote is one group record, and each member counts it.
-        other.vote(&held, &[1], (now + 2) * 1_000, &mut rng).unwrap();
+        other
+            .vote(&held, &[1], (now + 2) * 1_000, &mut rng)
+            .unwrap();
         assert_eq!(other.poll_view(&held, now + 2).unwrap().mine, [1]);
         let vote = other.take_group_post().unwrap();
         assert!(other.take_outgoing().is_none());
@@ -833,7 +847,9 @@ mod tests {
         let mut draft = client.new_draft(conversation);
         draft.set_text(&units("@Dana which one")).unwrap();
         draft.set_mentions(vec![1]);
-        client.send_draft(draft, (now + 4) * 1_000, &mut rng).unwrap();
+        client
+            .send_draft(draft, (now + 4) * 1_000, &mut rng)
+            .unwrap();
         let post = client.take_group_post().unwrap();
         let named = other
             .on_group_record(&[0xC3; 32], 1, &post.record, (now + 5) * 1_000, &mut rng)
@@ -860,7 +876,8 @@ mod tests {
                             at: u64,
                             rng: &mut Rng| {
             let post = from.take_group_post().unwrap();
-            to.on_group_record(&[0xC3; 32], 1, &post.record, at * 1_000, rng).unwrap()
+            to.on_group_record(&[0xC3; 32], 1, &post.record, at * 1_000, rng)
+                .unwrap()
         };
 
         let mut draft = other.new_draft(member);
@@ -869,22 +886,35 @@ mod tests {
         let held = deliver_post(&mut other, &mut client, now + 1, &mut rng).unwrap();
 
         // GRP-081: a plain member moderates nothing.
-        assert!(other.moderate(&mine, MOD_HIDE, (now + 2) * 1_000, &mut rng).is_err());
+        assert!(other
+            .moderate(&mine, MOD_HIDE, (now + 2) * 1_000, &mut rng)
+            .is_err());
 
         // GRP-085: a hide keeps the record, out of the view.
-        client.moderate(&held, MOD_HIDE, (now + 2) * 1_000, &mut rng).unwrap();
+        client
+            .moderate(&held, MOD_HIDE, (now + 2) * 1_000, &mut rng)
+            .unwrap();
         assert_eq!(client.info(&held).unwrap().moderation, MOD_HIDE);
         assert!(deliver_post(&mut client, &mut other, now + 3, &mut rng).is_none());
         let info = other.info(&mine).unwrap();
-        assert_eq!((info.moderation, info.moderator_role, info.deleted), (MOD_HIDE, 5, false));
-        client.moderate(&held, MOD_UNHIDE, (now + 4) * 1_000, &mut rng).unwrap();
+        assert_eq!(
+            (info.moderation, info.moderator_role, info.deleted),
+            (MOD_HIDE, 5, false)
+        );
+        client
+            .moderate(&held, MOD_UNHIDE, (now + 4) * 1_000, &mut rng)
+            .unwrap();
         deliver_post(&mut client, &mut other, now + 5, &mut rng);
         assert_eq!(other.info(&mine).unwrap().moderation, 0);
 
         // A remove leaves a placeholder that names the role (GRP-082), and a
         // removed message takes no second act (GRP-084).
-        client.moderate(&held, MOD_REMOVE, (now + 6) * 1_000, &mut rng).unwrap();
-        assert!(client.moderate(&held, MOD_HIDE, (now + 7) * 1_000, &mut rng).is_err());
+        client
+            .moderate(&held, MOD_REMOVE, (now + 6) * 1_000, &mut rng)
+            .unwrap();
+        assert!(client
+            .moderate(&held, MOD_HIDE, (now + 7) * 1_000, &mut rng)
+            .is_err());
         deliver_post(&mut client, &mut other, now + 7, &mut rng);
         let info = other.info(&mine).unwrap();
         assert_eq!((info.moderation, info.deleted), (MOD_REMOVE, true));
@@ -892,7 +922,10 @@ mod tests {
         // GRP-089: each epoch keeps its count.
         let notes = other.moderation_notes(member).unwrap();
         assert_eq!(notes.len(), 3);
-        assert_eq!((notes[0].hidden, notes[1].shown, notes[2].removed), (1, 1, 1));
+        assert_eq!(
+            (notes[0].hidden, notes[1].shown, notes[2].removed),
+            (1, 1, 1)
+        );
         assert_eq!(notes[2].actor_role, 5);
         let _ = conversation;
     }
@@ -916,11 +949,15 @@ mod tests {
         assert_eq!(client.info(&held).unwrap().sender, Some(1));
         assert_eq!(other.info(&mine).unwrap().sender, None);
         // A member deletes no message of another member.
-        assert!(client.delete_for_everyone(&held, (now + 2) * 1_000, &mut rng).is_err());
+        assert!(client
+            .delete_for_everyone(&held, (now + 2) * 1_000, &mut rng)
+            .is_err());
 
         let mut draft = other.new_draft(member);
         draft.set_text(&units("meet at 9")).unwrap();
-        other.edit(&mine, draft, (now + 3) * 1_000, &mut rng).unwrap();
+        other
+            .edit(&mine, draft, (now + 3) * 1_000, &mut rng)
+            .unwrap();
         let post = other.take_group_post().unwrap();
         assert!(other.take_outgoing().is_none());
         client
@@ -931,7 +968,9 @@ mod tests {
         assert_eq!(String::from_utf16(&view.0).unwrap(), "meet at 9");
         assert!(client.info(&held).unwrap().revisions == 1);
 
-        other.delete_for_everyone(&mine, (now + 5) * 1_000, &mut rng).unwrap();
+        other
+            .delete_for_everyone(&mine, (now + 5) * 1_000, &mut rng)
+            .unwrap();
         let post = other.take_group_post().unwrap();
         client
             .on_group_record(&[0xC3; 32], 1, &post.record, (now + 6) * 1_000, &mut rng)
@@ -959,11 +998,11 @@ mod tests {
         assert!(other.set_alert_setting(member, 3, &mut rng).is_err());
 
         let send = |client: &mut Client<MemoryBackend, Element>,
-                        other: &mut Client<MemoryBackend, Element>,
-                        text: &str,
-                        mentions: Vec<u16>,
-                        at: u64,
-                        rng: &mut Rng| {
+                    other: &mut Client<MemoryBackend, Element>,
+                    text: &str,
+                    mentions: Vec<u16>,
+                    at: u64,
+                    rng: &mut Rng| {
             let mut draft = client.new_draft(conversation);
             draft.set_text(&units(text)).unwrap();
             draft.set_mentions(mentions);
@@ -976,14 +1015,22 @@ mod tests {
         };
         let plain = send(&mut client, &mut other, "plain", vec![], now, &mut rng);
         assert!(other.should_alert(&plain).unwrap());
-        other.set_alert_setting(member, ALERT_MENTIONS, &mut rng).unwrap();
+        other
+            .set_alert_setting(member, ALERT_MENTIONS, &mut rng)
+            .unwrap();
         assert!(!other.should_alert(&plain).unwrap());
         let named = send(&mut client, &mut other, "@you", vec![1], now + 1, &mut rng);
         assert!(other.should_alert(&named).unwrap());
-        other.set_alert_setting(member, ALERT_NONE, &mut rng).unwrap();
+        other
+            .set_alert_setting(member, ALERT_NONE, &mut rng)
+            .unwrap();
         assert!(!other.should_alert(&named).unwrap());
         // The conversation stays in the list.
-        assert!(other.summaries().unwrap().iter().any(|summary| summary.conversation == member));
+        assert!(other
+            .summaries()
+            .unwrap()
+            .iter()
+            .any(|summary| summary.conversation == member));
     }
 
     #[test]
@@ -1006,18 +1053,39 @@ mod tests {
         // The helper adds the member on the group itself, thus no note yet.
         assert!(kinds(&client).is_empty());
         client
-            .set_group_role(conversation, 1, umbra_wire::group::control::Role::Moderator, now * 1_000, &mut rng)
+            .set_group_role(
+                conversation,
+                1,
+                umbra_wire::group::control::Role::Moderator,
+                now * 1_000,
+                &mut rng,
+            )
             .unwrap();
         let notes = client.roster_notes(conversation).unwrap();
-        assert_eq!((notes[0].kind, notes[0].index, notes[0].role), (NOTE_ROLE, 1, 3));
+        assert_eq!(
+            (notes[0].kind, notes[0].index, notes[0].role),
+            (NOTE_ROLE, 1, 3)
+        );
         // GRP-166: a silent moderator steps down first. GRP-050: the removal
         // for silence says so.
         client
-            .act_on_silence(conversation, 1, Silence::Demote, (now + 1) * 1_000, &mut rng)
+            .act_on_silence(
+                conversation,
+                1,
+                Silence::Demote,
+                (now + 1) * 1_000,
+                &mut rng,
+            )
             .unwrap();
         assert_eq!(kinds(&client).last(), Some(&(NOTE_ROLE, 1)));
         client
-            .act_on_silence(conversation, 1, Silence::Remove, (now + 2) * 1_000, &mut rng)
+            .act_on_silence(
+                conversation,
+                1,
+                Silence::Remove,
+                (now + 2) * 1_000,
+                &mut rng,
+            )
             .unwrap();
         assert_eq!(kinds(&client).last(), Some(&(NOTE_EVICTED, 1)));
     }
@@ -2696,13 +2764,25 @@ mod tests {
             .offer_group(at_admin, pair_at_admin, 1_700_000_011_000, &mut rng)
             .unwrap();
         let offer = admin.take_outgoing().unwrap();
-        deliver(&mut joiner, &admin_at_joiner, &offer.app, 1_700_000_011_500, &mut rng);
+        deliver(
+            &mut joiner,
+            &admin_at_joiner,
+            &offer.app,
+            1_700_000_011_500,
+            &mut rng,
+        );
         let offers = joiner.group_offers().unwrap();
         joiner
             .accept_group_offer(&offers[0], 1_700_000_012_000, &mut rng)
             .unwrap();
         let asked = joiner.take_outgoing().unwrap();
-        deliver(&mut admin, &joiner_at_admin, &asked.app, 1_700_000_012_500, &mut rng);
+        deliver(
+            &mut admin,
+            &joiner_at_admin,
+            &asked.app,
+            1_700_000_012_500,
+            &mut rng,
+        );
         let joiners = admin.group_joiners().unwrap();
         let first = admin
             .add_joiner(&joiners[0], 1_700_000_013_000, &mut rng)
@@ -2710,12 +2790,30 @@ mod tests {
         let add = admin.take_group_post().unwrap();
         while admin.take_group_post().is_some() {}
         admin
-            .admit_joiner(&joiners[0], first.index, b"one", 1_700_000_013_500, &mut rng)
+            .admit_joiner(
+                &joiners[0],
+                first.index,
+                b"one",
+                1_700_000_013_500,
+                &mut rng,
+            )
             .unwrap();
         let admit = admin.take_outgoing().unwrap();
-        deliver(&mut joiner, &admin_at_joiner, &admit.app, 1_700_000_014_000, &mut rng);
+        deliver(
+            &mut joiner,
+            &admin_at_joiner,
+            &admit.app,
+            1_700_000_014_000,
+            &mut rng,
+        );
         let joined = joiner
-            .accept_group_admit(pair_at_joiner, &group_id, &first.snapshot, 1_700_000_014, &mut rng)
+            .accept_group_admit(
+                pair_at_joiner,
+                &group_id,
+                &first.snapshot,
+                1_700_000_014,
+                &mut rng,
+            )
             .unwrap();
 
         // The owner grants a role at the predecessor of the add, and its
@@ -2748,19 +2846,43 @@ mod tests {
             .on_group_record(&[0xC3; 32], 4, &again.record, 1_700_000_016_500, &mut rng)
             .unwrap();
         admin
-            .admit_joiner(&joiners[0], second.index, b"two", 1_700_000_017_000, &mut rng)
+            .admit_joiner(
+                &joiners[0],
+                second.index,
+                b"two",
+                1_700_000_017_000,
+                &mut rng,
+            )
             .unwrap();
         let admit = admin.take_outgoing().unwrap();
-        deliver(&mut joiner, &admin_at_joiner, &admit.app, 1_700_000_017_500, &mut rng);
+        deliver(
+            &mut joiner,
+            &admin_at_joiner,
+            &admit.app,
+            1_700_000_017_500,
+            &mut rng,
+        );
         assert_eq!(joiner.group_admits().unwrap().len(), 1);
         let rejoined = joiner
-            .accept_group_admit(pair_at_joiner, &group_id, &second.snapshot, 1_700_000_018, &mut rng)
+            .accept_group_admit(
+                pair_at_joiner,
+                &group_id,
+                &second.snapshot,
+                1_700_000_018,
+                &mut rng,
+            )
             .unwrap();
         assert_eq!(rejoined, joined);
         assert_eq!(joiner.group_info(joined).unwrap().own_index, second.index);
         let chain = *owner.group_of(group).unwrap().roster().chain_hash();
-        assert_eq!(*admin.group_of(at_admin).unwrap().roster().chain_hash(), chain);
-        assert_eq!(*joiner.group_of(joined).unwrap().roster().chain_hash(), chain);
+        assert_eq!(
+            *admin.group_of(at_admin).unwrap().roster().chain_hash(),
+            chain
+        );
+        assert_eq!(
+            *joiner.group_of(joined).unwrap().roster().chain_hash(),
+            chain
+        );
     }
 
     #[test]
@@ -2998,7 +3120,10 @@ mod tests {
         let hour = record(AppKind::ConversationTimer, [3; 16], &[1, 0, 0, 0x0E, 0x10]);
         deliver(&mut client, &peer, &hour, at(1), &mut rng);
         let setting = client.conversation_timer(conversation).unwrap().unwrap();
-        assert_eq!((setting.seconds, setting.set_at_ms, setting.by_user), (3_600, at(1), false));
+        assert_eq!(
+            (setting.seconds, setting.set_at_ms, setting.by_user),
+            (3_600, at(1), false)
+        );
         // DEV-208: the period runs from the receive time.
         let after = record(AppKind::Text, [4; 16], b"after");
         deliver(&mut client, &peer, &after, at(10), &mut rng);
@@ -3016,7 +3141,10 @@ mod tests {
         let rows = client.messages(conversation).unwrap();
         client.render(&rows[1], &mut view).unwrap();
         assert!(view.0.is_empty());
-        assert_eq!((infos[2].timer, infos[2].expires_at), (None, Some(now + 3_610)));
+        assert_eq!(
+            (infos[2].timer, infos[2].expires_at),
+            (None, Some(now + 3_610))
+        );
 
         // DEV-215: a backup carries the untimed rows and the timer alone.
         let upload = client.backup_due(now + 20, true).unwrap().unwrap();
@@ -3047,7 +3175,13 @@ mod tests {
             .set_conversation_timer(conversation, 30, at(4_000), &mut rng)
             .unwrap();
         assert_eq!(client.info(&change).unwrap().timer, Some(30));
-        assert!(client.conversation_timer(conversation).unwrap().unwrap().by_user);
+        assert!(
+            client
+                .conversation_timer(conversation)
+                .unwrap()
+                .unwrap()
+                .by_user
+        );
         let outgoing = client.take_outgoing().unwrap();
         assert_eq!(outgoing.message, change);
         let mut draft = client.new_draft(conversation);
@@ -3077,10 +3211,28 @@ mod tests {
 
         // A hidden count needs a close.
         assert!(alice
-            .send_poll(with_bob, "lunch?", &["soup", "salad"], false, true, 0, now * 1_000, &mut rng)
+            .send_poll(
+                with_bob,
+                "lunch?",
+                &["soup", "salad"],
+                false,
+                true,
+                0,
+                now * 1_000,
+                &mut rng
+            )
             .is_err());
         let poll = alice
-            .send_poll(with_bob, "lunch?", &["soup", "salad", "none"], false, false, 3_600, now * 1_000, &mut rng)
+            .send_poll(
+                with_bob,
+                "lunch?",
+                &["soup", "salad", "none"],
+                false,
+                false,
+                3_600,
+                now * 1_000,
+                &mut rng,
+            )
             .unwrap();
         let sent = alice.take_outgoing().unwrap();
         assert!(alice.info(&poll).unwrap().poll);
@@ -3092,10 +3244,15 @@ mod tests {
         deliver(&mut bob, &at_bob, &sent.app, (now + 60) * 1_000, &mut rng);
         let held = *bob.messages(with_alice).unwrap().last().unwrap();
         let seen = bob.poll_view(&held, now + 60).unwrap();
-        assert_eq!((seen.options.len(), seen.closes_at, seen.voters), (3, now + 3_660, 0));
+        assert_eq!(
+            (seen.options.len(), seen.closes_at, seen.voters),
+            (3, now + 3_660, 0)
+        );
 
         // WIR-186: one choice alone. A vote is no row of the view.
-        assert!(bob.vote(&held, &[0, 1], (now + 61) * 1_000, &mut rng).is_err());
+        assert!(bob
+            .vote(&held, &[0, 1], (now + 61) * 1_000, &mut rng)
+            .is_err());
         bob.vote(&held, &[1], (now + 61) * 1_000, &mut rng).unwrap();
         let first = bob.take_outgoing().unwrap();
         bob.vote(&held, &[0], (now + 62) * 1_000, &mut rng).unwrap();
@@ -3105,21 +3262,47 @@ mod tests {
         assert_eq!((mine.counts, mine.mine), (vec![1, 0, 0], vec![0]));
 
         // WIR-190: the last vote of the contact counts, once.
-        deliver(&mut alice, &at_alice, &first.app, (now + 70) * 1_000, &mut rng);
-        deliver(&mut alice, &at_alice, &second.app, (now + 71) * 1_000, &mut rng);
-        alice.vote(&poll, &[0], (now + 72) * 1_000, &mut rng).unwrap();
+        deliver(
+            &mut alice,
+            &at_alice,
+            &first.app,
+            (now + 70) * 1_000,
+            &mut rng,
+        );
+        deliver(
+            &mut alice,
+            &at_alice,
+            &second.app,
+            (now + 71) * 1_000,
+            &mut rng,
+        );
+        alice
+            .vote(&poll, &[0], (now + 72) * 1_000, &mut rng)
+            .unwrap();
         let count = alice.poll_view(&poll, now + 72).unwrap();
-        assert_eq!((count.counts, count.voters, count.mine), (vec![2, 0, 0], 2, vec![0]));
+        assert_eq!(
+            (count.counts, count.voters, count.mine),
+            (vec![2, 0, 0], 2, vec![0])
+        );
         assert_eq!(alice.messages(with_bob).unwrap(), [poll]);
 
         // WIR-189: a vote after the close goes, and this device votes no more.
-        bob.vote(&held, &[2], (now + 3_000) * 1_000, &mut rng).unwrap();
+        bob.vote(&held, &[2], (now + 3_000) * 1_000, &mut rng)
+            .unwrap();
         let late = bob.take_outgoing().unwrap();
-        deliver(&mut alice, &at_alice, &late.app, (now + 3_700) * 1_000, &mut rng);
+        deliver(
+            &mut alice,
+            &at_alice,
+            &late.app,
+            (now + 3_700) * 1_000,
+            &mut rng,
+        );
         let closed = alice.poll_view(&poll, now + 3_700).unwrap();
         assert!(closed.closed);
         assert_eq!(closed.counts, vec![2, 0, 0]);
-        assert!(alice.vote(&poll, &[1], (now + 3_701) * 1_000, &mut rng).is_err());
+        assert!(alice
+            .vote(&poll, &[1], (now + 3_701) * 1_000, &mut rng)
+            .is_err());
 
         // WIR-176: a pairwise record that names a member goes.
         let named = RichRecord {
@@ -3132,7 +3315,13 @@ mod tests {
         };
         let mut body = vec![0u8; named.len()];
         named.encode(Channel::Group, &mut body).unwrap();
-        deliver(&mut bob, &at_bob, &record(AppKind::Rich, [9; 16], &body), now * 1_000, &mut rng);
+        deliver(
+            &mut bob,
+            &at_bob,
+            &record(AppKind::Rich, [9; 16], &body),
+            now * 1_000,
+            &mut rng,
+        );
         assert_eq!(bob.messages(with_alice).unwrap().len(), 1);
         // A pairwise draft names no member (WIR-175).
         let mut draft = bob.new_draft(with_alice);
@@ -3154,9 +3343,13 @@ mod tests {
             contact,
             state: zeroize::Zeroizing::new(state),
         };
-        client.commit_network(&[change], &[], 1_000_000, &mut rng).unwrap();
+        client
+            .commit_network(&[change], &[], 1_000_000, &mut rng)
+            .unwrap();
         let conversation = client.conversation_for(&contact.0).unwrap();
-        client.set_verified(conversation, &[7; 32], 1_000_000, &mut rng).unwrap();
+        client
+            .set_verified(conversation, &[7; 32], 1_000_000, &mut rng)
+            .unwrap();
         assert!(client.is_verified(conversation).unwrap());
         assert!(client.key_change(conversation).unwrap().is_none());
 
@@ -3167,21 +3360,36 @@ mod tests {
         };
         let mut body = vec![0u8; 1_217];
         notice.encode(&mut body).unwrap();
-        deliver(&mut client, &contact, &record(AppKind::KeyChange, [3; 16], &body), 2_000_000, &mut rng);
+        deliver(
+            &mut client,
+            &contact,
+            &record(AppKind::KeyChange, [3; 16], &body),
+            2_000_000,
+            &mut rng,
+        );
         // IDN-061, IDN-062: the notice waits, and the old key holds.
         let pending = client.key_change(conversation).unwrap().unwrap();
         assert_eq!(pending.at_ms, 2_000_000);
-        assert_ne!(pending.new_safety_number, client.safety_number(conversation).unwrap());
+        assert_ne!(
+            pending.new_safety_number,
+            client.safety_number(conversation).unwrap()
+        );
         assert!(client.messages(conversation).unwrap().is_empty());
         assert!(client.is_verified(conversation).unwrap());
         // IDN-025: the conversation takes no message before the answer.
         let mut draft = client.new_draft(conversation);
         draft.set_text(&units("hello")).unwrap();
-        assert_eq!(client.send_draft(draft, 2_001_000, &mut rng), Err(Error::Busy));
+        assert_eq!(
+            client.send_draft(draft, 2_001_000, &mut rng),
+            Err(Error::Busy)
+        );
 
         let (named, key) = client.accept_key_change(conversation, &mut rng).unwrap();
         assert_eq!((named, key), (contact, [0xAB; 32]));
-        assert_eq!(client.safety_number(conversation).unwrap(), pending.new_safety_number);
+        assert_eq!(
+            client.safety_number(conversation).unwrap(),
+            pending.new_safety_number
+        );
         // IDN-175: the verification of the earlier key counts for nothing.
         assert!(!client.is_verified(conversation).unwrap());
         assert!(client.key_change(conversation).unwrap().is_none());
@@ -3200,17 +3408,27 @@ mod tests {
         let mut bob = new_client(&mut rng);
         let at_alice = ContactId([0x61; 32]);
         let at_bob = ContactId([0x62; 32]);
-        let store = |client: &mut Client<MemoryBackend, Element>, contact: ContactId, salt: [u8; 16], peer: [u8; 32], rng: &mut Rng| {
+        let store = |client: &mut Client<MemoryBackend, Element>,
+                     contact: ContactId,
+                     salt: [u8; 16],
+                     peer: [u8; 32],
+                     rng: &mut Rng| {
             let state = [&[0x01][..], &salt, &peer, &[0; 8]].concat();
             let change = StateChange::Contact {
                 contact,
                 state: zeroize::Zeroizing::new(state),
             };
-            client.commit_network(&[change], &[], 1_000_000, rng).unwrap();
+            client
+                .commit_network(&[change], &[], 1_000_000, rng)
+                .unwrap();
             client.conversation_for(&contact.0).unwrap()
         };
         let salt = [5; 16];
-        let old = alice.root_identity().unwrap().pairwise_identity(&salt).x25519_public();
+        let old = alice
+            .root_identity()
+            .unwrap()
+            .pairwise_identity(&salt)
+            .x25519_public();
         let with_bob = store(&mut alice, at_alice, salt, [7; 32], &mut rng);
         let with_alice = store(&mut bob, at_bob, [9; 16], old, &mut rng);
         let mut draft = alice.new_draft(with_bob);
@@ -3221,7 +3439,11 @@ mod tests {
         let now = 2_000_000u64;
         let summary = alice.reset_identity(now * 1_000, &mut rng).unwrap();
         assert_eq!((summary.contacts, summary.groups), (1, 0));
-        let new = alice.root_identity().unwrap().pairwise_identity(&salt).x25519_public();
+        let new = alice
+            .root_identity()
+            .unwrap()
+            .pairwise_identity(&salt)
+            .x25519_public();
         assert_ne!(new, old);
         // K_set stays, thus each stored message keeps its place.
         assert_eq!(alice.messages(with_bob).unwrap(), [kept]);
@@ -3229,10 +3451,18 @@ mod tests {
         // IDN-063: the notice waits for its delay, and then it goes on the
         // session that exists. No view shows it.
         assert_eq!(alice.send_due_notices(now, &mut rng).unwrap(), 0);
-        assert_eq!(alice.send_due_notices(now + 10_000_000, &mut rng).unwrap(), 1);
+        assert_eq!(
+            alice.send_due_notices(now + 10_000_000, &mut rng).unwrap(),
+            1
+        );
         let notice = alice.take_outgoing().unwrap();
         assert_eq!(notice.conversation, with_bob);
-        assert_eq!(AppMessage::parse(&notice.app, Channel::Pairwise).unwrap().kind, AppKind::KeyChange);
+        assert_eq!(
+            AppMessage::parse(&notice.app, Channel::Pairwise)
+                .unwrap()
+                .kind,
+            AppKind::KeyChange
+        );
         assert_eq!(alice.messages(with_bob).unwrap(), [kept]);
 
         // The contact holds the notice until its user accepts it.
@@ -3242,7 +3472,10 @@ mod tests {
         assert_ne!(pending.new_safety_number, before);
         let (_, key) = bob.accept_key_change(with_alice, &mut rng).unwrap();
         assert_eq!(key, new);
-        assert_eq!(bob.safety_number(with_alice).unwrap(), pending.new_safety_number);
+        assert_eq!(
+            bob.safety_number(with_alice).unwrap(),
+            pending.new_safety_number
+        );
     }
 
     #[test]
@@ -3254,26 +3487,46 @@ mod tests {
 
         let mut rng = Rng(103);
         let mut alice = new_client(&mut rng);
-        let store = |client: &mut Client<MemoryBackend, Element>, contact: ContactId, rng: &mut Rng| {
-            let state = [&[0x01][..], &contact.0[..16], &[7; 32], &[0; 8]].concat();
-            let change = StateChange::Contact {
-                contact,
-                state: zeroize::Zeroizing::new(state),
+        let store =
+            |client: &mut Client<MemoryBackend, Element>, contact: ContactId, rng: &mut Rng| {
+                let state = [&[0x01][..], &contact.0[..16], &[7; 32], &[0; 8]].concat();
+                let change = StateChange::Contact {
+                    contact,
+                    state: zeroize::Zeroizing::new(state),
+                };
+                client
+                    .commit_network(&[change], &[], 1_000_000, rng)
+                    .unwrap();
+                client.conversation_for(&contact.0).unwrap()
             };
-            client.commit_network(&[change], &[], 1_000_000, rng).unwrap();
-            client.conversation_for(&contact.0).unwrap()
-        };
-        let contacts = [ContactId([0x71; 32]), ContactId([0x72; 32]), ContactId([0x73; 32])];
-        let holders: Vec<ConversationId> = contacts.iter().map(|c| store(&mut alice, *c, &mut rng)).collect();
+        let contacts = [
+            ContactId([0x71; 32]),
+            ContactId([0x72; 32]),
+            ContactId([0x73; 32]),
+        ];
+        let holders: Vec<ConversationId> = contacts
+            .iter()
+            .map(|c| store(&mut alice, *c, &mut rng))
+            .collect();
         // IDN-188: one share to each holder, and no holder twice.
-        assert!(alice.split_social(&[holders[0], holders[0]], 2, 2_000_000, &mut rng).is_err());
-        assert!(alice.split_social(&holders[..1], 2, 2_000_000, &mut rng).is_err());
-        alice.split_social(&holders, 2, 2_000_000, &mut rng).unwrap();
+        assert!(alice
+            .split_social(&[holders[0], holders[0]], 2, 2_000_000, &mut rng)
+            .is_err());
+        assert!(alice
+            .split_social(&holders[..1], 2, 2_000_000, &mut rng)
+            .is_err());
+        alice
+            .split_social(&holders, 2, 2_000_000, &mut rng)
+            .unwrap();
         let given = alice.shares_given().unwrap();
         assert_eq!(given.len(), 3);
-        assert!(given.iter().all(|share| (share.threshold, share.count) == (2, 3)));
+        assert!(given
+            .iter()
+            .all(|share| (share.threshold, share.count) == (2, 3)));
         // The records are no rows of the view.
-        assert!(holders.iter().all(|holder| alice.messages(*holder).unwrap().is_empty()));
+        assert!(holders
+            .iter()
+            .all(|holder| alice.messages(*holder).unwrap().is_empty()));
 
         let mut digits = Vec::new();
         for holder_id in 0..3 {
@@ -3295,10 +3548,19 @@ mod tests {
         // IDN-191: two shares join, and the halves give the recovery code.
         let shares: Vec<[u8; 17]> = digits[1..]
             .iter()
-            .map(|text| from_digits(text, DigitsType::Share).unwrap().as_slice().try_into().unwrap())
+            .map(|text| {
+                from_digits(text, DigitsType::Share)
+                    .unwrap()
+                    .as_slice()
+                    .try_into()
+                    .unwrap()
+            })
             .collect();
         let social = join_social(&shares).unwrap();
-        let rebuilt = RecoveryCode::new(umbra_crypto::secret::Secret::new(user.as_slice().try_into().unwrap()), social);
+        let rebuilt = RecoveryCode::new(
+            umbra_crypto::secret::Secret::new(user.as_slice().try_into().unwrap()),
+            social,
+        );
         let held = alice.recovery_code(&mut rng).unwrap();
         assert_eq!(rebuilt.bytes().expose(), held.bytes().expose());
         // IDN-087: a share alone is no code.
@@ -3322,9 +3584,14 @@ mod tests {
         // IMP-075: a queued record does not go again, and a failed one waits
         // for the user.
         assert!(client.send_again(&answer, 1_002_000, &mut rng).is_err());
-        client.set_delivery(&answer, Delivery::Failed, &mut rng).unwrap();
+        client
+            .set_delivery(&answer, Delivery::Failed, &mut rng)
+            .unwrap();
         assert!(client.take_outgoing().is_none());
-        assert_eq!(client.info(&answer).unwrap().reply, ReplyTarget::Message(first));
+        assert_eq!(
+            client.info(&answer).unwrap().reply,
+            ReplyTarget::Message(first)
+        );
         client.send_again(&answer, 1_003_000, &mut rng).unwrap();
         let again = client.take_outgoing().unwrap();
         // The record goes as it went the first time, with its raw target.
@@ -3353,7 +3620,10 @@ mod tests {
         sender.digest_sent(source, now, &mut rng).unwrap();
         assert!(sender.due_digest(now + 1, &mut rng).unwrap().is_none());
         let interval = umbra_core::discovery::GOSSIP_INTERVAL;
-        assert!(sender.due_digest(now + interval, &mut rng).unwrap().is_some());
+        assert!(sender
+            .due_digest(now + interval, &mut rng)
+            .unwrap()
+            .is_some());
 
         // A root of the same epoch agrees, and one that differs warns.
         receiver
@@ -3361,7 +3631,11 @@ mod tests {
             .unwrap();
         deliver(&mut receiver, &peer, &app, now * 1_000, &mut rng);
         assert!(receiver.gossip_warnings().unwrap().is_empty());
-        assert!(receiver.summaries().unwrap().iter().all(|s| s.last.is_none()));
+        assert!(receiver
+            .summaries()
+            .unwrap()
+            .iter()
+            .all(|s| s.last.is_none()));
         receiver
             .keep_consensus_digest(40, &[0xB2; 32], &mut rng)
             .unwrap();
@@ -3377,9 +3651,7 @@ mod tests {
         // another size waits for its proof (DIS-136).
         let mut other = new_client(&mut rng);
         other.conversation_for(&peer.0).unwrap();
-        other
-            .keep_head(9, &[0xC3; 32], now, now, &mut rng)
-            .unwrap();
+        other.keep_head(9, &[0xC3; 32], now, now, &mut rng).unwrap();
         sender
             .keep_head(9, &[0xC3; 32], now, now, &mut rng)
             .unwrap();

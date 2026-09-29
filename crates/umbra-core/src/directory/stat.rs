@@ -67,7 +67,11 @@ impl StatQuery {
     }
 
     /// Signs the query with the key of its aggregator.
-    pub fn sign<R: CryptoRng + ?Sized>(&self, key: &SigningKey, rng: &mut R) -> Result<Vec<u8>, Error> {
+    pub fn sign<R: CryptoRng + ?Sized>(
+        &self,
+        key: &SigningKey,
+        rng: &mut R,
+    ) -> Result<Vec<u8>, Error> {
         let body = self.body();
         let sig = key.sign(&[labels::STAT_QUERY, &body].concat(), rng)?;
         Ok([body.as_slice(), &sig.to_bytes()].concat())
@@ -143,7 +147,10 @@ mod tests {
         let shares = split(412, &mut rng);
         assert_eq!(combine(shares), 412);
         // REL-194: the noise of each aggregator adds, and a negative sum is 0.
-        assert_eq!(combine([add_noise(shares[0], -7), add_noise(shares[1], 3)]), 408);
+        assert_eq!(
+            combine([add_noise(shares[0], -7), add_noise(shares[1], 3)]),
+            408
+        );
         let small = split(2, &mut rng);
         assert_eq!(combine([add_noise(small[0], -9), small[1]]), 0);
     }

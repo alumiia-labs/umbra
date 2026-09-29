@@ -314,7 +314,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             0
         };
         let value = Zeroizing::new(
-            [subject.as_slice(), &order.to_be_bytes(), &at.to_be_bytes(), app].concat(),
+            [
+                subject.as_slice(),
+                &order.to_be_bytes(),
+                &at.to_be_bytes(),
+                app,
+            ]
+            .concat(),
         );
         let mut batch = open.store.begin();
         batch.put(GROUP_RECORDS_HELD, row, None, &value, rng)?;

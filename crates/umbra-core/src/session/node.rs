@@ -862,7 +862,9 @@ pub fn stored_with_peer_key(state: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, Err
     contact_version(&mut reader)?;
     let mut out = state.to_vec();
     // The version and the salt come first, and the key of the peer after.
-    out.get_mut(17..49).ok_or(Error::Malformed)?.copy_from_slice(key);
+    out.get_mut(17..49)
+        .ok_or(Error::Malformed)?
+        .copy_from_slice(key);
     Ok(out)
 }
 
@@ -3805,7 +3807,11 @@ impl ClientNode {
 
     /// Builds a circuit to `relay` with no queue on it, for the probe of an
     /// isolation query (Part 10 `REL-109`).
-    pub fn open_circuit<R: CryptoRng + ?Sized>(&mut self, relay: [u8; 32], rng: &mut R) -> Result<(), Error> {
+    pub fn open_circuit<R: CryptoRng + ?Sized>(
+        &mut self,
+        relay: [u8; 32],
+        rng: &mut R,
+    ) -> Result<(), Error> {
         self.circuit_to(relay, rng)
     }
 
@@ -3819,7 +3825,11 @@ impl ClientNode {
             .iter()
             .position(|slot| slot.is_general() && slot.is_ready())
             .ok_or(Error::NoPath)?;
-        let chain = self.slots.get(ready).and_then(|slot| slot.chain).ok_or(Error::NoPath)?;
+        let chain = self
+            .slots
+            .get(ready)
+            .and_then(|slot| slot.chain)
+            .ok_or(Error::NoPath)?;
         let Some(Circuit::Ready(session)) = self.slots.get_mut(ready).map(|slot| &mut slot.circuit)
         else {
             return Err(Error::NoPath);

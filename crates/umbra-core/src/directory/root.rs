@@ -147,7 +147,11 @@ impl<'a> DirectoryKeySet<'a> {
 
     /// Counts the valid signatures over `preimage` and fails below five
     /// (`REL-031`, `REL-032`).
-    pub(crate) fn verify_multi(&self, preimage: &[u8], sigs: &[AuthoritySig<'_>]) -> Result<(), Error> {
+    pub(crate) fn verify_multi(
+        &self,
+        preimage: &[u8],
+        sigs: &[AuthoritySig<'_>],
+    ) -> Result<(), Error> {
         let mut valid = 0usize;
         for s in sigs {
             let key = self.key(s.authority_index)?;

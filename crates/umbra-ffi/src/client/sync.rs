@@ -19,9 +19,9 @@ use umbra_core::{
         engine::{SyncEngine, Taken},
         roster::{ClaimScope, OwnerClaim, Roster},
         sync::{
-            group_subject, restamp_expires_in, IdentityEntry, Origin, SyncedRecord, AUTHOR_PEER, AUTHOR_USER, ITEM_CONTACT_NAME,
-            ITEM_DELIVERY, ITEM_GROUP_REKEY, ITEM_GROUP_STATE, ITEM_IDENTITY_ENTRY, SCOPE_GROUP,
-            SCOPE_PAIRWISE,
+            group_subject, restamp_expires_in, IdentityEntry, Origin, SyncedRecord, AUTHOR_PEER,
+            AUTHOR_USER, ITEM_CONTACT_NAME, ITEM_DELIVERY, ITEM_GROUP_REKEY, ITEM_GROUP_STATE,
+            ITEM_IDENTITY_ENTRY, SCOPE_GROUP, SCOPE_PAIRWISE,
         },
         DeviceId,
     },
@@ -590,7 +590,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
     /// Queues the next record of a resend, one at each call, thus a resend
     /// is no burst (`DEV-073`, `DEV-074`). The result is whether one went.
-    pub fn resend_one<R: CryptoRng + ?Sized>(&mut self, now: u64, rng: &mut R) -> Result<bool, Error> {
+    pub fn resend_one<R: CryptoRng + ?Sized>(
+        &mut self,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<bool, Error> {
         let Some(mut engine) = self.sync_engine()? else {
             return Ok(false);
         };
@@ -713,7 +717,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
     /// Drops the body of each timed record whose period ended, thus no
     /// resend holds it (`DEV-211`).
-    pub(super) fn drop_sync_sent_of(&mut self, due: &[(ConversationId, MsgRef)]) -> Result<(), Error> {
+    pub(super) fn drop_sync_sent_of(
+        &mut self,
+        due: &[(ConversationId, MsgRef)],
+    ) -> Result<(), Error> {
         let mut gone = Vec::new();
         for (row, value) in self.open_ref()?.store.list(SYNC_SENT, None)? {
             let value = Zeroizing::new(value);

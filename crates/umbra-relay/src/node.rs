@@ -495,7 +495,11 @@ impl RelayNode {
     }
 
     /// The answer to a receipt query that verified (`REL-179`).
-    pub fn receipt_answer(&mut self, query: &receipt::ReceiptQuery, now: u64) -> Option<receipt::ReceiptAnswer> {
+    pub fn receipt_answer(
+        &mut self,
+        query: &receipt::ReceiptQuery,
+        now: u64,
+    ) -> Option<receipt::ReceiptAnswer> {
         // REL-186: one authority asks at most RECEIPT_QUERY_MAX times.
         if !self.receipts.admit(query.authority_index, now) {
             return None;
@@ -563,7 +567,11 @@ impl RelayNode {
         // REL-173: the next hop learns which relay dialed it.
         if let Some(key) = self.pow_key.as_ref() {
             let hello = receipt::relay_hello(&self.relay.relay_id, &session_id, key, rng);
-            outputs.extend(hello.ok().and_then(|hello| capsule_output(link, CapsuleType::RelayHello, &hello)));
+            outputs.extend(
+                hello
+                    .ok()
+                    .and_then(|hello| capsule_output(link, CapsuleType::RelayHello, &hello)),
+            );
         }
         let mut actions = Vec::new();
         for waiting in self.extending.remove(&relay_id).unwrap_or_default() {
@@ -675,7 +683,8 @@ impl RelayNode {
                         let mut outputs = Vec::new();
                         if let Some(key) = self.pow_key.as_ref() {
                             let own = self.relay.relay_id;
-                            for signed in self.receipts.cell_taken(link, &cell, &own, key, now, rng) {
+                            for signed in self.receipts.cell_taken(link, &cell, &own, key, now, rng)
+                            {
                                 outputs.extend(capsule_output(link, CapsuleType::Receipt, &signed));
                             }
                         }

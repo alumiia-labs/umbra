@@ -84,7 +84,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
-        let forks: Vec<Fork> = group.roster().forks().iter().skip(before).copied().collect();
+        let forks: Vec<Fork> = group
+            .roster()
+            .forks()
+            .iter()
+            .skip(before)
+            .copied()
+            .collect();
         for fork in forks {
             self.put_roster_note(
                 conversation,
@@ -124,9 +130,19 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// The changes of the roster of a conversation, in the order of time.
     pub fn roster_notes(&self, conversation: ConversationId) -> Result<Vec<RosterNote>, Error> {
         let mut notes = Vec::new();
-        for (_, value) in self.open_ref()?.store.list(ROSTER_NOTES, Some(&conversation.0))? {
-            let at: [u8; 8] = value.get(16..24).and_then(|b| b.try_into().ok()).ok_or(Error::Integrity)?;
-            let index: [u8; 2] = value.get(25..27).and_then(|b| b.try_into().ok()).ok_or(Error::Integrity)?;
+        for (_, value) in self
+            .open_ref()?
+            .store
+            .list(ROSTER_NOTES, Some(&conversation.0))?
+        {
+            let at: [u8; 8] = value
+                .get(16..24)
+                .and_then(|b| b.try_into().ok())
+                .ok_or(Error::Integrity)?;
+            let index: [u8; 2] = value
+                .get(25..27)
+                .and_then(|b| b.try_into().ok())
+                .ok_or(Error::Integrity)?;
             notes.push(RosterNote {
                 at_ms: u64::from_be_bytes(at),
                 kind: *value.get(24).ok_or(Error::Integrity)?,

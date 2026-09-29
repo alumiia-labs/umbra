@@ -103,7 +103,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         rng: &mut R,
     ) -> Result<(), Error> {
         let store = &self.open_ref()?.store;
-        if store.get(SETTINGS, &store.row_id(SETTINGS, &alert_key(conversation)))?.is_some() {
+        if store
+            .get(SETTINGS, &store.row_id(SETTINGS, &alert_key(conversation)))?
+            .is_some()
+        {
             return Ok(());
         }
         let value = if members > GROUP_ALL_NOTIFY_MAX {

@@ -78,7 +78,11 @@ impl LinkReceipt {
     }
 
     /// Signs the receipt with the identity key of `to_relay` (`REL-072`).
-    pub fn sign<R: CryptoRng + ?Sized>(&self, key: &SigningKey, rng: &mut R) -> Result<Vec<u8>, Error> {
+    pub fn sign<R: CryptoRng + ?Sized>(
+        &self,
+        key: &SigningKey,
+        rng: &mut R,
+    ) -> Result<Vec<u8>, Error> {
         let sig = key.sign(&self.preimage()?, rng)?;
         let mut out = alloc::vec![0u8; RECEIPT_LEN];
         let mut w = Writer::new(&mut out);
@@ -113,7 +117,9 @@ impl LinkReceipt {
     /// `to_relay` (`REL-178`).
     pub fn verify(bytes: &[u8], identity_pk: &[u8]) -> Result<Self, Error> {
         let receipt = Self::parse(bytes)?;
-        let sig = bytes.get(RECEIPT_LEN - SIGNATURE_LEN..).ok_or(Error::Malformed)?;
+        let sig = bytes
+            .get(RECEIPT_LEN - SIGNATURE_LEN..)
+            .ok_or(Error::Malformed)?;
         verify_under(identity_pk, &receipt.preimage()?, sig)?;
         Ok(receipt)
     }
@@ -174,7 +180,11 @@ impl ReceiptQuery {
     }
 
     /// Signs the query with the key of its authority.
-    pub fn sign<R: CryptoRng + ?Sized>(&self, key: &SigningKey, rng: &mut R) -> Result<Vec<u8>, Error> {
+    pub fn sign<R: CryptoRng + ?Sized>(
+        &self,
+        key: &SigningKey,
+        rng: &mut R,
+    ) -> Result<Vec<u8>, Error> {
         let body = self.body();
         let sig = key.sign(&[labels::RECEIPT_QUERY, &body].concat(), rng)?;
         Ok([body.as_slice(), &sig.to_bytes()].concat())
@@ -303,7 +313,11 @@ impl ReceiptAnswer {
 
     /// Whether the receipt verifies under the identity key of its
     /// `to_relay` and the proof puts the cell of `query` under its root.
-    pub fn covers(&self, query: &ReceiptQuery, to_identity_pk: &[u8]) -> Result<LinkReceipt, Error> {
+    pub fn covers(
+        &self,
+        query: &ReceiptQuery,
+        to_identity_pk: &[u8],
+    ) -> Result<LinkReceipt, Error> {
         let receipt = LinkReceipt::verify(&self.receipt, to_identity_pk)?;
         if receipt.epoch != query.epoch {
             return Err(Error::Unverified);
@@ -456,7 +470,11 @@ mod tests {
             leaf_index: 5,
             proof: tree::prove(&leaves, 5).unwrap(),
         };
-        let (taken, issued, none) = (answer(Found::Taken), answer(Found::Issued), ReceiptAnswer::none());
+        let (taken, issued, none) = (
+            answer(Found::Taken),
+            answer(Found::Issued),
+            ReceiptAnswer::none(),
+        );
         let judge = |f: Option<&ReceiptAnswer>, t: Option<&ReceiptAnswer>| {
             judge_link(from, to, &query, f, t, &to_pk)
         };
@@ -467,12 +485,25 @@ mod tests {
             judge(Some(&taken), Some(&none)),
             LinkVerdict::Contradiction { relay: to }
         );
-        assert_eq!(judge(Some(&taken), None), LinkVerdict::Contradiction { relay: to });
+        assert_eq!(
+            judge(Some(&taken), None),
+            LinkVerdict::Contradiction { relay: to }
+        );
         // REL-084: neither side shows the cell, or a side gives no answer.
-        assert_eq!(judge(Some(&none), Some(&none)), LinkVerdict::LinkFault { from, to });
+        assert_eq!(
+            judge(Some(&none), Some(&none)),
+            LinkVerdict::LinkFault { from, to }
+        );
         assert_eq!(judge(None, None), LinkVerdict::LinkFault { from, to });
         // A receipt under another key names no one.
-        let forged = judge_link(from, to, &query, Some(&taken), Some(&none), &keys[2].verifying_key().to_bytes());
+        let forged = judge_link(
+            from,
+            to,
+            &query,
+            Some(&taken),
+            Some(&none),
+            &keys[2].verifying_key().to_bytes(),
+        );
         assert_eq!(forged, LinkVerdict::LinkFault { from, to });
     }
 

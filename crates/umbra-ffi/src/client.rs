@@ -17,43 +17,43 @@ mod devices;
 mod discovery;
 mod files;
 mod gossip;
-mod group_sync;
 mod group_changes;
+mod group_sync;
 mod groups;
 mod held_handles;
 mod key_changes;
-mod notify;
-mod sync;
 mod moderation;
+mod notify;
 mod polls;
 mod reset;
 mod roster_notes;
 mod social;
+mod sync;
 mod timers;
 mod tokens;
 
 pub use alerts::{ALERT_ALL, ALERT_MENTIONS, ALERT_NONE};
 pub use backup::{BackupUpload, PendingBackup, RestoredBackup, RootWrite};
 pub use dead::DeadWork;
-pub use gossip::{GossipWarning, HeadCheck};
 pub use devices::DeviceInfo;
 pub use discovery::{ContactRequest, EntryKind, Published, PROFILE_NAME_MAX};
 pub use files::{DownloadJob, ErasureJob, FileExtras, FileInfo, FileState, UploadJob};
 use files::{FileQueues, CHUNK_CRED, FILE_DATA, FILE_STATE};
+pub use gossip::{GossipWarning, HeadCheck};
 pub use groups::{
     EpochUpload, GroupAdmitWaiting, GroupInfo, GroupJoiner, GroupOffer, GroupPost, GroupQueueJob,
     GroupSubscription, Silence, GROUP_NAME_MAX,
 };
-pub use notify::NdrCall;
-pub use sync::SyncSend;
-pub use moderation::{ModNote, MOD_HIDE, MOD_REMOVE, MOD_UNHIDE};
 pub use key_changes::PendingKeyChange;
+pub use moderation::{ModNote, MOD_HIDE, MOD_REMOVE, MOD_UNHIDE};
+pub use notify::NdrCall;
 pub use polls::PollView;
 pub use reset::ResetSummary;
-pub use social::{GivenShare, HeldShare};
 pub use roster_notes::{
     RosterNote, NOTE_EVICTED, NOTE_FORK, NOTE_JOINED, NOTE_LEFT, NOTE_NOBODY, NOTE_ROLE,
 };
+pub use social::{GivenShare, HeldShare};
+pub use sync::SyncSend;
 pub use timers::{timer_body, TimerSetting, TIMER_VALUES};
 use umbra_core::{
     devset::edits::Deadline,
@@ -738,7 +738,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if !blocked.contains(&record.conversation) && self.is_blocked(record.conversation)? {
                 blocked.push(record.conversation);
             }
-            if let std::collections::btree_map::Entry::Vacant(slot) = timers.entry(record.conversation) {
+            if let std::collections::btree_map::Entry::Vacant(slot) =
+                timers.entry(record.conversation)
+            {
                 slot.insert(self.timer_seconds(record.conversation)?);
             }
         }
@@ -2228,18 +2230,31 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .ok_or(Error::NotFound)?,
         );
         let info = info_of(&plain)?;
-        if !info.outgoing || info.delivery != Delivery::Failed || info.deleted || is_request(&plain)? {
+        if !info.outgoing
+            || info.delivery != Delivery::Failed
+            || info.deleted
+            || is_request(&plain)?
+        {
             return Err(Error::Malformed);
         }
         if open.store.get(FILE_STATE, &message.0)?.is_some() {
             return Err(Error::Malformed);
         }
         let conversation = conversation_of(&plain)?;
-        let app = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?.to_vec();
+        let app = plain
+            .get(MESSAGE_PREFIX..)
+            .ok_or(Error::Integrity)?
+            .to_vec();
         *plain.get_mut(1).ok_or(Error::Integrity)? = Delivery::Queued as u8;
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
-        batch.put(TableId::MESSAGE, message.0, Some(conversation.0), &plain, rng)?;
+        batch.put(
+            TableId::MESSAGE,
+            message.0,
+            Some(conversation.0),
+            &plain,
+            rng,
+        )?;
         batch.put(OUTBOX, message.0, None, &outbox_row(), rng)?;
         batch.commit()?;
         self.events.push_back(Event::Delivery {
@@ -2800,7 +2815,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         batch.put(FILE_DATA, row, Some(conversation.0), &file.plain, rng)?;
         batch.commit()?;
         let message = MsgRef(row);
-        self.stamp_deadline(conversation, message, AppKind::Attachment, now_ms / 1_000, rng)?;
+        self.stamp_deadline(
+            conversation,
+            message,
+            AppKind::Attachment,
+            now_ms / 1_000,
+            rng,
+        )?;
         self.files.uploads.push_back(UploadJob {
             message,
             plain: file.plain,
@@ -2951,7 +2972,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 Ok(body) => body.caption.map_or(&[][..], str::as_bytes),
                 // A body that is no descriptor and no text shows no
                 // caption, and the rest of the conversation shows.
-                Err(_) if info_of(&plain)?.outgoing && core::str::from_utf8(parsed.body).is_ok() => {
+                Err(_)
+                    if info_of(&plain)?.outgoing && core::str::from_utf8(parsed.body).is_ok() =>
+                {
                     parsed.body
                 }
                 Err(_) => &[][..],
@@ -2999,11 +3022,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .ok_or(Error::Integrity)?;
             // A record that waits for its relay, or that failed, holds the
             // raw target still.
-            let reference = if info.outgoing && matches!(info.delivery, Delivery::Queued | Delivery::Failed) {
-                msg_ref(&open.device_set_key, &held)
-            } else {
-                held
-            };
+            let reference =
+                if info.outgoing && matches!(info.delivery, Delivery::Queued | Delivery::Failed) {
+                    msg_ref(&open.device_set_key, &held)
+                } else {
+                    held
+                };
             // WIR-171, WIR-172: the target is a message of this conversation.
             let natural = [conversation_of(&plain)?.0.as_slice(), &reference].concat();
             let row = open.store.row_id(TableId::MESSAGE, &natural);

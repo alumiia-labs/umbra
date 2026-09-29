@@ -206,10 +206,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
     /// The contacts that a digest may go to: no channel of another device
     /// of the set, and no blocked contact (`DIS-031`).
-    pub fn gossip_contacts(
-        &self,
-        all: &[ConversationId],
-    ) -> Result<Vec<ConversationId>, Error> {
+    pub fn gossip_contacts(&self, all: &[ConversationId]) -> Result<Vec<ConversationId>, Error> {
         let peers = self.device_peers()?;
         let mut out = Vec::new();
         for conversation in all {

@@ -111,7 +111,11 @@ impl ReceiptBook {
         let epoch = now / EPOCH_SECONDS;
         let mut out = Vec::new();
         // REL-176: a window of an earlier epoch closes first.
-        if self.taking.get(&link).is_some_and(|open| open.epoch < epoch) {
+        if self
+            .taking
+            .get(&link)
+            .is_some_and(|open| open.epoch < epoch)
+        {
             out.extend(self.close(link, own_id, key, now, rng));
         }
         let open = match self.taking.get_mut(&link) {
@@ -282,7 +286,8 @@ impl ReceiptBook {
         let (held, count) = self.chains;
         if held != epoch {
             if held != 0 {
-                self.shares.insert(held, umbra_core::directory::stat::split(count, rng));
+                self.shares
+                    .insert(held, umbra_core::directory::stat::split(count, rng));
             }
             self.chains = (epoch, 0);
         }
@@ -338,7 +343,10 @@ mod tests {
             Ok(self.try_next_u64()? as u32)
         }
         fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
-            self.0 = self.0.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
             Ok(self.0)
         }
         fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
@@ -398,7 +406,10 @@ mod tests {
         }
         assert_eq!(receipts.len(), 1, "one full window");
         assert!(sender.receipt_taken(at_a, &receipts[0], &a, &b_pk, now));
-        assert!(!sender.receipt_taken(at_a, &receipts[0], &a, &b_pk, now), "no second time");
+        assert!(
+            !sender.receipt_taken(at_a, &receipts[0], &a, &b_pk, now),
+            "no second time"
+        );
 
         // REL-176: the partial window closes at the end of the epoch.
         let later = now + EPOCH_SECONDS;

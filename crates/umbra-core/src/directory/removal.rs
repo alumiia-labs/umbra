@@ -36,7 +36,11 @@ pub struct LinkRemoval {
 impl LinkRemoval {
     /// The removal of the link between two relays, in either order.
     pub fn of(epoch: u64, one: [u8; 32], other: [u8; 32]) -> Self {
-        let (relay_a, relay_b) = if one <= other { (one, other) } else { (other, one) };
+        let (relay_a, relay_b) = if one <= other {
+            (one, other)
+        } else {
+            (other, one)
+        };
         LinkRemoval {
             epoch,
             relay_a,
@@ -89,7 +93,11 @@ impl LinkRemoval {
 
     /// Reads a removal and verifies it under `keyset` for a root of
     /// `root_epoch` (`REL-184`).
-    pub fn verify(bytes: &[u8], keyset: &DirectoryKeySet<'_>, root_epoch: u64) -> Result<Self, Error> {
+    pub fn verify(
+        bytes: &[u8],
+        keyset: &DirectoryKeySet<'_>,
+        root_epoch: u64,
+    ) -> Result<Self, Error> {
         let mut r = Reader::new(bytes);
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
@@ -104,7 +112,9 @@ impl LinkRemoval {
         if removal.relay_a >= removal.relay_b {
             return Err(Error::Malformed);
         }
-        if removal.epoch > root_epoch || removal.epoch.saturating_add(LINK_REMOVAL_EPOCHS) < root_epoch {
+        if removal.epoch > root_epoch
+            || removal.epoch.saturating_add(LINK_REMOVAL_EPOCHS) < root_epoch
+        {
             return Err(Error::Stale);
         }
         keyset.verify_multi(&removal.preimage(), &sigs)?;
@@ -113,7 +123,8 @@ impl LinkRemoval {
 
     /// Whether two relays side by side form this link, in either order.
     pub fn names(&self, one: &[u8; 32], other: &[u8; 32]) -> bool {
-        (self.relay_a == *one && self.relay_b == *other) || (self.relay_a == *other && self.relay_b == *one)
+        (self.relay_a == *one && self.relay_b == *other)
+            || (self.relay_a == *other && self.relay_b == *one)
     }
 }
 
@@ -135,7 +146,8 @@ pub fn peel(removals: &[LinkRemoval]) -> Vec<[u8; 32]> {
     edges.dedup();
     let mut expelled = Vec::new();
     loop {
-        let mut degree: alloc::collections::BTreeMap<[u8; 32], usize> = alloc::collections::BTreeMap::new();
+        let mut degree: alloc::collections::BTreeMap<[u8; 32], usize> =
+            alloc::collections::BTreeMap::new();
         for (one, other) in &edges {
             for relay in [one, other] {
                 let held = degree.entry(*relay).or_insert(0);
@@ -144,13 +156,13 @@ pub fn peel(removals: &[LinkRemoval]) -> Vec<[u8; 32]> {
         }
         // The map is in `relay_id` order, thus the first of the most is
         // the lower one.
-        let Some((top, count)) = degree
-            .iter()
-            .fold(None::<(&[u8; 32], usize)>, |best, (relay, count)| match best {
+        let Some((top, count)) = degree.iter().fold(
+            None::<(&[u8; 32], usize)>,
+            |best, (relay, count)| match best {
                 Some((_, held)) if held >= *count => best,
                 _ => Some((relay, *count)),
-            })
-        else {
+            },
+        ) else {
             break;
         };
         if count < LINK_FAULT_DEGREE {
@@ -174,13 +186,17 @@ mod tests {
         let relay = |n: u8| [n; 32];
         // An attacker at 9 drops on a link to each of 8 honest relays, and
         // one honest relay loses one more link to another attacker.
-        let mut removals: Vec<LinkRemoval> = (1..=8).map(|n| LinkRemoval::of(5, relay(9), relay(n))).collect();
+        let mut removals: Vec<LinkRemoval> = (1..=8)
+            .map(|n| LinkRemoval::of(5, relay(9), relay(n)))
+            .collect();
         removals.push(LinkRemoval::of(5, relay(1), relay(20)));
         assert_eq!(peel(&removals), [relay(9)]);
         // Below the degree, nobody leaves.
         assert!(peel(&removals[..7]).is_empty());
         // A tie takes the lower relay_id first, and its links leave with it.
-        let mut two: Vec<LinkRemoval> = (1..=8).map(|n| LinkRemoval::of(5, relay(40), relay(n))).collect();
+        let mut two: Vec<LinkRemoval> = (1..=8)
+            .map(|n| LinkRemoval::of(5, relay(40), relay(n)))
+            .collect();
         two.extend((1..=8).map(|n| LinkRemoval::of(5, relay(30), relay(n + 10))));
         assert_eq!(peel(&two), [relay(30), relay(40)]);
     }
@@ -209,6 +225,8 @@ mod tests {
         assert_eq!(LinkRemoval::verify(&signed, &keyset, 99), Err(Error::Stale));
         // Four signatures are not a consensus.
         let four: Vec<(u8, &SigningKey)> = (0..4u8).map(|i| (i, &keys[usize::from(i)])).collect();
-        assert!(LinkRemoval::verify(&removal.sign(&four, &mut rng).unwrap(), &keyset, 100).is_err());
+        assert!(
+            LinkRemoval::verify(&removal.sign(&four, &mut rng).unwrap(), &keyset, 100).is_err()
+        );
     }
 }

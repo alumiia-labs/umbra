@@ -151,7 +151,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     ) -> Result<(DeviceIdentity, Vec<u8>), Error> {
         let label = match self.device_identity()? {
             Some(held) => {
-                let end = held.label.iter().position(|b| *b == 0).unwrap_or(held.label.len());
+                let end = held
+                    .label
+                    .iter()
+                    .position(|b| *b == 0)
+                    .unwrap_or(held.label.len());
                 String::from_utf8_lossy(held.label.get(..end).unwrap_or_default()).into_owned()
             }
             None => String::new(),

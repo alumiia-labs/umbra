@@ -357,10 +357,19 @@ mod tests {
     fn a_removed_link_leaves_each_chain_that_holds_it_and_no_other() {
         let list = BlocList::v1();
         let ingress = cand(1, list.bloc_of(b"DE"), 0, true);
-        let middles = [cand(2, list.bloc_of(b"US"), 2, false), cand(4, list.bloc_of(b"JP"), 2, false)];
-        let exits = [cand(3, list.bloc_of(b"CH"), 3, false), cand(5, list.bloc_of(b"BR"), 3, false)];
+        let middles = [
+            cand(2, list.bloc_of(b"US"), 2, false),
+            cand(4, list.bloc_of(b"JP"), 2, false),
+        ];
+        let exits = [
+            cand(3, list.bloc_of(b"CH"), 3, false),
+            cand(5, list.bloc_of(b"BR"), 3, false),
+        ];
         let all: Vec<Candidate> = middles.iter().chain(&exits).copied().collect();
-        assert_eq!(select(&ingress, &all).unwrap().hops, [[1; 32], [2; 32], [3; 32]]);
+        assert_eq!(
+            select(&ingress, &all).unwrap().hops,
+            [[1; 32], [2; 32], [3; 32]]
+        );
         // REL-185: the link 2-3 goes, in the order the removal names it.
         let removed = [LinkRemoval::of(7, [3; 32], [2; 32])];
         assert_eq!(

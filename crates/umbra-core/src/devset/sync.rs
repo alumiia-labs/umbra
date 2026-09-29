@@ -620,7 +620,10 @@ mod tests {
         assert_eq!(SyncedRecord::parse(&out[..n]).unwrap(), rec);
         // DEV-243: a resend carries the period that remains then.
         restamp_expires_in(&mut out[..n], 42).unwrap();
-        assert_eq!(SyncedRecord::parse(&out[..n]).unwrap().context.expires_in, 42);
+        assert_eq!(
+            SyncedRecord::parse(&out[..n]).unwrap().context.expires_in,
+            42
+        );
         assert_eq!(SyncedRecord::parse(&out[..n]).unwrap().inner, rec.inner);
         let entry = IdentityEntry {
             salt: [5; 16],
