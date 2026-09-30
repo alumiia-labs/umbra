@@ -297,6 +297,9 @@ pub struct FfiGroupInfo {
     /// Whether a rival re-key took the index of this member, and its
     /// request to an admin waits for the admit (`GRP-373`).
     pub is_returning: bool,
+    /// Whether no replica of the group answers, thus each record waits
+    /// (`GRP-199`, `GRP-200`).
+    pub is_unreachable: bool,
     /// Whether a rival re-key took the index of this member, and it knows
     /// no contact in the group to ask (`GRP-374`).
     pub needs_invitation: bool,
@@ -2160,6 +2163,7 @@ impl Inner {
         let answered = match &update {
             GroupUpdate::Created { tag, .. }
             | GroupUpdate::Posted { tag, .. }
+            | GroupUpdate::Unreachable { tag }
             | GroupUpdate::Failed { tag, .. } => Some(*tag),
             _ => None,
         };
@@ -2235,6 +2239,10 @@ impl Inner {
                     return;
                 };
                 self.group_refusals.remove(&(conversation, relay));
+                // GRP-200: an answer of a replica ends the line of GRP-199.
+                let _ = self
+                    .client
+                    .group_replica_reached(conversation, &relay, true, &mut OsRng);
                 if let Some(row) = unsent {
                     let _ = self.client.group_post_accepted(&row, &relay, &mut OsRng);
                 }
@@ -2266,6 +2274,8 @@ impl Inner {
                 if let Ok(Some(conversation)) = self.client.conversation_of_queue(&group_queue_id) {
                     self.group_lost.remove(&conversation);
                 }
+                // GRP-200: a record of a replica is its answer.
+                let _ = self.client.group_queue_reached(&group_queue_id, &mut OsRng);
                 let _ = self.client.on_group_record(
                     &group_queue_id,
                     seq,
@@ -2274,6 +2284,20 @@ impl Inner {
                     &mut OsRng,
                 );
                 self.pump_epoch_transfers();
+            }
+            // GRP-199: no circuit reached the replica of the record. The
+            // store holds the record, and the next run asks for it again.
+            GroupUpdate::Unreachable { tag } => {
+                if let Some(GroupWork::Post {
+                    conversation,
+                    relay,
+                    ..
+                }) = self.group_tags.remove(&tag)
+                {
+                    let _ =
+                        self.client
+                            .group_replica_reached(conversation, &relay, false, &mut OsRng);
+                }
             }
             GroupUpdate::Failed { tag, reason } => {
                 // WIR-317: a group queue that the relay does not hold and a
@@ -4971,6 +4995,7 @@ impl Handle {
             epoch: info.epoch,
             is_ready: info.is_ready,
             is_member: info.is_member,
+            is_unreachable: info.is_unreachable,
         })
     }
 

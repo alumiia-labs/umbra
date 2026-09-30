@@ -326,6 +326,9 @@ pub struct GroupInfo {
     /// Whether the roster still holds this device. A removal and a
     /// self-removal both take it away (`GRP-067`, `GRP-382`).
     pub is_member: bool,
+    /// Whether no replica of the group answered its last session, thus
+    /// the view shows the line of `GRP-199`.
+    pub is_unreachable: bool,
 }
 
 /// One `GNEW` that waits for a circuit to its relay.
@@ -1115,7 +1118,65 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .roster()
                 .member(group.own_index())
                 .is_some_and(|member| member.active),
+            is_unreachable: group.replicas().is_some_and(|held| held.unreachable()),
         })
+    }
+
+    /// A record of the group queue `group_queue_id` arrived, thus its
+    /// replica answers (`GRP-200`).
+    pub fn group_queue_reached<R: CryptoRng + ?Sized>(
+        &mut self,
+        group_queue_id: &[u8; 32],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let Some(conversation) = self.conversation_of_queue(group_queue_id)? else {
+            return Ok(());
+        };
+        let group = self.group_of(conversation)?;
+        let relay = group.replicas().and_then(|replicas| {
+            (0..GROUP_REPLICAS)
+                .filter_map(|index| replicas.reference(index))
+                .find(|held| held.group_queue_id == *group_queue_id)
+                .map(|held| held.relay_id)
+        });
+        match relay {
+            Some(relay) => self.group_replica_reached(conversation, &relay, true, rng),
+            None => Ok(()),
+        }
+    }
+
+    /// A session to the replica of `relay` answered, or none could reach
+    /// it. The line of `GRP-199` shows while no replica answers, and it
+    /// ends at the first answer (`GRP-200`).
+    pub fn group_replica_reached<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        relay: &[u8; 32],
+        reached: bool,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let mut group = self.group_of(conversation)?;
+        let Some(replicas) = group.replicas_mut() else {
+            return Ok(());
+        };
+        let Some(which) = (0..GROUP_REPLICAS).find(|index| {
+            replicas
+                .reference(*index)
+                .is_some_and(|held| held.relay_id == *relay)
+        }) else {
+            return Ok(());
+        };
+        if replicas.is_reachable(which) == reached {
+            return Ok(());
+        }
+        let before = replicas.unreachable();
+        replicas.set_reachable(which, reached);
+        let moved = replicas.unreachable() != before;
+        self.save_group(conversation, &group, rng)?;
+        if moved {
+            self.events.push_back(super::Event::Conversations);
+        }
+        Ok(())
     }
 
     /// The next `GNEW` that waits for the run of the group queues.

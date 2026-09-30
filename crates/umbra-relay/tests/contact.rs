@@ -272,6 +272,9 @@ impl Network {
                 self.clients[client]
                     .start_rendezvous_due(self.now, &mut self.rng)
                     .unwrap();
+                self.clients[client]
+                    .rebuild_lost(self.now, &mut self.rng)
+                    .unwrap();
                 // The store takes each change before a capsule leaves.
                 self.commit(client);
                 for capsule in self.clients[client].take_capsules() {

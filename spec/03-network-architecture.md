@@ -992,7 +992,10 @@ forward cell on that circuit. §3.4.4 rule `NET-114` gives it the check.
    NOT send a cell other than `EXTEND` or `DESTROY`. The rule applies to the
    circuit under build, and not to another circuit of the client.
 10. **[NET-169]** If no `EXTENDED` cell arrives in `CIRCUIT_BUILD_TIMEOUT`, the
-    client MUST send a `DESTROY` cell and discard the circuit.
+    client MUST send a `DESTROY` cell and discard the circuit. **[NET-347]**
+    While a record waits for a circuit to that exit, the client MUST start a
+    new build to it on a fresh chain, and it MUST NOT hold the record for its
+    next run.
 
 > *Cause.* In each design, a relay learns that it is a hop of a new circuit.
 > Thus the build cell hides nothing from it that steady state would hide. Rule

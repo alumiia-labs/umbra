@@ -609,6 +609,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         recipient_id: &[u8; 32],
         rng: &mut R,
     ) -> Result<(), Error> {
+        self.binding.remove(recipient_id);
         let Some(queue) = self.notify_queue(recipient_id)? else {
             return Ok(());
         };

@@ -781,6 +781,10 @@ struct GroupWait {
     subscribes: bool,
 }
 
+/// The longest wait before a build again to a relay whose builds ran out of
+/// time, in seconds (`NET-347`).
+const REBUILD_WAIT_MAX: u64 = 300;
+
 /// The `SUB` and `GSUB` commands whose refusal the node still maps, as the
 /// session watches them. A command that took no refusal waits for none,
 /// thus the oldest leaves the map past this bound.
@@ -1164,6 +1168,9 @@ pub struct ClientNode {
     capsules: VecDeque<Vec<u8>>,
     next_handle: u64,
     waiting: BTreeMap<u64, Waiting>,
+    /// The builds again to each relay after a lost build: the count, and
+    /// the time before which no build to it starts (`NET-347`).
+    rebuilds: BTreeMap<[u8; 32], (u32, u64)>,
     /// The handles in `waiting` of the commands whose only answer is a
     /// `NACK`, oldest first.
     watched_waits: VecDeque<u64>,
@@ -1344,6 +1351,7 @@ impl ClientNode {
             capsules: VecDeque::new(),
             next_handle: 1,
             waiting: BTreeMap::new(),
+            rebuilds: BTreeMap::new(),
             watched_waits: VecDeque::new(),
             halves: BTreeMap::new(),
             contacts: BTreeMap::new(),
@@ -2767,6 +2775,113 @@ impl ClientNode {
         }
         self.current = current;
         Ok(())
+    }
+
+    /// Builds again a circuit to the relay of a waiting record whose build
+    /// ran past `CIRCUIT_BUILD_TIMEOUT` (`NET-169`, `NET-347`). The slot of
+    /// that build stays, thus no later record starts a build to that relay,
+    /// and a record that waits would wait for the next run. A build takes a
+    /// fresh chain, and the one that failed counted as a forced replacement
+    /// (`REL-171`). The builds to one relay back off from
+    /// `CIRCUIT_BUILD_TIMEOUT` up to `REBUILD_WAIT_MAX`, thus a relay that
+    /// is down draws no build at each tick. A circuit with no conformant
+    /// chain holds no chain, and it waits (`NET-033`). The runtime calls it
+    /// at each tick.
+    pub fn rebuild_lost<R: CryptoRng + ?Sized>(
+        &mut self,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        if self.range == Range::Group || self.link.is_none() {
+            return Ok(());
+        }
+        // A run whose circuits all ended gives `CircuitLost`, and the next
+        // run builds.
+        if self
+            .slots
+            .iter()
+            .all(|slot| matches!(slot.circuit, Circuit::None))
+        {
+            return Ok(());
+        }
+        let ends_at = |slot: &Slot, relay: &[u8; 32], class: DelayClass| {
+            slot.is_general()
+                && slot.class == class
+                && match slot.chain {
+                    Some(chain) => chain.last() == Some(relay),
+                    None => slot.exit == Some(*relay),
+                }
+        };
+        // A relay that a live circuit reaches builds on from scratch at its
+        // next loss.
+        let slots = &self.slots;
+        self.rebuilds.retain(|relay, _| {
+            !slots
+                .iter()
+                .any(|slot| slot.is_ready() && slot.chain.is_some_and(|c| c.last() == Some(relay)))
+        });
+        // The records that could go now, by the relay of their queue.
+        let mut waiting: Vec<([u8; 32], DelayClass)> = self
+            .contacts
+            .iter()
+            .filter(|(_, held)| {
+                !held.stale && held.channel.can_send() && !held.waiting_sends.is_empty()
+            })
+            .map(|(id, held)| (*held.channel.outbound().relay_id(), self.class_of(id)))
+            .chain(
+                self.held_records
+                    .iter()
+                    .map(|sealed| (*sealed.relay_id(), self.delay_class)),
+            )
+            .chain(
+                self.held_fetches
+                    .iter()
+                    .map(|fetch| (fetch.relay, self.delay_class)),
+            )
+            .collect();
+        waiting.sort_unstable();
+        waiting.dedup();
+        let current = self.current;
+        let mut result = Ok(());
+        for (relay, class) in waiting {
+            let live = self
+                .slots
+                .iter()
+                .any(|slot| ends_at(slot, &relay, class) && !matches!(slot.circuit, Circuit::None));
+            if live || self.rebuilds.get(&relay).is_some_and(|(_, at)| now < *at) {
+                continue;
+            }
+            let lost = |slot: &Slot| {
+                ends_at(slot, &relay, class)
+                    && matches!(slot.circuit, Circuit::None)
+                    && slot.chain.is_some()
+            };
+            let started = match self
+                .slots
+                .iter()
+                .position(|slot| lost(slot) && slot.exit == Some(relay))
+            {
+                Some(index) => {
+                    self.current = index;
+                    self.build_current(rng)
+                }
+                // A circuit with no fixed exit that ended at the relay
+                // stays for its own use, and the relay takes one of its own.
+                None if self.slots.iter().any(lost) => self.add_circuit_in(Some(relay), class, rng),
+                None => continue,
+            };
+            let tries = self.rebuilds.get(&relay).map_or(0, |(tries, _)| *tries);
+            let wait = CIRCUIT_BUILD_TIMEOUT
+                .saturating_mul(1 << tries.min(6))
+                .min(REBUILD_WAIT_MAX);
+            self.rebuilds
+                .insert(relay, (tries.saturating_add(1), now.saturating_add(wait)));
+            if started.is_err() {
+                result = started;
+            }
+        }
+        self.current = current;
+        result
     }
 
     /// Chooses a chain for the current circuit and sends its first

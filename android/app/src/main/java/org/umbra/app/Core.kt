@@ -127,6 +127,8 @@ class Chat(
     val isReturning: Boolean = false,
     /** Whether a removed device took the index of this member, and no contact can add it again (`GRP-374`). */
     val needsInvitation: Boolean = false,
+    /** Whether no relay of a group answers, thus its messages wait (`GRP-199`). */
+    val isUnreachable: Boolean = false,
 ) {
     /** What each list shows: the name of the user, or a stable short label. */
     val title: String
@@ -2294,6 +2296,7 @@ object Core {
             isLapsed = group?.isLapsed ?: false,
             isReturning = group?.isReturning ?: false,
             needsInvitation = group?.needsInvitation ?: false,
+            isUnreachable = group?.isUnreachable ?: false,
         )
     }
 

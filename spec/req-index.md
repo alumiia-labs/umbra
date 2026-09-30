@@ -68,7 +68,7 @@ column when a crate implements the requirement and a test covers it.
 | --- | --- | --- | --- | --- | --- | --- |
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
-| `NET` | 247 | 87 | 1 | 0 | 9 | **344** |
+| `NET` | 247 | 88 | 1 | 0 | 9 | **345** |
 | `IDN` | 134 | 46 | 1 | 0 | 5 | **186** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
 | `WIR` | 398 | 85 | 0 | 0 | 7 | **490** |
@@ -81,7 +81,7 @@ column when a crate implements the requirement and a test covers it.
 | `ABU` | 72 | 30 | 1 | 0 | 0 | **103** |
 | `IMP` | 121 | 41 | 0 | 0 | 2 | **164** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2069 | 626 | 7 | 0 | 54 | **2756** |
+| **All** | 2069 | 627 | 7 | 0 | 54 | **2757** |
 
 ## SCP — Scope and Conventions
 
@@ -483,6 +483,7 @@ Source: `spec/03-network-architecture.md`
 | `NET-344` | §3.4.6 | MUST | (unstated) | The same relaxation, under the same state, applies to each placement that needs different operators or families: the group replicas of Part 11 rule `GRP-191`, the chunk relays of Part 12 rule `ATT-017`, the backup relays of Part 4 rule `IDN-076`, and the two ingress pins of Part 10 rule `REL-154`. |  |  |
 | `NET-345` | §3.4.6 | MUST | A client | A client MUST end a pin that shares an operator or a family with the other pin when the relaxation ends, and it fills the place under `REL-154`. |  |  |
 | `NET-346` | §3.2.4 | MUST | At a start a relay | At a start a relay MUST keep the newest `QUEUE_QUOTA` records of a queue whose stored records pass that quota: the older ones ended in the run before. |  |  |
+| `NET-347` | §3.4.3 | MUST NOT | (unstated) | While a record waits for a circuit to that exit, the client MUST start a new build to it on a fresh chain, and it MUST NOT hold the record for its next run. |  |  |
 
 ## IDN — Identity
 

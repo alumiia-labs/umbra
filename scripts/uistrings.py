@@ -26,7 +26,7 @@ SOURCES = os.path.join(ROOT, "android", "app", "src", "main", "java")
 RULES = [
     "IDN-010", "IDN-014", "IDN-024", "IDN-087", "IDN-088", "IDN-089", "IDN-152",
     "DEV-126", "DEV-137", "DEV-218", "NTF-009", "DIS-084", "NET-103", "WIR-341",
-    "GRP-050", "GRP-087", "GRP-090", "GRP-374",
+    "GRP-050", "GRP-087", "GRP-090", "GRP-199", "GRP-374",
     "ATT-157", "ABU-040", "ABU-041", "IMP-047", "IMP-050",
     "REL-116", "REL-126", "IMP-082", "NET-343", "DEV-114", "IMP-074",
 ]

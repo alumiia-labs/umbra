@@ -316,6 +316,13 @@ pub enum GroupUpdate {
         /// The `GroupQueueRecord` bytes.
         record: Vec<u8>,
     },
+    /// No circuit reached the relay of a command, which leaves no answer
+    /// (`GRP-197`). The view shows the line of `GRP-199` when no replica
+    /// answers.
+    Unreachable {
+        /// The tag of the command.
+        tag: u64,
+    },
     /// The relay refused the command, or the node could not send it.
     Failed {
         /// The tag of the command.
@@ -554,10 +561,7 @@ async fn session(
                             node.report_relay(&held.relay);
                             let faults = Box::new(node.take_faults());
                             let _ = updates.send(GroupUpdate::Faults(faults));
-                            GroupUpdate::Failed {
-                                tag: held.tag,
-                                reason: None,
-                            }
+                            GroupUpdate::Unreachable { tag: held.tag }
                         }
                     };
                     let _ = updates.send(update);

@@ -724,6 +724,19 @@ mod tests {
         client
             .group_queue_made(&group_id, 1, relays[1], [0xD4; 32], &mut rng)
             .unwrap();
+        // GRP-199, GRP-200: the line shows while no replica answers, and
+        // the first answer ends it.
+        assert!(!client.group_info(conversation).unwrap().is_unreachable);
+        for relay in &relays {
+            client
+                .group_replica_reached(conversation, relay, false, &mut rng)
+                .unwrap();
+        }
+        assert!(client.group_info(conversation).unwrap().is_unreachable);
+        client
+            .group_replica_reached(conversation, &relays[1], true, &mut rng)
+            .unwrap();
+        assert!(!client.group_info(conversation).unwrap().is_unreachable);
         while let Some(post) = client.take_group_post() {
             if let Some(row) = post.unsent {
                 for replica in &post.replicas {

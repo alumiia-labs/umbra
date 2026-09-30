@@ -2641,6 +2641,7 @@ fn update_name(update: &GroupUpdate) -> &'static str {
         GroupUpdate::Posted { .. } => "posted",
         GroupUpdate::Record { .. } => "record",
         GroupUpdate::Failed { .. } => "failed",
+        GroupUpdate::Unreachable { .. } => "unreachable",
         GroupUpdate::Unsent { .. } => "unsent",
         GroupUpdate::SubscriptionLost { .. } => "subscription lost",
         GroupUpdate::Reset => "reset",

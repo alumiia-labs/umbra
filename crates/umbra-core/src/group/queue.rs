@@ -214,6 +214,11 @@ impl Replicas {
         })
     }
 
+    /// Whether a replica answered its last session.
+    pub fn is_reachable(&self, which: usize) -> bool {
+        self.reachable.get(which).copied().unwrap_or(false)
+    }
+
     /// Marks a replica reachable or not.
     pub fn set_reachable(&mut self, which: usize, reachable: bool) {
         if let Some(slot) = self.reachable.get_mut(which) {

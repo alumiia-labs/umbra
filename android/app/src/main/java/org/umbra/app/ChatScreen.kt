@@ -514,6 +514,12 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
             },
         )
         BlockedLine(chat)
+        // GRP-199, GRP-200: the line ends at the first answer of a relay.
+        if (chat.isUnreachable) {
+            Box(Modifier.padding(start = 20.dp, end = 20.dp, top = 8.dp)) {
+                Note(UiText.get(R.string.umbra_ui_grp_199))
+            }
+        }
         if (isQueueFull) {
             Box(Modifier.padding(start = 20.dp, end = 20.dp, top = 8.dp)) {
                 Note(UiText.get(R.string.umbra_ui_imp_082))
