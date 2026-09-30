@@ -80,6 +80,7 @@ use crate::{
     },
     identity::{
         invitation::{Bundle, Fragment, FRAGMENT_LEN},
+        keychange::sweep_delay,
         verify::Ceremony,
     },
     Error,
@@ -880,6 +881,11 @@ struct Contact {
     /// Whether the ratchet is stale, as after a restore: the channel sends
     /// nothing on it until a renewal replaces it (`NET-325`).
     stale: bool,
+    /// The time of a swept rotation or renewal: one operation that moves
+    /// the queues of many contacts gives each its own delay (`NET-180`,
+    /// `NET-181`). Zero is none, and a stale contact draws one at the next
+    /// check.
+    sweep_at: u64,
 }
 
 /// The two pairwise identity keys of a stored contact: the key of this
@@ -953,9 +959,11 @@ const SHADOW_VERSION: u8 = 0x10;
 
 fn contact_version(reader: &mut Reader<'_>) -> Result<u8, Error> {
     match reader.u8()? {
-        version @ (0x01 | STORED_VERSION | CONTACT_ROTATION_VERSION | CONTACT_STORED_VERSION) => {
-            Ok(version)
-        }
+        version @ (0x01
+        | STORED_VERSION
+        | CONTACT_ROTATION_VERSION
+        | CONTACT_STALE_VERSION
+        | CONTACT_STORED_VERSION) => Ok(version),
         _ => Err(Error::Malformed),
     }
 }
@@ -1048,9 +1056,13 @@ const STORED_VERSION: u8 = 0x02;
 /// the address of the own queue to version `0x02`.
 const CONTACT_ROTATION_VERSION: u8 = 0x03;
 
-/// The version byte of a stored contact. It adds the stale flag of a
-/// channel renewal (Part 3 §3.2.6) to version `0x03`.
-const CONTACT_STORED_VERSION: u8 = 0x04;
+/// The version byte of a stored contact of the earlier form: version `0x03`
+/// and the stale flag of a channel renewal (Part 3 §3.2.6).
+const CONTACT_STALE_VERSION: u8 = 0x04;
+
+/// The version byte of a stored contact. It adds the time of the swept
+/// rotation or renewal of `NET-180` to version `0x04`.
+const CONTACT_STORED_VERSION: u8 = 0x05;
 
 /// The version byte of a stored invitation that renews a contact: version
 /// `0x02` and then the contact.
@@ -1377,6 +1389,7 @@ impl ClientNode {
                 None => writer.u8(0),
             }
             writer.u8(u8::from(contact.stale));
+            writer.u64(contact.sweep_at);
             changes.push(StateChange::Contact {
                 contact: ContactId(id),
                 state: writer.finish(),
@@ -1400,7 +1413,7 @@ impl ClientNode {
         let channel = PairwiseChannel::restore(reader.var()?)?;
         // A form of version 0x03 names the contact, which stays the first
         // queue after a rotation, and the state of the rotation.
-        let has_tail = version == CONTACT_ROTATION_VERSION || version == CONTACT_STORED_VERSION;
+        let has_tail = version >= CONTACT_ROTATION_VERSION;
         let (id, since, previous_relay, rotated_at) = if has_tail {
             (
                 reader.array()?,
@@ -1416,7 +1429,12 @@ impl ClientNode {
         } else {
             None
         };
-        let stale = version == CONTACT_STORED_VERSION && reader.u8()? == 1;
+        let stale = version >= CONTACT_STALE_VERSION && reader.u8()? == 1;
+        let sweep_at = if version >= CONTACT_STORED_VERSION {
+            reader.u64()?
+        } else {
+            0
+        };
         reader.end()?;
         // A store of version 0x01 came from a network with one queue relay,
         // thus the two queues of its contact live at one relay, and the
@@ -1444,6 +1462,7 @@ impl ClientNode {
                 rotated_at,
                 own_address,
                 stale,
+                sweep_at,
             },
         );
         Ok(ContactId(id))
@@ -1548,11 +1567,19 @@ impl ClientNode {
                 self.moved.insert(*id);
             }
             if held.stale {
-                if !self.renewing.contains(id) {
+                // NET-180, NET-181: the renewals of a restore each wait
+                // for their own delay.
+                if held.sweep_at == 0 {
+                    held.sweep_at =
+                        now.saturating_add(sweep_delay(u64::from_be_bytes(random(rng))).max(1));
+                    self.moved.insert(*id);
+                }
+                if !self.renewing.contains(id) && now >= held.sweep_at {
                     stale.push(*id);
                 }
                 continue;
             }
+            let is_swept = held.sweep_at != 0 && now >= held.sweep_at;
             if held.channel.previous().is_some() {
                 if now.saturating_sub(held.rotated_at) >= ROTATE_GRACE {
                     ended.push(*id);
@@ -1566,7 +1593,7 @@ impl ClientNode {
             // The address travels on the ratchet, thus a contact with no
             // sending chain waits.
             if due.is_none()
-                && (is_old || is_full || self.forced.contains(id))
+                && (is_old || is_full || is_swept || self.forced.contains(id))
                 && held.channel.can_send()
                 && !self.rotating.contains(id)
             {
@@ -1603,6 +1630,15 @@ impl ClientNode {
         Ok(())
     }
 
+    /// The time of the swept rotation or renewal of a contact, when one
+    /// waits (`NET-180`).
+    pub fn sweep_time(&self, contact: &ContactId) -> Option<u64> {
+        self.contacts
+            .get(&contact.0)
+            .map(|held| held.sweep_at)
+            .filter(|at| *at != 0)
+    }
+
     /// Whether the channel of a contact waits for its renewal.
     pub fn is_stale(&self, contact: &ContactId) -> bool {
         self.contacts.get(&contact.0).is_some_and(|held| held.stale)
@@ -1619,6 +1655,7 @@ impl ClientNode {
             return Ok(());
         }
         self.renewing.insert(contact);
+        self.clear_sweep(&contact);
         self.make_queue(Purpose::Renew { contact }, rng)?;
         Ok(())
     }
@@ -1787,6 +1824,23 @@ impl ClientNode {
         Ok(())
     }
 
+    /// Makes a new queue for a contact after its own delay, as one operation
+    /// that moves the queues of many contacts does: a revocation of a
+    /// device (`NET-180`, `NET-181`). The time stays across runs.
+    pub fn rotate_swept<R: CryptoRng + ?Sized>(
+        &mut self,
+        contact: &ContactId,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let held = self.contacts.get_mut(&contact.0).ok_or(Error::NoPath)?;
+        if held.sweep_at == 0 {
+            held.sweep_at = now.saturating_add(sweep_delay(u64::from_be_bytes(random(rng))).max(1));
+            self.moved.insert(contact.0);
+        }
+        Ok(())
+    }
+
     /// Makes a new queue for a contact at the next rotation check, whatever
     /// the age of the current one (`NET-182`). A [`ClientEvent::QueueRotated`]
     /// gives its address. A rotation that runs serves already.
@@ -1841,6 +1895,16 @@ impl ClientNode {
     /// than the relay of its inbound queue (Part 3 §3.2.4). With no ready
     /// circuit to such a relay a circuit starts, and a later check makes
     /// the queue. A set with no other operator gives no rotation.
+    /// Ends the swept time of a contact whose rotation or renewal starts.
+    fn clear_sweep(&mut self, contact: &[u8; 32]) {
+        if let Some(held) = self.contacts.get_mut(contact) {
+            if held.sweep_at != 0 {
+                held.sweep_at = 0;
+                self.moved.insert(*contact);
+            }
+        }
+    }
+
     fn start_rotation<R: CryptoRng + ?Sized>(
         &mut self,
         contact: [u8; 32],
@@ -1864,6 +1928,9 @@ impl ClientNode {
                 && exit.is_some_and(|exit| is_other(&exit, self.operator_of(&exit)))
         });
         if let Some(slot) = ready {
+            // A rotation that waits for its circuit stays due at the next
+            // check, thus its swept time ends with the `NEW` alone.
+            self.clear_sweep(&contact);
             self.rotating.insert(contact);
             self.current = slot;
             let handle = self.handle();
@@ -5294,6 +5361,7 @@ impl ClientNode {
                 rotated_at: 0,
                 own_address,
                 stale: false,
+                sweep_at: 0,
             },
         );
         self.moved.insert(queue_id);

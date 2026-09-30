@@ -92,6 +92,12 @@ impl Bridge {
         self.command(Command::MakeNotifyQueue(tag))
     }
 
+    /// Makes a new queue for a contact after its own delay, as a revocation
+    /// of a device does for each contact (`NET-180`, `NET-181`).
+    pub fn rotate_swept(&self, contact: ContactId) -> Result<(), Error> {
+        self.command(Command::RotateSwept(contact))
+    }
+
     /// Makes a new queue for a dead channel (`NET-182`).
     pub fn rotate_now(&self, contact: ContactId) -> Result<(), Error> {
         self.command(Command::RotateNow(contact))

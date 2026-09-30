@@ -1522,6 +1522,67 @@ fn a_conversation_in_another_mode_sends_on_a_circuit_of_that_mode() {
 }
 
 #[test]
+fn a_revocation_moves_each_queue_after_its_own_delay_across_a_restart() {
+    const ALICE: usize = 0;
+    const BOB: usize = 1;
+    let mut mesh = Mesh::new(&[0x41, 0x61]);
+    mesh.settle();
+    mesh.take_events(ALICE);
+    mesh.take_events(BOB);
+    mesh.clients[ALICE].invite(&mut Rng(1)).unwrap();
+    mesh.settle();
+    let events = mesh.take_events(ALICE);
+    let [ClientEvent::Invitation { bundle, .. }] = &events[..] else {
+        panic!("{events:?}");
+    };
+    mesh.clients[BOB]
+        .accept(bundle.clone(), &mut Rng(2))
+        .unwrap();
+    mesh.settle();
+    mesh.settle();
+    let contacts = (
+        contact_of(&mesh.take_events(ALICE)),
+        contact_of(&mesh.take_events(BOB)),
+    );
+    let alice_contact = contacts.0;
+    // A rotation waits for a sending chain, thus the two talk first.
+    talk(&mut mesh, [contacts.0, contacts.1], 1);
+    let first = mesh.clients[ALICE].inbound_queue(&alice_contact).unwrap().0;
+
+    // NET-180, NET-181: a revocation gives the queue of each contact a
+    // delay of its own, and no rotation starts before it.
+    let now = mesh.now;
+    mesh.clients[ALICE]
+        .rotate_swept(&alice_contact, now, &mut Rng(3))
+        .unwrap();
+    let at = mesh.clients[ALICE].sweep_time(&alice_contact).unwrap();
+    assert!(at > now);
+    assert!(mesh.clients[ALICE]
+        .rotate_due(now, &mut Rng(4))
+        .unwrap()
+        .is_empty());
+    mesh.settle();
+    assert_eq!(
+        mesh.clients[ALICE].inbound_queue(&alice_contact).unwrap().0,
+        first
+    );
+
+    // The delay lives through a restart, and the queue moves at its end.
+    mesh.now = mesh.now.max(at);
+    let seed = mesh_seed_of(&mesh, ALICE);
+    mesh.restart(ALICE, seed);
+    mesh.settle();
+    mesh.take_events(ALICE);
+    assert_eq!(mesh.clients[ALICE].sweep_time(&alice_contact), Some(at));
+    rotate(&mut mesh, ALICE, &alice_contact);
+    assert_ne!(
+        mesh.clients[ALICE].inbound_queue(&alice_contact).unwrap().0,
+        first
+    );
+    assert_eq!(mesh.clients[ALICE].sweep_time(&alice_contact), None);
+}
+
+#[test]
 fn a_queue_rotates_to_another_operator_and_the_old_one_ends() {
     const ALICE: usize = 0;
     const BOB: usize = 1;
@@ -2044,12 +2105,36 @@ fn a_channel_restored_from_an_old_state_renews_and_talks_again() {
         mesh.restart(client, seed);
     }
     mesh.settle();
+    // NET-180, NET-181: each renewal waits for its own delay, and the
+    // delay lives through a restart.
     for client in [ALICE, BOB] {
         mesh.take_events(client);
         mesh.clients[client].mark_stale(&contacts[client]).unwrap();
         let now = mesh.now;
         let events = mesh.clients[client]
             .rotate_due(now, &mut Rng(30 + client as u64))
+            .unwrap();
+        assert!(events.is_empty());
+    }
+    mesh.settle();
+    let due =
+        [ALICE, BOB].map(|client| mesh.clients[client].sweep_time(&contacts[client]).unwrap());
+    assert_ne!(due[0], due[1]);
+    mesh.now = mesh.now.max(due[0]).max(due[1]);
+    for client in [ALICE, BOB] {
+        let seed = mesh_seed_of(&mesh, client);
+        mesh.restart(client, seed);
+    }
+    mesh.settle();
+    for client in [ALICE, BOB] {
+        mesh.take_events(client);
+        assert_eq!(
+            mesh.clients[client].sweep_time(&contacts[client]),
+            Some(due[client])
+        );
+        let now = mesh.now;
+        let events = mesh.clients[client]
+            .rotate_due(now, &mut Rng(40 + client as u64))
             .unwrap();
         mesh.events[client].extend(events);
     }

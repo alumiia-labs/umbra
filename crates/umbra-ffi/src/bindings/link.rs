@@ -892,8 +892,9 @@ impl Handle {
         if let Some(running) = bridge.as_mut() {
             let peers = client.device_peers()?;
             for (conversation, contact) in running.contacts() {
+                // NET-180: each contact moves after its own delay.
                 if !peers.contains(&conversation) {
-                    running.rotate_now(contact)?;
+                    running.rotate_swept(contact)?;
                 }
             }
             running.flush(client, &mut OsRng)?;

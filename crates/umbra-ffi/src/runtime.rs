@@ -169,6 +169,9 @@ pub enum Command {
     EndNotifyQueue([u8; 32]),
     /// Make a new queue for a dead channel (`NET-182`).
     RotateNow(ContactId),
+    /// Makes a new queue for a contact after its own delay, for an
+    /// operation that moves the queues of many contacts (`NET-180`).
+    RotateSwept(ContactId),
     /// The dead-channel blob of the peer gave its address (`NET-190`).
     PeerMoved {
         /// The contact.
@@ -866,6 +869,9 @@ pub async fn run_client(
                 }
                 Command::RotateNow(contact) => {
                     let _ = node.rotate_now(&contact);
+                }
+                Command::RotateSwept(contact) => {
+                    let _ = node.rotate_swept(&contact, now, &mut rng);
                 }
                 Command::PeerMoved { contact, address } => {
                     let _ = node.peer_moved(&contact, &address, now, &mut rng);
