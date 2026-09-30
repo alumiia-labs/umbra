@@ -359,7 +359,9 @@ pub async fn run_node(
 
 /// The pushes of chunk copies and deposits that run at once. It stays
 /// below `RELAY_CONN_PER_IP`, thus an ingress relay that holds a role of
-/// the pushes takes each one (`NET-334`).
+/// the pushes takes each one of one pushing relay (`NET-334`). Relays that
+/// share one address can pass that cap together, and a copy it refuses is
+/// one that the sample of the uploader finds (`ATT-113`).
 const PUSHES_RUNNING: usize = 16;
 /// The time that one push takes at most: a relay that takes the
 /// connection and reads nothing holds no place of another push.

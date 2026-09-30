@@ -3484,6 +3484,17 @@ pub fn init(
                 config.argon2_floor_ms
             };
             let cost = Cost::calibrate(floor);
+            // The rows of that launch sit under a key that no header wraps,
+            // thus they open no more, and the files go before the new store.
+            drop(backend);
+            for suffix in ["", "-wal", "-shm"] {
+                let path = format!("{}{suffix}", config.database_path);
+                if std::path::Path::new(&path).exists() {
+                    std::fs::remove_file(&path).map_err(|_| FfiError::Storage)?;
+                }
+            }
+            let backend =
+                SqliteBackend::open(&config.database_path).map_err(|_| FfiError::Storage)?;
             // The header goes into the same file as the records, thus the
             // connection opens a second time for the write of the header.
             let headers =
