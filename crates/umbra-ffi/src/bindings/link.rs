@@ -21,7 +21,7 @@ use umbra_core::{
         DeviceId, LINK_PROVISION_TTL, LINK_QR_TTL,
     },
 };
-use umbra_crypto::{kem::KeyPair, rand_core::TryRng};
+use umbra_crypto::{kem::KeyPair, rand_core::TryRng, secret::Secret};
 use umbra_wire::descriptor::FileDescriptor;
 use zeroize::Zeroizing;
 
@@ -209,8 +209,20 @@ impl Inner {
     }
 
     fn link_tag(&mut self, step: LinkStep) -> Option<u64> {
+        self.link_tag_erasing(step, None)
+    }
+
+    fn link_tag_erasing(
+        &mut self,
+        step: LinkStep,
+        erase: Option<([u8; 32], Secret<32>)>,
+    ) -> Option<u64> {
         let serial = self.link.as_ref()?.serial;
-        Some(self.next_tag(TransferWork::Link { serial, step }))
+        Some(self.next_tag(TransferWork::Link {
+            serial,
+            step,
+            erase,
+        }))
     }
 
     fn write_slot(&mut self, step: LinkStep, slot: Slot, object: &[u8]) {
@@ -218,7 +230,8 @@ impl Inner {
             self.end_link(LinkStatus::Failed);
             return;
         };
-        let Some(tag) = self.link_tag(step) else {
+        let erase = Some((slot.handle, Secret::new(*slot.cred.expose())));
+        let Some(tag) = self.link_tag_erasing(step, erase) else {
             return;
         };
         self.send_transfer(TransferCommand::WriteHandle {
@@ -412,11 +425,44 @@ impl Inner {
         if matches!(update, TransferUpdate::Progress { .. }) {
             return None;
         }
-        let Some(TransferWork::Link { serial, step }) = self.transfer_tags.remove(&tag) else {
+        let Some(TransferWork::Link {
+            serial,
+            step,
+            erase,
+        }) = self.transfer_tags.remove(&tag)
+        else {
             return None;
         };
-        // A transfer of a link that ended goes nowhere.
-        if self.link.as_ref().map(|link| link.serial) != Some(serial) {
+        // A transfer of a link that ended goes nowhere, and what it wrote
+        // leaves the chunk path (`DEV-003`).
+        let is_live = self
+            .link
+            .as_ref()
+            .is_some_and(|link| link.serial == serial && !is_over(&link.status));
+        if !is_live {
+            match update {
+                TransferUpdate::HandleWritten { relays, .. } => {
+                    if let Some((chunk_id, cred)) = erase {
+                        if !relays.is_empty() {
+                            self.send_transfer(TransferCommand::Erase {
+                                chunk_id,
+                                cred,
+                                relays,
+                            });
+                        }
+                    }
+                }
+                TransferUpdate::Uploaded { uploaded, .. } => {
+                    for credential in uploaded.credentials {
+                        self.send_transfer(TransferCommand::Erase {
+                            chunk_id: credential.chunk_id,
+                            cred: credential.cred,
+                            relays: credential.relays,
+                        });
+                    }
+                }
+                _ => {}
+            }
             return None;
         }
         let now = unix_now();

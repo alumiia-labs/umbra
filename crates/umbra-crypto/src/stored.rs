@@ -22,6 +22,13 @@ impl Writer {
         Self::default()
     }
 
+    /// An empty object with room for `capacity` bytes. A writer of secrets
+    /// that sizes its object grows in no reallocation, which would free a
+    /// copy of them that no one wipes.
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self(Zeroizing::new(Vec::with_capacity(capacity)))
+    }
+
     /// One byte.
     pub fn u8(&mut self, value: u8) {
         self.0.push(value);

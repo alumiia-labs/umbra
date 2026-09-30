@@ -40,6 +40,7 @@
     <string name="umbra_ui_grp_087">This deletes the message on the device of each member. You cannot undo this. Each member sees that you removed a message.</string>
     <string name="umbra_ui_grp_090">A restore from a backup that predates today brings them back.</string>
     <string name="umbra_ui_grp_199">The relays of this group do not answer. Messages wait.</string>
+    <string name="umbra_ui_grp_229">The device clock may be wrong. Notifications show no preview until it is checked.</string>
     <string name="umbra_ui_grp_374">A removed device took your place in this group. Ask an admin for a new invitation.</string>
     <string name="umbra_ui_att_157">The original keeps its metadata, such as a place and a time.</string>
     <string name="umbra_ui_abu_040">They can still send. Their messages reach this device and are dropped unread.</string>

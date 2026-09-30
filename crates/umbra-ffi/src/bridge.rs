@@ -456,6 +456,9 @@ impl Bridge {
             // REL-115: a clock movement discards the directory correction.
             Update::ClockMoved => {
                 client.clear_directory_correction()?;
+                // GRP-229: the clock check that the held group records wait
+                // for. A fault of one sweep ends no update.
+                client.clock_check(now_ms, rng);
                 None
             }
             // NET-218: a record that a full queue refused goes again.

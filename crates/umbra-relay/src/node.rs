@@ -6,7 +6,7 @@
 //! The runtime gives it the bytes of each link, the ticks of each pacing
 //! clock, and the time, and it sends what the node returns.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// The wall clock in milliseconds, for the per-hop delay of Part 3 §3.9.
 fn unix_now_ms() -> u64 {
@@ -291,6 +291,9 @@ pub struct RelayNode {
     /// runs: a challenge or a relay hello costs one ML-DSA verification on
     /// the task that serves each circuit, and no session gates it.
     verifies: BTreeMap<LinkId, (u64, u32)>,
+    /// The relays of the next layer that this relay may dial; empty for a
+    /// node that takes each named relay, as a test does (`NET-167`).
+    next_layer: BTreeSet<[u8; 32]>,
     /// The link receipts (Part 10 §10.4.2).
     receipts: ReceiptBook,
 }
@@ -330,6 +333,7 @@ impl RelayNode {
             challenges: ChallengeBook::default(),
             challenges_moved: false,
             verifies: BTreeMap::new(),
+            next_layer: BTreeSet::new(),
             receipts: ReceiptBook::default(),
         }
     }
@@ -343,6 +347,11 @@ impl RelayNode {
     ) {
         self.pow_key = Some(key);
         self.carriers = carriers;
+    }
+
+    /// The relays of the next layer that this relay may dial (`NET-167`).
+    pub fn set_next_layer(&mut self, relays: BTreeSet<[u8; 32]>) {
+        self.next_layer = relays;
     }
 
     /// The receipts of this relay go on `shelf` (`REL-073`).
@@ -851,6 +860,10 @@ impl RelayNode {
                     relay_id,
                     body,
                 } => match self.next_hops.get(&relay_id).copied() {
+                    // NET-167: a relay that is not of the next layer takes
+                    // no body, and the body goes at once.
+                    None if !self.next_layer.is_empty() && !self.next_layer.contains(&relay_id) => {
+                    }
                     // NET-167: only a relay of the next layer holds a link
                     // here. NET-319: the body waits for the link, and one
                     // dial serves each body that waits for that relay.

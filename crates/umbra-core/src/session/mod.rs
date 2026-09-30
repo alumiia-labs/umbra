@@ -345,6 +345,18 @@ mod tests {
             .acknowledge(bob_circuit.relay_session_pk(), [5; 16], 23)
             .unwrap()
             .is_none());
+
+        // WIR-253: a relay that serves the record again under a new seq
+        // draws no key request, since the record opened once.
+        let mut replayed = alloc::vec![0u8; 4 + stored.len()];
+        msg_from_send(seq + 1, &stored, Bucket::B0, &mut replayed).unwrap();
+        assert_eq!(
+            bob.receive(&replayed, Bucket::B0, 24, &mut rng).unwrap(),
+            Received::Undecryptable {
+                seq: seq + 1,
+                send_index: None,
+            }
+        );
     }
 
     #[test]

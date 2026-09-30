@@ -444,6 +444,16 @@ impl Receiver {
         self.held.len()
     }
 
+    /// The epoch and the slot of each content record held.
+    pub fn held_slots(&self) -> Vec<(u32, u32)> {
+        self.held
+            .iter()
+            .filter_map(|held| GroupQueueRecord::parse(&held.bytes, held.bucket).ok())
+            .filter(|record| record.kind != RecordKind::EpochKey)
+            .map(|record| (record.epoch, record.slot))
+            .collect()
+    }
+
     /// The newest group epoch among the records held, which names an
     /// epoch this member may lack (§11.4.3).
     pub fn newest_held_epoch(&self) -> Option<u32> {

@@ -398,9 +398,12 @@ open the records before the join.
 - **[GRP-228]** A receiver MUST accept a content record only when its `slot`
   is in `[t_now − GROUP_SLOT_WINDOW, t_now + GROUP_SLOT_SKEW]`.
   `GROUP_SLOT_SKEW` is 2 slots. **[GRP-229]** A receiver MUST store a record
-  outside that window in the manner of Part 6 rule `WIR-050`, treat it as
-  evidence of a clock movement of Part 1 §1.9, and retry it after the next
-  clock check. Part 14 §14.9.2 gives the `clock` line.
+  outside that window in the manner of Part 6 rule `WIR-050`, and retry it
+  after the next clock check: a clock movement of Part 1 §1.9, or the hour
+  that brings its slot inside the window. A record above the window is
+  evidence of a clock movement, and Part 14 §14.9.2 gives the `clock` line;
+  a record below it came late, as after a time offline, and names no
+  clock.
 - **[GRP-230]** After a rotation to `e + 1`, a receiver MUST keep the state of
   epoch `e` for `GROUP_EPOCH_GRACE`. **[GRP-231]** A receiver MUST zeroize
   that state at the end of the grace. `GROUP_EPOCH_GRACE` is 24 h.

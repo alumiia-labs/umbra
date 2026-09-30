@@ -1,5 +1,6 @@
 package org.umbra.app
 
+import android.os.Build
 import android.text.SpannableStringBuilder
 import android.text.style.ForegroundColorSpan
 import android.text.style.UnderlineSpan
@@ -46,6 +47,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.ModalBottomSheetProperties
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -65,6 +67,7 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.window.SecureFlagPolicy
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.onClick
@@ -659,6 +662,16 @@ fun ActionSheet(
 ) {
     ModalBottomSheet(
         onDismissRequest = onDismiss,
+        // IMP-055: a sheet is a window of its own, above the cover. Before
+        // Android 13 no call keeps the task snapshot from it, thus there
+        // the sheet takes no snapshot at all.
+        properties = ModalBottomSheetProperties(
+            securePolicy = if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+                SecureFlagPolicy.SecureOn
+            } else {
+                SecureFlagPolicy.Inherit
+            },
+        ),
         containerColor = Palette.Surface,
         shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
         dragHandle = {

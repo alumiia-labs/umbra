@@ -45,6 +45,7 @@ import uniffi.umbra_ffi.LinkStatus
 import uniffi.umbra_ffi.initFromRootSeed
 import uniffi.umbra_ffi.recoveryDigitsKind
 import uniffi.umbra_ffi.measureArgon2FloorMs
+import uniffi.umbra_ffi.storeHasHeader
 import uniffi.umbra_ffi.MsgHandle
 import uniffi.umbra_ffi.MsgReaction
 
@@ -135,6 +136,8 @@ class Chat(
     val needsInvitation: Boolean = false,
     /** Whether no relay of a group answers, thus its messages wait (`GRP-199`). */
     val isUnreachable: Boolean = false,
+    /** Whether a record of a group waits for a clock check (`GRP-229`). */
+    val isClockSuspect: Boolean = false,
 ) {
     /** What each list shows: the name of the user, or a stable short label. */
     val title: String
@@ -997,8 +1000,12 @@ object Core {
         }
     }
 
-    /** Whether this device holds a store, thus the unlock view says so. */
-    fun hasStore(context: Context) = File(context.filesDir, "umbra.db").exists()
+    /**
+     * Whether this device holds a store, thus the unlock view says so. A
+     * first launch that ended before its key left a file that holds none.
+     */
+    fun hasStore(context: Context) =
+        handle != null || storeHasHeader(File(context.filesDir, "umbra.db").absolutePath)
 
     private fun launch(app: Context, passphrase: List<UShort>): Handle {
         val database = File(app.filesDir, "umbra.db")
@@ -1105,7 +1112,9 @@ object Core {
                 // conversation decides what it shows.
                 val client = handle
                 if (!isVisible && client != null) {
-                    val preview = Modes.preview(app)
+                    // GRP-229: while the clock may be wrong, no alert
+                    // shows a preview (Part 14 §14.9.2).
+                    val preview = Modes.preview(app) && chats.none { it.isClockSuspect }
                     val title = chats.firstOrNull { it.conversation.id.contentEquals(event.conversation) }?.title
                     // The worker reads the handle of the message, thus the
                     // worker frees the event after that read.
@@ -1129,7 +1138,7 @@ object Core {
                                     if (phase == Phase.Open) {
                                         Notifier.message(app, Conversation(event.conversation), title.takeIf { preview }, text)
                                     } else {
-                                        text?.fill(' ')
+                                        text?.fill('\u0000')
                                     }
                                 }
                             }
@@ -2339,6 +2348,7 @@ object Core {
             isReturning = group?.isReturning ?: false,
             needsInvitation = group?.needsInvitation ?: false,
             isUnreachable = group?.isUnreachable ?: false,
+            isClockSuspect = group?.isClockSuspect ?: false,
         )
     }
 

@@ -280,8 +280,10 @@ impl<R: CryptoRng + ?Sized> StepHooks for Hooks<'_, R> {
         // secret of the epoch that completed.
         let next = self.braid.next_epoch(self.now)?;
         let completed = self.braid.epoch;
-        let secret = self.braid.own_secret.take();
+        // CRY-149: the secret stays until the mix takes it, thus an advance
+        // that fails keeps it for the next chain start.
         self.braid.start_epoch(next, self.now, self.rng).ok()?;
+        let secret = self.braid.own_secret.take();
         secret.map(|s| (completed, s))
     }
 }
@@ -368,7 +370,14 @@ impl Ratchet {
     /// them before a record of [`Ratchet::send`] leaves the device, because
     /// an earlier state would seal a second record under the same key.
     pub fn export(&self) -> Result<Zeroizing<Vec<u8>>, Error> {
-        let mut writer = Writer::new();
+        // The braid holds a few kilobytes, and each skipped key under 96
+        // bytes.
+        let capacity = self
+            .session
+            .skipped_len()
+            .saturating_mul(96)
+            .saturating_add(16 * 1_024);
+        let mut writer = Writer::with_capacity(capacity);
         writer.u8(STORED_VERSION);
         self.session.export(&mut writer)?;
         self.braid.export(&mut writer)?;
@@ -481,8 +490,29 @@ impl Ratchet {
         self.session.send(plaintext, frame, rng, out)
     }
 
-    /// Decrypts `record` into `out`.
+    /// Decrypts `record` into `out`. A record that does not open leaves
+    /// both ratchets as they were: a header that opens under a body that
+    /// does not moves no chain and takes no step.
     pub fn receive<R: CryptoRng + ?Sized>(
+        &mut self,
+        record: &[u8],
+        now: u64,
+        rng: &mut R,
+        out: &mut [u8],
+    ) -> Result<Opened, Error> {
+        let before = self.export()?;
+        let opened = self.receive_once(record, now, rng, out);
+        // Bytes that `export` just wrote restore, and the first fault is
+        // the one that the caller gets.
+        if opened.is_err() {
+            if let Ok(back) = Self::restore(&before) {
+                *self = back;
+            }
+        }
+        opened
+    }
+
+    fn receive_once<R: CryptoRng + ?Sized>(
         &mut self,
         record: &[u8],
         now: u64,
@@ -628,6 +658,26 @@ mod tests {
         // The key served one record, in the stored form too.
         let mut b = stored_and_read_again(&b);
         assert!(recv(&mut b, &mut rng, &late, 3).is_err());
+    }
+
+    #[test]
+    fn a_body_that_does_not_open_moves_no_chain() {
+        let (mut a, mut b, mut rng) = pair(b"changed body", Width::W64);
+        // The first record takes a ratchet step at the receiver, and the
+        // third one skips a key.
+        let first = send(&mut a, &mut rng, b"first", 0);
+        let second = send(&mut a, &mut rng, b"second", 1);
+        let third = send(&mut a, &mut rng, b"third", 2);
+        for record in [&first, &third] {
+            let before = b.export().unwrap();
+            let mut changed = record.clone();
+            let last = changed.len() - 1;
+            changed[last] ^= 1;
+            assert!(recv(&mut b, &mut rng, &changed, 3).is_err());
+            assert_eq!(*b.export().unwrap(), *before);
+            assert!(recv(&mut b, &mut rng, record, 3).is_ok());
+        }
+        assert_eq!(recv(&mut b, &mut rng, &second, 4).unwrap(), b"second");
     }
 
     #[test]

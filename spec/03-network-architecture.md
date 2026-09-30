@@ -1109,7 +1109,9 @@ below are relay-local, and a client of ordinary use stays far under each one.
   `RELAY_CONN_MAX` connections.
 - **[NET-334]** An ingress relay MUST close a new connection at once when its
   address holds `RELAY_CONN_PER_IP` connections. A loopback address is
-  exempt, because a test network on one machine shares it.
+  exempt, because a test network on one machine shares it. A relay of
+  layer 2 or 3 applies no such cap: another relay opens a connection there
+  for each chunk copy and each digest deposit that it pushes.
 - **[NET-335]** A relay MUST run at most `RELAY_HANDSHAKES_MAX` TLS
   handshakes at once, and it MUST close a connection that holds no upgrade
   request of Part 6 §6.2.1 at `RELAY_HANDSHAKE_TIMEOUT` from its accept.

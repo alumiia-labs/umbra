@@ -28,8 +28,8 @@
 //! ```
 //!
 //! The lines `max_connections=` and `max_conns_per_ip=` change the limits of
-//! Part 3 `NET-333` and `NET-334`. An ingress relay applies the second one,
-//! and a value of 0 turns it off.
+//! Part 3 `NET-333` and `NET-334`. An ingress relay alone applies the second
+//! one, and a value of 0 turns it off.
 //!
 //! A test network on one machine can list a relay at an address that names
 //! this machine from an emulator, as `10.0.2.2` does. The line
@@ -334,14 +334,15 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
         manifest,
         manifest_source,
         // NET-334: the clients arrive at an ingress relay alone, thus the
-        // cap of one address applies there.
+        // cap of one address applies there. A relay of another layer takes
+        // a connection for each push of another relay.
         limits: ConnectionLimits {
             max_connections: match values.get("max_connections") {
                 Some(count) => count.parse().ok()?,
                 None => ConnectionLimits::CONN_MAX,
             },
             per_ip_max: match (layer, values.get("max_conns_per_ip")) {
-                (_, Some(count)) => count.parse().ok()?,
+                (1, Some(count)) => count.parse().ok()?,
                 (1, None) => ConnectionLimits::CONN_PER_IP,
                 _ => 0,
             },

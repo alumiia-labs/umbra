@@ -202,6 +202,7 @@ object VoicePlayer {
             }
             val made = MediaPlayer()
             player = made
+            val data = CoreDataSource(source)
             try {
                 made.setAudioAttributes(
                     AudioAttributes.Builder()
@@ -209,7 +210,7 @@ object VoicePlayer {
                         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                         .build(),
                 )
-                made.setDataSource(CoreDataSource(source))
+                made.setDataSource(data)
                 made.setOnPreparedListener {
                     if (player !== it) return@setOnPreparedListener
                     lengthMs = it.duration.coerceAtLeast(1)
@@ -224,6 +225,7 @@ object VoicePlayer {
                 }
                 made.prepareAsync()
             } catch (unplayable: Exception) {
+                data.close()
                 stop()
             }
         }

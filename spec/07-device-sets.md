@@ -783,6 +783,12 @@ MutableItem {                 // the body of kind 0x20 at sub-kind 0x01
   `writer`, and it MUST discard it otherwise. A device MUST set `writer` to
   its own `device_id` in each item that it writes, and a relay of `DEV-308`
   MUST keep the `lamport` and the `writer` of the item that it carries.
+  **[DEV-310]** A device MAY forget the winner of a delivery item once it
+  holds more than 65 536 of them, the oldest by `lamport` first, and it
+  keeps the winner of each item of another table. The delivery state of
+  each message is an item, thus the set grows with each message; an item
+  that arrives after its winner went can then win again, and each item of
+  that table converges forward in any case.
 
 > *Cause.* An earlier draft named the context and the sub-kinds and gave
 > them no layout, thus two implementations could not exchange one sync

@@ -769,6 +769,9 @@ struct Wanted {
     /// no such chunk.
     answers: u32,
     refusals: u32,
+    /// The replicas that a hold-off left out (`ATT-174`): the chunk may
+    /// sit there, thus the refusals of the others lose no file.
+    held: u32,
 }
 
 /// The download of one file. A file of level `0x01` reads its manifest
@@ -780,13 +783,20 @@ pub struct Download {
     chunk_key: Secret<32>,
     chunk_ids: Vec<[u8; 32]>,
     wanted: Vec<Wanted>,
-    /// Each `CGET` that waits for its answer: the chunk, and the tick of
-    /// its send.
-    waiting: BTreeMap<u64, (usize, u32)>,
+    /// Each `CGET` that waits for its answer: the chunk, the tick of its
+    /// send, and the relay.
+    waiting: BTreeMap<u64, (usize, u32, [u8; 32])>,
     /// The ticks of the caller since the start.
     ticks: u32,
     /// The data phase of a file of level `0x01`, while its manifest comes.
     then: Option<DataPlan>,
+    /// The relays that the fetch orders leave out (`ATT-174`), and the time
+    /// that they hold at.
+    hold_offs: HoldOffs,
+    now: u64,
+    /// Each chunk and relay that answered `BUSY` or `LIMIT`, for the
+    /// hold-offs of the caller.
+    refused: Vec<([u8; 32], [u8; 32])>,
 }
 
 /// What the data phase of a file of level `0x01` needs.
@@ -802,9 +812,10 @@ struct DataPlan {
 fn plan<R: CryptoRng + ?Sized>(
     chunks: &[Replicas],
     relays: &[AttachmentRelay],
+    hold_offs: &HoldOffs,
+    now: u64,
     rng: &mut R,
 ) -> Vec<Wanted> {
-    let hold_offs = HoldOffs::default();
     chunks
         .iter()
         .map(|chunk| {
@@ -817,16 +828,19 @@ fn plan<R: CryptoRng + ?Sized>(
                     }
                 }
             }
-            let mut order = fetch_order(&chunk.chunk_id, &replicas, &hold_offs, 0, &mut |bound| {
+            let mut order = fetch_order(&chunk.chunk_id, &replicas, hold_offs, now, &mut |bound| {
                 random_below(rng, bound)
             });
             order.reverse();
+            let held =
+                u32::try_from(replicas.len().saturating_sub(order.len())).unwrap_or(u32::MAX);
             Wanted {
                 order,
                 bytes: None,
                 is_asked: false,
                 answers: 0,
                 refusals: 0,
+                held,
             }
         })
         .collect()
@@ -892,11 +906,39 @@ impl Download {
             assembler: Some(assembler),
             chunk_key,
             chunk_ids: chunks.iter().map(|chunk| chunk.chunk_id).collect(),
-            wanted: plan(&chunks, relays, rng),
+            wanted: plan(&chunks, relays, &HoldOffs::default(), 0, rng),
             waiting: BTreeMap::new(),
             ticks: 0,
             then,
+            hold_offs: HoldOffs::default(),
+            now: 0,
+            refused: Vec::new(),
         })
+    }
+
+    /// The download leaves out each relay inside its hold-off for a chunk
+    /// at `now` (`ATT-174`), in each phase.
+    #[must_use]
+    pub fn with_hold_offs(mut self, hold_offs: &HoldOffs, now: u64) -> Self {
+        for (wanted, chunk_id) in self.wanted.iter_mut().zip(&self.chunk_ids) {
+            let before = wanted.order.len();
+            wanted
+                .order
+                .retain(|relay| !hold_offs.blocked(chunk_id, relay, now));
+            let left_out = before.saturating_sub(wanted.order.len());
+            wanted.held = wanted
+                .held
+                .saturating_add(u32::try_from(left_out).unwrap_or(u32::MAX));
+        }
+        self.hold_offs = hold_offs.clone();
+        self.now = now;
+        self
+    }
+
+    /// Each chunk and relay that answered `BUSY` or `LIMIT` since the last
+    /// call (`ATT-174`).
+    pub fn take_refused(&mut self) -> Vec<([u8; 32], [u8; 32])> {
+        core::mem::take(&mut self.refused)
     }
 
     /// The manifest opened: the data phase reads the chunks that it names
@@ -910,7 +952,7 @@ impl Download {
         let refs = manifest::parse(manifest_plain)?;
         let chunks = manifest::collapse(&refs, then.data_chunks)?;
         self.chunk_ids = chunks.iter().map(|chunk| chunk.chunk_id).collect();
-        self.wanted = plan(&chunks, &then.relays, rng);
+        self.wanted = plan(&chunks, &then.relays, &self.hold_offs, self.now, rng);
         self.chunk_key = then.file_key;
         self.assembler = Some(then.assembler);
         Ok(())
@@ -932,7 +974,7 @@ impl Download {
             u32::try_from(index).map_err(|_| Error::Malformed)?,
         );
         let handle = node.chunk(relay, chunk_id, ChunkJob::Fetch { read }, rng)?;
-        self.waiting.insert(handle, (index, self.ticks));
+        self.waiting.insert(handle, (index, self.ticks, relay));
         Ok(())
     }
 
@@ -951,6 +993,7 @@ impl Download {
                 && wanted.bytes.is_none()
                 && wanted.refusals > 0
                 && wanted.refusals == wanted.answers
+                && wanted.held == 0
         })
     }
 
@@ -968,8 +1011,8 @@ impl Download {
         let late: Vec<(u64, usize)> = self
             .waiting
             .iter()
-            .filter(|(_, (_, sent))| self.ticks.saturating_sub(*sent) >= STEP_TIMEOUT_TICKS)
-            .map(|(handle, (index, _))| (*handle, *index))
+            .filter(|(_, (_, sent, _))| self.ticks.saturating_sub(*sent) >= STEP_TIMEOUT_TICKS)
+            .map(|(handle, (index, _, _))| (*handle, *index))
             .collect();
         for (handle, index) in late {
             self.waiting.remove(&handle);
@@ -1029,7 +1072,7 @@ impl Download {
         outcome: ChunkOutcome,
         rng: &mut R,
     ) -> Result<bool, Error> {
-        let Some((index, _)) = self.waiting.remove(&handle) else {
+        let Some((index, _, relay)) = self.waiting.remove(&handle) else {
             return Ok(false);
         };
         // ATT-150: a chunk that does not open under its tag is one bad
@@ -1055,6 +1098,13 @@ impl Download {
             // unknown chunk, and the read secret of a descriptor is right.
             ChunkOutcome::Refused(Reject::Rejected) => {
                 wanted.refusals = wanted.refusals.saturating_add(1);
+                self.ask(node, index, rng)?;
+            }
+            // ATT-173, ATT-174: the next replica, and this relay takes no
+            // same `CGET` inside the hold.
+            ChunkOutcome::Refused(Reject::Busy | Reject::Limit) => {
+                let chunk_id = *self.chunk_ids.get(index).ok_or(Error::Malformed)?;
+                self.refused.push((chunk_id, relay));
                 self.ask(node, index, rng)?;
             }
             _ => self.ask(node, index, rng)?,
@@ -1087,8 +1137,13 @@ pub struct ChunkFetch {
     order: Vec<[u8; 32]>,
     /// The `CGET` that waits for its answer, and the tick of its send.
     waiting: Option<(u64, u32)>,
+    /// The relay of the last `CGET`.
+    asked: [u8; 32],
     /// The ticks of the caller since the start.
     ticks: u32,
+    /// Each relay that answered `BUSY` or `LIMIT`, for the hold-offs of the
+    /// caller (`ATT-174`).
+    refused: Vec<[u8; 32]>,
 }
 
 impl ChunkFetch {
@@ -1135,8 +1190,30 @@ impl ChunkFetch {
             chunk_id: chunk_ref.chunk_id,
             order,
             waiting: None,
+            asked: [0; 32],
             ticks: 0,
+            refused: Vec::new(),
         })
+    }
+
+    /// The fetch leaves out each relay inside its hold-off at `now`
+    /// (`ATT-174`).
+    #[must_use]
+    pub fn with_hold_offs(mut self, hold_offs: &HoldOffs, now: u64) -> Self {
+        let chunk_id = self.chunk_id;
+        self.order
+            .retain(|relay| !hold_offs.blocked(&chunk_id, relay, now));
+        self
+    }
+
+    /// Each chunk and relay that answered `BUSY` or `LIMIT` since the last
+    /// call (`ATT-174`).
+    pub fn take_refused(&mut self) -> Vec<([u8; 32], [u8; 32])> {
+        let chunk_id = self.chunk_id;
+        core::mem::take(&mut self.refused)
+            .into_iter()
+            .map(|relay| (chunk_id, relay))
+            .collect()
     }
 
     /// Whether the answer with this handle belongs to this fetch.
@@ -1176,6 +1253,7 @@ impl ChunkFetch {
         let read = read_secret(&self.file_key, self.index);
         let handle = node.chunk(relay, self.chunk_id, ChunkJob::Fetch { read }, rng)?;
         self.waiting = Some((handle, self.ticks));
+        self.asked = relay;
         Ok(())
     }
 
@@ -1191,6 +1269,9 @@ impl ChunkFetch {
             return Ok(Progress::Running(0, 1));
         }
         self.waiting = None;
+        if matches!(outcome, ChunkOutcome::Refused(Reject::Busy | Reject::Limit)) {
+            self.refused.push(self.asked);
+        }
         if let ChunkOutcome::Fetched(bytes) = outcome {
             if let Ok(plain) = open_chunk(
                 &self.file_key,

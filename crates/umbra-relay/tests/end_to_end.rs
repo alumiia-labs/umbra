@@ -517,3 +517,41 @@ fn a_relay_holds_an_extend_while_it_dials_the_next_relay() {
     // The circuit holds three hops and carries a command.
     let (_, _) = client.new_queue(&mut network, 0x40);
 }
+
+#[test]
+fn a_relay_drops_an_extend_to_a_relay_outside_the_next_layer() {
+    // NET-167: relay 1 knows another next layer, thus the EXTEND to relay 2
+    // draws no dial, and no EXTENDED comes back.
+    let mut network = Network::unlinked();
+    network.relays[0].set_next_layer([[0x77; 32]].into_iter().collect());
+    network.peers[0].push((1, Peer::Client(0)));
+    let mut buffer = vec![0u8; 40_000];
+    let (mut link, used) = ClientLink::open([0xC0; 8], Secret::new([0; 32]), &mut buffer).unwrap();
+    network.client_sends(0, &buffer[..used]);
+    let mut rng = Rng(100);
+    let mut build = CircuitBuild::new([0xA0; 16]);
+    for hop in 0..2usize {
+        let relay = network.statics[hop].clone_static();
+        let mut hello = [0u8; HELLO_LEN];
+        let pending = Pending::hello(&relay, DelayClass::Fast, &mut rng, &mut hello).unwrap();
+        let mut body = vec![0u8; BUILD_BUCKET.body_len()];
+        build_cell_body(CellCommand::Extend, &hello, &mut body).unwrap();
+        let tag = build.seal(&mut body).unwrap();
+        let cell = [build.circ_id().as_slice(), &tag, &body].concat();
+        let used = link.send(&cell, &mut buffer).unwrap();
+        network.client_sends(0, &buffer[..used]);
+        let Some(capsule_bytes) = network.inboxes[0].pop_front() else {
+            assert_eq!(hop, 1);
+            return;
+        };
+        let (_, value, _) = capsule::parse(&capsule_bytes).unwrap();
+        let cell = link.receive(value).unwrap().unwrap().to_vec();
+        let (parsed, _) = Cell::parse(&cell).unwrap();
+        let mut body = parsed.body.to_vec();
+        build.open(parsed.tag, &mut body).unwrap();
+        let (command, reply) = read_cell_body(&body).unwrap();
+        assert_eq!(command, CellCommand::Extended);
+        build.push(&pending.finish(reply).unwrap()).unwrap();
+    }
+    panic!("relay 1 took the EXTEND to relay 2");
+}

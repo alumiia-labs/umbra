@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 use umbra_core::{
     attach::{
         handle::{HandleRead, HandleWrite},
-        place::AttachmentRelay,
+        place::{AttachmentRelay, HoldOffs},
         transfer::{ChunkFetch, Class, Download, Progress, Shape, Upload, Uploaded},
     },
     session::node::{ChunkJob, ClientEvent, ClientNode},
@@ -215,10 +215,24 @@ pub async fn run_transfers(
     guard: Dial,
     tls: Arc<ClientConfig>,
     relays: Vec<AttachmentRelay>,
+    hold_offs: Arc<std::sync::Mutex<HoldOffs>>,
     mut commands: mpsc::UnboundedReceiver<TransferCommand>,
     updates: mpsc::UnboundedSender<TransferUpdate>,
 ) {
     let mut rng = OsRng;
+    // ATT-174: the relays that refused a chunk, which the runs of this
+    // handle share, as the fetch orders take them at each start.
+    let held = || {
+        let now = crate::runtime::unix_now();
+        let holds = hold_offs.lock().map_or_else(
+            |_| HoldOffs::default(),
+            |mut holds| {
+                holds.expire(now);
+                holds.clone()
+            },
+        );
+        (holds, now)
+    };
     let mut active: BTreeMap<u64, Active> = BTreeMap::new();
     // ATT-167: the mode of each transfer, which the node takes before each
     // call into it.
@@ -435,6 +449,19 @@ pub async fn run_transfers(
                                 },
                             }),
                     };
+                    let refused = match transfer {
+                        Active::One(fetch) => fetch.take_refused(),
+                        Active::Down(download) => download.take_refused(),
+                        _ => Vec::new(),
+                    };
+                    if !refused.is_empty() {
+                        if let Ok(mut holds) = hold_offs.lock() {
+                            let now = crate::runtime::unix_now();
+                            for (chunk_id, relay_id) in refused {
+                                holds.note(chunk_id, relay_id, now);
+                            }
+                        }
+                    }
                     let update = step.unwrap_or_else(|error| {
                         crate::devlog::line(format!("transfers: tag {tag} failed: {error:?}"));
                         TransferUpdate::Failed { tag }
@@ -464,12 +491,13 @@ pub async fn run_transfers(
                     // ATT-167: each start takes a mode of its own, not the mode
                     // of the transfer before it.
                     node.set_chunk_class(umbra_core::session::node::DelayClass::default());
-                    let started = ChunkFetch::new(&descriptor, index, &relays, &mut rng).and_then(
-                        |mut fetch| {
+                    let (holds, now) = held();
+                    let started =
+                        ChunkFetch::new(&descriptor, index, &relays, &mut rng).and_then(|fetch| {
+                            let mut fetch = fetch.with_hold_offs(&holds, now);
                             fetch.tick(&mut node, &mut rng)?;
                             Ok(fetch)
-                        },
-                    );
+                        });
                     match started {
                         Ok(fetch) => {
                             active.insert(tag, Active::One(Box::new(fetch)));
@@ -523,12 +551,13 @@ pub async fn run_transfers(
                     // ATT-167: each start takes a mode of its own, not the mode
                     // of the transfer before it.
                     node.set_chunk_class(umbra_core::session::node::DelayClass::default());
-                    let started = Download::new_backup(&descriptor, &relays, &mut rng).and_then(
-                        |mut download| {
+                    let (holds, now) = held();
+                    let started =
+                        Download::new_backup(&descriptor, &relays, &mut rng).and_then(|download| {
+                            let mut download = download.with_hold_offs(&holds, now);
                             download.tick(&mut node, &mut rng)?;
                             Ok(download)
-                        },
-                    );
+                        });
                     match started {
                         Ok(download) => {
                             active.insert(tag, Active::Down(Box::new(download)));
@@ -610,8 +639,10 @@ pub async fn run_transfers(
                 }
                 TransferCommand::Download { tag, descriptor } => {
                     node.set_chunk_class(classes.get(&tag).copied().unwrap_or_default());
+                    let (holds, now) = held();
                     let started =
-                        Download::new(&descriptor, &relays, &mut rng).and_then(|mut download| {
+                        Download::new(&descriptor, &relays, &mut rng).and_then(|download| {
+                            let mut download = download.with_hold_offs(&holds, now);
                             download.tick(&mut node, &mut rng)?;
                             Ok(download)
                         });

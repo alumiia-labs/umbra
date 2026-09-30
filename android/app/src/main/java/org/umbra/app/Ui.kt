@@ -480,6 +480,8 @@ private fun ConnectionNote() {
         Core.degraded?.let { add(it) }
         if (BuildNetwork.isProvisional) add(UiText.get(R.string.umbra_ui_rel_126))
         if (Core.online && BuildNetwork.isClockCorrected) add(UiText.get(R.string.umbra_ui_rel_116))
+        // GRP-229: a group record outside its slot window.
+        if (Core.chats.any { it.isClockSuspect }) add(UiText.get(R.string.umbra_ui_grp_229))
         // DEV-076 to DEV-079: a hole of the synced history shows, and a gap
         // takes no dismissal.
         for (hole in Core.historyHoles) {

@@ -543,7 +543,14 @@ pub struct PairwiseChannel {
     outbound: Outbound,
     inbound: Inbound,
     previous: Option<Inbound>,
+    /// The `send_index` of each record that opened in this run, the oldest
+    /// first, at most `OPENED_HELD` of them. A record that fails at one of
+    /// them is a copy, and no hole (`WIR-253`).
+    opened: alloc::collections::VecDeque<u16>,
 }
+
+/// The indices that a channel holds of the records that opened.
+const OPENED_HELD: usize = 4_096;
 
 /// The version byte of a stored channel. Version `0x01` holds no previous
 /// inbound queue.
@@ -594,6 +601,7 @@ impl PairwiseChannel {
             outbound,
             inbound,
             previous,
+            opened: alloc::collections::VecDeque::new(),
         })
     }
 
@@ -604,6 +612,7 @@ impl PairwiseChannel {
             outbound,
             inbound,
             previous: None,
+            opened: alloc::collections::VecDeque::new(),
         }
     }
 
@@ -759,16 +768,28 @@ impl PairwiseChannel {
                 })
             }
         };
+        let ctx = umbra_crypto::ratchet::dr::Session::peek_ctx(&inner).ok();
         let mut app = alloc::vec![0u8; bucket.l7_record()];
         match self.ratchet.receive(&inner, now, rng, &mut app) {
             Ok(opened) => {
                 app.truncate(opened.len);
+                if let Some(ctx) = ctx {
+                    if self.opened.len() >= OPENED_HELD {
+                        self.opened.pop_front();
+                    }
+                    self.opened.push_back(ctx.send_index);
+                }
                 Ok(Received::App { seq, bytes: app })
             }
+            // WIR-253: a record of another session, or a copy of one that
+            // opened, names no hole of this session (`WIR-254`).
             Err(_) => Ok(Received::Undecryptable {
                 seq,
-                send_index: umbra_crypto::ratchet::dr::Session::peek_ctx(&inner)
-                    .ok()
+                send_index: ctx
+                    .filter(|ctx| {
+                        ctx.session_tag == self.ratchet.next_ctx().session_tag
+                            && !self.opened.contains(&ctx.send_index)
+                    })
                     .map(|ctx| ctx.send_index),
             }),
         }

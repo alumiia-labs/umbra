@@ -300,6 +300,8 @@ pub struct FfiGroupInfo {
     /// Whether no replica of the group answers, thus each record waits
     /// (`GRP-199`, `GRP-200`).
     pub is_unreachable: bool,
+    /// Whether a record waits for a clock check (`GRP-229`).
+    pub is_clock_suspect: bool,
     /// Whether a rival re-key took the index of this member, and it knows
     /// no contact in the group to ask (`GRP-374`).
     pub needs_invitation: bool,
@@ -1338,6 +1340,9 @@ struct Inner {
     transfers: Option<mpsc::UnboundedSender<TransferCommand>>,
     /// What each transfer that runs belongs to.
     transfer_tags: BTreeMap<u64, TransferWork>,
+    /// The relays that refused a chunk with `BUSY` or `LIMIT`, which no
+    /// fetch of this handle asks for it again inside the hold (`ATT-174`).
+    hold_offs: Arc<Mutex<umbra_core::attach::place::HoldOffs>>,
     /// The files whose transfer run ended before them, the time before
     /// which none goes again, and the count of the ends in a row: a guard
     /// that is down draws no dial at each update (`NET-320`).
@@ -1386,6 +1391,9 @@ struct Inner {
     pending_grants: VecDeque<[u8; 16]>,
     /// The handle groups whose NDR call runs.
     ndr_in_flight: BTreeSet<[u8; 16]>,
+    /// The time before which a call of a handle that the NDR did not take
+    /// goes no more, and the count of its failures in a row.
+    ndr_retry: BTreeMap<[u8; 16], (u64, u32)>,
     /// The group of each notify queue that the run makes, by tag.
     notify_pending: BTreeMap<u64, crate::ConversationId>,
     next_notify_tag: u64,
@@ -1527,6 +1535,9 @@ enum TransferWork {
         serial: u64,
         /// The step.
         step: link::LinkStep,
+        /// The `chunk_id` and the `cred_sk` of a slot that the step
+        /// writes, which a write that ends after its link erases.
+        erase: Option<([u8; 32], umbra_crypto::secret::Secret<32>)>,
     },
     /// The backup root of one week, which a restore reads (`IDN-101`).
     RestoreRoot {
@@ -1693,6 +1704,9 @@ impl Inner {
             return;
         }
         self.pump_recovery();
+        // GRP-253, GRP-229: a record that waits leaves at its bound, and one
+        // whose slot came inside the window opens, on each device.
+        let _ = self.client.expire_group_holds(unix_now_ms(), &mut OsRng);
         // GRP-343: each device of a member reads each group on its own
         // circuit with its own cursor. A device that does not own the
         // channels writes nothing to a group queue (GRP-338).
@@ -1752,8 +1766,6 @@ impl Inner {
         // §11.9.7: a quiet week gives one presence record, and an admin
         // removes a member that stayed silent for `GROUP_SILENT_EVICT`.
         let now_ms = crate::runtime::unix_now().saturating_mul(1_000);
-        // GRP-253: a record that waits in a quiet group leaves at its bound.
-        let _ = self.client.expire_group_holds(now_ms, &mut OsRng);
         if let Ok(due) = self.client.groups_owing_presence(now_ms, &mut OsRng) {
             for conversation in due {
                 let _ = self.client.post_presence(conversation, now_ms, &mut OsRng);
@@ -1967,6 +1979,23 @@ impl Inner {
             });
         }
         while let Some((conversation, wanted)) = self.client.take_epoch_chunk() {
+            // A fetch in flight serves a copy of its record, and at most
+            // `EPOCH_CHUNKS_MAX` fetches of one epoch of one group run.
+            let mut same_epoch = self.transfer_tags.values().filter_map(|work| match work {
+                TransferWork::EpochChunk {
+                    conversation: held,
+                    wanted: other,
+                } if *held == conversation && other.epoch == wanted.epoch => Some(other),
+                _ => None,
+            });
+            let fetching = same_epoch.clone().any(|other| **other == wanted);
+            if fetching
+                || same_epoch
+                    .nth(crate::client::EPOCH_CHUNKS_MAX.saturating_sub(1))
+                    .is_some()
+            {
+                continue;
+            }
             let Ok(descriptor) = umbra_wire::descriptor::FileDescriptor::parse(&wanted.descriptor)
             else {
                 continue;
@@ -2388,7 +2417,16 @@ impl Inner {
         let Ok(calls) = self.client.ndr_calls_due(&mut OsRng) else {
             return;
         };
+        let now = unix_now();
         for call in calls {
+            // A call that failed waits for its backoff.
+            if self
+                .ndr_retry
+                .get(&call.handle)
+                .is_some_and(|(at, _)| now < *at)
+            {
+                continue;
+            }
             if !self.ndr_in_flight.insert(call.handle) {
                 continue;
             }
@@ -2705,6 +2743,7 @@ impl Inner {
             dial,
             tls,
             holders,
+            self.hold_offs.clone(),
             task_commands,
             task_updates,
         ));
@@ -3361,6 +3400,17 @@ impl SecureElement for NoElement {
     }
 }
 
+/// Whether the store at `database_path` holds the header of its wrap. A
+/// first launch that ended before its header left a file with none, and
+/// the next start is a first launch again, with its restore and its link.
+#[uniffi::export]
+pub fn store_has_header(database_path: String) -> bool {
+    // A file that does not read is a store all the same: a first launch
+    // would offer a restore that ends in the removal of that file.
+    std::path::Path::new(&database_path).exists()
+        && SqliteBackend::holds_header(&database_path).unwrap_or(true)
+}
+
 /// Runs one Argon2id try at the floor cost, and returns its time in
 /// milliseconds. The platform gives the result to [`init`] at the first
 /// launch, off the main thread.
@@ -3589,6 +3639,7 @@ fn handle_of(database_path: String, client: Client<SqliteBackend, ForeignElement
             root_ca_path: None,
             transfers: None,
             transfer_tags: BTreeMap::new(),
+            hold_offs: Arc::default(),
             interrupted: (Vec::new(), 0, 0),
             file_progress: BTreeMap::new(),
             progress_events: VecDeque::new(),
@@ -3608,6 +3659,7 @@ fn handle_of(database_path: String, client: Client<SqliteBackend, ForeignElement
             next_rendezvous_tag: 0,
             pending_grants: VecDeque::new(),
             ndr_in_flight: BTreeSet::new(),
+            ndr_retry: BTreeMap::new(),
             notify_pending: BTreeMap::new(),
             next_notify_tag: 0,
             rotated_in_run: false,
@@ -3780,6 +3832,7 @@ impl Handle {
             circuits_changed,
             notify_pending,
             rotated_in_run,
+            ndr_retry,
             silent,
             dead_work,
             rendezvous_ready,
@@ -3919,6 +3972,8 @@ impl Handle {
             Update::QueueEnded(queue) => {
                 let _ = client.unbind_queue(queue, &mut OsRng);
             }
+            // A network that came back takes each NDR call at once.
+            Update::Online => ndr_retry.clear(),
             // A run that ended holds no circuit, and a notify queue that it
             // did not make goes to the next run.
             Update::Offline(_) => {
@@ -4019,7 +4074,30 @@ impl Handle {
     ) {
         let mut inner = locked(&self.inner);
         inner.ndr_in_flight.remove(&call.handle);
-        // A call that failed goes again at the next pump.
+        // A removal that the NDR refuses names a registration under another
+        // secret, which no later call of this device removes, thus it ends
+        // as one that the NDR took.
+        let answer = match answer {
+            Ok(NdrResponse::Refused | NdrResponse::Gone) if call.is_removal => {
+                Ok(NdrResponse::Taken)
+            }
+            other => other,
+        };
+        // A call that failed goes again after a wait that doubles, from 30
+        // seconds up to an hour.
+        if matches!(answer, Ok(NdrResponse::Taken)) {
+            inner.ndr_retry.remove(&call.handle);
+        } else {
+            let fails = inner
+                .ndr_retry
+                .get(&call.handle)
+                .map_or(0, |(_, fails)| *fails);
+            let wait = (30u64 << fails.min(7)).min(3_600);
+            inner.ndr_retry.insert(
+                call.handle,
+                (unix_now().saturating_add(wait), fails.saturating_add(1)),
+            );
+        }
         if matches!(answer, Ok(NdrResponse::Taken)) {
             // NTF-125: each queue of the handle binds again at once.
             let again = inner
@@ -4055,6 +4133,8 @@ impl Handle {
     fn set_push_token(&self, token: Option<(TokenCarrier, &str)>) -> Result<(), FfiError> {
         let mut inner = locked(&self.inner);
         inner.client.set_push_token(token, &mut OsRng)?;
+        // A new token goes to the NDR at once, whatever the earlier calls.
+        inner.ndr_retry.clear();
         inner.pump_ndr();
         Ok(())
     }
@@ -4444,6 +4524,9 @@ impl Handle {
                     })
                     .collect(),
             );
+            // DEV-257: a revoked device whose channel a crash left, before
+            // the node takes the channels of this run.
+            let _ = client.end_revoked_channels(&mut OsRng);
             let stored = client.stored_network()?;
             let device_peers = client.device_peers()?;
             let mut contacts = BTreeMap::new();
@@ -5073,6 +5156,7 @@ impl Handle {
             is_ready: info.is_ready,
             is_member: info.is_member,
             is_unreachable: info.is_unreachable,
+            is_clock_suspect: info.is_clock_suspect,
         })
     }
 

@@ -106,6 +106,11 @@ pub enum Taken {
     },
 }
 
+/// The winners of mutable items that an engine holds at most (`DEV-310`).
+const MUTABLE_HELD: usize = 65_536;
+/// The winners above `MUTABLE_HELD` before a trim.
+const MUTABLE_SLACK: usize = 4_096;
+
 /// The sync state of one device.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncEngine {
@@ -116,6 +121,9 @@ pub struct SyncEngine {
     watermarks: Watermarks,
     /// The Lamport counter and the writer of each mutable item held.
     mutable: BTreeMap<(u8, Vec<u8>), (u64, DeviceId)>,
+    /// The delivery items of `mutable`, thus an insert under the bound of
+    /// `DEV-310` reads no other item.
+    deliveries: usize,
 }
 
 fn class_of(inner: &[u8]) -> Result<Class, Error> {
@@ -142,6 +150,7 @@ impl SyncEngine {
             peers: peers.iter().map(|peer| (*peer, Peer::default())).collect(),
             watermarks: Watermarks::default(),
             mutable: BTreeMap::new(),
+            deliveries: 0,
         })
     }
 
@@ -260,8 +269,7 @@ impl SyncEngine {
         let mut body = alloc::vec![0u8; key.len().saturating_add(value.len()).saturating_add(256)];
         let used = mutable.encode(&mut body)?;
         body.truncate(used);
-        self.mutable
-            .insert((item, key.to_vec()), (self.lamport, self.own));
+        self.put_mutable((item, key.to_vec()), (self.lamport, self.own));
         self.retain(slot_ref, now);
         Ok(Published {
             counter: self.counter,
@@ -329,6 +337,11 @@ impl SyncEngine {
     /// the sync channel of `source`. The caller rejects that kind on each
     /// other channel (`DEV-052`).
     pub fn receive(&mut self, source: &DeviceId, body: &[u8], now: u64) -> Result<Taken, Error> {
+        // DEV-257: a device that is no peer, as one that the roster
+        // revoked, gives nothing to this device.
+        if !self.peers.contains_key(source) {
+            return Err(Error::Unverified);
+        }
         match DeviceSetBody::parse(body)? {
             DeviceSetBody::Record(_) => {
                 let record = SyncedRecord::parse(body)?;
@@ -374,7 +387,7 @@ impl SyncEngine {
                 if !wins {
                     return Ok(Taken::Superseded);
                 }
-                self.mutable.insert(slot, offered);
+                self.put_mutable(slot, offered);
                 Ok(Taken::Mutable {
                     item: item.item,
                     key: item.key.to_vec(),
@@ -519,6 +532,42 @@ impl SyncEngine {
             .unwrap_or_else(|| self.counter.saturating_add(1))
     }
 
+    /// Forgets the winners of the oldest delivery items once the engine
+    /// holds more than `MUTABLE_HELD` of them (`DEV-310`): an item of each
+    /// message would grow the engine with each message, and the stored
+    /// engine past its bound would open no more. A delivery item converges
+    /// forward, thus a late write that wins again changes no device; an
+    /// item of another table keeps its winner. The drop takes
+    /// `MUTABLE_SLACK` at once, thus its cost spreads over the inserts.
+    fn trim_mutable(&mut self) {
+        if self.deliveries <= MUTABLE_HELD.saturating_add(MUTABLE_SLACK) {
+            return;
+        }
+        let is_delivery = |key: &(u8, Vec<u8>)| key.0 == super::sync::ITEM_DELIVERY;
+        let mut lamports: Vec<u64> = self
+            .mutable
+            .iter()
+            .filter(|(key, _)| is_delivery(key))
+            .map(|(_, (lamport, _))| *lamport)
+            .collect();
+        lamports.sort_unstable();
+        let excess = lamports.len().saturating_sub(MUTABLE_HELD);
+        let floor = lamports.get(excess).copied().unwrap_or(0);
+        self.mutable
+            .retain(|key, (lamport, _)| !is_delivery(key) || *lamport >= floor);
+        self.deliveries = self.mutable.keys().filter(|key| is_delivery(key)).count();
+    }
+
+    /// Holds the winner of one item, and trims the delivery items
+    /// (`DEV-310`).
+    fn put_mutable(&mut self, slot: (u8, Vec<u8>), winner: (u64, DeviceId)) {
+        let is_delivery = slot.0 == super::sync::ITEM_DELIVERY;
+        if self.mutable.insert(slot, winner).is_none() && is_delivery {
+            self.deliveries = self.deliveries.saturating_add(1);
+        }
+        self.trim_mutable();
+    }
+
     /// Whether the engine holds a write of the item `item` under `key`.
     pub fn holds_mutable(&self, item: u8, key: &[u8]) -> bool {
         self.mutable.contains_key(&(item, key.to_vec()))
@@ -619,6 +668,10 @@ impl SyncEngine {
             mutable.insert((item, key), (lamport, writer));
         }
         r.end()?;
+        let deliveries = mutable
+            .keys()
+            .filter(|(item, _)| *item == super::sync::ITEM_DELIVERY)
+            .count();
         Ok(SyncEngine {
             own,
             lamport,
@@ -626,6 +679,7 @@ impl SyncEngine {
             peers,
             watermarks,
             mutable,
+            deliveries,
         })
     }
 }
@@ -672,6 +726,28 @@ mod tests {
             SyncEngine::new(PHONE, &[LAPTOP, TABLET]).unwrap(),
             SyncEngine::new(LAPTOP, &[PHONE, TABLET]).unwrap(),
         )
+    }
+
+    #[test]
+    fn a_trim_forgets_the_oldest_delivery_items_alone() {
+        // DEV-310: the delivery winners past the bound go, the oldest
+        // first, and an item of another table keeps its winner.
+        let (mut phone, _) = pair();
+        let delivery = crate::devset::sync::ITEM_DELIVERY;
+        phone.put_mutable((1, alloc::vec![0]), (0, PHONE));
+        let count = MUTABLE_HELD + MUTABLE_SLACK + 1;
+        for at in 0..count {
+            let key = u32::try_from(at).unwrap().to_be_bytes().to_vec();
+            phone.put_mutable((delivery, key), (u64::try_from(at).unwrap() + 1, PHONE));
+        }
+        assert!(phone.holds_mutable(1, &[0]));
+        assert!(!phone.holds_mutable(delivery, &0u32.to_be_bytes()));
+        let newest = u32::try_from(count - 1).unwrap().to_be_bytes();
+        assert!(phone.holds_mutable(delivery, &newest));
+        assert_eq!(phone.mutable.len(), MUTABLE_HELD + 1);
+        assert_eq!(phone.deliveries, MUTABLE_HELD);
+        let back = SyncEngine::restore(&phone.export().unwrap()).unwrap();
+        assert_eq!(back, phone);
     }
 
     #[test]

@@ -503,7 +503,9 @@ that draft is dropped, and it MUST do that whether the send succeeded or failed.
   `CharArray` type, thus the generated Kotlin takes a list of code units. The
   Kotlin wrapper of the app MUST fill that list from a `CharArray`, and it
   MUST overwrite the `CharArray` after the call. The list is an object on the
-  JVM heap for the length of the call, and Part 15 §15.3 holds that residual.
+  JVM heap for the length of the call, and so is the buffer that UniFFI
+  lowers each value through in either direction; Part 15 §15.3 holds that
+  residual.
 - **[IMP-125]** The secure-element step of §14.6.4 MUST cross as one callback
   that takes the input of the keyed function and returns its 32 bytes. The
   Android keystore has a Java interface only, thus this one value crosses as
@@ -1160,7 +1162,10 @@ removes one. Part 2 rule `THR-013` names those actions as its one exception.
 - **[IMP-055]** A client MUST draw a cover view over each conversation surface
   before the application leaves the foreground. Thus the task snapshot of the
   platform holds the cover and not the conversation. On Android 13 or newer a
-  client also calls `setRecentsScreenshotEnabled(false)`.
+  client also calls `setRecentsScreenshotEnabled(false)`. Before Android 13
+  a sheet is a window of its own above the cover, thus it takes
+  `FLAG_SECURE`; the conversation under it keeps its screenshot of
+  `IMP-059`.
 
 **The clipboard and the input method.**
 
@@ -1413,7 +1418,7 @@ its condition, its end, and the one line that the client shows.
 | `recipient queue full` | A `QUOTA` of Part 3 rule `NET-017` names the queue of a contact | The relay stops the signal | "This contact has not collected messages for a while." |
 | `notification carrier absent` | The build holds no carrier of Part 8 rule `NTF-040` for the selected mode | The user selects a mode that the build carries | The line of `NTF-040` |
 | `corrected clock` | The clock state of Part 10 §10.5.2 is `corrected` (`REL-116`) | A root gives a correction at or below `CLOCK_SKEW`, or a clock movement discards the correction | "The clock of this device differs from the network time by more than one hour." |
-| `clock` | `NTF_FAIL_MAX` consecutive notification blobs failed to open inside the window of Part 8 rule `NTF-075`, or a group record fell outside the slot window of Part 11 rule `GRP-229` | One blob opens after a fresh `k_ntf_root`, or each held group record opens | "The device clock may be wrong. Notifications show no preview until it is checked." |
+| `clock` | `NTF_FAIL_MAX` consecutive notification blobs failed to open inside the window of Part 8 rule `NTF-075`, or a held group record names a slot above the window of Part 11 rule `GRP-229` | One blob opens after a fresh `k_ntf_root`, or no held group record names such a slot | "The device clock may be wrong. Notifications show no preview until it is checked." |
 
 - **[IMP-077]** A client MUST show each current degraded state in one line at
   the top of the message list. **[IMP-078]** A client MUST NOT show a degraded

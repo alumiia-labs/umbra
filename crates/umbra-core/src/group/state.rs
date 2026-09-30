@@ -1345,6 +1345,29 @@ impl Group {
         Ok(bytes)
     }
 
+    /// Whether a record of an epoch that this member holds waits because
+    /// its slot lies above the window at `now`: evidence of a clock
+    /// movement, and the `clock` state of Part 14 §14.9.2 (`GRP-229`). A
+    /// record below the window came late, as after a time offline, and
+    /// names no clock.
+    pub fn holds_clock_suspect(&self, now: u64) -> bool {
+        self.held_at(now, core::cmp::Ordering::Greater)
+    }
+
+    /// Whether a record of an epoch that this member holds waits and its
+    /// slot lies inside the window at `now`, thus a retry opens it: the
+    /// clock check of `GRP-229`, after a clock movement or as the window
+    /// moves.
+    pub fn holds_openable(&self, now: u64) -> bool {
+        self.held_at(now, core::cmp::Ordering::Equal)
+    }
+
+    fn held_at(&self, now: u64, place: core::cmp::Ordering) -> bool {
+        self.receiver.held_slots().into_iter().any(|(epoch, slot)| {
+            self.epochs.holds_epoch(epoch) && EpochStore::place_of(slot, now) == place
+        })
+    }
+
     /// The epoch that this member lacks: a record of a later epoch waits,
     /// and no epoch-key record of it opened here (§11.4.3, `GRP-289`).
     pub fn lacks_epoch(&self) -> Option<u32> {
@@ -1858,6 +1881,24 @@ mod tests {
         let mut other =
             Group::create(*creator.group_id(), &Secret::new([0x99; 32]), now, &mut rng).unwrap();
         assert!(other.receive(&record, now).is_err());
+    }
+
+    #[test]
+    fn a_record_outside_the_slot_window_waits_for_a_clock_check() {
+        // GRP-229: a record from a clock that runs ahead waits, names the
+        // clock state, and opens once the clock of the member reaches it.
+        let now = 1_700_000_000;
+        let (mut creator, mut member, _) = pair(now);
+        let mut rng = Rng(12);
+        let ahead = now + 10 * crate::group::GROUP_SLOT;
+        let record = creator.post(&text("from ahead"), ahead, &mut rng).unwrap();
+        assert_eq!(member.receive(&record, now).unwrap(), Outcome::ClockSuspect);
+        assert!(member.holds_clock_suspect(now));
+        assert!(!member.holds_openable(now));
+        assert!(member.holds_openable(ahead));
+        let opened = member.retry_held(ahead);
+        assert!(matches!(opened[..], [Outcome::Content { sender: 0, .. }]));
+        assert!(!member.holds_clock_suspect(ahead));
     }
 
     #[test]

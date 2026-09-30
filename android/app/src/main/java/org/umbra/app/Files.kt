@@ -850,13 +850,18 @@ fun VideoScreen(line: Line, onBack: () -> Unit) {
     var ratio by remember { mutableFloatStateOf(16f / 9f) }
     var failed by remember { mutableStateOf(false) }
     DisposableEffect(line.key) {
+        var isGone = false
         Core.openMedia(line) { source ->
-            if (source == null) {
-                failed = true
+            // IMP-166: a source that comes after the screen went is released
+            // here, since no player holds it.
+            if (source == null || isGone) {
+                source?.release()
+                if (source == null) failed = true
                 return@openMedia
             }
+            val data = CoreDataSource(source)
             try {
-                player.setDataSource(CoreDataSource(source))
+                player.setDataSource(data)
                 player.setOnPreparedListener {
                     length = it.duration.coerceAtLeast(1).toFloat()
                     if (it.videoHeight > 0) ratio = it.videoWidth.toFloat() / it.videoHeight
@@ -871,10 +876,14 @@ fun VideoScreen(line: Line, onBack: () -> Unit) {
                 }
                 player.prepareAsync()
             } catch (unplayable: Exception) {
+                data.close()
                 failed = true
             }
         }
-        onDispose { player.release() }
+        onDispose {
+            isGone = true
+            player.release()
+        }
     }
     LaunchedEffect(isPlaying) {
         while (isPlaying) {

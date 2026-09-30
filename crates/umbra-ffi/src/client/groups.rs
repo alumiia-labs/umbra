@@ -44,6 +44,9 @@ use crate::{ConversationId, Delivery, Error, Event, MsgRef};
 
 /// The state byte of a group row: open.
 const OPEN: u8 = 0;
+/// The fetches of chunked epoch-key records of one epoch of one group
+/// that wait at once.
+pub(crate) const EPOCH_CHUNKS_MAX: usize = 4;
 /// The state byte of a group whose two replicas refused it (`GRP-210`).
 const CLOSED: u8 = 1;
 /// The state byte of a group that this device can no longer reach: it
@@ -329,6 +332,8 @@ pub struct GroupInfo {
     /// Whether no replica of the group answered its last session, thus
     /// the view shows the line of `GRP-199`.
     pub is_unreachable: bool,
+    /// Whether a record waits for a clock check (`GRP-229`).
+    pub is_clock_suspect: bool,
 }
 
 /// One `GNEW` that waits for a circuit to its relay.
@@ -505,6 +510,11 @@ pub(super) struct GroupQueues {
     /// The slot objects of rotations that wait for the chunk path, whose
     /// records follow the upload (`GRP-283`).
     pub epoch_uploads: VecDeque<EpochUpload>,
+    /// The groups that showed the `clock` state at the last sweep
+    /// (`GRP-229`), thus a change of it draws a list event.
+    pub clock_suspect: BTreeSet<ConversationId>,
+    /// The time of the last sweep of the held records, in seconds.
+    pub swept_at: u64,
     /// The chunks of chunked epoch-key records that this device fetches
     /// (`GRP-284`).
     pub epoch_chunks: VecDeque<(ConversationId, WantedChunk)>,
@@ -1123,6 +1133,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .member(group.own_index())
                 .is_some_and(|member| member.active),
             is_unreachable: group.replicas().is_some_and(|held| held.unreachable()),
+            is_clock_suspect: group.holds_clock_suspect(super::unix_now_seconds()),
         })
     }
 
@@ -3336,14 +3347,70 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
+        let now = now_ms / 1_000;
+        // One sweep a minute: a hold ends at its hour, and the window moves
+        // by the slot. A clock check forces one (`clock_check`).
+        let swept_at = self.groups.swept_at;
+        if (swept_at..swept_at.saturating_add(60)).contains(&now) {
+            return Ok(());
+        }
+        self.groups.swept_at = now;
+        let mut released_any = false;
         for conversation in self.group_conversations()? {
-            let mut group = self.group_of(conversation)?;
-            if group.expire_held(now_ms / 1_000) > 0 {
-                self.save_group(conversation, &group, rng)?;
-                self.delivery_gap(conversation, now_ms, rng)?;
+            // A group that fails here stops no other group.
+            let Ok(mut group) = self.group_of(conversation) else {
+                continue;
+            };
+            if group.expire_held(now) > 0 {
+                let _ = self.save_group(conversation, &group, rng);
+                let _ = self.delivery_gap(conversation, now_ms, rng);
+            }
+            // GRP-229: a held record whose slot came inside the window
+            // opens now, after a clock movement or as the window moved.
+            if group.holds_openable(now) {
+                let before = Before::of(&group);
+                let released: VecDeque<Outcome> = group.retry_held(now).into();
+                if !released.is_empty() {
+                    released_any = true;
+                    let _ = self.take_outcomes(
+                        conversation,
+                        group,
+                        released,
+                        before,
+                        false,
+                        now_ms,
+                        rng,
+                    );
+                    let Ok(stored) = self.group_of(conversation) else {
+                        continue;
+                    };
+                    group = stored;
+                }
+            }
+            // IMP-080: the `clock` line leaves with its condition.
+            let suspect = group.holds_clock_suspect(now);
+            let changed = if suspect {
+                self.groups.clock_suspect.insert(conversation)
+            } else {
+                self.groups.clock_suspect.remove(&conversation)
+            };
+            if changed {
+                self.events.push_back(Event::Conversations);
             }
         }
+        // DEV-309: a roster object that a retry released can be the one that
+        // a held re-key item waits for.
+        if released_any {
+            let _ = self.retry_rekey_items(now_ms, rng);
+        }
         Ok(())
+    }
+
+    /// The clock check of `GRP-229` after a clock movement: a sweep of the
+    /// held records at once.
+    pub fn clock_check<R: CryptoRng + ?Sized>(&mut self, now_ms: u64, rng: &mut R) {
+        self.groups.swept_at = 0;
+        let _ = self.expire_group_holds(now_ms, rng);
     }
 
     /// Each group whose backoff passed and whose trigger no record
@@ -4206,11 +4273,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     // chunk path, and this device fetches its one chunk.
                     if let Ok(Some(wanted)) = group.wanted_chunk(epoch, start_slot, &body, now) {
                         // Each replica carries the record, and one fetch
-                        // serves both.
-                        let fetching = self.groups.epoch_chunks.iter().any(|(held, other)| {
-                            *held == conversation && other.epoch == wanted.epoch
-                        });
-                        if !fetching {
+                        // serves both. A record of the same epoch that
+                        // names another chunk takes a fetch of its own,
+                        // thus a false one that came first hides no true
+                        // one; `EPOCH_CHUNKS_MAX` bounds them.
+                        let mut same_epoch =
+                            self.groups.epoch_chunks.iter().filter(|(held, other)| {
+                                *held == conversation && other.epoch == wanted.epoch
+                            });
+                        let fetching = same_epoch.clone().any(|(_, other)| *other == wanted);
+                        if !fetching && same_epoch.nth(EPOCH_CHUNKS_MAX.saturating_sub(1)).is_none()
+                        {
                             self.groups.epoch_chunks.push_back((conversation, wanted));
                         }
                         continue;
@@ -4372,7 +4445,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     }
                     first = first.or(stored);
                 }
-                Outcome::Held | Outcome::ClockSuspect | Outcome::Duplicate => {}
+                // GRP-229: the list shows the `clock` state. A record of an
+                // epoch that this member lacks waits too, and it names no
+                // clock (`GRP-289`).
+                Outcome::ClockSuspect => {
+                    if group.holds_clock_suspect(now)
+                        && self.groups.clock_suspect.insert(conversation)
+                    {
+                        self.events.push_back(Event::Conversations);
+                    }
+                }
+                Outcome::Held | Outcome::Duplicate => {}
             }
         }
         // The counters, the held records and the roster moved.

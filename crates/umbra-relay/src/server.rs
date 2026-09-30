@@ -357,6 +357,17 @@ pub async fn run_node(
     }
 }
 
+/// The pushes of chunk copies and deposits that run at once. It stays
+/// below `RELAY_CONN_PER_IP`, thus an ingress relay that holds a role of
+/// the pushes takes each one (`NET-334`).
+const PUSHES_RUNNING: usize = 16;
+/// The time that one push takes at most: a relay that takes the
+/// connection and reads nothing holds no place of another push.
+const PUSH_TIMEOUT: Duration = Duration::from_secs(20);
+/// The pushes that wait or run at once. A push above it goes nowhere, as a
+/// copy that did not arrive does.
+const PUSHES_HELD: usize = 1_024;
+
 /// Sends one copy of a chunk on a connection of its own, and ends that
 /// connection (`WIR-211`). A copy that does not arrive gets no second send:
 /// the uploader finds it with its sample, and it names another relay
@@ -1007,7 +1018,7 @@ pub async fn dial_next(
 /// copies of Part 12 §12.4.1.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_relay(
-    node: RelayNode,
+    mut node: RelayNode,
     listener: TcpListener,
     tls: TlsAcceptor,
     next_hops: BTreeMap<[u8; 32], Dial>,
@@ -1023,6 +1034,8 @@ pub async fn run_relay(
     let carried_challenges = carried.clone();
     let (inputs, node_inputs) = mpsc::channel::<Input>(1_024);
     let (requests, mut node_requests) = mpsc::unbounded_channel::<Request>();
+    // NET-167: the relays that the dialer reaches are the next layer.
+    node.set_next_layer(next_hops.keys().copied().collect());
     let node_task = tokio::spawn(run_node(node, node_inputs, requests, pacing_mean_ms, store));
     // ABU-099: the keys of the issuer come from the log, on a thread of
     // their own, since each read blocks.
@@ -1039,6 +1052,8 @@ pub async fn run_relay(
     let dial_inputs = inputs.clone();
     tokio::spawn(async move {
         let mut link: LinkId = 1;
+        let pushes_held = Arc::new(tokio::sync::Semaphore::new(PUSHES_HELD));
+        let pushes_running = Arc::new(tokio::sync::Semaphore::new(PUSHES_RUNNING));
         // Each relay of the next layer gets a link at the start, thus the
         // first circuit of a client does not wait for a dial.
         for (relay_id, target) in &next_hops {
@@ -1072,7 +1087,20 @@ pub async fn run_relay(
                     // A chunk copy goes to a relay with the attachment role,
                     // and a deposit to a queue relay (`WIR-526`).
                     if let Some(target) = replicas.get(&relay_id) {
-                        tokio::spawn(push_copy(target.clone(), client_tls.clone(), capsule));
+                        let Ok(held) = pushes_held.clone().try_acquire_owned() else {
+                            continue;
+                        };
+                        let running = pushes_running.clone();
+                        let (target, tls) = (target.clone(), client_tls.clone());
+                        tokio::spawn(async move {
+                            let _held = held;
+                            let Ok(_running) = running.acquire_owned().await else {
+                                return;
+                            };
+                            let _ =
+                                tokio::time::timeout(PUSH_TIMEOUT, push_copy(target, tls, capsule))
+                                    .await;
+                        });
                     }
                 }
                 Request::Challenges(bundle) => {

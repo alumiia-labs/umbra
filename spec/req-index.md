@@ -72,7 +72,7 @@ column when a crate implements the requirement and a test covers it.
 | `IDN` | 134 | 46 | 1 | 0 | 5 | **186** |
 | `CRY` | 120 | 27 | 0 | 0 | 1 | **148** |
 | `WIR` | 398 | 85 | 0 | 0 | 7 | **490** |
-| `DEV` | 202 | 90 | 0 | 0 | 7 | **299** |
+| `DEV` | 202 | 90 | 0 | 0 | 8 | **300** |
 | `NTF` | 75 | 28 | 0 | 0 | 3 | **106** |
 | `DIS` | 130 | 35 | 0 | 0 | 3 | **168** |
 | `REL` | 159 | 33 | 1 | 0 | 2 | **195** |
@@ -81,7 +81,7 @@ column when a crate implements the requirement and a test covers it.
 | `ABU` | 72 | 30 | 1 | 0 | 0 | **103** |
 | `IMP` | 121 | 41 | 0 | 0 | 2 | **164** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2072 | 627 | 7 | 0 | 54 | **2760** |
+| **All** | 2072 | 627 | 7 | 0 | 55 | **2761** |
 
 ## SCP — Scope and Conventions
 
@@ -1637,6 +1637,7 @@ Source: `spec/07-device-sets.md`
 | `DEV-307` | §7.7.1 | MUST | A device set of more than one device | A device set of more than one device MUST remove each other device under §7.7 before the reset. |  |  |
 | `DEV-308` | §7.5.1 | MUST | The device that owns the channels | The device that owns the channels MUST publish again, to each of its peers, each `SyncedRecord` and each `MutableItem` that it takes from one peer, the source included, since each peer takes each counter of the publisher (`DEV-055`). |  |  |
 | `DEV-309` | §7.5.3 | MUST | (unstated) | A device that does not hold the group yet, or whose roster does not reach the roster epoch before the re-key, MUST keep the item and apply it again after each group state and each roster object that it takes, for 7 days at the most. |  |  |
+| `DEV-310` | §7.5.3 | MAY | A device | A device MAY forget the winner of a delivery item once it holds more than 65 536 of them, the oldest by `lamport` first, and it keeps the winner of each item of another table. |  |  |
 
 ## NTF — Notifications
 
@@ -2262,7 +2263,7 @@ Source: `spec/11-private-groups.md`
 | `GRP-226` | §11.3.2 | MUST | A device | A device MUST store, for each group, the triple `(e, t_old, K_{e,t_old})` with `t_old = t_now − GROUP_SLOT_WINDOW`, and no earlier slot key of that epoch. |  |  |
 | `GRP-227` | §11.3.2 | MUST | A device | A device MUST advance `t_old` by one slot each hour: derive `K_{e,t_old+1}` forward, overwrite, and zeroize the previous key. |  |  |
 | `GRP-228` | §11.3.2 | MUST | A receiver | A receiver MUST accept a content record only when its `slot` is in `[t_now − GROUP_SLOT_WINDOW, t_now + GROUP_SLOT_SKEW]`. |  |  |
-| `GRP-229` | §11.3.2 | MUST | A receiver | A receiver MUST store a record outside that window in the manner of Part 6 rule `WIR-050`, treat it as evidence of a clock movement of Part 1 §1.9, and retry it after the next clock check. |  |  |
+| `GRP-229` | §11.3.2 | MUST | A receiver | A receiver MUST store a record outside that window in the manner of Part 6 rule `WIR-050`, and retry it after the next clock check: a clock movement of Part 1 §1.9, or the hour that brings its slot inside the window. |  |  |
 | `GRP-230` | §11.3.2 | MUST | After a rotation to `e + 1`, a receiver | After a rotation to `e + 1`, a receiver MUST keep the state of epoch `e` for `GROUP_EPOCH_GRACE`. |  |  |
 | `GRP-231` | §11.3.2 | MUST | A receiver | A receiver MUST zeroize that state at the end of the grace. |  |  |
 | `GRP-232` | §11.3.2 | MUST | Inside that grace a receiver | Inside that grace a receiver MUST accept a record of epoch `e` only from a member that its current roster holds. |  |  |

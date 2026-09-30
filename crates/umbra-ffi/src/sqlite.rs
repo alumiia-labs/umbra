@@ -50,6 +50,9 @@ fn array<const N: usize>(bytes: Vec<u8>) -> Result<[u8; N], Error> {
 /// A store in one SQLite file.
 pub struct SqliteBackend {
     connection: Connection,
+    /// A checkpoint of a deletion that did not truncate the log, which the
+    /// next batch runs again (`IMP-043`).
+    checkpoint_due: bool,
 }
 
 impl SqliteBackend {
@@ -68,7 +71,48 @@ impl SqliteBackend {
         storage(connection.pragma_update(None, "secure_delete", "ON"))?;
         storage(connection.pragma_update(None, "journal_mode", "WAL"))?;
         storage(connection.execute_batch(SCHEMA))?;
-        Ok(SqliteBackend { connection })
+        // IMP-043: a checkpoint that an earlier run left undone runs now,
+        // and at the next batch when a reader keeps it from its end.
+        let mut backend = SqliteBackend {
+            connection,
+            checkpoint_due: true,
+        };
+        backend.checkpoint();
+        Ok(backend)
+    }
+
+    /// Whether the file at `path` holds the header of its wrap, read with a
+    /// connection that writes nothing: no schema, no checkpoint.
+    pub fn holds_header(path: &str) -> Result<bool, Error> {
+        let connection = storage(Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        ))?;
+        let tables: i64 = storage(connection.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'wrap'",
+            [],
+            |row| row.get(0),
+        ))?;
+        if tables == 0 {
+            return Ok(false);
+        }
+        let headers: i64 = storage(connection.query_row(
+            "SELECT count(*) FROM wrap WHERE id = 1 AND header IS NOT NULL",
+            [],
+            |row| row.get(0),
+        ))?;
+        Ok(headers > 0)
+    }
+
+    /// Moves each frame of the log into the file and empties the log
+    /// (`IMP-043`). A checkpoint that a reader keeps from its end stays due.
+    fn checkpoint(&mut self) {
+        let busy = self
+            .connection
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                row.get::<_, i64>(0)
+            });
+        self.checkpoint_due = !matches!(busy, Ok(0));
     }
 
     /// The header of the wrap, which holds no secret and sits beside the
@@ -207,12 +251,12 @@ impl Backend for SqliteBackend {
             };
         }
         storage(transaction.commit())?;
-        if batch.deletion {
-            // IMP-043: no frame of the deleted record stays in the log.
-            storage(
-                self.connection
-                    .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(())),
-            )?;
+        if batch.deletion || self.checkpoint_due {
+            // IMP-043: no frame of the deleted record stays in the log. The
+            // batch holds with its commit; a checkpoint that a reader kept
+            // from its end goes again at the next batch, thus the state of
+            // the tables never parts from the file (IMP-123).
+            self.checkpoint();
         }
         Ok(())
     }
@@ -225,6 +269,32 @@ mod tests {
     use umbra_crypto::secret::Secret;
 
     use super::*;
+
+    #[test]
+    fn a_file_with_no_header_is_no_store() {
+        let directory = std::env::temp_dir().join(format!("umbra-ffi-h-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("header.db");
+        let _ = std::fs::remove_file(&path);
+        let path_text = path.to_str().unwrap().to_owned();
+        // A first launch that ended before its header.
+        let backend = SqliteBackend::open(&path_text).unwrap();
+        assert!(!SqliteBackend::holds_header(&path_text).unwrap());
+        let header = umbra_core::store::wrap::WrapHeader {
+            cost: umbra_core::store::wrap::Cost {
+                m_kib: umbra_core::store::wrap::M_KIB_FLOOR,
+                t: umbra_core::store::wrap::T_FLOOR,
+            },
+            salt: [1; 16],
+            nonce: [2; 24],
+            wrapped: [3; 32],
+            tag: [4; 16],
+        };
+        backend.set_header(&header).unwrap();
+        assert!(SqliteBackend::holds_header(&path_text).unwrap());
+        drop(backend);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
 
     #[test]
     fn the_store_runs_over_sqlite_and_a_deleted_record_leaves_the_file() {

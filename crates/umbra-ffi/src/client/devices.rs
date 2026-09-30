@@ -387,6 +387,29 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .is_some())
     }
 
+    /// Ends the sync channel of each device that the roster revoked and
+    /// that still holds one, at the start of a run: a revocation and the
+    /// end of its channel are two commits, and a crash between them leaves
+    /// the channel (`DEV-255` to `DEV-257`).
+    pub fn end_revoked_channels<R: CryptoRng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let Some(bytes) = self.roster_bytes()? else {
+            return Ok(());
+        };
+        let roster = Roster::parse(&bytes)?;
+        let channels = self.peer_channels()?;
+        for device in roster
+            .revoked
+            .iter()
+            .filter(|device| channels.contains_key(*device))
+        {
+            self.end_sync_channel(*device, rng)?;
+        }
+        Ok(())
+    }
+
     /// The devices of the current roster.
     pub fn devices(&self) -> Result<Vec<DeviceInfo>, Error> {
         let own = self.device_identity()?.map(|identity| identity.device_id);

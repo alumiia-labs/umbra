@@ -220,6 +220,27 @@ impl EpochStore {
         self.previous.as_ref()
     }
 
+    /// Whether this store holds the keys of `epoch`, current or previous.
+    pub fn holds_epoch(&self, epoch: u32) -> bool {
+        [&self.current, &self.previous]
+            .into_iter()
+            .flatten()
+            .any(|state| state.epoch == epoch)
+    }
+
+    /// Where `slot` falls against the window of `now` (`GRP-228`): below
+    /// it, inside it, or above it.
+    pub fn place_of(slot: u32, now: u64) -> core::cmp::Ordering {
+        let t_now = slot_of(now);
+        if slot < t_now.saturating_sub(GROUP_SLOT_WINDOW) {
+            core::cmp::Ordering::Less
+        } else if slot > t_now.saturating_add(GROUP_SLOT_SKEW) {
+            core::cmp::Ordering::Greater
+        } else {
+            core::cmp::Ordering::Equal
+        }
+    }
+
     /// The current epoch number, or 0 before the first install.
     pub fn epoch(&self) -> u32 {
         self.current.as_ref().map_or(0, EpochState::epoch)

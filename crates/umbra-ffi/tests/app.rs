@@ -1601,6 +1601,7 @@ fn a_file_goes_through_the_relays_of_a_signed_network() {
             guard.clone(),
             tls.clone(),
             holders.clone(),
+            std::sync::Arc::default(),
             task_commands,
             task_updates,
         ));
