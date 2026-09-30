@@ -93,7 +93,13 @@ class Line(
 }
 
 /** The message that a line answers: its identity, its author, and its text. */
-class Quoted(val key: List<Byte>, val isOutgoing: Boolean, val text: CharArray)
+class Quoted(
+    val key: List<Byte>,
+    val isOutgoing: Boolean,
+    val text: CharArray,
+    /** The member index of the sender of a quoted group message. */
+    val sender: UShort? = null,
+)
 
 /**
  * One row of the chat list and of the contact list. The name is a label of
@@ -2229,7 +2235,7 @@ object Core {
                         else -> quotedFile.name ?: "File"
                     }.toCharArray()
                 }
-                Quoted(target.key().toList(), of.outgoing, quoted.chars)
+                Quoted(target.key().toList(), of.outgoing, quoted.chars, of.sender)
             }
             val poll = if (info.poll && !info.deleted) client.pollView(message) else null
             Line(message, sink.chars, info, quote, client.reactions(message), poll)

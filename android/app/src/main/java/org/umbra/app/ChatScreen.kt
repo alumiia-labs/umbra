@@ -601,6 +601,14 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                     author = line.info.sender?.takeIf {
                         chat.isGroup && (before == null || before.info.outgoing || before.info.sender != it)
                     }?.let { memberNames[it] ?: "Member $it" },
+                    // A quote in a group names the member who wrote it.
+                    quoteAuthor = line.quote?.let { quote ->
+                        when {
+                            quote.isOutgoing -> "You"
+                            chat.isGroup -> quote.sender?.let { memberNames[it] ?: "Member $it" }
+                            else -> chat.title
+                        }
+                    },
                 )
                 // WIR-273: a root names its replies, and a tap opens them.
                 val replies = replyCounts[line.key] ?: 0
@@ -899,6 +907,7 @@ private fun Bubble(
     onReply: (() -> Unit)?,
     isRevealed: Boolean = false,
     author: String? = null,
+    quoteAuthor: String? = null,
 ) {
     val isOutgoing = line.info.outgoing
     // A slide to the right answers the message. The bubble follows the
@@ -971,7 +980,7 @@ private fun Bubble(
                     onLongClick = onLongPress,
                     // The options of a poll take their own press.
                     isOver = line.poll == null,
-                ) { BubbleContent(line, chat, isRevealed, author) }
+                ) { BubbleContent(line, chat, isRevealed, author, quoteAuthor) }
                 if (line.reactions.isNotEmpty()) ReactionPills(line)
             }
         }
@@ -1041,7 +1050,13 @@ private val SLIDE_REACH = 72.dp
 private const val SLIDE_POINT = 0.8f
 
 @Composable
-private fun BubbleContent(line: Line, chat: Chat, isRevealed: Boolean = false, author: String? = null) {
+private fun BubbleContent(
+    line: Line,
+    chat: Chat,
+    isRevealed: Boolean = false,
+    author: String? = null,
+    quoteAuthor: String? = null,
+) {
     val isOutgoing = line.info.outgoing
     // Part 11 §11.9.6: a hidden message shows its placeholder until a tap.
     val isHidden = line.info.moderation == MOD_HIDE && !isRevealed
@@ -1098,7 +1113,7 @@ private fun BubbleContent(line: Line, chat: Chat, isRevealed: Boolean = false, a
         } else if (line.isReply) {
             val quote = line.quote
             QuoteBlock(
-                author = quote?.let { if (it.isOutgoing) "You" else chat.title },
+                author = quoteAuthor,
                 text = quote?.text,
                 modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
             )
