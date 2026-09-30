@@ -491,6 +491,12 @@ impl Group {
             .into_iter()
             .find(|bucket| bucket.group_record() == record.len())
             .ok_or(Error::Malformed)?;
+        self.receive_in(record, bucket, now)
+    }
+
+    /// A record of `bucket`, under the index that stands and then, for a
+    /// record tagged for it, under the index before a re-key.
+    fn receive_in(&mut self, record: &[u8], bucket: Bucket, now: u64) -> Result<Outcome, Error> {
         let mut ctx = Context {
             roster: &self.roster,
             epochs: &mut self.epochs,
@@ -561,24 +567,17 @@ impl Group {
     /// Tries each held record again, after a roster object or a clock
     /// check (`GRP-252`, `GRP-229`).
     pub fn retry_held(&mut self, now: u64) -> Vec<Outcome> {
-        let mut ctx = Context {
-            roster: &self.roster,
-            epochs: &mut self.epochs,
-            pairs: &mut self.pairs,
-            own: &self.keys,
-        };
-        let mut out = self.receiver.retry_held(&mut ctx, now);
-        if let Some(previous) = self.previous.as_mut() {
-            let current = self.receiver.own_index();
-            self.receiver.set_own_index(previous.index);
-            let mut ctx = Context {
-                roster: &self.roster,
-                epochs: &mut self.epochs,
-                pairs: &mut previous.pairs,
-                own: &previous.keys,
-            };
-            out.extend(self.receiver.retry_held(&mut ctx, now));
-            self.receiver.set_own_index(current);
+        // GRP-372: each record takes both indexes of a re-key, as a record
+        // that arrives does, thus one tagged for the index before stays.
+        let mut out = Vec::new();
+        for (bytes, bucket, arrived_at) in self.receiver.take_held() {
+            match self.receive_in(&bytes, bucket, now) {
+                Ok(Outcome::Held | Outcome::ClockSuspect) => {
+                    self.receiver.keep_arrival(arrived_at);
+                }
+                Ok(outcome) => out.push(outcome),
+                Err(_) => {}
+            }
         }
         out
     }
@@ -820,6 +819,11 @@ impl Group {
             && !triggers
                 .iter()
                 .any(|trigger| trigger.excluded == Some(self.own_index))
+    }
+
+    /// The rotator of the current epoch secret.
+    pub fn epoch_rotator(&self) -> Option<u16> {
+        self.epochs.current().map(EpochState::rotator)
     }
 
     /// The rotation this group owes at `now`, from a trigger on the roster
@@ -1174,10 +1178,21 @@ impl Group {
     /// that a later trigger removed rotates again under Part 11 §11.4.3.
     fn check_rotator(&self, epoch: u32, roster_epoch: u32, rotator: u16) -> Result<(), Error> {
         let current = self.epochs.current().ok_or(Error::NoPath)?;
-        if epoch != current.epoch().saturating_add(1) {
+        // A second record of the current epoch races the first, and it
+        // answers the triggers since the epoch before, as the first did
+        // (GRP-273, GRP-288). Without that epoch no check holds, and the
+        // record installs nowhere here.
+        let base = if epoch == current.epoch().saturating_add(1) {
+            current.roster_epoch()
+        } else if epoch == current.epoch() {
+            self.epochs
+                .previous()
+                .ok_or(Error::Unverified)?
+                .roster_epoch()
+        } else {
             return Ok(());
-        }
-        let triggers = self.roster.triggers_since(current.roster_epoch());
+        };
+        let triggers = self.roster.triggers_since(base);
         let first = triggers.iter().map(|trigger| trigger.roster_epoch).min();
         if first.is_some_and(|first| roster_epoch < first) {
             return Err(Error::Unverified);
@@ -2039,6 +2054,41 @@ mod tests {
             Outcome::Content { .. }
         ));
         assert_eq!(member.receiver.held_count(), 1);
+    }
+
+    #[test]
+    fn a_record_that_fills_a_hole_shows_and_a_repeat_does_not() {
+        let now = 1_700_000_000;
+        let (mut creator, mut member, _) = pair(now);
+        let mut rng = Rng(41);
+        let records: Vec<Vec<u8>> = (0..3)
+            .map(|i| {
+                creator
+                    .post(&text(&alloc::format!("m{i}")), now, &mut rng)
+                    .unwrap()
+            })
+            .collect();
+        assert!(matches!(
+            member.receive(&records[0], now).unwrap(),
+            Outcome::Content { .. }
+        ));
+        assert!(matches!(
+            member.receive(&records[2], now).unwrap(),
+            Outcome::Content { .. }
+        ));
+        // GRP-259, GRP-205: the other replica gives the record of the hole.
+        assert!(matches!(
+            member.receive(&records[1], now).unwrap(),
+            Outcome::Content { .. }
+        ));
+        assert_eq!(
+            member.receive(&records[1], now).unwrap(),
+            Outcome::Duplicate
+        );
+        assert_eq!(
+            member.receive(&records[0], now).unwrap(),
+            Outcome::Duplicate
+        );
     }
 
     #[test]

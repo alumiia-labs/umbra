@@ -178,6 +178,13 @@ pub enum TransferUpdate {
         /// The tag of the command.
         tag: u64,
     },
+    /// The run ended before the transfer did: a lost or aged circuit, or a
+    /// dial that failed. Nothing of the transfer failed, and the caller
+    /// sends it in the next run (`NET-320`).
+    Interrupted {
+        /// The tag of the command.
+        tag: u64,
+    },
     /// Each replica of a chunk of the download holds none. No new attempt
     /// finds the file (Part 12 `ATT-052`).
     Gone {
@@ -213,9 +220,10 @@ pub async fn run_transfers(
     // call into it.
     let mut classes: BTreeMap<u64, umbra_core::session::node::DelayClass> = BTreeMap::new();
     let mut early: Vec<TransferCommand> = Vec::new();
+    // A run that ends ends no transfer: each one goes again in the next run.
     let fail_each = |active: &BTreeMap<u64, Active>, early: &[TransferCommand]| {
         for tag in active.keys() {
-            let _ = updates.send(TransferUpdate::Failed { tag: *tag });
+            let _ = updates.send(TransferUpdate::Interrupted { tag: *tag });
         }
         for command in early {
             // An erase that did not leave is lost with this run. The relays
@@ -228,7 +236,7 @@ pub async fn run_transfers(
             | TransferCommand::UploadBackup { tag, .. }
             | TransferCommand::DownloadBackup { tag, .. } = command
             {
-                let _ = updates.send(TransferUpdate::Failed { tag: *tag });
+                let _ = updates.send(TransferUpdate::Interrupted { tag: *tag });
             }
         }
     };

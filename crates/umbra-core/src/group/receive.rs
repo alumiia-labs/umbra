@@ -4,7 +4,10 @@
 //! the counter of each sender with its gap, and the records held for a
 //! roster that has not arrived.
 
-use alloc::{collections::BTreeMap, vec::Vec};
+use alloc::{
+    collections::{BTreeMap, BTreeSet},
+    vec::Vec,
+};
 
 use umbra_crypto::group::{
     pair::{app_hash, RecordTag},
@@ -135,7 +138,21 @@ pub struct Receiver {
     counters: BTreeMap<(u16, u32), u32>,
     held: Vec<HeldRecord>,
     gaps: BTreeMap<u16, u64>,
+    /// The counters below the highest one of a sender and an epoch that no
+    /// record filled yet: a record that fills one is a reorder, and it
+    /// shows (`GRP-259`, `GRP-205`).
+    holes: BTreeSet<(u16, u32, u32)>,
 }
+
+/// The stored form of a receiver with its holes; the form before them is
+/// `STORED_VERSION`, which a read still takes.
+const RECEIVER_VERSION: u8 = 0x02;
+
+/// The holes that one sender keeps in one epoch. A gap above it leaves its
+/// oldest holes, whose records then count as repeats, and the gap shows.
+const HOLES_MAX: usize = 256;
+/// `HOLES_MAX` as a counter distance.
+const HOLES_MAX_COUNTER: u32 = 256;
 
 impl Receiver {
     /// The index whose tags this receiver checks.
@@ -155,13 +172,14 @@ impl Receiver {
             counters: BTreeMap::new(),
             held: Vec::new(),
             gaps: BTreeMap::new(),
+            holes: BTreeSet::new(),
         }
     }
 
     /// Writes the receiver to its stored form. The held records travel
     /// with it, because a roster that has not arrived outlives a run.
     pub fn export(&self, w: &mut Writer) -> Result<(), Error> {
-        w.u8(STORED_VERSION);
+        w.u8(RECEIVER_VERSION);
         w.u16(self.own_index);
         w.u32(count(self.counters.len())?);
         for ((sender, epoch), counter) in &self.counters {
@@ -180,12 +198,19 @@ impl Receiver {
             w.u16(*sender);
             w.u64(*since);
         }
+        w.u32(count(self.holes.len())?);
+        for (sender, epoch, counter) in &self.holes {
+            w.u16(*sender);
+            w.u32(*epoch);
+            w.u32(*counter);
+        }
         Ok(())
     }
 
     /// Reads a receiver that [`Receiver::export`] wrote.
     pub fn import(r: &mut Reader<'_>) -> Result<Self, Error> {
-        if r.u8()? != STORED_VERSION {
+        let version = r.u8()?;
+        if version != STORED_VERSION && version != RECEIVER_VERSION {
             return Err(Error::Stale);
         }
         let own_index = r.u16()?;
@@ -211,11 +236,18 @@ impl Receiver {
         for _ in 0..r.u32()? {
             gaps.insert(r.u16()?, r.u64()?);
         }
+        let mut holes = BTreeSet::new();
+        if version == RECEIVER_VERSION {
+            for _ in 0..r.u32()? {
+                holes.insert((r.u16()?, r.u32()?, r.u32()?));
+            }
+        }
         Ok(Receiver {
             own_index,
             counters,
             held,
             gaps,
+            holes,
         })
     }
 
@@ -336,16 +368,50 @@ impl Receiver {
             }
             return Ok(Outcome::Presence { sender });
         }
-        let last = self.counters.entry((sender, record.epoch)).or_insert(0);
+        let epoch = record.epoch;
+        let last = self.counters.entry((sender, epoch)).or_insert(0);
         if plain.counter > *last {
-            if plain.counter > last.saturating_add(1) {
-                self.gaps.entry(sender).or_insert(now);
-            } else {
-                self.gaps.remove(&sender);
-            }
+            // GRP-259: each counter between the last and this one is a
+            // hole, which a record of the other replica can fill.
+            // A jump keeps the newest HOLES_MAX holes alone, thus a counter
+            // far above the last one costs no more.
+            let from = last
+                .saturating_add(1)
+                .max(plain.counter.saturating_sub(HOLES_MAX_COUNTER));
             *last = plain.counter;
+            for missing in from..plain.counter {
+                self.holes.insert((sender, epoch, missing));
+            }
+            // The holes of an epoch before the previous one name records
+            // that no key opens any more (GRP-250).
+            let floor = epoch.saturating_sub(1);
+            self.holes.retain(|(_, held, _)| *held >= floor);
+            let mut of_sender: Vec<(u16, u32, u32)> = self
+                .holes
+                .range((sender, epoch, 0)..=(sender, epoch, u32::MAX))
+                .copied()
+                .collect();
+            if of_sender.len() > HOLES_MAX {
+                let excess = of_sender.len() - HOLES_MAX;
+                for old in of_sender.drain(..excess) {
+                    self.holes.remove(&old);
+                }
+            }
+        } else if self.holes.remove(&(sender, epoch, plain.counter)) {
+            // A reorder or a record that the other replica held: it fills
+            // its hole, and it shows (GRP-205).
         } else if !rekey {
             return Ok(Outcome::Duplicate);
+        }
+        let has_hole = self
+            .holes
+            .range((sender, 0, 0)..=(sender, u32::MAX, u32::MAX))
+            .next()
+            .is_some();
+        if has_hole {
+            self.gaps.entry(sender).or_insert(now);
+        } else {
+            self.gaps.remove(&sender);
         }
         // GRP-369: two holders of the keys of one index each count on their
         // own, thus a rival re-key can come under a counter that the other
@@ -386,6 +452,23 @@ impl Receiver {
             .filter_map(|held| GroupQueueRecord::parse(&held.bytes, held.bucket).ok())
             .map(|record| record.epoch)
             .max()
+    }
+
+    /// Takes the held records, for a caller that tries each one again: a
+    /// record that waits again is held again by the receive, and
+    /// [`Receiver::keep_arrival`] gives it its first arrival back.
+    pub(crate) fn take_held(&mut self) -> Vec<(Vec<u8>, Bucket, u64)> {
+        core::mem::take(&mut self.held)
+            .into_iter()
+            .map(|held| (held.bytes, held.bucket, held.arrived_at))
+            .collect()
+    }
+
+    /// Gives the record held last its first arrival.
+    pub(crate) fn keep_arrival(&mut self, arrived_at: u64) {
+        if let Some(last) = self.held.last_mut() {
+            last.arrived_at = arrived_at;
+        }
     }
 
     /// Tries each held record again, after a roster record or a clock
@@ -450,6 +533,7 @@ impl Receiver {
     pub fn removed(&mut self, sender: u16) {
         self.counters.retain(|(s, _), _| *s != sender);
         self.gaps.remove(&sender);
+        self.holes.retain(|(s, _, _)| *s != sender);
     }
 }
 

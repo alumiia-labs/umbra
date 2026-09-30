@@ -192,6 +192,11 @@ impl Queue {
         self.next_seq
     }
 
+    /// The last sequence number that an `ACK` covered.
+    pub const fn last_ack(&self) -> u32 {
+        self.last_ack
+    }
+
     /// Applies a cumulative `ACK` at `seq` (`WIR-048`). An `ACK` below the
     /// last one changes nothing.
     pub fn ack(&mut self, seq: u32) {

@@ -183,6 +183,8 @@ impl Network {
             let outputs = self.relays[2].pacing_tick(&circuit, 100, &mut self.rng);
             self.route(2, outputs);
         }
+        let outputs = self.relays[2].drain_tick(100, &mut self.rng);
+        self.route(2, outputs);
     }
 }
 

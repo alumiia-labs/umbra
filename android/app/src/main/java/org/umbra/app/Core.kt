@@ -259,13 +259,21 @@ object Core {
             // that the collector frees (`IMP-124`).
             val units = passphrase.map { it.code.toUShort() }
             passphrase.fill('\u0000')
+            var unlocked: Handle? = null
             try {
                 val opened = handle ?: launch(app, units)
                 opened.unlock(units)
+                unlocked = opened
                 begin(app, opened)
             } catch (wrong: FfiException.WrongPassphrase) {
                 fail("That passphrase does not open this device.")
             } catch (other: FfiException) {
+                // IMP-127: a fault after the unlock closes the store again,
+                // thus no key stays in RAM behind a locked screen.
+                try {
+                    unlocked?.lock()
+                } catch (ignored: FfiException) {
+                }
                 fail("The store did not open: ${other.javaClass.simpleName}.")
             }
         }
@@ -285,9 +293,16 @@ object Core {
         opened.setMetered(isMetered(app))
         val backupAt = opened.lastBackupAt()?.toLong()
         val owns = opened.ownsChannels()
+        // A network that does not start leaves the store open, and the
+        // retry of the run starts it later.
         BuildNetwork.network(app, opened)?.let { network ->
             main.post { isStarting = true }
-            opened.connect(network)
+            try {
+                opened.connect(network)
+            } catch (offline: FfiException) {
+                main.post { isStarting = false }
+                retryLater(app)
+            }
         }
         drain(opened, app)
         main.post {
@@ -2213,8 +2228,16 @@ object Core {
         val lines = client.messages(conversation.id).map { message ->
             val sink = CharSink()
             val info = client.msgInfo(message)
-            // A placeholder of a deleted message has no text.
-            if (!info.deleted) client.msgRender(message, sink)
+            // A placeholder of a deleted message has no text, and a record
+            // of a peer that gives no text shows none: one such record
+            // leaves each other line of the conversation in place.
+            if (!info.deleted) {
+                try {
+                    client.msgRender(message, sink)
+                } catch (noText: FfiException) {
+                    sink.chars = CharArray(0)
+                }
+            }
             val quote = info.replyTo?.let { target ->
                 val quoted = CharSink()
                 // A target of a kind with no text gives an empty quote.

@@ -229,7 +229,7 @@ impl<B: Backend> Store<B> {
                 return Err(Error::Unverified);
             }
             seen.push(row.row_id);
-            let tag = SealedRecord::from_bytes(row.sealed)?.tag();
+            let tag = SealedRecord::from_bytes(row.sealed)?.mac_input();
             scanned.insert(&self.table_key.row_tag(&[table.0], &row.row_id, &tag));
         }
         let held = self.tables.get(&table).cloned().unwrap_or_default();
@@ -337,14 +337,14 @@ impl<B: Backend> Transaction<'_, B> {
             let table_id = [table.0];
             let old_tag = match store.backend.read(table, &row_id)? {
                 Some(old) => {
-                    let tag = SealedRecord::from_bytes(old.sealed)?.tag();
+                    let tag = SealedRecord::from_bytes(old.sealed)?.mac_input();
                     Some(store.table_key.row_tag(&table_id, &row_id, &tag))
                 }
                 None => None,
             };
             match change {
                 Pending::Put(row) => {
-                    let tag = SealedRecord::from_bytes(row.sealed.clone())?.tag();
+                    let tag = SealedRecord::from_bytes(row.sealed.clone())?.mac_input();
                     let new_tag = store.table_key.row_tag(&table_id, &row_id, &tag);
                     match old_tag {
                         Some(old) => state.update(&old, &new_tag),
@@ -620,6 +620,19 @@ mod tests {
         assert!(Store::unlock(store.lock(), Secret::new(KEY))
             .unwrap()
             .indexed());
+    }
+
+    #[test]
+    fn a_salt_that_a_party_sets_to_zero_fails_the_scan() {
+        let (store, _, first, _) = filled();
+        let mut backend = store.lock();
+        // IDN-031, IDN-163: a row hidden by a zero salt shows in the scan.
+        let row = backend.rows.get_mut(&(TableId::MESSAGE, first)).unwrap();
+        for byte in row.sealed.iter_mut().take(16) {
+            *byte = 0;
+        }
+        let store = Store::unlock(backend, Secret::new(KEY)).unwrap();
+        assert_eq!(store.audit(TableId::MESSAGE), Err(Error::Unverified));
     }
 
     #[test]

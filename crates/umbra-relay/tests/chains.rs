@@ -324,6 +324,8 @@ impl Mesh {
                     let outputs = self.relays[relay].pacing_tick(&circuit, self.now, &mut self.rng);
                     self.route(relay, outputs);
                 }
+                let outputs = self.relays[relay].drain_tick(self.now, &mut self.rng);
+                self.route(relay, outputs);
             }
             for client in 0..self.clients.len() {
                 while let Some(capsule) = self.inboxes[client].pop_front() {

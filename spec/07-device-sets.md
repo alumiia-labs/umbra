@@ -894,7 +894,10 @@ class in Part 6 §6.6. **[DEV-022]** A client MUST NOT process a kind that decla
   conversation in the stores of the set. A device MUST publish that item
   when it makes a contact. A receiver MUST reject an item whose subject the
   salt does not give, and it MUST otherwise hold the conversation from
-  then on, whether or not it owns the channel. **[DEV-198]** A revision that adds a chat-list item MUST add a row.
+  then on, whether or not it owns the channel. The device that owns the
+  channels MUST publish, at the start of each run, the item of each contact
+  that its engine does not hold, and a receiver MUST hold a synced record
+  whose subject names no conversation until the item comes. **[DEV-198]** A revision that adds a chat-list item MUST add a row.
 
   **[DEV-304]** The device that owns the channels MUST publish the delivery
   state of each message that it sent when that state becomes delivered,

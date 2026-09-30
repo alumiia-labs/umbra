@@ -715,42 +715,66 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     pub fn requeue_transfers(&mut self) -> Result<(), Error> {
         self.files.uploads.clear();
         self.files.downloads.clear();
+        let rows: Vec<RowId> = self
+            .open_ref()?
+            .store
+            .list(FILE_STATE, None)?
+            .into_iter()
+            .map(|(row, _)| row)
+            .collect();
+        for row in rows {
+            self.requeue_file(&MsgRef(row))?;
+        }
+        Ok(())
+    }
+
+    /// Puts the transfer of one file back into the work list, when its
+    /// state waits for one: a run that ended took it along, and nothing
+    /// failed (`NET-320`).
+    pub fn requeue_file(&mut self, message: &MsgRef) -> Result<(), Error> {
+        // A file in the work list takes no second place in it.
+        if self.files.uploads.iter().any(|job| job.message == *message)
+            || self
+                .files
+                .downloads
+                .iter()
+                .any(|job| job.message == *message)
+        {
+            return Ok(());
+        }
         let store = &self.open_ref()?.store;
-        let mut uploads = Vec::new();
-        let mut downloads = Vec::new();
-        for (row, state) in store.list(FILE_STATE, None)? {
-            let info = read_state_row(&state)?;
-            let Some(plain) = store.get(TableId::MESSAGE, &row)? else {
-                continue;
-            };
-            let plain = Zeroizing::new(plain);
-            match info.state {
-                FileState::Uploading => {
-                    let Some(file) = store.get(FILE_DATA, &row)? else {
-                        continue;
-                    };
-                    uploads.push(UploadJob {
-                        message: MsgRef(row),
-                        plain: Zeroizing::new(file),
-                        shape: info.shape,
+        let Some(state) = store.get(FILE_STATE, &message.0)? else {
+            return Ok(());
+        };
+        let info = read_state_row(&state)?;
+        let Some(plain) = store.get(TableId::MESSAGE, &message.0)? else {
+            return Ok(());
+        };
+        let plain = Zeroizing::new(plain);
+        match info.state {
+            FileState::Uploading => {
+                let Some(file) = store.get(FILE_DATA, &message.0)? else {
+                    return Ok(());
+                };
+                self.files.uploads.push_back(UploadJob {
+                    message: *message,
+                    plain: Zeroizing::new(file),
+                    shape: info.shape,
+                });
+            }
+            FileState::Wanted => {
+                let app = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
+                let parsed = AppMessage::parse(app, Channel::Pairwise)?;
+                if let Some(descriptor) = fetchable(parsed.body) {
+                    self.files.downloads.push_back(DownloadJob {
+                        message: *message,
+                        descriptor: Box::new(descriptor),
                     });
                 }
-                FileState::Wanted => {
-                    let app = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
-                    let parsed = AppMessage::parse(app, Channel::Pairwise)?;
-                    if let Some(descriptor) = fetchable(parsed.body) {
-                        downloads.push(DownloadJob {
-                            message: MsgRef(row),
-                            descriptor: Box::new(descriptor),
-                        });
-                    }
-                }
-                // A held file waits for a tap and not for a new start.
-                FileState::Ready | FileState::Failed | FileState::Held | FileState::Gone => {}
             }
+            // A held file waits for a tap and not for a new start.
+            FileState::Ready | FileState::Failed | FileState::Held | FileState::Gone => {}
         }
-        self.files.uploads.extend(uploads);
-        self.files.downloads.extend(downloads);
         Ok(())
     }
 

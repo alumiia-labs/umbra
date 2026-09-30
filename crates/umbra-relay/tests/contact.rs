@@ -293,6 +293,8 @@ impl Network {
                 let outputs = self.relays[2].pacing_tick(&circuit, self.now, &mut self.rng);
                 self.route(2, outputs);
             }
+            let outputs = self.relays[2].drain_tick(self.now, &mut self.rng);
+            self.route(2, outputs);
             for client in 0..self.clients.len() {
                 while let Some(capsule) = self.inboxes[client].pop_front() {
                     let events = self.clients[client]

@@ -193,7 +193,39 @@ struct Endpoint {
     session: Session,
     range: Option<Range>,
     outbox: VecDeque<Outbound>,
+    /// The records of a drain (`NET-037`), which leave in steps at each
+    /// clock tick, thus one drain fills no link backlog.
+    drain: VecDeque<Outbound>,
+    /// The bytes that `drain` holds.
+    drain_bytes: usize,
     loops: u32,
+}
+
+/// The answers that wait for the pacing clock of one circuit. The clock
+/// sends one each second (`NET-291`), thus a circuit that asks for more
+/// loses the newest: a record leaves its queue only at its `ACK`, and a
+/// command that took no answer goes again.
+const OUTBOX_MAX: usize = 1_024;
+/// The bytes of drains that wait for one circuit. A `SUB` or a `GSUB` of a
+/// full queue fits; one that the circuit repeats before the first left
+/// finds no room.
+const DRAIN_MAX: usize = 40 << 20;
+/// The bytes of a drain that one clock tick sends on one circuit.
+const DRAIN_STEP: usize = 256 << 10;
+
+impl Endpoint {
+    /// Puts one answer on the pacing clock, at the front for a `NACK`
+    /// (`WIR-322`).
+    fn post(&mut self, outbound: Outbound, first: bool) {
+        if self.outbox.len() >= OUTBOX_MAX {
+            return;
+        }
+        if first {
+            self.outbox.push_front(outbound);
+        } else {
+            self.outbox.push_back(outbound);
+        }
+    }
 }
 
 /// One `EXTEND` body that waits for a link to its next relay.
@@ -464,7 +496,7 @@ impl RelayNode {
         };
         if let Some(reply) = self.queues.deposit(&command, &self.static_secret, now, rng) {
             if let Some(endpoint) = self.endpoints.get_mut(&reply.circuit) {
-                endpoint.outbox.push_back(reply.outbound);
+                endpoint.post(reply.outbound, false);
             }
         }
         self.queues
@@ -837,17 +869,20 @@ impl RelayNode {
                             .into_iter()
                             .map(Output::NdrPush),
                     );
+                    // NET-037: a drain leaves at the clock in steps, thus it
+                    // fills no link that other circuits share.
                     for reply in unpaced {
-                        work.extend(self.circuits.originate(
-                            &reply.circuit,
-                            reply.outbound.bucket,
-                            CellCommand::Data,
-                            &reply.outbound.encoded,
-                        ));
+                        if let Some(endpoint) = self.endpoints.get_mut(&reply.circuit) {
+                            let len = reply.outbound.encoded.len();
+                            if endpoint.drain_bytes.saturating_add(len) <= DRAIN_MAX {
+                                endpoint.drain_bytes = endpoint.drain_bytes.saturating_add(len);
+                                endpoint.drain.push_back(reply.outbound);
+                            }
+                        }
                     }
                     for reply in paced {
                         if let Some(endpoint) = self.endpoints.get_mut(&reply.circuit) {
-                            endpoint.outbox.push_back(reply.outbound);
+                            endpoint.post(reply.outbound, false);
                         }
                     }
                 }
@@ -933,6 +968,8 @@ impl RelayNode {
                 session: Session::for_circuit(&circuit.circ_id, secret),
                 range: None,
                 outbox: VecDeque::new(),
+                drain: VecDeque::new(),
+                drain_bytes: 0,
                 loops: 0,
             },
         );
@@ -973,9 +1010,7 @@ impl RelayNode {
                 Err(reject) => {
                     // WIR-322: a NACK goes before each pending MSG.
                     if let Some(endpoint) = self.endpoints.get_mut(&circuit) {
-                        endpoint
-                            .outbox
-                            .push_front(nack(circuit, command, reject).outbound);
+                        endpoint.post(nack(circuit, command, reject).outbound, true);
                     }
                 }
             }
@@ -1079,6 +1114,33 @@ impl RelayNode {
             })
         };
         self.run(action.into_iter().collect(), now, rng)
+    }
+
+    /// Sends the next step of each drain that waits (`NET-037`). The
+    /// runtime calls it at each tick of its clock.
+    pub fn drain_tick<R: CryptoRng + ?Sized>(&mut self, now: u64, rng: &mut R) -> Vec<Output> {
+        let mut actions = Vec::new();
+        for (circuit, endpoint) in &mut self.endpoints {
+            let mut sent = 0usize;
+            while sent < DRAIN_STEP {
+                let Some(outbound) = endpoint.drain.pop_front() else {
+                    break;
+                };
+                let len = outbound.encoded.len();
+                sent = sent.saturating_add(len);
+                endpoint.drain_bytes = endpoint.drain_bytes.saturating_sub(len);
+                actions.extend(self.circuits.originate(
+                    circuit,
+                    outbound.bucket,
+                    CellCommand::Data,
+                    &outbound.encoded,
+                ));
+            }
+        }
+        if actions.is_empty() {
+            return Vec::new();
+        }
+        self.run(actions, now, rng)
     }
 
     /// A link closed. Each circuit on it ends.

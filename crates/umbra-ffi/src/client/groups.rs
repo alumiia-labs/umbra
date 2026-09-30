@@ -521,6 +521,9 @@ pub(super) struct GroupQueues {
 /// The facts of a group before an arrival, which tell what it changed.
 pub(super) struct Before {
     epoch: u32,
+    /// The rotator of the current secret: a lower index of the same epoch
+    /// takes its place (`GRP-273`).
+    rotator: Option<u16>,
     owners: Option<[u8; 32]>,
 }
 
@@ -528,6 +531,7 @@ impl Before {
     pub(super) fn of(group: &Group) -> Self {
         Before {
             epoch: group.epoch(),
+            rotator: group.epoch_rotator(),
             owners: group.owner(0).map(|held| *held.expose()),
         }
     }
@@ -4383,8 +4387,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         self.drop_passed_adds(conversation)?;
         // GRP-363: an admin that installs an epoch it did not credential
         // moves each replica to it. A delivery of owner credentials alone
-        // installs no epoch.
-        if installed && group.epoch() != before.epoch {
+        // installs no epoch. GRP-364: a switch to the secret of a lower
+        // rotator of the same epoch moves each replica too.
+        if installed && (group.epoch() != before.epoch || group.epoch_rotator() != before.rotator) {
             self.queue_rekeys(&group)?;
             // GRP-405: the epoch that a lapsed member lacked arrived, and
             // the credentials of it take its records again.

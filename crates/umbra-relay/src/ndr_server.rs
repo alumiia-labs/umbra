@@ -28,6 +28,12 @@ pub const GATEWAY_PATH: &str = "/gateway";
 const REQUEST_MAX: usize = 4_096;
 /// The wait for the provider.
 const PROVIDER_WAIT: Duration = Duration::from_secs(10);
+/// The time that one connection has from its accept to its answer, the
+/// wait for the provider included.
+const CONNECTION_TIME: Duration = Duration::from_secs(30);
+/// The connections that the server holds at once. One more closes at its
+/// accept.
+const CONNECTION_MAX: usize = 4_096;
 
 /// The store of the registrations.
 pub trait NdrStore: Send {
@@ -283,9 +289,15 @@ pub async fn run_ndr(
         broken: false,
     }));
     let gateway = Arc::new(gateway);
+    let held = Arc::new(tokio::sync::Semaphore::new(CONNECTION_MAX));
     loop {
         let Ok((tcp, _)) = listener.accept().await else {
             return Ok(());
+        };
+        // A peer that stalls holds no task past its time, and the server
+        // holds a bounded count of them (`NET-335`).
+        let Ok(permit) = held.clone().try_acquire_owned() else {
+            continue;
         };
         let tls = tls.clone();
         let gateway = gateway.clone();
@@ -293,9 +305,13 @@ pub async fn run_ndr(
         let provider_tls = provider_tls.clone();
         let fcm = fcm.clone();
         tokio::spawn(async move {
-            if let Ok(stream) = tls.accept(tcp).await {
-                serve(stream, gateway, state, provider_tls, fcm).await;
-            }
+            let _permit = permit;
+            let _ = tokio::time::timeout(CONNECTION_TIME, async move {
+                if let Ok(stream) = tls.accept(tcp).await {
+                    serve(stream, gateway, state, provider_tls, fcm).await;
+                }
+            })
+            .await;
         });
     }
 }

@@ -59,6 +59,17 @@ pub(super) const SYNC_STATE: TableId = TableId(0x24);
 pub(super) const SYNC_SENT: TableId = TableId(0x25);
 
 const ENGINE_KEY: &[u8] = b"engine";
+/// Each synced record of a conversation whose identity entry did not come
+/// yet, under a random row: the subject, the order of its arrival, its
+/// deadline or 0, whether the user wrote it, then the record (`DEV-294`).
+const PAIRWISE_HELD: TableId = TableId(0x51);
+/// Each record that the engine took and the store did not take yet, in the
+/// commit of the engine (`DEV-013`).
+const SYNC_INBOX: TableId = TableId(0x52);
+/// The records that a device holds while their entries wait.
+const PAIRWISE_HELD_MAX: usize = 1_024;
+/// The time that a held record waits for its entry, in seconds.
+const PAIRWISE_HELD_AGE: u64 = 30 * 86_400;
 
 /// One record for a sync channel: the conversation of the channel, and the
 /// encoded `AppMessage` of kind `0x20`.
@@ -83,6 +94,35 @@ pub(super) struct Synced {
     pub is_group: bool,
     /// The remaining period of a timed record, or zero (`DEV-244`).
     pub expires_in: u32,
+}
+
+/// The stored form of a synced record in the inbox: the conversation, the
+/// source device, its counter, whether the user wrote it, whether it is of
+/// a group, its remaining period, then the record.
+fn encode_synced(synced: &Synced) -> Vec<u8> {
+    [
+        synced.conversation.0.as_slice(),
+        &synced.origin.0,
+        &synced.origin.1.to_be_bytes(),
+        &[u8::from(synced.from_user), u8::from(synced.is_group)],
+        &synced.expires_in.to_be_bytes(),
+        &synced.app,
+    ]
+    .concat()
+}
+
+fn decode_synced(bytes: &[u8]) -> Option<Synced> {
+    Some(Synced {
+        conversation: ConversationId(bytes.get(..16)?.try_into().ok()?),
+        origin: (
+            bytes.get(16..32)?.try_into().ok()?,
+            u64::from_be_bytes(bytes.get(32..40)?.try_into().ok()?),
+        ),
+        from_user: *bytes.get(40)? == 1,
+        is_group: *bytes.get(41)? == 1,
+        expires_in: u32::from_be_bytes(bytes.get(42..46)?.try_into().ok()?),
+        app: bytes.get(46..)?.to_vec(),
+    })
 }
 
 pub(super) fn counter_key(counter: u64) -> [u8; 8] {
@@ -179,7 +219,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .map(|(counter, body)| (counter, body.to_vec()))
             .into_iter()
             .collect();
-        self.put_engine_all(engine, &sent, rng)
+        self.put_engine_all(engine, &sent, &[], rng).map(|_| ())
     }
 
     /// Stores the engine and each body that it published, in one commit.
@@ -187,14 +227,22 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         &mut self,
         engine: &SyncEngine,
         sent: &[(u64, Vec<u8>)],
+        inbox: &[Vec<u8>],
         rng: &mut R,
-    ) -> Result<(), Error> {
+    ) -> Result<Vec<RowId>, Error> {
         let bytes = Zeroizing::new(engine.export()?);
         let open = self.open_mut()?;
         let row = open.store.row_id(SYNC_STATE, ENGINE_KEY);
         let sent_rows: Vec<RowId> = sent
             .iter()
             .map(|(counter, _)| open.store.row_id(SYNC_SENT, &counter_key(*counter)))
+            .collect();
+        let inbox_rows: Vec<RowId> = inbox
+            .iter()
+            .map(|value| {
+                let digest = umbra_crypto::hash::sha3_256(&[value]);
+                open.store.row_id(SYNC_INBOX, &digest)
+            })
             .collect();
         let mut batch = open.store.begin();
         batch.put(SYNC_STATE, row, None, &bytes, rng)?;
@@ -203,7 +251,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let value = Zeroizing::new([counter_key(*counter).as_slice(), body].concat());
             batch.put(SYNC_SENT, sent_row, None, &value, rng)?;
         }
-        Ok(batch.commit()?)
+        for (value, row) in inbox.iter().zip(&inbox_rows) {
+            batch.put(SYNC_INBOX, *row, None, &Zeroizing::new(value.clone()), rng)?;
+        }
+        batch.commit()?;
+        Ok(inbox_rows)
     }
 
     /// The blinded subject of a pairwise conversation (`DEV-226`), or none
@@ -331,6 +383,203 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
         }
         Ok(())
+    }
+
+    /// Publishes the identity entry of each contact that the engine holds
+    /// none of, at the start of a run: an entry that a run lost before it
+    /// left goes now, and a linked device holds each conversation
+    /// (`DEV-011`, `DEV-294`).
+    pub fn ensure_identity_entries<R: CryptoRng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        if !self.owns_channels()? {
+            return Ok(());
+        }
+        let Some(engine) = self.sync_engine()? else {
+            return Ok(());
+        };
+        if engine.peers().next().is_none() {
+            return Ok(());
+        }
+        let groups = self.group_conversations()?;
+        for conversation in self.conversations()? {
+            if groups.contains(&conversation) {
+                continue;
+            }
+            let Some(subject) = self.subject_of(conversation)? else {
+                continue;
+            };
+            if !engine.holds_mutable(ITEM_IDENTITY_ENTRY, &subject) {
+                self.publish_identity_entry(conversation, rng)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Keeps a synced record of a conversation whose identity entry did not
+    /// come yet (`DEV-294`).
+    fn hold_pairwise_record<R: CryptoRng + ?Sized>(
+        &mut self,
+        subject: &[u8; 32],
+        app: &[u8],
+        from_user: bool,
+        expires_in: u32,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let order = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| {
+                u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX)
+            });
+        let at = if expires_in > 0 {
+            umbra_core::devset::edits::Deadline::from_sync(now, expires_in).at
+        } else {
+            0
+        };
+        let open = self.open_mut()?;
+        if open.store.list(PAIRWISE_HELD, None)?.len() >= PAIRWISE_HELD_MAX {
+            return Ok(());
+        }
+        // One record holds one row, thus a record that comes again takes
+        // no second place.
+        let digest = umbra_crypto::hash::sha3_256(&[subject.as_slice(), app]);
+        let row = open.store.row_id(PAIRWISE_HELD, &digest);
+        let value = Zeroizing::new(
+            [
+                subject.as_slice(),
+                &order.to_be_bytes(),
+                &at.to_be_bytes(),
+                &[u8::from(from_user)],
+                app,
+            ]
+            .concat(),
+        );
+        let mut batch = open.store.begin();
+        batch.put(PAIRWISE_HELD, row, None, &value, rng)?;
+        Ok(batch.commit()?)
+    }
+
+    /// Stores the held records of each conversation that this device holds
+    /// by now, at the start of a run, and drops each one past
+    /// `PAIRWISE_HELD_AGE` (`DEV-294`).
+    pub fn replay_held_pairwise<R: CryptoRng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let now_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| {
+                u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX)
+            });
+        let mut subjects = std::collections::BTreeSet::new();
+        let mut old = Vec::new();
+        for (row, plain) in self.open_ref()?.store.list(PAIRWISE_HELD, None)? {
+            let plain = Zeroizing::new(plain);
+            let order = plain
+                .get(32..40)
+                .and_then(|bytes| bytes.try_into().ok())
+                .map_or(0, u64::from_be_bytes);
+            if now_ns.saturating_sub(order) / 1_000_000_000 > PAIRWISE_HELD_AGE {
+                old.push(row);
+                continue;
+            }
+            if let Some(subject) = plain
+                .get(..32)
+                .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+            {
+                subjects.insert(subject);
+            }
+        }
+        if !old.is_empty() {
+            let open = self.open_mut()?;
+            let mut batch = open.store.begin();
+            for row in old {
+                batch.delete(PAIRWISE_HELD, row);
+            }
+            batch.commit()?;
+        }
+        for subject in subjects {
+            if let Some(conversation) = self.conversation_of_subject(&subject)? {
+                self.replay_pairwise_records(&subject, conversation, rng)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Stores each held record of a conversation whose identity entry came,
+    /// in order.
+    fn replay_pairwise_records<R: CryptoRng + ?Sized>(
+        &mut self,
+        subject: &[u8; 32],
+        conversation: ConversationId,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let mut held: Vec<(u64, RowId, super::Record)> = Vec::new();
+        let now = super::unix_now_seconds();
+        for (row, plain) in self.open_ref()?.store.list(PAIRWISE_HELD, None)? {
+            let plain = Zeroizing::new(plain);
+            if plain.get(..32) != Some(subject.as_slice()) {
+                continue;
+            }
+            let field = |range: core::ops::Range<usize>| plain.get(range).ok_or(Error::Integrity);
+            let order =
+                u64::from_be_bytes(field(32..40)?.try_into().map_err(|_| Error::Integrity)?);
+            let at = u64::from_be_bytes(field(40..48)?.try_into().map_err(|_| Error::Integrity)?);
+            let from_user = field(48..49)? == [1];
+            let app = plain.get(49..).ok_or(Error::Integrity)?.to_vec();
+            // A timed record whose period ended stays gone (DEV-210).
+            if at != 0 && at <= now {
+                held.push((
+                    order,
+                    row,
+                    super::Record {
+                        conversation,
+                        app: Vec::new(),
+                        from_user,
+                        synced: true,
+                        expires_in: 0,
+                    },
+                ));
+                continue;
+            }
+            let expires_in = if at == 0 {
+                0
+            } else {
+                u32::try_from(at.saturating_sub(now)).unwrap_or(u32::MAX)
+            };
+            held.push((
+                order,
+                row,
+                super::Record {
+                    conversation,
+                    app,
+                    from_user,
+                    synced: true,
+                    expires_in,
+                },
+            ));
+        }
+        if held.is_empty() {
+            return Ok(());
+        }
+        held.sort_by_key(|(order, _, _)| *order);
+        let rows: Vec<RowId> = held.iter().map(|(_, row, _)| *row).collect();
+        let records: Vec<super::Record> = held
+            .into_iter()
+            .map(|(_, _, record)| record)
+            .filter(|record| !record.app.is_empty())
+            .collect();
+        if !records.is_empty() {
+            self.commit_records(&[], &records, now.saturating_mul(1_000), rng)?;
+        }
+        let open = self.open_mut()?;
+        let mut batch = open.store.begin();
+        for row in rows {
+            batch.delete(PAIRWISE_HELD, row);
+        }
+        Ok(batch.commit()?)
     }
 
     /// Publishes one item of mutable state to each device of the set
@@ -508,6 +757,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     self.subjects.insert(ConversationId(row), subject);
                     self.events.push_back(Event::Conversations);
                 }
+                // DEV-294: each record that came before its entry takes its
+                // place now, and one that an earlier try left too.
+                self.replay_pairwise_records(&subject, ConversationId(row), rng)?;
             }
             ITEM_CONTACT_NAME => {
                 let name = core::str::from_utf8(value).map_err(|_| Error::Malformed)?;
@@ -672,9 +924,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         bodies: Vec<(ConversationId, Vec<u8>)>,
         now: u64,
         rng: &mut R,
-    ) -> Result<Vec<Synced>, Error> {
+    ) -> Result<(Vec<Synced>, Vec<RowId>), Error> {
         let Some(mut engine) = self.sync_engine()? else {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         };
         let devices: BTreeMap<ConversationId, DeviceId> = self
             .peer_channels()?
@@ -723,6 +975,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         // DEV-299: the state of the group is on its way on
                         // the chunk path, and its records wait for it.
                         self.hold_group_record(&origin.subject, &inner, expires_in, now, rng)?;
+                    } else {
+                        // DEV-294: the identity entry of the conversation
+                        // comes as an item, and it can come after a record.
+                        self.hold_pairwise_record(
+                            &origin.subject,
+                            &inner,
+                            origin.author == AUTHOR_USER,
+                            expires_in,
+                            now,
+                            rng,
+                        )?;
                     }
                 }
                 Ok(Taken::Acknowledged) => acked = true,
@@ -782,7 +1045,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 relayed.push((published.counter, published.body));
             }
         }
-        self.put_engine_all(&engine, &relayed, rng)?;
+        // DEV-013: the records that the engine took wait in the inbox, in
+        // the commit of the engine, until the caller stores them. A crash
+        // between the two loses no record: the inbox gives it again.
+        let inbox: Vec<Vec<u8>> = out.iter().map(encode_synced).collect();
+        let inbox_rows = self.put_engine_all(&engine, &relayed, &inbox, rng)?;
         for (_, body) in &relayed {
             self.queue_to_peers(&engine, body, rng)?;
         }
@@ -791,7 +1058,35 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             self.prune_sync_sent(below.max(engine.acked_by_all()))?;
         }
         self.keep_history_holes(&engine, now, rng)?;
-        Ok(out)
+        Ok((out, inbox_rows))
+    }
+
+    /// Drops the inbox rows of records that the store took.
+    pub(super) fn drop_sync_inbox(&mut self, rows: &[RowId]) -> Result<(), Error> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let open = self.open_mut()?;
+        let mut batch = open.store.begin();
+        for row in rows {
+            batch.delete(SYNC_INBOX, *row);
+        }
+        Ok(batch.commit()?)
+    }
+
+    /// The records that an earlier run took from a sync channel and did
+    /// not store, with their rows (`DEV-013`).
+    pub(super) fn sync_inbox(&self) -> Result<(Vec<Synced>, Vec<RowId>), Error> {
+        let mut out = Vec::new();
+        let mut rows = Vec::new();
+        for (row, plain) in self.open_ref()?.store.list(SYNC_INBOX, None)? {
+            let plain = Zeroizing::new(plain);
+            rows.push(row);
+            if let Some(synced) = decode_synced(&plain) {
+                out.push(synced);
+            }
+        }
+        Ok((out, rows))
     }
 
     /// Queues one body to each peer of the engine.

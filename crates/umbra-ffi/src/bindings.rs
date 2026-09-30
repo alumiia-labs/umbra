@@ -1338,6 +1338,10 @@ struct Inner {
     transfers: Option<mpsc::UnboundedSender<TransferCommand>>,
     /// What each transfer that runs belongs to.
     transfer_tags: BTreeMap<u64, TransferWork>,
+    /// The files whose transfer run ended before them, the time before
+    /// which none goes again, and the count of the ends in a row: a guard
+    /// that is down draws no dial at each update (`NET-320`).
+    interrupted: (Vec<crate::MsgRef>, u64, u32),
     /// The chunks that moved and the chunks in all of each file transfer
     /// that runs.
     file_progress: BTreeMap<crate::MsgRef, (u32, u32)>,
@@ -1630,6 +1634,12 @@ impl Inner {
     fn pump_transfers(&mut self) {
         if self.bridge.is_none() {
             return;
+        }
+        // NET-320: a file whose run ended goes again after its wait.
+        if !self.interrupted.0.is_empty() && unix_now() >= self.interrupted.1 {
+            for message in core::mem::take(&mut self.interrupted.0) {
+                let _ = self.client.requeue_file(&message);
+            }
         }
         let mut commands = Vec::new();
         while let Some(job) = self.client.take_upload() {
@@ -2725,9 +2735,32 @@ impl Inner {
             TransferUpdate::HandleWritten { tag, .. } => format!("transfer {tag}: handle written"),
             TransferUpdate::HandleRead { tag, .. } => format!("transfer {tag}: handle read"),
             TransferUpdate::Failed { tag } => format!("transfer {tag}: failed"),
+            TransferUpdate::Interrupted { tag } => format!("transfer {tag}: interrupted"),
             TransferUpdate::Gone { tag } => format!("transfer {tag}: gone"),
             TransferUpdate::Faults(_) => return,
         });
+        // NET-320: a file whose run ended goes again in the next run, from
+        // its stored state; each other work takes the end as a failure, and
+        // its own retry follows.
+        let update = match update {
+            TransferUpdate::Interrupted { tag } => {
+                if let Some(TransferWork::File { message, .. }) = self.transfer_tags.get(&tag) {
+                    let message = *message;
+                    self.transfer_tags.remove(&tag);
+                    self.file_progress.remove(&message);
+                    let (waiting, at, ends) = &mut self.interrupted;
+                    if !waiting.contains(&message) {
+                        waiting.push(message);
+                    }
+                    let wait = (5u64 << (*ends).min(5)).min(120);
+                    *at = unix_now().saturating_add(wait);
+                    *ends = ends.saturating_add(1);
+                    return;
+                }
+                TransferUpdate::Failed { tag }
+            }
+            other => other,
+        };
         // ATT-052: a file whose chunk each replica lost ends there. Each
         // other transfer takes the loss as a failure.
         let (update, is_gone) = match update {
@@ -2737,6 +2770,13 @@ impl Inner {
         let Some(update) = self.link_update(update) else {
             return;
         };
+        // A transfer that ends well ends the backoff of the runs.
+        if matches!(
+            update,
+            TransferUpdate::Uploaded { .. } | TransferUpdate::Downloaded { .. }
+        ) {
+            self.interrupted.2 = 0;
+        }
         let mut moved = false;
         let Inner {
             client,
@@ -2979,7 +3019,9 @@ impl Inner {
                 _ => {}
             },
             // The top of this function took each such update as a failure.
-            TransferUpdate::Gone { .. } | TransferUpdate::Faults(_) => {}
+            TransferUpdate::Gone { .. }
+            | TransferUpdate::Interrupted { .. }
+            | TransferUpdate::Faults(_) => {}
             TransferUpdate::Failed { tag } => match transfer_tags.remove(&tag) {
                 Some(TransferWork::RestoreRoot { .. } | TransferWork::RestoreObject(_)) => {
                     restore_step = Some(RestoreStep::Failed);
@@ -3519,6 +3561,7 @@ fn handle_of(database_path: String, client: Client<SqliteBackend, ForeignElement
             root_ca_path: None,
             transfers: None,
             transfer_tags: BTreeMap::new(),
+            interrupted: (Vec::new(), 0, 0),
             file_progress: BTreeMap::new(),
             progress_events: VecDeque::new(),
             next_transfer_tag: 0,
@@ -4437,6 +4480,12 @@ impl Handle {
             client.requeue_waiting()?;
             // Each transfer that an earlier run left open starts again.
             client.requeue_transfers()?;
+            // DEV-294: an identity entry that an earlier run lost goes now.
+            let _ = client.ensure_identity_entries(&mut OsRng);
+            // DEV-013: a record that an earlier run took and did not store.
+            let _ = client.replay_sync_inbox(unix_now_ms(), &mut OsRng);
+            // DEV-294: a record whose entry came in an earlier run.
+            let _ = client.replay_held_pairwise(&mut OsRng);
             // A group record takes a fresh nonce, thus the group work comes
             // back at the start of a run and not at the unlock.
             client.resume_group_work(&mut OsRng)?;

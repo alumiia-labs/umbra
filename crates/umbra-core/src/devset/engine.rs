@@ -519,6 +519,11 @@ impl SyncEngine {
             .unwrap_or_else(|| self.counter.saturating_add(1))
     }
 
+    /// Whether the engine holds a write of the item `item` under `key`.
+    pub fn holds_mutable(&self, item: u8, key: &[u8]) -> bool {
+        self.mutable.contains_key(&(item, key.to_vec()))
+    }
+
     /// The peers of the engine.
     pub fn peers(&self) -> impl Iterator<Item = &DeviceId> {
         self.peers.keys()

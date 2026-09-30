@@ -215,6 +215,11 @@ impl EpochStore {
         self.current.as_ref()
     }
 
+    /// The epoch before the current one, inside its grace.
+    pub const fn previous(&self) -> Option<&EpochState> {
+        self.previous.as_ref()
+    }
+
     /// The current epoch number, or 0 before the first install.
     pub fn epoch(&self) -> u32 {
         self.current.as_ref().map_or(0, EpochState::epoch)

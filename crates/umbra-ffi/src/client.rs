@@ -241,6 +241,12 @@ const DIRECTORY_EPOCH_SETTING: &[u8] = b"directory-epoch";
 /// The cause of each failed message of this device, under the row of the
 /// message: one byte of `FailureCause` (`IMP-074`).
 const FAILURE: TableId = TableId(0x4F);
+/// Each record of a contact that goes to the other devices of the set, in
+/// the commit that stores it (`DEV-293`): the conversation of 16 bytes, then
+/// the record.
+/// The publish reads it after the commit, thus a crash between the two
+/// loses no copy.
+const PUBLISH_PENDING: TableId = TableId(0x50);
 /// The clock correction of the relay directory in seconds, signed
 /// (Part 10 `REL-114`).
 const DIRECTORY_CORRECTION_SETTING: &[u8] = b"directory-correction";
@@ -909,6 +915,46 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             kept.push(change);
         }
         self.commit_records(&kept, &records, now_ms, rng)
+    }
+
+    /// Publishes each record copy that waits for the other devices of the
+    /// set, and drops its row (`DEV-293`). A copy that a crash left goes
+    /// with the next commit.
+    fn publish_pending<R: CryptoRng + ?Sized>(
+        &mut self,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let pending = self.open_ref()?.store.list(PUBLISH_PENDING, None)?;
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let mut done = Vec::new();
+        for (row, plain) in pending {
+            let plain = Zeroizing::new(plain);
+            let (Some(conversation), Some(app)) = (
+                plain
+                    .get(..16)
+                    .and_then(|bytes| <[u8; 16]>::try_from(bytes).ok()),
+                plain.get(16..),
+            ) else {
+                done.push(row);
+                continue;
+            };
+            // A copy that does not go stays for the next commit.
+            if self
+                .publish_sync(ConversationId(conversation), app, false, None, now, rng)
+                .is_ok()
+            {
+                done.push(row);
+            }
+        }
+        let open = self.open_mut()?;
+        let mut batch = open.store.begin();
+        for row in done {
+            batch.delete(PUBLISH_PENDING, row);
+        }
+        Ok(batch.commit()?)
     }
 
     /// The commit of [`Client::commit_network`], for the records of a
@@ -1631,6 +1677,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 ));
             }
         }
+        // DEV-268, DEV-293: each record of a contact goes to each device of
+        // the set, and its copy waits in the same commit as the record.
+        let pending_copies: Vec<(RowId, Zeroizing<Vec<u8>>)> = to_publish
+            .iter()
+            .map(|(conversation, app)| {
+                let digest = umbra_crypto::hash::sha3_256(&[conversation.0.as_slice(), app]);
+                (
+                    open.store.row_id(PUBLISH_PENDING, &digest),
+                    Zeroizing::new([conversation.0.as_slice(), app].concat()),
+                )
+            })
+            .collect();
         let mut batch = open.store.begin();
         for write in &planned {
             match write {
@@ -1647,8 +1705,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         {
             batch.erase_earlier();
         }
+        for (row, value) in &pending_copies {
+            batch.put(PUBLISH_PENDING, *row, None, value, rng)?;
+        }
         batch.commit()?;
         self.events.extend(events);
+        self.publish_pending(now_ms / 1_000, rng)?;
         // DEV-304: each other device of the set holds a copy of the message.
         for (row, delivery) in delivered {
             let _ = self.publish_delivery(&row, delivery, rng);
@@ -1687,66 +1749,92 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for (conversation, body, voter) in votes {
             self.take_vote(conversation, &body, voter, now_ms, now_ms / 1_000, rng)?;
         }
-        // DEV-268: each record of a contact goes to each device of the set.
-        for (conversation, app) in to_publish {
-            self.publish_sync(conversation, &app, false, None, now_ms / 1_000, rng)?;
-        }
         if !digests.is_empty() {
             self.take_digests(&digests, now_ms / 1_000, rng)?;
         }
         if !sync_bodies.is_empty() {
-            let synced = self.take_sync_bodies(sync_bodies, now_ms / 1_000, rng)?;
-            // DEV-126: a deletion of the user on another device of the set.
-            let synced = self.take_own_deletions(synced, rng)?;
-            // DEV-015: each synced message keeps its source and counter.
-            let origins: Vec<(ConversationId, Vec<u8>, umbra_core::devset::DeviceId, u64)> = synced
-                .iter()
-                .map(|record| {
-                    (
-                        record.conversation,
-                        record.app.clone(),
-                        record.origin.0,
-                        record.origin.1,
-                    )
-                })
-                .collect();
-            let (groups, synced): (Vec<_>, Vec<_>) =
-                synced.into_iter().partition(|synced| synced.is_group);
-            for record in groups {
-                // A record that does not apply ends no batch.
-                let _ = self.apply_synced_group(
-                    record.conversation,
-                    &record.app,
-                    record.expires_in,
-                    now_ms,
-                    rng,
-                );
-            }
-            let records: Vec<Record> = synced
-                .into_iter()
-                .map(|synced| Record {
-                    conversation: synced.conversation,
-                    app: synced.app,
-                    from_user: synced.from_user,
-                    synced: true,
-                    expires_in: synced.expires_in,
-                })
-                .collect();
-            if !records.is_empty() {
-                self.commit_records(&[], &records, now_ms, rng)?;
-            }
-            for (conversation, app, source, counter) in origins {
-                let Ok(parsed) = AppMessage::parse(&app, Channel::Pairwise) else {
-                    continue;
-                };
-                let open = self.open_ref()?;
-                let reference = msg_ref(&open.device_set_key, &parsed.msg_id);
-                let natural = [conversation.0.as_slice(), &reference].concat();
-                let row = open.store.row_id(TableId::MESSAGE, &natural);
-                self.keep_sync_origin(row, &source, counter, rng)?;
-            }
+            let (synced, inbox) = self.take_sync_bodies(sync_bodies, now_ms / 1_000, rng)?;
+            self.store_synced(synced, now_ms, rng)?;
+            // DEV-013: the store holds each record, thus the inbox lets go.
+            self.drop_sync_inbox(&inbox)?;
         }
         Ok(())
+    }
+
+    /// Stores the records that a sync channel gave, in the conversations
+    /// they name (Part 7 §7.5).
+    fn store_synced<R: CryptoRng + ?Sized>(
+        &mut self,
+        synced: Vec<sync::Synced>,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        // DEV-126: a deletion of the user on another device of the set.
+        let synced = self.take_own_deletions(synced, rng)?;
+        // DEV-015: each synced message keeps its source and counter.
+        let origins: Vec<(ConversationId, Vec<u8>, umbra_core::devset::DeviceId, u64)> = synced
+            .iter()
+            .map(|record| {
+                (
+                    record.conversation,
+                    record.app.clone(),
+                    record.origin.0,
+                    record.origin.1,
+                )
+            })
+            .collect();
+        let (groups, synced): (Vec<_>, Vec<_>) =
+            synced.into_iter().partition(|synced| synced.is_group);
+        for record in groups {
+            // A record that does not apply ends no batch.
+            let _ = self.apply_synced_group(
+                record.conversation,
+                &record.app,
+                record.expires_in,
+                now_ms,
+                rng,
+            );
+        }
+        let records: Vec<Record> = synced
+            .into_iter()
+            .map(|synced| Record {
+                conversation: synced.conversation,
+                app: synced.app,
+                from_user: synced.from_user,
+                synced: true,
+                expires_in: synced.expires_in,
+            })
+            .collect();
+        if !records.is_empty() {
+            self.commit_records(&[], &records, now_ms, rng)?;
+        }
+        for (conversation, app, source, counter) in origins {
+            let Ok(parsed) = AppMessage::parse(&app, Channel::Pairwise) else {
+                continue;
+            };
+            let open = self.open_ref()?;
+            let reference = msg_ref(&open.device_set_key, &parsed.msg_id);
+            let natural = [conversation.0.as_slice(), &reference].concat();
+            let row = open.store.row_id(TableId::MESSAGE, &natural);
+            self.keep_sync_origin(row, &source, counter, rng)?;
+        }
+        Ok(())
+    }
+
+    /// Stores each record that an earlier run took from a sync channel and
+    /// did not store, at the start of a run (`DEV-013`). A record that does
+    /// not store now goes, as it would have gone in its own run.
+    pub fn replay_sync_inbox<R: CryptoRng + ?Sized>(
+        &mut self,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let (synced, rows) = self.sync_inbox()?;
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let _ = self.store_synced(synced, now_ms, rng);
+        self.drop_sync_inbox(&rows)
     }
 
     /// The state of the client node from the earlier runs.

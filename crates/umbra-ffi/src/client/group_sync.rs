@@ -35,6 +35,8 @@ use crate::{ConversationId, Error};
 /// before the roster object that calls for them (`DEV-303`), under the
 /// group and the epoch. The owner column names the group.
 pub(super) const EPOCH_HELD: TableId = TableId(0x2A);
+/// The epoch-key records that one group holds while each waits.
+const EPOCH_HELD_MAX: usize = 8;
 /// The re-key items of `DEV-301` that did not apply yet, under the subject
 /// of the group: the time of arrival in seconds, the subject, then the
 /// item. The group
@@ -540,6 +542,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     }
 
     /// Keeps an epoch-key record of the next epoch that did not install.
+    /// Each record keeps a row of its own, thus a record of a rival rotator
+    /// or a key supply for another member takes no place of the one that
+    /// holds this device's slot (`DEV-303`, `GRP-273`). A group holds at
+    /// most `EPOCH_HELD_MAX` of them.
     pub(super) fn hold_epoch_key<R: CryptoRng + ?Sized>(
         &mut self,
         conversation: ConversationId,
@@ -549,7 +555,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         rng: &mut R,
     ) -> Result<(), Error> {
         let open = self.open_mut()?;
-        let key = [conversation.0.as_slice(), &epoch.to_be_bytes()].concat();
+        if open.store.list(EPOCH_HELD, Some(&conversation.0))?.len() >= EPOCH_HELD_MAX {
+            return Ok(());
+        }
+        let digest = umbra_crypto::hash::sha3_256(&[body]);
+        let key = [conversation.0.as_slice(), &epoch.to_be_bytes(), &digest].concat();
         let row = open.store.row_id(EPOCH_HELD, &key);
         let value = Zeroizing::new(
             [
@@ -605,7 +615,20 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut outcomes = std::collections::VecDeque::new();
         let mut installed = false;
         for (row, epoch, start_slot, body) in held {
-            if epoch <= group.epoch() {
+            // A record of the epoch that installed may be the rival of a
+            // lower rotator, which takes the place of the one that
+            // installed (GRP-273); an older one goes.
+            if epoch < group.epoch() {
+                done.push(row);
+                continue;
+            }
+            if epoch == group.epoch() {
+                if group
+                    .install_epoch_key(epoch, start_slot, &body, now)
+                    .is_ok()
+                {
+                    installed = true;
+                }
                 done.push(row);
                 continue;
             }

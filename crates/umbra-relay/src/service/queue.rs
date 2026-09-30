@@ -584,6 +584,11 @@ impl QueueService {
                 if seq >= queue.next_seq() {
                     return Err(Reject::Rejected);
                 }
+                // An ACK at or below the last one moves nothing, thus it
+                // costs the store no commit.
+                if seq <= queue.last_ack() {
+                    return Ok(Vec::new());
+                }
                 queue.ack(seq);
                 self.changes.push(StoreChange::Acked { recipient_id, seq });
                 Ok(Vec::new())

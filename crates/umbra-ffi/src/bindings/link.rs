@@ -399,6 +399,7 @@ impl Inner {
             | TransferUpdate::HandleWritten { tag, .. }
             | TransferUpdate::HandleRead { tag, .. }
             | TransferUpdate::Failed { tag }
+            | TransferUpdate::Interrupted { tag }
             | TransferUpdate::Gone { tag } => *tag,
             TransferUpdate::Faults(_) => return Some(update),
         };

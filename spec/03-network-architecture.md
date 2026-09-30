@@ -429,7 +429,10 @@ gives it the ratchet key of the initiator.
 
 4. **[NET-176]** At a rotation, the queue owner MUST send the new
    `QueueAddress` to the contact as a record of kind `0x33`. The record travels
-   on the established ratchet with that contact. **[NET-177]** The owner MUST hold the old queue until a record
+   on the established ratchet with that contact. **[NET-348]** While no record
+   of the contact has arrived on the new queue, the owner MUST send that
+   record again at the start of each run and after each `ADDRESS_RESEND` of 6
+   hours: a run that ends before the record leaves loses it. **[NET-177]** The owner MUST hold the old queue until a record
    arrives on the new queue, or until `ROTATE_GRACE` ends. **[NET-178]** The
    owner MUST then send the `DEL` of `NET-020`.
 5. **[NET-179]** A sender MUST use the newest `QueueAddress` that it accepted
@@ -660,8 +663,8 @@ group queue by time and by quota only, under the table below. **[NET-235]** A
 relay MUST NOT erase a record because a reader read it. **[NET-236]** A reader
 MUST hold its own cursor for each replica, as mutable state of Part 7 §7.5.3,
 for each device. **[NET-237]** If a `GSUB` names a backlog above
-`DRAIN_THRESHOLD` of §3.5.2, the relay MUST answer it in one unpaced response,
-as `NET-037` gives for a pairwise queue.
+`DRAIN_THRESHOLD` of §3.5.2, the relay MUST answer it unpaced, in the steps of
+`NET-349`, as `NET-037` gives for a pairwise queue.
 
 **The acknowledgment of a post.** **[NET-238]** A relay MUST answer an accepted
 `GPOST` with a `GSEQ`. §3.7 makes that `GSEQ` the relay acknowledgment of the
@@ -1457,7 +1460,12 @@ build and the drain of `NET-037`.
 **The clock governs each held session.** A push-wake session is a held session,
 thus the clock runs during it. The one exception is the reconnect drain of §3.7
 item 4. **[NET-037]** If that batched peek finds more than `DRAIN_THRESHOLD` messages, the
-relay MUST answer it in one unpaced response. `DRAIN_THRESHOLD` is 60 messages.
+relay MUST answer it unpaced, and not on the clock of `NET-035`.
+`DRAIN_THRESHOLD` is 60 messages. **[NET-349]** The relay MUST send such a
+drain in steps of at most 256 KiB for each circuit at each tick of its own
+fixed clock, and it MUST hold at most 40 MiB of drains for one circuit: one
+drain then fills no link that the circuits of other clients share, and the
+steps follow no arrival.
 
 **A group-queue session is a held session.** The `GSUB` of Part 6 §6.4.5 is
 the subscription of that session, and the relay pushes each new record on it.

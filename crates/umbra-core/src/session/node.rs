@@ -908,6 +908,10 @@ struct Contact {
     /// `NET-181`). Zero is none, and a stale contact draws one at the next
     /// check.
     sweep_at: u64,
+    /// The time the address of a rotation that runs last went to the peer,
+    /// or 0 in a run that sent none yet. The address goes again until a
+    /// record of the peer reaches the new queue (`NET-176`, `NET-348`).
+    address_sent: u64,
 }
 
 /// The two pairwise identity keys of a stored contact: the key of this
@@ -1110,6 +1114,10 @@ pub const ROTATE_AFTER_RECORDS: u32 = 10_000;
 /// `ROTATE_GRACE` of Part 3 §3.2.4: how long an owner reads the replaced
 /// queue, in seconds.
 pub const ROTATE_GRACE: u64 = 7 * 86_400;
+
+/// The time between two sends of the address of a rotation that no record
+/// of the peer answered on the new queue (`NET-348`).
+pub const ADDRESS_RESEND: u64 = 6 * 3_600;
 /// `ROTATE_JITTER` of Part 3 §3.2.4, in parts of a thousand.
 const ROTATE_JITTER_PERMILLE: u64 = 200;
 
@@ -1497,6 +1505,7 @@ impl ClientNode {
                 own_address,
                 stale,
                 sweep_at,
+                address_sent: 0,
             },
         );
         Ok(ContactId(id))
@@ -1595,6 +1604,7 @@ impl ClientNode {
         let mut ended = Vec::new();
         let mut due = None;
         let mut stale = Vec::new();
+        let mut unheard = Vec::new();
         for (id, held) in &mut self.contacts {
             if held.since == 0 {
                 held.since = now;
@@ -1617,6 +1627,15 @@ impl ClientNode {
             if held.channel.previous().is_some() {
                 if now.saturating_sub(held.rotated_at) >= ROTATE_GRACE {
                     ended.push(*id);
+                } else if held.channel.inbound().cursor().acked() == 0
+                    && held.channel.can_send()
+                    && (held.address_sent == 0
+                        || now.saturating_sub(held.address_sent) >= ADDRESS_RESEND)
+                {
+                    // NET-348: no record of the peer reached the new queue,
+                    // thus the address may not have reached the peer.
+                    held.address_sent = now;
+                    unheard.push(*id);
                 }
                 continue;
             }
@@ -1646,6 +1665,15 @@ impl ClientNode {
         }
         if let Some(contact) = due {
             self.start_rotation(contact, now, rng)?;
+        }
+        for contact in unheard {
+            let own = self
+                .contacts
+                .get(&contact)
+                .and_then(|held| held.own_address.clone());
+            if let Some(own) = own {
+                self.send_control(contact, AppKind::QueueAddress, &own, now, rng)?;
+            }
         }
         // NET-325: a stale channel with no renewal that runs starts one.
         for contact in stale {
@@ -2017,6 +2045,7 @@ impl ClientNode {
         held.since = now;
         held.rotated_at = now;
         held.own_address = Some(Zeroizing::new(address.to_vec()));
+        held.address_sent = now;
         self.forced.remove(&contact);
         self.moved.insert(contact);
         self.send_control(contact, AppKind::QueueAddress, address, now, rng)?;
@@ -4725,9 +4754,11 @@ impl ClientNode {
         if !held.channel.can_send() {
             return Ok(());
         }
+        // A record that cannot go stops no later one, and it ends no run:
+        // each other record of the contact goes in its order.
         for (app, user_handle) in core::mem::take(&mut held.waiting_sends) {
             let waiting = user_handle.map_or(Waiting::Other, Waiting::UserSend);
-            self.send_now(contact, &app, waiting, now, rng)?;
+            let _ = self.send_now(contact, &app, waiting, now, rng);
         }
         Ok(())
     }
@@ -5554,6 +5585,7 @@ impl ClientNode {
                 own_address,
                 stale: false,
                 sweep_at: 0,
+                address_sent: 0,
             },
         );
         self.moved.insert(queue_id);

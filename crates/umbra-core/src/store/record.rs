@@ -190,8 +190,23 @@ impl SealedRecord {
         Ok(plain)
     }
 
+    /// What the table MAC reads of the record: its tag, and for a record
+    /// whose key is discarded the tag with a mark. A salt that a party
+    /// with the file sets to zero bytes thus shows in the scan of the
+    /// table (`IDN-031`, `IDN-163`), and a store with no discarded record
+    /// keeps its MAC.
+    pub fn mac_input(&self) -> [u8; aead::TAG_LEN] {
+        let mut tag = self.tag();
+        if self.is_discarded() {
+            for byte in &mut tag {
+                *byte = !*byte;
+            }
+        }
+        tag
+    }
+
     /// Discards the record key: the salt becomes zero bytes (`IMP-041`).
-    /// The tag stays, thus the table MAC does not change.
+    /// The table MAC reads the change through [`SealedRecord::mac_input`].
     pub fn discard_key(&mut self) {
         for byte in self.0.iter_mut().take(SALT_LEN) {
             *byte = 0;

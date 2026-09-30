@@ -3,7 +3,7 @@
 //! the accepted `corr_id` set (`NET-122`), and the queue count bound
 //! (`NET-022`).
 
-use alloc::vec::Vec;
+use alloc::{collections::BTreeSet, vec::Vec};
 
 use umbra_crypto::{
     auth::CommandAuthKey,
@@ -14,13 +14,17 @@ use umbra_wire::{command::Command, session::SessionControl};
 
 use crate::{params::MAX_QUEUES_PER_SESSION, Reject};
 
+/// The commands that one session authenticates at most, which bounds its
+/// replay set.
+const SEEN_MAX: usize = 65_536;
+
 /// One session.
 pub struct Session {
     id: [u8; 8],
     secret: Secret<32>,
     resume_count: u32,
     relay_session_sk: StaticSecret,
-    seen: Vec<[u8; 16]>,
+    seen: BTreeSet<[u8; 16]>,
     queues: Vec<[u8; 32]>,
 }
 
@@ -37,7 +41,7 @@ impl Session {
                 secret: session_secret,
                 resume_count: 0,
                 relay_session_sk,
-                seen: Vec::new(),
+                seen: BTreeSet::new(),
                 queues: Vec::new(),
             }),
             _ => Err(Reject::Rejected),
@@ -56,7 +60,7 @@ impl Session {
             secret: Secret::new([0; 32]),
             resume_count: u32::MAX,
             relay_session_sk,
-            seen: Vec::new(),
+            seen: BTreeSet::new(),
             queues: Vec::new(),
         }
     }
@@ -98,10 +102,16 @@ impl Session {
         if self.seen.contains(&command.corr_id) {
             return Err(Reject::Rejected);
         }
+        // NET-122: the replay check holds each `corr_id` of the session, and
+        // a session past `SEEN_MAX` commands takes no more; its client
+        // builds a new circuit, as at `CIRCUIT_MAX_CELLS`.
+        if self.seen.len() >= SEEN_MAX {
+            return Err(Reject::Limit);
+        }
         let key = CommandAuthKey::derive(&self.relay_session_sk, auth_pk)
             .map_err(|_| Reject::Rejected)?;
         command.verify(&key, bind).map_err(|_| Reject::Rejected)?;
-        self.seen.push(command.corr_id);
+        self.seen.insert(command.corr_id);
         Ok(())
     }
 

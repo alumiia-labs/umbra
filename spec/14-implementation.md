@@ -974,6 +974,8 @@ read flight 1 already drops the copy (Part 6 `WIR-503`).
 | `0x4D` | Held Deletions | Each message that a deletion of another device names after a restore, by its row, with its conversation. It waits for the user (`DEV-118`). |
 | `0x4E` | Rekey Held | The re-key items of `DEV-301` that did not apply yet, under the subject of the group: the time of arrival in seconds, the subject, then the item. The group can come later on the chunk path, and the roster epoch before the re-key on the sync channel. |
 | `0x4F` | Failure | The cause of each failed message of this device, under the row of the message: a relay refused it, no path took it, its file did not upload, no replica of the group took it, or the queue of the contact was full (`IMP-074`) |
+| `0x50` | Publish Pending | The copy of each record of a contact that goes to the other devices of the set, written in the commit of the record: the conversation, then the record (`DEV-293`). The publish drops it, and one that a crash left goes with the next commit. |
+| `0x51` | Pairwise Held | Each synced record of a conversation whose identity entry did not come yet, under a random row: the subject, the order of its arrival, its deadline or 0, whether the user wrote it, then the record (`DEV-294`). The entry replays them. |
 
 The stored form of a row is local to one device, and no peer reads it. This
 part gives it no byte layout. **[IMP-130]** A stored object MUST start with a

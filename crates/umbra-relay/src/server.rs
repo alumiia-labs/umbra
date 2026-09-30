@@ -283,8 +283,10 @@ pub async fn run_node(
                 let mut outputs = Vec::new();
                 // NET-035, NET-036: a Poisson clock for each circuit, which
                 // no arrival moves.
+                // The endpoints come in their order, thus a search finds
+                // each one in log time.
                 let paced: Vec<CircuitKey> = node.paced_circuits().copied().collect();
-                next_tick.retain(|circuit, _| paced.contains(circuit));
+                next_tick.retain(|circuit, _| paced.binary_search(circuit).is_ok());
                 for circuit in paced {
                     let due = next_tick.entry(circuit).or_insert(instant);
                     if *due <= instant {
@@ -295,6 +297,8 @@ pub async fn run_node(
                         *due = instant + Duration::from_millis(wait.max(1));
                     }
                 }
+                // NET-037: the next step of each drain.
+                outputs.extend(node.drain_tick(now, &mut rng));
                 // Part 3 §3.9: each forward cell whose per-hop delay ended.
                 let now_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)

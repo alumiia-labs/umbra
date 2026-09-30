@@ -68,7 +68,7 @@ column when a crate implements the requirement and a test covers it.
 | --- | --- | --- | --- | --- | --- | --- |
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
-| `NET` | 247 | 88 | 1 | 0 | 9 | **345** |
+| `NET` | 249 | 88 | 1 | 0 | 9 | **347** |
 | `IDN` | 134 | 46 | 1 | 0 | 5 | **186** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
 | `WIR` | 398 | 85 | 0 | 0 | 7 | **490** |
@@ -81,7 +81,7 @@ column when a crate implements the requirement and a test covers it.
 | `ABU` | 72 | 30 | 1 | 0 | 0 | **103** |
 | `IMP` | 121 | 41 | 0 | 0 | 2 | **164** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2069 | 627 | 7 | 0 | 54 | **2757** |
+| **All** | 2071 | 627 | 7 | 0 | 54 | **2759** |
 
 ## SCP — Scope and Conventions
 
@@ -175,7 +175,7 @@ Source: `spec/03-network-architecture.md`
 | `NET-034` | §3.4.6 | MUST NOT | The client | The client MUST NOT degrade silently to a single-operator path. |  |  |
 | `NET-035` | §3.5.2 | MUST | A relay | A relay MUST deliver to a client on a schedule. |  |  |
 | `NET-036` | §3.5.2 | MUST NOT | That schedule | That schedule MUST NOT depend on the arrival times of the messages. |  |  |
-| `NET-037` | §3.5.2 | MUST | (unstated) | If that batched peek finds more than `DRAIN_THRESHOLD` messages, the relay MUST answer it in one unpaced response. |  |  |
+| `NET-037` | §3.5.2 | MUST | (unstated) | If that batched peek finds more than `DRAIN_THRESHOLD` messages, the relay MUST answer it unpaced, and not on the clock of `NET-035`. |  |  |
 | `NET-038` | §3.5.2 | MUST NOT | UMBRA | UMBRA MUST NOT copy that default. |  |  |
 | `NET-039` | §3.5.3 | MUST | The destination relay | The destination relay MUST take a delay for each message from an exponential distribution before it emits the message. |  |  |
 | `NET-040` | §3.5.4 | MUST | A revision | A revision MUST derive this value again if the bucket ladder or the default chunk width changes. |  |  |
@@ -373,7 +373,7 @@ Source: `spec/03-network-architecture.md`
 | `NET-234` | §3.2.7 | MUST | A relay | A relay MUST retain a record of a group queue by time and by quota only, under the table below. |  |  |
 | `NET-235` | §3.2.7 | MUST NOT | A relay | A relay MUST NOT erase a record because a reader read it. |  |  |
 | `NET-236` | §3.2.7 | MUST | A reader | A reader MUST hold its own cursor for each replica, as mutable state of Part 7 §7.5.3, for each device. |  |  |
-| `NET-237` | §3.2.7 | MUST | (unstated) | If a `GSUB` names a backlog above `DRAIN_THRESHOLD` of §3.5.2, the relay MUST answer it in one unpaced response, as `NET-037` gives for a pairwise queue. |  |  |
+| `NET-237` | §3.2.7 | MUST | (unstated) | If a `GSUB` names a backlog above `DRAIN_THRESHOLD` of §3.5.2, the relay MUST answer it unpaced, in the steps of `NET-349`, as `NET-037` gives for a pairwise queue. |  |  |
 | `NET-238` | §3.2.7 | MUST | A relay | A relay MUST answer an accepted `GPOST` with a `GSEQ`. |  |  |
 | `NET-239` | §3.2.7 | MUST | (unstated) | If a `GPOST` carries record bytes that the relay already holds, the relay MUST answer with the `seq` that it holds for those bytes. |  |  |
 | `NET-240` | §3.2.7 | MUST | A relay | A relay MUST apply `GROUP_POST_RATE` for each group queue. |  |  |
@@ -484,6 +484,8 @@ Source: `spec/03-network-architecture.md`
 | `NET-345` | §3.4.6 | MUST | A client | A client MUST end a pin that shares an operator or a family with the other pin when the relaxation ends, and it fills the place under `REL-154`. |  |  |
 | `NET-346` | §3.2.4 | MUST | At a start a relay | At a start a relay MUST keep the newest `QUEUE_QUOTA` records of a queue whose stored records pass that quota: the older ones ended in the run before. |  |  |
 | `NET-347` | §3.4.3 | MUST NOT | (unstated) | While a record waits for a circuit to that exit, the client MUST start a new build to it on a fresh chain, and it MUST NOT hold the record for its next run. |  |  |
+| `NET-348` | §3.2.6 | MUST | (unstated) | While no record of the contact has arrived on the new queue, the owner MUST send that record again at the start of each run and after each `ADDRESS_RESEND` of 6 hours: a run that ends before the record leaves loses it. |  |  |
+| `NET-349` | §3.5.2 | MUST | The relay | The relay MUST send such a drain in steps of at most 256 KiB for each circuit at each tick of its own fixed clock, and it MUST hold at most 40 MiB of drains for one circuit: one drain then fills no link that the circuits of other clients share, and the steps follow no arrival. |  |  |
 
 ## IDN — Identity
 
