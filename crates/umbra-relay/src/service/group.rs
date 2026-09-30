@@ -194,6 +194,18 @@ impl GroupService {
         match cmd {
             GroupCmd::Gpost => {
                 accept_either(session, command, served.queue.write_pks(now))?;
+                // WIR-370: a post fills the record row of one bucket.
+                // WIR-408, WIR-409: the relay reads the version and the kind
+                // of the record, and refuses one that the table does not hold.
+                let payload = command.payload;
+                let fills_bucket = BUCKETS
+                    .into_iter()
+                    .any(|bucket| bucket.group_record() == payload.len());
+                let is_known = payload.first() == Some(&umbra_wire::group::record::VERSION)
+                    && matches!(payload.get(1), Some(0x01 | 0x02));
+                if !fills_bucket || !is_known {
+                    return Err(Reject::Rejected);
+                }
                 // WIR-374: a post carries no admission.
                 let posted = served.queue.post(command.payload, now)?;
                 if posted.fresh {
@@ -554,8 +566,13 @@ mod tests {
         *XPublic::from(sk).as_bytes()
     }
 
+    /// A content record of bucket `B0`: the version and the kind of
+    /// `WIR-409`, and a fill.
     fn record(byte: u8) -> Vec<u8> {
-        vec![byte; Bucket::B0.group_record()]
+        let mut record = vec![byte; Bucket::B0.group_record()];
+        record[0] = umbra_wire::group::record::VERSION;
+        record[1] = 0x01;
+        record
     }
 
     fn registration(sender: u8) -> Vec<u8> {

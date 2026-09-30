@@ -4051,6 +4051,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             return Ok(None);
         };
         let mut group = self.group_of(conversation)?;
+        // GRP-253, GRP-254: a record that waited past GROUP_ROSTER_WAIT
+        // for its roster leaves, and the conversation shows a gap.
+        let expired = group.expire_held(now_ms / 1_000);
         let outcome = group.receive(record, now_ms / 1_000);
         // GRP-202: the cursor of that replica moves to the record.
         let which = (0..GROUP_REPLICAS).find(|index| {
@@ -4065,7 +4068,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
         let before = Before::of(&group);
         let outcomes: VecDeque<Outcome> = outcome.into_iter().collect();
-        self.take_outcomes(conversation, group, outcomes, before, false, now_ms, rng)
+        let taken =
+            self.take_outcomes(conversation, group, outcomes, before, false, now_ms, rng)?;
+        if expired > 0 {
+            self.delivery_gap(conversation, now_ms, rng)?;
+        }
+        // DEV-309: a roster object of another member can be the one that a
+        // held re-key item waits for.
+        self.retry_rekey_items(now_ms, rng)?;
+        Ok(taken)
     }
 
     /// Takes the outcomes of one arrival in their order, with each record
@@ -4847,8 +4858,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
             batch.commit()?;
         }
+        // NET-272, IMP-074: no replica took the record before its ARQ gave up.
         for message in failed {
-            self.set_delivery(&message, Delivery::Failed, rng)?;
+            self.fail(&message, crate::FailureCause::NoReplica, rng)?;
         }
         kept.sort_by_key(|(order, _)| *order);
         self.groups
@@ -4894,7 +4906,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 )
                 .is_err()
             {
-                self.set_delivery(&message, Delivery::Failed, rng)?;
+                self.fail(&message, crate::FailureCause::NoPath, rng)?;
             }
         }
         Ok(())

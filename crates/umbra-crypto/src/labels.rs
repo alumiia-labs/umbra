@@ -21,6 +21,7 @@ labels! {
     DEVICE_SET = "umbra/v1/device-set";
     PAIRWISE = "umbra/v1/pairwise";
     PUBLIC_ADDRESS = "umbra/v1/public-address";
+    HANDLE_KEY = "umbra/v1/handle-key";
     INVITE_BLOB = "umbra/v1/invite-blob";
     PROFILE_BLOB = "umbra/v1/profile-blob";
     KEM_COMBINE = "umbra/v1/kem-combine";
@@ -108,13 +109,15 @@ labels! {
     BACKUP_SALT = "umbra/v1/backup-salt";
     HANDLE_BLOB = "umbra/v1/handle-blob";
     ISSUER_RSA = "umbra/v1/issuer-rsa";
+    LOOKUP_POW_VERIFIER = "umbra/v1/lookup-pow-verifier";
+    ISSUE_POW_VERIFIER = "umbra/v1/issue-pow-verifier";
+    RELAY_NTF = "umbra/v1/relay-ntf";
+    NDR = "umbra/v1/ndr";
+    DIRECTORY = "umbra/v1/directory";
+    CLIENT_RNG = "umbra/v1/client-rng";
+    QUOTA_HOLDER = "umbra/v1/quota-holder";
+    NDR_REMOVAL = "umbra/v1/ndr-removal";
 }
-
-/// `umbra/v1/handle-key`
-///
-/// Part 5 §5.2 derives `HandleKey_{j,r}` under this label, and the register
-/// of §5.11 does not list it. The code follows §5.2 until the register does.
-pub const HANDLE_KEY: &[u8] = b"umbra/v1/handle-key";
 
 #[cfg(test)]
 #[allow(

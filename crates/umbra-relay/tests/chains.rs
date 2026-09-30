@@ -1339,10 +1339,13 @@ fn a_group_queue_takes_a_record_at_one_client_and_gives_it_at_another() {
         .unwrap();
     mesh.settle();
 
-    // The creator posts one record, and the reader takes it.
-    let record: Vec<u8> = (0..Bucket::B1.group_record())
+    // The creator posts one record, and the reader takes it. The relay
+    // reads its version and its kind alone (`WIR-408`, `WIR-409`).
+    let mut record: Vec<u8> = (0..Bucket::B1.group_record())
         .map(|i| (i % 253) as u8)
         .collect();
+    record[0] = umbra_wire::group::record::VERSION;
+    record[1] = 0x01;
     mesh.clients[CREATOR]
         .group(
             relay,

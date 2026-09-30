@@ -40,7 +40,7 @@ pub struct OsRng;
 static HARDEN: std::sync::Mutex<Option<Secret<32>>> = std::sync::Mutex::new(None);
 
 /// The context of each value of this process under the hardening.
-const HARDEN_CONTEXT: &[u8] = b"umbra/v1/client-rng";
+const HARDEN_CONTEXT: &[u8] = umbra_crypto::labels::CLIENT_RNG;
 
 /// Hardens each later value of [`OsRng`] under `key`.
 pub fn harden_with(key: Secret<32>) {
@@ -430,6 +430,9 @@ pub enum Update {
     Sent(u64),
     /// A relay rejected the record with this tag.
     Failed(u64),
+    /// No path took the record with this tag: the node could not seal it
+    /// or holds no channel for it (`IMP-074`).
+    Unsent(u64),
     /// The node refused an invitation command. A bundle that does not parse
     /// gives this update, and the runtime stays up.
     Refused,
@@ -491,7 +494,6 @@ fn settle(
 /// each second (Part 3 §3.6.2, tier A).
 const COVER_MEAN: Duration = Duration::from_secs(20);
 
-/// The time to the next slot of a Poisson clock.
 /// A monotonic source that runs while the device sleeps. `Instant` stops
 /// in a suspend on Linux and Android, and a night of sleep then reads as a
 /// clock movement; `/proc/uptime` counts the suspend, as `CLOCK_BOOTTIME`
@@ -525,6 +527,7 @@ impl AwakeClock {
     }
 }
 
+/// The time to the next slot of a Poisson clock.
 fn cover_delay(rng: &mut OsRng) -> Duration {
     let mut bytes = [0u8; 4];
     let _ = rng.try_fill_bytes(&mut bytes);
@@ -902,7 +905,7 @@ pub async fn run_client(
                             tags.insert(handle, tag);
                         }
                         Err(_) => {
-                            let _ = updates.send(Update::Failed(tag));
+                            let _ = updates.send(Update::Unsent(tag));
                         }
                     }
                 }

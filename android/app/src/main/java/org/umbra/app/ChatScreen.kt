@@ -164,15 +164,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
     val readUpTo = lines.indexOfLast { it.info.outgoing && it.info.delivery.toInt() == READ }
     val replyCounts = remember(lines) { lines.mapNotNull { it.threadKey }.groupingBy { it }.eachCount() }
     val composer = rememberPlatformField()
-    // IMP-058: the window of a conversation with the block takes no screenshot.
-    var isSecure by remember { mutableStateOf(false) }
-    LaunchedEffect(conversation, Core.revision) { Core.screenshotBlocked(conversation) { isSecure = it } }
-    val activity = LocalContext.current as? Activity
-    DisposableEffect(isSecure) {
-        val window = activity?.window
-        if (isSecure) window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
-        onDispose { if (isSecure) window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE) }
-    }
+    ScreenshotBlock(conversation)
     // Part 6 §6.6.9: the text of the field starts and ends a typing state.
     LaunchedEffect(conversation) {
         composer.onChange = { if (!chat.isGroup) Core.typing(conversation, !composer.isEmpty) }
@@ -359,6 +351,10 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                             answered = null
                             edited = line
                             composer.set(line.text.copyOf())
+                            // DEV-126: the limits of an edit.
+                            notice = UiText.get(
+                                if (chat.isGroup) R.string.umbra_ui_dev_126_edit_group else R.string.umbra_ui_dev_126_edit,
+                            )
                         },
                     )
                 }
@@ -482,13 +478,15 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
             // DEV-126: each limit of a deletion for the other party. The
             // spread of a sweep (DEV-107) has no action here, since one
             // deletion goes to one conversation at once.
-            note = if (chat.isGroup) {
-                "This asks the app of each member to delete the message. A member who left " +
-                    "the group never gets the request. A member who sends nothing for more than 30 days " +
-                    "leaves the group and never gets the request. A member can keep a copy."
-            } else {
-                UiText.get(R.string.umbra_ui_dev_126)
-            },
+            note = (
+                if (chat.isGroup) {
+                    "This asks the app of each member to delete the message. A member who left " +
+                        "the group never gets the request. A member who sends nothing for more than 30 days " +
+                        "leaves the group and never gets the request. A member can keep a copy."
+                } else {
+                    UiText.get(R.string.umbra_ui_dev_126)
+                }
+            ) + if (line.info.file != null) "\n\n" + UiText.get(R.string.umbra_ui_dev_126_file) else "",
             onDismiss = { deletingAll = null },
         )
     }
@@ -704,6 +702,8 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
             chat.needsInvitation -> UiText.get(R.string.umbra_ui_grp_374)
             chat.isGroup && !chat.isMember ->
                 "You are no longer a member of this group. The messages here stay on this device."
+            // An observer reads the group and posts nothing to it.
+            chat.isGroup && ownRole == FfiRole.OBSERVER -> "Your role in this group is observer."
             else -> null
         }
         if (stopped != null) {
@@ -1170,7 +1170,7 @@ private fun BubbleContent(line: Line, chat: Chat, isRevealed: Boolean = false, a
                         when {
                             isUploading && share != null -> "Sending $share %"
                             isUploading -> "Sending"
-                            else -> deliveryLabel(line.info.delivery)
+                            else -> deliveryLabel(line.info.delivery, line.info.failure)
                         },
                     )
                 }
@@ -1273,11 +1273,39 @@ private fun ReadMark(chat: Chat) {
  * The closed list of Part 14 §14.9.1. "Accepted" means that a relay took the
  * record. It does not mean that the contact has it.
  */
-private fun deliveryLabel(state: UByte): String = when (state.toInt()) {
+private fun deliveryLabel(state: UByte, failure: UByte): String = when (state.toInt()) {
     0 -> "Waiting"
     1 -> "Accepted"
     2 -> "Delivered"
-    FAILED -> "Not sent"
+    // IMP-074: a failed record names its cause.
+    FAILED -> UiText.get(
+        when (failure.toInt()) {
+            1 -> R.string.umbra_ui_imp_074_refused
+            2 -> R.string.umbra_ui_imp_074_no_path
+            3 -> R.string.umbra_ui_imp_074_upload
+            4 -> R.string.umbra_ui_imp_074_no_replica
+            5 -> R.string.umbra_ui_imp_074_full
+            else -> R.string.umbra_ui_imp_074
+        },
+    )
     // A read message shows the mark of the contact and no word.
     else -> ""
+}
+
+/**
+ * IMP-058: each screen of a conversation with the block, its photos,
+ * videos and media list too, takes no screenshot.
+ */
+@Composable
+fun ScreenshotBlock(conversation: Conversation) {
+    // The screen stays secure until the store answers, thus no frame of a
+    // blocked conversation shows while the answer is on its way.
+    var isSecure by remember(conversation) { mutableStateOf(true) }
+    LaunchedEffect(conversation, Core.revision) { Core.screenshotBlocked(conversation) { isSecure = it } }
+    val activity = LocalContext.current as? Activity
+    DisposableEffect(isSecure) {
+        val window = activity?.window
+        if (isSecure) window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        onDispose { if (isSecure) window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE) }
+    }
 }

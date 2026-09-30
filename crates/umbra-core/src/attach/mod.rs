@@ -73,33 +73,6 @@ pub const CHUNK_FETCH_RATE: u32 = 60;
 pub const FETCH_RETRY_HOLD: u64 = 3_600;
 /// `PLACE_PROBE`.
 pub const PLACE_PROBE: usize = 4;
-/// The floor of `REPLICA_VERIFY_SAMPLE`.
-pub const VERIFY_SAMPLE_MIN: usize = 4;
-/// The ceiling of `REPLICA_VERIFY_SAMPLE`.
-pub const VERIFY_SAMPLE_MAX: usize = 64;
-/// The divisor of `REPLICA_VERIFY_SAMPLE`.
-pub const VERIFY_SAMPLE_DIVISOR: usize = 32;
-
-/// `REPLICA_VERIFY_SAMPLE` for a relay that holds `chunks_held` chunks of
-/// one file (§12.4.1).
-pub const fn verify_sample(chunks_held: usize) -> usize {
-    let share = chunks_held / VERIFY_SAMPLE_DIVISOR;
-    let floored = if share < VERIFY_SAMPLE_MIN {
-        VERIFY_SAMPLE_MIN
-    } else {
-        share
-    };
-    let capped = if floored > VERIFY_SAMPLE_MAX {
-        VERIFY_SAMPLE_MAX
-    } else {
-        floored
-    };
-    if capped > chunks_held {
-        chunks_held
-    } else {
-        capped
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -110,9 +83,5 @@ mod tests {
         assert_eq!(SEGMENT_SIZE, 32_634);
         assert_eq!(MAX_DATA_CHUNKS, 72_899);
         assert_eq!(MANIFEST_REFS_PER_CHUNK, SEGMENT_SIZE / 120);
-        assert_eq!(verify_sample(2), 2);
-        assert_eq!(verify_sample(100), 4);
-        assert_eq!(verify_sample(320), 10);
-        assert_eq!(verify_sample(10_000), 64);
     }
 }

@@ -259,9 +259,13 @@ thus no address label equals a handle label.
 An address lookup blinds `"umbra/v1/address-index" || address` in step 1, and
 steps 2 to 4 do not change.
 
-The directory **does not see the plaintext handle**. An anonymous crawler has to
-pass one chokepoint. That chokepoint is one operation that a party can meter,
-and it shows nothing about the handle in the query.
+The evaluation **does not show the plaintext handle** to the directory. The
+lookup that follows sends the search key, and the directory holds the label
+of each registered handle under that key, thus it maps the lookup of a
+registered handle to that handle. OHTTP hides who asked, and Part 15 §15.3
+records the residual. An anonymous crawler has to pass one chokepoint. That
+chokepoint is one operation that a party can meter, and it shows nothing
+about the handle in the query.
 
 ### 9.4.1 Metering with anonymous tokens
 
@@ -1073,8 +1077,8 @@ directory computes the search key from it under its own key.
   `PowSolution` at `POW_LOOKUP_FLOOR` or above. **[DIS-165]** The seed of that
   solution MUST be `SHA3-256("umbra/v1/lookup-pow" || BE32(epoch) ||
   blinded)`, where `epoch` is the epoch of Part 13 §13.6 of the directory or
-  the one before it, and its `verifier_id` MUST be `SHA3-256("umbra/v1/lookup-pow"
-  || pk)`, where `pk` is the VOPRF key of the directory. A solution thus
+  the one before it, and its `verifier_id` MUST be
+  `SHA3-256("umbra/v1/lookup-pow-verifier" || pk)`, where `pk` is the VOPRF key of the directory. A solution thus
   serves one blinded element, and a second request with that element gains
   nothing, because it gets the same element back.
 - **[DIS-166]** A directory MUST stage a registration, a write, and a renewal
@@ -1114,8 +1118,9 @@ directory computes the search key from it under its own key.
 > and the carrier of the challenges as gaps. The shape follows the Notification
 > Delivery Relay of Part 8 §8.2, which already runs one request type through
 > an ingress relay in OHTTP. The padding hides the kind of a request from the
-> relay. A lookup shows no handle to the directory, and a write shows its label,
-> because the directory must bind the write to it.
+> relay. A lookup shows the search key to the directory, which names a
+> registered handle, and a write shows its label, because the directory must
+> bind the write to it. OHTTP keeps the asking party apart from both.
 
 ## 9.11 Parameters
 

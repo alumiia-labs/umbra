@@ -172,14 +172,26 @@ impl DirectoryStore for SqliteDirectoryStore {
 struct State {
     directory: Directory,
     store: Box<dyn DirectoryStore>,
+    /// A commit failed: the state in memory ran ahead of the store, and
+    /// the directory serves nothing more until a restart replays the
+    /// store. Serving it would sign a head that a restart does not sign
+    /// again, which is a split view (`DIS-034`).
+    broken: bool,
 }
 
 impl State {
     /// Runs one step and commits its events. A store that takes no commit
-    /// refuses the request.
+    /// refuses the request, and each later one.
     fn step<T>(&mut self, run: impl FnOnce(&mut Directory) -> T) -> Option<T> {
+        if self.broken {
+            return None;
+        }
         let out = run(&mut self.directory);
-        self.store.commit(&self.directory.take_events()).ok()?;
+        if self.store.commit(&self.directory.take_events()).is_err() {
+            eprintln!("the store took no commit, and the directory serves nothing more");
+            self.broken = true;
+            return None;
+        }
         Some(out)
     }
 }
@@ -239,7 +251,11 @@ pub async fn run_directory(
     directory
         .replay(&events, &mut OsRng)
         .map_err(|_| StoreFault)?;
-    let state = Arc::new(Mutex::new(State { directory, store }));
+    let state = Arc::new(Mutex::new(State {
+        directory,
+        store,
+        broken: false,
+    }));
     let clock = state.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(TICK);

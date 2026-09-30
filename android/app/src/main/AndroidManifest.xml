@@ -15,9 +15,11 @@
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
 
     <!-- IMP-048: the platform backup carries no UMBRA data, and a library
-         manifest cannot set the value again. -->
+         manifest cannot set the value again. IMP-050: a device-to-device
+         transfer carries none either. -->
     <application
         android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:label="@string/app_name"

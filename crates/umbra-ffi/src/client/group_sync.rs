@@ -410,13 +410,28 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
+        self.take_rekey_item(subject, value, now_ms, now_ms / 1_000, rng)
+            .map(|_| ())
+    }
+
+    /// Applies a re-key item that arrived at `since` seconds, or holds it
+    /// under that time. The answer says whether the item waits.
+    fn take_rekey_item<R: CryptoRng + ?Sized>(
+        &mut self,
+        subject: [u8; 32],
+        value: &[u8],
+        now_ms: u64,
+        since: u64,
+        rng: &mut R,
+    ) -> Result<bool, Error> {
         if self.owns_channels()? {
-            return Ok(());
+            return Ok(false);
         }
         // DEV-301: a group that this device does not hold yet takes the
         // item when it comes.
         let Some(conversation) = self.conversation_of_group_subject(&subject)? else {
-            return self.hold_rekey_item(subject, value, now_ms, rng);
+            self.hold_rekey_item(subject, value, since, rng)?;
+            return Ok(true);
         };
         let seed: [u8; 32] = value
             .get(..32)
@@ -428,17 +443,20 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         match group.adopt_rekey(object, &seed, now_ms / 1_000) {
             Ok(_) => {}
             // A re-key that this row holds already changes nothing.
-            Err(umbra_core::Error::Stale) => return Ok(()),
+            Err(umbra_core::Error::Stale) => return Ok(false),
             // A roster that does not reach the epoch before the re-key
             // takes the item after the next roster object.
-            Err(_) => return self.hold_rekey_item(subject, value, now_ms, rng),
+            Err(_) => {
+                self.hold_rekey_item(subject, value, since, rng)?;
+                return Ok(true);
+            }
         }
         self.store_rekeyed(conversation, &group, &seed, rng)?;
         // DEV-303: an epoch key of the new index that came on the group
         // queue before the seed waits, and it installs now.
         self.retry_epoch_keys(conversation, now_ms, rng)?;
         self.events.push_back(super::Event::Conversations);
-        Ok(())
+        Ok(false)
     }
 
     /// The group whose subject is `subject`, on this device.
@@ -458,17 +476,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 }
 
 impl<B: Backend, E: SecureElement> Client<B, E> {
+    /// Holds a re-key item under the time of its first arrival, thus a
+    /// retry that holds it again moves no clock of `REKEY_HOLD_MAX`.
     fn hold_rekey_item<R: CryptoRng + ?Sized>(
         &mut self,
         subject: [u8; 32],
         value: &[u8],
-        now_ms: u64,
+        since: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
         let open = self.open_mut()?;
         let row = open.store.row_id(REKEY_HELD, &subject);
-        let held =
-            Zeroizing::new([(now_ms / 1_000).to_be_bytes().as_slice(), &subject, value].concat());
+        let held = Zeroizing::new([since.to_be_bytes().as_slice(), &subject, value].concat());
         let mut batch = open.store.begin();
         batch.put(REKEY_HELD, row, None, &held, rng)?;
         Ok(batch.commit()?)
@@ -486,36 +505,38 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if held.is_empty() {
             return Ok(());
         }
-        let open = self.open_mut()?;
-        let mut batch = open.store.begin();
-        for (row, _) in &held {
-            batch.delete(REKEY_HELD, *row);
-        }
-        batch.commit()?;
         let now = now_ms / 1_000;
-        for (_, plain) in held {
+        let mut done = Vec::new();
+        for (row, plain) in held {
             let plain = Zeroizing::new(plain);
-            let Some(at) = plain
+            let at = plain
                 .get(..8)
                 .and_then(|bytes| bytes.try_into().ok())
-                .map(u64::from_be_bytes)
-            else {
+                .map(u64::from_be_bytes);
+            let subject = plain
+                .get(8..40)
+                .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok());
+            let (Some(at), Some(subject), Some(item)) = (at, subject, plain.get(40..)) else {
+                done.push(row);
                 continue;
             };
             if now.saturating_sub(at) > REKEY_HOLD_MAX {
+                done.push(row);
                 continue;
             }
-            let (Some(subject), Some(item)) = (
-                plain
-                    .get(8..40)
-                    .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok()),
-                plain.get(40..),
-            ) else {
-                continue;
-            };
-            self.on_group_rekey_item(subject, item, now_ms, rng)?;
+            // An item that applied goes; one that waits again kept its row
+            // and its time; a fault keeps the row for the next try, and it
+            // stops no other item.
+            if let Ok(false) = self.take_rekey_item(subject, item, now_ms, at, rng) {
+                done.push(row);
+            }
         }
-        Ok(())
+        let open = self.open_mut()?;
+        let mut batch = open.store.begin();
+        for row in done {
+            batch.delete(REKEY_HELD, row);
+        }
+        Ok(batch.commit()?)
     }
 
     /// Keeps an epoch-key record of the next epoch that did not install.

@@ -130,6 +130,38 @@ pub enum ReplyTarget {
     Absent,
 }
 
+/// Why a message of this device failed (Part 14 `IMP-074`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum FailureCause {
+    /// A relay refused the record for good.
+    Refused = 1,
+    /// No path took the record: no channel, or no seal.
+    NoPath = 2,
+    /// The upload of its file failed.
+    Upload = 3,
+    /// No replica of the group took the record before its ARQ gave up.
+    NoReplica = 4,
+    /// The queue of the contact was full, and an edit or a deletion waits
+    /// for no room (`DEV-113`).
+    Full = 5,
+}
+
+impl FailureCause {
+    /// The cause of a stored byte.
+    pub fn from_byte(byte: u8) -> Option<Self> {
+        [
+            FailureCause::Refused,
+            FailureCause::NoPath,
+            FailureCause::Upload,
+            FailureCause::NoReplica,
+            FailureCause::Full,
+        ]
+        .into_iter()
+        .find(|cause| *cause as u8 == byte)
+    }
+}
+
 /// What a conversation view shows beside the text of a message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MessageInfo {
@@ -179,6 +211,9 @@ pub struct MessageInfo {
     pub moderator_role: u8,
     /// The member index that sent a message of a group that arrived.
     pub sender: Option<u16>,
+    /// Why a failed message of this device failed, when this device knows
+    /// (`IMP-074`).
+    pub failure: Option<FailureCause>,
 }
 
 /// The longest local name of a contact, in bytes of UTF-8.
@@ -1877,8 +1912,10 @@ mod tests {
         assert!(client
             .set_push_token(Some((up, "http://plain.example/up")), &mut rng)
             .is_err());
-        let first = "https://push.example/up/one";
-        client.set_push_token(Some((up, first)), &mut rng).unwrap();
+        let first = "fcm-token-1";
+        client
+            .set_push_token(Some((TokenCarrier::Fcm, first)), &mut rng)
+            .unwrap();
         assert_eq!(
             client.push_token().unwrap().unwrap()[1..],
             *first.as_bytes()
@@ -2615,7 +2652,7 @@ mod tests {
             .unwrap();
             out
         };
-        assert_eq!(ndr.handle(&push(&before)).0, NdrResponse::Refused);
+        assert_eq!(ndr.handle(&push(&before)).0, NdrResponse::Gone);
         assert_eq!(ndr.handle(&push(&after)).0, NdrResponse::Taken);
         assert_eq!(ndr.len(), 1);
     }

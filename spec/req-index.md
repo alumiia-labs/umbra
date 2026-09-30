@@ -73,15 +73,15 @@ column when a crate implements the requirement and a test covers it.
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
 | `WIR` | 398 | 85 | 0 | 0 | 7 | **490** |
 | `DEV` | 202 | 90 | 0 | 0 | 7 | **299** |
-| `NTF` | 74 | 28 | 0 | 0 | 3 | **105** |
+| `NTF` | 75 | 28 | 0 | 0 | 3 | **106** |
 | `DIS` | 130 | 34 | 0 | 0 | 3 | **167** |
 | `REL` | 159 | 33 | 1 | 0 | 2 | **195** |
 | `GRP` | 232 | 65 | 0 | 0 | 6 | **303** |
 | `ATT` | 143 | 45 | 2 | 0 | 3 | **193** |
 | `ABU` | 71 | 30 | 1 | 0 | 0 | **102** |
-| `IMP` | 120 | 41 | 0 | 0 | 2 | **163** |
+| `IMP` | 121 | 41 | 0 | 0 | 2 | **164** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2064 | 625 | 7 | 0 | 54 | **2750** |
+| **All** | 2066 | 625 | 7 | 0 | 54 | **2752** |
 
 ## SCP — Scope and Conventions
 
@@ -1301,7 +1301,7 @@ Source: `spec/06-wire-format.md`
 | `WIR-510` | §6.4 | MUST | At the first `IGET` that verifies, a relay | At the first `IGET` that verifies, a relay MUST answer with the blob, delete the blob and the link identifier, and put `lock_pk` in the place of the `QS_auth` of the queue. |  |  |
 | `WIR-511` | §6.4 | MUST | A relay | A relay MUST answer an `IGET` for an identifier that it does not hold with the `NACK` reason `REJECTED`, and `WIR-317` gives that one reason to an unknown link, to a link with no blob, and to an `auth` that does not verify. |  |  |
 | `WIR-512` | §6.4 | MUST NOT | A relay | A relay MUST NOT answer a `COVER` of a client. |  |  |
-| `WIR-513` | §6.4 | MUST NOT | A client | A client MUST NOT hold a `COVER`, an `ACK`, a `SUB`, an `UNSUB`, or a `DEL` in the table of the commands that wait for an answer. |  |  |
+| `WIR-513` | §6.4 | MUST NOT | A client | A client MUST NOT hold a `COVER`, an `ACK`, an `UNSUB`, or a `DEL` in the table of the commands that wait for an answer. |  |  |
 | `WIR-514` | §6.6.9 | MUST | (unstated) | A read receipt, kind `0x07`, is a marker that moves forward. |  |  |
 | `WIR-515` | §6.4 | MUST | A relay | A relay MUST send a `CRPUT` as the value of one `UMBRA_REPLICA` capsule, on a connection of §6.2.1 that it opens for that copy. |  |  |
 | `WIR-516` | §6.4 | MUST NOT | (unstated) | The sender MUST set `corr_id` and `auth` of that command to zero bytes, and the receiver MUST NOT read them. |  |  |
@@ -1734,7 +1734,7 @@ Source: `spec/08-notifications.md`
 | `NTF-121` | §8.4.1 | MUST NOT | A record that arrives | A record that arrives MUST NOT start the idle time of the auto-lock again. |  |  |
 | `NTF-122` | §8.2.7 | MUST | A party | A party MUST pad each request to `NDR_REQUEST_LEN` with zero bytes, and the NDR MUST refuse a request whose padding is not zero. |  |  |
 | `NTF-123` | §8.2.7 | MUST | The plaintext of `ct_token` | The plaintext of `ct_token` MUST be a `PushToken`: carrier `0x01` is UnifiedPush and its target is the `https` URL of the endpoint, and carrier `0x02` is FCM and its target is the registration token. |  |  |
-| `NTF-124` | §8.2.7 | MUST | A device | A device MUST draw a fresh 32-byte removal secret for each registration and send its `SHA3-256` as `removal_hash`. |  |  |
+| `NTF-124` | §8.2.7 | MUST | A device | A device MUST draw a fresh 32-byte removal secret for the first registration of a handle, and each later registration of that handle MUST take `SHA3-256("umbra/v1/ndr-removal" || prior)` as its removal secret, where `prior` is the secret of the registration before it. |  |  |
 | `NTF-125` | §8.2.7 | MUST | The NDR | The NDR MUST bound the `ttl` of an `NPUSH` at `PUSH_TTL_MESSAGE`, and it MUST answer `gone` and drop the registration when the provider names the target gone. |  |  |
 | `NTF-126` | §8.2 | MUST | The inner message of that OHTTP | The inner message of that OHTTP MUST be one `NdrRequest` of §8.2.7 and its response one `NdrResponse`, with no Binary HTTP around them. |  |  |
 | `NTF-127` | §8.2 | MUST | A client build and the settings of a queue relay | A client build and the settings of a queue relay MUST pin the route to the NDR: the URL of the OHTTP relay, the key id, and the key configuration of the gateway. |  |  |
@@ -1744,6 +1744,7 @@ Source: `spec/08-notifications.md`
 | `NTF-131` | §8.4.1 | MAY | A client that holds no push carrier | A client that holds no push carrier MAY poll: a periodic job of the platform, no more often than its least period, starts a run of an open client that has none, and that run drains each queue under Part 3 §3.7 item 4. |  |  |
 | `NTF-132` | §8.5.2 | MUST | (unstated) | A client that leaves a group, that the group removes, or whose group closes MUST send a `GNUNREG` for its notify queue to each replica while it holds a read key of the group. |  |  |
 | `NTF-133` | §8.5.2 | MUST | A client | A client MUST end a notify queue that it drops with a `DEL` of Part 6 §6.4. |  |  |
+| `NTF-134` | §8.2.7 | MUST | An NDR | An NDR MUST refuse an `NPUSH` whose carrier it does not serve, and it MUST NOT post to an address that no provider of its own names. |  |  |
 
 ## DIS — Discovery, Handles, and Key Transparency
 
@@ -2549,15 +2550,15 @@ Source: `spec/12-attachments.md`
 | `ATT-110` | §12.4.1 | MUST | A relay | A relay MUST reject a second `CRPUT` for a `chunk_id` that it holds. |  |  |
 | `ATT-111` | §12.4.1 | MUST | A relay | A relay MUST reject a `CRPUT` whose payload is not 32 682 bytes. |  |  |
 | `ATT-112` | §12.4.1 | MUST | A relay | A relay MUST erase the `storage_token` of a registration when it accepts the chunk. |  |  |
-| `ATT-113` | §12.4.1 | MUST | A client | A client MUST send a `CVFY` to each replica relay for a sample of the chunks that the relay holds. |  |  |
+| `ATT-113` | §12.4.1 | MUST | A client | A client MUST send a `CVFY` to each replica relay for each chunk that the relay holds. |  |  |
 | `ATT-114` | §12.4.1 | MUST | A client | A client MUST draw `nonce` from the device CSPRNG for each `CVFY`. |  |  |
 | `ATT-115` | §12.4.1 | MUST | A relay | A relay MUST answer a `CVFY` with a `CPRF` that carries the value above. |  |  |
 | `ATT-116` | §12.4.1 | MUST | A relay | A relay MUST answer with an unknown-chunk response when it holds no chunk at that `chunk_id`. |  |  |
 | `ATT-117` | §12.4.1 | MUST | A client | A client MUST compare `proof` against the value that it computes from its own copy. |  |  |
 | `ATT-118` | §12.4.1 | MUST | (unstated) | If the two values differ, or if the relay answers unknown-chunk, the client MUST send `CNEW` and `CPUT` to a fresh relay for that chunk. |  |  |
 | `ATT-119` | §12.4.1 | MUST | The client | The client MUST report the relay that failed as a link fault under Part 10 §10.4.2. |  |  |
-| `ATT-120` | §12.4.1 | MUST | A client | A client MUST select the sampled chunks at random. |  |  |
-| `ATT-121` | §12.4.1 | MUST NOT | A client | A client MUST NOT use a fixed sample position, because a relay that predicts the sample replicates that chunk and drops the others. |  |  |
+| `ATT-120` | §12.4.1 | MUST | A client | A client MUST verify each copy of each chunk. |  |  |
+| `ATT-121` | §12.4.1 | MUST NOT | A client | A client MUST NOT leave a copy out, because a relay that could predict the copies that go unchecked would replicate those alone and drop the others. |  |  |
 | `ATT-122` | §12.4.1 | MUST | A client | A client MUST select the `REPLICAS` relays of one chunk independently of the relays of each other chunk. |  |  |
 | `ATT-123` | §12.4 | MUST NOT | A client | A client MUST NOT upload more than one copy of a chunk, and §12.4.1 makes the relay push the others. |  |  |
 | `ATT-124` | §12.7.2 | MUST | A revision that takes the code above | A revision that takes the code above MUST make that measurement first, and it MUST state the §12.2.2 concession or the device cost in the Part 2 §2.4 table. |  |  |
@@ -2617,7 +2618,7 @@ Source: `spec/12-attachments.md`
 | `ATT-181` | §12.3.3 | MUST | A pending registration whose bytes never arrive | A pending registration whose bytes never arrive MUST leave the relay at `CHUNK_TTL` after the `CNEW` or the `BNEW`, and the relay MUST count it as `CHUNK_SIZE` of used store until then. |  |  |
 | `ATT-182` | §12.3.3 | MUST | A client | A client MUST derive `read_sk` as `HKDF-SHA3-256(salt = "", ikm = file_key, info = "umbra/v1/chunk-read" || BE32(chunk_index), L = 32)`, and it MUST clamp the result as an X25519 scalar. |  |  |
 | `ATT-183` | §12.3.4 | MUST | A client | A client MUST derive `K_manifest` as `HKDF-SHA3-256(salt = "", ikm = file_key, info = "umbra/v1/file-manifest" || file_nonce, L = 32)`. |  |  |
-| `ATT-184` | §12.3.4 | MUST | (unstated) | A manifest carries no digest of its own: the tag of each manifest chunk under `K_manifest` authenticates it, and a receiver MUST accept a manifest whose chunks each verify under §12.3.1 and whose ref count equals the data chunk count of `padded_size`. |  |  |
+| `ATT-184` | §12.3.4 | MUST | (unstated) | A manifest carries no digest of its own: the tag of each manifest chunk under `K_manifest` authenticates it, and a receiver MUST accept a manifest whose chunks each verify under §12.3.1 and whose distinct `chunk_id` count equals the data chunk count of `padded_size`; two refs of one `chunk_id` are replicas of one chunk under `ATT-176`. |  |  |
 | `ATT-185` | §12.4.1 | MUST | A relay | A relay MUST reject a `CREP` whose `target_count` is 0 or above `HOT_REPLICAS` − 1. |  |  |
 | `ATT-186` | §12.3.3 | MUST | A relay | A relay MUST answer an accepted `CPUT` and an accepted `CREP` with a `CPRF` whose `proof` is `SHA3-256(corr_id || chunk)`, where `corr_id` is the 16 bytes of that command and `chunk` is what the relay holds. |  |  |
 | `ATT-187` | §12.3.3 | MUST | A relay | A relay MUST answer an accepted `CDEL` with a `CPRF` of 32 zero bytes. |  |  |
@@ -2908,7 +2909,8 @@ Source: `spec/14-implementation.md`
 | `IMP-171` | §14.6.4 | MUST | A client | A client MUST record a voice object of Part 12 into the memory alone. |  |  |
 | `IMP-172` | §14.6.4 | MUST | A client | A client MUST end a recording at `VOICE_MAX_SECONDS` (`ATT-071`), and it MUST drop a recording that the user leaves: a close of the conversation, or a lock. |  |  |
 | `IMP-173` | §14.6.4 | MUST | The encode of a recording | The encode of a recording MUST carry no comment field and no time of the capture (`ATT-155`). |  |  |
-| `IMP-174` | §14.2.1 | MUST | An implementation | An implementation **MUST** turn `zeroize` on: with it off, a secret scalar and a shared secret stay in memory after a drop (Part 5 `CRY-059`) | `chacha20poly1305` 0.11 | `default-features = false` | `aes` + `polyval` | for the onion UIV+ layer only | `sha3` 0.11 | pin to 0.11 to match `ml-kem` and to prevent a duplicate `sha3` 0.12; `features = ["zeroize"]` | `hkdf` 0.13, `hmac` 0.13 | generic over `Sha3_256`; `hmac` with `features = ["zeroize"]`, thus a keyed state is wiped | `subtle` 2, `zeroize` 1 | | |  |  |
+| `IMP-174` | §14.2.1 | MUST | An implementation | An implementation **MUST** turn `zeroize` on: with it off, a secret scalar and a shared secret stay in memory after a drop (Part 5 `CRY-059`). |  |  |
+| `IMP-175` | §14.6.4 | MUST | A client | A client MUST refuse a header whose memory is above four times the floor, or whose passes are above 3 000, before it runs Argon2id: a party with the file that raises the two values would otherwise make each unlock allocate without bound. |  |  |
 
 ## SEC — Security Considerations
 

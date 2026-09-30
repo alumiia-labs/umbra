@@ -374,7 +374,7 @@ fun NameContactScreen(conversation: Conversation, onDone: () -> Unit) {
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
-                        name.trim().firstOrNull()?.uppercase() ?: "?",
+                        firstLetter(name.trim()),
                         style = MaterialTheme.typography.headlineMedium,
                     )
                 }

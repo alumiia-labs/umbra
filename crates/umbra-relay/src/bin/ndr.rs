@@ -48,7 +48,7 @@ fn hex32(text: &str) -> Option<[u8; 32]> {
 
 /// The gateway key of a seed.
 fn gateway_pair(seed: &[u8; 32]) -> KeyPair {
-    seeded_pair(b"umbra/v1/ndr", seed)
+    seeded_pair(umbra_crypto::labels::NDR, seed)
 }
 
 fn main() -> ExitCode {
@@ -155,6 +155,8 @@ async fn run() -> ExitCode {
         store,
         provider_tls,
         fcm,
+        // NTF-134: the reference NDR posts to FCM alone.
+        false,
     )
     .await
     {

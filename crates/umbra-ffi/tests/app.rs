@@ -686,6 +686,8 @@ fn a_message_to_an_app_that_went_away_reaches_its_push_endpoint() {
         Box::new(MemoryNdrStore::default()),
         native::tls_config_with_root_file(CA).unwrap(),
         None,
+        // The endpoint of the test is a UnifiedPush endpoint on this machine.
+        true,
     ));
     let (_relays, ports) = start_relays_with(None, None, Some(&ndr));
     let mut network = network_of(&ports);
@@ -772,6 +774,8 @@ fn a_group_record_wakes_a_member_that_went_away_through_its_notify_queue() {
         Box::new(MemoryNdrStore::default()),
         native::tls_config_with_root_file(CA).unwrap(),
         None,
+        // The endpoint of the test is a UnifiedPush endpoint on this machine.
+        true,
     ));
     let relays = tokio::runtime::Runtime::new().unwrap();
     let network = start_signed_network_with(&relays, None, Some(&ndr), None, false);

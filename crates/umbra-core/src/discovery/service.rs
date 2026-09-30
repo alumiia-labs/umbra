@@ -227,7 +227,7 @@ pub fn lookup_seed(epoch: u32, blinded: &[u8; 32]) -> [u8; 32] {
 
 /// The verifier of the proof of work of a lookup (`DIS-165`).
 pub fn lookup_verifier(directory_pk: &[u8; 32]) -> [u8; 32] {
-    sha3_256(&[labels::LOOKUP_POW, directory_pk])
+    sha3_256(&[labels::LOOKUP_POW_VERIFIER, directory_pk])
 }
 
 /// The seed of the proof of work of an issuance (`ABU-109`).
@@ -237,7 +237,7 @@ pub fn issue_seed(epoch: u32, blinded: &[u8]) -> [u8; 32] {
 
 /// The verifier of the proof of work of an issuance (`ABU-109`).
 pub fn issue_verifier(issuer_pk: &[u8]) -> [u8; 32] {
-    sha3_256(&[labels::ISSUE_POW, issuer_pk])
+    sha3_256(&[labels::ISSUE_POW_VERIFIER, issuer_pk])
 }
 
 impl Directory {
@@ -891,13 +891,9 @@ impl Directory {
             .verify(&answer, Some(&entry))
             .map_err(|_| Status::Refused)?;
         let key = self.check_entry(&input, &entry, version_new)?;
-        if self
-            .stage(&search_key, entry, rng)
-            .map_err(|_| Status::Stale)?
-            != version_new
-        {
-            return Err(Status::Stale);
-        }
+        // DIS-076: the label takes the change before the log does, thus a
+        // change that the label refuses stages no entry, and the label and
+        // the log never part.
         if key == [0; 1_216] {
             // DIS-171: the holder retires the entry.
             record
@@ -909,6 +905,16 @@ impl Directory {
                 .label
                 .publish(version_new, key, now)
                 .map_err(|_| Status::Stale)?;
+        }
+        if self.operator.next_version(&search_key) != Some(version_new) {
+            return Err(Status::Stale);
+        }
+        if self
+            .stage(&search_key, entry, rng)
+            .map_err(|_| Status::Stale)?
+            != version_new
+        {
+            return Err(Status::Stale);
         }
         self.keep_label(&search_key, record);
         Ok(Vec::new())

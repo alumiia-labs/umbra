@@ -556,7 +556,9 @@ K_manifest     = HKDF-SHA3-256( "umbra/v1/file-manifest", file_key, file_nonce )
 ```
 
 The client segments the manifest under §12.2.3, and it seals each segment under
-§12.3.1 with `K_manifest` in place of `file_key`. It uploads those chunks under
+§12.3.1 with `K_manifest` in place of `file_key`. The `read_sk` of each
+manifest chunk takes `K_manifest` as the `ikm` of `ATT-182` in the same manner,
+thus the key of a data chunk opens no manifest chunk. It uploads those chunks under
 §12.3.3 with `REPLICAS` copies. The descriptor then carries a `ChunkRef` for
 each manifest chunk.
 
@@ -578,8 +580,9 @@ each manifest chunk.
   "umbra/v1/file-manifest" || file_nonce, L = 32)`. **[ATT-184]** A manifest
   carries no digest of its own: the tag of each manifest chunk under
   `K_manifest` authenticates it, and a receiver MUST accept a manifest whose
-  chunks each verify under §12.3.1 and whose ref count equals the data chunk
-  count of `padded_size`.
+  chunks each verify under §12.3.1 and whose distinct `chunk_id` count equals
+  the data chunk count of `padded_size`; two refs of one `chunk_id` are
+  replicas of one chunk under `ATT-176`.
 - **[ATT-079]** A receiver MUST rebuild the full manifest before it fetches a
   data chunk. **[ATT-080]** A receiver MUST NOT present a file as complete
   before it verifies `digest` under `ATT-031`.
@@ -709,8 +712,8 @@ own.
 proof = SHA3-256( nonce || chunk )
 ```
 
-- **[ATT-113]** A client MUST send a `CVFY` to each replica relay for a sample
-  of the chunks that the relay holds. **[ATT-114]** A client MUST draw `nonce`
+- **[ATT-113]** A client MUST send a `CVFY` to each replica relay for each
+  chunk that the relay holds. **[ATT-114]** A client MUST draw `nonce`
   from the device CSPRNG for each `CVFY`.
 - **[ATT-115]** A relay MUST answer a `CVFY` with a `CPRF` that carries the
   value above. **[ATT-116]** A relay MUST answer with an unknown-chunk response
@@ -737,20 +740,21 @@ proof = SHA3-256( nonce || chunk )
   fails, and the message fails with it. The reference client asks 6 times,
   waits 30 seconds, and stops at 3.
 
-**The sample size.** `REPLICA_VERIFY_SAMPLE` is the greater of 4 and one 32nd of
-the chunks that the relay holds for that file, and it is at most 64.
-**[ATT-120]** A client MUST select the sampled chunks at random. **[ATT-121]** A
-client MUST NOT use a fixed sample position, because a relay that predicts the
-sample replicates that chunk and drops the others.
+**Each copy.** **[ATT-120]** A client MUST verify each copy of each chunk.
+**[ATT-121]** A client MUST NOT leave a copy out, because a relay that could
+predict the copies that go unchecked would replicate those alone and drop the
+others. A sample saved about 8 MiB of `B0` cells on a file of 250 MiB, and it
+repaired only the chunk whose copy failed, thus the other copies that a bad
+relay dropped stayed lost.
 
 **What this costs and what it saves.**
 
 | | Client uplink for a 250 MiB object | Chain traffic at 3 hops | Direct relay to relay |
 | --- | --- | --- | --- |
 | A client that uploads 3 copies | 762.0 MiB | 2.23 GiB | 0 |
-| **The rule above** | **259.4 MiB** | **778 MiB** | **504 MiB** |
+| **The rule above** | **267.7 MiB** | **803 MiB** | **503.9 MiB** |
 
-§12.7.2 derives each figure. The saving is 2.94 times on the uplink of the
+§12.7.2 derives each figure. The saving is 2.85 times on the uplink of the
 device, and the relay carries the difference on a mains-power link with
 flat-rate bandwidth. Part 3 §3.6.3 applies the same principle to the cover
 traffic, and Part 10 §10.2 already ranks a relay by its capacity class.
@@ -873,7 +877,6 @@ three properties hold:
 | `CHUNK_STORE_MIN` | 100 GiB for a relay that declares the attachment role (§12.10) |
 | `CHUNK_STORE_TARGET` | 200 GiB (§12.10) |
 | `LARGE_FILE_WARN` | 25 MiB (§12.7.2) |
-| `REPLICA_VERIFY_SAMPLE` | the greater of 4 and one 32nd of the chunks, at most 64 (§12.4.1) |
 | `PLACE_PROBE` | 4 relays for one handle (§12.4.2) |
 | `IMAGE_REENCODE_BYTES` | 2 MiB (§12.3) |
 | `FILE_NAME_MAX` | 255 bytes of UTF-8, the name of Part 6 rule `WIR-531` |
@@ -961,19 +964,19 @@ Three rules bound the failure that stays.
 
 | Quantity | Value |
 | --- | --- |
-| Data chunks | 8 034, which is 262 144 000 divided by `SEGMENT_SIZE` of 32 634, rounded up |
+| Data chunks | 8 033, which is 262 144 000 and the pad marker divided by `SEGMENT_SIZE` of 32 634, rounded up |
 | Manifest chunks | 30, and §12.3.4 derives them |
-| Chunks in total | 8 064 |
+| Chunks in total | 8 063 |
 | Descriptor | 137 + 30 × 120 = 3 737 bytes, thus one `B2` cell |
-| `CNEW` and `CID`, 3 for each chunk | 24 192 commands, batched 3 to a `B0` cell under Part 6 §6.4.1, which is 8 064 cells and 4.31 MiB |
-| `CPUT`, 1 for each chunk | 8 064 `B3` cells at 32 860 bytes, which is **252.7 MiB** |
-| `CREP`, 1 for each chunk | 8 064 commands, batched 2 to a `B0` cell, which is 4 032 cells and 2.15 MiB |
-| `CVFY`, a sample of 64 for each replica relay | about 504 `B0` cells and 0.27 MiB |
-| **Client uplink** | **about 259.4 MiB** |
-| `CDEL` at a deletion, 3 for each chunk | 24 192 commands, batched 3 to a `B0` cell, which is 8 064 cells and 4.31 MiB |
-| Direct relay to relay, 2 `CRPUT` for each chunk | 16 128 × 32 766 = about 504.0 MiB |
-| Download at one replica | 8 064 × 32 860 = about 252.7 MiB |
-| Upload time, Fast mode, 5 Mbit/s uplink | about **7 minutes**, and the link binds it |
+| `CNEW` and `CID`, 3 for each chunk | 24 189 commands, batched 3 to a `B0` cell under Part 6 §6.4.1, which is 8 063 cells and 4.31 MiB |
+| `CPUT`, 1 for each chunk | 8 063 `B3` cells at 32 860 bytes, which is **252.7 MiB** |
+| `CREP`, 1 for each chunk | 8 063 commands, batched 2 to a `B0` cell, which is 4 032 cells and 2.15 MiB |
+| `CVFY`, 1 for each copy | 16 126 `B0` cells and 8.61 MiB |
+| **Client uplink** | **about 267.7 MiB** |
+| `CDEL` at a deletion, 3 for each chunk | 24 189 commands, batched 3 to a `B0` cell, which is 8 063 cells and 4.31 MiB |
+| Direct relay to relay, 2 `CRPUT` for each chunk | 16 126 × 32 766 = about 503.9 MiB |
+| Download at one replica | 8 063 × 32 860 = about 252.7 MiB |
+| Upload time, Fast mode, 5 Mbit/s uplink | about **7.5 minutes**, and the link binds it |
 | Upload time, Balanced mode | about **23 minutes**, and the round trip binds it |
 | Upload time, Private mode | about **80 minutes**, and the round trip binds it |
 | Download time at 20 Mbit/s, Fast, Balanced, Private | about 2, 6, and 19 minutes |
@@ -1003,13 +1006,14 @@ the throughput, and the smaller of that figure and the link rate gives the time.
 > a faster mode than its conversation shows the mode of that conversation to
 > the ingress relay, which Part 3 §3.9.1 forbids.
 
-**A 250 MiB attachment costs about 259.4 MiB of the uplink of the device.**
-§12.4.1 makes the relay carry the copies, thus the device pays about 1.04 times
-the object and not 3.0 times it. The remaining 4 percent is the `CNEW` traffic,
-the `CREP` traffic, and the padding of the `B3` bucket.
+**A 250 MiB attachment costs about 267.7 MiB of the uplink of the device.**
+§12.4.1 makes the relay carry the copies, thus the device pays about 1.07 times
+the object and not 3.0 times it. The remaining 7 percent is the `CNEW` traffic,
+the `CREP` traffic, the `CVFY` of each copy, and the padding of the `B3`
+bucket.
 
 No usability goal of Part 2 §2.4 caps an attachment upload. A client that sends
-such an object on a metered plan still spends about 259 MiB of that plan, and
+such an object on a metered plan still spends about 268 MiB of that plan, and
 this section states that plainly. A deletion of the same object costs 4.31 MiB
 more, under `ATT-161`.
 

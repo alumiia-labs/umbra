@@ -63,7 +63,7 @@ fn hex32(text: &str) -> Option<[u8; 32]> {
 
 /// The gateway key of a seed.
 fn gateway_pair(seed: &[u8; 32]) -> KeyPair {
-    seeded_pair(b"umbra/v1/directory", seed)
+    seeded_pair(umbra_crypto::labels::DIRECTORY, seed)
 }
 
 fn main() -> ExitCode {

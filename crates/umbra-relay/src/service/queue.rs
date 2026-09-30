@@ -460,6 +460,10 @@ impl QueueService {
                 Ok(replies)
             }
             Cmd::Iget => {
+                // WIR-509: the fetch names no queue.
+                if command.queue_id != [0; 32] {
+                    return Err(Reject::Rejected);
+                }
                 // The party holds no key of the queue yet. It signs under
                 // the lock key, thus the lock names a key that it holds.
                 let payload: &[u8; IGET_LEN] =
@@ -555,6 +559,11 @@ impl QueueService {
             Cmd::Ack => {
                 let seq: [u8; 4] = command.payload.try_into().map_err(|_| Reject::Rejected)?;
                 let seq = u32::from_be_bytes(seq);
+                // An ACK above the last record of the queue names no record,
+                // and it would move the cursor past the next one.
+                if seq >= queue.next_seq() {
+                    return Err(Reject::Rejected);
+                }
                 queue.ack(seq);
                 self.changes.push(StoreChange::Acked { recipient_id, seq });
                 Ok(Vec::new())

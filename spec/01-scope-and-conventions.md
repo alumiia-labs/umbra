@@ -330,6 +330,9 @@ examples. Without the table below a maintainer finds the dependents by hand.
 | `MAX_STORED` | Part 5 §5.5.4 | Part 13 §13.12, Part 15 §15.3 |
 | `MAX_BYTES`, `MAX_STORED_DEVICE` | Part 5 §5.5.4 | Part 15 §15.3 |
 | `DELETE_BATCH_MAX` | Part 7 §7.5.6 | Part 6 §6.6.1, Part 6 §6.8 |
+| `EDIT_WINDOW`, `EDIT_MAX`, `DELETE_RATE_LIMIT` | Part 7 §7.5.6 | Part 14 §14.6.1 |
+| `VOICE_MAX_SECONDS` | Part 12 §12.7 | Part 14 §14.6.4 |
+| `CIRCUIT_BUILD_TIMEOUT` | Part 3 §3.4.3 | Part 11 §11.2.2 |
 | `SWEEP_SPREAD` | Part 7 §7.5.6 | Part 4 §4.5.1 |
 | `SYNC_MAX_AGE` | Part 7 §7.8 | Part 2 §2.4, Part 6 §6.6 |
 | `SYNC_ACK_BATCH`, `SYNC_ACK_MAX_DELAY`, `OWNER_CLAIM_MAX` | Part 7 §7.8 | Part 3 §3.12 |
@@ -428,25 +431,25 @@ side channel that the user selects, such as a QR code scan.
 | One-time invitation link | Part 4 §4.3.1 | Out of band | Client |
 | Invitation landing document | Part 4 §4.3.1 | HTTPS at the invitation host | The nonprofit |
 | Invitation blob | Part 5 §5.4.1 | The relay, under the link of Part 4 §4.3.1 | Client |
-| Reusable contact link (Part 4 §4.3.2) | none | Out of band | Client |
 | `KeyChangeNotice` | Part 4 §4.5.1 | `AppMessage`, kind `0x30` | Client |
 | Backup object, `BackupRootChunk`, `BackupRoot`, `BackupEntry` | Part 4 §4.7.2 | Backup-class chunks under `BNEW`, Part 12 §12.3.3, and the handle-addressed chunk of Part 12 §12.4.2 | Client |
 | `RecoveryShare` | Part 4 §4.7.3 | `AppMessage`, kind `0x0D` | Client |
-| Handshake flights 1 to 3 | Part 5 §5.4.2 | none | Client |
-| `Roster`, `DeviceEntry`, `OwnerClaim`, `OwnerClaimRecord` | Part 7 §7.3.1 | none | Client |
-| Link QR code and provisioning payload (Part 7 §7.4) | none | none | Client |
-| Mutable state body, kind `0x20` sub-kind `0x01` (Part 7 §7.5.3) | none | `AppMessage` | Client |
+| Handshake flights 1 to 3 | Part 5 §5.4.2 | `HandshakeRecord`, an L6 record of kind `0x05`, Part 6 §6.4.2 | Client |
+| `HandshakeRecord` | Part 6 §6.4.2 | The L6 record of a queue | Client |
+| `Roster`, `DeviceEntry`, `OwnerClaim`, `OwnerClaimRecord` | Part 7 §7.3.1 | `DeviceSetControl` type `0x02` and type `0x03`, Part 7 §7.5.3 | Client |
+| Link QR code and provisioning payload | Part 7 §7.4 | Out of band for the code, and the chunk path of Part 12 §12.3.3 for the provision | Client |
+| `MutableItem`, kind `0x20` sub-kind `0x01` | Part 7 §7.5.3 | `AppMessage` | Client |
 | `DeviceSetControl`, `SyncAck` | Part 7 §7.5.5 | `AppMessage`, kind `0x20` sub-kind `0x02` | Client |
 | `SyncSeedUpdate` | Part 7 §7.7 | `DeviceSetControl`, type `0x05` | Client |
-| Catch-up object (Part 7 §7.5.1) | none | The chunk path of Part 12 §12.3.3, and `DeviceSetControl` type `0x04` carries its `FileDescriptor` | Client |
-| Push registration `(handle_i, ct_token_i)` (Part 8 §8.2.1) | none | none | Client |
+| Catch-up object | Part 7 §7.5.1 | The chunk path of Part 12 §12.3.3, and `DeviceSetControl` type `0x04` carries its `FileDescriptor` | Client |
+| `NdrRequest`, `NdrResponse`, `PushToken` | Part 8 §8.2.7 | OHTTP to the NDR, Part 8 §8.2.7 | Client and NDR |
 | Notification blob | Part 8 §8.2.2 | The platform push, Part 8 §8.4 | Relay |
-| `k_ntf_root` transfer (Part 8 §8.2.3) | none | none | Client |
+| `NotifyBinding`, the `k_ntf_root` transfer | Part 8 §8.2.3 | `NBIND`, Part 6 §6.4 | Client |
 | `DirectoryEntry` | Part 9 §9.3 | The directory, Part 9 §9.3 | Client |
 | `AddressEntry` | Part 9 §9.3.3 | The directory, Part 9 §9.3.3 | Client |
 | Reusable contact link | Part 4 §4.3.2 | Out of band | Client |
 | Handle link | Part 9 §9.3.1 | Out of band | Client |
-| Profile blob (Part 9 §9.3.1) | none | none | Client |
+| Profile blob | Part 9 §9.3.1 | The directory service of Part 9 §9.10 | Client |
 | Lookup request and response (Part 9 §9.4) | Part 9 §9.10 | OHTTP through an ingress relay, Part 9 §9.10 | Client and directory |
 | `LookupProof`, `LadderStep` | Part 9 §9.5.1 | The lookup response of Part 9 §9.4 step 4 | Directory |
 | `VersionProof` | Part 9 §9.9.2 | The `Version` response of Part 9 §9.10 | Directory |
@@ -469,7 +472,7 @@ side channel that the user selects, such as a QR code scan.
 | `RelaySetDiff` | Part 10 §10.5.3 | The bootstrap carriers of Part 3 §3.10 | Directory authority |
 | `RelayDescriptor` | Part 10 §10.5.3 | `RelayEntry`, Part 10 §10.5.3 | Relay |
 | `RelayEntry` | Part 10 §10.5.3 | The consensus, Part 10 §10.5.3 | Directory authority |
-| Inclusion proof (Part 10 §10.5.3) | none | none | Directory authority |
+| `ProvenEntry`, the inclusion proof | Part 10 §10.5.5 | The relay manifest of Part 10 §10.5.5 | Directory authority |
 | `FamilyCert` | Part 10 §10.6.3 | The dossier of Part 10 §10.6 | Relay |
 | `BlocList`, `Bloc` | Part 10 §10.6.3 | The bootstrap carriers of Part 3 §3.10 | Directory authority |
 | Group-queue commands `0x90` to `0x9A` | Part 6 §6.4.5 | `Cell` | Client and relay |
@@ -484,11 +487,16 @@ side channel that the user selects, such as a QR code scan.
 | `JoinRecord` | Part 6 §6.6.3 | `GroupControl`, type `0x02`, on the pairwise channel of the invitee to the inviter | Client |
 | `GroupInvitation` | Part 6 §6.6.3 | `GroupControl`, type `0x07`, on the pairwise channel of the inviter to the invitee | Client |
 | `SnapshotNotice` | Part 6 §6.6.3 | `GroupQueueRecord`, as `GroupControl` type `0x08` | Client |
-| `RekeyRecord` | Part 6 §6.6.3 | `GroupControl`, type `0x09`, on a pairwise channel to an admin | Client |
+| `RekeyRecord` | Part 6 §6.6.3 | `GroupControl`, type `0x09`, as a `GroupQueueRecord` of the group (Part 11 `GRP-365`) | Client |
 | `GroupMemberEntry`, `RosterSnapshot` | Part 6 §6.6.3 | The chunk path of Part 12 §12.3.3, under a `FileDescriptor` in a `GroupInvitation` stage `0x02` or in a `SnapshotNotice` | Client |
-| Plain epoch (Part 11 §11.9.2) | none | `GroupControl`, type `0x03` | Client |
-| Granting epoch (Part 11 §11.9.2) | none | `GroupControl`, type `0x04` | Client |
-| Group moderation epoch (Part 11 §11.9.6) | none | `GroupControl`, type `0x05` | Client |
+| Plain epoch | Part 6 §6.6.3 | `GroupControl`, type `0x03` | Client |
+| Granting epoch | Part 6 §6.6.3 | `GroupControl`, type `0x04` | Client |
+| Group moderation epoch | Part 6 §6.6.3 | `GroupControl`, type `0x05` | Client |
+| `InvitationOffer`, `InvitationAdmit` | Part 6 §6.6.3 | `GroupInvitation`, `GroupControl` type `0x07` | Client |
+| `GroupNotifyRegistration` | Part 6 §6.4.5 | `GNREG`, Part 6 §6.4.5 | Client |
+| `InvitationBlob` | Part 4 §4.3.1 | `IPUT` and `IBLOB`, Part 6 §6.4 | Client |
+| `DirRequest`, `DirResponse` | Part 9 §9.10 | OHTTP to the directory, Part 9 §9.10 | Client and directory |
+| `IssueRequest`, `IssueResponse` | Part 13 §13.9 | OHTTP to the issuer, Part 13 §13.9 | Client and issuer |
 | `GroupPresence` | Part 11 §11.9.7 | `GroupQueueRecord`, as `GroupControl` type `0x06` | Client |
 | `FileDescriptor`, `ChunkRef` | Part 12 §12.3 | `AppMessage`, kind `0x02` | Client |
 | `RelayRef` | Part 12 §12.3.2 | `ChunkRef` | Client |
@@ -499,7 +507,7 @@ side channel that the user selects, such as a QR code scan.
 | `PowSolution` | Part 13 §13.8 | `Admission` | Client |
 | Cross-relay token, first-party token | The RFC of each type, Part 13 §13.3 | The issuance request of Part 13 §13.9, for a first-party token | Issuer, Part 13 §13.9 |
 
-The table has 97 rows, and 21 of them hold at least one `none` cell.
+The table has 107 rows, and none of them holds a `none` cell.
 `Cell` has two definitions, and the two agree field for field.
 
 - **[SCP-011]** A revision MUST NOT add a requirement that names an artifact
@@ -516,10 +524,10 @@ The table has 97 rows, and 21 of them hold at least one `none` cell.
 > of them. The proof-of-work challenge of Part 13 §13.8 is a second. Each one
 > sat behind a requirement that an implementer could not satisfy.
 >
-> The table above found more. The handshake flights of Part 5 §5.4.2 have a
-> byte layout, and no command or kind carries them. Rule `SCP-015` follows rule
-> `SCP-010`, and the duplicate pair above is the debt that it stops from
-> growing.
+> The table above found more: the handshake flights of Part 5 §5.4.2 had a
+> byte layout and no carrier, until `HandshakeRecord` of Part 6 §6.4.2 took
+> them. Rule `SCP-015` follows rule `SCP-010`, and `Cell` is the one duplicate
+> pair that the table keeps.
 
 ## 1.9 Time and the clock
 

@@ -56,6 +56,10 @@ class Conversation(val id: ByteArray) {
     /** A stable short name for a contact that the user did not name yet. */
     val label: String
         get() = id.take(4).joinToString("") { "%02x".format(it) }
+
+    /** The whole identifier as text, a key that no two conversations share. */
+    val key: String
+        get() = id.joinToString("") { "%02x".format(it) }
 }
 
 /**
@@ -1513,7 +1517,12 @@ object Core {
                 // NET-100: a push wake is a session of 6 s at most.
                 if (isWake) client.connectWake(network) else client.connect(network)
             } catch (failure: FfiException) {
-                main.post { isStarting = false }
+                // A run that did not start calls for a retry, as one that
+                // ended does.
+                main.post {
+                    isStarting = false
+                    retryLater(app)
+                }
                 throw failure
             }
             // A run starts in the foreground tier, thus it takes the state

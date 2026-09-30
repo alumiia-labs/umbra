@@ -14,7 +14,7 @@ by hand. `python scripts/logo.py --check` reports a file that is out of date.
 | `umbra-mark-light.svg`, `umbra-logo-light.svg` | On a light ground: forest `#285C43`, ink `#202B25` |
 | `umbra-mark-dark.svg`, `umbra-logo-dark.svg` | On a dark ground: mint `#B5DDC4`, soft white `#E4EAE5` |
 | `umbra-mark-auto.svg`, `umbra-logo-auto.svg` | Follow the viewer's light or dark colour scheme |
-| `umbra-favicon.svg` | 24 px and less: a heavier rim and a wider gap, follows the colour scheme |
+| `umbra-favicon.svg` | Below 32 px: a heavier rim and a wider gap, follows the colour scheme |
 | `umbra-app-icon.svg` | Square tile on the 108-unit adaptive-icon canvas, inside the 66-unit safe zone |
 | `umbra-app-icon-rounded.svg`, `umbra-app-icon-dark.svg` | Tiles with round corners, green and charcoal |
 

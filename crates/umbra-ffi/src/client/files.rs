@@ -519,7 +519,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         rng: &mut R,
     ) -> Result<(), Error> {
         self.set_file_state(message, FileState::Failed, rng)?;
-        self.set_delivery(message, Delivery::Failed, rng)?;
+        self.fail(message, crate::FailureCause::Upload, rng)?;
         self.events.push_back(Event::Delivery {
             message: *message,
             delivery: Delivery::Failed,

@@ -15,10 +15,8 @@ import uniffi.umbra_ffi.SecureElementCallback
  * The keyed function of Part 14 §14.6.4: `HMAC-SHA256(k_se, input)` under a
  * key that the keystore made and that has no export path. StrongBox holds the
  * key when the device has one, and the TEE holds it on each other device.
- *
- * Open: the wrapping key does not ask for the biometric or the device
- * credential at each use yet. That step needs a `BiometricPrompt` around
- * this call.
+ * The key asks for no user authentication at each use: the passphrase is the
+ * authentication of this step (`IMP-065`).
  */
 class KeystoreElement(private val context: Context) : SecureElementCallback {
 
@@ -30,6 +28,9 @@ class KeystoreElement(private val context: Context) : SecureElementCallback {
         } catch (fault: Exception) {
             // The Rust side reads an empty result as a keystore failure.
             ByteArray(0)
+        } finally {
+            // IMP-037: the stretch of the passphrase leaves no copy here.
+            input.fill(0)
         }
 
     private fun key(): SecretKey {

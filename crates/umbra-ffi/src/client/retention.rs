@@ -157,7 +157,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     *top = (*top).max(counter);
                 }
             }
-            self.delete_if_held(message)?;
+            // A fault of one message keeps it for the next sweep, and it
+            // stops no other removal.
+            if self.delete_if_held(message).is_err() {
+                continue;
+            }
             let open = self.open_mut()?;
             let mut batch = open.store.begin();
             batch.delete(SYNC_ORIGIN, message.0);

@@ -9,6 +9,7 @@
 //! and at each change of the contact set, one group in one run
 //! (`NTF-007`, `NTF-008`, `NTF-080`, `NTF-081`).
 
+use umbra_core::notify::ndr::next_removal;
 use umbra_core::{
     notify::{binding::Binding, MAX_QUEUES_PER_HANDLE, ROTATE_INTERVAL},
     store::{engine::Backend, record::TableId, wrap::SecureElement},
@@ -198,6 +199,9 @@ pub struct NdrCall {
     pub handle: [u8; 16],
     /// Whether the request removes the group (`NUNREG`).
     pub is_removal: bool,
+    /// Whether the registration moves the group to the next removal secret
+    /// of its chain (`NTF-124`).
+    pub advances: bool,
     /// The request.
     pub request: Box<[u8; NDR_REQUEST_LEN]>,
 }
@@ -657,6 +661,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     NdrCall {
                         handle: group.handle,
                         is_removal: true,
+                        advances: false,
                         request: out,
                     }
                 }
@@ -670,18 +675,24 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         .map_err(|_| Error::Malformed)?;
                     ct_token.extend_from_slice(&tag);
                     // NTF-124: a handle that the NDR holds moves on its
-                    // removal secret; a new one names zero.
-                    let prior = if state == STALE {
-                        Secret::new(*group.removal.expose())
+                    // removal secret, and the next registration takes the
+                    // next secret of the chain. The request carries the
+                    // secret that the device holds in `prior` in each case:
+                    // the NDR reads it for a handle that it holds, thus a
+                    // first registration whose answer was lost goes again.
+                    let advances = state == STALE;
+                    let prior = Secret::new(*group.removal.expose());
+                    let removal = if advances {
+                        next_removal(&group.removal)
                     } else {
-                        Secret::new([0; 32])
+                        Secret::new(*group.removal.expose())
                     };
                     let mut out = Box::new([0u8; NDR_REQUEST_LEN]);
                     NdrRequest::Register {
                         handle: group.handle,
                         nonce,
                         ct_token: &ct_token,
-                        removal_hash: sha3_256(&[group.removal.expose()]),
+                        removal_hash: sha3_256(&[removal.expose()]),
                         prior,
                     }
                     .encode(&mut out)
@@ -689,6 +700,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     NdrCall {
                         handle: group.handle,
                         is_removal: false,
+                        advances,
                         request: out,
                     }
                 }
@@ -703,6 +715,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     NdrCall {
                         handle: group.handle,
                         is_removal: true,
+                        advances: false,
                         request: out,
                     }
                 }
@@ -734,9 +747,25 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         } else {
             REGISTERED
         };
-        self.put_rows(
-            &[(NOTIFY_GROUP, group.handle.to_vec(), group.encode())],
-            rng,
-        )
+        // NTF-124: the registration took the next secret of the chain.
+        if call.advances {
+            group.removal = next_removal(&group.removal);
+        }
+        // NTF-125: a relay that pushed before this registration got `gone`
+        // and dropped its binding, thus each queue of the handle binds again.
+        let mut unbound = Vec::new();
+        if !call.is_removal {
+            for (_, bytes) in self.open_ref()?.store.list(NOTIFY_QUEUE, None)? {
+                let Ok(mut queue) = Queue::parse(&bytes) else {
+                    continue;
+                };
+                if queue.handle == group.handle && queue.bound {
+                    queue.bound = false;
+                    unbound.push((NOTIFY_QUEUE, queue.recipient_id.to_vec(), queue.encode()));
+                }
+            }
+        }
+        unbound.push((NOTIFY_GROUP, group.handle.to_vec(), group.encode()));
+        self.put_rows(&unbound, rng)
     }
 }

@@ -184,7 +184,7 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                 Note("A removed device took your place in this group. Your request to an admin waits.")
             } else if (chat.needsInvitation) {
                 Spacer(Modifier.height(12.dp))
-                Note("A removed device took your place in this group. Ask an admin for a new invitation.")
+                Note(UiText.get(R.string.umbra_ui_grp_374))
             } else if (!chat.isMember) {
                 Spacer(Modifier.height(12.dp))
                 Note("You are no longer a member of this group.")
@@ -488,7 +488,7 @@ fun InviteToGroupScreen(chat: Chat, onBack: () -> Unit) {
             return
         }
         LazyColumn {
-            items(contacts, key = { it.conversation.label }) { contact ->
+            items(contacts, key = { it.conversation.key }) { contact ->
                 val isInvited = contact.conversation.id.toList() in invited
                 Row(
                     Modifier

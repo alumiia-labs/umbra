@@ -672,6 +672,14 @@ impl Group {
         super::join::rekey_record(&self.keys, fresh, &self.roster, self.own_index, false, rng)
     }
 
+    /// Discards each held record past `GROUP_ROSTER_WAIT` at `now`, and
+    /// returns the count, which the client shows as a gap (`GRP-253`,
+    /// `GRP-254`).
+    pub fn expire_held(&mut self, now: u64) -> usize {
+        let current = self.epochs.epoch();
+        self.receiver.expire_held(now, current)
+    }
+
     /// Whether a gap in the counter of one sender passed
     /// `GROUP_GAP_TIMEOUT`, thus the reader fetches from the other replica
     /// (`GRP-205`).
@@ -1144,24 +1152,27 @@ impl Group {
         Ok(())
     }
 
-    /// GRP-356: the rotator of the next epoch is no index that a trigger
-    /// since the epoch before excludes, and its record names a roster epoch
-    /// at or above the newest trigger. Thus a removed member cannot post the
-    /// next epoch under a roster epoch in which it was still active.
+    /// GRP-356: the record of the next epoch names a roster epoch at or
+    /// above the first trigger since the epoch before, and its rotator is no
+    /// index that a trigger since then excludes. Thus a removed member
+    /// cannot post the next epoch under any roster epoch; an honest rotator
+    /// that a later trigger removed rotates again under Part 11 §11.4.3.
     fn check_rotator(&self, epoch: u32, roster_epoch: u32, rotator: u16) -> Result<(), Error> {
         let current = self.epochs.current().ok_or(Error::NoPath)?;
         if epoch != current.epoch().saturating_add(1) {
             return Ok(());
         }
         let triggers = self.roster.triggers_since(current.roster_epoch());
-        if triggers
-            .iter()
-            .any(|trigger| trigger.excluded == Some(rotator))
-        {
+        let first = triggers.iter().map(|trigger| trigger.roster_epoch).min();
+        if first.is_some_and(|first| roster_epoch < first) {
             return Err(Error::Unverified);
         }
-        let newest = triggers.iter().map(|trigger| trigger.roster_epoch).max();
-        if newest.is_some_and(|newest| roster_epoch < newest) {
+        // GRP-356: an index that any trigger since the epoch before
+        // excludes rotates nothing, whatever roster epoch its record names.
+        let excluded = triggers
+            .iter()
+            .any(|trigger| trigger.excluded == Some(rotator));
+        if excluded {
             return Err(Error::Unverified);
         }
         Ok(())

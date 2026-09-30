@@ -1682,7 +1682,7 @@ made the joiner open 499 pairwise channels for the same admission.
 | `GROUP_SLOT` | 3 600 s (§11.3.1) |
 | `GROUP_SLOT_WINDOW` | 24 slots (§11.3.2) |
 | `GROUP_SLOT_SKEW` | 2 slots (§11.3.2) |
-| `GROUP_EPOCH_MAX_AGE` | 30 days from `t_e`, measured by each admin (§11.4.1) |
+| `GROUP_EPOCH_MAX_AGE` | 30 days from `t_e`, measured by each member (§11.4.1, `GRP-360`) |
 | `GROUP_EPOCH_GRACE` | 24 h from the installation of the next epoch, measured by the receiver (§11.3.2) |
 | `GROUP_ROSTER_WAIT` | 24 h from the arrival of the held record, measured by the receiver (§11.3.5) |
 | `GROUP_GAP_TIMEOUT` | 60 s from the first record above the gap, measured by the reader (§11.2.2) |

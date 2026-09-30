@@ -69,7 +69,7 @@ impl RecoveryCode {
         Ok(RecoveryCode::new(Secret::new(user), Secret::new(social)))
     }
 
-    /// `BackupRootKey` under the fixed salt and cost of `IDN-157`, which a
+    /// `BackupRootKey` under the fixed salt and cost of `IDN-177`, which a
     /// device that holds the code alone derives again.
     pub fn backup_root_key(&self) -> Result<BackupRootKey, Error> {
         self.root_key(labels::BACKUP_SALT, kdf::RECOVERY_M_KIB, kdf::RECOVERY_T)

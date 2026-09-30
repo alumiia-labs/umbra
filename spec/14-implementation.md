@@ -74,7 +74,7 @@ of §14.2.4 writes.
 | --- | --- |
 | `ml-kem` 0.3 | `default-features = false`, `features = ["zeroize"]` |
 | `ml-dsa` 0.1 | `default-features = false`, `features = ["rand_core", "zeroize"]`. **[IMP-004]** An implementation **MUST** turn the `pkcs8` default off. If it stays on, the build inherits `der`, `spki`, `pkcs8`, and `const-oid` |
-| `x25519-dalek` 3 | `default-features = false`, `features = ["static_secrets", "reusable_secrets", "zeroize"]`. **[IMP-174]** An implementation **MUST** turn `zeroize` on: with it off, a secret scalar and a shared secret stay in memory after a drop (Part 5 `CRY-059`) |
+| `x25519-dalek` 3 | `default-features = false`, `features = ["static_secrets", "reusable_secrets", "zeroize"]`. **[IMP-174]** An implementation **MUST** turn `zeroize` on: with it off, a secret scalar and a shared secret stay in memory after a drop (Part 5 `CRY-059`). |
 | `chacha20poly1305` 0.11 | `default-features = false` |
 | `aes` + `polyval` | for the onion UIV+ layer only |
 | `sha3` 0.11 | pin to 0.11 to match `ml-kem` and to prevent a duplicate `sha3` 0.12; `features = ["zeroize"]` |
@@ -751,7 +751,10 @@ WrapHeader {                      // 97 bytes
   the passes until one try takes about 3 s. A device that needs more than 3 s
   at the floor keeps the floor. The header carries the two values, thus a
   restore on a faster device opens the store and the next passphrase change
-  calibrates again.
+  calibrates again. **[IMP-175]** A client MUST refuse a header whose memory
+  is above four times the floor, or whose passes are above 3 000, before it
+  runs Argon2id: a party with the file that raises the two values would
+  otherwise make each unlock allocate without bound.
 - **[IMP-118]** A passphrase change MUST wrap the same `K_store` under a new
   `salt_pw` and a new `nonce_w`. It MUST NOT change `K_store`, because each
   record key derives from it.
@@ -853,9 +856,8 @@ ECDH P-256, HMAC-SHA256, and 3DES only. It has no X25519 and no ML-KEM.
 
 **Set the file protection explicitly:**
 
-- Set `setUnlockedDeviceRequired(true)` and
-  `setUserAuthenticationParameters(0, AUTH_BIOMETRIC_STRONG |
-  AUTH_DEVICE_CREDENTIAL)` on the wrapping key. Set `setIsStrongBoxBacked(true)`
+- Set `setUnlockedDeviceRequired(true)` on the wrapping key, and no user
+  authentication for each use (`IMP-065`). Set `setIsStrongBoxBacked(true)`
   when `android.hardware.strongbox_keystore` is present. If it is not present,
   fall back to the TEE gracefully. A wrapping key in the keystore has no export
   path, thus it does not go into the platform backup of §14.6.6.
@@ -898,7 +900,7 @@ read flight 1 already drops the copy (Part 6 `WIR-503`).
 | `0x03` | Contacts | One contact: the `RecipientId` of its inbound queue, and the stored channel |
 | `0x04` | Queues | Reserved for the queues of the path selection of Part 3 §3.4.6 |
 | `0x05` | Verifications | One verification of Part 4 §4.5 |
-| `0x06` | Local identity | The root seed |
+| `0x06` | Local identity | The root seed, the Recovery Code, the seed of each group, and the mark of `IDN-193`. Part 4 calls these rows, the pairwise salts of the rows of `0x03`, and the rotation counters of the rows of `0x28` together the local identity table |
 | `0x07` | Send queue | One record that waits for the send path (`IMP-126`) |
 | `0x08` | Invitations | One invitation that waits: the `RecipientId` of its queue, the fragment of its link or its bundle, the queue end, and the prekey seed. A handshake between two flights has its row here too, with its state (`IMP-169`) |
 | `0x09` | Conversations | What this device alone knows of one conversation: the time up to which the user saw its messages, and the name that the user gave the contact |
@@ -971,6 +973,7 @@ read flight 1 already drops the copy (Part 6 `WIR-503`).
 | `0x4C` | Sync Origin | The source device and the causal counter of each message that a peer synced, by the row of the message. |
 | `0x4D` | Held Deletions | Each message that a deletion of another device names after a restore, by its row, with its conversation. It waits for the user (`DEV-118`). |
 | `0x4E` | Rekey Held | The re-key items of `DEV-301` that did not apply yet, under the subject of the group: the time of arrival in seconds, the subject, then the item. The group can come later on the chunk path, and the roster epoch before the re-key on the sync channel. |
+| `0x4F` | Failure | The cause of each failed message of this device, under the row of the message: a relay refused it, no path took it, its file did not upload, no replica of the group took it, or the queue of the contact was full (`IMP-074`) |
 
 The stored form of a row is local to one device, and no peer reads it. This
 part gives it no byte layout. **[IMP-130]** A stored object MUST start with a
@@ -1408,7 +1411,7 @@ its condition, its end, and the one line that the client shows.
 | `recipient queue full` | A `QUOTA` of Part 3 rule `NET-017` names the queue of a contact | The relay stops the signal | "This contact has not collected messages for a while." |
 | `notification carrier absent` | The build holds no carrier of Part 8 rule `NTF-040` for the selected mode | The user selects a mode that the build carries | The line of `NTF-040` |
 | `corrected clock` | The clock state of Part 10 §10.5.2 is `corrected` (`REL-116`) | A root gives a correction at or below `CLOCK_SKEW`, or a clock movement discards the correction | "The clock of this device differs from the network time by more than one hour." |
-| `clock` | `NTF_FAIL_MAX` consecutive notification blobs failed to open inside the window of Part 8 rule `NTF-075` | One blob opens after a fresh `k_ntf_root` | "The device clock may be wrong. Notifications show no preview until it is checked." |
+| `clock` | `NTF_FAIL_MAX` consecutive notification blobs failed to open inside the window of Part 8 rule `NTF-075`, or a group record fell outside the slot window of Part 11 rule `GRP-229` | One blob opens after a fresh `k_ntf_root`, or each held group record opens | "The device clock may be wrong. Notifications show no preview until it is checked." |
 
 - **[IMP-077]** A client MUST show each current degraded state in one line at
   the top of the message list. **[IMP-078]** A client MUST NOT show a degraded

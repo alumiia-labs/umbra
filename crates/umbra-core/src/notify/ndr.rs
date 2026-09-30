@@ -7,7 +7,7 @@
 
 use alloc::{collections::BTreeMap, vec::Vec};
 
-use umbra_crypto::{aead, hash::sha3_256, zeroize::Zeroizing};
+use umbra_crypto::{aead, hash::sha3_256, secret::Secret, zeroize::Zeroizing};
 use umbra_wire::ndr::{parse_token, NdrRequest, NdrResponse, TokenCarrier, BLOB_LEN, HANDLE_LEN};
 
 use super::PUSH_TTL_MESSAGE;
@@ -56,11 +56,33 @@ pub struct Delivery {
     pub blob: [u8; BLOB_LEN],
 }
 
+/// The removal secret of the next registration of a handle (Part 8
+/// `NTF-124`): each registration after the first takes the next secret of
+/// the chain.
+pub fn next_removal(removal: &Secret<32>) -> Secret<32> {
+    Secret::new(sha3_256(&[
+        umbra_crypto::labels::NDR_REMOVAL,
+        removal.expose(),
+    ]))
+}
+
+/// Whether `secret` opens a registration whose removal hash is `held`: the
+/// secret of that registration, or the one before it in the chain, whose
+/// move the device may not have seen taken.
+fn opens_registration(secret: &Secret<32>, held: &[u8; 32]) -> bool {
+    let presented = sha3_256(&[secret.expose()]);
+    let chained = sha3_256(&[next_removal(secret).expose()]);
+    umbra_crypto::ct_eq(&presented, held) | umbra_crypto::ct_eq(&chained, held)
+}
+
 /// The Notification Delivery Relay.
 #[derive(Default)]
 pub struct Ndr {
     held: BTreeMap<[u8; HANDLE_LEN], Held>,
     changes: Vec<NdrChange>,
+    /// Whether this deployment serves UnifiedPush endpoints as well as FCM
+    /// (`NTF-134`). The reference NDR does not.
+    unified_push: bool,
 }
 
 impl Ndr {
@@ -69,7 +91,15 @@ impl Ndr {
         Ndr {
             held: held.into_iter().collect(),
             changes: Vec::new(),
+            unified_push: false,
         }
+    }
+
+    /// Makes the NDR serve UnifiedPush endpoints too, for a deployment that
+    /// holds such endpoints (`NTF-134`).
+    pub fn serving_unified_push(mut self, serves: bool) -> Self {
+        self.unified_push = serves;
+        self
     }
 
     /// The registrations held.
@@ -108,10 +138,11 @@ impl Ndr {
             } => {
                 // NTF-124: a handle that is held moves on its removal secret
                 // alone, thus a queue relay that knows the handle cannot
-                // point it elsewhere.
+                // point it elsewhere. The secret of the held registration
+                // moves it, and so does the secret before it in the chain:
+                // that request repeats a move whose answer was lost.
                 if let Some(held) = self.held.get(&handle) {
-                    let presented = sha3_256(&[prior.expose()]);
-                    if !umbra_crypto::ct_eq(&presented, &held.removal_hash) {
+                    if !opens_registration(&prior, &held.removal_hash) {
                         return (NdrResponse::Refused, None);
                     }
                 }
@@ -125,13 +156,15 @@ impl Ndr {
                 (NdrResponse::Taken, None)
             }
             NdrRequest::Unregister { handle, removal } => {
-                let presented = sha3_256(&[removal.expose()]);
                 match self.held.get(&handle) {
-                    Some(held) if umbra_crypto::ct_eq(&presented, &held.removal_hash) => {
+                    Some(held) if opens_registration(&removal, &held.removal_hash) => {
                         self.drop_handle(handle);
                         (NdrResponse::Taken, None)
                     }
-                    _ => (NdrResponse::Refused, None),
+                    // NTF-124: a handle that the NDR does not hold left
+                    // already, thus a repeat of a lost answer ends.
+                    None => (NdrResponse::Taken, None),
+                    Some(_) => (NdrResponse::Refused, None),
                 }
             }
             NdrRequest::Push {
@@ -140,8 +173,10 @@ impl Ndr {
                 ttl,
                 blob,
             } => {
+                // NTF-125: a handle that no registration holds is gone, thus
+                // the queue relay stops its pushes to it.
                 let Some(held) = self.held.get(&handle) else {
-                    return (NdrResponse::Refused, None);
+                    return (NdrResponse::Gone, None);
                 };
                 let split = held.ct_token.len().saturating_sub(aead::TAG_LEN);
                 let (Some(body), Some(tag)) =
@@ -156,6 +191,11 @@ impl Ndr {
                 let Ok((carrier, target)) = parse_token(&token) else {
                     return (NdrResponse::Refused, None);
                 };
+                // NTF-134: the NDR posts to the provider that it serves, and
+                // to no address that a caller named.
+                if carrier != TokenCarrier::Fcm && !self.unified_push {
+                    return (NdrResponse::Refused, None);
+                }
                 let delivery = Delivery {
                     handle,
                     carrier,
@@ -203,12 +243,7 @@ mod tests {
         let set = HandleSet::assign(&[[1; 32]], &[], &[], 0, &mut rng).unwrap();
         let group = &set.groups()[0];
         let mut plain = [0u8; PUSH_TOKEN_MAX];
-        let n = encode_token(
-            TokenCarrier::UnifiedPush,
-            b"https://push.example/up/device-1",
-            &mut plain,
-        )
-        .unwrap();
+        let n = encode_token(TokenCarrier::Fcm, b"fcm-device-1", &mut plain).unwrap();
         let registration = group.registration(&plain[..n], [4; 24]).unwrap();
         let removal = Secret::new([9; 32]);
         let register = |prior: [u8; 32], removal_hash: [u8; 32]| {
@@ -224,6 +259,12 @@ mod tests {
         let hash = sha3_256(&[removal.expose()]);
         assert_eq!(ndr.handle(&register([0; 32], hash)).0, NdrResponse::Taken);
         assert_eq!(ndr.take_changes().len(), 1);
+        // NTF-124: the same registration again, whose answer was lost, is
+        // taken when it carries the secret that the device holds; with no
+        // secret it moves nothing.
+        assert_eq!(ndr.handle(&register([0; 32], hash)).0, NdrResponse::Refused);
+        assert_eq!(ndr.handle(&register([9; 32], hash)).0, NdrResponse::Taken);
+        assert_eq!(ndr.take_changes().len(), 1);
 
         // The push brings `k_tok`, and the delivery names the endpoint.
         let push = |k_tok: [u8; 32]| {
@@ -237,8 +278,8 @@ mod tests {
         let (answer, delivery) = ndr.handle(&push(*group.k_tok.expose()));
         assert_eq!(answer, NdrResponse::Taken);
         let delivery = delivery.unwrap();
-        assert_eq!(delivery.carrier, TokenCarrier::UnifiedPush);
-        assert_eq!(&delivery.target[..], b"https://push.example/up/device-1");
+        assert_eq!(delivery.carrier, TokenCarrier::Fcm);
+        assert_eq!(&delivery.target[..], b"fcm-device-1");
         assert_eq!(u64::from(delivery.ttl), PUSH_TTL_MESSAGE);
         assert_eq!(ndr.handle(&push([0; 32])).0, NdrResponse::Refused);
 
@@ -260,10 +301,33 @@ mod tests {
         });
         assert_eq!(ndr.handle(&right).0, NdrResponse::Taken);
         assert!(ndr.is_empty());
+        // NTF-124: the removal again, whose answer was lost, is taken.
+        assert_eq!(ndr.handle(&right).0, NdrResponse::Taken);
+        // NTF-125: a push to a handle that left is gone.
         assert_eq!(
             ndr.handle(&push(*group.k_tok.expose())).0,
-            NdrResponse::Refused
+            NdrResponse::Gone
         );
+
+        // NTF-134: a carrier that the NDR does not serve takes no push.
+        let n = encode_token(
+            TokenCarrier::UnifiedPush,
+            b"https://evil.example/x",
+            &mut plain,
+        )
+        .unwrap();
+        let other = group.registration(&plain[..n], [5; 24]).unwrap();
+        let taken = ndr.handle(&request(&NdrRequest::Register {
+            handle: group.handle,
+            nonce: other.nonce,
+            ct_token: &other.ct_token,
+            removal_hash: hash,
+            prior: Secret::new([9; 32]),
+        }));
+        assert_eq!(taken.0, NdrResponse::Taken);
+        let (answer, delivery) = ndr.handle(&push(*group.k_tok.expose()));
+        assert_eq!(answer, NdrResponse::Refused);
+        assert!(delivery.is_none());
     }
 
     #[test]

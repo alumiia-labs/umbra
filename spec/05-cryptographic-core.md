@@ -1533,7 +1533,28 @@ names the object type and its lifetime:
 "umbra/v1/backup-salt"
 "umbra/v1/handle-blob"
 "umbra/v1/issuer-rsa"
+"umbra/v1/lookup-pow-verifier"
+"umbra/v1/issue-pow-verifier"
+"umbra/v1/relay-ntf"
+"umbra/v1/ndr"
+"umbra/v1/directory"
+"umbra/v1/client-rng"
+"umbra/v1/quota-holder"
+"umbra/v1/ndr-removal"
 ```
+
+> *The cause of the last eight labels.* The two verifier labels take the
+> `verifier_id` of Part 9 `DIS-165` and Part 13 `ABU-109` apart from the seed
+> of the same proof of work, as `hello-seed` and `hello-verifier` are apart
+> (`CRY-031`). `relay-ntf`, `ndr`, and `directory` derive the key pair of a
+> relay notifier, of the NDR gateway, and of the directory gateway from the
+> seed of its operator. `client-rng` keys the hardening of the device
+> CSPRNG of `CRY-025` in a client runtime before its store opens.
+> `quota-holder` names the holder of a chunk quota at a relay (Part 12).
+> `ndr-removal` gives the removal secret of the next registration of a
+> handle from the one before it, thus each registration takes a fresh secret
+> and a lost answer can be sent again (Part 8 `NTF-124`). The code used six
+> of them before this register named them.
 
 **The list above is closed.** **[CRY-028]** An implementation MUST NOT use a label that this
 list does not hold. **[CRY-029]** A revision that needs a new label MUST add that label to

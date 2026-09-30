@@ -29,6 +29,9 @@ use super::{
 };
 use crate::Error;
 
+/// The records that a receiver holds at most, for a roster or for a key.
+const HELD_MAX: usize = 512;
+
 /// What the receiver holds and reads.
 pub struct Context<'a> {
     /// The roster.
@@ -358,6 +361,11 @@ impl Receiver {
     }
 
     fn hold(&mut self, bytes: &[u8], bucket: Bucket, now: u64) {
+        // A record is held before any tag check, thus a writer of the queue
+        // could fill the list: the oldest leaves at the bound.
+        if self.held.len() >= HELD_MAX {
+            self.held.remove(0);
+        }
         self.held.push(HeldRecord {
             bytes: bytes.to_vec(),
             bucket,
@@ -400,12 +408,25 @@ impl Receiver {
         out
     }
 
-    /// Discards each held record past `GROUP_ROSTER_WAIT`, and returns the
-    /// count, which the client shows as a gap (`GRP-253`, `GRP-254`).
-    pub fn expire_held(&mut self, now: u64) -> usize {
+    /// Discards each held record past `GROUP_ROSTER_WAIT` that waits for a
+    /// roster epoch, and returns the count, which the client shows as a gap
+    /// (`GRP-253`, `GRP-254`). A record of the epoch after `current_epoch`
+    /// waits for its key and not for a roster, and it stays up to
+    /// `GROUP_RETENTION` (Part 11 §11.4.3).
+    pub fn expire_held(&mut self, now: u64, current_epoch: u32) -> usize {
         let before = self.held.len();
-        self.held
-            .retain(|h| now.saturating_sub(h.arrived_at) < GROUP_ROSTER_WAIT);
+        self.held.retain(|h| {
+            // A record of the next epoch waits for its key up to the
+            // retention of the queue; each other record waits for a roster.
+            let waits_for_key = GroupQueueRecord::parse(&h.bytes, h.bucket)
+                .is_ok_and(|record| record.epoch == current_epoch.saturating_add(1));
+            let wait = if waits_for_key {
+                umbra_queue::params::GROUP_RETENTION
+            } else {
+                GROUP_ROSTER_WAIT
+            };
+            now.saturating_sub(h.arrived_at) < wait
+        });
         before.saturating_sub(self.held.len())
     }
 
@@ -649,6 +670,9 @@ mod tests {
         assert_eq!(rx.held_count(), 0);
         // A held record past the wait is discarded and counted.
         rx.hold(&record, Bucket::B1, now);
-        assert_eq!(rx.expire_held(now + GROUP_ROSTER_WAIT), 1);
+        assert_eq!(
+            rx.expire_held(now + GROUP_ROSTER_WAIT, bob_epochs.epoch()),
+            1
+        );
     }
 }

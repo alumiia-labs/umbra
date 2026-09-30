@@ -307,7 +307,7 @@ impl Bridge {
                     rng,
                 )?;
             } else {
-                client.set_delivery(&outgoing.message, Delivery::Failed, rng)?;
+                client.fail(&outgoing.message, crate::FailureCause::NoPath, rng)?;
             }
         }
         // NET-097: the records of a sync channel wait for a session of the
@@ -411,9 +411,16 @@ impl Bridge {
                 }
                 None
             }
+            // IMP-074: a failed record names its cause.
             Update::Failed(tag) => {
                 if let Some(message) = self.sent.remove(&tag) {
-                    client.set_delivery(&message, Delivery::Failed, rng)?;
+                    client.fail(&message, crate::FailureCause::Refused, rng)?;
+                }
+                None
+            }
+            Update::Unsent(tag) => {
+                if let Some(message) = self.sent.remove(&tag) {
+                    client.fail(&message, crate::FailureCause::NoPath, rng)?;
                 }
                 None
             }

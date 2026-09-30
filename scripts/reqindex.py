@@ -52,7 +52,7 @@ def paragraphs(lines):
     """Yield (start_line_no, joined_text) for each paragraph outside fences."""
     buf, start, in_fence = [], None, False
     for no, raw in enumerate(lines, 1):
-        if raw.startswith("```"):
+        if raw.lstrip().startswith("```"):
             in_fence = not in_fence
             if buf:
                 yield start, " ".join(buf)

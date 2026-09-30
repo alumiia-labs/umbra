@@ -269,7 +269,10 @@ fn count_report(counts: &mut Counts, report: &LinkFaultReport) {
 fn evaluate(settings: &Arc<Settings>, key: &Arc<SigningKey>, counts: &mut Counts) {
     let now = unix_now();
     for ((epoch, relay), tally) in counts.iter_mut() {
-        let ended = (epoch + 1) * EPOCH_SECONDS + SHARE_SETTLE;
+        let ended = epoch
+            .saturating_add(1)
+            .saturating_mul(EPOCH_SECONDS)
+            .saturating_add(SHARE_SETTLE);
         if tally.is_done || now < ended {
             continue;
         }
@@ -382,9 +385,10 @@ async fn run_once(
                         report.loops_sent,
                         report.loops_lost,
                     );
-                    // REL-170: a report of an older epoch goes.
+                    // REL-170: a report of the current epoch or the one
+                    // before it counts, and each other goes.
                     let epoch = unix_now() / EPOCH_SECONDS;
-                    if report.epoch.saturating_add(1) >= epoch {
+                    if report.epoch == epoch || report.epoch.saturating_add(1) == epoch {
                         count_report(counts, &report);
                     }
                 }

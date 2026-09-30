@@ -12,6 +12,9 @@ use crate::params::{ACK_HOLE_TIMEOUT, DRAIN_THRESHOLD, IN_FLIGHT_WINDOW, RECEIPT
 pub struct AckCursor {
     acked: u32,
     received: BTreeMap<u32, u64>,
+    /// The floor of the start of each hole: a clock movement moves it up
+    /// (`SCP-019`). A hole starts at the arrival of the first record above
+    /// it, and never below this floor.
     hole_since: Option<u64>,
     gap_shown: bool,
 }
@@ -111,10 +114,10 @@ impl AckCursor {
     /// clock movement at `from` interrupted it, and the point then crosses
     /// no hole on that duration (Part 1 `SCP-019`, `SCP-021`).
     pub fn restart_hole(&mut self, from: u64) {
-        if let Some(since) = self.hole_since.as_mut() {
-            if *since < from {
-                *since = from;
-            }
+        // A hole behind a contiguous record holds no start of its own yet,
+        // thus the floor takes the movement too.
+        if self.hole().is_some() {
+            self.hole_since = Some(self.hole_since.map_or(from, |since| since.max(from)));
         }
     }
 
@@ -132,22 +135,23 @@ impl AckCursor {
     }
 
     /// The `ACK` the cursor can send now, or `None` when nothing new is
-    /// contiguous. After `ACK_HOLE_TIMEOUT` the point may cross the hole
-    /// (`WIR-116`), and the point then says so. The point stops below a
-    /// record that arrived less than `RECEIPT_MIN_DELAY` ago (`NET-050`).
+    /// contiguous. After `ACK_HOLE_TIMEOUT` the point may cross a hole
+    /// (`WIR-116`), and the point then says so. Each hole counts from the
+    /// arrival of the first record above it, thus a stale hole crosses no
+    /// later hole that is young. The point stops below a record that
+    /// arrived less than `RECEIPT_MIN_DELAY` ago (`NET-050`).
     pub fn ack_point(&self, now: u64) -> Option<AckPoint> {
         let mut point = self.acked;
         let mut expect = self.acked.saturating_add(1);
         let mut crosses = false;
+        let floor = self.hole_since.unwrap_or(0);
         for (seq, arrived) in &self.received {
             if now.saturating_sub(*arrived) < RECEIPT_MIN_DELAY {
                 break;
             }
             if *seq != expect {
-                let stale = self
-                    .hole_since
-                    .is_some_and(|since| now.saturating_sub(since) >= ACK_HOLE_TIMEOUT);
-                if !stale {
+                let since = (*arrived).max(floor);
+                if now.saturating_sub(since) < ACK_HOLE_TIMEOUT {
                     break;
                 }
                 crosses = true;
@@ -224,6 +228,27 @@ mod tests {
         assert!(!p.crosses_hole);
         c.acknowledged(p);
         assert!(!c.gap_shown());
+    }
+
+    #[test]
+    fn each_hole_counts_from_the_first_record_above_it() {
+        // A hole that an ACK leaves at the head starts its own timer.
+        let mut c = AckCursor::new(0);
+        c.receive(1, 100);
+        c.receive(3, 200);
+        let p = c.ack_point(200 + RECEIPT_MIN_DELAY).unwrap();
+        assert_eq!(p.seq, 1);
+        c.acknowledged(p);
+        assert_eq!(c.ack_point(200 + ACK_HOLE_TIMEOUT - 1), None);
+        let p = c.ack_point(200 + ACK_HOLE_TIMEOUT).unwrap();
+        assert_eq!((p.seq, p.crosses_hole), (3, true));
+
+        // A stale hole crosses no young hole above it.
+        let mut c = AckCursor::new(0);
+        c.receive(2, 1_000);
+        c.receive(4, 1_000 + ACK_HOLE_TIMEOUT - 10);
+        let p = c.ack_point(1_000 + ACK_HOLE_TIMEOUT).unwrap();
+        assert_eq!((p.seq, p.crosses_hole), (2, true));
     }
 
     #[test]

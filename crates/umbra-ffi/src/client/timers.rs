@@ -205,7 +205,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
         for (conversation, message) in &due {
             // A row that a deletion took first leaves its deadline alone.
-            self.delete_if_held(message)?;
+            // A fault of one message keeps its deadline for the next sweep,
+            // and it stops no other expiry.
+            if self.delete_if_held(message).is_err() {
+                continue;
+            }
             let open = self.open_mut()?;
             let mut batch = open.store.begin();
             batch.delete(DEADLINES, message.0);

@@ -89,8 +89,8 @@ The device makes a fresh 32-byte `k_tok` **for each group of at most
 `MAX_QUEUES_PER_HANDLE` queues that it subscribes from on one relay**:
 
 ```
-ct_token_i = XChaCha20-Poly1305(k_tok_i, nonce, push_token)
 handle_i   = 16 random bytes
+ct_token_i = XChaCha20-Poly1305(k_tok_i, nonce, push_token, ad = handle_i)
 ```
 
 **[NTF-031]** A device MUST make one `k_tok` and one `handle` for each group of
@@ -350,16 +350,37 @@ PushToken   { carrier u8, target }         // the plaintext of ct_token, at most
   `0x01` is UnifiedPush and its target is the `https` URL of the endpoint,
   and carrier `0x02` is FCM and its target is the registration token. The
   target MUST be printable ASCII.
-- **[NTF-124]** A device MUST draw a fresh 32-byte removal secret for each
-  registration and send its `SHA3-256` as `removal_hash`. The NDR MUST drop
-  a registration at an `NUNREG` whose `removal` hashes to that value, and
-  MUST refuse any other `NUNREG`. An `NREG` for a handle that the NDR holds
-  MUST carry the removal secret of that registration in `prior`, and the
-  NDR MUST refuse it otherwise. A new handle carries zero in `prior`.
+- **[NTF-124]** A device MUST draw a fresh 32-byte removal secret for the
+  first registration of a handle, and each later registration of that
+  handle MUST take `SHA3-256("umbra/v1/ndr-removal" || prior)` as its
+  removal secret, where `prior` is the secret of the registration before
+  it. The device sends the `SHA3-256` of the secret as `removal_hash`, and
+  it carries the secret that it holds for the handle in `prior` in each
+  request. The NDR MUST drop a registration at an `NUNREG` whose `removal`
+  opens it, MUST answer `taken` to an `NUNREG` for a handle that it does not
+  hold, and MUST refuse any other `NUNREG`. The NDR MUST take an `NREG` for a
+  handle that it holds only when `prior` opens that registration. A secret
+  opens a registration when its `SHA3-256`, or the `SHA3-256` of the next
+  secret of the chain, equals the `removal_hash` held: the second form
+  repeats a move whose answer the device did not see.
+
+  > *Cause.* An answer that the network lost left the device with a
+  > request that the NDR refused at each later try: a first `NREG` that
+  > landed, an `NUNREG` that landed, or a move that landed. The chain of
+  > secrets makes each request safe to send again, each registration still
+  > takes a secret that no earlier request showed, and no party that reads
+  > the hashes alone moves a handle.
 - **[NTF-125]** The NDR MUST bound the `ttl` of an `NPUSH` at
   `PUSH_TTL_MESSAGE`, and it MUST answer `gone` and drop the registration
-  when the provider names the target gone. A queue relay MUST stop pushing
-  to a handle that got the answer `gone`.
+  when the provider names the target gone. It MUST answer `gone` to an
+  `NPUSH` for a handle that it does not hold, thus a device that left
+  Instant mode stops the pushes of its queue relays. A queue relay MUST
+  stop pushing to a handle that got the answer `gone`.
+- **[NTF-134]** An NDR MUST refuse an `NPUSH` whose carrier it does not
+  serve, and it MUST NOT post to an address that no provider of its own
+  names. The reference NDR serves carrier `0x02` alone, thus a caller that
+  registered a UnifiedPush endpoint cannot make it post to an address of
+  its choice.
 
 - **[NTF-130]** The NDR MUST send an FCM push through the HTTP v1 API of
   FCM as a data message with no `notification` field: the one data field

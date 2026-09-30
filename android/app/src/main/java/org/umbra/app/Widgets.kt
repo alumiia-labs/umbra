@@ -533,7 +533,7 @@ fun ProfilePicture(picture: ByteArray?, name: String, size: Int) {
 @Composable
 fun LetterAvatar(name: String, seed: Int, size: Int = 44, icon: String? = null) {
     val ground = Palette.Avatars[(seed and 0x7FFFFFFF) % Palette.Avatars.size]
-    val letter = name.firstOrNull()?.uppercase() ?: "?"
+    val letter = firstLetter(name)
     Box(
         Modifier.size(size.dp).clip(CircleShape).background(ground),
         contentAlignment = Alignment.Center,
@@ -840,4 +840,14 @@ fun Headline(title: String, body: String? = null) {
         Spacer(Modifier.height(8.dp))
         Text(body, style = MaterialTheme.typography.bodyLarge, color = Palette.TextSecondary)
     }
+}
+
+/**
+ * The first code point of a name in upper case, or "?". A name that starts
+ * with an emoji keeps the whole emoji, not half of a surrogate pair.
+ */
+fun firstLetter(name: String): String {
+    if (name.isEmpty()) return "?"
+    val end = name.offsetByCodePoints(0, 1)
+    return name.substring(0, end).uppercase()
 }

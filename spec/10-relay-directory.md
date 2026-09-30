@@ -971,7 +971,7 @@ RelayEntry {
     descriptor     RelayDescriptor
     operator_id    [32]u8      // one opaque value for each beneficial control
     class          u8          // the verified class of §10.2, 0 to 3
-    flags          u8          // bit 0 ingress, bit 1 layer 3 (§10.5.4)
+    flags          u8          // bit 0 ingress, bit 1 layer 3, bit 2 pending (§10.5.4)
 }
 ```
 
@@ -1649,6 +1649,7 @@ relay with the notification role, and this section then applies to it.
 | Parameter | Value |
 | --- | --- |
 | Capacity classes | C0 1 / C1 4 / C2 16 / C3 64 Mbit/s |
+| `GENESIS_ROOT` | 32 zero bytes: the root under which the relays of the first root take their layer (`REL-159`) |
 | Class growth cap | 1 class up in each 7-day epoch, and a demotion applies at the next consensus (§10.2) |
 | `MEASURE_INTERVAL` | 7 d between two class tests of one relay (§10.2) |
 | `MEASURE_STALE` | 21 d without a verifying report, then class C0 (§10.2) |

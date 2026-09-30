@@ -313,11 +313,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// The user accepted an offer: the invitation that it carries, and the
     /// petname that the introducer uses for that party.
     pub fn take_offer(&mut self, id: &[u8; 16]) -> Result<(Zeroizing<Vec<u8>>, String), Error> {
+        let taken = self.offer(id)?;
+        self.drop_intro(id)?;
+        Ok(taken)
+    }
+
+    /// The link and the name of an offer, which stays until its accept
+    /// succeeds: an accept with no run keeps it for a later try.
+    pub fn offer(&self, id: &[u8; 16]) -> Result<(Zeroizing<Vec<u8>>, String), Error> {
         let row = self.intro_row(id)?;
         if row.kind != OFFER_IN {
             return Err(Error::Malformed);
         }
-        self.drop_intro(id)?;
         Ok((row.link, row.name))
     }
 

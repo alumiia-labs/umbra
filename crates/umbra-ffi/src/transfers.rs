@@ -441,6 +441,9 @@ pub async fn run_transfers(
                     descriptor,
                     index,
                 } => {
+                    // ATT-167: each start takes a mode of its own, not the mode
+                    // of the transfer before it.
+                    node.set_chunk_class(umbra_core::session::node::DelayClass::default());
                     let started = ChunkFetch::new(&descriptor, index, &relays, &mut rng).and_then(
                         |mut fetch| {
                             fetch.tick(&mut node, &mut rng)?;
@@ -483,6 +486,9 @@ pub async fn run_transfers(
                     cred,
                     relays,
                 } => {
+                    // ATT-167: each start takes a mode of its own, not the mode
+                    // of the transfer before it.
+                    node.set_chunk_class(umbra_core::session::node::DelayClass::default());
                     for relay in relays {
                         let job = ChunkJob::Erase {
                             cred: StaticSecret::from(*cred.expose()),
@@ -494,6 +500,9 @@ pub async fn run_transfers(
                     idle_since = tokio::time::Instant::now();
                 }
                 TransferCommand::DownloadBackup { tag, descriptor } => {
+                    // ATT-167: each start takes a mode of its own, not the mode
+                    // of the transfer before it.
+                    node.set_chunk_class(umbra_core::session::node::DelayClass::default());
                     let started = Download::new_backup(&descriptor, &relays, &mut rng).and_then(
                         |mut download| {
                             download.tick(&mut node, &mut rng)?;
@@ -510,6 +519,9 @@ pub async fn run_transfers(
                     }
                 }
                 TransferCommand::UploadBackup { tag, plain } => {
+                    // ATT-167: each start takes a mode of its own, not the mode
+                    // of the transfer before it.
+                    node.set_chunk_class(umbra_core::session::node::DelayClass::default());
                     let started = Upload::with_class(
                         &plain,
                         Shape::default(),
@@ -538,6 +550,9 @@ pub async fn run_transfers(
                     chunk,
                     replaces,
                 } => {
+                    // ATT-167: each start takes a mode of its own, not the mode
+                    // of the transfer before it.
+                    node.set_chunk_class(umbra_core::session::node::DelayClass::default());
                     let started = HandleWrite::new(handle, cred, read_pk, chunk, replaces, &relays)
                         .and_then(|mut write| {
                             write.tick(&mut node, &mut rng)?;
@@ -553,6 +568,9 @@ pub async fn run_transfers(
                     }
                 }
                 TransferCommand::ReadHandle { tag, handle, read } => {
+                    // ATT-167: each start takes a mode of its own, not the mode
+                    // of the transfer before it.
+                    node.set_chunk_class(umbra_core::session::node::DelayClass::default());
                     let mut reading = HandleRead::new(handle, read, &relays);
                     match reading.tick(&mut node, &mut rng) {
                         Ok(Progress::Running(..)) => {

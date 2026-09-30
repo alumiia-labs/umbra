@@ -44,7 +44,20 @@ pub struct Cost {
     pub t: u32,
 }
 
+/// The greatest memory that a header may name: four times the floor
+/// (`IMP-175`).
+pub const M_KIB_MAX: u32 = 4 * M_KIB_FLOOR;
+/// The greatest pass count that a header may name: the calibration of a
+/// device that runs one pass in a millisecond (`IMP-175`).
+pub const T_MAX: u32 = 3_000;
+
 impl Cost {
+    /// Whether a header may carry this cost: a party with the file that
+    /// raises it makes no unlock allocate without bound (`IMP-175`).
+    pub const fn is_bounded(&self) -> bool {
+        self.m_kib <= M_KIB_MAX && self.t <= T_MAX
+    }
+
     /// The cost for a device that ran the floor cost in `floor_ms`
     /// milliseconds. The memory stays at the floor, and the passes grow
     /// until one try takes about `TARGET_MS`.
@@ -53,7 +66,7 @@ impl Cost {
         let passes = u32::try_from(TARGET_MS.div_ceil(per_pass)).unwrap_or(u32::MAX);
         Cost {
             m_kib: M_KIB_FLOOR,
-            t: passes.max(T_FLOOR),
+            t: passes.clamp(T_FLOOR, T_MAX),
         }
     }
 }
@@ -168,6 +181,9 @@ impl WrapHeader {
             tag: r.array()?,
         };
         r.finish()?;
+        if !header.cost.is_bounded() {
+            return Err(Error::Malformed);
+        }
         Ok(header)
     }
 }

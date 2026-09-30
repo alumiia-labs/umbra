@@ -1,7 +1,7 @@
 # Dependency policy of Part 14 §14.2.7.
 # Each allow entry names its register. A transitive crate that is not on the
-# list fails the build. A skip entry carries a date and a cause, and CI fails
-# on one older than 90 days.
+# list fails the build. A skip entry carries a date and a cause, and a review
+# removes one older than 90 days; the skip list is empty today.
 
 [graph]
 all-features = false
@@ -129,7 +129,6 @@ allow = [
   { crate = "semver" },                  # build
   # dev-dependencies of the known-answer harness; no shipped binary links them
   { crate = "itoa" },                    # dev
-  { crate = "memchr" },                  # dev
   { crate = "serde_core" },              # dev
   { crate = "serde_json" },              # dev
   { crate = "zmij" },                    # dev

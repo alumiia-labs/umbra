@@ -79,7 +79,7 @@ def load_spec():
         current = f"{part}"
         in_fence = False
         for no, raw in enumerate(lines, 1):
-            if raw.startswith("```"):
+            if raw.lstrip().startswith("```"):
                 in_fence = not in_fence
                 continue
             h = HEADER_RE.match(raw)
@@ -167,7 +167,7 @@ def main(argv):
         in_fence = False
         prev = ""
         for no, raw in enumerate(lines, 1):
-            if raw.startswith("```"):
+            if raw.lstrip().startswith("```"):
                 in_fence = not in_fence
                 continue
             if in_fence:

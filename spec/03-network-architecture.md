@@ -343,7 +343,9 @@ first two bytes of its address.
   become a default, because a default would let two relays of one operator
   look like two operators.
 - **[NET-313]** A client MUST take the first relay of layer 1 as its pinned
-  ingress of `NET-022`. It dials no other relay.
+  ingress of `NET-022`. It dials no relay of the descriptor but its pins:
+  a network from a signed manifest pins two relays under Part 10 `REL-154`,
+  and a dial that fails goes to the second one.
 - **[NET-314]** A client MUST read a descriptor with the first line
   `umbra-network 1`. That version holds three relay lines with no facts, and
   the lines are the layers 1, 2 and 3 in their order. Such a set holds one
@@ -2514,9 +2516,9 @@ below rests on the same unverified figure, and it carries the same mark.
 > the row is 278 × 1 × 2 096 = 582 688 bytes.
 >
 > A sync record uses bucket `B1`, thus it does not replace a `B0` cover cell.
-> §3.6.2 gives the replacement rule for a `B0` item only, which is an
-> acknowledgment, a receipt, or a backup write. Thus a sync record adds a cell to
-> the outbound process, and the tier A cover row does not change.
+> §3.6.2 gives the replacement rule for a `B0` item only, which is one of the
+> four items of `NET-064`. Thus a sync record adds a cell to the outbound
+> process, and the tier A cover row does not change.
 >
 > Part 7 §7.5.5 gives the acknowledgment count on one channel each day. That
 > count is the batch term plus the idle term. The batch term gives one
@@ -2893,8 +2895,9 @@ round trips reach hop 1, then hop 2, then hop 3, which is 2 × 60 + 2 × 135 +
 2 × 210 ms against the leg model above. Two spare circuits (§3.4.3) keep this
 cost off the common path.
 
-The mean added delay is 1.42 s in Fast mode, 1.87 s in Balanced mode, and 3.52 s
-in Private mode. The first two are in the measured band of §3.0, where 1 s and
+With the propagation budget of 420 ms, the mean delay is 1.42 s in Fast mode,
+1.87 s in Balanced mode, and 3.52 s in Private mode; §3.9 gives the added delay
+alone, which is 420 ms less in each mode. The first two are in the measured band of §3.0, where 1 s and
 4 s keep usability. Private mode is above 1 s and below the marginal point of
 7 s.
 

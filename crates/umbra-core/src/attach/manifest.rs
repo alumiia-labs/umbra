@@ -107,9 +107,13 @@ pub struct Replicas {
 /// group count must equal `expected` (`ATT-067`).
 pub fn collapse(refs: &[ChunkRef], expected: usize) -> Result<Vec<Replicas>, Error> {
     let mut out: Vec<Replicas> = Vec::new();
+    // The place of each chunk_id in `out`: a peer's manifest of many refs
+    // costs one lookup for each ref, and no scan.
+    let mut places: alloc::collections::BTreeMap<[u8; 32], usize> =
+        alloc::collections::BTreeMap::new();
     for chunk_ref in refs {
-        let entry = match out.iter_mut().find(|r| r.chunk_id == chunk_ref.chunk_id) {
-            Some(entry) => entry,
+        let place = match places.get(&chunk_ref.chunk_id) {
+            Some(place) => *place,
             None => {
                 out.push(Replicas {
                     chunk_id: chunk_ref.chunk_id,
@@ -117,9 +121,12 @@ pub fn collapse(refs: &[ChunkRef], expected: usize) -> Result<Vec<Replicas>, Err
                     relay_ids: Vec::new(),
                     hints: Vec::new(),
                 });
-                out.last_mut().ok_or(Error::Malformed)?
+                let place = out.len().saturating_sub(1);
+                places.insert(chunk_ref.chunk_id, place);
+                place
             }
         };
+        let entry = out.get_mut(place).ok_or(Error::Malformed)?;
         if entry.cred_pk != chunk_ref.cred_pk {
             return Err(Error::Malformed);
         }

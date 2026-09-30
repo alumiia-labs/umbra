@@ -498,6 +498,18 @@ impl LogOperator {
         self.staged.contains_key(search_key)
     }
 
+    /// The version that [`LogOperator::stage`] gives the next entry of a
+    /// label, or none when a version waits or the counter ends.
+    pub fn next_version(&self, search_key: &[u8]) -> Option<u32> {
+        if self.staged.contains_key(search_key) {
+            return None;
+        }
+        match self.newest.get(search_key) {
+            Some(held) => held.checked_add(1),
+            None => Some(0),
+        }
+    }
+
     /// Stages the next version of a label for the open epoch, and returns
     /// its version. A label with a staged update is rejected (`DIS-010`).
     /// `opening` comes from the CSPRNG of the operator.
@@ -539,7 +551,7 @@ impl LogOperator {
             self.newest.insert(search_key.clone(), version);
             self.stored.insert((search_key, version), stored);
         }
-        let prefix_root = self.tree.root(&nonce);
+        let prefix_root = self.tree.seal(&nonce);
         self.epochs.push((nonce, prefix_root));
         let leaf_hash = epoch_leaf(&nonce, &prefix_root);
         self.log_leaves.push(leaf_hash);

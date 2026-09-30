@@ -170,15 +170,32 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         sent: Option<(u64, &[u8])>,
         rng: &mut R,
     ) -> Result<(), Error> {
+        let sent: Vec<(u64, Vec<u8>)> = sent
+            .map(|(counter, body)| (counter, body.to_vec()))
+            .into_iter()
+            .collect();
+        self.put_engine_all(engine, &sent, rng)
+    }
+
+    /// Stores the engine and each body that it published, in one commit.
+    fn put_engine_all<R: CryptoRng + ?Sized>(
+        &mut self,
+        engine: &SyncEngine,
+        sent: &[(u64, Vec<u8>)],
+        rng: &mut R,
+    ) -> Result<(), Error> {
         let bytes = Zeroizing::new(engine.export()?);
         let open = self.open_mut()?;
         let row = open.store.row_id(SYNC_STATE, ENGINE_KEY);
-        let sent_row = sent.map(|(counter, _)| open.store.row_id(SYNC_SENT, &counter_key(counter)));
+        let sent_rows: Vec<RowId> = sent
+            .iter()
+            .map(|(counter, _)| open.store.row_id(SYNC_SENT, &counter_key(*counter)))
+            .collect();
         let mut batch = open.store.begin();
         batch.put(SYNC_STATE, row, None, &bytes, rng)?;
-        if let (Some((counter, body)), Some(sent_row)) = (sent, sent_row) {
+        for ((counter, body), sent_row) in sent.iter().zip(sent_rows) {
             // The row holds its counter, thus a prune reads it.
-            let value = [counter_key(counter).as_slice(), body].concat();
+            let value = Zeroizing::new([counter_key(*counter).as_slice(), body].concat());
             batch.put(SYNC_SENT, sent_row, None, &value, rng)?;
         }
         Ok(batch.commit()?)
@@ -665,7 +682,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // relay brings it back.
         let relays = self.owns_channels()? && engine.peers().count() > 1;
         let mut relay_records: Vec<(Origin, Vec<u8>, u32)> = Vec::new();
-        let mut relay_items: Vec<(u8, Vec<u8>, Vec<u8>)> = Vec::new();
+        let mut relay_items: Vec<(u8, Vec<u8>, Vec<u8>, u64)> = Vec::new();
         // DEV-075: a record past `SYNC_MAX_AGE` waits for no resend.
         let floor = engine.retained_floor();
         engine.expire(now);
@@ -704,9 +721,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     }
                 }
                 Ok(Taken::Acknowledged) => acked = true,
-                Ok(Taken::Mutable { item, key, value }) => {
+                Ok(Taken::Mutable {
+                    item,
+                    key,
+                    value,
+                    lamport,
+                }) => {
                     if relays {
-                        relay_items.push((item, key.clone(), value.clone()));
+                        relay_items.push((item, key.clone(), value.clone(), lamport));
                     }
                     // An item that does not apply ends no batch.
                     let _ = self.apply_mutable(item, &key, &value, rng);
@@ -726,34 +748,37 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 _ => {}
             }
         }
-        self.put_engine(&engine, None, rng)?;
+        // DEV-308: each peer takes each counter of this device, thus the
+        // relay goes to each peer, the source too. An item keeps the Lamport
+        // counter of its write, thus its echo supersedes no later write of
+        // the source. The relays commit with the counters that the source
+        // took, thus a fault between the two loses no relay.
+        let mut relayed: Vec<(u64, Vec<u8>)> = Vec::new();
+        for (origin, inner, expires_in) in relay_records {
+            let counter = engine.counter().saturating_add(1);
+            if let Ok(published) =
+                engine.publish(&inner, origin, counter_ref(counter), expires_in, now)
+            {
+                relayed.push((published.counter, published.body));
+            }
+        }
+        for (item, key, value, lamport) in relay_items {
+            let counter = engine.counter().saturating_add(1);
+            if let Ok(published) =
+                engine.relay_mutable(item, &key, &value, lamport, counter_ref(counter), now)
+            {
+                relayed.push((published.counter, published.body));
+            }
+        }
+        self.put_engine_all(&engine, &relayed, rng)?;
+        for (_, body) in &relayed {
+            self.queue_to_peers(&engine, body, rng)?;
+        }
         if acked {
             let below = engine.retained_floor().saturating_sub(1);
             self.prune_sync_sent(below.max(engine.acked_by_all()))?;
         }
         self.keep_history_holes(&engine, now, rng)?;
-        // DEV-308: each peer takes each counter of this device, thus the
-        // relay goes to each peer, the source too.
-        for (origin, inner, expires_in) in relay_records {
-            let counter = engine.counter().saturating_add(1);
-            let Ok(published) =
-                engine.publish(&inner, origin, counter_ref(counter), expires_in, now)
-            else {
-                continue;
-            };
-            self.put_engine(&engine, Some((published.counter, &published.body)), rng)?;
-            self.queue_to_peers(&engine, &published.body, rng)?;
-        }
-        for (item, key, value) in relay_items {
-            let counter = engine.counter().saturating_add(1);
-            let Ok(published) =
-                engine.publish_mutable(item, &key, &value, counter_ref(counter), now)
-            else {
-                continue;
-            };
-            self.put_engine(&engine, Some((published.counter, &published.body)), rng)?;
-            self.queue_to_peers(&engine, &published.body, rng)?;
-        }
         Ok(out)
     }
 

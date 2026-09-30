@@ -162,14 +162,24 @@ pub struct Gateway {
 struct State {
     ndr: Ndr,
     store: Box<dyn NdrStore>,
+    /// A commit failed: the registrations in memory ran ahead of the store,
+    /// and the NDR serves nothing more until a restart reads the store.
+    broken: bool,
 }
 
 impl State {
     /// Runs one step of the NDR and commits what it changed. A store that
-    /// takes no commit refuses the request.
+    /// takes no commit refuses the request, and each later one.
     fn step<T>(&mut self, run: impl FnOnce(&mut Ndr) -> T) -> Option<T> {
+        if self.broken {
+            return None;
+        }
         let out = run(&mut self.ndr);
-        self.store.commit(&self.ndr.take_changes()).ok()?;
+        if self.store.commit(&self.ndr.take_changes()).is_err() {
+            eprintln!("the store took no commit, and the NDR serves nothing more");
+            self.broken = true;
+            return None;
+        }
         Some(out)
     }
 }
@@ -240,8 +250,10 @@ async fn serve(
                 }
                 answer = NdrResponse::Gone;
             }
-            Some(_) => {}
-            None => answer = NdrResponse::Refused,
+            // A provider that took the push answers 2xx; each other status
+            // is a push that did not go, and the relay may try again.
+            Some(200..=299) => {}
+            Some(_) | None => answer = NdrResponse::Refused,
         }
     }
     let Ok(sealed) = ohttp::encapsulate_response(&key, &answer.encode(), &mut OsRng) else {
@@ -253,6 +265,7 @@ async fn serve(
 /// Runs the NDR until the listener fails. `provider_tls` is the
 /// configuration that the posts to the providers trust, and `fcm` the
 /// sender of the FCM account of the deployment, if it has one.
+/// `unified_push` makes it post to UnifiedPush endpoints too (`NTF-134`).
 pub async fn run_ndr(
     listener: TcpListener,
     tls: TlsAcceptor,
@@ -260,12 +273,14 @@ pub async fn run_ndr(
     mut store: Box<dyn NdrStore>,
     provider_tls: Arc<rustls::ClientConfig>,
     fcm: Option<Fcm>,
+    unified_push: bool,
 ) -> Result<(), StoreFault> {
     let fcm = fcm.map(Arc::new);
     let held = store.load()?;
     let state = Arc::new(Mutex::new(State {
-        ndr: Ndr::restore(held),
+        ndr: Ndr::restore(held).serving_unified_push(unified_push),
         store,
+        broken: false,
     }));
     let gateway = Arc::new(gateway);
     loop {

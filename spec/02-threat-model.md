@@ -311,7 +311,7 @@ adds a trade MUST add a row to this table.
 
 | Trade | Where the text states it |
 | --- | --- |
-| Mandatory inbound pacing raises the Balanced p50 from 0.6 s to 1.4 s, and U2 moves to match | Part 3 §3.9 |
+| Mandatory inbound pacing raises the Balanced p50 from 0.6 s to about 1.6 s, and U2 moves to match | Part 3 §3.9 |
 | A backgrounded client makes no cover cell, thus an ingress relay reads the send times of that user | Part 3 §3.6.2 |
 | A selected profile picture concedes G9 inside one Profile, in exchange for a recognizable identity | Part 4 §4.2.5 |
 | The table MAC does not detect a full-file rollback, and it does not detect a change after the first unlock | Part 4 §4.6 |
@@ -321,7 +321,7 @@ adds a trade MUST add a row to this table.
 | A device keeps the slot key of the last `GROUP_SLOT_WINDOW` hours of the current group epoch, thus a seized device opens 24 h of the retained records of that group | Part 11 §11.3.2 |
 | A granting epoch is a signed and transferable statement, thus G10 does not cover the group administration | Part 11 §11.9.5 |
 | A moderator removal in a private group destroys a record on the device of each member | Part 11 §11.9.6 |
-| Each queue relay holds its own session, thus each push wake pays one transport handshake for each queue relay. That row is 38 % of the idle background, and U4 moves from 25 MB to 100 MB each month | Part 3 §3.12 |
+| Each queue relay holds its own session, thus each push wake pays one transport handshake for each queue relay. That row is 42 % of the idle background, and U4 moves from 25 MB to 100 MB each month | Part 3 §3.12 |
 | A circuit and its session live 4 hours and not 10 minutes. A seized hop 1 or hop 2 key set then opens 4 hours of recorded cells, and one session links the wakes of 4 hours | Part 3 §3.4.3, Part 6 §6.2.3 |
 | Each background arrival wakes the device one time, thus the battery cost of Instant mode grows with the arrival count. U5 states that cost as a term for each arrival | Part 3 §3.12 |
 | Private mode holds a message for its fixed cadence, thus U3 covers Instant notifications and Balanced mode only | Part 8 §8.3 |
@@ -395,7 +395,7 @@ those rules has to check the goal again.
 | U9 | Part 2 §2.4 `THR-009`, Part 5 §5.5.2 braid, Part 5 §5.5.4 `CRY-098`, Part 6 §6.6.11 `WIR-456`, Part 11 §11.4.3 key supply | A count of the undecryptable records against the delivered records, at one device over 30 days |
 | U10 | Part 4 §4.7.1, Part 4 §4.7.2, Part 4 §4.7.3, Part 4 §4.8 | A restore from a fresh install, timed, at each of the three recovery paths, after a completed setup |
 | U10b | Part 4 §4.7.6 `IDN-051` to `IDN-054` | A scripted setup from the settings screen, with a tap count |
-| S1 | Part 4 §4.3.3 `IDN-129` to `IDN-132`, Part 9 §9.3.3, Part 9 §9.6, Part 8 §8.2.6, Part 13 §13.4 | A pasted address string at a fresh install, timed to the shown request at the addressee, in Instant mode and in Private mode |
+| S1 | Part 4 §4.3.2 `IDN-129` to `IDN-132`, Part 9 §9.3.3, Part 9 §9.6, Part 8 §8.2.6, Part 13 §13.4 | A pasted address string at a fresh install, timed to the shown request at the addressee, in Instant mode and in Private mode |
 | S2 | Part 9 §9.4, Part 9 §9.6, Part 8 §8.2.6 | A typed handle at a fresh install, timed in the same manner as S1 |
 | S3 | Part 6 §6.6.7 `WIR-358`, Part 4 §4.3.1 | A three-party introduction, timed from the request to the shown offer |
 

@@ -230,8 +230,11 @@ fn run(settings: &str, out: &Path) -> Result<(), &'static str> {
                 .map_err(|_| "a report queue does not sign")?,
         );
     }
-    // REL-183: each removed link of its life, under each key.
-    removed.sort();
+    // REL-183: each removed link of its life, under each key. One link
+    // keeps its newest removal, thus a renewed removal stays in force.
+    removed.sort_by(|one, other| {
+        (one.relay_a, one.relay_b, other.epoch).cmp(&(other.relay_a, other.relay_b, one.epoch))
+    });
     removed.dedup_by(|one, other| one.relay_a == other.relay_a && one.relay_b == other.relay_b);
     let signers: Vec<(u8, &SigningKey)> = (0u8..).zip(keys.iter()).collect();
     let mut signed_removals = Vec::new();

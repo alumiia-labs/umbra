@@ -182,6 +182,11 @@ impl Queue {
         self.records.iter().filter(move |r| r.seq > self.last_ack)
     }
 
+    /// The sequence that the next record takes.
+    pub const fn next_seq(&self) -> u32 {
+        self.next_seq
+    }
+
     /// Applies a cumulative `ACK` at `seq` (`WIR-048`). An `ACK` below the
     /// last one changes nothing.
     pub fn ack(&mut self, seq: u32) {

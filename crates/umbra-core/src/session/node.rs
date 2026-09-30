@@ -3194,7 +3194,28 @@ impl ClientNode {
         self.pump()
     }
 
-    /// The circuit that serves an inbound queue.
+    /// Whether a record of a cover slot to `contact` leaves now: a ratchet
+    /// that sends, a queue of the contact on a slot, and a ready circuit to
+    /// the relay of its queue. The caller erases a receipt or a digest when
+    /// it left, thus one that would wait in RAM behind a build does not
+    /// take the slot (`NET-054`); the build starts, and a later slot sends.
+    fn sends_now<R: CryptoRng + ?Sized>(&mut self, contact: &[u8; 32], rng: &mut R) -> bool {
+        let Some(held) = self.contacts.get(contact) else {
+            return false;
+        };
+        if held.stale || !held.channel.can_send() || !self.serves(contact) {
+            return false;
+        }
+        let relay = *held.channel.outbound().relay_id();
+        let inbound_slot = self.slot_of(held.channel.inbound().recipient_id());
+        let class = self.class_of(contact);
+        if self.ready_slot_in(&relay, inbound_slot, class).is_some() {
+            return true;
+        }
+        let _ = self.circuit_in(relay, class, rng);
+        false
+    }
+
     /// Whether a slot serves a queue of the contact `contact`. After a
     /// rotation or a renewal the contact id names no queue of a slot.
     fn serves(&self, contact: &[u8; 32]) -> bool {
@@ -3203,6 +3224,7 @@ impl ClientNode {
             .any(|queue| self.slot_of(queue).is_some())
     }
 
+    /// The circuit that serves an inbound queue.
     fn slot_of(&self, queue: &[u8; 32]) -> Option<usize> {
         self.slots
             .iter()
@@ -4081,11 +4103,7 @@ impl ClientNode {
             }
         }
         if let Some((contact, app)) = receipt {
-            let can_send = self
-                .contacts
-                .get(&contact.0)
-                .is_some_and(|held| held.channel.can_send());
-            if can_send && self.serves(&contact.0) {
+            if self.sends_now(&contact.0, rng) {
                 self.send_now(contact.0, app, Waiting::Other, now, rng)?;
                 return Ok(CoverSlot::Receipt);
             }
@@ -4098,11 +4116,7 @@ impl ClientNode {
         }
         // NET-065: a transparency digest after a report (DIS-029).
         if let Some((contact, app)) = digest {
-            let can_send = self
-                .contacts
-                .get(&contact.0)
-                .is_some_and(|held| held.channel.can_send());
-            if can_send && self.serves(&contact.0) {
+            if self.sends_now(&contact.0, rng) {
                 self.send_now(contact.0, app, Waiting::Other, now, rng)?;
                 return Ok(CoverSlot::Digest);
             }

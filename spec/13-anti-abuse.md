@@ -576,7 +576,7 @@ IssueResponse {
 
 - **[ABU-109]** The seed of each solution MUST be `SHA3-256("umbra/v1/issue-pow"
   || BE32(epoch) || blinded)`, and its `verifier_id` MUST be
-  `SHA3-256("umbra/v1/issue-pow" || pk)`, where `pk` is the issuer key of
+  `SHA3-256("umbra/v1/issue-pow-verifier" || pk)`, where `pk` is the issuer key of
   that epoch. **[ABU-110]** An issuer MUST answer the epoch of its clock and
   the next one only, and the next one only after its key is in the log under
   `ABU-098`. A solution thus serves one blinded element. A second request

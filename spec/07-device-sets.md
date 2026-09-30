@@ -642,7 +642,10 @@ about 24 days to drain it. The catch-up object removes that wait.
 
 - **[DEV-236]** If the acknowledged counter of a peer lags by more than
   `SYNC_CATCHUP_LAG`, the device MUST make a catch-up object. The object holds
-  each retained record above that counter, and §7.8 gives the value.
+  each retained record above that counter, and §7.8 gives the value. The
+  object is each retained body in the order of its counter, each as
+  `BE32(len) || body`, where `body` is the sync record as the channel
+  carries it.
 - **[DEV-237]** A device MUST write the object on the chunk path of Part 12
   §12.3.3 over the connection of Part 12 §12.8. Part 4 §4.7.2 carries the
   backup on that path in the same manner.
@@ -1362,10 +1365,8 @@ the act of a named party.
 client MUST NOT delay it. The spread below applies to the outbound request and
 to nothing else.
 
-| Parameter | Value |
-| --- | --- |
-| `DELETE_RATE_LIMIT` | 1 record of kind `0x05` in each 10 s, for each sender in each conversation and in each group |
-| `SWEEP_SPREAD` | Exponential, mean 30 minutes. It applies to the outbound request only |
+`DELETE_RATE_LIMIT` and `SWEEP_SPREAD` in the parameters of this section
+bound the outbound request. `SWEEP_SPREAD` applies to that request only.
 
 **One user action can produce records in more than one conversation or group.
 **[DEV-107]** In that case the client MUST draw an independent delay for each
@@ -1427,7 +1428,7 @@ signals the quota, the client MUST show a delivery failure to the user.
 | `EDIT_WINDOW` | 24 h, and the ratchet owner of the recipient measures it from its own receive time |
 | `EDIT_MAX` | 8 revisions of one message |
 | `DELETE_BATCH_MAX` | 9 targets in one record. Part 6 §6.6.1 derives it from Part 6 §6.9 |
-| `DELETE_RATE_LIMIT` | 1 record in each 10 s, for each sender in each conversation |
+| `DELETE_RATE_LIMIT` | 1 record of kind `0x05` in each 10 s, for each sender in each conversation and in each group |
 | `SWEEP_SPREAD` | Exponential, mean 30 min |
 | `REF_ORPHAN_TTL` | 45 days |
 | `REF_ORPHAN_MAX` | 4 096 entries for each conversation |

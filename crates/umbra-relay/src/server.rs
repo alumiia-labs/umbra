@@ -94,7 +94,7 @@ pub enum Input {
         /// The link.
         link: LinkId,
         /// The capsules to write.
-        writer: mpsc::UnboundedSender<Vec<u8>>,
+        writer: mpsc::Sender<Vec<u8>>,
     },
     /// The dialer reached a relay of the next layer.
     Dialed {
@@ -103,7 +103,7 @@ pub enum Input {
         /// The relay.
         relay_id: [u8; 32],
         /// The capsules to write.
-        writer: mpsc::UnboundedSender<Vec<u8>>,
+        writer: mpsc::Sender<Vec<u8>>,
     },
     /// One capsule arrived.
     Capsule {
@@ -181,7 +181,7 @@ pub async fn run_node(
     mut store: Box<dyn RelayStore>,
 ) {
     let mut rng = OsRng;
-    let mut writers: BTreeMap<LinkId, mpsc::UnboundedSender<Vec<u8>>> = BTreeMap::new();
+    let mut writers: BTreeMap<LinkId, mpsc::Sender<Vec<u8>>> = BTreeMap::new();
     let mut next_tick: BTreeMap<CircuitKey, tokio::time::Instant> = BTreeMap::new();
     let mut clock =
         tokio::time::interval(Duration::from_millis((pacing_mean_ms / 20).clamp(1, 50)));
@@ -286,8 +286,13 @@ pub async fn run_node(
         for output in outputs {
             match output {
                 Output::Send { link, capsule } => {
-                    if let Some(writer) = writers.get(&link) {
-                        let _ = writer.send(capsule);
+                    // A peer that reads nothing fills its backlog, and the
+                    // link closes: no link holds the memory of the relay.
+                    let is_full = writers
+                        .get(&link)
+                        .is_some_and(|writer| writer.try_send(capsule).is_err());
+                    if is_full {
+                        writers.remove(&link);
                     }
                 }
                 Output::Close { link } => {
@@ -324,6 +329,19 @@ async fn push_copy(target: Dial, tls: Arc<rustls::ClientConfig>, capsule: Vec<u8
         let _ = connection.send(&capsule).await;
     }
 }
+
+/// The capsules that wait for one client link. A peer that reads nothing
+/// fills them, and the relay closes that link.
+const LINK_BACKLOG: usize = 1_024;
+/// The capsules that wait for one link to a relay of the next layer, which
+/// carries the circuits of many clients.
+const RELAY_LINK_BACKLOG: usize = 16_384;
+/// The time that one write to a link may take before the link closes.
+const LINK_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The time that a POST has for its answer after the deadline of its
+/// request (`NET-335`).
+const POST_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The path of the OHTTP relay of Part 8 §8.2 (`NTF-127`).
 pub const OHTTP_PATH: &str = "/ohttp";
@@ -623,40 +641,71 @@ async fn relay_ohttp<S>(
 /// §3.8 serves that path, and the relay sees no such request. A `POST` to
 /// `OHTTP_PATH` goes to the gateway of the NDR.
 pub async fn serve_connection<S>(
-    mut stream: S,
+    stream: S,
     link: LinkId,
     node: mpsc::Sender<Input>,
     carried: Arc<Carried>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    let deadline = tokio::time::Instant::now() + carried.limits.handshake_timeout;
+    serve_connection_until(stream, link, node, carried, deadline).await;
+}
+
+/// [`serve_connection`] under a deadline that the accept set: the TLS
+/// handshake and the request share `RELAY_HANDSHAKE_TIMEOUT` (`NET-335`).
+pub async fn serve_connection_until<S>(
+    mut stream: S,
+    link: LinkId,
+    node: mpsc::Sender<Input>,
+    carried: Arc<Carried>,
+    deadline: tokio::time::Instant,
+) where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let mut inbound: Vec<u8> = Vec::with_capacity(4_096);
     let mut chunk = vec![0u8; 16_384];
-    // NET-335: a peer that sends no complete request in time is closed.
-    let deadline = tokio::time::Instant::now() + carried.limits.handshake_timeout;
+    // NET-335: a POST reads its request and gets its answer by the deadline
+    // and a grace for the answer, thus a peer that stalls holds no slot.
+    let post_end = deadline + POST_GRACE;
     let request = loop {
         if inbound.starts_with(format!("POST {OHTTP_PATH} ").as_bytes()) {
             let limits = (OHTTP_REQUEST_MAX, OHTTP_RESPONSE_MAX);
-            relay_ohttp(&mut stream, &mut inbound, carried.ohttp.as_ref(), limits).await;
+            let _ = tokio::time::timeout_at(
+                post_end,
+                relay_ohttp(&mut stream, &mut inbound, carried.ohttp.as_ref(), limits),
+            )
+            .await;
             return;
         }
         if inbound.starts_with(format!("POST {DIRECTORY_PATH} ").as_bytes()) {
             let limits = (DIRECTORY_REQUEST_MAX, DIRECTORY_RESPONSE_MAX);
-            relay_ohttp(
-                &mut stream,
-                &mut inbound,
-                carried.directory.as_ref(),
-                limits,
+            let _ = tokio::time::timeout_at(
+                post_end,
+                relay_ohttp(
+                    &mut stream,
+                    &mut inbound,
+                    carried.directory.as_ref(),
+                    limits,
+                ),
             )
             .await;
             return;
         }
         if inbound.starts_with(format!("POST {RECEIPT_PATH} ").as_bytes()) {
-            answer_receipt_query(&mut stream, &mut inbound, &node, &carried).await;
+            let _ = tokio::time::timeout_at(
+                post_end,
+                answer_receipt_query(&mut stream, &mut inbound, &node, &carried),
+            )
+            .await;
             return;
         }
         if inbound.starts_with(format!("POST {STAT_PATH} ").as_bytes()) {
-            answer_stat_query(&mut stream, &mut inbound, &node, &carried).await;
+            let _ = tokio::time::timeout_at(
+                post_end,
+                answer_stat_query(&mut stream, &mut inbound, &node, &carried),
+            )
+            .await;
             return;
         }
         if native::asks_challenges(&inbound) && inbound.windows(4).any(|w| w == b"\r\n\r\n") {
@@ -713,7 +762,7 @@ pub async fn serve_connection<S>(
         return;
     }
 
-    let (writer, mut outbound) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (writer, mut outbound) = mpsc::channel::<Vec<u8>>(LINK_BACKLOG);
     if node.send(Input::Opened { link, writer }).await.is_err() {
         return;
     }
@@ -746,7 +795,10 @@ pub async fn serve_connection<S>(
                 let Ok(used) = websocket::encode(&bytes, None, &mut frame) else {
                     break 'connection;
                 };
-                if stream.write_all(frame.get(..used).unwrap_or(&[])).await.is_err() {
+                // A peer that reads nothing holds no task: the write ends at
+                // its bound, and the link closes.
+                let write = stream.write_all(frame.get(..used).unwrap_or(&[]));
+                if !matches!(tokio::time::timeout(LINK_WRITE_TIMEOUT, write).await, Ok(Ok(()))) {
                     break 'connection;
                 }
             }
@@ -820,12 +872,15 @@ pub async fn accept_loop(
         let carried = carried.clone();
         let this_link = link;
         link = link.saturating_add(2);
+        // NET-335: one deadline from the accept covers the TLS handshake and
+        // the request.
+        let deadline = tokio::time::Instant::now() + limits.handshake_timeout;
         tokio::spawn(async move {
             let _held = held;
-            let accepted = tokio::time::timeout(limits.handshake_timeout, tls.accept(tcp)).await;
+            let accepted = tokio::time::timeout_at(deadline, tls.accept(tcp)).await;
             drop(permit);
             if let Ok(Ok(stream)) = accepted {
-                serve_connection(stream, this_link, node, carried).await;
+                serve_connection_until(stream, this_link, node, carried, deadline).await;
             }
         });
     }
@@ -851,7 +906,7 @@ pub async fn dial_next(
     else {
         return;
     };
-    let (writer, mut outbound) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (writer, mut outbound) = mpsc::channel::<Vec<u8>>(RELAY_LINK_BACKLOG);
     let opened = Input::Dialed {
         link,
         relay_id,
@@ -871,8 +926,13 @@ pub async fn dial_next(
                 Err(_) => break,
             },
             next = outbound.recv() => match next {
-                Some(bytes) if connection.send(&bytes).await.is_ok() => {}
-                _ => break,
+                Some(bytes) => {
+                    let sent = tokio::time::timeout(LINK_WRITE_TIMEOUT, connection.send(&bytes)).await;
+                    if !matches!(sent, Ok(Ok(()))) {
+                        break;
+                    }
+                }
+                None => break,
             },
         }
     }

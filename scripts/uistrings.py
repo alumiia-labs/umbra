@@ -2,9 +2,11 @@
 
 Each rule that requires the Android interface to show a string has a
 resource named after it: `umbra.ui.idn-024` is `umbra_ui_idn_024`, because a
-resource name holds no dot and no hyphen (IMP-084). This check fails when a
-rule below has no such string, when a string of a shipped locale is empty
-(IMP-086, IMP-087), or when no source file reads it.
+resource name holds no dot and no hyphen (IMP-084). A rule with more than one
+string names each one with a suffix, as `umbra_ui_dev_126_edit`. This check
+fails when a rule below has no such string, when a string of a shipped
+locale is empty (IMP-086, IMP-087), when no source file reads it, and when a
+string of the family names no rule below or no source reads it.
 
     python scripts/uistrings.py
 """
@@ -19,14 +21,14 @@ ROOT = os.path.join(os.path.dirname(__file__), "..")
 RES = os.path.join(ROOT, "android", "app", "src", "main", "res")
 SOURCES = os.path.join(ROOT, "android", "app", "src", "main", "java")
 
-# The rules that require a string of the Android interface. A rule of the
-# web client, and a rule of a feature that the app does not hold, is not here.
+# The rules that require a string of the Android interface. A rule of a
+# feature that the app does not hold is not here.
 RULES = [
     "IDN-010", "IDN-014", "IDN-024", "IDN-087", "IDN-088", "IDN-089", "IDN-152",
     "DEV-126", "DEV-137", "DEV-218", "NTF-009", "DIS-084", "NET-103", "WIR-341",
     "GRP-050", "GRP-087", "GRP-090", "GRP-374",
     "ATT-157", "ABU-040", "ABU-041", "IMP-047", "IMP-050",
-    "REL-116", "REL-126", "IMP-082", "NET-343", "DEV-114",
+    "REL-116", "REL-126", "IMP-082", "NET-343", "DEV-114", "IMP-074",
 ]
 
 
@@ -62,6 +64,15 @@ def main() -> int:
         name = resource_name(rule)
         if not re.search(r"R\.string\." + name + r"\b", source):
             problems.append(f"no source reads {name}")
+    names = [resource_name(rule) for rule in RULES]
+    for folder in locales:
+        for name in strings_of(folder):
+            if not name.startswith("umbra_ui_"):
+                continue
+            if not any(name == known or name.startswith(known + "_") for known in names):
+                problems.append(f"{os.path.basename(folder)}: {name} names no rule")
+            if not re.search(r"R\.string\." + name + r"\b", source):
+                problems.append(f"no source reads {name}")
     for problem in problems:
         print(problem)
     print(f"rules: {len(RULES)}  locales: {len(locales)}  problems: {len(problems)}")

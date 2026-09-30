@@ -18,8 +18,8 @@ use super::{
     manifest::{self, Replicas},
     place::{fetch_order, resolve_hint, AttachmentRelay, HoldOffs},
     seal::{manifest_key, open_chunk, read_secret, seal_file, Assembler, SealedFile},
-    upload::{sample_positions, ChunkUpload},
-    verify_sample, MAX_CONCURRENT_DOWN, MAX_CONCURRENT_UP, MAX_DATA_CHUNKS, REPLICAS,
+    upload::ChunkUpload,
+    MAX_CONCURRENT_DOWN, MAX_CONCURRENT_UP, MAX_DATA_CHUNKS, REPLICAS,
 };
 use crate::{
     session::node::{ChunkJob, ChunkOutcome, ClientNode},
@@ -575,22 +575,10 @@ impl Upload {
                 self.send(node, index, Step::Replicate, rng)?;
             }
             (Step::Replicate, ChunkOutcome::Replicated) => {
-                // ATT-113, ATT-120: a random sample of the copies proves
-                // itself. The relay of the `CPUT` gave its proof already.
-                let copies = u32::try_from(chunk.relays.len().saturating_sub(1))
-                    .map_err(|_| Error::Malformed)?;
-                let sample = verify_sample(usize::try_from(copies).unwrap_or(0));
-                let picked =
-                    sample_positions(copies, sample, &mut |bound| random_below(rng, bound));
-                chunk.unverified = picked
-                    .into_iter()
-                    .map(|copy| {
-                        (
-                            usize::try_from(copy).unwrap_or(0).saturating_add(1),
-                            VERIFY_ATTEMPTS,
-                        )
-                    })
-                    .collect();
+                // ATT-113, ATT-120: each copy proves itself. The relay of the
+                // `CPUT` gave its proof already.
+                let copies = chunk.relays.len().saturating_sub(1);
+                chunk.unverified = (1..=copies).map(|copy| (copy, VERIFY_ATTEMPTS)).collect();
                 if chunk.unverified.is_empty() {
                     chunk.is_done = true;
                 }

@@ -203,7 +203,7 @@ impl RelayGate {
 
 /// The holder of an upload quota, from what admitted the upload.
 fn holder(kind: &[u8], value: &[u8]) -> [u8; 32] {
-    umbra_crypto::hash::sha3_256(&[b"umbra/v1/quota-holder", kind, value])
+    umbra_crypto::hash::sha3_256(&[umbra_crypto::labels::QUOTA_HOLDER, kind, value])
 }
 
 /// Admits a hello at the addressee (`ABU-012`, `ABU-078` to `ABU-085`):

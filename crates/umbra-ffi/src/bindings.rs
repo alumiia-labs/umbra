@@ -876,6 +876,11 @@ pub struct MsgInfo {
     pub moderator_role: u8,
     /// The member index that sent a message of a group that arrived.
     pub sender: Option<u16>,
+    /// Why a failed message of this device failed (`IMP-074`): 0 unknown,
+    /// 1 a relay refused it, 2 no path took it, 3 its file did not upload,
+    /// 4 no replica of the group took it, 5 the queue of the contact was
+    /// full.
+    pub failure: u8,
 }
 
 /// A share of the social half that a holder took (Part 4 §4.7.3).
@@ -2110,6 +2115,15 @@ impl Inner {
             return;
         };
         for admit in waiting {
+            // One fetch of one admit at a time: a commit while it runs
+            // starts no second one.
+            let is_running = self.transfer_tags.values().any(|work| {
+                matches!(work, TransferWork::Admit { from, group_id }
+                    if *from == admit.from && *group_id == admit.group_id)
+            });
+            if is_running {
+                continue;
+            }
             let Ok(descriptor) = umbra_wire::descriptor::FileDescriptor::parse(&admit.descriptor)
             else {
                 continue;
@@ -3110,10 +3124,12 @@ impl Inner {
     }
 
     fn has_event(&self) -> bool {
+        // A locked client gives no progress event, thus one waits and does
+        // not wake the platform thread.
         self.client.has_event()
             || !self.net_events.is_empty()
             || self.circuits_changed
-            || !self.progress_events.is_empty()
+            || (self.client.is_unlocked() && !self.progress_events.is_empty())
     }
 
     fn next_event(&mut self) -> Option<FfiEvent> {
@@ -3232,6 +3248,8 @@ impl Inner {
     fn stop_network_if_locked(&mut self) {
         if !self.client.is_unlocked() {
             self.bridge = None;
+            // A progress event names a message that the lock hides.
+            self.progress_events.clear();
         }
     }
 }
@@ -4236,6 +4254,11 @@ impl Handle {
             let mut inner = locked(&self.inner);
             inner.run = inner.run.wrapping_add(1);
             run = inner.run;
+            // The run before ends here: a start that fails below leaves no
+            // bridge of a run whose commits the new identifier refuses, and
+            // a grant of that run captures no invitation of this one.
+            inner.bridge = None;
+            inner.pending_grants.clear();
             inner.invitation_host.clone_from(&network.invitation_host);
             inner.guard = Some(ingress.key.relay_id);
             inner.bootstrap = network.is_provisional;
@@ -4615,9 +4638,11 @@ impl Handle {
     /// the result is the petname that the introducer uses (`WIR-358`).
     pub fn accept_introduction(&self, id: Vec<u8>) -> Result<String, FfiError> {
         let id: [u8; 16] = id.try_into().map_err(|_| FfiError::Malformed)?;
-        let (link, name) = locked(&self.inner).client.take_offer(&id)?;
+        let (link, name) = locked(&self.inner).client.offer(&id)?;
         let link = String::from_utf8(link.to_vec()).map_err(|_| FfiError::Malformed)?;
         self.accept(link)?;
+        // The accept went, thus a row that stays asks nothing of the user.
+        let _ = locked(&self.inner).client.decline_introduction(&id);
         Ok(name)
     }
 
@@ -5472,6 +5497,7 @@ impl Handle {
             moderation: info.moderation,
             moderator_role: info.moderator_role,
             sender: info.sender,
+            failure: info.failure.map_or(0, |cause| cause as u8),
         })
     }
 

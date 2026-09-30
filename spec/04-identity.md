@@ -963,7 +963,8 @@ that table.
   ```
   BackupRootChunk {                     // the chunk plaintext, before the padding
       nonce        [24]u8               // from the device CSPRNG
-      sealed       var                  // XChaCha20-Poly1305( backup_key_epoch, nonce, BackupRoot )
+      sealed       var                  // XChaCha20-Poly1305( backup_key_epoch, nonce, BackupRoot,
+                                        //   ad = backup_handle_epoch )
   }
 
   BackupRoot {

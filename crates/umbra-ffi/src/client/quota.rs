@@ -67,7 +67,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // quota paces, and the user sees the failure.
         if self.is_change(message)? {
             self.set_full(conversation, true);
-            return self.set_delivery(message, Delivery::Failed, rng);
+            return self.fail(message, crate::FailureCause::Full, rng);
         }
         self.set_full(conversation, true);
         self.held_sends.insert(*message, (conversation, now));

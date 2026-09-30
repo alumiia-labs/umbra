@@ -231,8 +231,9 @@ ARQ of Part 3 §3.7 covers its record.
 
 **[WIR-138]** A sender MUST increase `seq` by one for each frame, and it MUST
 start at zero. **[WIR-139]** A sender MUST close the session before `seq` wraps.
-A `u24` gives 16 777 216 frames, and `CIRCUIT_MAX_CELLS` of Part 3 §3.4.3 is
-8 192, thus a wrap does not occur in a conformant session.
+A `u24` gives 16 777 216 frames. A session between two relays carries many
+circuits, thus `CIRCUIT_MAX_CELLS` of Part 3 §3.4.3 does not bound it, and
+the sender closes the link at the last value and opens a new session.
 
 **[WIR-140]** A sender MUST set bit 0 of `flags` on a resend, and it MUST keep
 `seq` at the value of the first transmission. **[WIR-141]** A receiver MUST
@@ -290,7 +291,9 @@ auth = HMAC-SHA3-256( session_secret,
 
 - **[WIR-229]** A client MUST send a `SessionOpen` or a `SessionResume` as the
   first capsule of each transport connection. **[WIR-230]** A relay MUST close a
-  connection whose first capsule is not one of those two records.
+  connection whose first capsule is not one of those two records, or one of
+  the capsules between relays of `WIR-515` on a connection that a relay
+  opened for it.
 - **[WIR-231]** A client MUST draw `session_secret` from the device CSPRNG at
   each open. **[WIR-232]** A relay MUST hold `session_id`, `session_secret`, the
   next `seq`, and the accepted `seq` values for the life of the session.
@@ -571,9 +574,10 @@ plus the length of its `Admission`, and an `IDS` whose `payload_len` is not
 **[WIR-512]** A relay MUST NOT answer a `COVER` of a client. An accepted
 `ACK`, `SUB`, `UNSUB`, or `DEL` has no answer command: the records of a `SUB`
 are its effect, and a `NACK` reports a refusal.
-**[WIR-513]** A client MUST NOT hold a `COVER`, an `ACK`, a `SUB`, an `UNSUB`,
-or a `DEL` in the table of the commands that wait for an answer. A `NACK` for
-one of them then names no command of the session, and `WIR-323` drops it. A
+**[WIR-513]** A client MUST NOT hold a `COVER`, an `ACK`, an `UNSUB`, or a
+`DEL` in the table of the commands that wait for an answer. A `NACK` for one
+of them then names no command of the session, and `WIR-323` drops it. A
+`SUB` waits in that table, because Part 3 `NET-324` acts on its `REJECTED`. A
 lost `ACK` costs a second delivery, which the cursor of `IMP-135` drops.
 
 > *Cause.* An earlier draft gave no answer to these commands and no rule for

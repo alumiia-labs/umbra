@@ -273,9 +273,18 @@ private fun ContactView(
         is Screen.Verify -> VerifyScreen(chat, pop, push)
         is Screen.VerifyCode -> VerifyCodeScreen(chat, top.starts, pop)
         is Screen.SafetyNumber -> SafetyNumberScreen(chat, pop)
-        is Screen.Photo -> PhotoScreen(top.line, chat, pop)
-        is Screen.Video -> VideoScreen(top.line, pop)
-        is Screen.Media -> MediaScreen(chat, pop, push)
+        is Screen.Photo -> {
+            ScreenshotBlock(top.conversation)
+            PhotoScreen(top.line, chat, pop)
+        }
+        is Screen.Video -> {
+            ScreenshotBlock(top.conversation)
+            VideoScreen(top.line, pop)
+        }
+        is Screen.Media -> {
+            ScreenshotBlock(top.conversation)
+            MediaScreen(chat, pop, push)
+        }
         is Screen.GroupDetails -> GroupDetailsScreen(chat, pop, push)
         is Screen.InviteToGroup -> InviteToGroupScreen(chat, pop)
         is Screen.GroupMembers -> GroupMembersScreen(chat, pop, push)
@@ -493,7 +502,7 @@ private fun ChatsTab(push: (Screen) -> Unit) {
             return
         }
         LazyColumn {
-            items(withMessages, key = { it.conversation.label }) { chat ->
+            items(withMessages, key = { it.conversation.key }) { chat ->
                 ChatRow(chat) { push(Screen.Chat(chat.conversation)) }
             }
         }
@@ -563,13 +572,14 @@ private fun ChatRowContent(chat: Chat) {
 private fun ContactsTab(push: (Screen) -> Unit) {
     Column(Modifier.fillMaxSize()) {
         TabTitle("Contacts")
-        if (Core.chats.isEmpty()) {
+        // A group is no contact, and its details are group details.
+        val byName = Core.chats.filter { !it.isGroup }.sortedBy { it.title.lowercase() }
+        if (byName.isEmpty()) {
             EmptyState("No contacts yet.")
             return
         }
-        val byName = Core.chats.sortedBy { it.title.lowercase() }
         LazyColumn {
-            items(byName, key = { it.conversation.label }) { chat ->
+            items(byName, key = { it.conversation.key }) { chat ->
                 Row(
                     Modifier
                         .fillMaxWidth()

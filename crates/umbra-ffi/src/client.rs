@@ -238,6 +238,9 @@ pub const AUTO_DOWNLOAD_DEFAULT: u64 = umbra_core::attach::LARGE_FILE_WARN;
 /// The highest epoch of a directory root that this device verified
 /// (Part 10 rule `REL-034`).
 const DIRECTORY_EPOCH_SETTING: &[u8] = b"directory-epoch";
+/// The cause of each failed message of this device, under the row of the
+/// message: one byte of `FailureCause` (`IMP-074`).
+const FAILURE: TableId = TableId(0x4F);
 /// The clock correction of the relay directory in seconds, signed
 /// (Part 10 `REL-114`).
 const DIRECTORY_CORRECTION_SETTING: &[u8] = b"directory-correction";
@@ -290,7 +293,7 @@ struct Open<B: Backend> {
 const AUDIT_PERIOD: u64 = 23 * 3_600;
 
 /// The place of the scan of `IDN-162`: the index of the next table, and the
-/// start of the pass. A pass starts at the first step after an unlock.
+/// start of the pass. The first pass starts at the first step of the run.
 #[derive(Debug, Default, Clone, Copy)]
 struct Audit {
     next: usize,
@@ -812,7 +815,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             // IMP-126, IMP-127: each queue in RAM leaves with the key, and
             // its plaintext is wiped. The store holds each record again at
             // the unlock: the send queue in its rows, and a sync record in
-            // its retained body, which the next run sends again.
+            // its retained body, which the next run sends again. A sync
+            // acknowledgment or a catch-up descriptor that waited goes at
+            // the next record of its peer. The marks of the records that a
+            // peer handed hold no text, and they stay.
             for outgoing in &mut self.outgoing {
                 outgoing.app.zeroize();
             }
@@ -821,7 +827,6 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
             self.outgoing.clear();
             self.sync_out.clear();
-            self.synced_out.clear();
             self.subjects.clear();
             self.typing_sent.clear();
             self.held_sends.clear();
@@ -2329,6 +2334,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         batch.delete(TableId::MESSAGE, message.0);
         batch.delete(OUTBOX, message.0);
         batch.delete(REVISION, message.0);
+        batch.delete(FAILURE, message.0);
         batch.delete(timers::DEADLINES, message.0);
         batch.delete(polls::POLLS, message.0);
         batch.delete(groups::MENTIONED, message.0);
@@ -3365,11 +3371,32 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         self.outgoing.pop_front()
     }
 
+    /// Fails a message of this device and keeps its cause (`IMP-074`).
+    pub fn fail<R: CryptoRng + ?Sized>(
+        &mut self,
+        message: &MsgRef,
+        cause: crate::FailureCause,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        self.set_delivery_with(message, Delivery::Failed, Some(cause), rng)
+    }
+
     /// The send path reports a delivery state of a message.
     pub fn set_delivery<R: CryptoRng + ?Sized>(
         &mut self,
         message: &MsgRef,
         delivery: Delivery,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        self.set_delivery_with(message, delivery, None, rng)
+    }
+
+    /// A delivery state and, for a failure, its cause, in one commit.
+    fn set_delivery_with<R: CryptoRng + ?Sized>(
+        &mut self,
+        message: &MsgRef,
+        delivery: Delivery,
+        cause: Option<crate::FailureCause>,
         rng: &mut R,
     ) -> Result<(), Error> {
         let open = self.open_mut()?;
@@ -3408,6 +3435,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if delivery != Delivery::Queued {
             // A relay took the record, or the ARQ stopped. It waits no more.
             batch.delete(OUTBOX, message.0);
+        }
+        match (delivery, cause) {
+            (Delivery::Failed, Some(cause)) => {
+                batch.put(FAILURE, message.0, None, &[cause as u8], rng)?;
+            }
+            (Delivery::Failed, None) => {}
+            // A record that goes again, or that a relay took, fails no more.
+            _ => batch.delete(FAILURE, message.0),
         }
         batch.commit()?;
         self.events.push_back(Event::Delivery {
@@ -3536,6 +3571,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         info.mentions_me = open.store.get(groups::MENTIONED, &message.0)?.is_some();
         info.sender = self.group_sender(message)?;
         info.recovered = self.is_recovered(message)?;
+        // IMP-074: a failed message names its cause.
+        if info.delivery == Delivery::Failed {
+            info.failure = open
+                .store
+                .get(FAILURE, &message.0)?
+                .and_then(|value| value.first().copied())
+                .and_then(crate::FailureCause::from_byte);
+        }
         if let Some((state, role)) = self.moderation_of(message)? {
             info.moderation = state;
             info.moderator_role = role;
@@ -3746,6 +3789,8 @@ fn info_of(plain: &[u8]) -> Result<MessageInfo, Error> {
         thread: None,
         // WIR-177: the depth of a forward, and zero for an original.
         forward_depth: plain.get(MESSAGE_PREFIX..).map_or(0, forward::depth_of),
+        // The store holds the cause: see `Client::info`.
+        failure: None,
         // The store holds the state: see `Client::info`.
         moderation: 0,
         moderator_role: 0,

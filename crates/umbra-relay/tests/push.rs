@@ -89,6 +89,8 @@ async fn a_registration_and_a_push_cross_the_ohttp_relay_to_the_endpoint() {
         Box::new(MemoryNdrStore::default()),
         trust.clone(),
         None,
+        // The endpoint of the test is a UnifiedPush endpoint on this machine.
+        true,
     ));
 
     // A relay with the OHTTP relay role, whose node sees no request.
@@ -152,13 +154,13 @@ async fn a_registration_and_a_push_cross_the_ohttp_relay_to_the_endpoint() {
     assert!(got.headers.contains(&("ttl".into(), "86400".into())));
 
     // NTF-125: the endpoint names the target gone, the NDR drops the
-    // registration, and the next push is refused.
+    // registration, and the next push is gone as well, thus the relay stops.
     let answer = call(&route, &push, trust.clone(), &mut OsRng)
         .await
         .unwrap();
     assert_eq!(answer, NdrResponse::Gone);
     let answer = call(&route, &push, trust, &mut OsRng).await.unwrap();
-    assert_eq!(answer, NdrResponse::Refused);
+    assert_eq!(answer, NdrResponse::Gone);
 }
 
 /// What the fake Google server saw: each path, its authorization, and its
@@ -286,6 +288,7 @@ async fn an_fcm_token_gets_a_data_message_under_the_account_of_the_ndr() {
         Box::new(MemoryNdrStore::default()),
         trust.clone(),
         Some(fcm),
+        false,
     ));
     let (relay_listener, relay_port) = listener().await;
     let (node, _unused) = mpsc::channel(8);
@@ -356,5 +359,5 @@ async fn an_fcm_token_gets_a_data_message_under_the_account_of_the_ndr() {
     let answer = call(&route, &push, trust.clone(), &mut OsRng).await;
     assert_eq!(answer.unwrap(), NdrResponse::Gone);
     let answer = call(&route, &push, trust, &mut OsRng).await;
-    assert_eq!(answer.unwrap(), NdrResponse::Refused);
+    assert_eq!(answer.unwrap(), NdrResponse::Gone);
 }

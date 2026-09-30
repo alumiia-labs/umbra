@@ -175,7 +175,13 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
     let text = std::fs::read_to_string(path).ok()?;
     let mut values: BTreeMap<&str, &str> = BTreeMap::new();
     let mut next = BTreeMap::new();
-    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+    // A line that starts with `#` is a comment, thus the output of `keygen`
+    // pastes as it is.
+    for line in text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+    {
         let (key, value) = line.split_once('=')?;
         if key != "next" {
             values.insert(key, value);
@@ -454,7 +460,9 @@ fn signed_descriptor(settings: &Settings) -> Option<Vec<u8>> {
         family_id: hex32(fact("family")?)?,
         capacity_class: fact("class")?.parse().ok()?,
         roles: role_bits,
-        chunk_store_gib: 0,
+        // REL-127, ATT-087: the descriptor declares the store that the
+        // relay holds for chunks.
+        chunk_store_gib: u32::try_from(settings.config.chunk_capacity >> 30).unwrap_or(u32::MAX),
         valid_after: now / EPOCH_SECONDS,
         sig: &[],
     }

@@ -82,6 +82,8 @@ pub enum Taken {
         key: Vec<u8>,
         /// The new value.
         value: Vec<u8>,
+        /// The Lamport counter of the write, which a relay keeps.
+        lamport: u64,
     },
     /// An item of mutable state that loses to the value held (`DEV-270`).
     Superseded,
@@ -176,6 +178,13 @@ impl SyncEngine {
 
     fn context(&mut self, expires_in: u32) -> CausalContext {
         self.lamport = self.lamport.saturating_add(1);
+        let lamport = self.lamport;
+        self.context_at(lamport, expires_in)
+    }
+
+    /// A context of the next counter under `lamport`, which a relay keeps
+    /// from the item that it carries (`DEV-308`).
+    fn context_at(&mut self, lamport: u64, expires_in: u32) -> CausalContext {
         self.counter = self.counter.saturating_add(1);
         let mut vector: Vec<(DeviceId, u64)> = self
             .peers
@@ -185,7 +194,7 @@ impl SyncEngine {
         vector.push((self.own, self.counter));
         vector.sort_unstable();
         CausalContext {
-            lamport: self.lamport,
+            lamport,
             vector,
             expires_in,
         }
@@ -257,6 +266,35 @@ impl SyncEngine {
         })
     }
 
+    /// Publishes again an item of mutable state that a peer published, at
+    /// the Lamport counter of that write (`DEV-308`). The item takes a
+    /// counter of this device, and it keeps the time of its write, thus it
+    /// supersedes no later write of any device, its source included.
+    pub fn relay_mutable(
+        &mut self,
+        item: u8,
+        key: &[u8],
+        value: &[u8],
+        lamport: u64,
+        slot_ref: [u8; 16],
+        now: u64,
+    ) -> Result<Published, Error> {
+        let mutable = MutableItem {
+            context: self.context_at(lamport, 0),
+            item,
+            key,
+            value,
+        };
+        let mut body = alloc::vec![0u8; key.len().saturating_add(value.len()).saturating_add(256)];
+        let used = mutable.encode(&mut body)?;
+        body.truncate(used);
+        self.retain(slot_ref, now);
+        Ok(Published {
+            counter: self.counter,
+            body,
+        })
+    }
+
     /// Whether an interactive record to `peer` goes at once. With an empty
     /// bucket the record waits for the pacing clock, and the interface
     /// says so (`DEV-195`, `DEV-241`).
@@ -321,8 +359,11 @@ impl SyncEngine {
                 let slot = (item.item, item.key.to_vec());
                 let offered = (item.context.lamport, *source);
                 // DEV-270: the higher Lamport counter, then the lower device.
+                // A second item of one device at one counter is a relay of
+                // the owner of the channels (DEV-308), whose later relay
+                // carries the winner that the owner holds.
                 let wins = self.mutable.get(&slot).is_none_or(|(lamport, writer)| {
-                    offered.0 > *lamport || (offered.0 == *lamport && offered.1 < *writer)
+                    offered.0 > *lamport || (offered.0 == *lamport && offered.1 <= *writer)
                 });
                 if !wins {
                     return Ok(Taken::Superseded);
@@ -332,6 +373,7 @@ impl SyncEngine {
                     item: item.item,
                     key: item.key.to_vec(),
                     value: item.value.to_vec(),
+                    lamport: item.context.lamport,
                 })
             }
             control @ DeviceSetBody::Control { .. } => {
@@ -757,6 +799,7 @@ mod tests {
                 item: 1,
                 key: b"conversation".to_vec(),
                 value: b"read to 5".to_vec(),
+                lamport: 1,
             }
         );
         assert_eq!(

@@ -7,7 +7,10 @@
 //! accepted before. No type here waits, reads, or writes: the runtime
 //! moves the bytes.
 
-use alloc::{collections::VecDeque, vec::Vec};
+use alloc::{
+    collections::{BTreeSet, VecDeque},
+    vec::Vec,
+};
 
 use umbra_crypto::secret::Secret;
 use umbra_wire::{
@@ -211,7 +214,12 @@ pub struct RelayLink {
     id: [u8; 8],
     secret: Secret<32>,
     resume_count: u32,
-    accepted: Vec<u32>,
+    /// The frame sequences that the relay accepted inside the window below
+    /// the highest one. A client resends inside `RESEND_WINDOW` only, thus
+    /// a sequence below that window is a duplicate, and the set stays
+    /// bounded whatever a peer sends.
+    accepted: BTreeSet<u32>,
+    top: Option<u32>,
     bound: bool,
     closed_at: Option<u64>,
     next_seq: u32,
@@ -235,7 +243,8 @@ impl RelayLink {
                 id: session_id,
                 secret: session_secret,
                 resume_count: 0,
-                accepted: Vec::new(),
+                accepted: BTreeSet::new(),
+                top: None,
                 bound: true,
                 closed_at: None,
                 next_seq: 0,
@@ -259,10 +268,17 @@ impl RelayLink {
         if frame.session_id != self.id {
             return Err(Error::Refused);
         }
-        if self.accepted.contains(&frame.seq) {
+        let window = u32::try_from(RESEND_WINDOW).unwrap_or(u32::MAX);
+        let floor = self.top.map_or(0, |top| top.saturating_sub(window));
+        let is_below = self.top.is_some() && frame.seq < floor;
+        if is_below || !self.accepted.insert(frame.seq) {
             return Ok(None);
         }
-        self.accepted.push(frame.seq);
+        if self.top.is_none_or(|top| frame.seq > top) {
+            self.top = Some(frame.seq);
+            let floor = frame.seq.saturating_sub(window);
+            self.accepted = self.accepted.split_off(&floor);
+        }
         Ok(Some(frame.cell))
     }
 

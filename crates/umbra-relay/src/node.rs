@@ -68,7 +68,10 @@ use crate::{
 /// label of its own (`NTF-112`). A relay of another layer holds no queue.
 fn notify_pair(config: &Config) -> Option<umbra_crypto::kem::KeyPair> {
     (config.layer == 3).then(|| {
-        umbra_core::notify::seeded_pair(b"umbra/v1/relay-ntf", &config.static_secret.to_bytes())
+        umbra_core::notify::seeded_pair(
+            umbra_crypto::labels::RELAY_NTF,
+            &config.static_secret.to_bytes(),
+        )
     })
 }
 
@@ -751,15 +754,20 @@ impl RelayNode {
 
     fn frame(&mut self, link: LinkId, cell: &[u8]) -> Option<Output> {
         let mut capsule = vec![0u8; cell.len().saturating_add(32)];
-        let used = match self.links.get_mut(&link)? {
-            Framing::Accepted(framing) => framing.send(cell, &mut capsule).ok()?,
+        let sent = match self.links.get_mut(&link)? {
+            Framing::Accepted(framing) => framing.send(cell, &mut capsule),
             Framing::Dialed(framing) => {
-                let used = framing.send(cell, &mut capsule).ok()?;
+                let sent = framing.send(cell, &mut capsule);
                 // The relay keeps no resend window toward the next hop: a
                 // lost link ends its circuits, and each client builds again.
                 framing.drained(framing.next_seq().saturating_sub(1));
-                used
+                sent
             }
+        };
+        // WIR-139: a session whose `seq` ran out closes, and a cell that
+        // it cannot carry ends its link rather than going nowhere.
+        let Ok(used) = sent else {
+            return Some(Output::Close { link });
         };
         capsule.truncate(used);
         self.receipts.cell_sent(link, cell);
