@@ -183,6 +183,10 @@ fun PlatformInput(
                     override fun afterTextChanged(text: android.text.Editable?) {
                         state.isEmpty = text.isNullOrEmpty()
                         state.onChange?.invoke()
+                        // IMP-119: the keyboard reaches the field through its
+                        // input connection and not as a touch, thus typing
+                        // starts the idle time of the auto-lock again.
+                        Core.touched()
                     }
                 })
                 state.view = this

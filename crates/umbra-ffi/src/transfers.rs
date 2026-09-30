@@ -166,12 +166,16 @@ pub enum TransferUpdate {
         /// The relays.
         relays: Vec<[u8; 32]>,
     },
-    /// The chunk under a handle, or `None` when no relay holds one.
+    /// The chunks under a handle, each distinct one that a relay gave, and
+    /// whether each relay asked answered (`ATT-136`).
     HandleRead {
         /// The tag of the command.
         tag: u64,
-        /// The chunk.
-        chunk: Option<Vec<u8>>,
+        /// The chunks, in the order of the placement list.
+        chunks: Vec<Vec<u8>>,
+        /// Whether each relay answered: a read that no relay answered is
+        /// no empty handle.
+        answered: bool,
     },
     /// The transfer ended with no result. The caller can ask again.
     Failed {
@@ -330,9 +334,13 @@ pub async fn run_transfers(
                     active.remove(&tag);
                     let _ = updates.send(TransferUpdate::Failed { tag });
                 }
-                for (tag, chunk) in read {
+                for (tag, found) in read {
                     active.remove(&tag);
-                    let _ = updates.send(TransferUpdate::HandleRead { tag, chunk });
+                    let _ = updates.send(TransferUpdate::HandleRead {
+                        tag,
+                        chunks: found.chunks,
+                        answered: found.answered,
+                    });
                 }
                 // CIRCUIT_BUILD_TIMEOUT: a build that no relay answers ends,
                 // and a run with no circuit left ends with it.
@@ -420,7 +428,11 @@ pub async fn run_transfers(
                                 Progress::Running(done, total) => {
                                     TransferUpdate::Progress { tag, done, total }
                                 }
-                                Progress::Done(chunk) => TransferUpdate::HandleRead { tag, chunk },
+                                Progress::Done(found) => TransferUpdate::HandleRead {
+                                    tag,
+                                    chunks: found.chunks,
+                                    answered: found.answered,
+                                },
                             }),
                     };
                     let update = step.unwrap_or_else(|error| {
@@ -584,8 +596,12 @@ pub async fn run_transfers(
                         Ok(Progress::Running(..)) => {
                             active.insert(tag, Active::Read(Box::new(reading)));
                         }
-                        Ok(Progress::Done(chunk)) => {
-                            let _ = updates.send(TransferUpdate::HandleRead { tag, chunk });
+                        Ok(Progress::Done(found)) => {
+                            let _ = updates.send(TransferUpdate::HandleRead {
+                                tag,
+                                chunks: found.chunks,
+                                answered: found.answered,
+                            });
                         }
                         Err(_) => {
                             let _ = updates.send(TransferUpdate::Failed { tag });

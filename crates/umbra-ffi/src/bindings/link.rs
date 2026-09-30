@@ -436,16 +436,23 @@ impl Inner {
             }
             (
                 step @ (LinkStep::ReadHello | LinkStep::ReadOffer | LinkStep::ReadProvision),
-                TransferUpdate::HandleRead { chunk, .. },
+                TransferUpdate::HandleRead { chunks, .. },
             ) => {
                 if let Some(link) = self.link.as_mut() {
                     link.reading = false;
                 }
-                if let Some(chunk) = chunk {
-                    match step {
-                        LinkStep::ReadHello => self.on_hello(&chunk),
-                        LinkStep::ReadOffer => self.on_offer(&chunk),
-                        _ => self.on_provision(&chunk),
+                // Each chunk that a relay gave is tried in order, and the
+                // link fails only when none of them opens.
+                let count = chunks.len();
+                for (index, chunk) in chunks.iter().enumerate() {
+                    let last = index.saturating_add(1) == count;
+                    let opened = match step {
+                        LinkStep::ReadHello => self.on_hello(chunk, last),
+                        LinkStep::ReadOffer => self.on_offer(chunk, last),
+                        _ => self.on_provision(chunk, last),
+                    };
+                    if opened {
+                        break;
                     }
                 }
             }
@@ -510,24 +517,28 @@ impl Inner {
 
     /// The hello is there: it opens under the key of the offer, and the
     /// offer goes, since the ticket works once (`DEV-006`).
-    fn on_hello(&mut self, chunk: &[u8]) {
+    /// The result is whether the chunk opened; a chunk that does not open
+    /// ends the link when it is the `last` one.
+    fn on_hello(&mut self, chunk: &[u8], last: bool) -> bool {
         let Some(LinkState {
             job: LinkJob::Offer(offer),
             status,
             ..
         }) = self.link.as_mut()
         else {
-            return;
+            return true;
         };
         if offer.hello.is_some() {
-            return;
+            return true;
         }
         let opened = unpad_handle_object(chunk).ok().and_then(|bytes| {
             LinkSecret::decapsulate(&offer.link_key, &offer.nonce, &offer.offer, bytes).ok()
         });
         let Some((hello, secret)) = opened else {
-            self.end_link(LinkStatus::Failed);
-            return;
+            if last {
+                self.end_link(LinkStatus::Failed);
+            }
+            return false;
         };
         *status = LinkStatus::Code {
             code: six_digits(secret.code()),
@@ -536,6 +547,7 @@ impl Inner {
         let relays = core::mem::take(&mut offer.offer_relays);
         let slot = offer_slot(&offer.nonce);
         self.erase_slot(slot, relays);
+        true
     }
 
     /// The user confirmed that the two codes match (`DEV-283`): the roster
@@ -664,23 +676,27 @@ impl Inner {
 
     /// The offer is there: it checks against the ticket (`DEV-281`), and
     /// the hello goes up.
-    fn on_offer(&mut self, chunk: &[u8]) {
+    /// The result is whether the chunk opened; a chunk that does not open
+    /// ends the link when it is the `last` one.
+    fn on_offer(&mut self, chunk: &[u8], last: bool) -> bool {
         let Some(LinkState {
             job: LinkJob::Join(join),
             ..
         }) = self.link.as_mut()
         else {
-            return;
+            return true;
         };
         let Some(identity) = join.identity.as_ref() else {
-            return;
+            return true;
         };
         let Some((offer_bytes, offer)) = unpad_handle_object(chunk)
             .ok()
             .and_then(|bytes| Some((bytes, LinkOffer::parse(bytes, &join.ticket).ok()?)))
         else {
-            self.end_link(LinkStatus::Failed);
-            return;
+            if last {
+                self.end_link(LinkStatus::Failed);
+            }
+            return false;
         };
         let nonce = join.ticket.nonce;
         let (ct, ss) = LinkSecret::encapsulate(&offer, &mut OsRng);
@@ -693,23 +709,26 @@ impl Inner {
         };
         let Ok(hello_bytes) = hello.seal(&ss, &nonce, &mut OsRng) else {
             self.end_link(LinkStatus::Failed);
-            return;
+            return true;
         };
         join.secret = Some(LinkSecret::new(ss, &nonce, offer_bytes, &hello_bytes));
         join.has_offer = true;
         self.write_slot(LinkStep::WriteHello, hello_slot(&nonce), &hello_bytes);
+        true
     }
 
     /// The provision is there: the snapshot that it names comes down, and
     /// the hello goes.
-    fn on_provision(&mut self, chunk: &[u8]) {
+    /// The result is whether the chunk opened; a chunk that does not open
+    /// ends the link when it is the `last` one.
+    fn on_provision(&mut self, chunk: &[u8], last: bool) -> bool {
         let Some(LinkState {
             job: LinkJob::Join(join),
             status,
             ..
         }) = self.link.as_mut()
         else {
-            return;
+            return true;
         };
         let descriptor = join.secret.as_ref().and_then(|secret| {
             let sealed = unpad_handle_object(chunk).ok()?;
@@ -717,8 +736,10 @@ impl Inner {
             FileDescriptor::parse(&provision.snapshot).ok()
         });
         let Some(descriptor) = descriptor else {
-            self.end_link(LinkStatus::Failed);
-            return;
+            if last {
+                self.end_link(LinkStatus::Failed);
+            }
+            return false;
         };
         *status = LinkStatus::Fetching;
         let relays = core::mem::take(&mut join.hello_relays);
@@ -730,6 +751,7 @@ impl Inner {
                 descriptor: Box::new(descriptor),
             });
         }
+        true
     }
 
     fn on_snapshot(&mut self, plain: &Zeroizing<Vec<u8>>) {

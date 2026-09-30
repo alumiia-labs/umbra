@@ -77,12 +77,15 @@ object Notifier {
             .build()
 
     /** One alert for each conversation. A later record updates that alert. */
-    fun message(context: Context, conversation: Conversation, title: String? = null, text: String? = null) {
-        if (!mayPost(context)) return
+    fun message(context: Context, conversation: Conversation, title: String? = null, text: CharArray? = null) {
+        if (!mayPost(context)) {
+            text?.fill('\u0000')
+            return
+        }
         val alert = Notification.Builder(context, MESSAGE_CHANNEL)
             .setSmallIcon(R.drawable.ic_stat_umbra)
             .setContentTitle(title ?: "New message")
-            .apply { if (!text.isNullOrEmpty()) setContentText(text) }
+            .apply { if (text != null && text.isNotEmpty()) setContentText(java.nio.CharBuffer.wrap(text)) }
             .setGroup(conversation.label)
             .setAutoCancel(true)
             .setContentIntent(openApp(context))
@@ -92,6 +95,7 @@ object Notifier {
             .setPublicVersion(lockScreen(context))
             .build()
         manager(context).notify(MESSAGE_TAG, conversation.hashCode(), alert)
+        text?.fill('\u0000')
     }
 
     /**

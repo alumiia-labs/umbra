@@ -107,7 +107,21 @@ impl PushScheduler {
                 due.push(Self::push(*handle, false, true));
             }
         }
+        // A handle with no push to come holds no state: an arrival makes it
+        // again, thus the scheduler holds the handles of live work alone.
+        self.handles.retain(|_, state| {
+            state.pending.is_some()
+                || (state.undrained_since.is_some() && state.repushes < REPUSH_MAX)
+                || state
+                    .last_handoff
+                    .is_some_and(|at| now.saturating_sub(at) < WAKE_COALESCE_WINDOW)
+        });
         due
+    }
+
+    /// Whether the scheduler holds state of `handle`.
+    pub fn holds(&self, handle: &[u8; HANDLE_LEN]) -> bool {
+        self.handles.contains_key(handle)
     }
 }
 

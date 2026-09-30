@@ -315,6 +315,10 @@ fun HideKeyboardOn(key: Any?) {
 private fun UnlockScreen() {
     val context = LocalContext.current
     val field = rememberPlatformField()
+    // A new store takes its passphrase twice: no party resets one with a
+    // typing error in it.
+    val confirm = rememberPlatformField()
+    var mismatch by remember { mutableStateOf(false) }
     val isFirst = remember { !Core.hasStore(context) }
     var isRestoring by remember { mutableStateOf(false) }
     var isJoining by remember { mutableStateOf(false) }
@@ -356,9 +360,29 @@ private fun UnlockScreen() {
             )
         } else {
             FramedPlatformField(field, "Passphrase", isPassphrase = true)
+            if (isFirst) {
+                Spacer(Modifier.height(14.dp))
+                FramedPlatformField(confirm, "Confirm passphrase", isPassphrase = true)
+            }
             Spacer(Modifier.height(14.dp))
             PrimaryButton(if (isFirst) "Create and open" else "Unlock") {
-                field.take()?.let { Core.open(context, it) }
+                val first = field.take()
+                if (!isFirst) {
+                    first?.let { Core.open(context, it) }
+                    return@PrimaryButton
+                }
+                val second = confirm.take()
+                mismatch = first == null || second == null || !first.contentEquals(second)
+                second?.fill('\u0000')
+                if (mismatch) {
+                    first?.fill('\u0000')
+                } else {
+                    first?.let { Core.open(context, it) }
+                }
+            }
+            if (mismatch) {
+                Spacer(Modifier.height(10.dp))
+                Note("The two passphrases differ.", isError = true)
             }
             if (isFirst) {
                 Spacer(Modifier.height(8.dp))

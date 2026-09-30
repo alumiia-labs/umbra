@@ -198,10 +198,25 @@ impl DirectoryLink {
     /// that this device reads (`DIS-136`): the proof of consistency from that
     /// size to the newest head. None while the log is not that long here, or
     /// when an epoch closed between two answers.
-    fn holds_head(&self, tree_size: u64, root: &[u8; 32]) -> Result<Option<bool>, FfiError> {
+    ///
+    /// `held_size` is the size of the newest head that this device holds:
+    /// a directory that refuses the proof for a size at or below it, or
+    /// that serves a log below it, shows another view (`DIS-034`).
+    fn holds_head(
+        &self,
+        tree_size: u64,
+        root: &[u8; 32],
+        held_size: u64,
+    ) -> Result<Option<bool>, FfiError> {
+        let reaches = held_size >= tree_size;
         let answer = match self.send(Kind::Head, &tree_size.to_be_bytes()) {
             Ok(answer) => answer,
-            Err(FfiError::NotFound | FfiError::Stale | FfiError::Malformed) => return Ok(None),
+            // A directory with no head yet answers NotFound, as one that
+            // restarted does, and it shows no other view.
+            Err(FfiError::NotFound) => return Ok(None),
+            Err(FfiError::Stale | FfiError::Malformed) => {
+                return Ok(reaches.then_some(false));
+            }
             Err(other) => return Err(other),
         };
         let (bytes, proof) = dirclient::parse_head(&answer).map_err(|_| FfiError::Malformed)?;
@@ -209,7 +224,7 @@ impl DirectoryLink {
             return Ok(None);
         };
         if newest.tree_size < tree_size {
-            return Ok(None);
+            return Ok(reaches.then_some(false));
         }
         if newest.tree_size == tree_size {
             return Ok(Some(newest.root == *root));
@@ -625,7 +640,14 @@ impl Handle {
     fn check_gossiped_heads(&self, link: &DirectoryLink) -> Result<(), FfiError> {
         let checks = locked(&self.inner).client.head_checks()?;
         for check in checks {
-            if let Some(holds) = link.holds_head(check.tree_size, &check.root)? {
+            let held_size = locked(&self.inner)
+                .client
+                .held_heads()?
+                .iter()
+                .map(|(size, _, _)| *size)
+                .max()
+                .unwrap_or(0);
+            if let Some(holds) = link.holds_head(check.tree_size, &check.root, held_size)? {
                 locked(&self.inner)
                     .client
                     .head_check_done(&check, !holds, &mut OsRng)?;
@@ -863,11 +885,25 @@ impl Handle {
         entry: &mut Published,
         now: u64,
     ) -> Result<bool, FfiError> {
+        // DIS-138: only a handle of a restore looks for its key; on any
+        // other device a newer version is another writer.
+        if !locked(&self.inner).client.awaits_resync(&entry.id)? {
+            return Ok(false);
+        }
         let found = link.find(&entry.label)?;
+        // A look that ends for certain ends the look of the restore; one
+        // that a fault of the network ended goes again at the next upkeep.
+        let done = |this: &Self| {
+            let _ = locked(&this.inner)
+                .client
+                .resync_done(&entry.id, &mut OsRng);
+        };
         let (Some(bytes), Some(version)) = (found.entry, found.version) else {
+            done(self);
             return Ok(false);
         };
         let Ok(shown) = DirectoryEntry::parse(&bytes) else {
+            done(self);
             return Ok(false);
         };
         let last = entry
@@ -885,6 +921,7 @@ impl Handle {
             }
         }
         let Some((rotation, key)) = matched else {
+            done(self);
             return Ok(false);
         };
         let next_version = version.checked_add(1).ok_or(FfiError::TooLong)?;
@@ -916,6 +953,7 @@ impl Handle {
         locked(&self.inner)
             .client
             .put_published(entry, &mut OsRng)?;
+        done(self);
         Ok(true)
     }
 
@@ -944,7 +982,9 @@ impl Handle {
             .ok_or(FfiError::NotFound)?;
         entry.rotation = 0;
         entry.version = 0;
-        Ok(inner.client.put_published(&entry, &mut OsRng)?)
+        inner.client.put_published(&entry, &mut OsRng)?;
+        // The handle stands as a restore left it, and it looks for its key.
+        Ok(inner.client.mark_resync(&mut OsRng)?)
     }
 
     /// Whether the directory shows the entry as this device wrote it
@@ -1009,9 +1049,22 @@ impl Handle {
             // a restored handle finds its current key before it shows as
             // held by another party.
             if let Ok(own) = self.is_own_entry(&link, &entry) {
-                let own = own
-                    || (entry.kind == EntryKind::Handle
-                        && self.resync_handle(&link, &mut entry, now).unwrap_or(false));
+                let own = if own {
+                    // The entry is this device's own, thus a look of a
+                    // restore for it has no more to find.
+                    let _ = locked(&self.inner)
+                        .client
+                        .resync_done(&entry.id, &mut OsRng);
+                    Some(true)
+                } else if entry.kind == EntryKind::Handle {
+                    // A fault of the network changes no state of the entry.
+                    self.resync_handle(&link, &mut entry, now).ok()
+                } else {
+                    Some(false)
+                };
+                let Some(own) = own else {
+                    continue;
+                };
                 if own == entry.foreign {
                     entry.foreign = !own;
                     locked(&self.inner)

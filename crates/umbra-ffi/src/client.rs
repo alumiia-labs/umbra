@@ -751,27 +751,38 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 return Err(Error::Integrity);
             }
         };
-        // IDN-193: a store that wrote the MAC of its set of tables and
-        // holds none lost a table to a party with the file.
-        let mark = store.row_id(TableId::LOCAL_IDENTITY, SET_MARK);
-        let set_marked = store.get(TableId::LOCAL_IDENTITY, &mark)?.is_some();
-        if set_marked && !store.indexed() {
-            self.events.push_back(Event::IntegrityFault);
-            return Err(Error::Integrity);
-        }
-        let row = store.row_id(TableId::LOCAL_IDENTITY, ROOT_KEY);
-        let seed = Zeroizing::new(
-            store
-                .get(TableId::LOCAL_IDENTITY, &row)?
-                .ok_or(Error::Integrity)?,
-        );
-        let seed: [u8; 32] = seed.as_slice().try_into().map_err(|_| Error::Integrity)?;
-        let root = RootIdentity::new(Secret::new(seed));
-        let floor_row = store.row_id(SETTINGS, STAMP_FLOOR);
-        let floor = store
-            .get(SETTINGS, &floor_row)?
-            .and_then(|bytes| bytes.as_slice().try_into().ok())
-            .map_or(0, u64::from_be_bytes);
+        // IDN-039, IDN-040: a row of the identity that does not read after
+        // the store opened is a fault of the file, and the user learns it.
+        let read = (|| -> Result<(bool, Zeroizing<[u8; 32]>, u64), Error> {
+            // IDN-193: a store that wrote the MAC of its set of tables and
+            // holds none lost a table to a party with the file.
+            let mark = store.row_id(TableId::LOCAL_IDENTITY, SET_MARK);
+            let set_marked = store.get(TableId::LOCAL_IDENTITY, &mark)?.is_some();
+            if set_marked && !store.indexed() {
+                return Err(Error::Integrity);
+            }
+            let row = store.row_id(TableId::LOCAL_IDENTITY, ROOT_KEY);
+            let seed = Zeroizing::new(
+                store
+                    .get(TableId::LOCAL_IDENTITY, &row)?
+                    .ok_or(Error::Integrity)?,
+            );
+            let seed: [u8; 32] = seed.as_slice().try_into().map_err(|_| Error::Integrity)?;
+            let floor_row = store.row_id(SETTINGS, STAMP_FLOOR);
+            let floor = store
+                .get(SETTINGS, &floor_row)?
+                .and_then(|bytes| bytes.as_slice().try_into().ok())
+                .map_or(0, u64::from_be_bytes);
+            Ok((set_marked, Zeroizing::new(seed), floor))
+        })();
+        let (set_marked, seed, floor) = match read {
+            Ok(read) => read,
+            Err(_) => {
+                self.events.push_back(Event::IntegrityFault);
+                return Err(Error::Integrity);
+            }
+        };
+        let root = RootIdentity::new(Secret::new(*seed));
         self.state = State::Unlocked(Box::new(Open {
             store,
             device_set_key: root.device_set_key(),

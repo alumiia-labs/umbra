@@ -675,6 +675,9 @@ fn alloc_vec(len: usize) -> Vec<u8> {
 /// for its renewal. Each run marks them stale again, until the renewal of
 /// each one ends (`IDN-183`).
 pub(super) const RESTORE_STALE_SETTING: &[u8] = b"restore-stale";
+/// The handle entries of a restore that did not look for their current key
+/// yet (`IDN-109`), 16 bytes each.
+const RESTORE_RESYNC_SETTING: &[u8] = b"restore-resync";
 
 /// The rows of a restore: the full object and each delta after it, in the
 /// order of the root (`IDN-182`), with the root seed that they hold.
@@ -787,6 +790,64 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         )?;
         // DEV-117: the deletions of the other devices wait for the user.
         batch.put(super::SETTINGS, holds, None, &[1], rng)?;
+        batch.commit()?;
+        // IDN-109: each handle of the restore looks for its current key
+        // once; a device that no restore made takes no newer version of
+        // its handle in silence (DIS-138).
+        self.mark_resync(rng)
+    }
+
+    /// Each handle entry that this device holds looks for its current key
+    /// once, as after a restore (`IDN-109`).
+    pub fn mark_resync<R: CryptoRng + ?Sized>(&mut self, rng: &mut R) -> Result<(), Error> {
+        let ids: Vec<u8> = self
+            .published()?
+            .iter()
+            .filter(|entry| entry.kind == super::discovery::EntryKind::Handle)
+            .flat_map(|entry| entry.id)
+            .collect();
+        let open = self.open_mut()?;
+        let row = open.store.row_id(super::SETTINGS, RESTORE_RESYNC_SETTING);
+        let mut batch = open.store.begin();
+        batch.put(super::SETTINGS, row, None, &ids, rng)?;
+        Ok(batch.commit()?)
+    }
+
+    /// Whether the handle entry `id` came from a restore and did not look
+    /// for its current key yet (`IDN-109`).
+    pub fn awaits_resync(&self, id: &[u8; 16]) -> Result<bool, Error> {
+        let store = &self.open_ref()?.store;
+        let row = store.row_id(super::SETTINGS, RESTORE_RESYNC_SETTING);
+        Ok(store
+            .get(super::SETTINGS, &row)?
+            .is_some_and(|bytes| bytes.as_chunks::<16>().0.contains(id)))
+    }
+
+    /// The handle entry `id` looked for its current key.
+    pub fn resync_done<R: CryptoRng + ?Sized>(
+        &mut self,
+        id: &[u8; 16],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let open = self.open_mut()?;
+        let row = open.store.row_id(super::SETTINGS, RESTORE_RESYNC_SETTING);
+        let Some(bytes) = open.store.get(super::SETTINGS, &row)? else {
+            return Ok(());
+        };
+        let kept: Vec<u8> = bytes
+            .as_chunks::<16>()
+            .0
+            .iter()
+            .filter(|held| *held != id)
+            .flatten()
+            .copied()
+            .collect();
+        let mut batch = open.store.begin();
+        if kept.is_empty() {
+            batch.delete(super::SETTINGS, row);
+        } else {
+            batch.put(super::SETTINGS, row, None, &kept, rng)?;
+        }
         Ok(batch.commit()?)
     }
 

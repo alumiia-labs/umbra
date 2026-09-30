@@ -1114,15 +1114,23 @@ object Core {
                             if (client.shouldAlert(event.message)) {
                                 // NTF-083: the sender and the text only when
                                 // the user turned the preview on.
+                                // IMP-017: the text stays a CharArray, and
+                                // the alert wipes it after the post.
                                 val text = if (preview) {
                                     val sink = CharSink()
                                     runCatching { client.msgRender(event.message, sink) }
-                                    String(sink.chars)
+                                    sink.chars
                                 } else {
                                     null
                                 }
                                 main.post {
-                                    Notifier.message(app, Conversation(event.conversation), title.takeIf { preview }, text)
+                                    // A lock that came since takes the text
+                                    // of no alert to the shade.
+                                    if (phase == Phase.Open) {
+                                        Notifier.message(app, Conversation(event.conversation), title.takeIf { preview }, text)
+                                    } else {
+                                        text?.fill(' ')
+                                    }
                                 }
                             }
                         } catch (_: FfiException) {
@@ -1199,6 +1207,8 @@ object Core {
                 // A locked client holds no key that reads a queue, thus the
                 // carrier ends, and the user learns it.
                 DeliveryService.stop(app)
+                // A lock takes the text of each alert off the shade.
+                Notifier.clear(app)
                 if (!isVisible) Notifier.locked(app)
             }
             is FfiEvent.IntegrityFault -> fault = "The local store does not verify."
@@ -2288,6 +2298,9 @@ object Core {
                 // The words of a placeholder are words of the interface.
                 when {
                     info.deleted -> sink.chars = "Message deleted".toCharArray()
+                    // GRP-085: a message that a moderator hid shows no text
+                    // outside its conversation.
+                    info.moderation == MOD_HIDE -> sink.chars = "Hidden message".toCharArray()
                     info.timer != null -> sink.chars = timerPreview(info.timer!!).toCharArray()
                     info.file != null -> sink.chars = when (info.file?.mimeClass) {
                         CLASS_IMAGE -> "Photo"
@@ -2338,6 +2351,11 @@ object Core {
                 // A read that the lock overtook is no fault of the user.
             } catch (failure: FfiException) {
                 // A debug build names the call that failed.
+                if (BuildConfig.DEBUG) android.util.Log.w("umbra-core", "a call failed", failure)
+                main.post { fault = "That did not work: ${failure.javaClass.simpleName}." }
+            } catch (failure: Exception) {
+                // A fault of the platform, as a content provider that
+                // refuses a file, ends the call and not the app.
                 if (BuildConfig.DEBUG) android.util.Log.w("umbra-core", "a call failed", failure)
                 main.post { fault = "That did not work: ${failure.javaClass.simpleName}." }
             }

@@ -1247,6 +1247,11 @@ raise `MSG_TTL` alone.
 > `MAX_STORED_DEVICE` bound the count of that set, and only the age changes.
 > Part 15 §15.3 records the residual.
 
+**[CRY-153]** A session MUST drop each skipped key older than `SKIP_TTL` at
+each skip, and a skip that would pass `MAX_STORED` or `MAX_BYTES` MUST drop the
+oldest keys first. A session that refused a skip at the limit would open no
+later record of that peer, and the contact would end.
+
 **[CRY-023]** An implementation MUST store the skipped keys encrypted at rest under `K_store`.
 The specification records that these keys are a long-tailed hole in the forward
 secrecy. An attacker that recorded the dropped ciphertexts, and later

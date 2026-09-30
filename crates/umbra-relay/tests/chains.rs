@@ -1731,13 +1731,13 @@ fn read_handle(
     let mut rng = Rng(62);
     for _ in 0..400 {
         if let Progress::Done(found) = read.tick(&mut mesh.clients[client], &mut rng).unwrap() {
-            return found;
+            return found.chunks.into_iter().next();
         }
         for (handle, outcome) in chunk_answers(mesh, client) {
             let node = &mut mesh.clients[client];
             if let Progress::Done(found) = read.on_outcome(node, handle, outcome, &mut rng).unwrap()
             {
-                return found;
+                return found.chunks.into_iter().next();
             }
         }
     }

@@ -180,6 +180,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if closes_at != 0 && now > closes_at {
             return Ok(None);
         }
+        // WIR-190: a member that re-keyed votes under its newest index, thus
+        // its vote before the re-key and after it are one vote.
+        let voter = if voter == VOTER_SELF {
+            voter
+        } else {
+            self.group_of(conversation)
+                .ok()
+                .and_then(|group| group.roster().successor_of(voter))
+                .unwrap_or(voter)
+        };
         let open = self.open_ref()?;
         let row = open.store.row_id(VOTES, &vote_key(&poll, voter));
         if let Some(held) = open.store.get(VOTES, &row)? {
@@ -373,8 +383,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let closes_at = self.closes_at(poll)?;
         let closed = closes_at != 0 && now > closes_at;
         let mut counts = vec![0u32; question.options.len()];
-        let mut voters = 0u32;
         let mut mine = Vec::new();
+        // WIR-190: one vote for each member, under its newest index, and
+        // the latest position of that member wins.
+        let group = self.group_of(conversation).ok();
+        let mut by_member: std::collections::BTreeMap<u16, (u64, Vec<u8>)> =
+            std::collections::BTreeMap::new();
         for (_, value) in self.open_ref()?.store.list(VOTES, Some(&conversation.0))? {
             let value = Zeroizing::new(value);
             if value.get(16..32) != Some(poll.0.as_slice()) {
@@ -384,15 +398,36 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .get(32..34)
                 .and_then(|b| b.try_into().ok())
                 .ok_or(Error::Integrity)?;
+            let voter = u16::from_be_bytes(voter);
+            let position = value
+                .get(34..VOTE_PREFIX)
+                .and_then(|b| b.try_into().ok())
+                .map_or(0, u64::from_be_bytes);
             let choices = value.get(VOTE_PREFIX..).ok_or(Error::Integrity)?;
-            voters = voters.saturating_add(1);
+            if voter == VOTER_SELF {
+                mine = choices.to_vec();
+            }
+            let member = if voter == VOTER_SELF {
+                voter
+            } else {
+                group
+                    .as_ref()
+                    .and_then(|group| group.roster().successor_of(voter))
+                    .unwrap_or(voter)
+            };
+            let held = by_member
+                .entry(member)
+                .or_insert((position, choices.to_vec()));
+            if position > held.0 {
+                *held = (position, choices.to_vec());
+            }
+        }
+        let voters = u32::try_from(by_member.len()).unwrap_or(u32::MAX);
+        for (_, choices) in by_member.values() {
             for choice in choices {
                 if let Some(count) = counts.get_mut(usize::from(*choice)) {
                     *count = count.saturating_add(1);
                 }
-            }
-            if u16::from_be_bytes(voter) == VOTER_SELF {
-                mine = choices.to_vec();
             }
         }
         if question.hidden && !closed {

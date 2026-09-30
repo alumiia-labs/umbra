@@ -218,6 +218,13 @@ impl Assembler {
         if chunk_count == 0 {
             return Err(Error::Malformed);
         }
+        // ATT-022: a file above MAX_FILE_SIZE holds more chunks than one
+        // that a sender may seal, and a receiver takes none of it: the
+        // download would hold the whole of it in memory.
+        let most = segment::segment_count(usize::try_from(MAX_FILE_SIZE).unwrap_or(usize::MAX));
+        if usize::try_from(chunk_count).map_or(true, |count| count > most) {
+            return Err(Error::Malformed);
+        }
         if descriptor.level == Level::Data
             && usize::try_from(chunk_count).ok() != Some(descriptor.refs.len())
         {

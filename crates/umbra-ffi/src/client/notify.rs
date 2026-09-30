@@ -204,6 +204,9 @@ pub struct NdrCall {
     pub advances: bool,
     /// The request.
     pub request: Box<[u8; NDR_REQUEST_LEN]>,
+    /// The digest of the push token that a registration carries, or zero
+    /// bytes for a removal.
+    pub token: [u8; 32],
 }
 
 fn random<const N: usize, R: CryptoRng + ?Sized>(rng: &mut R) -> [u8; N] {
@@ -680,6 +683,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         is_removal: true,
                         advances: false,
                         request: out,
+                        token: [0; 32],
                     }
                 }
                 (Some(_), REGISTERED) | (None, UNREGISTERED) => continue,
@@ -719,6 +723,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         is_removal: false,
                         advances,
                         request: out,
+                        token: sha3_256(&[plain.as_slice()]),
                     }
                 }
                 (None, _) => {
@@ -734,6 +739,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         is_removal: true,
                         advances: false,
                         request: out,
+                        token: [0; 32],
                     }
                 }
             };
@@ -756,19 +762,36 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         else {
             return Ok(Vec::new());
         };
-        if group.state == RETIRED {
-            self.write_rows(&[], &[(NOTIFY_GROUP, group.handle.to_vec())], rng)?;
-            return Ok(Vec::new());
-        }
-        group.state = if call.is_removal {
-            UNREGISTERED
-        } else {
-            REGISTERED
-        };
         // NTF-124: the registration took the next secret of the chain.
         if call.advances {
             group.removal = next_removal(&group.removal);
         }
+        if group.state == RETIRED {
+            // NTF-007: a retired handle leaves at its `NUNREG` alone; a
+            // registration that landed after the retirement leaves the row,
+            // thus the `NUNREG` still goes.
+            if call.is_removal {
+                self.write_rows(&[], &[(NOTIFY_GROUP, group.handle.to_vec())], rng)?;
+            } else {
+                self.put_rows(
+                    &[(NOTIFY_GROUP, group.handle.to_vec(), group.encode())],
+                    rng,
+                )?;
+            }
+            return Ok(Vec::new());
+        }
+        // A registration under a token that the platform replaced since
+        // holds the handle under the old token, thus the handle moves again.
+        let current = self
+            .push_token()?
+            .map(|token| sha3_256(&[token.as_slice()]));
+        group.state = if call.is_removal {
+            UNREGISTERED
+        } else if current == Some(call.token) {
+            REGISTERED
+        } else {
+            STALE
+        };
         // NTF-125: a relay that pushed before this registration got `gone`
         // and dropped its binding, thus each queue of the handle binds again.
         let mut unbound = Vec::new();

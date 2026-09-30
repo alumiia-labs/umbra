@@ -70,7 +70,7 @@ column when a crate implements the requirement and a test covers it.
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
 | `NET` | 249 | 88 | 1 | 0 | 9 | **347** |
 | `IDN` | 134 | 46 | 1 | 0 | 5 | **186** |
-| `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
+| `CRY` | 120 | 27 | 0 | 0 | 1 | **148** |
 | `WIR` | 398 | 85 | 0 | 0 | 7 | **490** |
 | `DEV` | 202 | 90 | 0 | 0 | 7 | **299** |
 | `NTF` | 75 | 28 | 0 | 0 | 3 | **106** |
@@ -81,7 +81,7 @@ column when a crate implements the requirement and a test covers it.
 | `ABU` | 72 | 30 | 1 | 0 | 0 | **103** |
 | `IMP` | 121 | 41 | 0 | 0 | 2 | **164** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2071 | 627 | 7 | 0 | 54 | **2759** |
+| **All** | 2072 | 627 | 7 | 0 | 54 | **2760** |
 
 ## SCP — Scope and Conventions
 
@@ -833,6 +833,7 @@ Source: `spec/05-cryptographic-core.md`
 | `CRY-150` | §5.4.1 | MUST | A client | A client MUST write the six fields in the order above, with `bundle_len` before `relay_bundle`, and a reader MUST reject a bundle with bytes after `relay_bundle`. |  |  |
 | `CRY-151` | §5.4.1 | MUST | An HPKE of AUX-6 | An HPKE of AUX-6 MUST build its `suite_id` as `"HPKE" || kem_id || kdf_id || aead_id` from the identifiers of §5.4, which are `0x0001` each, and it MUST use `UMBRA-KEM` as the KEM with `Nsecret` of 32, `Nenc` of 1 120, and `Npk` of 1 216, HKDF-SHA3-256 as the KDF, and ChaCha20-Poly1305 as the AEAD, with the labeled extract and expand of RFC 9180 §4 unchanged. |  |  |
 | `CRY-152` | §5.4.8 | MUST | (unstated) | The relay handshake of §5.4.9 has one exception of the same kind: the last hop of a circuit MUST keep its `er_sk` as `RelaySession_sk` under Part 3 rule `NET-285`, and it MUST erase it when the circuit ends. |  |  |
+| `CRY-153` | §5.5.4 | MUST | A session | A session MUST drop each skipped key older than `SKIP_TTL` at each skip, and a skip that would pass `MAX_STORED` or `MAX_BYTES` MUST drop the oldest keys first. |  |  |
 
 ## WIR — Wire Format
 
@@ -2579,7 +2580,7 @@ Source: `spec/12-attachments.md`
 | `ATT-133` | §12.4.2 | MUST | A writer | A writer MUST select the first `BACKUP_REPLICAS` relays of the placement list of `h`. |  |  |
 | `ATT-134` | §12.4.2 | MUST | (unstated) | If a `BNEW` at a selected relay fails, the writer MUST replace that relay with the next of the list. |  |  |
 | `ATT-135` | §12.4.2 | MUST | A writer | A writer MUST send `CPUT` to the selected relay of the lowest rank and `CREP` for the others, under §12.4.1. |  |  |
-| `ATT-136` | §12.4.2 | MUST | A reader | A reader MUST send `CGET` to the relays of the placement list in list order, until it holds the chunk. |  |  |
+| `ATT-136` | §12.4.2 | MUST | A reader | A reader MUST send `CGET` to the relays of the placement list in list order, and it MUST try each distinct chunk that they give until one opens: a relay that serves bytes that do not open hides no chunk. |  |  |
 | `ATT-137` | §12.4.2 | MUST NOT | A reader | A reader MUST NOT ask more than `PLACE_PROBE` relays for one `h`. |  |  |
 | `ATT-138` | §12.4.2 | MUST | (unstated) | Before a writer replaces the chunk under one `h`, it MUST send `CDEL` to each relay that holds it. |  |  |
 | `ATT-139` | §12.4.2 | MUST | A party | A party MUST compute the placement list from the consensus that it holds. |  |  |

@@ -803,7 +803,10 @@ list holds. Part 5 §5.11 holds the label.
    A writer MUST send `CPUT` to the selected relay of the lowest rank and
    `CREP` for the others, under §12.4.1.
 2. **[ATT-136]** A reader MUST send `CGET` to the relays of the placement list
-   in list order, until it holds the chunk. **[ATT-137]** A reader MUST NOT
+   in list order, and it MUST try each distinct chunk that they give until
+   one opens: a relay that serves bytes that do not open hides no chunk. A
+   read that no relay answered with a chunk or with a plain refusal knows
+   nothing of the handle, and it is no empty handle. **[ATT-137]** A reader MUST NOT
    ask more than `PLACE_PROBE` relays for one `h`. §12.7 sets that value to 4.
 3. **[ATT-138]** Before a writer replaces the chunk under one `h`, it MUST send
    `CDEL` to each relay that holds it. `ATT-058` rejects a registration under

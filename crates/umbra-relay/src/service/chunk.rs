@@ -20,6 +20,7 @@ use umbra_core::{
 };
 
 use crate::store::{Loaded, StoreChange};
+use std::collections::BTreeMap;
 use umbra_crypto::rand_core::CryptoRng;
 use umbra_queue::{params::store_time, relay::session::Session, Reject};
 use umbra_wire::command::{Cmd, Command};
@@ -43,7 +44,15 @@ pub struct ChunkService {
     store: ChunkStore,
     pushes: Vec<Push>,
     changes: Vec<StoreChange>,
+    /// The copies that each held chunk sent at a `CREP`: an owner that
+    /// repeats the command makes this relay dial no more than
+    /// `COPIES_MAX` times for one chunk.
+    copies: BTreeMap<[u8; 32], u8>,
 }
+
+/// The copies that one chunk sends in its life: the replicas of `ATT-104`
+/// and the ones that replace a replica whose copy did not verify.
+const COPIES_MAX: u8 = 8;
 
 impl ChunkService {
     /// A service over a store of `capacity` bytes.
@@ -52,6 +61,7 @@ impl ChunkService {
             store: ChunkStore::new(capacity),
             pushes: Vec::new(),
             changes: Vec::new(),
+            copies: BTreeMap::new(),
         }
     }
 
@@ -101,6 +111,9 @@ impl ChunkService {
     pub fn sweep(&mut self, now: u64) {
         self.store.sweep(now);
         self.store.trim();
+        let store = &self.store;
+        self.copies
+            .retain(|chunk_id, _| store.bytes(chunk_id).is_some());
     }
 
     /// The proof that answers an accepted `CPUT` and an accepted `CREP`
@@ -224,7 +237,12 @@ impl ChunkService {
                     .bytes(&chunk_id)
                     .ok_or(Reject::Rejected)?
                     .to_vec();
+                let sent = self.copies.entry(chunk_id).or_insert(0);
                 for target in targets.targets {
+                    if *sent >= COPIES_MAX {
+                        break;
+                    }
+                    *sent = sent.saturating_add(1);
                     self.pushes.push(Push {
                         chunk_id,
                         target,
@@ -241,6 +259,7 @@ impl ChunkService {
                 };
                 session.accept(command, &cred_pk)?;
                 self.store.delete(&chunk_id)?;
+                self.copies.remove(&chunk_id);
                 // ATT-187: the relay holds no byte of the chunk.
                 Ok(reply(ChunkCmd::Cprf, &[0; PROOF_LEN]))
             }

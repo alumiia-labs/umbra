@@ -172,6 +172,15 @@ impl QueueService {
         for push in due {
             self.queue_push(push, now, rng);
         }
+        // WIR-041: a handle that no push waits for names no queue here, and
+        // a queue that a DEL ended leaves no identifier in memory.
+        if let Some(notify) = self.notify.as_mut() {
+            let scheduler = &notify.scheduler;
+            let queues = &self.queues;
+            notify.latest.retain(|handle, recipient_id| {
+                scheduler.holds(handle) && queues.contains_key(recipient_id)
+            });
+        }
     }
 
     /// The NDR named a handle gone: each queue under it drops its binding,

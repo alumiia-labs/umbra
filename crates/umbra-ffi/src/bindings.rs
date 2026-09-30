@@ -1485,7 +1485,8 @@ impl Restored {
 enum RestoreStep {
     Root {
         week: u32,
-        chunk: Option<Vec<u8>>,
+        chunks: Vec<Vec<u8>>,
+        answered: bool,
     },
     Object {
         index: usize,
@@ -2831,12 +2832,17 @@ impl Inner {
             },
             // NET-190: a blob that opens gives the address of the peer. A
             // blob that does not open is an empty handle (`NET-192`).
-            TransferUpdate::HandleRead { tag, chunk } => {
+            TransferUpdate::HandleRead {
+                tag,
+                chunks,
+                answered,
+            } => {
                 let work = transfer_tags.remove(&tag);
                 if let Some(TransferWork::RestoreRoot { week }) = &work {
                     restore_step = Some(RestoreStep::Root {
                         week: *week,
-                        chunk: chunk.clone(),
+                        chunks: chunks.clone(),
+                        answered,
                     });
                 }
                 if let Some(TransferWork::DeadRead {
@@ -2844,8 +2850,10 @@ impl Inner {
                     blob_key,
                 }) = work
                 {
-                    let address = chunk.and_then(|chunk| {
-                        umbra_core::session::dead::open_blob(&blob_key, &chunk).ok()
+                    // A relay that serves bytes that do not open stops no
+                    // read: the first chunk that opens names the address.
+                    let address = chunks.iter().find_map(|chunk| {
+                        umbra_core::session::dead::open_blob(&blob_key, chunk).ok()
                     });
                     let contact = client.contact_id_of(conversation);
                     if let (Some(address), Ok(contact), Some(running)) =
@@ -3117,12 +3125,18 @@ impl Inner {
         };
         match step {
             RestoreStep::Failed => job.status = RestoreStatus::Failed,
-            RestoreStep::Root { week, chunk } => {
+            RestoreStep::Root {
+                week,
+                chunks,
+                answered,
+            } => {
                 // IDN-103, IDN-116: a root that does not open is an empty
-                // epoch, and the search goes back until one opens.
+                // epoch, and the search goes back until one opens. Each
+                // chunk that a relay gave is tried, thus one relay that
+                // serves junk hides no root.
                 let credentials = job.key.epoch(week);
-                let mut buf = Vec::new();
-                let descriptors: Option<Vec<Vec<u8>>> = chunk.as_deref().and_then(|chunk| {
+                let descriptors: Option<Vec<Vec<u8>>> = chunks.iter().find_map(|chunk| {
+                    let mut buf = Vec::new();
                     let sealed = unpad_handle_object(chunk).ok()?;
                     let root = BackupRoot::open(&credentials, sealed, &mut buf).ok()?;
                     Some(
@@ -3132,6 +3146,12 @@ impl Inner {
                             .collect(),
                     )
                 });
+                // A week that no relay answered for certain is no empty
+                // week: the restore fails, and a new attempt reads it again.
+                if descriptors.is_none() && !answered {
+                    job.status = RestoreStatus::Failed;
+                    return;
+                }
                 let Some(descriptors) = descriptors else {
                     let back = job.first_week.saturating_sub(week).saturating_add(1);
                     if back >= BACKUP_LOOKBACK || week == 0 {
@@ -3405,7 +3425,15 @@ pub fn init(
     let client = match backend.header().map_err(|_| FfiError::Storage)? {
         Some(header) => Client::open(backend, element, header, now),
         None => {
-            let cost = Cost::calibrate(config.argon2_floor_ms);
+            // A caller that passed no floor held a file with no header: a
+            // first launch that ended before its header. The store takes a
+            // measured floor, and not the cost of a floor of zero.
+            let floor = if config.argon2_floor_ms == 0 {
+                measure_argon2_floor_ms()
+            } else {
+                config.argon2_floor_ms
+            };
+            let cost = Cost::calibrate(floor);
             // The header goes into the same file as the records, thus the
             // connection opens a second time for the write of the header.
             let headers =

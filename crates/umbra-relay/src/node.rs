@@ -201,6 +201,10 @@ struct Endpoint {
     loops: u32,
 }
 
+/// The signature checks of challenges and relay hellos that one link may
+/// ask for in a minute.
+const VERIFIES_PER_MINUTE: u32 = 32;
+
 /// The answers that wait for the pacing clock of one circuit. The clock
 /// sends one each second (`NET-291`), thus a circuit that asks for more
 /// loses the newest: a record leaves its queue only at its `ACK`, and a
@@ -283,6 +287,10 @@ pub struct RelayNode {
     challenges: ChallengeBook,
     /// Whether the book moved since the last read of it.
     challenges_moved: bool,
+    /// The signature checks that each link asked for in the minute that
+    /// runs: a challenge or a relay hello costs one ML-DSA verification on
+    /// the task that serves each circuit, and no session gates it.
+    verifies: BTreeMap<LinkId, (u64, u32)>,
     /// The link receipts (Part 10 §10.4.2).
     receipts: ReceiptBook,
 }
@@ -321,6 +329,7 @@ impl RelayNode {
             identities: BTreeMap::new(),
             challenges: ChallengeBook::default(),
             challenges_moved: false,
+            verifies: BTreeMap::new(),
             receipts: ReceiptBook::default(),
         }
     }
@@ -704,11 +713,16 @@ impl RelayNode {
             CapsuleType::Deposit => self.take_deposit(value, now, rng),
             // ABU-103: the challenge of another relay, for a carrier.
             CapsuleType::Challenge => {
-                self.take_challenge(value, now);
+                if self.may_verify(link, now) {
+                    self.take_challenge(value, now);
+                }
                 Vec::new()
             }
-            // REL-174: the relay that dialed this link names itself.
+            // REL-174: the relay that dialed this link names itself, once.
             CapsuleType::RelayHello => {
+                if self.receipts.peer(link).is_some() || !self.may_verify(link, now) {
+                    return Vec::new();
+                }
                 if let Some(Framing::Accepted(framing)) = self.links.get(&link) {
                     let session_id = framing.session_id();
                     let identities = &self.identities;
@@ -1143,9 +1157,25 @@ impl RelayNode {
         self.run(actions, now, rng)
     }
 
+    /// Whether one more signature check fits the budget of `link` in the
+    /// minute of `now`.
+    fn may_verify(&mut self, link: LinkId, now: u64) -> bool {
+        let minute = now / 60;
+        let held = self.verifies.entry(link).or_insert((minute, 0));
+        if held.0 != minute {
+            *held = (minute, 0);
+        }
+        if held.1 >= VERIFIES_PER_MINUTE {
+            return false;
+        }
+        held.1 = held.1.saturating_add(1);
+        true
+    }
+
     /// A link closed. Each circuit on it ends.
     pub fn link_closed(&mut self, link: LinkId, now: u64) -> Vec<Output> {
         self.links.remove(&link);
+        self.verifies.remove(&link);
         self.receipts.link_closed(link);
         self.next_hops.retain(|_, held| *held != link);
         self.circuits.set_clock_ms(unix_now_ms());

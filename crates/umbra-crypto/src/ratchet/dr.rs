@@ -43,6 +43,18 @@ pub const MAX_SKIP: u32 = 1000;
 pub const MAX_STORED: usize = 2000;
 /// `SKIP_TTL` in seconds: 45 days, equal to `MSG_TTL`.
 pub const SKIP_TTL: u64 = 45 * 86_400;
+/// `MAX_BYTES`, the bytes of the skipped keys of one session.
+pub const MAX_BYTES: usize = 80 * 1_024;
+/// The bytes of one skipped key as a session holds it: the header key, the
+/// message key, the index, and the time.
+const SKIPPED_BYTES: usize = 32 + 32 + 4 + 8;
+/// The skipped keys that one session holds at most, under `MAX_STORED` and
+/// `MAX_BYTES` both.
+const SKIPPED_CAP: usize = if MAX_STORED < MAX_BYTES / SKIPPED_BYTES {
+    MAX_STORED
+} else {
+    MAX_BYTES / SKIPPED_BYTES
+};
 
 /// The record version of Part 6 §6.5.
 pub const VERSION: u8 = 0x02;
@@ -557,7 +569,7 @@ impl Session {
         if let Some((index, header, mk)) = self.try_skipped(&hdr_nonce, head, hdr_ct) {
             out.copy_from_slice(body_ct);
             open(&mk, &body_nonce, ad, out, body_tag)?;
-            self.skipped.swap_remove(index);
+            self.skipped.remove(index);
             return Ok(Received {
                 ctx,
                 header,
@@ -649,12 +661,20 @@ impl Session {
             self.ck_r = Some(ck);
             return Err(Error::Ratchet);
         }
+        // CRY-153: a key past SKIP_TTL goes at each skip, and at the cap
+        // the oldest keys go, in one step, thus a peer that skipped many
+        // records costs the oldest of them and no later record.
+        self.prune(now);
+        let adds = usize::try_from(until.saturating_sub(self.n_r)).unwrap_or(usize::MAX);
+        let excess = self
+            .skipped
+            .len()
+            .saturating_add(adds)
+            .saturating_sub(SKIPPED_CAP)
+            .min(self.skipped.len());
+        self.skipped.drain(..excess);
         let mut ck = ck;
         while self.n_r < until {
-            if self.skipped.len() >= MAX_STORED {
-                self.ck_r = Some(ck);
-                return Err(Error::Ratchet);
-            }
             let (next, mk) = kdf_ck(&ck);
             self.skipped.push(Skipped {
                 hk,

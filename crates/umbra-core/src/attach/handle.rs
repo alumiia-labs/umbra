@@ -275,9 +275,11 @@ impl HandleWrite {
 }
 
 /// The read of one handle-addressed chunk: a `CGET` to each relay of the
-/// placement list in list order, at most `PLACE_PROBE` of them, until one
-/// holds it (`ATT-136`, `ATT-137`). The result is the chunk, or `None`
-/// when no relay holds one.
+/// placement list in list order, at most `PLACE_PROBE` of them
+/// (`ATT-136`, `ATT-137`). The result is each distinct chunk that a relay
+/// gave, in list order, and whether each relay answered: a relay that
+/// serves bytes that do not open stops no read, and a read that no relay
+/// answered is no empty handle.
 pub struct HandleRead {
     handle: [u8; 32],
     read: Secret<32>,
@@ -285,6 +287,20 @@ pub struct HandleRead {
     order: Vec<[u8; 32]>,
     waiting: Option<(u64, u32)>,
     ticks: u32,
+    found: Vec<Vec<u8>>,
+    answered: bool,
+}
+
+/// What a handle read found: each distinct chunk, and whether a relay gave
+/// a definitive answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandleFound {
+    /// The chunks, in the order of the placement list.
+    pub chunks: Vec<Vec<u8>>,
+    /// Whether one relay at least answered with a chunk or with the plain
+    /// refusal of a chunk it does not hold. A read of timeouts and of
+    /// relays under load alone knows nothing of the handle.
+    pub answered: bool,
 }
 
 impl HandleRead {
@@ -299,6 +315,8 @@ impl HandleRead {
             order,
             waiting: None,
             ticks: 0,
+            found: Vec::new(),
+            answered: false,
         }
     }
 
@@ -314,7 +332,7 @@ impl HandleRead {
         &mut self,
         node: &mut ClientNode,
         rng: &mut R,
-    ) -> Result<Progress<Option<Vec<u8>>>, Error> {
+    ) -> Result<Progress<HandleFound>, Error> {
         self.ticks = self.ticks.saturating_add(1);
         if let Some((_, at)) = self.waiting {
             if self.ticks.saturating_sub(at) < STEP_TIMEOUT_TICKS {
@@ -323,7 +341,10 @@ impl HandleRead {
             self.waiting = None;
         }
         let Some(relay) = self.order.pop() else {
-            return Ok(Progress::Done(None));
+            return Ok(Progress::Done(HandleFound {
+                chunks: core::mem::take(&mut self.found),
+                answered: self.answered,
+            }));
         };
         let read = StaticSecret::from(*self.read.expose());
         let handle = node.chunk(relay, self.handle, ChunkJob::Fetch { read }, rng)?;
@@ -339,13 +360,26 @@ impl HandleRead {
         handle: u64,
         outcome: ChunkOutcome,
         rng: &mut R,
-    ) -> Result<Progress<Option<Vec<u8>>>, Error> {
+    ) -> Result<Progress<HandleFound>, Error> {
         if !self.owns(handle) {
             return Ok(Progress::Running(0, 1));
         }
         self.waiting = None;
-        if let ChunkOutcome::Fetched(bytes) = outcome {
-            return Ok(Progress::Done(Some(bytes)));
+        match outcome {
+            ChunkOutcome::Fetched(bytes) => {
+                self.answered = true;
+                if !self.found.contains(&bytes) {
+                    self.found.push(bytes);
+                }
+            }
+            // A relay under load or that takes no credential now says
+            // nothing of the handle.
+            ChunkOutcome::Refused(
+                umbra_queue::Reject::Busy
+                | umbra_queue::Reject::Limit
+                | umbra_queue::Reject::Admission,
+            ) => {}
+            _ => self.answered = true,
         }
         self.tick(node, rng)
     }
