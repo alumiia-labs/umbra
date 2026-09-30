@@ -412,9 +412,41 @@ pub struct GroupPost {
     /// Whether the record starts an epoch. A `GKEY` follows it at the
     /// replica that accepted it, and never before (`GRP-362`).
     pub is_rotation: bool,
-    /// The row that keeps the record until a replica accepts it, for a
-    /// record that carries no message.
+    /// The row that keeps the record until each replica accepted it or
+    /// gave up.
     pub unsent: Option<[u8; 16]>,
+    /// The replicas that still take the record: a replica that accepted it
+    /// or gave up takes it no more (`NET-258`, `NET-271`).
+    pub pending: [bool; GROUP_REPLICAS],
+}
+
+/// The ARQ of one replica of a kept record (`NET-271`): whether it
+/// accepted or gave up, the count of its sends, and the time of its first.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ReplicaArq {
+    state: u8,
+    attempts: u32,
+    first: u64,
+}
+
+/// A replica that still takes the record.
+const REPLICA_PENDING: u8 = 0;
+/// A replica that returned a `GSEQ`.
+const REPLICA_ACCEPTED: u8 = 1;
+/// A replica whose ARQ ended under `NET-220`.
+const REPLICA_GAVE_UP: u8 = 2;
+
+impl ReplicaArq {
+    /// Ends the ARQ at `SEND_MAX_ATTEMPTS` sends or at `SEND_GIVE_UP` after
+    /// the first one.
+    fn check(&mut self, now: u64) {
+        let ran_out = self.attempts >= umbra_queue::params::SEND_MAX_ATTEMPTS
+            || (self.first != 0
+                && now.saturating_sub(self.first) >= umbra_queue::params::SEND_GIVE_UP);
+        if self.state == REPLICA_PENDING && ran_out {
+            self.state = REPLICA_GAVE_UP;
+        }
+    }
 }
 
 /// One `GKEY` at one replica, which moves that replica to the credentials
@@ -2329,6 +2361,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 record,
                 is_rotation: false,
                 unsent: None,
+                pending: [true; GROUP_REPLICAS],
             },
             rng,
         )?;
@@ -2630,6 +2663,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 record,
                 is_rotation: false,
                 unsent: None,
+                pending: [true; GROUP_REPLICAS],
             },
             rng,
         )?;
@@ -2958,6 +2992,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     record,
                     is_rotation: true,
                     unsent: None,
+                    pending: [true; GROUP_REPLICAS],
                 },
                 rng,
             )?,
@@ -3010,6 +3045,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 record,
                 is_rotation: true,
                 unsent: None,
+                pending: [true; GROUP_REPLICAS],
             },
             rng,
         )?;
@@ -3904,7 +3940,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
         let mut row = [0u8; 16];
         rng.fill_bytes(&mut row);
-        let value = unsent_row(order, &post);
+        let value = unsent_row(order, &post, &[ReplicaArq::default(); GROUP_REPLICAS]);
         let mut batch = open.store.begin();
         for earlier in replaced {
             batch.delete(GROUP_UNSENT, earlier);
@@ -3916,14 +3952,68 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(())
     }
 
-    /// A replica accepted a record that the store kept (`GRP-195`).
-    pub fn group_post_accepted(&mut self, row: &[u8; 16]) -> Result<(), Error> {
+    /// A replica accepted a record that the store kept (`GRP-195`). The
+    /// record stays for the other replica until it accepts or gives up,
+    /// thus a new run sends it there again (`NET-258`).
+    pub fn group_post_accepted<R: CryptoRng + ?Sized>(
+        &mut self,
+        row: &[u8; 16],
+        relay: &[u8; 32],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        self.update_unsent(row, relay, rng, |replica| {
+            replica.state = REPLICA_ACCEPTED;
+        })
+    }
+
+    /// One send of a kept record to the replica at `relay`, which counts
+    /// against its ARQ (`NET-271`).
+    pub fn group_post_sent<R: CryptoRng + ?Sized>(
+        &mut self,
+        row: &[u8; 16],
+        relay: &[u8; 32],
+        now: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        self.update_unsent(row, relay, rng, |replica| {
+            replica.attempts = replica.attempts.saturating_add(1);
+            if replica.first == 0 {
+                replica.first = now.max(1);
+            }
+        })
+    }
+
+    /// Changes the ARQ of one replica of a kept record, and ends the row
+    /// when no replica takes it more.
+    fn update_unsent<R: CryptoRng + ?Sized>(
+        &mut self,
+        row: &[u8; 16],
+        relay: &[u8; 32],
+        rng: &mut R,
+        change: impl FnOnce(&mut ReplicaArq),
+    ) -> Result<(), Error> {
         let open = self.open_mut()?;
-        if open.store.get(GROUP_UNSENT, row)?.is_none() {
+        let Some(plain) = open.store.get(GROUP_UNSENT, row)? else {
             return Ok(());
-        }
+        };
+        let plain = Zeroizing::new(plain);
+        let Some((order, post, mut arq)) = read_unsent(&plain, *row) else {
+            return Ok(());
+        };
+        let Some(index) = post.replicas.iter().position(|held| held.relay == *relay) else {
+            return Ok(());
+        };
+        let Some(replica) = arq.get_mut(index) else {
+            return Ok(());
+        };
+        change(replica);
         let mut batch = open.store.begin();
-        batch.delete(GROUP_UNSENT, *row);
+        if arq.iter().all(|replica| replica.state != REPLICA_PENDING) {
+            batch.delete(GROUP_UNSENT, *row);
+        } else {
+            let value = unsent_row(order, &post, &arq);
+            batch.put(GROUP_UNSENT, *row, Some(post.conversation.0), &value, rng)?;
+        }
         Ok(batch.commit()?)
     }
 
@@ -4523,6 +4613,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             record,
             is_rotation: false,
             unsent: None,
+            pending: [true; GROUP_REPLICAS],
         });
         self.put_clock(conversation, sent_key(conversation), now_ms / 1_000, rng)
     }
@@ -4675,21 +4766,45 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // that no longer waits in the outbox takes none.
         let mut kept = Vec::new();
         let mut dropped = Vec::new();
+        let mut ended = Vec::new();
+        let mut failed = Vec::new();
         let mut sealed = BTreeSet::new();
+        let now = super::unix_now_seconds();
         for (row, plain) in self.open_ref()?.store.list(GROUP_UNSENT, None)? {
             let plain = Zeroizing::new(plain);
-            let Some((order, post)) = read_unsent_row(&plain, row) else {
+            let Some((order, mut post, mut arq)) = read_unsent(&plain, row) else {
                 dropped.push(row);
                 continue;
             };
             let store = &self.open_ref()?.store;
             let is_held = store.get(GROUP, &post.conversation.0)?.is_some();
+            // NET-258: a record that one replica accepted left the outbox,
+            // and it still goes to the other one.
+            let accepted = arq.iter().any(|replica| replica.state == REPLICA_ACCEPTED);
             let waits = match post.message {
-                Some(message) => store.get(OUTBOX, &message.0)?.is_some(),
+                Some(message) => accepted || store.get(OUTBOX, &message.0)?.is_some(),
                 None => true,
             };
             if !is_held || !waits || self.group_closed(post.conversation)? {
                 dropped.push(row);
+                continue;
+            }
+            // NET-271: each replica ends its own ARQ, and NET-272 fails the
+            // message only when no replica accepted it.
+            for replica in &mut arq {
+                replica.check(now);
+            }
+            post.pending = [
+                arq[0].state == REPLICA_PENDING,
+                arq[1].state == REPLICA_PENDING,
+            ];
+            if !post.pending.iter().any(|pending| *pending) {
+                if !accepted {
+                    if let Some(message) = post.message {
+                        failed.push(message);
+                    }
+                }
+                ended.push(row);
                 continue;
             }
             if let Some(message) = post.message {
@@ -4697,13 +4812,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
             kept.push((order, post));
         }
-        if !dropped.is_empty() {
+        if !dropped.is_empty() || !ended.is_empty() {
             let open = self.open_mut()?;
             let mut batch = open.store.begin();
-            for row in dropped {
+            for row in dropped.into_iter().chain(ended) {
                 batch.delete(GROUP_UNSENT, row);
             }
             batch.commit()?;
+        }
+        for message in failed {
+            self.set_delivery(&message, Delivery::Failed, rng)?;
         }
         kept.sort_by_key(|(order, _)| *order);
         self.groups
@@ -4775,9 +4893,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
 /// The row of a kept record: its order, the conversation, whether it
 /// starts an epoch, the credentials, the two replicas, and the record.
-fn unsent_row(order: u64, post: &GroupPost) -> Zeroizing<Vec<u8>> {
-    let mut value = Zeroizing::new(Vec::with_capacity(UNSENT_HEAD + post.record.len()));
-    value.push(UNSENT_VERSION);
+fn unsent_row(
+    order: u64,
+    post: &GroupPost,
+    arq: &[ReplicaArq; GROUP_REPLICAS],
+) -> Zeroizing<Vec<u8>> {
+    let mut value = Zeroizing::new(Vec::with_capacity(
+        UNSENT_HEAD + GROUP_REPLICAS * REPLICA_ARQ_LEN + post.record.len(),
+    ));
+    value.push(UNSENT_ARQ_VERSION);
     value.extend_from_slice(&order.to_be_bytes());
     value.extend_from_slice(&post.conversation.0);
     value.push(u8::from(post.is_rotation));
@@ -4794,6 +4918,11 @@ fn unsent_row(order: u64, post: &GroupPost) -> Zeroizing<Vec<u8>> {
     }
     value.push(u8::from(post.message.is_some()));
     value.extend_from_slice(&post.message.map_or([0u8; 16], |message| message.0));
+    for replica in arq {
+        value.push(replica.state);
+        value.extend_from_slice(&replica.attempts.to_be_bytes());
+        value.extend_from_slice(&replica.first.to_be_bytes());
+    }
     value.extend_from_slice(&post.record);
     value
 }
@@ -4802,6 +4931,14 @@ fn unsent_row(order: u64, post: &GroupPost) -> Zeroizing<Vec<u8>> {
 /// first form starts with its order, whose first byte is zero.
 const UNSENT_VERSION: u8 = 2;
 
+/// The first byte of a kept record that holds the ARQ of each replica
+/// after the message.
+const UNSENT_ARQ_VERSION: u8 = 3;
+
+/// The width of the ARQ of one replica: its state, its sends, and the time
+/// of its first send.
+const REPLICA_ARQ_LEN: usize = 1 + 4 + 8;
+
 /// The fixed part of a kept record ahead of the record.
 const UNSENT_HEAD: usize = 1 + 8 + 16 + 1 + 1 + 32 + 32 + GROUP_REPLICAS * 64 + 1 + 16;
 
@@ -4809,10 +4946,32 @@ const UNSENT_HEAD: usize = 1 + 8 + 16 + 1 + 1 + 32 + 32 + GROUP_REPLICAS * 64 + 
 const UNSENT_HEAD_V1: usize = 8 + 16 + 1 + 1 + 32 + 32 + GROUP_REPLICAS * 64;
 
 fn read_unsent_row(plain: &[u8], row: [u8; 16]) -> Option<(u64, GroupPost)> {
-    let (body, head) = if plain.first() == Some(&UNSENT_VERSION) {
+    read_unsent(plain, row).map(|(order, post, _)| (order, post))
+}
+
+/// A kept record with the ARQ of each replica. A row of an earlier form
+/// holds none, and each replica then takes the record.
+fn read_unsent(
+    plain: &[u8],
+    row: [u8; 16],
+) -> Option<(u64, GroupPost, [ReplicaArq; GROUP_REPLICAS])> {
+    let has_arq = plain.first() == Some(&UNSENT_ARQ_VERSION);
+    let (body, head) = if plain.first() == Some(&UNSENT_VERSION) || has_arq {
         (plain.get(1..)?, UNSENT_HEAD - 1)
     } else {
         (plain, UNSENT_HEAD_V1)
+    };
+    let mut arq = [ReplicaArq::default(); GROUP_REPLICAS];
+    let head = if has_arq {
+        for (index, replica) in arq.iter_mut().enumerate() {
+            let at = head + index * REPLICA_ARQ_LEN;
+            replica.state = *body.get(at)?;
+            replica.attempts = u32::from_be_bytes(body.get(at + 1..at + 5)?.try_into().ok()?);
+            replica.first = u64::from_be_bytes(body.get(at + 5..at + 13)?.try_into().ok()?);
+        }
+        head + GROUP_REPLICAS * REPLICA_ARQ_LEN
+    } else {
+        head
     };
     let take = |from: usize| -> Option<[u8; 32]> { body.get(from..from + 32)?.try_into().ok() };
     let order = u64::from_be_bytes(body.get(..8)?.try_into().ok()?);
@@ -4839,6 +4998,10 @@ fn read_unsent_row(plain: &[u8], row: [u8; 16]) -> Option<(u64, GroupPost)> {
     if record.is_empty() {
         return None;
     }
+    let pending = [
+        arq[0].state == REPLICA_PENDING,
+        arq[1].state == REPLICA_PENDING,
+    ];
     Some((
         order,
         GroupPost {
@@ -4850,6 +5013,8 @@ fn read_unsent_row(plain: &[u8], row: [u8; 16]) -> Option<(u64, GroupPost)> {
             record,
             is_rotation,
             unsent: Some(row),
+            pending,
         },
+        arq,
     ))
 }

@@ -547,8 +547,9 @@ async fn session(
                             reason: Some(reason),
                         },
                         // GRP-390: the other replica takes the same record.
-                        // GRP-197: the replica that never accepted it is a
-                        // link fault.
+                        // GRP-197, NET-259: the replica that never accepted
+                        // it is a link fault, whether or not the other one
+                        // accepted it.
                         GroupOutcome::Unreachable => {
                             node.report_relay(&held.relay);
                             let faults = Box::new(node.take_faults());

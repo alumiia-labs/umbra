@@ -553,6 +553,14 @@ fn held_receipt_key(conversation: ConversationId, kind: AppKind, target: &[u8; 1
     [conversation.0.as_slice(), &[kind as u8], target].concat()
 }
 
+/// The clock in seconds, for a rule of the store that runs on no call of
+/// the caller.
+fn unix_now_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
 fn stored_message(
     direction: u8,
     delivery: Delivery,

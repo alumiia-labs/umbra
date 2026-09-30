@@ -1805,10 +1805,21 @@ impl Inner {
                 write_pk: job.write_pk,
             });
         }
+        let now = crate::runtime::unix_now();
         while let Some(job) = self.client.take_group_post() {
             // GRP-194: the same record goes to each replica, each under its
-            // own tag, and the first `GSEQ` accepts it (`GRP-195`).
-            for replica in job.replicas {
+            // own tag, and the first `GSEQ` accepts it (`GRP-195`). A replica
+            // that accepted it or gave up takes it no more, and each send
+            // counts against the ARQ of its replica (`NET-271`).
+            for (replica, pending) in job.replicas.iter().zip(job.pending) {
+                if !pending {
+                    continue;
+                }
+                if let Some(row) = job.unsent {
+                    let _ = self
+                        .client
+                        .group_post_sent(&row, &replica.relay, now, &mut OsRng);
+                }
                 let tag = self.next_group_tag(GroupWork::Post {
                     message: job.message,
                     conversation: job.conversation,
@@ -2160,7 +2171,7 @@ impl Inner {
                 };
                 self.group_refusals.remove(&(conversation, relay));
                 if let Some(row) = unsent {
-                    let _ = self.client.group_post_accepted(&row);
+                    let _ = self.client.group_post_accepted(&row, &relay, &mut OsRng);
                 }
                 if let Some(message) = message {
                     let _ =

@@ -684,7 +684,11 @@ mod tests {
             .unwrap();
         while let Some(post) = client.take_group_post() {
             if let Some(row) = post.unsent {
-                client.group_post_accepted(&row).unwrap();
+                for replica in &post.replicas {
+                    client
+                        .group_post_accepted(&row, &replica.relay, &mut rng)
+                        .unwrap();
+                }
             }
         }
 
@@ -704,8 +708,18 @@ mod tests {
         assert_eq!(again.replicas[1].group_queue_id, [0xD4; 32]);
         assert_eq!(again.write.expose(), sent.write.expose());
 
-        // A replica took it, and the next start sends it no more.
-        client.group_post_accepted(&again.unsent.unwrap()).unwrap();
+        // NET-258: one replica took it, and the next start sends it to the
+        // other one alone. When that one takes it too, it goes no more.
+        let row = again.unsent.unwrap();
+        client
+            .group_post_accepted(&row, &relays[0], &mut rng)
+            .unwrap();
+        client.resume_group_work(&mut rng).unwrap();
+        let other = client.take_group_post().unwrap();
+        assert_eq!(other.pending, [false, true]);
+        client
+            .group_post_accepted(&row, &relays[1], &mut rng)
+            .unwrap();
         client.resume_group_work(&mut rng).unwrap();
         assert!(client.take_group_post().is_none());
 
@@ -721,12 +735,49 @@ mod tests {
         let second = client.take_group_post().unwrap();
         assert_eq!(second.record, first.record);
         assert!(client.take_group_post().is_none());
-        // A message that a relay took waits no more.
+        // NET-257, NET-258: the first replica accepts the message, and the
+        // record still goes to the other one.
+        let row = second.unsent.unwrap();
+        client
+            .group_post_accepted(&row, &relays[1], &mut rng)
+            .unwrap();
         client
             .set_delivery(&message, Delivery::Accepted, &mut rng)
             .unwrap();
         client.resume_group_work(&mut rng).unwrap();
+        let rest = client.take_group_post().unwrap();
+        assert_eq!(rest.pending, [true, false]);
+        assert_eq!(rest.record, first.record);
+        // NET-271: that replica ends its ARQ at SEND_MAX_ATTEMPTS, and the
+        // message stays accepted.
+        for _ in 0..umbra_queue::params::SEND_MAX_ATTEMPTS {
+            client
+                .group_post_sent(&row, &relays[0], 1_700_000_040, &mut rng)
+                .unwrap();
+        }
+        client.resume_group_work(&mut rng).unwrap();
         assert!(client.take_group_post().is_none());
+        assert_eq!(client.info(&message).unwrap().delivery, Delivery::Accepted);
+
+        // NET-272: a message that no replica accepted fails when each ARQ
+        // ended.
+        let mut draft = client.new_draft(conversation);
+        draft.set_text(&units("no replica")).unwrap();
+        let lost = client
+            .send_draft(draft, 1_700_000_050_000, &mut rng)
+            .unwrap();
+        let post = client.take_group_post().unwrap();
+        let row = post.unsent.unwrap();
+        for replica in &relays {
+            for _ in 0..umbra_queue::params::SEND_MAX_ATTEMPTS {
+                client
+                    .group_post_sent(&row, replica, 1_700_000_050, &mut rng)
+                    .unwrap();
+            }
+        }
+        client.resume_group_work(&mut rng).unwrap();
+        assert!(client.take_group_post().is_none());
+        assert_eq!(client.info(&lost).unwrap().delivery, Delivery::Failed);
     }
 
     #[test]
