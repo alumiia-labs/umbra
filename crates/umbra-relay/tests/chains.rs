@@ -104,6 +104,7 @@ fn relay_info(index: usize) -> RelayInfo {
             chain: LAYERS[index] != 1,
             queue: LAYERS[index] == 3,
             layer: LAYERS[index],
+            class: 2,
         },
         key,
     }
@@ -629,8 +630,12 @@ fn a_chunk_goes_to_one_relay_and_that_relay_makes_the_two_copies() {
         };
         tokens.push(token);
     }
-    // A circuit ends at each relay that holds a copy.
-    assert_eq!(mesh.clients[CLIENT].chains().len(), 3);
+    // A circuit ends at each relay that holds a copy. The first circuit of
+    // the node ends where its draw put it, which can be a fourth relay.
+    let chains = mesh.clients[CLIENT].chains();
+    for relay in [first, second, third] {
+        assert!(chains.iter().any(|chain| chain[2] == relay));
+    }
 
     // ATT-097: the bytes go to one relay. ATT-042: its own token binds them.
     let wrong_token = ChunkJob::Put {

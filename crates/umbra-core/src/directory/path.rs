@@ -39,6 +39,90 @@ pub struct Candidate {
     pub queue: bool,
     /// The layer under the accepted root, for a chain relay.
     pub layer: u8,
+    /// The verified class of the entry, 0 to 3 (§10.2).
+    pub class: u8,
+}
+
+/// The weight of each class in a draw, in proportion to its rate of 100,
+/// 250, 500, and 1 000 Mbit/s (`REL-196`).
+pub const CLASS_WEIGHTS: [u64; 4] = [2, 5, 10, 20];
+/// The lowest class of an ingress relay: 250 Mbit/s (§10.6.1).
+pub const INGRESS_CLASS_MIN: u8 = 1;
+
+/// The weight of `class` in a draw; a class above C3 counts as C3.
+pub fn class_weight(class: u8) -> u64 {
+    CLASS_WEIGHTS
+        .get(usize::from(class))
+        .copied()
+        .unwrap_or(CLASS_WEIGHTS[3])
+}
+
+/// Orders `candidates` by a random draw in proportion to the weight of the
+/// class of each (`REL-196`): each place takes one of the relays left, and
+/// a relay of C3 comes before one of C0 ten times as often. `random` gives
+/// a value below its argument. The class comes from the signed entry and
+/// from no measurement of this client (`REL-014`).
+///
+/// The relays of one class weigh the same, thus each class is shuffled on
+/// its own, and each place draws a class in proportion to the relays it
+/// has left times its weight. The draw is exact, and it costs time linear
+/// in the relays.
+pub fn weighted_order(
+    candidates: &[Candidate],
+    random: &mut dyn FnMut(u64) -> u64,
+) -> Vec<Candidate> {
+    let mut classes: [Vec<Candidate>; 4] = Default::default();
+    for candidate in candidates {
+        let class = usize::from(candidate.class.min(3));
+        if let Some(bucket) = classes.get_mut(class) {
+            bucket.push(*candidate);
+        }
+    }
+    // Fisher–Yates in each class, from the end.
+    for bucket in &mut classes {
+        let mut end = bucket.len();
+        while end > 1 {
+            let bound = u64::try_from(end).unwrap_or(u64::MAX);
+            let pick = usize::try_from(random(bound)).unwrap_or(0) % end;
+            bucket.swap(pick, end.saturating_sub(1));
+            end = end.saturating_sub(1);
+        }
+    }
+    let mut out = Vec::with_capacity(candidates.len());
+    loop {
+        let mass = |class: usize, bucket: &Vec<Candidate>| {
+            u64::try_from(bucket.len())
+                .unwrap_or(u64::MAX)
+                .saturating_mul(class_weight(u8::try_from(class).unwrap_or(3)))
+        };
+        let total: u64 = classes
+            .iter()
+            .enumerate()
+            .map(|(class, bucket)| mass(class, bucket))
+            .sum();
+        if total == 0 {
+            break;
+        }
+        let mut at = random(total);
+        let mut chosen = None;
+        for (class, bucket) in classes.iter().enumerate() {
+            let share = mass(class, bucket);
+            if at < share {
+                chosen = Some(class);
+                break;
+            }
+            at = at.saturating_sub(share);
+        }
+        let Some(candidate) = chosen
+            .or_else(|| classes.iter().rposition(|bucket| !bucket.is_empty()))
+            .and_then(|class| classes.get_mut(class))
+            .and_then(Vec::pop)
+        else {
+            break;
+        };
+        out.push(candidate);
+    }
+    out
 }
 
 impl Candidate {
@@ -63,10 +147,12 @@ impl Candidate {
             asn: d.asn,
             v4_prefix,
             v6_prefix,
-            ingress: placed && entry.ingress(),
+            // §10.6.1: an ingress relay holds 250 Mbit/s or more.
+            ingress: placed && entry.ingress() && entry.class >= INGRESS_CLASS_MIN,
             chain: placed && d.roles & roles::CHAIN != 0,
             queue: placed && d.roles & roles::QUEUE != 0,
             layer: entry.layer(),
+            class: entry.class,
         }
     }
 
@@ -102,16 +188,44 @@ pub struct Chain {
     /// Whether two hops share an operator or a family under the bootstrap
     /// relaxation (`NET-340`), which the client shows (`NET-343`).
     pub one_operator: bool,
+    /// Whether hop 1 and hop 3 share a bloc under the bootstrap relaxation
+    /// of `NET-350`; the route view names the country of each hop.
+    pub one_bloc: bool,
+    /// Whether two hops share an autonomous system or a prefix under the
+    /// bootstrap relaxation of `NET-350`.
+    pub one_network: bool,
 }
 
-/// Checks a chain against the invariants (`NET-032`). `relax` permits the
-/// relaxation of `NET-200`, and `bootstrap` the one of `NET-340`.
+/// The relaxations that one selection pass permits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Relax {
+    /// Hop 2 may share a bloc with hop 1 or hop 3 (`NET-200`).
+    pub hop2: bool,
+    /// Two hops may share an operator or a family (`NET-340`).
+    pub operator: bool,
+    /// Hop 1 and hop 3 may share a bloc (`NET-350`).
+    pub bloc: bool,
+    /// Two hops may share an autonomous system or a prefix (`NET-350`).
+    pub network: bool,
+}
+
+impl Relax {
+    /// No relaxation.
+    pub const NONE: Relax = Relax {
+        hop2: false,
+        operator: false,
+        bloc: false,
+        network: false,
+    };
+}
+
+/// Checks a chain against the invariants (`NET-032`) under the
+/// relaxations of `relax`.
 pub fn check(
     hop1: &Candidate,
     hop2: &Candidate,
     hop3: &Candidate,
-    relax: bool,
-    bootstrap: bool,
+    relax: Relax,
 ) -> Result<Chain, Error> {
     // Invariant 4: the ingress at hop 1, then layer 2, then layer 3, and no
     // ingress-flagged relay at hop 2 or 3 (REL-133, REL-134).
@@ -121,28 +235,42 @@ pub fn check(
     if hop2.layer != 2 || hop3.layer != 3 || !hop3.queue {
         return Err(Error::NoPath);
     }
-    // Invariant 3 at every pair, and invariant 1 unless the bootstrap
-    // relaxation holds (NET-340, NET-342).
-    if !hop1.apart_network(hop2) || !hop1.apart_network(hop3) || !hop2.apart_network(hop3) {
+    // Three relays, and not one relay twice.
+    if hop1.relay_id == hop2.relay_id
+        || hop1.relay_id == hop3.relay_id
+        || hop2.relay_id == hop3.relay_id
+    {
         return Err(Error::NoPath);
     }
+    // Invariant 3 at every pair unless the bootstrap relaxation of NET-350
+    // holds.
+    let one_network =
+        !hop1.apart_network(hop2) || !hop1.apart_network(hop3) || !hop2.apart_network(hop3);
+    if one_network && !relax.network {
+        return Err(Error::NoPath);
+    }
+    // Invariant 1 unless the bootstrap relaxation holds (NET-340, NET-342).
     let one_operator =
         !hop1.apart_operator(hop2) || !hop1.apart_operator(hop3) || !hop2.apart_operator(hop3);
-    if one_operator && !bootstrap {
+    if one_operator && !relax.operator {
         return Err(Error::NoPath);
     }
-    // Invariant 2: hops 1 and 3 always; hop 2 unless relaxed (NET-202).
-    if hop1.bloc == hop3.bloc {
+    // Invariant 2: hops 1 and 3 unless the bootstrap relaxation of NET-350
+    // holds; hop 2 unless relaxed (NET-202).
+    let shares_ends = hop1.bloc == hop3.bloc;
+    if shares_ends && !relax.bloc {
         return Err(Error::NoPath);
     }
     let hop2_shares = hop1.bloc == hop2.bloc || hop2.bloc == hop3.bloc;
-    if hop2_shares && !relax {
+    if hop2_shares && !relax.hop2 {
         return Err(Error::NoPath);
     }
     Ok(Chain {
         hops: [hop1.relay_id, hop2.relay_id, hop3.relay_id],
         relaxed: hop2_shares,
         one_operator,
+        one_bloc: shares_ends,
+        one_network,
     })
 }
 
@@ -169,12 +297,33 @@ pub fn select_avoiding(
             .iter()
             .any(|link| link.names(&one.relay_id, &other.relay_id))
     };
-    let levels: &[(bool, bool)] = if bootstrap {
-        &[(false, false), (true, false), (false, true), (true, true)]
-    } else {
-        &[(false, false), (true, false)]
+    // NET-342, NET-350: the relaxations of a provisional directory come
+    // last, one at a time: the operator, the bloc of hop 1 and hop 3, and
+    // the network.
+    let strict = Relax::NONE;
+    let hop2 = Relax {
+        hop2: true,
+        ..strict
     };
-    for &(relax, one_operator) in levels {
+    let operator = Relax {
+        operator: true,
+        ..strict
+    };
+    let both = Relax {
+        operator: true,
+        ..hop2
+    };
+    let bloc = Relax { bloc: true, ..both };
+    let network = Relax {
+        network: true,
+        ..bloc
+    };
+    let levels: &[Relax] = if bootstrap {
+        &[strict, hop2, operator, both, bloc, network]
+    } else {
+        &[strict, hop2]
+    };
+    for &relax in levels {
         for hop2 in candidates
             .iter()
             .filter(|c| c.layer == 2 && !is_removed(ingress, c))
@@ -183,7 +332,7 @@ pub fn select_avoiding(
                 .iter()
                 .filter(|c| c.is_exit() && !is_removed(hop2, c))
             {
-                if let Ok(chain) = check(ingress, hop2, hop3, relax, one_operator) {
+                if let Ok(chain) = check(ingress, hop2, hop3, relax) {
                     return Ok(chain);
                 }
             }
@@ -391,7 +540,73 @@ mod tests {
             chain: true,
             queue: true,
             layer,
+            class: 2,
         }
+    }
+
+    #[test]
+    fn a_network_in_one_country_builds_under_the_provisional_directory_alone() {
+        // NET-350: each relay in the United States, at three providers.
+        let us = BlocList::v1().bloc_of(b"US");
+        let mut ingress = cand(1, us, 0, true);
+        ingress.operator_id = [0xAA; 32];
+        let mut hop2 = cand(2, us, 2, false);
+        hop2.operator_id = [0xAA; 32];
+        let mut hop3 = cand(3, us, 3, false);
+        hop3.operator_id = [0xAA; 32];
+        assert_eq!(
+            select_avoiding(&ingress, &[hop2, hop3], &[], false),
+            Err(Error::NoPath)
+        );
+        let chain = select_avoiding(&ingress, &[hop2, hop3], &[], true).unwrap();
+        assert!(chain.one_bloc && chain.one_operator && chain.relaxed);
+        // NET-350: one provider at each hop also passes, last, and only in
+        // the provisional directory.
+        let mut same_provider = hop3;
+        same_provider.asn = ingress.asn;
+        same_provider.v4_prefix = ingress.v4_prefix;
+        assert_eq!(
+            select_avoiding(&ingress, &[hop2, same_provider], &[], false),
+            Err(Error::NoPath)
+        );
+        let one_host = select_avoiding(&ingress, &[hop2, same_provider], &[], true).unwrap();
+        assert!(one_host.one_network);
+        let first = select_avoiding(&ingress, &[hop2, same_provider, hop3], &[], true).unwrap();
+        assert!(!first.one_network);
+        // A chain with hop 1 and hop 3 in two blocs comes first.
+        let mut abroad = hop3;
+        abroad.relay_id = [9; 32];
+        abroad.asn = 99;
+        abroad.v4_prefix = Some([10, 99]);
+        abroad.bloc = BlocList::v1().bloc_of(b"CH");
+        let first = select_avoiding(&ingress, &[hop2, hop3, abroad], &[], true).unwrap();
+        assert!(!first.one_bloc);
+    }
+
+    #[test]
+    fn a_faster_class_comes_first_in_proportion_to_its_weight() {
+        // REL-196: a C3 relay against a C0 relay leads 20 draws in 22.
+        let mut fast = cand(1, BlocId::Own([b'A', 1]), 2, false);
+        fast.class = 3;
+        let mut slow = cand(2, BlocId::Own([b'A', 2]), 2, false);
+        slow.class = 0;
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut random = |bound: u64| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) % bound
+        };
+        let rounds = 22_000;
+        let mut leads = 0u32;
+        for _ in 0..rounds {
+            let order = weighted_order(&[slow, fast], &mut random);
+            assert_eq!(order.len(), 2);
+            if order[0].relay_id == fast.relay_id {
+                leads += 1;
+            }
+        }
+        assert!((19_600..20_400).contains(&leads), "{leads}");
     }
 
     #[test]
@@ -437,27 +652,94 @@ mod tests {
         let good2 = cand(2, five, 2, false);
         let good3 = cand(3, ch, 3, false);
         assert_eq!(
-            check(&ingress, &good2, &good3, false, false).unwrap(),
+            check(
+                &ingress,
+                &good2,
+                &good3,
+                Relax {
+                    hop2: false,
+                    operator: false,
+                    bloc: false,
+                    network: false
+                }
+            )
+            .unwrap(),
             Chain {
                 hops: [[1; 32], [2; 32], [3; 32]],
                 relaxed: false,
                 one_operator: false,
+                one_bloc: false,
+                one_network: false,
             }
         );
         // Wrong layer order, an ingress at hop 2, a shared ASN.
-        assert!(check(&ingress, &good3, &good2, false, false).is_err());
-        assert!(check(&ingress, &cand(2, five, 2, true), &good3, false, false).is_err());
+        assert!(check(
+            &ingress,
+            &good3,
+            &good2,
+            Relax {
+                hop2: false,
+                operator: false,
+                bloc: false,
+                network: false
+            }
+        )
+        .is_err());
+        assert!(check(&ingress, &cand(2, five, 2, true), &good3, Relax::NONE).is_err());
         let mut same_asn = good3;
         same_asn.asn = 2;
-        assert!(check(&ingress, &good2, &same_asn, false, false).is_err());
+        assert!(check(
+            &ingress,
+            &good2,
+            &same_asn,
+            Relax {
+                hop2: false,
+                operator: false,
+                bloc: false,
+                network: false
+            }
+        )
+        .is_err());
         // Hop 1 and hop 3 in one bloc never pass; hop 2 sharing passes only relaxed.
-        assert!(check(&ingress, &good2, &cand(4, eu, 3, false), true, false).is_err());
+        assert!(check(
+            &ingress,
+            &good2,
+            &cand(4, eu, 3, false),
+            Relax {
+                hop2: true,
+                operator: false,
+                bloc: false,
+                network: false
+            }
+        )
+        .is_err());
         let shared2 = cand(5, eu, 2, false);
-        assert!(check(&ingress, &shared2, &good3, false, false).is_err());
+        assert!(check(
+            &ingress,
+            &shared2,
+            &good3,
+            Relax {
+                hop2: false,
+                operator: false,
+                bloc: false,
+                network: false
+            }
+        )
+        .is_err());
         assert!(
-            check(&ingress, &shared2, &good3, true, false)
-                .unwrap()
-                .relaxed
+            check(
+                &ingress,
+                &shared2,
+                &good3,
+                Relax {
+                    hop2: true,
+                    operator: false,
+                    bloc: false,
+                    network: false
+                }
+            )
+            .unwrap()
+            .relaxed
         );
         // Selection prefers the strict chain over the relaxed one.
         let chosen = select(&ingress, &[shared2, good3, good2]).unwrap();
@@ -471,11 +753,32 @@ mod tests {
         // (NET-342).
         let mut own2 = good2;
         own2.operator_id = ingress.operator_id;
-        assert!(check(&ingress, &own2, &good3, false, false).is_err());
+        assert!(check(
+            &ingress,
+            &own2,
+            &good3,
+            Relax {
+                hop2: false,
+                operator: false,
+                bloc: false,
+                network: false
+            }
+        )
+        .is_err());
         assert!(
-            check(&ingress, &own2, &good3, false, true)
-                .unwrap()
-                .one_operator
+            check(
+                &ingress,
+                &own2,
+                &good3,
+                Relax {
+                    hop2: false,
+                    operator: true,
+                    bloc: false,
+                    network: false
+                }
+            )
+            .unwrap()
+            .one_operator
         );
         assert_eq!(
             select_avoiding(&ingress, &[own2, good3], &[], false),
@@ -489,7 +792,18 @@ mod tests {
         // Invariant 3 holds under the relaxation.
         let mut own_asn = own2;
         own_asn.asn = good3.asn;
-        assert!(check(&ingress, &own_asn, &good3, true, true).is_err());
+        assert!(check(
+            &ingress,
+            &own_asn,
+            &good3,
+            Relax {
+                hop2: true,
+                operator: true,
+                bloc: false,
+                network: false
+            }
+        )
+        .is_err());
     }
 
     #[test]

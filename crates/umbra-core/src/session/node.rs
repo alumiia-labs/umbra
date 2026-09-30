@@ -75,7 +75,7 @@ use crate::{
     },
     directory::{
         bloc::BlocId,
-        path::{select_avoiding, Candidate},
+        path::{select_avoiding, weighted_order, Candidate},
         removal::LinkRemoval,
     },
     identity::{
@@ -1281,6 +1281,7 @@ fn unreachable_ingress(root: RootIdentity) -> ClientNode {
             chain: false,
             queue: false,
             layer: 0,
+            class: 0,
         },
         key: RelayStatic {
             s: [0; 32],
@@ -1326,6 +1327,7 @@ impl ClientNode {
                 chain: layer != 1,
                 queue: layer == 3,
                 layer,
+                class: 2,
             },
             key,
         });
@@ -2956,20 +2958,20 @@ impl ClientNode {
                 .filter(|chain| chain.contains(relay))
                 .count()
         };
-        let mut order: Vec<(usize, u32, Candidate)> = self
+        let pool: Vec<Candidate> = self
             .relays
             .iter()
             .map(|relay| relay.candidate)
             .filter(|candidate| {
                 !candidate.is_exit() || exit.is_none_or(|exit| exit == candidate.relay_id)
             })
-            .map(|candidate| {
-                let draw = u32::from_be_bytes(random(rng));
-                (uses(&candidate.relay_id), draw, candidate)
-            })
             .collect();
-        order.sort_by_key(|(used, draw, _)| (*used, *draw));
-        let candidates: Vec<Candidate> = order.into_iter().map(|(_, _, c)| c).collect();
+        // REL-196: a draw in proportion to the class of each relay, then the
+        // relays that serve fewer circuits of this node first.
+        let mut candidates = weighted_order(&pool, &mut |bound| {
+            u64::from_be_bytes(random(rng)) % bound.max(1)
+        });
+        candidates.sort_by_key(|candidate| uses(&candidate.relay_id));
         let kept: Vec<Candidate> = candidates
             .iter()
             .filter(|candidate| !candidate.is_exit() || !apart.contains(&candidate.relay_id))
@@ -5672,6 +5674,7 @@ mod tests {
                 chain: true,
                 queue: layer == 3,
                 layer,
+                class: 2,
             },
             key: RelayStatic {
                 s: [number; 32],

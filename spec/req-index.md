@@ -68,20 +68,20 @@ column when a crate implements the requirement and a test covers it.
 | --- | --- | --- | --- | --- | --- | --- |
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
-| `NET` | 249 | 88 | 1 | 0 | 9 | **347** |
+| `NET` | 250 | 88 | 1 | 0 | 9 | **348** |
 | `IDN` | 134 | 46 | 1 | 0 | 5 | **186** |
 | `CRY` | 120 | 27 | 0 | 0 | 1 | **148** |
 | `WIR` | 398 | 85 | 0 | 0 | 7 | **490** |
 | `DEV` | 203 | 90 | 0 | 0 | 8 | **301** |
 | `NTF` | 75 | 28 | 0 | 0 | 3 | **106** |
 | `DIS` | 130 | 35 | 0 | 0 | 3 | **168** |
-| `REL` | 159 | 33 | 1 | 0 | 2 | **195** |
+| `REL` | 160 | 34 | 1 | 0 | 2 | **197** |
 | `GRP` | 234 | 65 | 0 | 0 | 6 | **305** |
 | `ATT` | 143 | 45 | 2 | 0 | 3 | **193** |
 | `ABU` | 72 | 30 | 1 | 0 | 0 | **103** |
 | `IMP` | 121 | 41 | 0 | 0 | 2 | **164** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2074 | 627 | 7 | 0 | 55 | **2763** |
+| **All** | 2076 | 628 | 7 | 0 | 55 | **2766** |
 
 ## SCP — Scope and Conventions
 
@@ -446,7 +446,7 @@ Source: `spec/03-network-architecture.md`
 | `NET-307` | §3.5.4 | MUST | A client | A client MUST hold at most one read receipt for each peer. |  |  |
 | `NET-308` | §3.2.5 | MUST | A client | A client MUST put each command for a queue on a circuit whose last relay holds that queue: the `NEW`, the `SUB`, and the `ACK` of its own queue, and the `SEND` to the queue of a peer. |  |  |
 | `NET-309` | §3.2.5 | MUST | A client that holds no such circuit | A client that holds no such circuit MUST build one, and the command MUST wait for it. |  |  |
-| `NET-310` | §3.2.5 | MUST | A client | A client MUST give the candidates of §3.4.6 to the selection in a random order, and a relay that no other circuit of that client uses MUST come before a relay that one uses. |  |  |
+| `NET-310` | §3.2.5 | MUST | A client | A client MUST give the candidates of §3.4.6 to the selection in a random order weighted by class under Part 10 `REL-196`, and a relay that no other circuit of that client uses MUST come before a relay that one uses. |  |  |
 | `NET-311` | §3.2.5 | MUST NOT | (unstated) | A client MUST build each chain again at the start of a run, and it MUST NOT store a chain: the store names the relay of a queue, and no relay of a path to it. |  |  |
 | `NET-312` | §3.2.5 | MUST | A client | A client MUST reject a descriptor that has a relay line with no `layer`, no `operator`, no `country` or no `asn`, with one fact two times, or with a word that is no fact. |  |  |
 | `NET-313` | §3.2.5 | MUST | A client | A client MUST take the first relay of layer 1 as its pinned ingress of `NET-022`. |  |  |
@@ -486,6 +486,7 @@ Source: `spec/03-network-architecture.md`
 | `NET-347` | §3.4.3 | MUST NOT | (unstated) | While a record waits for a circuit to that exit, the client MUST start a new build to it on a fresh chain, and it MUST NOT hold the record for its next run. |  |  |
 | `NET-348` | §3.2.6 | MUST | (unstated) | While no record of the contact has arrived on the new queue, the owner MUST send that record again at the start of each run and after each `ADDRESS_RESEND` of 6 hours: a run that ends before the record leaves loses it. |  |  |
 | `NET-349` | §3.5.2 | MUST | The relay | The relay MUST send such a drain in steps of at most 256 KiB for each circuit at each tick of its own fixed clock, and it MUST hold at most 40 MiB of drains for one circuit: one drain then fills no link that the circuits of other clients share, and the steps follow no arrival. |  |  |
+| `NET-350` | §3.4.6 | MUST | (unstated) | Under the same state, a client MAY put hop 1 and hop 3 in one bloc, and after that it MAY put two hops in one autonomous system or one prefix, each only when no chain holds without it, in that order. |  |  |
 
 ## IDN — Identity
 
@@ -2030,8 +2031,8 @@ Source: `spec/10-relay-directory.md`
 | `REL-094` | §10.6.3 | MUST NOT | A directory authority | A directory authority MUST NOT change the bloc list without the 5-of-7 signature of §10.5.2. |  |  |
 | `REL-095` | §10.2 | MUST | (unstated) | If a class test verifies below the `class` of the entry, the directory MUST set `class` to the verified class. |  |  |
 | `REL-096` | §10.2 | MUST NOT | A directory authority | A directory authority MUST NOT apply a staging delay or a step limit to a demotion. |  |  |
-| `REL-097` | §10.2 | SHOULD | A directory authority | A directory authority SHOULD measure each relay above C0 one time in each `MEASURE_INTERVAL`. |  |  |
-| `REL-098` | §10.2 | MUST | (unstated) | If a relay has no verifying report inside `MEASURE_STALE`, a directory authority MUST set its `class` to C0. |  |  |
+| `REL-097` | §10.2 | SHOULD | A directory authority | A directory authority SHOULD measure each relay, C0 included, one time in each `MEASURE_INTERVAL`. |  |  |
+| `REL-098` | §10.2 | MUST | (unstated) | If a relay has no verifying report inside `MEASURE_STALE`, a directory authority MUST remove it from the listing until a class test verifies it again. |  |  |
 | `REL-099` | §10.3 | MUST | (unstated) | If a cluster holds `CLUSTER_FULL` relays or fewer, the directory MUST measure the full cluster in one slot. |  |  |
 | `REL-100` | §10.3 | MUST | (unstated) | If a cluster holds more than `CLUSTER_FULL` relays, the directory MUST select `CLUSTER_SAMPLE` relays of it for each slot. |  |  |
 | `REL-101` | §10.3 | MUST | The directory | The directory MUST measure each relay of such a cluster inside `ceil(n / CLUSTER_SAMPLE)` slots. |  |  |
@@ -2129,6 +2130,8 @@ Source: `spec/10-relay-directory.md`
 | `REL-193` | §10.8 | MUST | An aggregator | An aggregator MUST add an integer sample of Laplace(`b`) to each share that it takes, before any other party reads the share. |  |  |
 | `REL-194` | §10.8 | MUST | An authority | An authority MUST read the chain count of a relay as the sum of the two noised shares modulo 2⁶⁴, read as a signed value, and it MUST read a negative sum as 0. |  |  |
 | `REL-195` | §10.8 | MUST | An authority | An authority MUST compute the fault rate of `REL-080` for an epoch after the end of that epoch, from the shares of that epoch. |  |  |
+| `REL-196` | §10.2 | MUST | A client | A client MUST order the relays of a draw at random in proportion to the rate of their class, with the weights 2, 5, 10, and 20 for C0 to C3. |  |  |
+| `REL-197` | §10.2 | MUST NOT | A directory authority | A directory authority MUST NOT list a relay before a class test verifies C0 or above for it, and it MUST remove a relay whose class test verifies below C0. |  |  |
 
 ## GRP — Private Groups
 

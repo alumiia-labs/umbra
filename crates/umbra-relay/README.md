@@ -156,7 +156,7 @@ that key. Its settings file holds these lines in the place of `relay_id`,
 ```text
 identity_seed=<from umbra-relay keygen>
 family=<64 hex characters, one value for each family of relays>
-class=<0 to 3>
+class=<0 to 3: 100, 250, 500, or 1 000 Mbit/s in both directions>
 roles=<queue,chain for a chain relay; chain,ingress for an ingress relay>
 manifest=/var/lib/umbra/manifest.bin
 keyset=/etc/umbra/keyset.bin

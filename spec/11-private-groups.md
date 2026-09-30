@@ -143,8 +143,8 @@ relay-side name, and it carries no relation to `group_id`.
   **[GRP-190]** The creator MUST make a different `own_sk` for each replica.
 - **[GRP-191]** The creator MUST send `GNEW` to two relays whose entries carry
   different `operator_id` values and different jurisdiction blocs, under
-  invariant 1 and invariant 2 of Part 3 §3.4.6. Part 10 §10.6.3 gives the bloc
-  list. **[GRP-192]** A creator that finds no such pair MAY relax the bloc
+  invariant 1 and invariant 2 of Part 3 §3.4.6, drawn under Part 10 rule
+  `REL-196`. Part 10 §10.6.3 gives the bloc list. **[GRP-192]** A creator that finds no such pair MAY relax the bloc
   invariant in the manner of Part 3 rule `NET-200`, and Part 3 rule `NET-201`
   makes it show that relaxation. Part 3 rule `NET-344` relaxes the operator
   part in a provisional directory.

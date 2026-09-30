@@ -325,6 +325,7 @@ fn network_of(ports: &[u16]) -> Network {
                     identity_pk: Vec::new(),
                     roles: None,
                     prefix_v6: None,
+                    class: None,
                 }
             })
             .collect(),

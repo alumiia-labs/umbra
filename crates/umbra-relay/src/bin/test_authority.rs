@@ -178,7 +178,7 @@ fn run(settings: &str, out: &Path) -> Result<(), &'static str> {
                 epoch: 0,
             },
         )
-        .map_err(|_| "a descriptor does not verify")?;
+        .map_err(|_| "a descriptor does not verify, or its class is above the declared one")?;
         let read = RelayEntry::parse(&entry).map_err(|_| "an entry does not verify")?;
         if expelled.contains(&read.descriptor.relay_id) {
             println!("relay {} expelled", to_hex(&read.descriptor.relay_id));

@@ -309,7 +309,8 @@ command for that queue reaches it through a circuit that ends at that relay.
   manner. A `SEND` is signed for the session of one circuit, thus a client
   seals a record when it makes it and signs it when the circuit is ready.
 - **[NET-310]** A client MUST give the candidates of §3.4.6 to the selection
-  in a random order, and a relay that no other circuit of that client uses
+  in a random order weighted by class under Part 10 `REL-196`, and a relay
+  that no other circuit of that client uses
   MUST come before a relay that one uses. Thus two circuits of one client
   share no relay but the pinned ingress where the relay set permits it, and
   that is the independence that `NET-023` asks for. **[NET-311]** A client MUST
@@ -1373,7 +1374,8 @@ hop 2 may share a bloc with hop 1 or with hop 3. Hop 1 and hop 3 stay in
 different blocs. **[NET-201]** A client that relaxes invariant 2 MUST show the
 user that relaxation. **[NET-202]** A client MUST NOT relax invariant 1,
 invariant 3, invariant 4, or invariant 2 between hop 1 and hop 3. The bootstrap
-relaxation below is the one exception for invariant 1.
+relaxation below is the one exception for invariant 1, for invariant 3, and
+for invariant 2 between hop 1 and hop 3.
 
 **[NET-033]** If no conformant chain is available under `NET-200`, the client
 MUST **fail closed** and show the cause. **[NET-034]**
@@ -1389,8 +1391,15 @@ and invariant 1 then holds no chain.
   `independent_count` is `AUTHORITY_FLOOR` or above.
 - **[NET-342]** A client MUST select a chain that satisfies invariant 1 when one
   exists, with or without the relaxation of `NET-200`. Under the bootstrap
-  relaxation, invariants 3 and 4 and the bound of `NET-202` on invariant 2
-  still hold.
+  relaxation, invariant 4 still holds, and so do invariant 3 and the bound
+  of `NET-202` on invariant 2 unless `NET-350` applies.
+- **[NET-350]** Under the same state, a client MAY put hop 1 and hop 3 in one
+  bloc, and after that it MAY put two hops in one autonomous system or one
+  prefix, each only when no chain holds without it, in that order. A network
+  that starts in one country and at one provider then carries traffic. The
+  three hops stay three relays. The route view names the country of each
+  hop, and the note of `NET-343` names the one operator, thus the user sees
+  the relaxation under `NET-201`.
 - **[NET-343]** A client MUST show the user each circuit whose chain holds two
   relays of one operator or of one family. That display makes the path visible
   under `NET-034`.
@@ -2132,7 +2141,7 @@ relay (G7).
 
 > **Deviation note.** An earlier draft gave a second and unpublished relay tier.
 > This document withdraws that tier, and there are four causes. First, the tier
-> put a cheap relay at the ingress position. Part 10 §10.6.1 sets a class C2
+> put a cheap relay at the ingress position. Part 10 §10.6.1 sets a class C1
 > floor at that position. A cheap Sybil attack at the one position that sees a
 > client IP address has to stay too expensive. Second, the tier bypassed the
 > staging of Part 10 §10.7.1, the operator dossier of §10.6, and the measurement

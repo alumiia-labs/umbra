@@ -419,6 +419,9 @@ pub struct RelayEndpoint {
     pub roles: Option<HopRoles>,
     /// The 6 bytes of the IPv6 /48, when the entry names an address.
     pub prefix_v6: Option<Vec<u8>>,
+    /// The verified class of the entry, 0 to 3 (Part 10 §10.2). A network
+    /// from a descriptor text names none.
+    pub class: Option<u8>,
 }
 
 /// The hops that one relay serves.
@@ -603,6 +606,7 @@ fn endpoints_of(set: &RelaySet) -> Vec<RelayEndpoint> {
                 queue: relay.candidate.queue,
             }),
             prefix_v6: relay.candidate.v6_prefix.map(|prefix| prefix.to_vec()),
+            class: Some(relay.candidate.class),
         })
         .collect()
 }
@@ -674,6 +678,7 @@ pub fn parse_network(text: String, root_ca_path: Option<String>) -> Result<Netwo
                     identity_pk: Vec::new(),
                     roles: None,
                     prefix_v6: None,
+                    class: None,
                 };
                 if has_facts {
                     read_facts(&mut relay, facts)?;
@@ -816,6 +821,9 @@ fn relay_info(endpoint: &RelayEndpoint) -> Result<RelayInfo, FfiError> {
             chain: roles.chain,
             queue: roles.queue,
             layer: endpoint.layer,
+            // REL-196: the signed class weighs the draw; a network from a
+            // descriptor text weighs each relay as C2.
+            class: endpoint.class.unwrap_or(2).min(3),
         },
         key,
     })
@@ -2017,25 +2025,34 @@ impl Inner {
     /// operators and different blocs, from the relays of the run
     /// (`GRP-191`).
     fn group_replicas(&self) -> Result<[[u8; 32]; GROUP_REPLICAS], FfiError> {
-        let mut candidates = Vec::new();
+        let mut pool = Vec::new();
         for endpoint in self.relays.iter().filter(|relay| relay.layer == 3) {
             let info = relay_info(endpoint)?;
             // REL-158: a relay that holds no queue role serves no group.
-            if !info.candidate.queue {
-                continue;
+            if info.candidate.queue {
+                pool.push(info.candidate);
             }
-            // NET-344: a provisional directory counts each relay as its own
-            // operator, and the bloc still counts.
-            candidates.push(GroupRelay {
-                relay_id: info.candidate.relay_id,
-                operator_id: if self.bootstrap {
-                    info.candidate.relay_id
-                } else {
-                    info.candidate.operator_id
-                },
-                bloc: info.candidate.bloc,
-            });
         }
+        // REL-196: the pair comes from a draw weighted by class, and not
+        // from the order of the set, which would put each group of each
+        // client on the same two relays.
+        let ordered = umbra_core::directory::path::weighted_order(&pool, &mut |bound| {
+            random_u64() % bound.max(1)
+        });
+        let candidates: Vec<GroupRelay> = ordered
+            .iter()
+            .map(|candidate| GroupRelay {
+                relay_id: candidate.relay_id,
+                // NET-344: a provisional directory counts each relay as its
+                // own operator, and the bloc still counts.
+                operator_id: if self.bootstrap {
+                    candidate.relay_id
+                } else {
+                    candidate.operator_id
+                },
+                bloc: candidate.bloc,
+            })
+            .collect();
         Ok(select_pair(&candidates)
             .map_err(|_| FfiError::Offline)?
             .relays)
@@ -4269,14 +4286,16 @@ impl Handle {
         // The pins stay while the set lists them and their lifetime runs,
         // and an open place takes a random eligible relay (Part 10 §10.6.1).
         let now = consensus.client_clock(unix_now()).unwrap_or_else(unix_now);
-        let mut eligible: Vec<(u64, Candidate)> = set
+        // REL-196: the draw weighs each relay by its class.
+        let pool: Vec<Candidate> = set
             .relays
             .iter()
             .filter(|relay| relay.candidate.ingress && relay.addr_v4 != [0; 4])
-            .map(|relay| (random_u64(), relay.candidate))
+            .map(|relay| relay.candidate)
             .collect();
-        eligible.sort_by_key(|(draw, _)| *draw);
-        let eligible: Vec<Candidate> = eligible.into_iter().map(|(_, relay)| relay).collect();
+        let eligible = umbra_core::directory::path::weighted_order(&pool, &mut |bound| {
+            random_u64() % bound.max(1)
+        });
         let mut pins = inner.client.ingress_pins()?;
         if pins.refresh(&eligible, now, is_provisional) {
             inner.client.set_ingress_pins(&pins, &mut OsRng)?;

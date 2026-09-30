@@ -267,6 +267,7 @@ fail at the next start. UMBRA accepts this residual, and §15.3 holds the row.
 | A match of two six-digit codes under an active adversary at the first contact, with a probability of one in 10⁶ for each ceremony | An active A3 at the first contact | Part 4 §4.5.2. The commit binds each nonce before the reveal, thus the adversary cannot select a nonce. The 60-digit safety number stays available for a comparison that needs more. UMBRA accepts this residual |
 | The invitation landing document, at a hostile invitation host | The invitation host, against a party without the client | Part 4 §4.3.1. `IDN-120` and `IDN-121` fix a static document with no script, and a host that serves a different document breaks that rule. The fragment never reaches the host. A fetch that the host makes from a link locks the queue under `IDN-023`, and the two parties detect it. UMBRA accepts this residual |
 | The member count of a group at each rotation, from the slot count | The group-queue relay | The count and no identity. UMBRA accepts this residual |
+| Each hop of each circuit, while the provisional directory lists relays of one country or of one provider | A5 in that country; the provider and a party that watches its network, which reads the timing of each hop | Part 3 rule `NET-350`; the route view names the country of each hop. It ends when the relay set reaches the floor of Part 10 §10.6.3. UMBRA accepts this residual for the launch |
 | The activity timeline and the bucket of each record of a group | The group-queue relay, and A5 against it | Part 11 §11.2 replicates the queue on two relays under different operators; a reader alternates. UMBRA accepts this residual |
 | A reader circuit and the group it reads, joined to an IP address | The ingress relay and the group-queue relay in collusion | The same class as the two-ended collusion of Part 3 §3.11 |
 | The ciphertext of a group for `GROUP_READ_GRACE` after a removal | The removed member | It holds no slot key of the new epoch; it reads timing and buckets only |
@@ -301,7 +302,7 @@ commit. §15.8 makes this table a published promise.
 | A message-existence oracle from the packet counts (ToB #2) | Part 8 §8.4.3 — a fetch response with a constant size and a constant count |
 | Compulsion of a TLS key (Lavabit) | An inner transport encryption layer below TLS, shipped in v1, with short-lived relay identity keys |
 | Deanonymization of a sealed sender through delivery receipts | Part 3 §3.5.4 — a receipt is an ordinary padded message, and it is off by default. A receipt rides a cover slot, and it replaces the cover cell of that slot |
-| Bandwidth inflation (177×, 420×, 28×) | Part 10 §10.2 — discrete classes limit it to 4× in one 7-day epoch and to 64× over the ladder |
+| Bandwidth inflation (177×, 420×, 28×) | Part 10 §10.2 — discrete classes limit it to 2.5× in one 7-day epoch and to 10× over the ladder |
 | Sybil flooding (KAX17) | Part 10 §10.7 — staging with an automated sybilhunter |
 | A flood of connections, TLS handshakes, or circuit builds at an ingress relay | Part 3 §3.4.3 — `NET-331` to `NET-335` cap the circuits and the builds of one link, the connections of one address, and the handshakes that run at once. An attacker with many addresses still costs the relay the work of those caps, and §15.3 records it |
 | A flood of attachment storage | Part 13 §13.8.1 — a solution admits `POW_CHUNK_ALLOWANCE` registrations and no more, thus a flood pays a puzzle for each 2 MiB |
@@ -475,7 +476,8 @@ Onion-chained relays multiply that cost.
   the second auditor. Signal pays two auditors, and both sit in one
   jurisdiction. A third jurisdiction costs more than a second auditor.
 - Fund the measurement fleet of Part 10 §10.3 from the same reserve. Part 10
-  §10.3 sizes one class-C2 test at 36 Mbit/s for 30 seconds. Rule `REL-097`
+  §10.3 sizes one class-C2 test at 1 125 Mbit/s for 30 seconds, and a slot
+  of `CLUSTER_FULL` relays at C3 at 9 Gbit/s; the fleet holds that burst. Rule `REL-097`
   measures each relay above C0 one time in each 7 days. About 3 000
   relays give about 430 tests each day, and a sampled cluster adds
   `ceil(n / CLUSTER_SAMPLE)` slots for each large cluster.
@@ -489,7 +491,10 @@ Onion-chained relays multiply that cost.
   `provisional directory` state on each client under `REL-126`. Under that
   state Part 3 rule `NET-340` lets a client build a chain of one operator,
   thus a launch can start with the relays of the project alone, in three
-  blocs and three autonomous systems.
+  blocs and three autonomous systems. Rule `NET-350` also lets that launch
+  start in one country and at one provider: one legal order of that country
+  then reaches each relay, as one order to the one operator already does,
+  and the provider sees each hop of each circuit.
 - Note that the EU NGI and NLnet funding stream paid for much of this ecosystem.
   The Horizon Europe 2025 work programme cut that stream, and the stream stopped
   fully in June 2026. Do not plan for it.

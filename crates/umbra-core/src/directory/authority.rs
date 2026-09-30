@@ -59,8 +59,15 @@ pub struct Listing<'a> {
 /// `REL-156`).
 pub fn entry_of(listing: &Listing<'_>, admission: Admission) -> Result<Vec<u8>, Error> {
     let descriptor = RelayDescriptor::parse(listing.descriptor)?;
+    // REL-129: the verified class stays at or below the declared one.
+    if listing.class > 3 || listing.class > descriptor.capacity_class {
+        return Err(Error::Malformed);
+    }
+    // §10.6.1: an ingress relay holds C1 or above, thus a relay demoted
+    // below it keeps its listing and loses the flag.
+    let is_ingress = listing.is_ingress && listing.class >= super::path::INGRESS_CLASS_MIN;
     let exit_roles = roles::QUEUE | roles::CHAIN;
-    let flags = if listing.is_ingress {
+    let flags = if is_ingress {
         if descriptor.roles & roles::INGRESS_OFFERED == 0 {
             return Err(Error::Malformed);
         }
@@ -247,6 +254,31 @@ mod tests {
             &mut Rng(seed),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn a_listing_holds_its_class_and_an_ingress_holds_c1() {
+        let bytes = descriptor(12, roles::CHAIN | roles::INGRESS_OFFERED);
+        // REL-129: no class above the declared one of 2.
+        let above = Listing {
+            class: 3,
+            ..listing(&bytes, false)
+        };
+        assert!(entry_of(&above, Admission::Pending).is_err());
+        // §10.6.1: an ingress relay of C0 is listed with no ingress flag,
+        // and one of C1 keeps it.
+        let slow = Listing {
+            class: 0,
+            ..listing(&bytes, true)
+        };
+        let entry = entry_of(&slow, Admission::Pending).unwrap();
+        assert!(!RelayEntry::parse(&entry).unwrap().ingress());
+        let fast = Listing {
+            class: 1,
+            ..listing(&bytes, true)
+        };
+        let entry = entry_of(&fast, Admission::Pending).unwrap();
+        assert!(RelayEntry::parse(&entry).unwrap().ingress());
     }
 
     #[test]

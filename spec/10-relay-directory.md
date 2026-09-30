@@ -44,11 +44,30 @@ deployment.
 This decision has the largest effect in this part.
 
 ```
-C0 =  1 Mbit/s      C1 =  4 Mbit/s      C2 = 16 Mbit/s      C3 = 64 Mbit/s
+C0 = 100 Mbit/s     C1 = 250 Mbit/s     C2 = 500 Mbit/s     C3 = 1 000 Mbit/s
 ```
 
-- **The selection is uniform in a class.** The directory sizes the class
-  populations for each layer, thus the expected load matches the class capacity.
+Each rate holds in both directions at once, since a relay forwards what it
+takes in.
+
+- **The floor.** **[REL-197]** A directory authority MUST NOT list a relay
+  before a class test verifies C0 or above for it, and it MUST remove a relay
+  whose class test verifies below C0. A relay of UMBRA is a server of a data
+  centre or of equal quality, and a slow relay slows each circuit that
+  crosses it. Before the fleet of §10.3 runs, an authority takes the class
+  that its own operator states for a relay of that operator, under the
+  provisional directory of Part 3 `NET-340`.
+- **The selection is weighted by class.** **[REL-196]** A client MUST order
+  the relays of a draw at random in proportion to the rate of their class,
+  with the weights 2, 5, 10, and 20 for C0 to C3. The draws are the hops of
+  a chain and its queue relay (Part 3 `NET-310`), a replacement (§10.6.2),
+  the ingress pins (`REL-154`), and the group replicas (Part 11 `GRP-191`).
+  The hash placements of Part 12 `ATT-017` and Part 4 `IDN-076` are no draw:
+  a writer and a reader compute one list, and a weight would move it at each
+  demotion. Among the relays that the other circuits of a client leave
+  free, a relay of C3 thus comes first ten times as often as a relay of C0.
+  The class comes from the signed entry, and from no measurement of the
+  client (`REL-014`).
 - A relay declares its own class in `capacity_class`, and that declaration is
   the upper bound. A measurement confirms the class, and the directory writes
   the confirmed class in the `class` field of the `RelayEntry` of §10.5.3. A
@@ -59,23 +78,25 @@ C0 =  1 Mbit/s      C1 =  4 Mbit/s      C2 = 16 Mbit/s      C3 = 64 Mbit/s
   The change applies at the next consensus. **[REL-096]** A directory authority
   MUST NOT apply a staging delay or a step limit to a demotion.
 - **The cadence.** **[REL-097]** A directory authority SHOULD measure each
-  relay above C0 one time in each `MEASURE_INTERVAL`. **[REL-098]** If a relay
-  has no verifying report inside `MEASURE_STALE`, a directory authority MUST
-  set its `class` to C0. The directory authority measures each of the two
+  relay, C0 included, one time in each `MEASURE_INTERVAL`. **[REL-098]** If a
+  relay has no verifying report inside `MEASURE_STALE`, a directory authority
+  MUST remove it from the listing until a class test verifies it again. The directory authority measures each of the two
   periods from the slot of the last verifying report. §10.11 gives the two
   values.
 
-This rule limits the payoff of one bandwidth-inflation step to **4×**, which is
-one class step in one 7-day epoch. The ladder has three steps, thus the payoff
-over the full ladder is **64×** in three epochs or more. The published payoffs
+This rule limits the payoff of one bandwidth-inflation step to **2.5×**, which
+is one class step in one 7-day epoch. The ladder has three steps, thus the
+payoff over the full ladder is **10×** in three epochs or more. The published payoffs
 were 177×, 420×, and 28×, and each one is a cumulative figure. The rule needs
 **no cryptography**. It needs the measurement fleet of §10.3, and §15.6.1
 prices that fleet. A demotion needs no delay, because a false claim is what the
 delay defends against, and a lower class is not a claim.
 
-Uniform selection in a class also moves the Gini coefficient of the relay
-selection to the flat end of the Snader–Borisov family. That end of the trade
-favors anonymity.
+Four discrete weights keep the Gini coefficient of the relay selection near
+the flat end of the Snader–Borisov family, and the floor keeps the ratio of the
+largest weight to the smallest at 10. A continuous weight would favor
+performance further and anonymity less. The weights trade a little of that
+flatness for circuits that cross fast relays.
 
 ## 10.3 Measurement: saturating echo, scheduled by co-residency cluster
 
@@ -112,8 +133,8 @@ one of these items:
 This rule is the only defense against the *n × N* cluster inflation of TorMult.
 Its cost is measurer capacity. §10.6 lets one ASN hold 10 % of the chain
 population of a bloc, and §10.5.3 works with about 3 000 relays. A cluster of
-300 relays at class C2 needs 300 × 36 Mbit/s, which is 10.8 Gbit/s, in one
-30-second slot. No cheap measurer fleet holds that burst, thus a large cluster
+300 relays at class C2 needs 300 × 1 125 Mbit/s, which is 337.5 Gbit/s, in
+one 30-second slot. No cheap measurer fleet holds that burst, thus a large cluster
 is measured in samples.
 
 - **[REL-099]** If a cluster holds `CLUSTER_FULL` relays or fewer, the directory
@@ -131,8 +152,8 @@ the cluster does not know which relays to feed. Part 15 §15.3 records that
 residual.
 
 A class test proves a **threshold** only, which is the question "does this relay
-hold 16 Mbit/s?". A class test does not estimate a value. Thus the measurer
-budget is much smaller than the FlashFlow budget. A class-C2 test needs 36
+hold 500 Mbit/s?". A class test does not estimate a value. Thus the measurer
+budget is much smaller than the FlashFlow budget. A class-C2 test needs 1 125
 Mbit/s of measurer capacity for 30 seconds, and not a full-rate speed test.
 
 The class test and the honesty probe are two different measurements. The
@@ -196,8 +217,8 @@ holds the label. Each signature covers this preimage:
 
 > *Cause.* An earlier draft made a relay decrypt and re-emit each `MEAS_ECHO`
 > cell that "a measurer" sent, and no rule bound the cell to the measurer key
-> that §10.5.1 already issues. §10.11 sets a class-C2 test at 36 Mbit/s for 30
-> seconds, thus an unauthorized party made a relay spend that work at will.
+> that §10.5.1 already issues. §10.11 sets a class-C2 test at 1 125 Mbit/s for
+> 30 seconds, thus an unauthorized party made a relay spend that work at will.
 > `REL-041` bounds the amplification by the bucket, and it does not bound the
 > volume. The rule above puts the existing measurer key on the path.
 >
@@ -989,7 +1010,7 @@ multi-signature.
   `capacity_class` of the descriptor. §10.2 gives the measurement that sets
   it.
 - A relay is **ingress eligible** when three conditions hold. Its `roles` bit 2
-  is set. Its `class` is C2 or above, under §10.6.1. Its staging of §10.7.1 is
+  is set. Its `class` is C1 or above, under §10.6.1. Its staging of §10.7.1 is
   complete. **[REL-130]** A directory authority MUST set `flags` bit 0 only for
   an ingress eligible relay.
 - **[REL-131]** A directory authority MUST NOT take `operator_id`, `class`, or
@@ -1156,7 +1177,7 @@ through it.
 > own layer and the sentence above was a claim with no mechanism behind it.
 >
 > A later draft put the ingress layer in this function, at one third of the
-> population. §10.6.1 admits class C2 and above to the ingress role, and
+> population. §10.6.1 admits class C1 and above to the ingress role, and
 > §10.7.1 stages an ingress relay for 14 days. Thus the hash placed a relay at
 > layer 1 that the two rules then rejected. The function now covers hops 2 and
 > 3, and the directory sets the ingress flag. That draft also bound the
@@ -1257,7 +1278,7 @@ the root adds 17 KB to 24 KB.
 > with proofs serves both uses of Part 3 §3.10 with one form: the full set
 > from an HTTPS endpoint, and the few relays inside an invitation.
 
-## 10.6 Path selection: hard constraints, not soft weights
+## 10.6 Path selection: hard constraints, and the class weight alone
 
 **[REL-011]** A client MUST reject a chain if two of its relays share one of these items:
 
@@ -1266,6 +1287,10 @@ the root adds 17 KB to 24 KB.
 - an ASN
 - a jurisdiction bloc, and §10.6.3 gives that list
 
+Under the provisional directory of `REL-126`, Part 3 rules `NET-200`,
+`NET-340`, and `NET-350` relax these items in that order, each only when no
+chain holds without it.
+
 The directory enforces two ceilings in each **population** of each bloc.
 §10.5.4 defines the ingress population and the chain population. The **family
 ceiling** is 3 % of the population, or one relay when one relay is larger.
@@ -1273,7 +1298,8 @@ ceiling** is 3 % of the population, or one relay when one relay is larger.
 the family ceiling in one population of one bloc. **[REL-140]** A directory
 authority MUST NOT list an ASN above 10 % of one population of one bloc. Thus
 no measurement error and no reputation bug can concentrate a path inside one
-bloc.
+bloc. The provisional directory of `REL-126` holds the relays of the project
+alone, and neither ceiling binds it.
 
 A family declaration uses the **family certificate of §10.6.3**, which has the
 shape of Tor proposal 321. That certificate is mandatory in v1. UMBRA does not
@@ -1315,10 +1341,10 @@ relay claims with no audit.
 
 - **Rotation: a minimum confirmed lifetime of 60 days, and 120 days if the
   lifetime is unconfirmed.**
-- **Only class C2 and above are eligible for the ingress role.** An equivalent
-  floor costs about 7 % of the capacity. It also decreases the pool to about
-  1000 relays. It thus makes a Sybil attack at botnet scale too expensive at the
-  one position that sees a client IP address.
+- **Only class C1 and above are eligible for the ingress role.** A node of a
+  botnet rarely holds 250 Mbit/s in both directions, thus the floor makes a
+  Sybil attack at botnet scale too expensive at the one position that sees a
+  client IP address.
 
 **The life of a pin.** A pin is the `relay_id` of an ingress relay, the time
 of the pin on the client clock of §10.5.2, and a confirmed flag. A pin is
@@ -1329,7 +1355,7 @@ of the pin on the client clock of §10.5.2, and a confirmed flag. A pin is
   that relay holds `flags` bit 0 and the lifetime of the pin runs. It MUST
   end a pin for no other cause, and `REL-014` names the cause that tempts.
 - **[REL-154]** A client MUST fill an open place with a random draw from the
-  ingress eligible relays of the accepted set. The two pins MUST NOT share an
+  ingress eligible relays of the accepted set, weighted under `REL-196`. The two pins MUST NOT share an
   `operator_id` or a `family_id`, because one operator with the two pins sees
   each connection of that client for 60 days. A set with one eligible relay
   gives one pin, and the second place stays open. Part 3 rules `NET-344` and
@@ -1348,8 +1374,8 @@ of the pin on the client clock of §10.5.2, and a confirmed flag. A pin is
 This rule is the direct lesson of Herrmann and Grothoff.
 
 - A relay set is **fixed for an epoch and comes from the directory**.
-- A consensus-random draw from the same class and the same layer replaces a
-  failed relay. **[REL-015]** The client MUST NOT select "the fastest peer that I have seen".
+- A draw from the same layer, weighted under `REL-196`, replaces a failed
+  relay. **[REL-015]** The client MUST NOT select "the fastest peer that I have seen".
 - Replacements have a rate limit of a maximum of one in each epoch for each
   layer, with hysteresis.
 - **[REL-016]** A client MUST report **repeated forced replacement to the directory as a link
@@ -1456,7 +1482,8 @@ it orders the blocs by their first code. The list of §10.12 is 66 bytes.
   or more each hold `BLOC_LAYER_SHARE` or more of the ingress population and
   of the chain population. **[REL-142]** A directory authority MUST NOT
   publish a `BlocList` under which the current relay set does not reach the
-  floor. §10.11 gives `BLOC_MIN` as 3 and `BLOC_LAYER_SHARE` as 10 %. Part 3
+  floor, except under the provisional directory of `REL-126`, whose clients
+  relax invariant 2 under Part 3 rule `NET-350`. §10.11 gives `BLOC_MIN` as 3 and `BLOC_LAYER_SHARE` as 10 %. Part 3
   §3.4.6 gives the client rule for a relay set below the floor. Part 15
   §15.6.1 gives the recruitment target that keeps the set above it.
 
@@ -1648,16 +1675,17 @@ relay with the notification role, and this section then applies to it.
 
 | Parameter | Value |
 | --- | --- |
-| Capacity classes | C0 1 / C1 4 / C2 16 / C3 64 Mbit/s |
+| Capacity classes | C0 100 / C1 250 / C2 500 / C3 1 000 Mbit/s, in both directions; no relay below C0 is listed (§10.2) |
+| Selection weights | 2 / 5 / 10 / 20 for C0 to C3 (§10.2) |
 | `GENESIS_ROOT` | 32 zero bytes: the root under which the relays of the first root take their layer (`REL-159`) |
 | Class growth cap | 1 class up in each 7-day epoch, and a demotion applies at the next consensus (§10.2) |
 | `MEASURE_INTERVAL` | 7 d between two class tests of one relay (§10.2) |
-| `MEASURE_STALE` | 21 d without a verifying report, then class C0 (§10.2) |
+| `MEASURE_STALE` | 21 d without a verifying report, then no listing until a test verifies the relay again (§10.2) |
 | Measurement duration | 30 s saturating echo |
 | Measurer capacity | ≥ 2.25× the class ceiling claimed |
 | Reports for each class | ≥ 3 measurers from ≥ 2 ASes |
-| `CLUSTER_FULL` | 16 relays, the largest cluster that one slot measures in full (§10.3) |
-| `CLUSTER_SAMPLE` | 16 relays of a larger cluster in each slot (§10.3) |
+| `CLUSTER_FULL` | 4 relays, the largest cluster that one slot measures in full (§10.3); 4 relays at C3 need 9 Gbit/s of measurer capacity |
+| `CLUSTER_SAMPLE` | 4 relays of a larger cluster in each slot (§10.3) |
 | `MeasurerCert` size | 8 598 B at 2 signatures, 25 148 B at 7, in bucket `B3` (§10.3.1) |
 | `MEASURER_REVOKE_MAX` | 16 entries in `revoked` of a `DirectoryRoot` (§10.3.1) |
 | Directory authorities | 7, and a consensus needs 5 of 7 ML-DSA-65 signatures (§10.5.2) |
@@ -1668,7 +1696,7 @@ relay with the notification role, and this section then applies to it.
 | `CLOCK_SKEW` | 1 h, and §10.5.2 rules REL-035 and REL-044 use it |
 | Ingress relays | 2, pinned |
 | Ingress rotation | 60 d confirmed, 120 d unconfirmed |
-| Ingress eligibility | class ≥ C2, and `flags` bit 0 of the entry carries it (§10.5.3) |
+| Ingress eligibility | class ≥ C1, and `flags` bit 0 of the entry carries it (§10.5.3) |
 | Staging period | 4 d chain and queue, 14 d ingress |
 | Family / ASN ceiling | 3 % or one relay / 10 %, of one population of one bloc (§10.6) |
 | `BLOC_MIN` | 3 blocs at the feasibility floor (§10.6.3) |
