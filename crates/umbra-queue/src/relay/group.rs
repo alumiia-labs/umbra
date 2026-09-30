@@ -8,8 +8,8 @@ use umbra_crypto::stored::{Reader, Writer};
 
 use crate::{
     params::{
-        store_time, GROUP_IDLE_TTL, GROUP_POST_RATE, GROUP_POST_WINDOW, GROUP_QUEUE_QUOTA,
-        GROUP_READ_GRACE, GROUP_RETENTION, GROUP_WRITE_GRACE,
+        store_grace_time, store_time, GROUP_IDLE_TTL, GROUP_POST_RATE, GROUP_POST_WINDOW,
+        GROUP_QUEUE_QUOTA, GROUP_READ_GRACE, GROUP_RETENTION, GROUP_WRITE_GRACE,
     },
     relay::Stored,
     Reject,
@@ -61,7 +61,7 @@ impl Credential {
         writer.bytes(&self.current);
         writer.option(self.previous.as_ref(), |w, (pk, at)| {
             w.bytes(pk);
-            w.u64(store_time(*at));
+            w.u64(store_grace_time(*at));
         });
     }
 

@@ -807,6 +807,21 @@ impl Group {
         )
     }
 
+    /// Whether the key of the current epoch reaches a party that a trigger
+    /// since its roster epoch removed, thus this member rotates before it
+    /// posts a record that is no roster object (`GRP-422`). A member that
+    /// the trigger excludes posts nothing, and it withholds nothing.
+    pub fn withholds(&self) -> bool {
+        let Some(current) = self.epochs.current() else {
+            return false;
+        };
+        let triggers = self.roster.triggers_since(current.roster_epoch());
+        !triggers.is_empty()
+            && !triggers
+                .iter()
+                .any(|trigger| trigger.excluded == Some(self.own_index))
+    }
+
     /// The rotation this group owes at `now`, from a trigger on the roster
     /// chain since the current epoch or from the age of that epoch
     /// (§11.4.1). A member the trigger excludes owes none (`GRP-356`).
@@ -1975,6 +1990,9 @@ mod tests {
         assert_eq!(trigger.excluded, Some(1));
         assert!(member.owes_rotation(now).is_none());
         assert!(third.owes_rotation(now).is_some());
+        // GRP-422: until the next epoch, a post waits for a rotation.
+        assert!(third.withholds());
+        assert!(!member.withholds());
         // GRP-356: a rotation by the removed index, or one that names the
         // roster epoch before the removal, installs nowhere.
         let next_epoch = third.epoch() + 1;
@@ -1988,6 +2006,7 @@ mod tests {
         assert_eq!(rotation.epoch, first_epoch + 1);
         assert_eq!(creator.epoch(), first_epoch + 1);
         assert!(creator.owes_rotation(now).is_none());
+        assert!(!creator.withholds());
 
         let record = parse_record(inline(&rotation));
         assert_eq!(record.kind, RecordKind::EpochKey);

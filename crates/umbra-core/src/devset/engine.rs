@@ -84,6 +84,8 @@ pub enum Taken {
         value: Vec<u8>,
         /// The Lamport counter of the write, which a relay keeps.
         lamport: u64,
+        /// The device that wrote the value, which a relay keeps.
+        writer: DeviceId,
     },
     /// An item of mutable state that loses to the value held (`DEV-270`).
     Superseded,
@@ -250,6 +252,7 @@ impl SyncEngine {
     ) -> Result<Published, Error> {
         let mutable = MutableItem {
             context: self.context(0),
+            writer: self.own,
             item,
             key,
             value,
@@ -267,20 +270,24 @@ impl SyncEngine {
     }
 
     /// Publishes again an item of mutable state that a peer published, at
-    /// the Lamport counter of that write (`DEV-308`). The item takes a
-    /// counter of this device, and it keeps the time of its write, thus it
-    /// supersedes no later write of any device, its source included.
+    /// the Lamport counter and under the writer of that write (`DEV-308`).
+    /// The item takes a counter of this device, and it keeps the time and
+    /// the writer of its write, thus it supersedes no later write of any
+    /// device, and a tie breaks as at the writer.
+    #[allow(clippy::too_many_arguments)]
     pub fn relay_mutable(
         &mut self,
         item: u8,
         key: &[u8],
         value: &[u8],
         lamport: u64,
+        writer: DeviceId,
         slot_ref: [u8; 16],
         now: u64,
     ) -> Result<Published, Error> {
         let mutable = MutableItem {
             context: self.context_at(lamport, 0),
+            writer,
             item,
             key,
             value,
@@ -357,13 +364,12 @@ impl SyncEngine {
                     return Ok(Taken::Duplicate);
                 }
                 let slot = (item.item, item.key.to_vec());
-                let offered = (item.context.lamport, *source);
-                // DEV-270: the higher Lamport counter, then the lower device.
-                // A second item of one device at one counter is a relay of
-                // the owner of the channels (DEV-308), whose later relay
-                // carries the winner that the owner holds.
+                let offered = (item.context.lamport, item.writer);
+                // DEV-270: the higher Lamport counter, then the lower writer.
+                // A relay keeps both (DEV-308), thus one write holds one
+                // pair, and each device ends on one value.
                 let wins = self.mutable.get(&slot).is_none_or(|(lamport, writer)| {
-                    offered.0 > *lamport || (offered.0 == *lamport && offered.1 <= *writer)
+                    offered.0 > *lamport || (offered.0 == *lamport && offered.1 < *writer)
                 });
                 if !wins {
                     return Ok(Taken::Superseded);
@@ -374,6 +380,7 @@ impl SyncEngine {
                     key: item.key.to_vec(),
                     value: item.value.to_vec(),
                     lamport: item.context.lamport,
+                    writer: item.writer,
                 })
             }
             control @ DeviceSetBody::Control { .. } => {
@@ -800,10 +807,53 @@ mod tests {
                 key: b"conversation".to_vec(),
                 value: b"read to 5".to_vec(),
                 lamport: 1,
+                writer: PHONE,
             }
         );
         assert_eq!(
             phone.receive(&LAPTOP, &from_laptop.body, 11).unwrap(),
+            Taken::Superseded
+        );
+
+        // DEV-308: the tablet owns the channels, and its relay of the write
+        // of the phone keeps the phone as its writer. The laptop took its own
+        // write at the same counter, and the relay wins there as it won at
+        // the tablet, and not by the device of the tablet.
+        let (mut phone2, mut laptop2) = pair();
+        let mut tablet = SyncEngine::new(TABLET, &[PHONE, LAPTOP]).unwrap();
+        let a = phone2
+            .publish_mutable(1, b"conversation", b"read to 5", [7; 16], 10)
+            .unwrap();
+        let b = laptop2
+            .publish_mutable(1, b"conversation", b"read to 9", [7; 16], 10)
+            .unwrap();
+        let Taken::Mutable {
+            lamport, writer, ..
+        } = tablet.receive(&PHONE, &a.body, 11).unwrap()
+        else {
+            panic!("the first write applies");
+        };
+        assert_eq!(
+            tablet.receive(&LAPTOP, &b.body, 11).unwrap(),
+            Taken::Superseded
+        );
+        let relay = tablet
+            .relay_mutable(
+                1,
+                b"conversation",
+                b"read to 5",
+                lamport,
+                writer,
+                [8; 16],
+                12,
+            )
+            .unwrap();
+        assert!(matches!(
+            laptop2.receive(&TABLET, &relay.body, 13).unwrap(),
+            Taken::Mutable { writer: PHONE, .. }
+        ));
+        assert_eq!(
+            phone2.receive(&TABLET, &relay.body, 13).unwrap(),
             Taken::Superseded
         );
 

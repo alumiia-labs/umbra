@@ -253,9 +253,16 @@ of a client brings one back. Thus the queues of a relay outlive its process.
   between two queues. Each of those ends with its process, and §3.11 gives a
   queue relay none of the last two.
 - **[NET-301]** A relay MUST write each time to its store as a multiple of
-  `STORE_TIME_GRAIN`, which is 3 600 s. The lifetimes that read those times
-  are 14 days and more. A seized file then gives no arrival time to the
-  second, and a live relay learns that time in each design.
+  `STORE_TIME_GRAIN`, which is 3 600 s, rounded up. A lifetime that a
+  restart reads from the store then ends no earlier than its own, and at
+  most one grain later, which `WIR-111` needs. The start of the grace of a
+  previous credential, and the time of a link identifier that holds no blob
+  yet, round down, thus that grace and the `INVITE_RESERVE_TTL` of
+  `WIR-508` end no later than their own. **[NET-346]** At a start a relay
+  MUST keep the newest `QUEUE_QUOTA` records of a queue whose stored records
+  pass that quota: the older ones ended in the run before. A seized file then gives no
+  arrival time to the second, and a live relay learns that time in each
+  design.
 - **[NET-302]** A relay MUST erase from its storage a record that an `ACK`
   covers, a record past `MSG_TTL`, a queue after its `DEL` or its idle
   lifetime, and an invitation after its first fetch or its lifetime. The

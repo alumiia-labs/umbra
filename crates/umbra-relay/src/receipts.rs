@@ -17,9 +17,11 @@ use umbra_crypto::{rand_core::CryptoRng, sign::SigningKey};
 
 use crate::circuits::LinkId;
 
-/// The receipts that a relay keeps at one time, of each kind. A window holds
-/// at most `RECEIPT_WINDOW` leaves of 32 bytes, thus this bounds the memory
-/// of the book near 256 MiB when each window is full.
+/// The receipts that a relay with no receipt file keeps at one time, of
+/// each kind. A window holds at most `RECEIPT_WINDOW` leaves of 32 bytes,
+/// thus this bounds the memory of the book near 256 MiB when each window is
+/// full. A relay that carries more cells in `RECEIPT_RETENTION` keeps its
+/// receipts in a file ([`ReceiptShelf`]).
 const HELD_MAX: usize = 4_096;
 /// The leaves of the cells sent on one link that no receipt covered yet. A
 /// peer that returns no receipt does not hold more than this.
@@ -31,11 +33,82 @@ struct Window {
     leaves: Vec<[u8; 32]>,
 }
 
-struct Held {
-    signed: Vec<u8>,
-    receipt: LinkReceipt,
-    leaves: Vec<[u8; 32]>,
-    at: u64,
+/// A receipt that the book keeps, with the leaves that its root covers.
+#[derive(Clone)]
+pub struct KeptReceipt {
+    /// Whether this relay issued the receipt; else it took it.
+    pub issued: bool,
+    /// The epoch of the receipt.
+    pub epoch: u64,
+    /// The signed receipt.
+    pub signed: Vec<u8>,
+    /// The leaves under its `batch_root`, in order.
+    pub leaves: Vec<[u8; 32]>,
+    /// The time at which the book kept it.
+    pub at: u64,
+}
+
+/// Where the book keeps its receipts for `RECEIPT_RETENTION` (`REL-073`).
+pub trait ReceiptShelf: Send {
+    /// Keeps one receipt. A fault keeps nothing.
+    fn keep(&mut self, kept: KeptReceipt) -> Result<(), crate::store::StoreFault>;
+    /// The receipts of `epoch` whose leaves may hold `leaf`, those issued
+    /// first.
+    fn find(&self, epoch: u64, leaf: &[u8; 32]) -> Vec<KeptReceipt>;
+    /// Erases each receipt kept before `floor` (`REL-074`).
+    fn erase_before(&mut self, floor: u64);
+    /// The receipts that it holds: those issued, and those taken.
+    fn held(&self) -> (usize, usize);
+}
+
+/// The shelf of a relay with no receipt file: the receipts sit in RAM, at
+/// most `HELD_MAX` of each kind.
+#[derive(Default)]
+pub struct MemoryShelf {
+    issued: VecDeque<KeptReceipt>,
+    taken: VecDeque<KeptReceipt>,
+}
+
+impl ReceiptShelf for MemoryShelf {
+    fn keep(&mut self, kept: KeptReceipt) -> Result<(), crate::store::StoreFault> {
+        let list = if kept.issued {
+            &mut self.issued
+        } else {
+            &mut self.taken
+        };
+        if list.len() >= HELD_MAX {
+            list.pop_front();
+        }
+        list.push_back(kept);
+        Ok(())
+    }
+
+    fn find(&self, epoch: u64, leaf: &[u8; 32]) -> Vec<KeptReceipt> {
+        self.issued
+            .iter()
+            .chain(self.taken.iter())
+            .filter(|kept| kept.epoch == epoch && kept.leaves.contains(leaf))
+            .cloned()
+            .collect()
+    }
+
+    fn erase_before(&mut self, floor: u64) {
+        self.issued.retain(|kept| kept.at >= floor);
+        self.taken.retain(|kept| kept.at >= floor);
+    }
+
+    fn held(&self) -> (usize, usize) {
+        (self.issued.len(), self.taken.len())
+    }
+}
+
+/// The shelf of a book.
+struct Shelf(Box<dyn ReceiptShelf>);
+
+impl Default for Shelf {
+    fn default() -> Self {
+        Shelf(Box::new(MemoryShelf::default()))
+    }
 }
 
 /// The receipts of one relay.
@@ -49,15 +122,22 @@ pub struct ReceiptBook {
     next_window: BTreeMap<LinkId, (u64, u32)>,
     /// The leaves of the cells sent on each relay link, the oldest first.
     sent: BTreeMap<LinkId, VecDeque<[u8; 32]>>,
-    issued: VecDeque<Held>,
-    taken: VecDeque<Held>,
+    /// The receipts that this relay issued and took.
+    shelf: Shelf,
     /// The queries of each authority in the current epoch (`REL-186`).
     queries: BTreeMap<u8, (u64, u32)>,
     /// The chains of the current epoch: the epoch and the count.
     chains: (u64, u64),
     /// The two shares of the chain count of each ended epoch (`REL-190`).
     shares: BTreeMap<u64, [u64; 2]>,
+    /// The time of the last erase of old receipts.
+    erased_at: u64,
 }
+
+/// The time between two erases of old receipts: a receipt leaves at most
+/// this long after `RECEIPT_RETENTION`, and the shelf takes no write at
+/// each tick.
+const ERASE_EVERY: u64 = 60;
 
 /// The leaf of a cell: its tag follows its `circ_id` (Part 3 §3.4.4).
 fn leaf_of(cell: &[u8]) -> Option<[u8; 32]> {
@@ -65,14 +145,12 @@ fn leaf_of(cell: &[u8]) -> Option<[u8; 32]> {
     Some(cell_leaf(&tag))
 }
 
-fn keep(list: &mut VecDeque<Held>, held: Held) {
-    if list.len() >= HELD_MAX {
-        list.pop_front();
-    }
-    list.push_back(held);
-}
-
 impl ReceiptBook {
+    /// The book keeps its receipts on `shelf` from now on.
+    pub fn set_shelf(&mut self, shelf: Box<dyn ReceiptShelf>) {
+        self.shelf = Shelf(shelf);
+    }
+
     /// The link runs to the relay `relay_id`: this relay dialed it, or its
     /// hello verified.
     pub fn set_peer(&mut self, link: LinkId, relay_id: [u8; 32]) {
@@ -160,15 +238,15 @@ impl ReceiptBook {
             batch_root: tree::root(&open.leaves)?,
         };
         let signed = receipt.sign(key, rng).ok()?;
-        keep(
-            &mut self.issued,
-            Held {
-                signed: signed.clone(),
-                receipt,
-                leaves: open.leaves,
-                at: now,
-            },
-        );
+        // A shelf that faults keeps nothing, and the peer takes the receipt
+        // all the same.
+        let _ = self.shelf.0.keep(KeptReceipt {
+            issued: true,
+            epoch: receipt.epoch,
+            signed: signed.clone(),
+            leaves: open.leaves,
+            at: now,
+        });
         Some(signed)
     }
 
@@ -195,9 +273,12 @@ impl ReceiptBook {
                 out.push((link, signed));
             }
         }
-        let live = |held: &Held| now.saturating_sub(held.at) < RECEIPT_RETENTION;
-        self.issued.retain(live);
-        self.taken.retain(live);
+        if now.saturating_sub(self.erased_at) >= ERASE_EVERY {
+            self.erased_at = now;
+            self.shelf
+                .0
+                .erase_before(now.saturating_sub(RECEIPT_RETENTION).saturating_add(1));
+        }
         out
     }
 
@@ -246,21 +327,21 @@ impl ReceiptBook {
             return false;
         }
         sent.drain(..count);
-        keep(
-            &mut self.taken,
-            Held {
+        self.shelf
+            .0
+            .keep(KeptReceipt {
+                issued: false,
+                epoch: receipt.epoch,
                 signed: signed.to_vec(),
-                receipt,
                 leaves,
                 at: now,
-            },
-        );
-        true
+            })
+            .is_ok()
     }
 
     /// The receipts that the book holds: those it issued, and those it took.
     pub fn held(&self) -> (usize, usize) {
-        (self.issued.len(), self.taken.len())
+        self.shelf.0.held()
     }
 
     /// Whether one more query of `authority` fits in the epoch of `now`
@@ -310,21 +391,26 @@ impl ReceiptBook {
     /// epoch that covers its cell, issued or taken, with the proof.
     pub fn answer(&self, query: &ReceiptQuery) -> ReceiptAnswer {
         let leaf = query.leaf();
-        for (list, found) in [(&self.issued, Found::Issued), (&self.taken, Found::Taken)] {
-            for held in list.iter().filter(|held| held.receipt.epoch == query.epoch) {
-                let Some(index) = held.leaves.iter().position(|held| *held == leaf) else {
-                    continue;
-                };
-                let Some(proof) = tree::prove(&held.leaves, index) else {
-                    continue;
-                };
-                return ReceiptAnswer {
-                    found,
-                    receipt: held.signed.clone(),
-                    leaf_index: u32::try_from(index).unwrap_or(u32::MAX),
-                    proof,
-                };
+        for held in self.shelf.0.find(query.epoch, &leaf) {
+            if held.epoch != query.epoch {
+                continue;
             }
+            let Some(index) = held.leaves.iter().position(|held| *held == leaf) else {
+                continue;
+            };
+            let Some(proof) = tree::prove(&held.leaves, index) else {
+                continue;
+            };
+            return ReceiptAnswer {
+                found: if held.issued {
+                    Found::Issued
+                } else {
+                    Found::Taken
+                },
+                receipt: held.signed,
+                leaf_index: u32::try_from(index).unwrap_or(u32::MAX),
+                proof,
+            };
         }
         ReceiptAnswer::none()
     }

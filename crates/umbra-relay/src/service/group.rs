@@ -116,12 +116,17 @@ impl GroupService {
         let mut service = GroupService::default();
         for (group_queue_id, stored) in &loaded.group_queues {
             let mut reader = Reader::new(&stored.head);
-            let Ok(queue) = GroupQueue::restore(&mut reader, stored.records.clone()) else {
+            let restored = GroupQueue::restore(&mut reader, stored.records.clone())
+                .ok()
+                .filter(|queue| queue.id() == *group_queue_id);
+            let Some(queue) = restored else {
+                // NET-302, NET-303: a queue that serves no one leaves the
+                // file too.
+                service.changes.push(StoreChange::GroupQueueDeleted {
+                    group_queue_id: *group_queue_id,
+                });
                 continue;
             };
-            if queue.id() != *group_queue_id {
-                continue;
-            }
             service.served.insert(
                 *group_queue_id,
                 Served {

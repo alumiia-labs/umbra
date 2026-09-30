@@ -10,11 +10,13 @@ use rusqlite::{params, Connection, OptionalExtension};
 use umbra_core::attach::store::{Class, Credentials, HeldChunk};
 use umbra_queue::relay::Stored;
 
+use crate::receipts::{KeptReceipt, ReceiptShelf};
 use crate::store::{Loaded, RelayStore, StoreChange, StoreFault, StoredInvitation, StoredQueue};
 
 /// The schema version in `user_version`. Version 2 added the group
-/// queues of Part 11, and version 3 the chunks of Part 12.
-const SCHEMA_VERSION: i64 = 3;
+/// queues of Part 11, version 3 the chunks of Part 12, and version 4 the
+/// spent token nonces of `ABU-114`.
+const SCHEMA_VERSION: i64 = 4;
 
 const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS queues (
@@ -56,6 +58,11 @@ const SCHEMA: &str = "
         erase_at      INTEGER NOT NULL,
         bytes         BLOB NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS spent (
+        epoch INTEGER NOT NULL,
+        nonce BLOB NOT NULL,
+        PRIMARY KEY (epoch, nonce)
+    ) WITHOUT ROWID;
 ";
 
 /// The class of a chunk in its column.
@@ -121,6 +128,12 @@ impl SqliteStore {
 
 impl RelayStore for SqliteStore {
     fn load(&mut self) -> Result<Loaded, StoreFault> {
+        // NET-302: a record of no queue serves no one, and it leaves.
+        fault(self.connection.execute_batch(
+            "DELETE FROM records WHERE recipient_id NOT IN (SELECT recipient_id FROM queues);
+             DELETE FROM group_records
+                WHERE group_queue_id NOT IN (SELECT group_queue_id FROM group_queues);",
+        ))?;
         let mut loaded = Loaded::default();
         let mut queues = fault(
             self.connection
@@ -151,17 +164,23 @@ impl RelayStore for SqliteStore {
         }))?;
         for row in rows {
             let (recipient_id, seq, accepted_at, bytes) = fault(row)?;
-            // A record of no queue is a fault of an earlier crash model, and
-            // one transaction for each commit excludes it.
-            let queue = loaded
-                .queues
-                .get_mut(&id::<32>(recipient_id)?)
-                .ok_or(StoreFault)?;
-            queue.records.push(Stored {
-                seq: u32::try_from(seq).map_err(|_| StoreFault)?,
-                accepted_at: unsigned(accepted_at)?,
-                bytes,
-            });
+            // NET-303: a record that does not read makes its queue one that
+            // does not parse, and the other queues stay. A record of no
+            // queue serves no one.
+            let Ok(recipient_id) = id::<32>(recipient_id) else {
+                continue;
+            };
+            let Some(queue) = loaded.queues.get_mut(&recipient_id) else {
+                continue;
+            };
+            match (u32::try_from(seq), unsigned(accepted_at)) {
+                (Ok(seq), Ok(accepted_at)) => queue.records.push(Stored {
+                    seq,
+                    accepted_at,
+                    bytes,
+                }),
+                _ => queue.head.clear(),
+            }
         }
 
         let mut group_queues = fault(
@@ -196,15 +215,20 @@ impl RelayStore for SqliteStore {
         }))?;
         for row in rows {
             let (group_queue_id, seq, accepted_at, bytes) = fault(row)?;
-            let queue = loaded
-                .group_queues
-                .get_mut(&id::<32>(group_queue_id)?)
-                .ok_or(StoreFault)?;
-            queue.records.push(Stored {
-                seq: u32::try_from(seq).map_err(|_| StoreFault)?,
-                accepted_at: unsigned(accepted_at)?,
-                bytes,
-            });
+            let Ok(group_queue_id) = id::<32>(group_queue_id) else {
+                continue;
+            };
+            let Some(queue) = loaded.group_queues.get_mut(&group_queue_id) else {
+                continue;
+            };
+            match (u32::try_from(seq), unsigned(accepted_at)) {
+                (Ok(seq), Ok(accepted_at)) => queue.records.push(Stored {
+                    seq,
+                    accepted_at,
+                    bytes,
+                }),
+                _ => queue.head.clear(),
+            }
         }
 
         let mut invitations = fault(
@@ -227,6 +251,21 @@ impl RelayStore for SqliteStore {
                 at: unsigned(at)?,
             };
             loaded.invitations.insert(id(link_id)?, held);
+        }
+
+        let mut spent = fault(
+            self.connection
+                .prepare("SELECT epoch, nonce FROM spent ORDER BY epoch"),
+        )?;
+        let rows = fault(spent.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+        }))?;
+        for row in rows {
+            let (epoch, nonce) = fault(row)?;
+            // A row that does not read spends nothing.
+            if let (Ok(epoch), Ok(nonce)) = (u32::try_from(epoch), id::<32>(nonce)) {
+                loaded.spent.insert((epoch, nonce));
+            }
         }
 
         let mut chunks = fault(self.connection.prepare(
@@ -416,6 +455,18 @@ impl RelayStore for SqliteStore {
                         params![chunk_id.as_slice()],
                     ))?
                 }
+                StoreChange::Spent { epoch, nonce } => {
+                    fault(transaction.execute(
+                        "INSERT OR IGNORE INTO spent (epoch, nonce) VALUES (?1, ?2)",
+                        params![i64::from(*epoch), nonce.as_slice()],
+                    ))?;
+                    // ABU-114: a nonce two epochs back names no token that
+                    // passes.
+                    fault(transaction.execute(
+                        "DELETE FROM spent WHERE epoch < ?1",
+                        [i64::from(epoch.saturating_sub(1))],
+                    ))?
+                }
             };
         }
         fault(transaction.commit())?;
@@ -431,11 +482,220 @@ impl RelayStore for SqliteStore {
     }
 }
 
+/// The schema of a receipt file. Each leaf of a receipt has a row in
+/// `receipt_leaves` under its epoch and its first 8 bytes, thus a query
+/// reads the receipts that may cover its cell and no other.
+const RECEIPT_SCHEMA: &str = "
+    CREATE TABLE IF NOT EXISTS receipts (
+        id     INTEGER PRIMARY KEY,
+        issued INTEGER NOT NULL,
+        epoch  INTEGER NOT NULL,
+        at     INTEGER NOT NULL,
+        signed BLOB NOT NULL,
+        leaves BLOB NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS receipts_by_time ON receipts (at);
+    CREATE TABLE IF NOT EXISTS receipt_leaves (
+        epoch   INTEGER NOT NULL,
+        leaf    INTEGER NOT NULL,
+        receipt INTEGER NOT NULL,
+        PRIMARY KEY (epoch, leaf, receipt)
+    ) WITHOUT ROWID;
+    CREATE INDEX IF NOT EXISTS receipt_leaves_by_receipt ON receipt_leaves (receipt);
+";
+
+/// The receipts of a relay in one SQLite file, apart from its queues. A
+/// busy relay closes more windows in `RECEIPT_RETENTION` than RAM holds,
+/// and a restart keeps each receipt that a query may ask for (`REL-073`).
+pub struct SqliteShelf {
+    connection: Connection,
+}
+
+/// The index column of a leaf: its first 8 bytes.
+fn leaf_key(leaf: &[u8; 32]) -> i64 {
+    let mut head = [0u8; 8];
+    head.copy_from_slice(leaf.get(..8).unwrap_or(&[0; 8]));
+    i64::from_be_bytes(head)
+}
+
+impl SqliteShelf {
+    /// Opens the receipt file at `path`, and makes it when it does not exist.
+    pub fn open(path: &str) -> Result<Self, StoreFault> {
+        let connection = fault(Connection::open(path))?;
+        // REL-074: an erased receipt leaves no bytes in the file.
+        fault(connection.pragma_update(None, "secure_delete", "ON"))?;
+        fault(connection.pragma_update(None, "journal_mode", "WAL"))?;
+        // A crash loses at most the last receipts, which no client needs.
+        fault(connection.pragma_update(None, "synchronous", "NORMAL"))?;
+        fault(connection.execute_batch(RECEIPT_SCHEMA))?;
+        Ok(SqliteShelf { connection })
+    }
+
+    fn put(&mut self, kept: &KeptReceipt) -> Result<(), StoreFault> {
+        let transaction = fault(self.connection.transaction())?;
+        let leaves: Vec<u8> = kept.leaves.iter().flatten().copied().collect();
+        let epoch = signed(kept.epoch)?;
+        fault(transaction.execute(
+            "INSERT INTO receipts (issued, epoch, at, signed, leaves) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                i64::from(kept.issued),
+                epoch,
+                signed(kept.at)?,
+                kept.signed,
+                leaves
+            ],
+        ))?;
+        let id = transaction.last_insert_rowid();
+        {
+            let mut insert = fault(transaction.prepare(
+                "INSERT OR IGNORE INTO receipt_leaves (epoch, leaf, receipt) VALUES (?1, ?2, ?3)",
+            ))?;
+            for leaf in &kept.leaves {
+                fault(insert.execute(params![epoch, leaf_key(leaf), id]))?;
+            }
+        }
+        fault(transaction.commit())
+    }
+
+    fn erase(&mut self, floor: u64) -> Result<(), StoreFault> {
+        let floor = signed(floor)?;
+        let old: Option<i64> = fault(
+            self.connection
+                .query_row(
+                    "SELECT 1 FROM receipts WHERE at < ?1 LIMIT 1",
+                    [floor],
+                    |row| row.get(0),
+                )
+                .optional(),
+        )?;
+        if old.is_none() {
+            return Ok(());
+        }
+        let transaction = fault(self.connection.transaction())?;
+        fault(transaction.execute(
+            "DELETE FROM receipt_leaves WHERE receipt IN (SELECT id FROM receipts WHERE at < ?1)",
+            [floor],
+        ))?;
+        fault(transaction.execute("DELETE FROM receipts WHERE at < ?1", [floor]))?;
+        fault(transaction.commit())?;
+        fault(
+            self.connection
+                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(())),
+        )?;
+        Ok(())
+    }
+
+    fn read(&self, epoch: u64, leaf: &[u8; 32]) -> Result<Vec<KeptReceipt>, StoreFault> {
+        let mut query = fault(self.connection.prepare(
+            "SELECT r.issued, r.epoch, r.at, r.signed, r.leaves
+             FROM receipt_leaves l JOIN receipts r ON r.id = l.receipt
+             WHERE l.epoch = ?1 AND l.leaf = ?2
+             ORDER BY r.issued DESC, r.id",
+        ))?;
+        let rows = fault(
+            query.query_map(params![signed(epoch)?, leaf_key(leaf)], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                ))
+            }),
+        )?;
+        let mut found = Vec::new();
+        for row in rows {
+            let (issued, epoch, at, signed, leaves) = fault(row)?;
+            let (whole, rest) = leaves.as_chunks::<32>();
+            if !rest.is_empty() {
+                return Err(StoreFault);
+            }
+            let leaves = whole.to_vec();
+            found.push(KeptReceipt {
+                issued: issued != 0,
+                epoch: unsigned(epoch)?,
+                signed,
+                leaves,
+                at: unsigned(at)?,
+            });
+        }
+        Ok(found)
+    }
+
+    fn count(&self, issued: bool) -> Result<usize, StoreFault> {
+        let count: i64 = fault(self.connection.query_row(
+            "SELECT COUNT(*) FROM receipts WHERE issued = ?1",
+            [i64::from(issued)],
+            |row| row.get(0),
+        ))?;
+        usize::try_from(count).map_err(|_| StoreFault)
+    }
+}
+
+impl ReceiptShelf for SqliteShelf {
+    fn keep(&mut self, kept: KeptReceipt) -> Result<(), StoreFault> {
+        self.put(&kept)
+    }
+
+    fn find(&self, epoch: u64, leaf: &[u8; 32]) -> Vec<KeptReceipt> {
+        self.read(epoch, leaf).unwrap_or_default()
+    }
+
+    fn erase_before(&mut self, floor: u64) {
+        // A fault leaves the rows, and the next tick erases them.
+        let _ = self.erase(floor);
+    }
+
+    fn held(&self) -> (usize, usize) {
+        (
+            self.count(true).unwrap_or(0),
+            self.count(false).unwrap_or(0),
+        )
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
     use crate::store::MemoryStore;
+
+    #[test]
+    fn a_receipt_file_finds_a_leaf_and_erases_after_retention() {
+        let path = file("receipts.db");
+        let kept = |issued: bool, epoch: u64, fill: u8, at: u64| KeptReceipt {
+            issued,
+            epoch,
+            signed: vec![fill; 40],
+            leaves: (0..4u8).map(|i| [fill.wrapping_add(i); 32]).collect(),
+            at,
+        };
+        {
+            let mut shelf = SqliteShelf::open(&path).unwrap();
+            shelf.keep(kept(false, 7, 10, 100)).unwrap();
+            shelf.keep(kept(true, 7, 12, 200)).unwrap();
+            shelf.keep(kept(true, 8, 10, 300)).unwrap();
+            assert_eq!(shelf.held(), (2, 1));
+        }
+        // A restart keeps each receipt.
+        let mut shelf = SqliteShelf::open(&path).unwrap();
+        let found = shelf.find(7, &[13; 32]);
+        assert_eq!(found.len(), 2);
+        assert!(found[0].issued);
+        assert_eq!(found[0].signed, vec![12; 40]);
+        assert!(!found[1].issued);
+        assert_eq!(found[1].leaves.len(), 4);
+        assert!(shelf.find(9, &[13; 32]).is_empty());
+        shelf.erase_before(250);
+        assert_eq!(shelf.held(), (1, 0));
+        assert!(shelf.find(7, &[13; 32]).is_empty());
+        assert_eq!(shelf.find(8, &[11; 32]).len(), 1);
+        let rows: i64 = shelf
+            .connection
+            .query_row("SELECT COUNT(*) FROM receipt_leaves", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 4);
+    }
 
     fn chunk(class: Class, fill: u8) -> Box<HeldChunk> {
         Box::new(HeldChunk {
@@ -569,6 +829,18 @@ mod tests {
                 erase_at: 1_500,
             },
             StoreChange::ChunkDeleted { chunk_id: [8; 32] },
+            StoreChange::Spent {
+                epoch: 5,
+                nonce: [1; 32],
+            },
+            StoreChange::Spent {
+                epoch: 7,
+                nonce: [2; 32],
+            },
+            StoreChange::Spent {
+                epoch: 6,
+                nonce: [3; 32],
+            },
         ]
     }
 
@@ -613,6 +885,46 @@ mod tests {
         assert_eq!(loaded.chunks.len(), 2);
         assert_eq!(loaded.chunks[&[6; 32]].erase_at, 1_500);
         assert_eq!(loaded.chunks[&[7; 32]].class, Class::Backup);
+        // ABU-114: the spent nonces of the two newest epochs stay.
+        assert_eq!(
+            loaded.spent.iter().copied().collect::<Vec<_>>(),
+            [(6, [3; 32]), (7, [2; 32])]
+        );
+    }
+
+    #[test]
+    fn a_record_that_does_not_read_drops_its_queue_alone() {
+        let path = file("bad-row.db");
+        let mut store = SqliteStore::open(&path).unwrap();
+        store.commit(&changes()).unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE records SET seq = -1 WHERE recipient_id = ?1",
+                [[1u8; 32].as_slice()],
+            )
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT INTO records (recipient_id, seq, accepted_at, bytes) VALUES (?1, 1, 0, x'00')",
+                [[9u8; 32].as_slice()],
+            )
+            .unwrap();
+        // NET-303: the queue of that record parses no more, the other one
+        // stays, and a record of no queue leaves the file.
+        let loaded = store.load().unwrap();
+        assert!(loaded.queues[&[1; 32]].head.is_empty());
+        assert_eq!(loaded.queues[&[2; 32]].records.len(), 1);
+        let orphans: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM records WHERE recipient_id = ?1",
+                [[9u8; 32].as_slice()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphans, 0);
     }
 
     #[test]

@@ -367,9 +367,10 @@ PushToken   { carrier u8, target }         // the plaintext of ct_token, at most
   > *Cause.* An answer that the network lost left the device with a
   > request that the NDR refused at each later try: a first `NREG` that
   > landed, an `NUNREG` that landed, or a move that landed. The chain of
-  > secrets makes each request safe to send again, each registration still
-  > takes a secret that no earlier request showed, and no party that reads
-  > the hashes alone moves a handle.
+  > secrets makes each request safe to send again. The NDR reads each
+  > secret in `prior` and can compute the chain, but a queue relay reads
+  > the handle alone and never a secret, and no party that reads the hashes
+  > alone moves a handle.
 - **[NTF-125]** The NDR MUST bound the `ttl` of an `NPUSH` at
   `PUSH_TTL_MESSAGE`, and it MUST answer `gone` and drop the registration
   when the provider names the target gone. It MUST answer `gone` to an

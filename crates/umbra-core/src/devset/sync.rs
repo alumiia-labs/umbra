@@ -261,6 +261,10 @@ fn context_len_at(bytes: &[u8]) -> Result<usize, Error> {
 pub struct MutableItem<'a> {
     /// The causal context.
     pub context: CausalContext,
+    /// The device that wrote the value. A relay of the device that owns the
+    /// channels keeps it, thus a tie breaks alike at each device (`DEV-270`,
+    /// `DEV-308`).
+    pub writer: DeviceId,
     /// The item, a row of the mutable-state table in its order from 1.
     pub item: u8,
     /// The scope key: a conversation, a contact, an identity, or a message.
@@ -277,6 +281,7 @@ impl<'a> MutableItem<'a> {
         let n = self.context.encode(w.tail())?;
         let at = w.position().saturating_add(n);
         let mut w = Writer::new(out.get_mut(at..).ok_or(Error::Malformed)?);
+        w.put(&self.writer)?;
         w.u8(self.item)?;
         w.u16(u16::try_from(self.key.len()).map_err(|_| Error::Malformed)?)?;
         w.put(self.key)?;
@@ -294,6 +299,7 @@ impl<'a> MutableItem<'a> {
         let context_len = context_len_at(r.rest())?;
         let mut r = Reader::new(bytes.get(1..).ok_or(Error::Malformed)?);
         let context = CausalContext::parse(r.take(context_len)?)?;
+        let writer = r.array()?;
         let item = r.u8()?;
         let key_len = usize::from(r.u16()?);
         let key = r.take(key_len)?;
@@ -302,6 +308,7 @@ impl<'a> MutableItem<'a> {
         r.finish()?;
         Ok(MutableItem {
             context,
+            writer,
             item,
             key,
             value,
@@ -309,15 +316,10 @@ impl<'a> MutableItem<'a> {
     }
 
     /// Whether this write wins against `held` (§7.5.3): the higher Lamport
-    /// counter, then the lower device.
-    pub fn wins_over(
-        &self,
-        held: &MutableItem<'_>,
-        own_device: &DeviceId,
-        held_device: &DeviceId,
-    ) -> bool {
+    /// counter, then the lower writer.
+    pub fn wins_over(&self, held: &MutableItem<'_>) -> bool {
         self.context.lamport > held.context.lamport
-            || (self.context.lamport == held.context.lamport && own_device < held_device)
+            || (self.context.lamport == held.context.lamport && self.writer < held.writer)
     }
 }
 
@@ -648,6 +650,7 @@ mod tests {
         assert!(SyncedRecord::parse(&out[..n]).is_err());
         let item = MutableItem {
             context: ctx.clone(),
+            writer: [1; 16],
             item: 1,
             key: &[9; 32],
             value: &[1],
@@ -659,9 +662,14 @@ mod tests {
             context: CausalContext { lamport: 4, ..ctx },
             ..item.clone()
         };
-        assert!(newer.wins_over(&item, &[2; 16], &[1; 16]));
-        assert!(!item.wins_over(&newer, &[1; 16], &[2; 16]));
-        assert!(item.wins_over(&item, &[0; 16], &[1; 16]));
+        assert!(newer.wins_over(&item));
+        assert!(!item.wins_over(&newer));
+        let lower = MutableItem {
+            writer: [0; 16],
+            ..item.clone()
+        };
+        assert!(lower.wins_over(&item));
+        assert!(!item.wins_over(&item));
     }
 
     #[test]

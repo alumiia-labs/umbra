@@ -87,6 +87,47 @@ impl TryRng for OsRng {
 
 impl TryCryptoRng for OsRng {}
 
+/// The sending half of one link, and the bytes that wait in it. A peer
+/// that reads nothing fills it, and the link closes: the bound is in bytes,
+/// thus no link holds more of the memory of the relay than its bound.
+pub struct LinkWriter {
+    sender: mpsc::Sender<Vec<u8>>,
+    queued: Arc<AtomicUsize>,
+    limit: usize,
+}
+
+impl LinkWriter {
+    /// A link that holds at most `limit` bytes, with the receiving half and
+    /// the count that the writing task lowers after each write.
+    fn new(limit: usize) -> (Self, mpsc::Receiver<Vec<u8>>, Arc<AtomicUsize>) {
+        let capsules = limit / 512;
+        let (sender, receiver) = mpsc::channel(capsules.max(16));
+        let queued = Arc::new(AtomicUsize::new(0));
+        (
+            LinkWriter {
+                sender,
+                queued: Arc::clone(&queued),
+                limit,
+            },
+            receiver,
+            queued,
+        )
+    }
+
+    /// Queues one capsule. False when the link holds its bound.
+    fn queue(&self, capsule: Vec<u8>) -> bool {
+        let len = capsule.len();
+        // The count rises before the send, thus the writing task never
+        // lowers it below zero.
+        let held = self.queued.fetch_add(len, Ordering::Relaxed);
+        if held.saturating_add(len) > self.limit || self.sender.try_send(capsule).is_err() {
+            self.queued.fetch_sub(len, Ordering::Relaxed);
+            return false;
+        }
+        true
+    }
+}
+
 /// What a connection task and the dialer tell the node task.
 pub enum Input {
     /// A connection opened. The node task writes its capsules to `writer`.
@@ -94,7 +135,7 @@ pub enum Input {
         /// The link.
         link: LinkId,
         /// The capsules to write.
-        writer: mpsc::Sender<Vec<u8>>,
+        writer: LinkWriter,
     },
     /// The dialer reached a relay of the next layer.
     Dialed {
@@ -103,7 +144,7 @@ pub enum Input {
         /// The relay.
         relay_id: [u8; 32],
         /// The capsules to write.
-        writer: mpsc::Sender<Vec<u8>>,
+        writer: LinkWriter,
     },
     /// One capsule arrived.
     Capsule {
@@ -181,7 +222,7 @@ pub async fn run_node(
     mut store: Box<dyn RelayStore>,
 ) {
     let mut rng = OsRng;
-    let mut writers: BTreeMap<LinkId, mpsc::Sender<Vec<u8>>> = BTreeMap::new();
+    let mut writers: BTreeMap<LinkId, LinkWriter> = BTreeMap::new();
     let mut next_tick: BTreeMap<CircuitKey, tokio::time::Instant> = BTreeMap::new();
     let mut clock =
         tokio::time::interval(Duration::from_millis((pacing_mean_ms / 20).clamp(1, 50)));
@@ -290,7 +331,7 @@ pub async fn run_node(
                     // link closes: no link holds the memory of the relay.
                     let is_full = writers
                         .get(&link)
-                        .is_some_and(|writer| writer.try_send(capsule).is_err());
+                        .is_some_and(|writer| !writer.queue(capsule));
                     if is_full {
                         writers.remove(&link);
                     }
@@ -330,12 +371,16 @@ async fn push_copy(target: Dial, tls: Arc<rustls::ClientConfig>, capsule: Vec<u8
     }
 }
 
-/// The capsules that wait for one client link. A peer that reads nothing
-/// fills them, and the relay closes that link.
-const LINK_BACKLOG: usize = 1_024;
-/// The capsules that wait for one link to a relay of the next layer, which
+/// The bytes that wait for one accepted link. A peer that reads nothing
+/// fills them, and the relay closes that link. An accepted link can be the
+/// link of a relay of the layer before, which carries the circuits of many
+/// clients, and a `SUB` replays up to `QUEUE_QUOTA` records of up to one
+/// capsule each at once, thus the bound holds such a burst. A peer that
+/// reads keeps its backlog near empty.
+const LINK_BACKLOG: usize = 32 << 20;
+/// The bytes that wait for one link to a relay of the next layer, which
 /// carries the circuits of many clients.
-const RELAY_LINK_BACKLOG: usize = 16_384;
+const RELAY_LINK_BACKLOG: usize = 64 << 20;
 /// The time that one write to a link may take before the link closes.
 const LINK_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -715,9 +760,14 @@ pub async fn serve_connection_until<S>(
                 .map(|held| held.clone())
                 .unwrap_or_default();
             let head = native::manifest_response_head(bundle.len());
-            let _ = stream.write_all(head.as_bytes()).await;
-            let _ = stream.write_all(&bundle).await;
-            let _ = stream.shutdown().await;
+            // NET-335: a peer that reads nothing holds the task no longer
+            // than a POST.
+            let _ = tokio::time::timeout_at(post_end, async {
+                stream.write_all(head.as_bytes()).await?;
+                stream.write_all(&bundle).await?;
+                stream.shutdown().await
+            })
+            .await;
             return;
         }
         if native::asks_manifest(&inbound) && inbound.windows(4).any(|w| w == b"\r\n\r\n") {
@@ -726,19 +776,22 @@ pub async fn serve_connection_until<S>(
                 .lock()
                 .map(|held| held.clone())
                 .unwrap_or_default();
-            let _ = match &manifest {
-                Some(bytes) => {
-                    let head = native::manifest_response_head(bytes.len());
-                    let _ = stream.write_all(head.as_bytes()).await;
-                    stream.write_all(bytes).await
+            let _ = tokio::time::timeout_at(post_end, async {
+                match &manifest {
+                    Some(bytes) => {
+                        let head = native::manifest_response_head(bytes.len());
+                        stream.write_all(head.as_bytes()).await?;
+                        stream.write_all(bytes).await?;
+                    }
+                    None => {
+                        stream
+                            .write_all(b"HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n")
+                            .await?;
+                    }
                 }
-                None => {
-                    stream
-                        .write_all(b"HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n")
-                        .await
-                }
-            };
-            let _ = stream.shutdown().await;
+                stream.shutdown().await
+            })
+            .await;
             return;
         }
         match upgrade::parse_request(&inbound) {
@@ -762,7 +815,7 @@ pub async fn serve_connection_until<S>(
         return;
     }
 
-    let (writer, mut outbound) = mpsc::channel::<Vec<u8>>(LINK_BACKLOG);
+    let (writer, mut outbound, queued) = LinkWriter::new(LINK_BACKLOG);
     if node.send(Input::Opened { link, writer }).await.is_err() {
         return;
     }
@@ -801,6 +854,7 @@ pub async fn serve_connection_until<S>(
                 if !matches!(tokio::time::timeout(LINK_WRITE_TIMEOUT, write).await, Ok(Ok(()))) {
                     break 'connection;
                 }
+                queued.fetch_sub(bytes.len(), Ordering::Relaxed);
             }
         }
     }
@@ -906,7 +960,7 @@ pub async fn dial_next(
     else {
         return;
     };
-    let (writer, mut outbound) = mpsc::channel::<Vec<u8>>(RELAY_LINK_BACKLOG);
+    let (writer, mut outbound, queued) = LinkWriter::new(RELAY_LINK_BACKLOG);
     let opened = Input::Dialed {
         link,
         relay_id,
@@ -931,6 +985,7 @@ pub async fn dial_next(
                     if !matches!(sent, Ok(Ok(()))) {
                         break;
                     }
+                    queued.fetch_sub(bytes.len(), Ordering::Relaxed);
                 }
                 None => break,
             },

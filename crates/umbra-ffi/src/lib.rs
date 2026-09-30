@@ -765,6 +765,23 @@ mod tests {
         client.resume_group_work(&mut rng).unwrap();
         assert!(client.take_group_post().is_none());
 
+        // GRP-422: the re-key is a trigger, thus the group rotates before a
+        // message goes.
+        assert!(client.group_of(conversation).unwrap().withholds());
+        client
+            .rotate_group(conversation, 1_700_000_025_000, &mut rng)
+            .unwrap();
+        while let Some(post) = client.take_group_post() {
+            if let Some(row) = post.unsent {
+                for replica in &post.replicas {
+                    client
+                        .group_post_accepted(&row, &replica.relay, &mut rng)
+                        .unwrap();
+                }
+            }
+        }
+        assert!(!client.group_of(conversation).unwrap().withholds());
+
         // GRP-392: a message goes again with the bytes of its first seal.
         let mut draft = client.new_draft(conversation);
         draft.set_text(&units("same bytes")).unwrap();
@@ -1924,6 +1941,7 @@ mod tests {
         // NTF-031: eight queues of one relay share a handle at most.
         let unbound = client.queues_to_bind(&queues, 0, &mut rng).unwrap();
         assert_eq!(unbound.len(), 11);
+        client.binds_sent(&unbound);
         let a = client.binding_of(&[0; 32]).unwrap().unwrap();
         let b = client.binding_of(&[7; 32]).unwrap().unwrap();
         let c = client.binding_of(&[8; 32]).unwrap().unwrap();
@@ -1949,6 +1967,18 @@ mod tests {
             client.ndr_call_taken(call, &mut rng).unwrap();
         }
         assert!(client.ndr_calls_due(&mut rng).unwrap().is_empty());
+        // NTF-125: a bind that the registration overtook binds once more
+        // after its report, and a queue that was bound binds again.
+        assert!(!client.queue_bound(&[1; 32], &mut rng).unwrap());
+        assert_eq!(
+            client.queues_to_bind(&queues, 0, &mut rng).unwrap().len(),
+            11
+        );
+        assert!(client.queue_bound(&[1; 32], &mut rng).unwrap());
+        assert!(!client
+            .queues_to_bind(&queues, 0, &mut rng)
+            .unwrap()
+            .contains(&[1; 32]));
         let mut push = [0u8; NDR_REQUEST_LEN];
         NdrRequest::Push {
             handle: a.handle,
@@ -4965,6 +4995,33 @@ mod tests {
         other.head_check_done(&checks[0], false, &mut rng).unwrap();
         assert!(other.head_checks().unwrap().is_empty());
         assert!(other.gossip_warnings().unwrap().is_empty());
+        // A new head takes the place of the oldest, and a head that waits a
+        // day goes.
+        for size in 20..26u64 {
+            other
+                .wait_for_check(size, &[0xE5; 32], now + size, &mut rng)
+                .unwrap();
+        }
+        let mut sizes: Vec<u64> = other
+            .head_checks()
+            .unwrap()
+            .iter()
+            .map(|check| check.tree_size)
+            .collect();
+        sizes.sort_unstable();
+        assert_eq!(sizes, [22, 23, 24, 25]);
+        other
+            .wait_for_check(30, &[0xE5; 32], now + 25 + 86_400, &mut rng)
+            .unwrap();
+        let sizes: Vec<u64> = other
+            .head_checks()
+            .unwrap()
+            .iter()
+            .map(|check| check.tree_size)
+            .collect();
+        assert_eq!(sizes, [30]);
+        let check = other.head_checks().unwrap()[0];
+        other.head_check_done(&check, false, &mut rng).unwrap();
         let mut split = new_client(&mut rng);
         split.conversation_for(&peer.0).unwrap();
         split

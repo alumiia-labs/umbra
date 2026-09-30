@@ -41,6 +41,11 @@ use zeroize::Zeroizing;
 use super::{devices::DEVICE_PEERS, Client};
 use crate::{ConversationId, Error, Event, MsgRef};
 
+/// An item of mutable state that the owner of the channels publishes again:
+/// its row, its key, its value, its Lamport counter, and its writer
+/// (`DEV-308`).
+type RelayItem = (u8, Vec<u8>, Vec<u8>, u64, DeviceId);
+
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -682,7 +687,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // relay brings it back.
         let relays = self.owns_channels()? && engine.peers().count() > 1;
         let mut relay_records: Vec<(Origin, Vec<u8>, u32)> = Vec::new();
-        let mut relay_items: Vec<(u8, Vec<u8>, Vec<u8>, u64)> = Vec::new();
+        let mut relay_items: Vec<RelayItem> = Vec::new();
         // DEV-075: a record past `SYNC_MAX_AGE` waits for no resend.
         let floor = engine.retained_floor();
         engine.expire(now);
@@ -726,9 +731,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     key,
                     value,
                     lamport,
+                    writer,
                 }) => {
                     if relays {
-                        relay_items.push((item, key.clone(), value.clone(), lamport));
+                        relay_items.push((item, key.clone(), value.clone(), lamport, writer));
                     }
                     // An item that does not apply ends no batch.
                     let _ = self.apply_mutable(item, &key, &value, rng);
@@ -762,11 +768,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 relayed.push((published.counter, published.body));
             }
         }
-        for (item, key, value, lamport) in relay_items {
+        for (item, key, value, lamport, writer) in relay_items {
             let counter = engine.counter().saturating_add(1);
-            if let Ok(published) =
-                engine.relay_mutable(item, &key, &value, lamport, counter_ref(counter), now)
-            {
+            if let Ok(published) = engine.relay_mutable(
+                item,
+                &key,
+                &value,
+                lamport,
+                writer,
+                counter_ref(counter),
+                now,
+            ) {
                 relayed.push((published.counter, published.body));
             }
         }

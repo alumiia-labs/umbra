@@ -625,20 +625,36 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     }
 
     /// The `NBIND` of a queue left. A relay gives it no answer, and a lost
-    /// one binds again at the next `NKEY` after a new run.
+    /// one binds again at the next `NKEY` after a new run. The result is
+    /// false when a registration of its handle overtook the bind: the relay
+    /// may have dropped it at a `gone`, thus the queue asks for its key and
+    /// binds once more (`NTF-125`).
     pub fn queue_bound<R: CryptoRng + ?Sized>(
         &mut self,
         recipient_id: &[u8; 32],
         rng: &mut R,
-    ) -> Result<(), Error> {
+    ) -> Result<bool, Error> {
+        if self.binding.remove(recipient_id) == Some(true) {
+            self.binding.insert(*recipient_id, false);
+            return Ok(false);
+        }
         let Some(mut queue) = self.notify_queue(recipient_id)? else {
-            return Ok(());
+            return Ok(true);
         };
         queue.bound = true;
         self.put_rows(
             &[(NOTIFY_QUEUE, recipient_id.to_vec(), queue.encode())],
             rng,
-        )
+        )?;
+        Ok(true)
+    }
+
+    /// The `NKEY` of each queue in `recipient_ids` left, and its bind is on
+    /// its way.
+    pub fn binds_sent(&mut self, recipient_ids: &[[u8; 32]]) {
+        for recipient_id in recipient_ids {
+            self.binding.insert(*recipient_id, false);
+        }
     }
 
     /// The requests that wait for the NDR: an `NREG` for each group that
@@ -726,21 +742,22 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     }
 
     /// The NDR took a call: the group is registered under the present
-    /// endpoint, or it left.
+    /// endpoint, or it left. The result is each queue that binds again now.
     pub fn ndr_call_taken<R: CryptoRng + ?Sized>(
         &mut self,
         call: &NdrCall,
         rng: &mut R,
-    ) -> Result<(), Error> {
+    ) -> Result<Vec<[u8; 32]>, Error> {
         let Some(mut group) = self
             .notify_groups()?
             .into_iter()
             .find(|group| group.handle == call.handle)
         else {
-            return Ok(());
+            return Ok(Vec::new());
         };
         if group.state == RETIRED {
-            return self.write_rows(&[], &[(NOTIFY_GROUP, group.handle.to_vec())], rng);
+            self.write_rows(&[], &[(NOTIFY_GROUP, group.handle.to_vec())], rng)?;
+            return Ok(Vec::new());
         }
         group.state = if call.is_removal {
             UNREGISTERED
@@ -754,18 +771,28 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // NTF-125: a relay that pushed before this registration got `gone`
         // and dropped its binding, thus each queue of the handle binds again.
         let mut unbound = Vec::new();
+        let mut again = Vec::new();
         if !call.is_removal {
             for (_, bytes) in self.open_ref()?.store.list(NOTIFY_QUEUE, None)? {
                 let Ok(mut queue) = Queue::parse(&bytes) else {
                     continue;
                 };
-                if queue.handle == group.handle && queue.bound {
+                if queue.handle != group.handle {
+                    continue;
+                }
+                if queue.bound {
                     queue.bound = false;
                     unbound.push((NOTIFY_QUEUE, queue.recipient_id.to_vec(), queue.encode()));
+                    again.push(queue.recipient_id);
+                } else if let Some(overtaken) = self.binding.get_mut(&queue.recipient_id) {
+                    // A bind on its way may meet the `gone` too.
+                    *overtaken = true;
                 }
             }
         }
         unbound.push((NOTIFY_GROUP, group.handle.to_vec(), group.encode()));
-        self.put_rows(&unbound, rng)
+        self.put_rows(&unbound, rng)?;
+        self.binds_sent(&again);
+        Ok(again)
     }
 }

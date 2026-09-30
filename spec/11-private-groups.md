@@ -633,7 +633,18 @@ rotate does not, because a rotation needs no secret that a plain member lacks.
   trigger excludes, or whose rotator is not active at the `roster_epoch` of
   that record. **[GRP-357]** A receiver MUST reject an epoch-key record for
   which the roster chain holds no trigger since the epoch-key record of the
-  epoch before it.
+  epoch before it. A receiver MUST accept a `roster_epoch` at or above the
+  first trigger since that record, and not only one at or above the newest:
+  a rotator that answered the first trigger before a second one reached it
+  then installs at each member alike.
+- **[GRP-422]** A member that holds a trigger since the `roster_epoch` of its
+  current epoch, and that the trigger does not exclude, MUST rotate before it
+  posts a record other than a roster object. Under `GRP-357` the current
+  epoch can answer an earlier trigger alone, and its key then reaches a party
+  that a later trigger removed. A member whose rotation fails, because an
+  active member of its roster holds no KEM key yet, posts under the current
+  key; the rotation of §11.4.1 then waits for that key as each rotation
+  does.
 - **[GRP-358]** A member that reads a trigger it did not cause MUST draw a
   delay from an exponential distribution with mean `ROTATE_BACKOFF_ROLE` if
   it holds a role at `moderator` or above, and with mean

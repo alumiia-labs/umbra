@@ -743,6 +743,7 @@ SyncedRecord {                // the body of kind 0x20 at sub-kind 0x03
 MutableItem {                 // the body of kind 0x20 at sub-kind 0x01
     sub_kind      u8          // 0x01
     context       CausalContext
+    writer        [16]u8      // the device_id of the device that wrote the value
     item          u8          // the row of the mutable-state table below, from 1
     key_len       u16
     key           [key_len]u8     // the scope of the row: a conversation, a contact,
@@ -779,7 +780,9 @@ MutableItem {                 // the body of kind 0x20 at sub-kind 0x01
   of the other members on its own subscription (Part 11 `GRP-343`).
   **[DEV-270]** A device MUST apply a `MutableItem`
   when its `lamport` is above the value held, or equal with a lower
-  `device_id` of the writer, and it MUST discard it otherwise.
+  `writer`, and it MUST discard it otherwise. A device MUST set `writer` to
+  its own `device_id` in each item that it writes, and a relay of `DEV-308`
+  MUST keep the `lamport` and the `writer` of the item that it carries.
 
 > *Cause.* An earlier draft named the context and the sub-kinds and gave
 > them no layout, thus two implementations could not exchange one sync

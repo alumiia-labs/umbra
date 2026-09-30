@@ -14,8 +14,17 @@ pub const INVITE_RESERVE_TTL: u64 = 600;
 /// arrival to the second.
 pub const STORE_TIME_GRAIN: u64 = 3_600;
 
-/// A time as the store of a relay holds it.
+/// A time as the store of a relay holds it: the end of its grain, thus a
+/// lifetime that a restart reads from the store ends no earlier than its
+/// own, and at most one grain later (`NET-301`, `WIR-111`).
 pub const fn store_time(seconds: u64) -> u64 {
+    seconds.saturating_add(STORE_TIME_GRAIN - 1) / STORE_TIME_GRAIN * STORE_TIME_GRAIN
+}
+
+/// The start of a grace as the store of a relay holds it: the start of its
+/// grain, thus a key that a grace keeps alive ends no later than its own
+/// grace after a restart (`NET-301`).
+pub const fn store_grace_time(seconds: u64) -> u64 {
     seconds / STORE_TIME_GRAIN * STORE_TIME_GRAIN
 }
 /// `MSG_TTL`.

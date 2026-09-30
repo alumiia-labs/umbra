@@ -143,7 +143,7 @@ impl Issued {
     /// Verifies an answer in constant time (`DIS-039`, `DIS-097`). A
     /// write answer carries the entry it authorizes, and the entry's
     /// `version` must be `version_new` (`DIS-099`).
-    pub fn verify(self, answer: &[u8], entry_new: Option<&[u8]>) -> Result<(), Error> {
+    pub fn verify(&self, answer: &[u8], entry_new: Option<&[u8]>) -> Result<(), Error> {
         if entry_new.is_some() != self.purpose.binds() {
             return Err(Error::Malformed);
         }

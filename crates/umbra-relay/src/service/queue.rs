@@ -22,7 +22,7 @@ use umbra_crypto::{
     x25519::StaticSecret,
 };
 use umbra_queue::{
-    params::{store_time, INVITE_RESERVE_TTL, INVITE_TTL, MSG_TTL},
+    params::{store_grace_time, store_time, INVITE_RESERVE_TTL, INVITE_TTL, MSG_TTL},
     relay::{
         queue::{Queue, QueueKeys},
         session::Session,
@@ -333,22 +333,35 @@ impl QueueService {
         };
         for (recipient_id, stored) in loaded.queues {
             let mut reader = Reader::new(&stored.head);
-            let Ok(queue) = Queue::restore(&mut reader, stored.records) else {
+            let restored = Queue::restore(&mut reader, stored.records)
+                .ok()
+                .filter(|queue| queue.keys().recipient_id == recipient_id);
+            let Some(queue) = restored else {
+                // NET-302, NET-303: a queue that serves no one leaves the
+                // file too.
+                service
+                    .changes
+                    .push(StoreChange::QueueDeleted { recipient_id });
                 continue;
             };
-            if queue.keys().recipient_id != recipient_id {
-                continue;
-            }
             service
                 .by_sender
                 .insert(queue.keys().sender_id, recipient_id);
             service.queues.insert(recipient_id, queue);
         }
         // An invitation of a queue that is gone serves no party.
-        let queues = &service.queues;
-        service
+        let gone: Vec<[u8; LINK_ID_LEN]> = service
             .invitations
-            .retain(|_, held| queues.contains_key(&held.recipient_id));
+            .iter()
+            .filter(|(_, held)| !service.queues.contains_key(&held.recipient_id))
+            .map(|(link_id, _)| *link_id)
+            .collect();
+        for link_id in gone {
+            service.invitations.remove(&link_id);
+            service
+                .changes
+                .push(StoreChange::InvitationDeleted { link_id });
+        }
         service
     }
 
@@ -370,9 +383,16 @@ impl QueueService {
         }
     }
 
-    /// Records an invitation, with its time as the store holds it.
+    /// Records an invitation, with its time as the store holds it. A
+    /// reservation that took no blob lives `INVITE_RESERVE_TTL`, far below
+    /// the grain, thus its time rounds down and it ends no later than its
+    /// own (`WIR-508`, `NET-301`).
     fn invitation_changed(&mut self, link_id: [u8; LINK_ID_LEN], mut held: Invitation) {
-        held.at = store_time(held.at);
+        held.at = if held.blob.is_none() {
+            store_grace_time(held.at)
+        } else {
+            store_time(held.at)
+        };
         self.changes.push(StoreChange::Invitation { link_id, held });
     }
 
@@ -710,7 +730,36 @@ impl QueueService {
 )]
 mod tests {
     use super::*;
+    use crate::store::StoredQueue;
     use umbra_core::notify::{blob::Receiver, seeded_pair};
+
+    #[test]
+    fn a_stored_queue_that_does_not_parse_leaves_the_store() {
+        let mut loaded = Loaded::default();
+        loaded.queues.insert(
+            [1; 32],
+            StoredQueue {
+                head: Vec::new(),
+                records: Vec::new(),
+            },
+        );
+        loaded.invitations.insert(
+            [2; LINK_ID_LEN],
+            crate::store::StoredInvitation {
+                recipient_id: [1; 32],
+                blob: None,
+                at: 0,
+            },
+        );
+        let mut service = QueueService::restore(loaded);
+        let changes = service.take_changes();
+        assert!(changes.contains(&StoreChange::QueueDeleted {
+            recipient_id: [1; 32]
+        }));
+        assert!(changes.contains(&StoreChange::InvitationDeleted {
+            link_id: [2; LINK_ID_LEN]
+        }));
+    }
     use umbra_crypto::{
         auth::CommandAuthKey,
         rand_core::{TryCryptoRng, TryRng},

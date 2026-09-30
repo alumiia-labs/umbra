@@ -1070,7 +1070,9 @@ DirResponse {                     // padded to the smallest DIR_RESPONSE_SIZES v
 
 The label input is the canonical handle of §9.3.2 for a handle, the input of
 §9.3.3 for an address, and the input of Part 13 §13.5 for an issuer key. The
-directory computes the search key from it under its own key.
+directory computes the search key from it under its own key. Thus each request
+of a holder shows its label input to the directory, which holds that input in
+the record of the label in any case; only the evaluation of a lookup hides it.
 
 - **[DIS-164]** A directory MUST evaluate a blinded element for a lookup only
   with an `Admission` of a first-party token of Part 13 §13.3.2 or of a
@@ -1088,7 +1090,11 @@ directory computes the search key from it under its own key.
   closes too.
 - **[DIS-168]** A directory MUST hold an issued challenge for
   `CHALLENGE_TTL` at the most, and it MUST refuse an answer after that time.
-  A second challenge for one label ends the first.
+  A right answer ends the challenge. **[DIS-194]** A directory MUST answer a
+  `Challenge` request for a label that holds a live challenge of the same
+  purpose with that challenge again, and a wrong answer MUST NOT end it. A
+  label input is no secret, thus a party that ends the challenge of another
+  holder stops each renewal of that holder until its lease lapses.
 - **[DIS-169]** A directory MUST refuse a registration whose entry does not
   name the label input: the handle of a `DirectoryEntry`, or the `address`
   of an `AddressEntry` whose `check` passes. **[DIS-170]** The version of a

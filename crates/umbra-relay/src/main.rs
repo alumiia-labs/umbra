@@ -56,7 +56,9 @@
 //!
 //! The `store` line names the SQLite file of the queues. A relay with no
 //! such line keeps its queues in RAM, and a restart of it ends each contact
-//! that it served. It says so at its start.
+//! that it served. It says so at its start. The link receipts of the relay
+//! go in a second file beside it, with `.receipts` after its name; a relay
+//! with no `store` line keeps its newest receipts in RAM.
 //!
 //! An `ohttp_gateway=https://ndr.example/gateway` line gives the relay the
 //! OHTTP relay role of Part 8 §8.2: it forwards each `POST /ohttp` to that
@@ -104,7 +106,7 @@ use umbra_relay::{
         run_relay, tls_acceptor, Carried, ConnectionLimits, ManifestSource, OhttpForward, OsRng,
         PACING_MEAN_MS,
     },
-    sqlite_store::SqliteStore,
+    sqlite_store::{SqliteShelf, SqliteStore},
     store::{MemoryStore, RelayStore},
 };
 use umbra_transport::{https, native, ndr::NdrRoute, Dial};
@@ -595,6 +597,17 @@ async fn run() -> ExitCode {
         eprintln!("the store does not load");
         return ExitCode::from(1);
     };
+    // REL-073: the receipts of RECEIPT_RETENTION outgrow RAM on a busy relay.
+    let shelf = match &settings.store {
+        Some(path) => match SqliteShelf::open(&format!("{path}.receipts")) {
+            Ok(shelf) => Some(shelf),
+            Err(_) => {
+                eprintln!("the receipt file does not open");
+                return ExitCode::from(1);
+            }
+        },
+        None => None,
+    };
     println!(
         "queues={} invitations={}",
         loaded.queues.len(),
@@ -604,6 +617,9 @@ async fn run() -> ExitCode {
         {
             let mut node = RelayNode::restored(settings.config, loaded);
             node.set_queue_relays(settings.queue_keys);
+            if let Some(shelf) = shelf {
+                node.set_receipt_shelf(Box::new(shelf));
+            }
             // ABU-057, ABU-102: the identity key signs the challenge of each
             // period, and the carriers of the manifest serve it.
             if let Some(identity) = settings.identity {
@@ -654,5 +670,9 @@ async fn run() -> ExitCode {
         },
     )
     .await;
-    ExitCode::SUCCESS
+    // A relay serves until a signal ends it, thus a return is a fault: the
+    // listener failed, or the store took no commit. A supervisor restarts
+    // it on this status.
+    eprintln!("the relay stopped");
+    ExitCode::from(1)
 }

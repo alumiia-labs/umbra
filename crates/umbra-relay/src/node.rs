@@ -304,6 +304,11 @@ impl RelayNode {
         self.carriers = carriers;
     }
 
+    /// The receipts of this relay go on `shelf` (`REL-073`).
+    pub fn set_receipt_shelf(&mut self, shelf: Box<dyn crate::receipts::ReceiptShelf>) {
+        self.receipts.set_shelf(shelf);
+    }
+
     /// The identity key of each relay of the set, by `relay_id`: a carrier
     /// takes a challenge under the key of its relay alone (`ABU-103`).
     pub fn set_relay_identities(&mut self, identities: BTreeMap<[u8; 32], Vec<u8>>) {
@@ -476,6 +481,9 @@ impl RelayNode {
         let chunks = ChunkService::restore(config.chunk_capacity, &loaded);
         let mut node = RelayNode::new(config);
         node.chunks = chunks;
+        for (epoch, nonce) in &loaded.spent {
+            node.gate.spent.restore(*epoch, *nonce);
+        }
         node.groups = GroupService::restore(&loaded);
         let mut queues = QueueService::restore(loaded);
         queues.keep_notify_of(&mut node.queues);
@@ -547,6 +555,13 @@ impl RelayNode {
         let mut changes = self.queues.take_changes();
         changes.append(&mut self.groups.take_changes());
         changes.append(&mut self.chunks.take_changes());
+        // ABU-114: a restart spends no token a second time.
+        changes.extend(
+            self.gate
+                .take_spent()
+                .into_iter()
+                .map(|(epoch, nonce)| StoreChange::Spent { epoch, nonce }),
+        );
         changes
     }
 

@@ -2,8 +2,9 @@
 //! server: the OHTTP gateway, the store of the log and of the labels, and
 //! the clock that closes each epoch.
 //!
-//! The store keeps the staged versions and the closed epochs in order, and
-//! the newest state of each label. A restart replays them. The server writes
+//! The store keeps the staged versions and the closed epochs in order, the
+//! newest state of each label, and the token nonces spent in this epoch and
+//! the one before it (`ABU-114`). A restart replays them. The server writes
 //! no log line that names a handle, an address, or a token.
 
 use std::{
@@ -28,6 +29,12 @@ const REQUEST_MAX: usize = 16_384;
 /// The interval of the clock. An epoch closes at the first tick after its
 /// end.
 const TICK: Duration = Duration::from_secs(5);
+/// The time that one connection has from its accept to its answer. A peer
+/// that stalls holds no task past it (`NET-335`).
+const CONNECTION_TIME: Duration = Duration::from_secs(30);
+/// The connections that the server holds at once. One more waits for none:
+/// it closes at its accept.
+const CONNECTION_MAX: usize = 4_096;
 
 /// The store of the directory.
 pub trait DirectoryStore: Send {
@@ -83,6 +90,11 @@ impl SqliteDirectoryStore {
             CREATE TABLE IF NOT EXISTS labels (
                 search_key BLOB PRIMARY KEY,
                 state      BLOB NOT NULL
+            ) WITHOUT ROWID;
+            CREATE TABLE IF NOT EXISTS spent (
+                epoch INTEGER NOT NULL,
+                nonce BLOB NOT NULL,
+                PRIMARY KEY (epoch, nonce)
             ) WITHOUT ROWID;",
         ))?;
         Ok(SqliteDirectoryStore { connection })
@@ -132,6 +144,20 @@ impl DirectoryStore for SqliteDirectoryStore {
         for row in rows {
             out.push(fault(row)?);
         }
+        let mut statement = fault(
+            self.connection
+                .prepare("SELECT epoch, nonce FROM spent ORDER BY epoch"),
+        )?;
+        let rows = fault(statement.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+        }))?;
+        for row in rows {
+            let (epoch, nonce) = fault(row)?;
+            out.push(DirEvent::Spent {
+                epoch: u32::try_from(epoch).map_err(|_| StoreFault)?,
+                nonce: nonce.try_into().map_err(|_| StoreFault)?,
+            });
+        }
         Ok(out)
     }
 
@@ -163,7 +189,25 @@ impl DirectoryStore for SqliteDirectoryStore {
                     "INSERT OR REPLACE INTO labels (search_key, state) VALUES (?1, ?2)",
                     params![search_key, state],
                 ))?,
+                DirEvent::Spent { epoch, nonce } => fault(transaction.execute(
+                    "INSERT OR IGNORE INTO spent (epoch, nonce) VALUES (?1, ?2)",
+                    params![i64::from(*epoch), nonce.as_slice()],
+                ))?,
             };
+        }
+        // ABU-095: a nonce two epochs back names no token that passes.
+        let newest = events
+            .iter()
+            .filter_map(|event| match event {
+                DirEvent::Spent { epoch, .. } => Some(*epoch),
+                _ => None,
+            })
+            .max();
+        if let Some(newest) = newest {
+            fault(transaction.execute(
+                "DELETE FROM spent WHERE epoch < ?1",
+                [i64::from(newest.saturating_sub(1))],
+            ))?;
         }
         fault(transaction.commit())
     }
@@ -273,17 +317,25 @@ pub async fn run_directory(
         }
     });
     let gateway = Arc::new(gateway);
+    let held = Arc::new(tokio::sync::Semaphore::new(CONNECTION_MAX));
     loop {
         let Ok((tcp, _)) = listener.accept().await else {
             return Ok(());
+        };
+        let Ok(permit) = held.clone().try_acquire_owned() else {
+            continue;
         };
         let tls = tls.clone();
         let gateway = gateway.clone();
         let state = state.clone();
         tokio::spawn(async move {
-            if let Ok(stream) = tls.accept(tcp).await {
-                serve(stream, gateway, state).await;
-            }
+            let _permit = permit;
+            let _ = tokio::time::timeout(CONNECTION_TIME, async move {
+                if let Ok(stream) = tls.accept(tcp).await {
+                    serve(stream, gateway, state).await;
+                }
+            })
+            .await;
         });
     }
 }

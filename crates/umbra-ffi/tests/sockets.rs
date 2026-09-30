@@ -221,7 +221,7 @@ async fn two_clients_meet_and_talk_over_real_sockets() {
     let parsed = AppMessage::parse(&app, Channel::Pairwise).unwrap();
     assert_eq!(parsed.body, b"hello bob");
 
-    // A record for no contact fails, and the runtime stays up.
+    // A record for no contact goes to no relay, and the runtime stays up.
     let send = Command::Send {
         contact: ContactId([0xEE; 32]),
         app: text(3, "nobody"),
@@ -229,7 +229,7 @@ async fn two_clients_meet_and_talk_over_real_sockets() {
     };
     alice.send(send).unwrap();
     wait_for(&mut alice_updates, |update| {
-        (update == Update::Failed(73)).then_some(())
+        (update == Update::Unsent(73)).then_some(())
     })
     .await;
 }

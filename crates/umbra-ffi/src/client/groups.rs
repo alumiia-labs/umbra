@@ -2340,6 +2340,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             return Ok(());
         }
         let mut group = self.group_of(conversation)?;
+        // GRP-422: a key that reaches a removed party carries no record but
+        // a roster object, thus this device rotates first. A rotation that
+        // this device may not make leaves the post under the current key.
+        if group.withholds()
+            && AppMessage::parse(app, umbra_wire::app::Channel::Group)?.kind
+                != AppKind::GroupControl
+        {
+            self.rotate_group(conversation, now_ms, rng)?;
+            group = self.group_of(conversation)?;
+        }
         let Some(replicas) = group.replicas() else {
             return Ok(());
         };
@@ -3251,6 +3261,24 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// The next `GKEY` that waits for the run of the group queues.
     pub fn take_group_rekey(&mut self) -> Option<GroupRekey> {
         self.groups.rekeys.pop_front()
+    }
+
+    /// Drops each held record of each group that waited past its bound,
+    /// and shows the gap, though no record of that group arrived since
+    /// (`GRP-253`, `GRP-254`).
+    pub fn expire_group_holds<R: CryptoRng + ?Sized>(
+        &mut self,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        for conversation in self.group_conversations()? {
+            let mut group = self.group_of(conversation)?;
+            if group.expire_held(now_ms / 1_000) > 0 {
+                self.save_group(conversation, &group, rng)?;
+                self.delivery_gap(conversation, now_ms, rng)?;
+            }
+        }
+        Ok(())
     }
 
     /// Each group whose backoff passed and whose trigger no record

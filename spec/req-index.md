@@ -68,20 +68,20 @@ column when a crate implements the requirement and a test covers it.
 | --- | --- | --- | --- | --- | --- | --- |
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
-| `NET` | 246 | 87 | 1 | 0 | 9 | **343** |
+| `NET` | 247 | 87 | 1 | 0 | 9 | **344** |
 | `IDN` | 134 | 46 | 1 | 0 | 5 | **186** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
 | `WIR` | 398 | 85 | 0 | 0 | 7 | **490** |
 | `DEV` | 202 | 90 | 0 | 0 | 7 | **299** |
 | `NTF` | 75 | 28 | 0 | 0 | 3 | **106** |
-| `DIS` | 130 | 34 | 0 | 0 | 3 | **167** |
+| `DIS` | 130 | 35 | 0 | 0 | 3 | **168** |
 | `REL` | 159 | 33 | 1 | 0 | 2 | **195** |
-| `GRP` | 232 | 65 | 0 | 0 | 6 | **303** |
+| `GRP` | 233 | 65 | 0 | 0 | 6 | **304** |
 | `ATT` | 143 | 45 | 2 | 0 | 3 | **193** |
-| `ABU` | 71 | 30 | 1 | 0 | 0 | **102** |
+| `ABU` | 72 | 30 | 1 | 0 | 0 | **103** |
 | `IMP` | 121 | 41 | 0 | 0 | 2 | **164** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2066 | 625 | 7 | 0 | 54 | **2752** |
+| **All** | 2069 | 626 | 7 | 0 | 54 | **2756** |
 
 ## SCP — Scope and Conventions
 
@@ -482,6 +482,7 @@ Source: `spec/03-network-architecture.md`
 | `NET-343` | §3.4.6 | MUST | A client | A client MUST show the user each circuit whose chain holds two relays of one operator or of one family. |  |  |
 | `NET-344` | §3.4.6 | MUST | (unstated) | The same relaxation, under the same state, applies to each placement that needs different operators or families: the group replicas of Part 11 rule `GRP-191`, the chunk relays of Part 12 rule `ATT-017`, the backup relays of Part 4 rule `IDN-076`, and the two ingress pins of Part 10 rule `REL-154`. |  |  |
 | `NET-345` | §3.4.6 | MUST | A client | A client MUST end a pin that shares an operator or a family with the other pin when the relaxation ends, and it fills the place under `REL-154`. |  |  |
+| `NET-346` | §3.2.4 | MUST | At a start a relay | At a start a relay MUST keep the newest `QUEUE_QUOTA` records of a queue whose stored records pass that quota: the older ones ended in the run before. |  |  |
 
 ## IDN — Identity
 
@@ -1594,7 +1595,7 @@ Source: `spec/07-device-sets.md`
 | `DEV-267` | §7.4 | MUST | In that direction the existing device | In that direction the existing device MUST show the label of the new device, and it MUST get an explicit confirmation from the user, before step 4. |  |  |
 | `DEV-268` | §7.5.3 | MUST | A device | A device MUST carry a conversation record on a sync channel as a `SyncedRecord`, and it MUST take the class of that record from the kind of `inner`. |  |  |
 | `DEV-269` | §7.5.3 | MUST | A parser | A parser MUST reject a `vector` that is not in strictly increasing `device_id` order, or that holds more than `MAX_DEVICES` entries. |  |  |
-| `DEV-270` | §7.5.3 | MUST | A device | A device MUST apply a `MutableItem` when its `lamport` is above the value held, or equal with a lower `device_id` of the writer, and it MUST discard it otherwise. |  |  |
+| `DEV-270` | §7.5.3 | MUST | A device | A device MUST apply a `MutableItem` when its `lamport` is above the value held, or equal with a lower `writer`, and it MUST discard it otherwise. |  |  |
 | `DEV-271` | §7.5.3 | MUST | A device | A device MUST give each `SyncedRecord` and each `MutableItem` that it sends the next value of its causal counter, which starts at 1. |  |  |
 | `DEV-272` | §7.5.3 | MUST | The `vector` | The `vector` MUST hold the entry of the sender, and the `counter` of that entry is the causal counter of the record. |  |  |
 | `DEV-273` | §7.5.3 | MUST | A receiver | A receiver MUST reject a record whose `vector` holds no entry of the device that the sync channel names. |  |  |
@@ -1919,6 +1920,7 @@ Source: `spec/09-discovery.md`
 | `DIS-183` | §9.9.2 | MUST | A client | A client MUST fetch each version of `DIS-079` with a `Version` request under the search key of the label, and it MUST verify the `VersionProof` as `DIS-149` to `DIS-151` and `DIS-153` give for a `LookupProof`. |  |  |
 | `DIS-184` | §9.9.2 | MUST | A client | A client MUST reject a `VersionProof` whose `label_version` differs from the version that it asked for, whose step shows no leaf, or whose leaf differs from the commitment of `opening` and `entry`. |  |  |
 | `DIS-185` | §9.9.2 | MUST | A directory | A directory MUST answer a `Version` request with the proof of that version under its newest head. |  |  |
+| `DIS-194` | §9.10 | MUST NOT | (unstated) | A directory MUST answer a `Challenge` request for a label that holds a live challenge of the same purpose with that challenge again, and a wrong answer MUST NOT end it. |  |  |
 
 ## REL — Relay Directory
 
@@ -2431,6 +2433,7 @@ Source: `spec/11-private-groups.md`
 | `GRP-419` | §11.9.4 | MUST | An admin whose add another epoch displaced | An admin whose add another epoch displaced MUST add the joiner again, under the index of the new head, before it sends the admit; the joiner waits in the list of joiners again. |  |  |
 | `GRP-420` | §11.9.4 | MUST | An admin | An admin MUST keep the joiner of each admit that it sent while the add stays the head of its roster, thus an epoch that displaces the add after the admit puts the joiner in the list of joiners again. |  |  |
 | `GRP-421` | §11.9.4 | MUST | A joiner | A joiner MUST take a second admit of the admin that admitted it while its own add is the head of its roster, and the group of that admit MUST take the place of the group that it holds, as an exception to `GRP-153`. |  |  |
+| `GRP-422` | §11.4.1 | MUST | (unstated) | A member that holds a trigger since the `roster_epoch` of its current epoch, and that the trigger does not exclude, MUST rotate before it posts a record other than a roster object. |  |  |
 
 ## ATT — Attachments and Large Objects
 
@@ -2740,6 +2743,7 @@ Source: `spec/13-anti-abuse.md`
 | `ABU-111` | §13.9 | MUST | An issuer | An issuer MUST take the RSA key of `0x0002` for an epoch from the log under `ABU-098`, and it MUST answer an epoch whose key the log does not hold as stale. |  |  |
 | `ABU-112` | §13.9 | MUST | A client | A client MUST verify each token of the answer under that key before it keeps the token. |  |  |
 | `ABU-113` | §13.9 | MUST | A client | A client MUST hold the cross-relay keys of its epoch and of the next one from the log, thus it verifies a hello of Part 9 `DIS-182` with no lookup at its arrival. |  |  |
+| `ABU-114` | §13.7 | MUST | A verifier | A verifier MUST keep its set of spent nonces across a restart, until the end of the epoch after the epoch of each nonce. |  |  |
 
 ## IMP — Implementation
 

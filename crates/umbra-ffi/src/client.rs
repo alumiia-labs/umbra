@@ -362,6 +362,9 @@ pub struct Client<B: Backend, E: SecureElement> {
     /// Each record that a full queue refused, with its conversation and the
     /// time of the refusal, in seconds.
     held_sends: BTreeMap<MsgRef, (ConversationId, u64)>,
+    /// The queues whose bind is on its way, each with whether a
+    /// registration of its handle overtook it (`NTF-125`).
+    binding: BTreeMap<[u8; 32], bool>,
 }
 
 /// One record for the commit path: of a contact, or of the sync channel.
@@ -674,6 +677,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             typing_sent: BTreeMap::new(),
             full_queues: BTreeSet::new(),
             held_sends: BTreeMap::new(),
+            binding: BTreeMap::new(),
             files: FileQueues::default(),
             groups: groups::GroupQueues::default(),
             auto_lock: AutoLock::new(now),
@@ -699,6 +703,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             typing_sent: BTreeMap::new(),
             full_queues: BTreeSet::new(),
             held_sends: BTreeMap::new(),
+            binding: BTreeMap::new(),
             files: FileQueues::default(),
             groups: groups::GroupQueues::default(),
             auto_lock: AutoLock::new(now),

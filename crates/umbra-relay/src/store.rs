@@ -126,6 +126,14 @@ pub enum StoreChange {
         /// The chunk identifier.
         chunk_id: [u8; 32],
     },
+    /// A token nonce of `epoch` spent at the gate. The store keeps it until
+    /// the end of the next epoch (`ABU-114`).
+    Spent {
+        /// The epoch of the token.
+        epoch: u32,
+        /// Its nonce.
+        nonce: [u8; 32],
+    },
 }
 
 /// One invitation of Part 4 §4.3.1, as the store holds it.
@@ -159,6 +167,9 @@ pub struct Loaded {
     pub group_queues: BTreeMap<[u8; 32], StoredQueue>,
     /// The chunks, by chunk identifier.
     pub chunks: BTreeMap<[u8; 32], HeldChunk>,
+    /// The spent token nonces of this epoch and the one before, in the
+    /// order of their epochs (`ABU-114`).
+    pub spent: std::collections::BTreeSet<(u32, [u8; 32])>,
 }
 
 impl Loaded {
@@ -236,6 +247,11 @@ impl Loaded {
             }
             StoreChange::ChunkDeleted { chunk_id } => {
                 self.chunks.remove(chunk_id);
+            }
+            StoreChange::Spent { epoch, nonce } => {
+                self.spent.insert((*epoch, *nonce));
+                let floor = epoch.saturating_sub(1);
+                self.spent.retain(|(held, _)| *held >= floor);
             }
         }
     }

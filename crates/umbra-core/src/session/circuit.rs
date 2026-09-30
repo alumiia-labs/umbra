@@ -86,8 +86,9 @@ pub struct CircuitSession {
     batcher: Batcher,
     /// The handle of each command that holds no answer yet, by `corr_id`.
     pending: BTreeMap<[u8; 16], u64>,
-    /// The last `SUB` commands, whose only answer is a `NACK`: a queue
-    /// that the relay does not hold (Part 3 `NET-324`).
+    /// The last `SUB` and `GSUB` commands, whose only answer is a `NACK`: a
+    /// queue that the relay does not hold (Part 3 `NET-324`), or a group
+    /// credential that it does not hold yet (`GRP-398`).
     watched: VecDeque<([u8; 16], u64)>,
 }
 
@@ -181,7 +182,9 @@ impl CircuitSession {
             self.pending.insert(corr_id, handle);
         }
         // A `SUB` has no answer, and a `NACK` of it names its queue as gone.
-        if cmd == Cmd::Sub {
+        // A `GSUB` has none either, and a `NACK` of it sends it again under
+        // the credentials of the epoch before (`GRP-398`).
+        if matches!(cmd, Cmd::Sub | Cmd::Group(GroupCmd::Gsub)) {
             self.watched.push_back((corr_id, handle));
             if self.watched.len() > WATCHED_SUBS {
                 self.watched.pop_front();

@@ -21,7 +21,7 @@ use umbra_core::{
 
 use crate::store::{Loaded, StoreChange};
 use umbra_crypto::rand_core::CryptoRng;
-use umbra_queue::{relay::session::Session, Reject};
+use umbra_queue::{params::store_time, relay::session::Session, Reject};
 use umbra_wire::command::{Cmd, Command};
 
 use super::{answer, Reply};
@@ -74,7 +74,11 @@ impl ChunkService {
 
     /// Records a chunk that took its bytes.
     fn note_held(&mut self, chunk_id: [u8; 32]) {
-        if let Some(held) = self.store.export(&chunk_id) {
+        if let Some(mut held) = self.store.export(&chunk_id) {
+            // NET-301: the file holds each time to the hour.
+            held.registered_at = store_time(held.registered_at);
+            held.renewed_at = store_time(held.renewed_at);
+            held.erase_at = store_time(held.erase_at);
             self.changes.push(StoreChange::Chunk {
                 chunk_id,
                 held: Box::new(held),
@@ -190,8 +194,8 @@ impl ChunkService {
                     if let Some(erase_at) = self.store.erase_at(&chunk_id) {
                         self.changes.push(StoreChange::ChunkRenewed {
                             chunk_id,
-                            renewed_at: now,
-                            erase_at,
+                            renewed_at: store_time(now),
+                            erase_at: store_time(erase_at),
                         });
                     }
                 }
@@ -460,7 +464,9 @@ mod tests {
 
         // The next run holds the chunk, and the registration is gone.
         let loaded = disk.load().unwrap();
-        assert_eq!(loaded.chunks[&[0xC1; 32]].renewed_at, 1_000);
+        // NET-301: the file holds the time to the hour.
+        assert_eq!(loaded.chunks[&[0xC1; 32]].renewed_at, store_time(1_000));
+        assert_eq!(loaded.chunks[&[0xC1; 32]].erase_at % 3_600, 0);
         bench.service = ChunkService::restore(1 << 24, &loaded);
         assert_eq!(bench.service.held_count(), 1);
         let (got, _) = bench.send(ChunkCmd::Cget, [0xC1; 32], &[], &read, b"");

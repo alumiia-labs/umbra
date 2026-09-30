@@ -16,7 +16,7 @@
     <string name="umbra_ui_idn_152">These digits do not check.</string>
     <string name="umbra_ui_imp_074">Not sent</string>
     <string name="umbra_ui_imp_074_refused">Not sent: the relay refused it</string>
-    <string name="umbra_ui_imp_074_no_path">Not sent: no route to the contact</string>
+    <string name="umbra_ui_imp_074_no_path">Not sent: no route</string>
     <string name="umbra_ui_imp_074_upload">Not sent: the file did not upload</string>
     <string name="umbra_ui_imp_074_no_replica">Not sent: no relay of the group took it</string>
     <string name="umbra_ui_imp_074_full">Not sent: the queue of the contact is full</string>

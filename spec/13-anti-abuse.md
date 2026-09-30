@@ -352,6 +352,10 @@ Each relay keeps its **own** set of spent nonces. That set is a Bloom filter or
 a hash set. Its scope is the current epoch, and its size matches the traffic of
 that relay.
 
+**[ABU-114]** A verifier MUST keep its set of spent nonces across a restart,
+until the end of the epoch after the epoch of each nonce. A set that a restart
+empties takes each token of two epochs one more time.
+
 **[ABU-006]** **UMBRA MUST NOT build a global double-spend database.** Such a database is a
 central linkage asset, a seizure target, and a scaling bottleneck. The cost is
 that a party can spend a token one time *at each relay*. Where that cost

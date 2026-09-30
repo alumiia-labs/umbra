@@ -1738,6 +1738,8 @@ impl Inner {
         // §11.9.7: a quiet week gives one presence record, and an admin
         // removes a member that stayed silent for `GROUP_SILENT_EVICT`.
         let now_ms = crate::runtime::unix_now().saturating_mul(1_000);
+        // GRP-253: a record that waits in a quiet group leaves at its bound.
+        let _ = self.client.expire_group_holds(now_ms, &mut OsRng);
         if let Ok(due) = self.client.groups_owing_presence(now_ms, &mut OsRng) {
             for conversation in due {
                 let _ = self.client.post_presence(conversation, now_ms, &mut OsRng);
@@ -3712,9 +3714,13 @@ impl Handle {
                     client.queues_to_bind(queues, unix_now(), &mut OsRng),
                     bridge.as_ref(),
                 ) {
+                    let mut sent = Vec::new();
                     for recipient_id in unbound {
-                        let _ = running.notify_queue(recipient_id);
+                        if running.notify_queue(recipient_id).is_ok() {
+                            sent.push(recipient_id);
+                        }
                     }
+                    client.binds_sent(&sent);
                 }
             }
             // NET-182: a dead channel takes a new queue, and its blob names
@@ -3801,8 +3807,12 @@ impl Handle {
                     .zip(umbra_crypto::kem::PublicKey::from_bytes(relay_ntf_pk).ok())
                     .and_then(|(binding, key)| binding.seal(&key, recipient_id, &mut OsRng).ok());
                 if let (Some(sealed), Some(running)) = (sealed, bridge.as_ref()) {
-                    if running.bind_queue(*recipient_id, sealed).is_ok() {
-                        let _ = client.queue_bound(recipient_id, &mut OsRng);
+                    // NTF-125: a bind that a registration overtook asks for
+                    // its key once more.
+                    if running.bind_queue(*recipient_id, sealed).is_ok()
+                        && !client.queue_bound(recipient_id, &mut OsRng).unwrap_or(true)
+                    {
+                        let _ = running.notify_queue(*recipient_id);
                     }
                 }
             }
@@ -3916,7 +3926,16 @@ impl Handle {
         inner.ndr_in_flight.remove(&call.handle);
         // A call that failed goes again at the next pump.
         if matches!(answer, Ok(NdrResponse::Taken)) {
-            let _ = inner.client.ndr_call_taken(call, &mut OsRng);
+            // NTF-125: each queue of the handle binds again at once.
+            let again = inner
+                .client
+                .ndr_call_taken(call, &mut OsRng)
+                .unwrap_or_default();
+            if let Some(running) = inner.bridge.as_ref() {
+                for recipient_id in again {
+                    let _ = running.notify_queue(recipient_id);
+                }
+            }
         }
     }
 }

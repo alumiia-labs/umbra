@@ -777,6 +777,24 @@ struct GroupWait {
     handle: u64,
     /// Whether the answer is a `GIDS` or a `GSEQ`.
     creates: bool,
+    /// A `GSUB`, whose only answer is a `NACK`.
+    subscribes: bool,
+}
+
+/// The `SUB` and `GSUB` commands whose refusal the node still maps, as the
+/// session watches them. A command that took no refusal waits for none,
+/// thus the oldest leaves the map past this bound.
+const WATCHED_WAITS: usize = 1_024;
+
+impl Waiting {
+    /// Whether the command has no answer but a `NACK`.
+    fn answers_only_a_refusal(&self) -> bool {
+        match self {
+            Waiting::Subscribe(_) => true,
+            Waiting::Group(wait) => wait.subscribes,
+            _ => false,
+        }
+    }
 }
 
 enum Waiting {
@@ -1146,6 +1164,9 @@ pub struct ClientNode {
     capsules: VecDeque<Vec<u8>>,
     next_handle: u64,
     waiting: BTreeMap<u64, Waiting>,
+    /// The handles in `waiting` of the commands whose only answer is a
+    /// `NACK`, oldest first.
+    watched_waits: VecDeque<u64>,
     /// The contacts whose handshake runs, by `RecipientId`.
     halves: BTreeMap<[u8; 32], Half>,
     contacts: BTreeMap<[u8; 32], Contact>,
@@ -1323,6 +1344,7 @@ impl ClientNode {
             capsules: VecDeque::new(),
             next_handle: 1,
             waiting: BTreeMap::new(),
+            watched_waits: VecDeque::new(),
             halves: BTreeMap::new(),
             contacts: BTreeMap::new(),
             rotating: BTreeSet::new(),
@@ -2980,6 +3002,14 @@ impl ClientNode {
             return Err(Error::NoPath);
         };
         if session.queue(encoded, handle)? {
+            if waiting.answers_only_a_refusal() {
+                self.watched_waits.push_back(handle);
+                if self.watched_waits.len() > WATCHED_WAITS {
+                    if let Some(old) = self.watched_waits.pop_front() {
+                        self.waiting.remove(&old);
+                    }
+                }
+            }
             self.waiting.insert(handle, waiting);
         }
         Ok(handle)
@@ -3571,10 +3601,13 @@ impl ClientNode {
         command.sign(&key, &[])?;
         let mut encoded = alloc::vec![0u8; command.len()];
         command.encode(&mut encoded)?;
-        let waiting = if creates || cmd == GroupCmd::Gpost {
+        // GRP-398: a `GSUB` has no answer, but its refusal names it, thus
+        // the caller sends it again under the credentials before.
+        let waiting = if creates || matches!(cmd, GroupCmd::Gpost | GroupCmd::Gsub) {
             Waiting::Group(Box::new(GroupWait {
                 handle: held.handle,
                 creates,
+                subscribes: cmd == GroupCmd::Gsub,
             }))
         } else {
             Waiting::Other

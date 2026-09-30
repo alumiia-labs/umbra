@@ -111,6 +111,15 @@ pub enum DirEvent {
         /// The stored form of [`LabelRecord`].
         state: Vec<u8>,
     },
+    /// A token nonce of `epoch` spent. A restart holds it until the end of
+    /// the next epoch, as the set does (`ABU-095`); the store drops it
+    /// then, and it replays the rest in the order of their epochs.
+    Spent {
+        /// The epoch of the token.
+        epoch: u32,
+        /// Its nonce.
+        nonce: [u8; 32],
+    },
 }
 
 /// A label that a holder publishes: a handle or an address.
@@ -188,7 +197,18 @@ impl LabelRecord {
 struct Pending {
     issued: Issued,
     at: u64,
+    /// The answer to the request, which a repeat gets again.
+    out: Vec<u8>,
+    /// The version of the label at the issue. A write moves the key, and a
+    /// challenge sealed to the key before ends with it.
+    version: u32,
 }
+
+/// The purpose byte of a `Challenge` request, which keys its pending
+/// challenge beside the search key.
+const RENEW: u8 = 0x01;
+const WRITE: u8 = 0x02;
+const BLOB: u8 = 0x03;
 
 /// The directory and the issuer.
 pub struct Directory {
@@ -202,7 +222,7 @@ pub struct Directory {
     last_close: Option<u64>,
     epoch_seconds: u64,
     labels: BTreeMap<Vec<u8>, LabelRecord>,
-    challenges: BTreeMap<Vec<u8>, Pending>,
+    challenges: BTreeMap<(Vec<u8>, u8), Pending>,
     spent: SpendSet,
     issuer_seed: Secret<32>,
     issuers: BTreeMap<u32, FirstPartyIssuer>,
@@ -316,6 +336,8 @@ impl Directory {
                     self.labels
                         .insert(search_key.clone(), LabelRecord::parse(state)?);
                 }
+                // A repeat in the store spends nothing more.
+                DirEvent::Spent { epoch, nonce } => self.spent.restore(*epoch, *nonce),
             }
         }
         self.events.clear();
@@ -611,10 +633,15 @@ impl Directory {
             }
             let issuer = self.issuer(token_epoch).map_err(|_| Status::Refused)?;
             issuer.verify(&token).map_err(|_| Status::Refused)?;
-            return self
-                .spent
+            self.spent
                 .spend(epoch, token_epoch, token.nonce)
-                .map_err(|_| Status::Refused);
+                .map_err(|_| Status::Refused)?;
+            // A restart takes the spent nonce again from the store.
+            self.events.push(DirEvent::Spent {
+                epoch: token_epoch,
+                nonce: token.nonce,
+            });
+            return Ok(());
         }
         Err(Status::Refused)
     }
@@ -683,13 +710,8 @@ impl Directory {
         if record.label.is_tombstoned() {
             return Err(Status::Stale);
         }
-        let issued = self.take_pending(&search_key, now)?;
-        if issued.purpose() != Purpose::Blob {
-            return Err(Status::Stale);
-        }
-        issued
-            .verify(&answer, Some(&blob))
-            .map_err(|_| Status::Refused)?;
+        let version = record.label.version;
+        self.answer_pending(&search_key, BLOB, version, &answer, Some(&blob), now)?;
         record.blob = (!blob.is_empty()).then_some(blob);
         self.keep_label(&search_key, record);
         Ok(Vec::new())
@@ -826,40 +848,90 @@ impl Directory {
             .get(&search_key)
             .cloned()
             .ok_or(Status::NotFound)?;
+        let allowed = match purpose {
+            RENEW | BLOB => !record.label.is_tombstoned(),
+            // DIS-075: during the reservation the last key writes too.
+            WRITE => record.label.needs(now) != Needs::Token,
+            _ => false,
+        };
+        if !allowed {
+            return Err(Status::Stale);
+        }
+        // DIS-194: a live challenge of this purpose goes again, thus a
+        // party that asks for the label of another ends no challenge of it.
+        let slot = (search_key.clone(), purpose);
+        if let Some(pending) = self.challenges.get(&slot) {
+            let current = pending.version == record.label.version
+                && match pending.issued.purpose() {
+                    Purpose::Renew { lease_epoch } => lease_epoch == record.label.lease_epoch,
+                    Purpose::Write { .. } | Purpose::Blob => true,
+                };
+            if current && now.saturating_sub(pending.at) < CHALLENGE_TTL {
+                return Ok(pending.out.clone());
+            }
+        }
         let (purpose, lease_epoch) = match purpose {
-            0x01 if !record.label.is_tombstoned() => {
+            RENEW => {
                 let lease_epoch = record.label.issue_lease_epoch();
                 (Purpose::Renew { lease_epoch }, Some(lease_epoch))
             }
-            // DIS-075: during the reservation the last key writes too.
-            0x02 if record.label.needs(now) != Needs::Token => (
+            WRITE => (
                 Purpose::Write {
                     version_new: record.label.version.saturating_add(1),
                 },
                 None,
             ),
-            0x03 if !record.label.is_tombstoned() => (Purpose::Blob, None),
-            _ => return Err(Status::Stale),
+            _ => (Purpose::Blob, None),
         };
         let issued = Issued::new(purpose, &record.label.hk_pub, record.challenge_name(), rng)
             .map_err(|_| Status::Busy)?;
         let mut out = issued.bytes().to_vec();
         if let Some(lease_epoch) = lease_epoch {
             out.extend_from_slice(&lease_epoch.to_be_bytes());
+        }
+        let version = record.label.version;
+        if lease_epoch.is_some() {
             self.keep_label(&search_key, record);
         }
-        // DIS-168: a second challenge ends the first.
-        self.challenges
-            .insert(search_key, Pending { issued, at: now });
+        self.challenges.insert(
+            slot,
+            Pending {
+                issued,
+                at: now,
+                out: out.clone(),
+                version,
+            },
+        );
         Ok(out)
     }
 
-    fn take_pending(&mut self, search_key: &[u8], now: u64) -> Result<Issued, Status> {
-        let pending = self.challenges.remove(search_key).ok_or(Status::Stale)?;
-        if now.saturating_sub(pending.at) >= CHALLENGE_TTL {
+    /// Verifies an answer to the live challenge of `purpose` for a label,
+    /// and ends that challenge when the answer holds (`DIS-168`). A wrong
+    /// answer ends nothing (`DIS-194`).
+    #[allow(clippy::too_many_arguments)]
+    fn answer_pending(
+        &mut self,
+        search_key: &[u8],
+        purpose: u8,
+        version: u32,
+        answer: &[u8; 32],
+        bound: Option<&[u8]>,
+        now: u64,
+    ) -> Result<Purpose, Status> {
+        let slot = (search_key.to_vec(), purpose);
+        let pending = self.challenges.get(&slot).ok_or(Status::Stale)?;
+        // A challenge sealed to a key that a write replaced ends with it.
+        if now.saturating_sub(pending.at) >= CHALLENGE_TTL || pending.version != version {
+            self.challenges.remove(&slot);
             return Err(Status::Stale);
         }
-        Ok(pending.issued)
+        pending
+            .issued
+            .verify(answer, bound)
+            .map_err(|_| Status::Refused)?;
+        let purpose = pending.issued.purpose();
+        self.challenges.remove(&slot);
+        Ok(purpose)
     }
 
     fn write<R: CryptoRng + TryCryptoRng + ?Sized>(
@@ -882,14 +954,13 @@ impl Directory {
         if self.operator.is_staged(&search_key) {
             return Err(Status::Busy);
         }
-        let issued = self.take_pending(&search_key, now)?;
-        let Purpose::Write { version_new } = issued.purpose() else {
+        // DIS-097, DIS-098: the answer binds the entry.
+        let version = record.label.version;
+        let Purpose::Write { version_new } =
+            self.answer_pending(&search_key, WRITE, version, &answer, Some(&entry), now)?
+        else {
             return Err(Status::Stale);
         };
-        // DIS-097, DIS-098: the answer binds the entry.
-        issued
-            .verify(&answer, Some(&entry))
-            .map_err(|_| Status::Refused)?;
         let key = self.check_entry(&input, &entry, version_new)?;
         // DIS-076: the label takes the change before the log does, thus a
         // change that the label refuses stages no entry, and the label and
@@ -976,11 +1047,12 @@ impl Directory {
             .get(&search_key)
             .cloned()
             .ok_or(Status::NotFound)?;
-        let issued = self.take_pending(&search_key, now)?;
-        let Purpose::Renew { lease_epoch } = issued.purpose() else {
+        let version = record.label.version;
+        let Purpose::Renew { lease_epoch } =
+            self.answer_pending(&search_key, RENEW, version, &answer, None, now)?
+        else {
             return Err(Status::Stale);
         };
-        issued.verify(&answer, None).map_err(|_| Status::Refused)?;
         record
             .label
             .renew(lease_epoch, now)
@@ -1406,6 +1478,9 @@ mod tests {
         let search_key = again.voprf.evaluate_direct(input).to_vec();
         assert_eq!(again.labels.get(&search_key).unwrap().label.version, 1);
         assert!(again.take_events().is_empty());
+        // ABU-114: a restart keeps each spent nonce.
+        assert!(!dir.spent.is_empty());
+        assert_eq!(again.spent.len(), dir.spent.len());
 
         // DIS-079: each version stays readable, the first one too.
         let key: [u8; 64] = search_key.as_slice().try_into().unwrap();

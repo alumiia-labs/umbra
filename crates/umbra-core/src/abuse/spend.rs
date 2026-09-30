@@ -47,6 +47,13 @@ impl SpendSet {
         Ok(())
     }
 
+    /// Takes back a nonce of `token_epoch` that a store kept, at the start
+    /// of a run (`ABU-114`). The store gives them in the order of their
+    /// epochs, and a repeat spends nothing more.
+    pub fn restore(&mut self, token_epoch: u32, nonce: [u8; 32]) {
+        let _ = self.spend(token_epoch, token_epoch, nonce);
+    }
+
     /// The nonces held.
     pub fn len(&self) -> usize {
         self.epochs.iter().flatten().map(|(_, s)| s.len()).sum()

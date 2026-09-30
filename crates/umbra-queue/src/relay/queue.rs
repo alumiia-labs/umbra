@@ -83,9 +83,9 @@ impl Queue {
     }
 
     /// A queue from the head that [`Queue::export_head`] wrote and from
-    /// its stored records. A record that an `ACK` covers, a record at or
-    /// above `next_seq`, and a record above the quota are faults of the
-    /// store.
+    /// its stored records. A record that an `ACK` covers and a record at or
+    /// above `next_seq` are faults of the store. Of more records than the
+    /// quota the newest stay (`NET-346`).
     pub fn restore(reader: &mut Reader<'_>, mut records: Vec<Stored>) -> Result<Self, Reject> {
         let mut head = || -> Result<Queue, umbra_crypto::Error> {
             Ok(Queue {
@@ -111,9 +111,14 @@ impl Queue {
         let mut queue = head().map_err(|_| Reject::Rejected)?;
         records.sort_by_key(|record| record.seq);
         let in_range = |record: &Stored| record.seq > queue.last_ack && record.seq < queue.next_seq;
-        if records.len() > QUEUE_QUOTA || !records.iter().all(in_range) {
+        if !records.iter().all(in_range) {
             return Err(Reject::Rejected);
         }
+        // NET-346: the store rounds a time up (`NET-301`), thus it can hold
+        // a record that `MSG_TTL` already ended in RAM while a later one
+        // took its place. The oldest above the quota are those records.
+        let excess = records.len().saturating_sub(QUEUE_QUOTA);
+        records.drain(..excess);
         queue.records = records;
         Ok(queue)
     }
@@ -286,6 +291,26 @@ mod tests {
         q.ack(1);
         assert_eq!(q.len(), 1);
         assert_eq!(q.send(b"d", 1_003).unwrap(), 4);
+    }
+
+    #[test]
+    fn a_store_above_the_quota_keeps_the_newest_records() {
+        let mut q = queue();
+        for i in 0..=QUEUE_QUOTA {
+            q.records.push(Stored {
+                seq: u32::try_from(i + 1).unwrap(),
+                accepted_at: 1_000,
+                bytes: vec![0],
+            });
+        }
+        q.next_seq = u32::try_from(QUEUE_QUOTA + 2).unwrap();
+        let records = q.records.clone();
+        let mut writer = Writer::new();
+        q.export_head(&mut writer);
+        let head = writer.finish();
+        let back = Queue::restore(&mut Reader::new(&head), records).unwrap();
+        assert_eq!(back.len(), QUEUE_QUOTA);
+        assert_eq!(back.pending().next().unwrap().seq, 2);
     }
 
     #[test]

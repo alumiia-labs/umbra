@@ -33,7 +33,7 @@ const SENT: u8 = 1;
 /// the digest.
 const ROOT: u8 = 2;
 /// A tree head of a contact that waits for a consistency proof: the size,
-/// the root (`DIS-136`).
+/// the root, the time that it came (`DIS-136`).
 const CHECK: u8 = 3;
 /// A warning: the source, the epoch (`DIS-034`, `REL-161`).
 const WARNING: u8 = 4;
@@ -45,8 +45,14 @@ type Rows = Vec<(RowId, Zeroizing<Vec<u8>>)>;
 /// root (Part 10 `REL-162`), thus a contact one epoch behind still
 /// compares.
 const ROOTS_KEPT: u64 = 3;
-/// The tree heads of contacts that wait for a check at one time.
+/// The tree heads of contacts that wait for a check at one time. A new one
+/// takes the place of the oldest, thus a contact that sends heads of no log
+/// stops no later check.
 const CHECKS_MAX: usize = 4;
+/// The time that a tree head waits for the log of this device to reach its
+/// size. A head that the log does not reach in that time names no log that
+/// this device reads, and it goes.
+const CHECK_WAIT: u64 = 86_400;
 
 /// A tree head of a contact that waits for a consistency proof.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -254,7 +260,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     match heads.iter().find(|(size, _, _)| *size == digest.epoch) {
                         Some((_, root, _)) if *root == digest.digest => {}
                         Some(_) => self.warn(DigestSource::TreeHead, digest.epoch, rng)?,
-                        None => self.wait_for_check(digest.epoch, &digest.digest, rng)?,
+                        None => self.wait_for_check(digest.epoch, &digest.digest, now, rng)?,
                     }
                 }
                 DigestSource::ConsensusRoot => {
@@ -271,40 +277,78 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(())
     }
 
-    fn wait_for_check<R: CryptoRng + ?Sized>(
+    pub(crate) fn wait_for_check<R: CryptoRng + ?Sized>(
         &mut self,
         tree_size: u64,
         root: &[u8; 32],
+        now: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
-        if self.head_checks()?.len() >= CHECKS_MAX {
+        let key = [&[CHECK][..], &tree_size.to_be_bytes(), root].concat();
+        let mut rows = self.check_rows()?;
+        if rows
+            .iter()
+            .any(|(_, check, _)| check.tree_size == tree_size && check.root == *root)
+        {
             return Ok(());
         }
-        let key = [&[CHECK][..], &tree_size.to_be_bytes(), root].concat();
-        let value = key.clone();
+        rows.sort_by_key(|(_, _, at)| *at);
+        let mut gone: Vec<RowId> = Vec::new();
+        let mut kept = rows.len();
+        for (row, _, at) in &rows {
+            if now.saturating_sub(*at) >= CHECK_WAIT || kept >= CHECKS_MAX {
+                gone.push(*row);
+                kept = kept.saturating_sub(1);
+            }
+        }
+        self.drop_gossip(gone)?;
+        let value = [&key[..], &now.to_be_bytes()].concat();
         self.put_gossip(&key, &value, rng)
+    }
+
+    /// The rows of the tree heads that wait for a check, each with the time
+    /// that it came.
+    fn check_rows(&self) -> Result<Vec<(RowId, HeadCheck, u64)>, Error> {
+        let mut out = Vec::new();
+        for (row, value) in self.gossip_rows()? {
+            // A row of the form before it held no time, and it goes at the
+            // next check that comes.
+            if value.len() == 41 && value.first() == Some(&CHECK) {
+                if let (Some(size), Some(root)) = (value.get(1..9), value.get(9..41)) {
+                    let check = HeadCheck {
+                        tree_size: u64::from_be_bytes(
+                            size.try_into().map_err(|_| Error::Integrity)?,
+                        ),
+                        root: root.try_into().map_err(|_| Error::Integrity)?,
+                    };
+                    out.push((row, check, 0));
+                }
+                continue;
+            }
+            if value.len() == 49 && value.first() == Some(&CHECK) {
+                let field =
+                    |range: core::ops::Range<usize>| value.get(range).ok_or(Error::Integrity);
+                let check = HeadCheck {
+                    tree_size: u64::from_be_bytes(
+                        field(1..9)?.try_into().map_err(|_| Error::Integrity)?,
+                    ),
+                    root: field(9..41)?.try_into().map_err(|_| Error::Integrity)?,
+                };
+                let at =
+                    u64::from_be_bytes(field(41..49)?.try_into().map_err(|_| Error::Integrity)?);
+                out.push((row, check, at));
+            }
+        }
+        Ok(out)
     }
 
     /// The tree heads of contacts that wait for a consistency proof.
     pub fn head_checks(&self) -> Result<Vec<HeadCheck>, Error> {
-        let mut out = Vec::new();
-        for (_, value) in self.gossip_rows()? {
-            if value.len() == 41 && value.first() == Some(&CHECK) {
-                out.push(HeadCheck {
-                    tree_size: u64::from_be_bytes(
-                        value
-                            .get(1..9)
-                            .and_then(|bytes| bytes.try_into().ok())
-                            .ok_or(Error::Integrity)?,
-                    ),
-                    root: value
-                        .get(9..41)
-                        .and_then(|bytes| bytes.try_into().ok())
-                        .ok_or(Error::Integrity)?,
-                });
-            }
-        }
-        Ok(out)
+        Ok(self
+            .check_rows()?
+            .into_iter()
+            .map(|(_, check, _)| check)
+            .collect())
     }
 
     /// The check of a tree head of a contact ended: a proof that failed is

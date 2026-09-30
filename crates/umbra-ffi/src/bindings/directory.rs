@@ -762,6 +762,12 @@ impl Handle {
             Ok(()) | Err(FfiError::NotFound | FfiError::Stale) => {}
             Err(error) => return Err(error),
         }
+        self.end_entry(entry)
+    }
+
+    /// Ends the queues of an entry that the directory holds no more, and
+    /// drops it.
+    fn end_entry(&self, entry: &Published) -> Result<(), FfiError> {
         self.end_rendezvous(entry.queue);
         if let Some((previous, _)) = entry.previous {
             self.end_rendezvous(previous);
@@ -993,8 +999,10 @@ impl Handle {
         let entries = locked(&self.inner).client.published()?;
         for mut entry in entries {
             if entry.expires_at != 0 && now >= entry.expires_at {
-                // A write in the same epoch waits for the next call.
-                let _ = self.retire(&link, &entry);
+                // DIS-172: the directory ended the lease and wrote the
+                // tombstone at a later version, thus a write of the holder
+                // finds no version to follow. DIS-174: the queue ends now.
+                let _ = self.end_entry(&entry);
                 continue;
             }
             // DIS-137, DIS-138: the holder reads its own entry. IDN-109:
@@ -1216,8 +1224,12 @@ impl Handle {
     /// queue ends (`DIS-171`). A second write in one epoch of the log waits
     /// for the next one, and the call then gives `Busy`.
     pub fn retire_public_link(&self, id: Vec<u8>) -> Result<(), FfiError> {
-        let link = self.directory_link()?;
         let entry = self.find_published(&id)?;
+        // A timed link past its end holds no label to write (DIS-172).
+        if entry.expires_at != 0 && unix_now() >= entry.expires_at {
+            return self.end_entry(&entry);
+        }
+        let link = self.directory_link()?;
         self.retire(&link, &entry)
     }
 
@@ -1539,8 +1551,16 @@ impl Handle {
         let link = self.directory_link()?;
         let (handle, fragment) =
             parse_profile_link(&target, &username_case_mapped).map_err(|_| FfiError::Malformed)?;
-        let found = link.find(&handle.label_input())?;
-        found.entry.ok_or(FfiError::NotFound)?;
+        let input = handle.label_input();
+        let found = link.find(&input)?;
+        let bytes = found.entry.ok_or(FfiError::NotFound)?;
+        // DIS-157: the entry names this handle at the newest version, and a
+        // tombstone previews no contact.
+        let entry = DirectoryEntry::parse(&bytes).map_err(|_| FfiError::Unverified)?;
+        if entry.handle != input || Some(entry.version) != found.version {
+            return Err(FfiError::Unverified);
+        }
+        entry.rendezvous.ok_or(FfiError::NotFound)?;
         let mut preview = ContactPreview {
             handle: handle.canonical(),
             name: String::new(),

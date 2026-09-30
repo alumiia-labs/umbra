@@ -4,7 +4,7 @@
 use umbra_queue::Reject;
 use umbra_wire::admission::{Admission, AdmissionKind};
 
-use alloc::collections::BTreeMap;
+use alloc::{collections::BTreeMap, vec::Vec};
 
 use super::{
     epoch_number,
@@ -70,6 +70,9 @@ pub struct RelayGate {
     /// The registrations that each accepted chunk solution may still admit,
     /// by its seed and its nonce, with its Equi-X bytes (`ABU-107`).
     chunk_uses: BTreeMap<SolutionKey, ([u8; 16], u16)>,
+    /// The token nonces spent since the last call, each with its epoch,
+    /// for the store (`ABU-114`).
+    fresh: Vec<(u32, [u8; 32])>,
 }
 
 /// A solution by the seed of its challenge and its nonce.
@@ -84,7 +87,13 @@ impl RelayGate {
             spent: SpendSet::default(),
             admissions: 0,
             chunk_uses: BTreeMap::new(),
+            fresh: Vec::new(),
         }
+    }
+
+    /// The token nonces spent since the last call, for the store.
+    pub fn take_spent(&mut self) -> Vec<(u32, [u8; 32])> {
+        core::mem::take(&mut self.fresh)
     }
 
     /// The admissions since the last call, which the next challenge takes
@@ -139,6 +148,7 @@ impl RelayGate {
                 self.spent
                     .spend(epoch_number(now), epoch, token.nonce)
                     .map_err(|_| Reject::Admission)?;
+                self.fresh.push((epoch, token.nonce));
                 Ok(Admitted::Token { epoch })
             }
             AdmissionKind::Pow => {
