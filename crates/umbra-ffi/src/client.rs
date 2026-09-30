@@ -275,7 +275,32 @@ pub struct Outgoing {
 struct Open<B: Backend> {
     store: Store<B>,
     device_set_key: Secret<32>,
+    /// The insertion stamp of each message that this device stores.
+    stamp: Stamp,
 }
+
+/// The local insertion sequence of Part 7 §7.5.3 and Part 11 §11.7: a
+/// monotone stamp for each message that this device stores. It follows the
+/// clock in milliseconds and never goes back, thus a clock that moves back
+/// changes no order of a view (`DEV-031`, `GRP-042`), and the edit window
+/// and the read mark still read it as a time. The store keeps its floor
+/// across runs.
+#[derive(Debug, Default, Clone, Copy)]
+struct Stamp {
+    last: u64,
+    kept: u64,
+}
+
+impl Stamp {
+    /// The stamp of the next message at `now_ms`.
+    fn next(&mut self, now_ms: u64) -> u64 {
+        self.last = self.last.saturating_add(1).max(now_ms);
+        self.last
+    }
+}
+
+/// The setting that holds the floor of [`Stamp`].
+const STAMP_FLOOR: &[u8] = b"insertion-stamp";
 
 enum State<B: Backend> {
     Locked(B),
@@ -597,6 +622,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             element,
             header,
             state: State::Unlocked(Box::new(Open {
+                stamp: Stamp::default(),
                 store,
                 device_set_key: root.device_set_key(),
             })),
@@ -676,9 +702,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .ok_or(Error::Integrity)?;
         let seed: [u8; 32] = seed.as_slice().try_into().map_err(|_| Error::Integrity)?;
         let root = RootIdentity::new(Secret::new(seed));
+        let floor_row = store.row_id(SETTINGS, STAMP_FLOOR);
+        let floor = store
+            .get(SETTINGS, &floor_row)?
+            .and_then(|bytes| bytes.as_slice().try_into().ok())
+            .map_or(0, u64::from_be_bytes);
         self.state = State::Unlocked(Box::new(Open {
             store,
             device_set_key: root.device_set_key(),
+            stamp: Stamp {
+                last: floor,
+                kept: floor,
+            },
         }));
         // Each record that waited for the send path at the lock waits again.
         self.requeue_waiting()?;
@@ -689,9 +724,26 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(())
     }
 
+    /// Writes the floor of the insertion stamp when it moved, thus a later
+    /// run starts above each stamp of this one.
+    pub fn keep_stamp<R: CryptoRng + ?Sized>(&mut self, rng: &mut R) -> Result<(), Error> {
+        let open = self.open_mut()?;
+        if open.stamp.last == open.stamp.kept {
+            return Ok(());
+        }
+        let row = open.store.row_id(SETTINGS, STAMP_FLOOR);
+        let last = open.stamp.last;
+        let mut batch = open.store.begin();
+        batch.put(SETTINGS, row, None, &last.to_be_bytes(), rng)?;
+        batch.commit()?;
+        open.stamp.kept = last;
+        Ok(())
+    }
+
     /// Locks the client: `K_store` leaves RAM, and each record that waits
     /// for the send path stays in the store.
     pub fn lock(&mut self) {
+        let _ = self.keep_stamp(&mut crate::runtime::OsRng);
         if let State::Unlocked(open) = core::mem::replace(&mut self.state, State::Closed) {
             self.state = State::Locked(open.store.lock());
             self.outgoing.clear();
@@ -952,7 +1004,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     TableId::MESSAGE,
                     row,
                     Some(conversation.0),
-                    stored_message(OUTGOING, Delivery::Queued, conversation, now_ms, app),
+                    stored_message(
+                        OUTGOING,
+                        Delivery::Queued,
+                        conversation,
+                        open.stamp.next(now_ms),
+                        app,
+                    ),
                 ));
                 planned.push(Planned::Put(
                     OUTBOX,
@@ -1371,7 +1429,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     TableId::MESSAGE,
                     row,
                     Some(conversation.0),
-                    stored_message(OUTGOING, Delivery::Queued, conversation, now_ms, app),
+                    stored_message(
+                        OUTGOING,
+                        Delivery::Queued,
+                        conversation,
+                        open.stamp.next(now_ms),
+                        app,
+                    ),
                 ));
                 planned.push(Planned::Put(
                     OUTBOX,
@@ -1420,7 +1484,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 TableId::MESSAGE,
                 row,
                 Some(conversation.0),
-                stored_message(direction, delivery, conversation, now_ms, &kept),
+                stored_message(
+                    direction,
+                    delivery,
+                    conversation,
+                    open.stamp.next(now_ms),
+                    &kept,
+                ),
             ));
             // WIR-187: the period of a poll runs from its receive time.
             if parsed.kind == AppKind::Poll {
@@ -2072,14 +2142,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // saw, and it covers each earlier one.
         // The order of a conversation view: two messages of one batch hold
         // one store time.
-        let mut newest: Option<((u64, u64, RowId), [u8; 16])> = None;
+        let mut newest: Option<((u64, RowId), [u8; 16])> = None;
         for (row, plain) in open.store.list(TableId::MESSAGE, Some(&conversation.0))? {
             let plain = Zeroizing::new(plain);
             let info = info_of(&plain)?;
             if info.outgoing || info.stored_at_ms <= read_up_to {
                 continue;
             }
-            let order = (info.stored_at_ms, info.sent_at_ms, row);
+            // DEV-032: the stamp orders, and the row breaks a tie.
+            let order = (info.stored_at_ms, row);
             if newest.is_none_or(|(held, _)| order > held) {
                 let app = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
                 let target = AppMessage::parse(app, Channel::Pairwise)?.msg_id;
@@ -2250,7 +2321,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let request_ref = msg_ref(&open.device_set_key, &msg_id);
         let natural = [conversation.0.as_slice(), &request_ref].concat();
         let request_row = open.store.row_id(TableId::MESSAGE, &natural);
-        let stored = stored_message(OUTGOING, Delivery::Queued, conversation, now_ms, &request);
+        let stored = stored_message(
+            OUTGOING,
+            Delivery::Queued,
+            conversation,
+            open.stamp.next(now_ms),
+            &request,
+        );
 
         let mut batch = open.store.begin();
         if exists {
@@ -2368,7 +2445,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let reference = msg_ref(&open.device_set_key, &msg_id);
         let natural = [conversation.0.as_slice(), &reference].concat();
         let request_row = open.store.row_id(TableId::MESSAGE, &natural);
-        let stored = stored_message(OUTGOING, Delivery::Queued, conversation, now_ms, &request);
+        let stored = stored_message(
+            OUTGOING,
+            Delivery::Queued,
+            conversation,
+            open.stamp.next(now_ms),
+            &request,
+        );
         let changed = row_with_text(&plain, draft.text())?;
         let changed_app = changed
             .get(MESSAGE_PREFIX..)
@@ -2532,7 +2615,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let reference = msg_ref(&open.device_set_key, &msg_id);
         let natural = [conversation.0.as_slice(), &reference].concat();
         let request_row = open.store.row_id(TableId::MESSAGE, &natural);
-        let stored = stored_message(OUTGOING, Delivery::Queued, conversation, now_ms, &request);
+        let stored = stored_message(
+            OUTGOING,
+            Delivery::Queued,
+            conversation,
+            open.stamp.next(now_ms),
+            &request,
+        );
 
         let mut batch = open.store.begin();
         batch.put(
@@ -2737,7 +2826,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut out = Vec::new();
         for conversation in self.conversations()? {
             let (read_up_to, name) = self.conversation_meta(conversation)?;
-            let mut last: Option<(u64, u64, RowId)> = None;
+            let mut last: Option<(u64, RowId)> = None;
             let mut unread = 0u32;
             for (row, plain) in store.list(TableId::MESSAGE, Some(&conversation.0))? {
                 let plain = Zeroizing::new(plain);
@@ -2748,7 +2837,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 if !info.outgoing && info.stored_at_ms > read_up_to {
                     unread = unread.saturating_add(1);
                 }
-                let key = (info.stored_at_ms, info.sent_at_ms, row);
+                let key = (info.stored_at_ms, row);
                 if last.is_none_or(|newest| key > newest) {
                     last = Some(key);
                 }
@@ -2756,8 +2845,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             out.push(ConversationSummary {
                 conversation,
                 name,
-                last: last.map(|(_, _, row)| MsgRef(row)),
-                last_at_ms: last.map_or(0, |(stored_at, _, _)| stored_at),
+                last: last.map(|(_, row)| MsgRef(row)),
+                last_at_ms: last.map_or(0, |(stored_at, _)| stored_at),
                 unread,
                 verified: self.is_verified(conversation)?,
             });
@@ -3020,7 +3109,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let reference = msg_ref(&open.device_set_key, &msg_id);
         let natural = [conversation.0.as_slice(), &reference].concat();
         let row = open.store.row_id(TableId::MESSAGE, &natural);
-        let plain = stored_message(OUTGOING, Delivery::Queued, conversation, now_ms, app);
+        let plain = stored_message(
+            OUTGOING,
+            Delivery::Queued,
+            conversation,
+            open.stamp.next(now_ms),
+            app,
+        );
         let mut batch = open.store.begin();
         batch.put(TableId::MESSAGE, row, Some(conversation.0), &plain, rng)?;
         batch.put(OUTBOX, row, None, &outbox_row(), rng)?;
@@ -3064,7 +3159,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let reference = msg_ref(&open.device_set_key, &msg_id);
         let natural = [conversation.0.as_slice(), &reference].concat();
         let row = open.store.row_id(TableId::MESSAGE, &natural);
-        let plain = stored_message(OUTGOING, Delivery::Queued, conversation, now_ms, &app);
+        let plain = stored_message(
+            OUTGOING,
+            Delivery::Queued,
+            conversation,
+            open.stamp.next(now_ms),
+            &app,
+        );
         let mut batch = open.store.begin();
         batch.put(TableId::MESSAGE, row, Some(conversation.0), &plain, rng)?;
         batch.put(
@@ -3196,7 +3297,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if open.store.get(TableId::MESSAGE, &row)?.is_some() {
             return Ok(message);
         }
-        let plain = stored_message(INCOMING, Delivery::Delivered, conversation, now_ms, app);
+        let plain = stored_message(
+            INCOMING,
+            Delivery::Delivered,
+            conversation,
+            open.stamp.next(now_ms),
+            app,
+        );
         let mut batch = open.store.begin();
         batch.put(TableId::MESSAGE, row, Some(conversation.0), &plain, rng)?;
         batch.commit()?;
@@ -3376,10 +3483,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 continue;
             }
             let info = info_of(&plain)?;
-            found.push((info.stored_at_ms, info.sent_at_ms, row));
+            // DEV-031, DEV-032: the insertion stamp orders, and the row
+            // breaks a tie.
+            found.push((info.stored_at_ms, row));
         }
         found.sort_unstable();
-        Ok(found.into_iter().map(|(_, _, row)| MsgRef(row)).collect())
+        Ok(found.into_iter().map(|(_, row)| MsgRef(row)).collect())
     }
 
     /// Compares each table with its accumulator by a scan, outside the

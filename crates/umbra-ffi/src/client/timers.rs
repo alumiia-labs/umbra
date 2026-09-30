@@ -262,7 +262,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let reference = super::msg_ref(&open.device_set_key, &msg_id);
             let natural = [conversation.0.as_slice(), &reference].concat();
             let row = open.store.row_id(TableId::MESSAGE, &natural);
-            let plain = stored_message(OUTGOING, Delivery::Queued, conversation, now_ms, &app);
+            let plain = stored_message(
+                OUTGOING,
+                Delivery::Queued,
+                conversation,
+                open.stamp.next(now_ms),
+                &app,
+            );
             let mut batch = open.store.begin();
             batch.put(TableId::MESSAGE, row, Some(conversation.0), &plain, rng)?;
             batch.put(OUTBOX, row, None, &super::outbox_row(), rng)?;

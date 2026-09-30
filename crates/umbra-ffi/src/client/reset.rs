@@ -181,7 +181,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 OUTGOING,
                 Delivery::Queued,
                 *conversation,
-                now.saturating_mul(1_000),
+                open.stamp.next(now.saturating_mul(1_000)),
                 app,
             );
             let mut batch = open.store.begin();

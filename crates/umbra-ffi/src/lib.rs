@@ -3396,6 +3396,61 @@ mod tests {
     }
 
     #[test]
+    fn a_clock_that_moves_back_changes_no_order_of_a_view() {
+        use umbra_wire::app::AppKind;
+
+        let mut rng = Rng(87);
+        let mut client = new_client(&mut rng);
+        let peer = ContactId([0x95; 32]);
+        let conversation = client.conversation_for(&peer.0).unwrap();
+        let texts = |client: &Client<MemoryBackend, Element>| -> Vec<Vec<u16>> {
+            client
+                .messages(conversation)
+                .unwrap()
+                .iter()
+                .map(|message| {
+                    let mut view = View::default();
+                    client.render(message, &mut view).unwrap();
+                    view.0.clone()
+                })
+                .collect()
+        };
+        // DEV-031: the second record comes at an earlier clock, and it
+        // stays second.
+        deliver(
+            &mut client,
+            &peer,
+            &record(AppKind::Text, [1; 16], b"first"),
+            1_800_000_000_000,
+            &mut rng,
+        );
+        deliver(
+            &mut client,
+            &peer,
+            &record(AppKind::Text, [2; 16], b"second"),
+            1_700_000_000_000,
+            &mut rng,
+        );
+        // The floor of the stamp lives through a lock.
+        client.lock();
+        client
+            .unlock(&units("correct horse"), 1_600_000_000)
+            .unwrap();
+        deliver(
+            &mut client,
+            &peer,
+            &record(AppKind::Text, [3; 16], b"third"),
+            1_600_000_000_000,
+            &mut rng,
+        );
+        let expected: Vec<Vec<u16>> = ["first", "second", "third"]
+            .iter()
+            .map(|text| units(text))
+            .collect();
+        assert_eq!(texts(&client), expected);
+    }
+
+    #[test]
     fn a_timer_times_each_later_message_and_a_sweep_erases_it() {
         use umbra_core::{
             identity::backup::{BackupObject, BackupRow},

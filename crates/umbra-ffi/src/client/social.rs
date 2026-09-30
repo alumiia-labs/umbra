@@ -131,7 +131,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for ((holder, _, app, index), row) in sends.iter().zip(rows) {
             // The request row holds the record for its send, and no view
             // shows it.
-            let stored = stored_message(OUTGOING, Delivery::Queued, *holder, now_ms, app);
+            let stored = stored_message(
+                OUTGOING,
+                Delivery::Queued,
+                *holder,
+                open.stamp.next(now_ms),
+                app,
+            );
             batch.put(TableId::MESSAGE, row, Some(holder.0), &stored, rng)?;
             batch.put(OUTBOX, row, None, &outbox_row(), rng)?;
             let given = [

@@ -1196,7 +1196,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             super::OUTGOING,
             Delivery::Queued,
             conversation,
-            now_ms,
+            open.stamp.next(now_ms),
             &app,
         );
         let mut batch = open.store.begin();
@@ -2225,7 +2225,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let row = open
             .store
             .row_id(umbra_core::store::record::TableId::MESSAGE, &natural);
-        let plain = stored_message(super::OUTGOING, Delivery::Queued, conversation, now_ms, app);
+        let plain = stored_message(
+            super::OUTGOING,
+            Delivery::Queued,
+            conversation,
+            open.stamp.next(now_ms),
+            app,
+        );
         let mut batch = open.store.begin();
         batch.put(
             umbra_core::store::record::TableId::MESSAGE,
@@ -2465,7 +2471,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             super::OUTGOING,
             Delivery::Accepted,
             conversation,
-            now_ms,
+            open.stamp.next(now_ms),
             &kept,
         );
         let mut batch = open.store.begin();
@@ -4217,7 +4223,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             super::INCOMING,
             Delivery::Delivered,
             conversation,
-            now_ms,
+            open.stamp.next(now_ms),
             &kept,
         );
         let mut batch = open.store.begin();

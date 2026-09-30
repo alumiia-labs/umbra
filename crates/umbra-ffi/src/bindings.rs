@@ -5892,6 +5892,9 @@ impl Handle {
         // Part 7 §7.5.2: the history older than its period leaves, once a
         // day at most.
         let _ = inner.client.sweep_history(now, &mut OsRng);
+        // DEV-031: the floor of the insertion stamp stays across a run that
+        // the platform ends with no lock.
+        let _ = inner.client.keep_stamp(&mut OsRng);
         // IDN-063: each key-change notice of a reset goes at its delay.
         if inner.client.send_due_notices(now, &mut OsRng).unwrap_or(0) > 0 {
             let Inner { client, bridge, .. } = &mut *inner;
