@@ -124,6 +124,7 @@ pub fn admit(
     group_id: [u8; 32],
     index: u16,
     epoch: u32,
+    t_e: u32,
     slot: u32,
     chain: &ChainState,
     credentials: &Credentials,
@@ -137,6 +138,7 @@ pub fn admit(
         stage: InvitationStage::Admit(alloc::boxed::Box::new(InvitationAdmit {
             index,
             epoch,
+            t_e,
             t_join: slot,
             slot_key: *slot_key.expose(),
             // GRP-384: the joiner holds no `K_e`, thus the admit hands it
@@ -185,6 +187,7 @@ pub fn accept_admit(
     let InvitationAdmit {
         index,
         epoch,
+        t_e,
         t_join,
         slot_key,
         read_sk,
@@ -200,10 +203,14 @@ pub fn accept_admit(
     if !roster.member(*index).is_some_and(|m| m.active) {
         return Err(Error::Unverified);
     }
+    // GRP-224: the age of the epoch runs from its start, and the key of the
+    // joiner starts at or after it.
+    if t_join < t_e {
+        return Err(Error::Malformed);
+    }
     let chain = ChainState::from_slot_key(*epoch, *t_join, Secret::new(*slot_key));
     let credentials = Credentials::from_secrets(&Secret::new(*read_sk), &Secret::new(*write_sk));
-    let epoch_state =
-        EpochState::from_chain(chain, *epoch, *t_join, *roster_epoch, credentials, now);
+    let epoch_state = EpochState::from_chain(chain, *epoch, *t_e, *roster_epoch, credentials, now);
     Ok(Admitted {
         roster,
         epoch: epoch_state,
@@ -325,6 +332,7 @@ mod tests {
             group,
             1,
             3,
+            100,
             slot,
             &chain,
             &secret.credentials(),
@@ -362,7 +370,10 @@ mod tests {
         let admitted = accept_admit(&invitation, &snapshot, &add_hash, &creator_pk, 50).unwrap();
         assert_eq!(admitted.index, 1);
         assert_eq!(admitted.epoch.epoch(), 3);
-        assert_eq!(admitted.epoch.start_slot(), slot);
+        // GRP-224: the joiner takes `t_e` of the epoch, and its key starts
+        // at the join slot.
+        assert_eq!(admitted.epoch.start_slot(), 100);
+        assert_eq!(admitted.epoch.chain().slot(), slot);
         assert_eq!(admitted.roster.active_count(), 2);
         // The joiner's chain agrees with the admin's from the join slot on.
         let mut joiner_chain = ChainState::from_slot_key(3, slot, chain.slot_key(slot).unwrap());

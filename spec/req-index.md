@@ -72,16 +72,16 @@ column when a crate implements the requirement and a test covers it.
 | `IDN` | 134 | 46 | 1 | 0 | 5 | **186** |
 | `CRY` | 120 | 27 | 0 | 0 | 1 | **148** |
 | `WIR` | 398 | 85 | 0 | 0 | 7 | **490** |
-| `DEV` | 202 | 90 | 0 | 0 | 8 | **300** |
+| `DEV` | 203 | 90 | 0 | 0 | 8 | **301** |
 | `NTF` | 75 | 28 | 0 | 0 | 3 | **106** |
 | `DIS` | 130 | 35 | 0 | 0 | 3 | **168** |
 | `REL` | 159 | 33 | 1 | 0 | 2 | **195** |
-| `GRP` | 233 | 65 | 0 | 0 | 6 | **304** |
+| `GRP` | 234 | 65 | 0 | 0 | 6 | **305** |
 | `ATT` | 143 | 45 | 2 | 0 | 3 | **193** |
 | `ABU` | 72 | 30 | 1 | 0 | 0 | **103** |
 | `IMP` | 121 | 41 | 0 | 0 | 2 | **164** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2072 | 627 | 7 | 0 | 55 | **2761** |
+| **All** | 2074 | 627 | 7 | 0 | 55 | **2763** |
 
 ## SCP — Scope and Conventions
 
@@ -1240,7 +1240,7 @@ Source: `spec/06-wire-format.md`
 | `WIR-437` | §6.6.3 | MUST | A parser | A parser MUST reject an offer whose `body_len` does not equal 3 905 plus `name_len`. |  |  |
 | `WIR-438` | §6.6.3 | MUST | A parser | A parser MUST reject a `name` that is not valid UTF-8. |  |  |
 | `WIR-439` | §6.6.3 | MUST | A parser | A parser MUST reject a `replica_count` that is not `GROUP_REPLICAS`. |  |  |
-| `WIR-440` | §6.6.3 | MUST | A parser | A parser MUST reject an admit whose `body_len` does not equal 249 plus `desc_len`. |  |  |
+| `WIR-440` | §6.6.3 | MUST | A parser | A parser MUST reject an admit whose `body_len` does not equal 253 plus `desc_len`. |  |  |
 | `WIR-443` | §6.6.3 | MUST | A client | A client MUST send a `JoinRecord` and a `GroupInvitation` on the pairwise channel between the inviting admin and the joiner, and on no other channel. |  |  |
 | `WIR-444` | §6.6.3 | MUST | A receiver | A receiver MUST discard a `JoinRecord` or a `GroupInvitation` that arrives as a group record. |  |  |
 | `WIR-445` | §6.6.3 | MUST | A client | A client MUST send a group control record of type `0x03`, `0x04`, `0x05`, `0x06`, or `0x08` as the `app` of a `GroupQueueRecord`, and on no pairwise channel. |  |  |
@@ -1314,7 +1314,7 @@ Source: `spec/06-wire-format.md`
 | `WIR-518` | §6.4.5 | MUST NOT | (unstated) | A relay MUST verify a `GNEW` under the `own_pk` of its payload, and it MUST NOT accept a `GNEW` under `read_pk` or under `write_pk`. |  |  |
 | `WIR-519` | §6.4.5 | MUST NOT | (unstated) | A relay MUST emit a `GMSG` of an accepted `GPOST` to each session that subscribed, and the relay MUST NOT emit a second `GMSG` for a record whose bytes `WIR-385` matched. |  |  |
 | `WIR-520` | §6.6.3 | MUST | An admit | An admit MUST carry `read_sk_e` and `write_sk_e` of the epoch that it names. |  |  |
-| `WIR-521` | §6.6.3 | MUST | A parser | A parser MUST reject an admit whose `body_len` is not 249 plus `desc_len`. |  |  |
+| `WIR-521` | §6.6.3 | MUST | A parser | A parser MUST reject an admit whose `body_len` is not 253 plus `desc_len`. |  |  |
 | `WIR-522` | §6.4.5 | MUST | It | It MUST replace `own_pk` with the third value, and it MUST keep no previous `own_pk`: a command under the owner key that the `GKEY` replaced is refused at once. |  |  |
 | `WIR-523` | §6.6.11 | MUST | A request of scope `0x02` on a pairwise channel | A request of scope `0x02` on a pairwise channel MUST carry 1 plus the member index of the requester in `index`, and one that another member posts on the group queue for it keeps that value; the tag of a group record names its poster and not the member that lacks the epoch. |  |  |
 | `WIR-524` | §6.2.3 | MUST | A relay | A relay MUST send a `CircuitDestroy` under `NET-322` on the link of each neighbor of a circuit that it ends, with the `circ_id` that the circuit carries on that link. |  |  |
@@ -1638,6 +1638,7 @@ Source: `spec/07-device-sets.md`
 | `DEV-308` | §7.5.1 | MUST | The device that owns the channels | The device that owns the channels MUST publish again, to each of its peers, each `SyncedRecord` and each `MutableItem` that it takes from one peer, the source included, since each peer takes each counter of the publisher (`DEV-055`). |  |  |
 | `DEV-309` | §7.5.3 | MUST | (unstated) | A device that does not hold the group yet, or whose roster does not reach the roster epoch before the re-key, MUST keep the item and apply it again after each group state and each roster object that it takes, for 7 days at the most. |  |  |
 | `DEV-310` | §7.5.3 | MAY | A device | A device MAY forget the winner of a delivery item once it holds more than 65 536 of them, the oldest by `lamport` first, and it keeps the winner of each item of another table. |  |  |
+| `DEV-311` | §7.4 | MUST | The snapshot | The snapshot MUST carry the causal counter of the existing device at the confirmation of `DEV-283`, and the new device MUST start the contiguous point of `DEV-055` for that peer at that counter. |  |  |
 
 ## NTF — Notifications
 
@@ -2439,6 +2440,7 @@ Source: `spec/11-private-groups.md`
 | `GRP-420` | §11.9.4 | MUST | An admin | An admin MUST keep the joiner of each admit that it sent while the add stays the head of its roster, thus an epoch that displaces the add after the admit puts the joiner in the list of joiners again. |  |  |
 | `GRP-421` | §11.9.4 | MUST | A joiner | A joiner MUST take a second admit of the admin that admitted it while its own add is the head of its roster, and the group of that admit MUST take the place of the group that it holds, as an exception to `GRP-153`. |  |  |
 | `GRP-422` | §11.4.1 | MUST | (unstated) | A member that holds a trigger since the `roster_epoch` of its current epoch, and that the trigger does not exclude, MUST rotate before it posts a record other than a roster object. |  |  |
+| `GRP-423` | §11.3.2 | MUST | (unstated) | An admin that joined inside the current epoch, and thus holds no `K_e` under `GRP-384`, MUST derive the key of the admit from its own slot chain, and it MUST hand no slot key before the oldest slot that the chain holds; the window then ends at that slot. |  |  |
 
 ## ATT — Attachments and Large Objects
 

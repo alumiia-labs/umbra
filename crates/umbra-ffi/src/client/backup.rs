@@ -377,6 +377,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 super::UNMETERED_ONLY_SETTING,
                 super::devices::PENDING_PEER_SETTING,
                 super::devices::SYNC_BUNDLE_SETTING,
+                super::devices::LINK_FLOOR_SETTING,
                 RESTORE_STALE_SETTING,
             ];
             return Ok(local
@@ -462,6 +463,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now: u64,
         roster: &[u8],
         sync_bundle: &[u8],
+        sync_floor: u64,
     ) -> Result<Zeroizing<Vec<u8>>, Error> {
         let tables: Vec<TableId> = BACKED_UP
             .into_iter()
@@ -478,7 +480,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         rows.retain(|row| {
             !matches!(row, BackupRow::Put { table, row, .. } if *table == TableId::LOCAL_IDENTITY && *row == code)
         });
-        rows.extend(self.link_rows(roster, sync_bundle)?);
+        rows.extend(self.link_rows(roster, sync_bundle, sync_floor)?);
         let object = BackupObject {
             kind: KIND_FULL,
             written_at: now,

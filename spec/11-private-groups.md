@@ -347,9 +347,12 @@ as Part 5 rule `CRY-120` gives it.
 - **[GRP-222]** A member MUST derive each slot key, the record key, and the
   two queue credentials with the calls above. **[GRP-223]** A member MUST
   compute `t` from the device clock, and Part 1 §1.9 applies to that clock.
-- **[GRP-224]** A member MUST take `t_e` from the epoch-key record.
+- **[GRP-224]** A member MUST take `t_e` from the epoch-key record, and a
+  joiner from the `t_e` field of its admit (Part 6 §6.6.3).
   **[GRP-225]** A member MUST NOT compute `t_e` from the arrival time of that
-  record.
+  record, and a joiner MUST NOT take its `t_join` for `t_e`: the age of
+  `GRP-360` runs from `t_e`, and a joiner that counts it from `t_join`
+  refuses a rotation of the aged epoch.
 
 **The chain is one-way.** A party that holds `K_{e,t}` derives every later slot
 key of epoch `e` and no earlier one. Thus a joiner that receives
@@ -410,9 +413,16 @@ open the records before the join.
   **[GRP-232]** Inside that grace a receiver MUST accept a record of epoch `e`
   only from a member that its current roster holds.
 
-Thus a seized device opens at most the last 24 h of retained records of the
-current epoch, plus the records of the previous epoch inside the grace. This is
-the forward secrecy of a group, and Part 15 §15.3 records what a seized device
+A member that installed the epoch from its epoch-key record holds `K_e` for
+the life of the epoch: the one-slot record of `GRP-375`, the credentials of
+`GRP-386`, and the two-rotator rule of §11.4.1 each need it. Thus a seized
+device of such a member opens each retained record of the current epoch from
+`t_e`, which is at most `GROUP_EPOCH_MAX_AGE`, plus the records of the
+previous epoch inside the grace. A member that joined inside the epoch holds
+the chain from its `t_join` alone, and a seized device of it opens the
+retained records from that slot. The rotation of `GRP-360` bounds the
+exposure, and a removal or a `RekeyRecord` ends it at once. This is the
+forward secrecy of a group, and Part 15 §15.3 records what a seized device
 plus the retained ciphertext of a replica gives.
 
 **The history window.** `HISTORY_WINDOW` is 0 by default and 7 days at most.
@@ -422,7 +432,10 @@ the joiner `K_{e,t_join − W}` in the admit stage of §11.9.1 in the place of
 `K_{e,t_join}`. **[GRP-234]** If that window crosses an epoch boundary, the
 admin MUST hand the slot key at the start of the current epoch and no key of
 an earlier epoch. The joiner then reads the retained records of that window
-from a replica.
+from a replica. **[GRP-423]** An admin that joined inside the current epoch,
+and thus holds no `K_e` under `GRP-384`, MUST derive the key of the admit
+from its own slot chain, and it MUST hand no slot key before the oldest slot
+that the chain holds; the window then ends at that slot.
 
 > *Cause.* Draft 0.1.0 held three sender-key generations for each member on a
 > device for 7 days, and a seized device opened every record of every member
@@ -1226,7 +1239,7 @@ other member is needed or created. Part 6 §6.6.3 gives the layouts of
    from each replica before step 4.
 4. **[GRP-312]** The admin MUST then send a `GroupInvitation` of stage `0x02`
    (an admit) on the pairwise channel. It carries `group_id`, the `index`, the
-   epoch `e`, `t_join`, `K_{e,t_join}` (or the history-window key of §11.3.2),
+   epoch `e`, its `t_e`, `t_join`, `K_{e,t_join}` (or the history-window key of §11.3.2),
    `read_sk_e` and `write_sk_e` (`GRP-384`), the `roster_epoch` of the add,
    and for each replica the `relay_id`, the
    `GroupQueueId`, and the `seq` of the add at that replica, and a

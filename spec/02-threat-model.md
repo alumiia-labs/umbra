@@ -318,7 +318,7 @@ adds a trade MUST add a row to this table.
 | A short `SYNC_MAX_AGE` makes a device reject each older sibling record, thus that device converges on a short window only | Part 7 §7.5.2 |
 | The sending device carries the convergence, thus a lost source device with no peer copy loses that range | Part 7 §7.5.3 |
 | An edit window of 24 hours lets a sender change a delivered message, and the recipient keeps no earlier text | Part 7 §7.5.6 |
-| A device keeps the slot key of the last `GROUP_SLOT_WINDOW` hours of the current group epoch, thus a seized device opens 24 h of the retained records of that group | Part 11 §11.3.2 |
+| A member keeps `K_e` for the life of the current group epoch, thus a seized device opens the retained records of that epoch from its start, at most `GROUP_EPOCH_MAX_AGE` | Part 11 §11.3.2 |
 | A granting epoch is a signed and transferable statement, thus G10 does not cover the group administration | Part 11 §11.9.5 |
 | A moderator removal in a private group destroys a record on the device of each member | Part 11 §11.9.6 |
 | Each queue relay holds its own session, thus each push wake pays one transport handshake for each queue relay. That row is 42 % of the idle background, and U4 moves from 25 MB to 100 MB each month | Part 3 §3.12 |

@@ -607,6 +607,8 @@ pub struct InvitationAdmit<'a> {
     pub index: u16,
     /// The group epoch at the admit.
     pub epoch: u32,
+    /// `t_e`, the start slot of that epoch, from which its age runs.
+    pub t_e: u32,
     /// The slot at which the key of the joiner starts.
     pub t_join: u32,
     /// `K_{e,t_join}`, or the history-window key.
@@ -625,7 +627,7 @@ pub struct InvitationAdmit<'a> {
 }
 
 /// The fixed part of an admit body, before the descriptor (`WIR-521`).
-pub const ADMIT_FIXED: usize = 249;
+pub const ADMIT_FIXED: usize = 253;
 
 /// A `GroupInvitation`, control type `0x07`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -665,6 +667,7 @@ impl<'a> GroupInvitation<'a> {
                 let InvitationAdmit {
                     index,
                     epoch,
+                    t_e,
                     t_join,
                     slot_key,
                     read_sk,
@@ -679,6 +682,7 @@ impl<'a> GroupInvitation<'a> {
                 )?;
                 w.u16(*index)?;
                 w.u32(*epoch)?;
+                w.u32(*t_e)?;
                 w.u32(*t_join)?;
                 w.put(slot_key)?;
                 w.put(read_sk)?;
@@ -725,6 +729,7 @@ impl<'a> GroupInvitation<'a> {
             0x02 => {
                 let index = b.u16()?;
                 let epoch = b.u32()?;
+                let t_e = b.u32()?;
                 let t_join = b.u32()?;
                 let slot_key = b.array()?;
                 let read_sk = b.array()?;
@@ -752,6 +757,7 @@ impl<'a> GroupInvitation<'a> {
                 InvitationStage::Admit(Box::new(InvitationAdmit {
                     index,
                     epoch,
+                    t_e,
                     t_join,
                     slot_key,
                     read_sk,
@@ -1243,6 +1249,7 @@ mod tests {
             stage: InvitationStage::Admit(Box::new(InvitationAdmit {
                 index: 4,
                 epoch: 2,
+                t_e: 496_900,
                 t_join: 497_000,
                 slot_key: [5; 32],
                 read_sk: [8; 32],
@@ -1259,7 +1266,7 @@ mod tests {
         assert!(GroupInvitation::parse(&out[..n]).is_err());
         out[33] = 0x02;
         // The replica count byte sits after the three keys.
-        out[36 + 110] = 3;
+        out[36 + 114] = 3;
         assert!(GroupInvitation::parse(&out[..n]).is_err());
     }
 

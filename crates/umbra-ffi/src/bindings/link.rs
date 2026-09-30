@@ -151,6 +151,9 @@ struct Offer {
     offer_relays: Vec<[u8; 32]>,
     hello: Option<(LinkHello, LinkSecret)>,
     roster: Option<Vec<u8>>,
+    /// The causal counter of this device at the confirmation: each record
+    /// after it waits for the new device (`DEV-297`, `DEV-311`).
+    sync_floor: u64,
     snapshot: Option<Box<Uploaded>>,
     provision_relays: Vec<[u8; 32]>,
     provisioned_at: u64,
@@ -617,6 +620,7 @@ impl Inner {
         let (hello, _) = offer.hello.as_ref().ok_or(FfiError::NotFound)?;
         let running = bridge.as_ref().ok_or(FfiError::Offline)?;
         offer.roster = Some(client.sign_linked_device(hello, &mut OsRng)?);
+        offer.sync_floor = client.sync_counter()?;
         client.set_pending_peer(hello.device_id, &hello.label, &mut OsRng)?;
         running.invite_device()?;
         *status = LinkStatus::Sending;
@@ -637,7 +641,10 @@ impl Inner {
         let Some(roster) = &offer.roster else {
             return;
         };
-        let plain = match self.client.link_snapshot(unix_now(), roster, bundle) {
+        let plain = match self
+            .client
+            .link_snapshot(unix_now(), roster, bundle, offer.sync_floor)
+        {
             Ok(plain) => plain,
             Err(_) => {
                 self.end_link(LinkStatus::Failed);
@@ -869,6 +876,7 @@ impl Handle {
             offer_relays: Vec::new(),
             hello: None,
             roster: None,
+            sync_floor: 0,
             snapshot: None,
             provision_relays: Vec::new(),
             provisioned_at: 0,

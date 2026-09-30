@@ -483,7 +483,12 @@ Provision {                      // sealed under the seal key, XChaCha20-Poly130
   roster of epoch *n+1*, the bundle of the sync invitation, and the
   `device_id` and the label of the existing device as the peer of that
   channel. It MUST NOT carry a record that waits to go, since the sender of
-  that record is the existing device. **[DEV-295]** It MUST NOT carry the
+  that record is the existing device. **[DEV-311]** The snapshot MUST carry
+  the causal counter of the existing device at the confirmation of
+  `DEV-283`, and the new device MUST start the contiguous point of `DEV-055`
+  for that peer at that counter. Each record after it waits for the new
+  device under `DEV-297`, and a second link otherwise leaves a hole of each
+  earlier record. **[DEV-295]** It MUST NOT carry the
   recovery code of Part 4 §4.7.1. That code opens each later backup, thus a
   device that the user removes under §7.7 would read the history that
   follows its removal. The device that owns the channels writes the backups

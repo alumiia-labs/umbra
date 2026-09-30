@@ -182,6 +182,21 @@ impl SyncEngine {
         Ok(())
     }
 
+    /// Each record of `peer` at or below `counter` came by another path, as
+    /// the snapshot of a link (`DEV-311`), thus the peer resends none of
+    /// them and the next one names no hole.
+    pub fn start_peer_at(&mut self, peer: &DeviceId, counter: u64) {
+        if let Some(held) = self.peers.get_mut(peer) {
+            if counter > held.contiguous {
+                held.contiguous = counter;
+                held.ahead.retain(|ahead| *ahead > counter);
+                while held.ahead.remove(&held.contiguous.saturating_add(1)) {
+                    held.contiguous = held.contiguous.saturating_add(1);
+                }
+            }
+        }
+    }
+
     /// A device left the roster. Its retained records leave with it.
     pub fn remove_peer(&mut self, peer: &DeviceId) {
         self.peers.remove(peer);
@@ -726,6 +741,29 @@ mod tests {
             SyncEngine::new(PHONE, &[LAPTOP, TABLET]).unwrap(),
             SyncEngine::new(LAPTOP, &[PHONE, TABLET]).unwrap(),
         )
+    }
+
+    #[test]
+    fn a_second_link_starts_at_the_counter_of_its_snapshot() {
+        // DEV-311: the phone published two records before the laptop
+        // linked, and the snapshot holds them; the third names no hole.
+        let (mut phone, _) = pair();
+        for tag in 1..=2 {
+            phone
+                .publish(&message(AppKind::Text, tag), ORIGIN, [tag; 16], 0, 5)
+                .unwrap();
+        }
+        let third = phone
+            .publish(&message(AppKind::Text, 3), ORIGIN, [3; 16], 0, 6)
+            .unwrap();
+        let mut late = SyncEngine::new(LAPTOP, &[PHONE]).unwrap();
+        late.start_peer_at(&PHONE, 2);
+        late.receive(&PHONE, &third.body, 7).unwrap();
+        assert_eq!(late.missing(&PHONE), None);
+        // With no start point, the two earlier records are a hole.
+        let mut blind = SyncEngine::new(LAPTOP, &[PHONE]).unwrap();
+        blind.receive(&PHONE, &third.body, 7).unwrap();
+        assert_eq!(blind.missing(&PHONE), Some((1, 2)));
     }
 
     #[test]

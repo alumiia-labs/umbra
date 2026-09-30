@@ -746,7 +746,14 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                 ) {
                     // The words stay for the time of the exit.
                     val header = remember { mutableStateOf("reply" to "") }
-                    answered?.let { header.value = "reply" to if (it.info.outgoing) "You" else chat.title }
+                    // A reply in a group names the member who wrote the message.
+                    answered?.let {
+                        header.value = "reply" to when {
+                            it.info.outgoing -> "You"
+                            chat.isGroup -> it.info.sender?.let { sender -> memberNames[sender] ?: "Member $sender" } ?: chat.title
+                            else -> chat.title
+                        }
+                    }
                     if (edited != null) header.value = "pen" to "Edit message"
                     ComposerHeader(header.value.first, header.value.second) {
                         if (edited != null) composer.clear()

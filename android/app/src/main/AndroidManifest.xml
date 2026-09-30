@@ -26,10 +26,13 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.Umbra"
         tools:replace="android:allowBackup">
+        <!-- A turn or a resize keeps the activity, thus the open views stay,
+             and no view state goes to a bundle outside the store. -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTask"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

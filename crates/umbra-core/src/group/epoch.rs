@@ -117,6 +117,17 @@ impl EpochState {
         &self.secret
     }
 
+    /// Whether this state holds `K_e`: a member that joined inside the
+    /// epoch holds its chain alone (`GRP-384`).
+    pub fn holds_secret(&self) -> bool {
+        self.secret.expose().expose() != &[0; 32]
+    }
+
+    /// The chain at the oldest slot that this state holds.
+    pub const fn chain(&self) -> &ChainState {
+        &self.chain
+    }
+
     /// The queue credentials of the epoch.
     pub const fn credentials(&self) -> &Credentials {
         &self.credentials

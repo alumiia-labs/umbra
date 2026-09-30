@@ -184,7 +184,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
         let store = &self.open_ref()?.store;
         let row = store.row_id(SYNC_STATE, ENGINE_KEY);
-        let mut engine = match store.get(SYNC_STATE, &row)? {
+        let stored = store.get(SYNC_STATE, &row)?;
+        let is_fresh = stored.is_none();
+        let mut engine = match stored {
             Some(bytes) => SyncEngine::restore(&Zeroizing::new(bytes))?,
             // DEV-019: a restored store takes the watermarks of its backup.
             None => {
@@ -206,7 +208,31 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for device in others {
             engine.add_peer(device)?;
         }
+        // DEV-311: a new device takes the records of its link from the
+        // snapshot, and the counter of the existing device starts there.
+        if is_fresh {
+            if let Some(floor) = self.setting(super::devices::LINK_FLOOR_SETTING)? {
+                let device = floor.get(..16).and_then(|id| <[u8; 16]>::try_from(id).ok());
+                let counter = floor
+                    .get(16..24)
+                    .and_then(|bytes| bytes.try_into().ok())
+                    .map(u64::from_be_bytes);
+                if let (Some(device), Some(counter)) = (device, counter) {
+                    engine.start_peer_at(&device, counter);
+                }
+            }
+        }
         Ok(Some(engine))
+    }
+
+    /// The causal counter of this device, or 0 before its first record.
+    pub fn sync_counter(&self) -> Result<u64, Error> {
+        let store = &self.open_ref()?.store;
+        let row = store.row_id(SYNC_STATE, ENGINE_KEY);
+        Ok(match store.get(SYNC_STATE, &row)? {
+            Some(bytes) => SyncEngine::restore(&Zeroizing::new(bytes))?.counter(),
+            None => 0,
+        })
     }
 
     pub(super) fn put_engine<R: CryptoRng + ?Sized>(

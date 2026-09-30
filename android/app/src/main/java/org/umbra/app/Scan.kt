@@ -44,6 +44,7 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -181,6 +182,17 @@ private fun CameraFrames(onText: (String) -> Unit) {
         }
     }
     var isStreaming by remember { mutableStateOf(false) }
+    // The activity keeps a turn of the device, thus the camera takes the
+    // new rotation of the display here.
+    var bound by remember { mutableStateOf<Pair<Preview, ImageAnalysis>?>(null) }
+    val orientation = LocalConfiguration.current.orientation
+    LaunchedEffect(orientation, bound) {
+        val rotation = preview.display?.rotation ?: return@LaunchedEffect
+        bound?.let { (picture, frames) ->
+            picture.targetRotation = rotation
+            frames.targetRotation = rotation
+        }
+    }
     DisposableEffect(owner) {
         val main = Handler(Looper.getMainLooper())
         val isFound = AtomicBoolean(false)
@@ -201,6 +213,7 @@ private fun CameraFrames(onText: (String) -> Unit) {
             val provider = providers.get()
             provider.unbindAll()
             provider.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, picture, frames)
+            bound = picture to frames
         }, ContextCompat.getMainExecutor(context))
         val watcher = Observer<PreviewView.StreamState> { isStreaming = it == PreviewView.StreamState.STREAMING }
         preview.previewStreamState.observe(owner, watcher)

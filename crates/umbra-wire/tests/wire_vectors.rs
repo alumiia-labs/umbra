@@ -679,6 +679,7 @@ fn group_controls() -> Value {
         stage: InvitationStage::Admit(Box::new(InvitationAdmit {
             index: 4,
             epoch: 1,
+            t_e: 496_900,
             t_join: 497_000,
             slot_key: [0x89; 32],
             read_sk: [0x8d; 32],

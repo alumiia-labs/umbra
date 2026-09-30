@@ -45,6 +45,9 @@ const ROSTER_KEY: &[u8] = b"roster";
 /// that channel at a linked device.
 pub(super) const PENDING_PEER_SETTING: &[u8] = b"device-pending-peer";
 pub(super) const SYNC_BUNDLE_SETTING: &[u8] = b"device-sync-bundle";
+/// The existing device of a link and its causal counter at the snapshot
+/// (`DEV-311`).
+pub(super) const LINK_FLOOR_SETTING: &[u8] = b"device-link-floor";
 
 /// One device of the set, as a view shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -503,6 +506,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         &self,
         roster: &[u8],
         sync_bundle: &[u8],
+        sync_floor: u64,
     ) -> Result<Vec<BackupRow>, Error> {
         let identity = self.device_identity()?.ok_or(Error::NotFound)?;
         // The head of this device is the parent of the epoch that adds the
@@ -520,7 +524,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             plain: Zeroizing::new(plain),
         };
         let peer = [identity.device_id.as_slice(), &identity.label].concat();
+        // DEV-311: the counter at the confirmation; each record after it
+        // waits for the new device under DEV-297, and the snapshot holds
+        // the state of each one at or below it.
+        let floor = [identity.device_id.as_slice(), &sync_floor.to_be_bytes()].concat();
         let mut rows = vec![
+            put(SETTINGS, LINK_FLOOR_SETTING, floor),
             put(DEVICE_ROSTER, ROSTER_KEY, roster.to_vec()),
             put(
                 ROSTER_HASHES,

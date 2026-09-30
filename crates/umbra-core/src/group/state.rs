@@ -1703,17 +1703,28 @@ impl Group {
             *replicas.reference(1).ok_or(Error::NoPath)?,
         ];
         let slot = admit_slot(slot_of(now), current.start_slot(), history_window_seconds);
-        let chain = current.secret().start(
-            self.roster.group_id(),
-            current.epoch(),
-            current.start_slot(),
-        );
+        // GRP-423: an admin that joined inside the epoch holds no `K_e`,
+        // thus it derives from its own chain, and the history window ends
+        // at the oldest slot of that chain.
+        let started;
+        let (chain, slot) = if current.holds_secret() {
+            started = current.secret().start(
+                self.roster.group_id(),
+                current.epoch(),
+                current.start_slot(),
+            );
+            (&started, slot)
+        } else {
+            let chain = current.chain();
+            (chain, slot.max(chain.slot()))
+        };
         admit(
             *self.roster.group_id(),
             index,
             current.epoch(),
+            current.start_slot(),
             slot,
-            &chain,
+            chain,
             current.credentials(),
             roster_epoch,
             refs,
@@ -1783,9 +1794,14 @@ mod tests {
 
     /// The creator and one member that its add and its admit placed.
     fn pair(now: u64) -> (Group, Group, Vec<u8>) {
+        pair_at(now, now)
+    }
+
+    /// A group made at `created` that a member joins at `now`.
+    fn pair_at(created: u64, now: u64) -> (Group, Group, Vec<u8>) {
         let mut rng = Rng(9);
         let creator_seed = Secret::new([0x21; 32]);
-        let mut creator = Group::create([0x55; 32], &creator_seed, now, &mut rng).unwrap();
+        let mut creator = Group::create([0x55; 32], &creator_seed, created, &mut rng).unwrap();
         creator.set_replicas([
             ReplicaRef {
                 relay_id: [1; 32],
@@ -1995,6 +2011,55 @@ mod tests {
                 .unwrap();
         let third = Group::joined(admitted, &THIRD_SEED).unwrap();
         (creator, member, third)
+    }
+
+    #[test]
+    fn an_admin_that_joined_inside_the_epoch_admits_a_member_that_reads() {
+        // GRP-423: the member of index 1 joined inside the epoch and holds
+        // no `K_e`; its admit comes from its own chain, and the third member
+        // reads the records of the creator after it.
+        // The member joins two days into the epoch, thus its chain starts
+        // after `t_e`, and the history window stops at its join.
+        let created = 1_700_000_000;
+        let now = created + 2 * 86_400;
+        let (mut creator, mut member, _) = pair_at(created, now);
+        let later = now + 3 * crate::group::GROUP_SLOT;
+        const THIRD_SEED: Secret<32> = Secret::new([0x34; 32]);
+        let keys = JoinKeys {
+            seed: THIRD_SEED,
+            keys: MemberKeys::from_seed(&THIRD_SEED),
+        };
+        let kem_pk = keys.keys.kem().public().to_bytes();
+        let record = JoinRecord {
+            group_id: *creator.group_id(),
+            keys: keys.wire_keys(&kem_pk),
+        };
+        let add = creator.add_object(&record).unwrap();
+        let control = GroupControl::parse(&add).unwrap();
+        let add_hash = control.epoch_hash();
+        creator.apply_control(&control, 0, later).unwrap();
+        member.apply_control(&control, 0, later).unwrap();
+        // A history window reaches no slot before the chain of the member.
+        let admit_bytes = member.admit_for(2, 7 * 86_400, b"", later).unwrap();
+        let invitation = umbra_wire::group::control::GroupInvitation::parse(
+            GroupControl::parse(&admit_bytes).unwrap().payload,
+        )
+        .unwrap();
+        let snapshot_bytes = creator.snapshot(&[]).unwrap();
+        let snapshot = RosterSnapshot::parse(&snapshot_bytes).unwrap();
+        let creator_pk = creator.keys.roster().verifying_key().to_bytes();
+        let admitted =
+            crate::group::join::accept_admit(&invitation, &snapshot, &add_hash, &creator_pk, later)
+                .unwrap();
+        let mut third = Group::joined(admitted, &THIRD_SEED).unwrap();
+        let mut rng = Rng(43);
+        let post = creator
+            .post(&text("after the admit"), later, &mut rng)
+            .unwrap();
+        let Outcome::Content { sender, .. } = third.receive(&post, later).unwrap() else {
+            panic!("the third member did not read the record");
+        };
+        assert_eq!(sender, 0);
     }
 
     /// The inline epoch-key record of a rotation.
@@ -2529,6 +2594,23 @@ mod tests {
         );
         // The backoff of a role holder is shorter than that of a member.
         assert!(creator.rotation_delay(&mut Rng(3)) <= member.rotation_delay(&mut Rng(3)));
+    }
+
+    #[test]
+    fn a_late_joiner_takes_the_rotation_of_the_aged_epoch() {
+        // GRP-224, GRP-360: the member joins 20 days into the epoch; the
+        // age runs from `t_e`, thus the rotation at 30 days installs.
+        let created = 1_700_000_000;
+        let joined = created + 20 * 86_400;
+        let (mut creator, mut member, _) = pair_at(created, joined);
+        let aged = created + crate::group::GROUP_EPOCH_MAX_AGE;
+        assert!(member.owes_rotation(aged).is_some());
+        let rotation = creator.rotate(aged, &mut Rng(29)).unwrap();
+        let record = parse_record(inline(&rotation));
+        member
+            .install_epoch_key(record.epoch, record.slot, record.body, aged)
+            .unwrap();
+        assert_eq!(member.epoch(), rotation.epoch);
     }
 
     #[test]

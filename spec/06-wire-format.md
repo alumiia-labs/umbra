@@ -1779,9 +1779,10 @@ InvitationOffer {                 // 3 905 bytes and the name
     creator_roster_pk [1952]u8    // GroupRosterKey_g.pk of the creator
 }
 
-InvitationAdmit {                 // 249 bytes and the descriptor
+InvitationAdmit {                 // 253 bytes and the descriptor
     index             u16         // the member index that the admin gave the joiner
     epoch             u32         // the group epoch e at the admit
+    t_e               u32         // the start slot of epoch e, from its epoch-key record
     t_join            u32         // the slot index at which the key of the joiner starts
     slot_key          [32]u8      // K_{e,t_join}, or the history-window key of Part 11 §11.3.1
     read_sk           [32]u8      // read_sk_e of Part 11 §11.3.1
@@ -1802,7 +1803,7 @@ ReplicaRef {                      // 68 bytes
 
 - **[WIR-520]** An admit MUST carry `read_sk_e` and `write_sk_e` of the
   epoch that it names. **[WIR-521]** A parser MUST reject an admit whose
-  `body_len` is not 249 plus `desc_len`. The two credentials come from `K_e`
+  `body_len` is not 253 plus `desc_len`. The two credentials come from `K_e`
   under Part 11 §11.3.1, and the admit hands the joiner `K_{e,t_join}` and
   never `K_e`, because `K_e` opens each slot of the epoch from its start. A
   joiner therefore derives no credential, and without them it authorizes no
@@ -1895,9 +1896,9 @@ every current role holder, concatenated, as `GRP-068` keeps it.
 
 A `JoinRecord` is 1 345 bytes as an `AppMessage`, thus it uses bucket `B1`.
 An offer is 3 973 bytes and the name as an `AppMessage`, thus it uses bucket
-`B2`. An admit is 574 bytes as an `AppMessage` at 3 members (a one-segment
+`B2`. An admit is 578 bytes as an `AppMessage` at 3 members (a one-segment
 descriptor of 257 bytes), thus it uses bucket `B1`; at `GROUP_MAX` the
-descriptor of a 21-segment snapshot is 2 657 bytes, the admit is 2 974
+descriptor of a 21-segment snapshot is 2 657 bytes, the admit is 2 978
 bytes, and it uses bucket `B2`. A granting epoch carries an ML-DSA-65
 signature of 3 309 bytes and a roster public key of 1 952 bytes, thus a path
 at `ROLE_HOLDER_MAX` is about 86 KB and fits no cell. The authority path
@@ -1911,7 +1912,7 @@ therefore travels in the `RosterSnapshot` in every case, under Part 11
   that is not valid UTF-8.
 - **[WIR-439]** A parser MUST reject a `replica_count` that is not
   `GROUP_REPLICAS`. **[WIR-440]** A parser MUST reject an admit whose
-  `body_len` does not equal 249 plus `desc_len`.
+  `body_len` does not equal 253 plus `desc_len`.
 - **[WIR-474]** A parser MUST reject an admit that carries a granting epoch.
   The `RosterSnapshot` below carries the authority path.
 - **[WIR-443]** A client MUST send a `JoinRecord` and a `GroupInvitation` on
