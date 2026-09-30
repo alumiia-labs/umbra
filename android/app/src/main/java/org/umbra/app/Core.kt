@@ -1127,6 +1127,13 @@ object Core {
                 revision++
                 refreshChats()
             }
+            // DEV-114: an edit or a deletion of this device reached no relay.
+            is FfiEvent.ChangeFailed -> {
+                fault = UiText.get(
+                    if (event.isDelete) R.string.umbra_ui_dev_114 else R.string.umbra_ui_dev_114_edit,
+                )
+                revision++
+            }
             is FfiEvent.Deleted -> {
                 revision++
                 refreshChats()

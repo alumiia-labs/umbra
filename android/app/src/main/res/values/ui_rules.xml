@@ -23,6 +23,9 @@
     <string name="umbra_ui_net_103">Some messages did not arrive.</string>
     <string name="umbra_ui_rel_116">The clock of this device differs from the network time by more than one hour.</string>
     <string name="umbra_ui_rel_126">The relay directory is provisional.</string>
+    <string name="umbra_ui_net_343">one operator</string>
+    <string name="umbra_ui_dev_114_edit">The edit reached no relay.</string>
+    <string name="umbra_ui_dev_114">The deletion reached no relay.</string>
     <string name="umbra_ui_imp_082">This contact has not collected messages for a while.</string>
     <string name="umbra_ui_grp_050">You removed %1$s after 30 days of silence</string>
     <string name="umbra_ui_grp_087">This deletes the message on the device of each member. You cannot undo this. Each member sees that you removed a message.</string>

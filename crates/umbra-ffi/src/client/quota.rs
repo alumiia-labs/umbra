@@ -7,6 +7,7 @@
 //! next `QUOTA` of the relay states it again.
 
 use umbra_core::store::{engine::Backend, record::TableId, wrap::SecureElement};
+use umbra_crypto::rand_core::CryptoRng;
 use zeroize::Zeroizing;
 
 use super::{conversation_of, info_of, Client, Outgoing, MESSAGE_PREFIX, OUTBOX};
@@ -55,11 +56,33 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
     /// A relay refused a record of `message` with `LIMIT`: the queue of the
     /// contact is full, and the record stays `queued` (`IMP-082`).
-    pub fn hold_for_room(&mut self, message: &MsgRef, now: u64) -> Result<(), Error> {
+    pub fn hold_for_room<R: CryptoRng + ?Sized>(
+        &mut self,
+        message: &MsgRef,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
         let conversation = self.conversation_of_message(message)?;
+        // DEV-113, DEV-114: an edit and a deletion take no retry that the
+        // quota paces, and the user sees the failure.
+        if self.is_change(message)? {
+            self.set_full(conversation, true);
+            return self.set_delivery(message, Delivery::Failed, rng);
+        }
         self.set_full(conversation, true);
         self.held_sends.insert(*message, (conversation, now));
         Ok(())
+    }
+
+    /// Whether a stored record is an edit or a deletion request of this
+    /// device.
+    fn is_change(&self, message: &MsgRef) -> Result<bool, Error> {
+        let store = &self.open_ref()?.store;
+        let Some(plain) = store.get(TableId::MESSAGE, &message.0)? else {
+            return Ok(false);
+        };
+        let plain = Zeroizing::new(plain);
+        Ok(super::change_kind(&plain)?.is_some())
     }
 
     /// Hands each held record past `HOLD_RETRY` to the send path again. The

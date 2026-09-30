@@ -3278,6 +3278,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             message: *message,
             delivery,
         });
+        // DEV-114: the user sees an edit or a deletion that reached no relay.
+        if delivery == Delivery::Failed {
+            if let Some(is_delete) = change_kind(&plain)? {
+                self.events.push_back(Event::ChangeFailed {
+                    conversation,
+                    is_delete,
+                });
+            }
+        }
         // DEV-304: a message that no relay took ends on each device.
         if delivery == Delivery::Failed {
             self.publish_delivery(&message.0, delivery, rng)?;
@@ -3593,6 +3602,17 @@ fn is_request(plain: &[u8]) -> Result<bool, Error> {
             | AppKind::GroupControl
             | AppKind::KeyRequest
     ) || tombstone_of(&parsed)? == Some(Tombstone::Request))
+}
+
+/// Whether a stored record is an edit (`false`) or a deletion request
+/// (`true`) of this device, or none for another record.
+fn change_kind(plain: &[u8]) -> Result<Option<bool>, Error> {
+    let app = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
+    let parsed = AppMessage::parse(app, Channel::Pairwise)?;
+    if parsed.kind == AppKind::Edit {
+        return Ok(Some(false));
+    }
+    Ok((tombstone_of(&parsed)? == Some(Tombstone::Request)).then_some(true))
 }
 
 fn conversation_of(plain: &[u8]) -> Result<ConversationId, Error> {

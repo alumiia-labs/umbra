@@ -442,7 +442,7 @@ impl Bridge {
             // IMP-082: the record stays queued while the queue is full.
             Update::Held(tag) => {
                 if let Some(message) = self.sent.remove(&tag) {
-                    client.hold_for_room(&message, now_ms / 1_000)?;
+                    client.hold_for_room(&message, now_ms / 1_000, rng)?;
                 }
                 None
             }

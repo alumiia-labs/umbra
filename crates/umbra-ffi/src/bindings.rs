@@ -1118,6 +1118,13 @@ pub enum FfiEvent {
         /// The conversation.
         conversation: Vec<u8>,
     },
+    /// An edit or a deletion of this device reached no relay (`DEV-114`).
+    ChangeFailed {
+        /// The conversation.
+        conversation: Vec<u8>,
+        /// Whether the change was a deletion.
+        is_delete: bool,
+    },
     /// The contact deleted a message of a conversation, and a placeholder
     /// stands in its place.
     Deleted {
@@ -3108,6 +3115,13 @@ impl Inner {
                 },
                 Event::Edited { conversation, .. } => FfiEvent::Edited {
                     conversation: conversation.0.to_vec(),
+                },
+                Event::ChangeFailed {
+                    conversation,
+                    is_delete,
+                } => FfiEvent::ChangeFailed {
+                    conversation: conversation.0.to_vec(),
+                    is_delete,
                 },
                 Event::Deleted { conversation, .. } => FfiEvent::Deleted {
                     conversation: conversation.0.to_vec(),

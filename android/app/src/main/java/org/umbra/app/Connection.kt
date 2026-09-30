@@ -135,7 +135,8 @@ fun ConnectionScreen(onBack: () -> Unit) {
                 // NET-343: a chain of one operator under a provisional directory.
                 val shared = connection?.oneOperator?.getOrNull(index) == true
                 val path = hops.joinToString(" → ") { it.country }
-                FactRow("route", "Circuit ${index + 1}", if (shared) "$path · one operator" else path)
+                val oneOperator = UiText.get(R.string.umbra_ui_net_343)
+                FactRow("route", "Circuit ${index + 1}", if (shared) "$path · $oneOperator" else path)
                 HorizontalDivider(color = Palette.Divider)
             }
             val epoch = connection?.directoryEpoch?.toLong() ?: 0L

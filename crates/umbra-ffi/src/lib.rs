@@ -272,6 +272,13 @@ pub enum Event {
         /// The message.
         message: MsgRef,
     },
+    /// An edit or a deletion of this device reached no relay (`DEV-114`).
+    ChangeFailed {
+        /// The conversation.
+        conversation: ConversationId,
+        /// Whether the change was a deletion.
+        is_delete: bool,
+    },
     /// The state of the file of a message changed: the relays hold it, the
     /// store holds it, or its transfer failed.
     File {
@@ -4002,7 +4009,7 @@ mod tests {
         while alice.next_event().is_some() {}
 
         // NET-016: the relay refused the record, and the queue is full.
-        alice.hold_for_room(&message, 2_000).unwrap();
+        alice.hold_for_room(&message, 2_000, &mut rng).unwrap();
         assert!(alice.queue_full(conversation));
         assert_eq!(alice.next_event(), Some(Event::Conversations));
         // IMP-082: the record stays queued.
@@ -4014,6 +4021,29 @@ mod tests {
         // A QUOTA with room ends the state.
         alice.queue_room(&message, 5).unwrap();
         assert!(!alice.queue_full(conversation));
+
+        // DEV-113, DEV-114: an edit that a full queue refused takes no
+        // retry, and the user sees that it reached no relay.
+        alice
+            .set_delivery(&message, Delivery::Accepted, &mut rng)
+            .unwrap();
+        while alice.next_event().is_some() {}
+        let mut draft = alice.new_draft(conversation);
+        draft.set_text(&units("changed")).unwrap();
+        alice.edit(&message, draft, 1_002_000, &mut rng).unwrap();
+        let edit = alice.take_outgoing().unwrap().message;
+        while alice.next_event().is_some() {}
+        alice.hold_for_room(&edit, 3_000, &mut rng).unwrap();
+        let mut events = Vec::new();
+        while let Some(event) = alice.next_event() {
+            events.push(event);
+        }
+        assert!(events.contains(&Event::ChangeFailed {
+            conversation,
+            is_delete: false,
+        }));
+        assert!(!alice.resend_held(3_000 + HOLD_RETRY).unwrap());
+        assert!(alice.take_outgoing().is_none());
     }
 
     #[test]
