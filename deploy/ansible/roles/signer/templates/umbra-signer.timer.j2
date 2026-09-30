@@ -1,0 +1,10 @@
+[Unit]
+Description=UMBRA directory signer, each hour (a root lives three hours)
+
+[Timer]
+OnBootSec=1min
+OnCalendar=*:02
+Persistent=true
+
+[Install]
+WantedBy=timers.target

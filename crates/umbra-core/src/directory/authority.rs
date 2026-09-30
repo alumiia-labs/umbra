@@ -40,6 +40,12 @@ pub enum Admission {
         /// Its epoch.
         epoch: u64,
     },
+    /// The authority of a provisional directory places the relay of its own
+    /// operator in `layer`, 2 or 3 (`REL-198`).
+    Fixed {
+        /// The layer.
+        layer: u8,
+    },
 }
 
 /// What an authority verified of one relay.
@@ -85,6 +91,14 @@ pub fn entry_of(listing: &Listing<'_>, admission: Admission) -> Result<Vec<u8>, 
                     0
                 }
             }
+            Admission::Fixed { layer: 3 } => {
+                if descriptor.roles & exit_roles != exit_roles {
+                    return Err(Error::Malformed);
+                }
+                flags::LAYER_3
+            }
+            Admission::Fixed { layer: 2 } => 0,
+            Admission::Fixed { .. } => return Err(Error::Malformed),
         }
     };
     let entry = RelayEntry {

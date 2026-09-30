@@ -50,6 +50,12 @@ name = "umbra-directory"
 path = "src/bin/directory.rs"
 required-features = ["native"]
 
+# The signer of a directory of one operator: seven keys, one machine.
+[[bin]]
+name = "umbra-signer"
+path = "src/bin/signer.rs"
+required-features = ["native"]
+
 # The seven directory authorities of a test network, in one process.
 [[bin]]
 name = "umbra-test-authority"

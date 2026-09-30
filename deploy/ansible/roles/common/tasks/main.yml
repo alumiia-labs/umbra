@@ -1,0 +1,82 @@
+- name: The FILL values of group_vars/all.yml are set
+  ansible.builtin.assert:
+    that:
+      - umbra_domain != "example.org"
+      - umbra_asn | int > 0
+      - umbra_family | length == 64
+    fail_msg: Fill umbra_domain, umbra_asn, and umbra_family in group_vars/all.yml.
+  run_once: true
+  delegate_to: localhost
+
+- name: The system is Debian
+  ansible.builtin.assert:
+    that: ansible_facts['distribution'] == "Debian"
+    fail_msg: These playbooks install on Debian alone.
+
+- name: Packages are current
+  ansible.builtin.apt:
+    update_cache: true
+    upgrade: safe
+    cache_valid_time: 3600
+
+- name: The packages of the network are there
+  ansible.builtin.apt:
+    name:
+      - nftables
+      - chrony
+      - certbot
+      - unattended-upgrades
+      - ca-certificates
+      - openssl
+      # Ansible needs it to run a task as another user than root.
+      - acl
+    state: present
+
+# A root is valid for three hours, and a wrong clock rejects it (Part 10
+# §10.5.2); a relay that serves a client needs a true clock.
+- name: The clock follows the network time
+  ansible.builtin.service:
+    name: chrony
+    enabled: true
+    state: started
+
+- name: Security updates install on their own
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+    mode: "0644"
+
+# Each service runs as a user of its own, thus a fault of the relay reads
+# no seed of the directory or of the notification server on one server.
+# The group umbra-tls reads the certificate of the server.
+- name: The group of the certificate is there
+  ansible.builtin.group:
+    name: umbra-tls
+    system: true
+
+- name: The directories of the settings and the certificate are there
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: /etc/umbra, group: root, mode: "0755" }
+    - { path: /etc/umbra/tls, group: umbra-tls, mode: "0750" }
+
+- name: The firewall holds the rules of this server
+  ansible.builtin.template:
+    src: nftables.conf.j2
+    dest: /etc/nftables.conf
+    mode: "0644"
+    validate: nft -c -f %s
+  notify: Reload nftables
+
+- name: The firewall runs
+  ansible.builtin.service:
+    name: nftables
+    enabled: true
+    state: started

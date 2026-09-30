@@ -1,0 +1,12 @@
+# Written by Ansible (deploy/ansible/site.yml). Public values alone.
+# The carriers of the manifest (Part 3 §3.10): the two entry relays, which
+# the app reaches anyway, and the signer.
+{% set carriers = groups['entry'] + groups['signer'] %}
+carriers={% for host in carriers %}{{ host }}.{{ umbra_domain }},{{ hostvars[host]['ansible_host'] }}{{ ';' if not loop.last else '' }}{% endfor %}
+
+{% set route = groups['entry'][0] %}
+# NTF-127 and DIS-163: the app reaches the two gateways through the OHTTP
+# relay of an entry relay.
+ndr_relay=https://{{ route }}.{{ umbra_domain }}/ohttp,{{ hostvars[route]['ansible_host'] }}
+directory_relay=https://{{ route }}.{{ umbra_domain }}/directory,{{ hostvars[route]['ansible_host'] }}
+invitation_host=invite.{{ umbra_domain }}

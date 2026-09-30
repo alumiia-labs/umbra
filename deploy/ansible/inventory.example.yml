@@ -1,0 +1,49 @@
+# The launch network: OVHcloud US, Debian, seven servers over two sites.
+# Copy this file to inventory.yml (which git ignores) and fill in the
+# addresses of the servers that OVH gave you.
+#
+# `class` is the capacity class the relay states under the provisional
+# directory (Part 10 §10.2): 0 = 100, 1 = 250, 2 = 500, 3 = 1000 Mbit/s,
+# in both directions. An entry relay needs class 1 or more. State only what
+# the plan of the server holds.
+all:
+  children:
+    entry:
+      hosts:
+        entry-east:
+          ansible_host: 203.0.113.10   # Vint Hill, Virginia
+          class: 1
+        entry-west:
+          ansible_host: 203.0.113.20   # Hillsboro, Oregon
+          class: 1
+    middle:
+      hosts:
+        middle-east:
+          ansible_host: 203.0.113.11   # Virginia
+          class: 0
+    exit:
+      hosts:
+        exit-east:
+          ansible_host: 203.0.113.12   # Virginia; runs the notification server
+          class: 0
+        exit-west-1:
+          ansible_host: 203.0.113.21   # Oregon; runs the handle directory
+          class: 0
+        exit-west-2:
+          ansible_host: 203.0.113.22   # Oregon
+          class: 0
+    ndr:
+      hosts:
+        exit-east:
+    directory:
+      hosts:
+        exit-west-1:
+    signer:
+      hosts:
+        signer-west:
+          ansible_host: 203.0.113.23   # Oregon; signs the relay list each hour
+    relays:
+      children:
+        entry:
+        middle:
+        exit:

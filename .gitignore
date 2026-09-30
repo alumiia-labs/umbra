@@ -5,3 +5,7 @@ target/
 # The Font Awesome Pro download of the owner. A Pro file must not sit in a
 # public repository.
 /fontawesome-pro-*/
+
+# The deployment: the filled inventory and what the servers gave back.
+deploy/ansible/inventory.yml
+deploy/ansible/build/

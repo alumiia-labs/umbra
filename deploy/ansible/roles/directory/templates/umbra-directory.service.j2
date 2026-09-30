@@ -1,0 +1,29 @@
+[Unit]
+Description=UMBRA directory and issuer (Parts 9 and 13)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=umbra-directory
+Group=umbra-directory
+ExecStart=/usr/local/bin/umbra-directory /etc/umbra/directory.conf
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+ReadWritePaths=/var/lib/umbra-directory
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

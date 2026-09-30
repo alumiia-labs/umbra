@@ -25,7 +25,13 @@
 //! identity_seed=<64 hex characters>
 //! manifest=/var/lib/umbra/manifest.bin
 //! keyset=/etc/umbra/keyset.bin
+//! manifest_from=<host name>,<IPv4 address>,<port>
 //! ```
+//!
+//! The `manifest_from` line names the HTTPS carrier of the signer: the
+//! relay fetches `/.well-known/umbra/manifest` there each five minutes, and
+//! a manifest that verifies and still places the relay takes the place of
+//! the file.
 //!
 //! The lines `max_connections=` and `max_conns_per_ip=` change the limits of
 //! Part 3 `NET-333` and `NET-334`. An ingress relay alone applies the second
@@ -171,6 +177,23 @@ struct Settings {
     limits: ConnectionLimits,
 }
 
+/// A carrier line: `<host name>,<IPv4 address>,<port>`.
+fn dial_of(value: &str) -> Option<Dial> {
+    let mut parts = value.split(',');
+    let host = parts.next()?.to_owned();
+    let address: std::net::Ipv4Addr = parts.next()?.parse().ok()?;
+    let port = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(Dial {
+        host,
+        addr_v4: Some(address.octets()),
+        addr_v6: None,
+        port,
+    })
+}
+
 /// Reads the settings file. With `takes_place` the relay reads its layer
 /// from the manifest, when the file names one.
 fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
@@ -257,6 +280,10 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
             keyset: std::fs::read(keyset).ok()?,
             relay_id: relay.relay_id,
             s: relay.s,
+            fetch: match values.get("manifest_from") {
+                Some(carrier) => Some(dial_of(carrier)?),
+                None => None,
+            },
         }),
         _ => None,
     };

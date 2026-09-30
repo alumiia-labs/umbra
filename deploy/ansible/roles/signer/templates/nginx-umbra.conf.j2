@@ -1,0 +1,23 @@
+# Written by Ansible (deploy/ansible/roles/signer). The HTTPS carrier of
+# Part 3 §3.10: the manifest alone, with no log of who fetched it.
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name {{ inventory_hostname }}.{{ umbra_domain }};
+
+    ssl_certificate /etc/umbra/tls/cert.pem;
+    ssl_certificate_key /etc/umbra/tls/key.pem;
+    ssl_protocols TLSv1.3;
+
+    access_log off;
+    root /var/www/umbra;
+
+    location = /.well-known/umbra/manifest {
+        default_type application/octet-stream;
+        add_header Cache-Control "no-cache" always;
+    }
+
+    location / {
+        return 404;
+    }
+}

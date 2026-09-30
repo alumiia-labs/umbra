@@ -1,0 +1,116 @@
+# The signer of the directory: the seven authority keys of a network of
+# one operator, a manifest each hour, and nginx that serves it at
+# /.well-known/umbra/manifest to the relays and to the app (Part 3 NET-316).
+- name: The packages of the signer are there
+  ansible.builtin.apt:
+    name: nginx
+    state: present
+
+- name: The user of the signer is there
+  ansible.builtin.user:
+    name: umbra-signer
+    system: true
+    shell: /usr/sbin/nologin
+    home: /var/lib/umbra-signer
+    create_home: true
+
+- name: The directories of the signer are there
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.owner }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: /etc/umbra-signer, owner: root, mode: "0755" }
+    - { path: /etc/umbra-signer/descriptors, owner: root, mode: "0755" }
+    - { path: /var/www/umbra/.well-known/umbra, owner: umbra-signer, mode: "0755" }
+
+- name: The binary of the signer is there
+  ansible.builtin.copy:
+    src: "{{ umbra_bin_dir }}/umbra-signer"
+    dest: /usr/local/bin/umbra-signer
+    mode: "0755"
+
+# The seven seeds are made here one time and never leave this server. Keep
+# a copy of /var/lib/umbra-signer/keys offline: without it no new manifest
+# verifies under the key set that the app ships.
+- name: The authority keys are made one time
+  become: true
+  become_user: umbra-signer
+  ansible.builtin.command:
+    cmd: /usr/local/bin/umbra-signer keygen /var/lib/umbra-signer/keys
+    creates: /var/lib/umbra-signer/keys/keyset.bin
+
+- name: The descriptor of each relay is there
+  ansible.builtin.copy:
+    src: "{{ umbra_out }}/descriptors/{{ item }}.desc"
+    dest: "/etc/umbra-signer/descriptors/{{ item }}.desc"
+    mode: "0644"
+  loop: "{{ groups['relays'] }}"
+
+# The relay lines change when a relay comes or goes, or a class changes;
+# phase 2 restarts each relay then (roles/relay).
+- name: The settings of the signer are there
+  ansible.builtin.template:
+    src: sign.conf.j2
+    dest: /etc/umbra-signer/sign.conf
+    mode: "0644"
+  register: umbra_relay_set
+
+- name: The service and the timer of the signer are there
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
+    mode: "0644"
+  loop:
+    - umbra-signer.service
+    - umbra-signer.timer
+
+- name: The timer signs each hour
+  ansible.builtin.systemd:
+    name: umbra-signer.timer
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: A manifest is signed now, with each relay of this run
+  ansible.builtin.systemd:
+    name: umbra-signer.service
+    state: started
+
+- name: This run holds a fresh manifest for the relays
+  ansible.builtin.set_fact:
+    umbra_signed: true
+
+- name: nginx serves the manifest
+  ansible.builtin.template:
+    src: nginx-umbra.conf.j2
+    dest: /etc/nginx/sites-available/umbra
+    mode: "0644"
+  notify: Reload nginx
+
+- name: The site of the manifest is on, and the default site is off
+  ansible.builtin.file:
+    src: "{{ item.src | default(omit) }}"
+    path: "{{ item.path }}"
+    state: "{{ item.state }}"
+  loop:
+    - { src: /etc/nginx/sites-available/umbra, path: /etc/nginx/sites-enabled/umbra, state: link }
+    - { path: /etc/nginx/sites-enabled/default, state: absent }
+  notify: Reload nginx
+
+- name: nginx runs
+  ansible.builtin.service:
+    name: nginx
+    enabled: true
+    state: started
+
+- name: The key set and the manifest go to this machine
+  ansible.builtin.fetch:
+    src: "/var/www/umbra/.well-known/umbra/{{ item }}"
+    dest: "{{ umbra_out }}/{{ item }}"
+    flat: true
+  loop:
+    - keyset.bin
+    - manifest

@@ -1,0 +1,28 @@
+# One service: its system user, a member of umbra-tls, and its data
+# directory, which it alone writes. `umbra_service` names it, as
+# umbra-relay.
+- name: "The user of {{ umbra_service }} is there"
+  ansible.builtin.user:
+    name: "{{ umbra_service }}"
+    system: true
+    shell: /usr/sbin/nologin
+    home: "/var/lib/{{ umbra_service }}"
+    create_home: false
+    groups: umbra-tls
+    append: true
+
+- name: "The data directory of {{ umbra_service }} is there"
+  ansible.builtin.file:
+    path: "/var/lib/{{ umbra_service }}"
+    state: directory
+    owner: "{{ umbra_service }}"
+    group: "{{ umbra_service }}"
+    mode: "0750"
+
+- name: "The settings fragments of {{ umbra_service }} have a directory"
+  ansible.builtin.file:
+    path: "/etc/umbra/{{ umbra_fragments }}"
+    state: directory
+    owner: root
+    group: "{{ umbra_service }}"
+    mode: "0750"

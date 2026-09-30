@@ -532,34 +532,108 @@ pub struct ManifestSource {
     pub relay_id: [u8; 32],
     /// The static key of this relay.
     pub s: [u8; 32],
+    /// The HTTPS carrier that serves each new manifest, as the signer of
+    /// the directory does, or none for a file that another process writes.
+    pub fetch: Option<Dial>,
 }
 
 /// How often a relay reads the file of the manifest again.
 const MANIFEST_READ_PERIOD: std::time::Duration = std::time::Duration::from_secs(60);
+/// The reads of the file between two fetches from the carrier: one fetch
+/// each five minutes, thus a root of three hours reaches each relay long
+/// before it ends.
+const MANIFEST_FETCH_EVERY: u32 = 5;
+
+/// The epoch of the root of a manifest, and whether that root still holds
+/// at `now`, `CONSENSUS_VALIDITY` and `CLOCK_SKEW` after its start.
+fn manifest_epoch(bytes: &[u8], now: u64) -> Option<(u64, bool)> {
+    use umbra_core::directory::{
+        manifest::RelayManifest, root::DirectoryRoot, CLOCK_SKEW, CONSENSUS_VALIDITY,
+    };
+    let manifest = RelayManifest::parse(bytes).ok()?;
+    let root = DirectoryRoot::parse(manifest.root).ok()?;
+    let ends = root
+        .epoch_start_unix
+        .saturating_add(CONSENSUS_VALIDITY)
+        .saturating_add(CLOCK_SKEW);
+    Some((root.epoch, now <= ends))
+}
+
+/// Whether `fresh` may take the place of `held`: a root that holds at `now`,
+/// and not older than the one held. An operator that copies an old manifest
+/// or a carrier that serves one moves no relay back.
+fn is_newer(fresh: &[u8], held: Option<&[u8]>, now: u64) -> bool {
+    let Some((epoch, holds)) = manifest_epoch(fresh, now) else {
+        return false;
+    };
+    let held_epoch = held
+        .and_then(|held| manifest_epoch(held, now))
+        .map(|(e, _)| e);
+    holds && held_epoch.is_none_or(|held| epoch >= held)
+}
+
+/// Fetches the manifest of the carrier, and writes it over the file when it
+/// verifies and still places this relay. A manifest that does not verify
+/// never takes the place of one that does.
+async fn fetch_manifest_into(
+    source: &ManifestSource,
+    dial: &Dial,
+    tls: Arc<rustls::ClientConfig>,
+    now: u64,
+) {
+    let Ok(fresh) = native::fetch_manifest(dial, tls).await else {
+        return;
+    };
+    let held = std::fs::read(&source.path).ok();
+    if held.as_deref() == Some(fresh.as_slice()) || !is_newer(&fresh, held.as_deref(), now) {
+        return;
+    }
+    if crate::placement::placement(&fresh, &source.keyset, &source.relay_id, &source.s, now)
+        .is_err()
+    {
+        return;
+    }
+    let part = source.path.with_extension("part");
+    if std::fs::write(&part, &fresh).is_ok() {
+        let _ = std::fs::rename(&part, &source.path);
+    }
+}
 
 /// Reads the file of the manifest again at each period, and serves a new
 /// manifest that verifies and still places this relay. The place that the
 /// relay took at its start holds until a restart.
-async fn reload_manifest(carried: Arc<Carried>) {
+async fn reload_manifest(carried: Arc<Carried>, tls: Arc<rustls::ClientConfig>) {
     let Some(source) = carried.manifest_source.as_ref() else {
         return;
     };
+    let mut reads: u32 = 0;
     loop {
         tokio::time::sleep(MANIFEST_READ_PERIOD).await;
+        if let Some(dial) = &source.fetch {
+            if reads.is_multiple_of(MANIFEST_FETCH_EVERY) {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |at| at.as_secs());
+                fetch_manifest_into(source, dial, tls.clone(), now).await;
+            }
+            reads = reads.wrapping_add(1);
+        }
         let Ok(fresh) = std::fs::read(&source.path) else {
             continue;
         };
-        let held = carried
-            .manifest
-            .lock()
-            .map(|held| held.as_deref() == Some(fresh.as_slice()))
-            .unwrap_or(true);
-        if held {
-            continue;
-        }
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |at| at.as_secs());
+        let served = carried
+            .manifest
+            .lock()
+            .map(|held| {
+                held.as_deref() == Some(fresh.as_slice()) || !is_newer(&fresh, held.as_deref(), now)
+            })
+            .unwrap_or(true);
+        if served {
+            continue;
+        }
         if crate::placement::placement(&fresh, &source.keyset, &source.relay_id, &source.s, now)
             .is_err()
         {
@@ -1032,7 +1106,7 @@ pub async fn run_relay(
 ) {
     let carried_ndr = carried.ndr.clone();
     let carried = Arc::new(carried);
-    tokio::spawn(reload_manifest(carried.clone()));
+    tokio::spawn(reload_manifest(carried.clone(), client_tls.clone()));
     let carried_challenges = carried.clone();
     let (inputs, node_inputs) = mpsc::channel::<Input>(1_024);
     let (requests, mut node_requests) = mpsc::unbounded_channel::<Request>();

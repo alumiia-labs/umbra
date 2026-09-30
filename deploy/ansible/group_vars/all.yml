@@ -1,0 +1,41 @@
+# The settings of the whole network. Fill in each value marked FILL.
+
+# The domain under which each server gets a name: <inventory name>.<domain>,
+# as entry-east.example.org. Point an A record at each server first.
+umbra_domain: example.org            # FILL
+
+# The address that Let's Encrypt writes to about the certificates.
+umbra_acme_email: ops@example.org    # FILL
+
+# The country of every relay (Part 10 §10.6.3), and the autonomous system
+# of the provider. `whois <address of a server>` prints the AS number.
+umbra_country: US
+umbra_asn: 0                         # FILL, the AS number of OVHcloud US
+
+# The name of the one operator, and the family of its relays: 64 hex
+# characters, made one time with `openssl rand -hex 32` and kept.
+umbra_operator: umbra-project
+umbra_family: ""                     # FILL
+
+# The directory of the Linux binaries on this machine, which
+# scripts/build-linux.sh writes.
+umbra_bin_dir: "{{ playbook_dir }}/../../target/deploy/bin"
+
+# The service account file of the Firebase project, on this machine. The
+# notification server needs it to send pushes. It never goes into git.
+umbra_fcm_credentials: ""            # FILL, the path of the JSON file
+
+# The bytes that each relay holds for files (Part 12), in bytes.
+umbra_chunk_capacity: 53687091200    # 50 GiB
+
+# The port of the notification server and of the directory. Port 443 holds
+# the relay on the same server. Only the relays reach this port.
+umbra_service_port: 8443
+
+# The addresses that may reach SSH. An empty list leaves port 22 open to
+# all; a list of your own addresses closes it to each other one.
+umbra_ssh_from: []
+
+# The directory on this machine where the playbooks put what the servers
+# made in public: descriptors, the key set, the pins of the app.
+umbra_out: "{{ playbook_dir }}/build"

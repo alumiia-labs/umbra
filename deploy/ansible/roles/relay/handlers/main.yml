@@ -1,0 +1,5 @@
+- name: Restart umbra-relay
+  ansible.builtin.systemd:
+    name: umbra-relay
+    state: restarted
+    daemon_reload: true

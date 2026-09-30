@@ -1,0 +1,5 @@
+- name: Restart umbra-ndr
+  ansible.builtin.systemd:
+    name: umbra-ndr
+    state: restarted
+    daemon_reload: true

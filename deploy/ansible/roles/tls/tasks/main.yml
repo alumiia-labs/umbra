@@ -1,0 +1,35 @@
+- name: The name of this server
+  ansible.builtin.set_fact:
+    umbra_fqdn: "{{ inventory_hostname }}.{{ umbra_domain }}"
+
+# Certbot makes /etc/letsencrypt at its first run, thus the hook directory
+# comes first here.
+- name: The directory of the renewal hooks is there
+  ansible.builtin.file:
+    path: /etc/letsencrypt/renewal-hooks/deploy
+    state: directory
+    mode: "0755"
+
+- name: The renewal hook hands the certificate to the services
+  ansible.builtin.template:
+    src: deploy-hook.sh.j2
+    dest: /etc/letsencrypt/renewal-hooks/deploy/umbra.sh
+    mode: "0755"
+
+# Port 80 is free on each server, thus certbot answers the challenge
+# itself; a renewal does the same each 60 days, on the timer of the
+# Debian package.
+- name: This server holds a certificate for its name
+  ansible.builtin.command:
+    cmd: >-
+      certbot certonly --standalone --non-interactive --agree-tos
+      --email {{ umbra_acme_email }} -d {{ umbra_fqdn }}
+      --deploy-hook /etc/letsencrypt/renewal-hooks/deploy/umbra.sh
+    creates: "/etc/letsencrypt/live/{{ umbra_fqdn }}/fullchain.pem"
+
+- name: The services read the certificate
+  ansible.builtin.command:
+    cmd: /etc/letsencrypt/renewal-hooks/deploy/umbra.sh
+    creates: /etc/umbra/tls/cert.pem
+  environment:
+    RENEWED_LINEAGE: "/etc/letsencrypt/live/{{ umbra_fqdn }}"

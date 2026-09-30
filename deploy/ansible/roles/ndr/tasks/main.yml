@@ -1,0 +1,95 @@
+# The Notification Delivery Relay of Part 8 §8.2, on port umbra_service_port.
+- name: The Firebase service account file is named
+  ansible.builtin.assert:
+    that: umbra_fcm_credentials | length > 0
+    fail_msg: Set umbra_fcm_credentials in group_vars/all.yml to the JSON file of the Firebase project.
+
+- name: The user and the directories of the notification server are there
+  ansible.builtin.include_role:
+    name: common
+    tasks_from: service_user
+  vars:
+    umbra_service: umbra-ndr
+    umbra_fragments: ndr.d
+
+- name: The binary of the notification server is there
+  ansible.builtin.copy:
+    src: "{{ umbra_bin_dir }}/umbra-ndr"
+    dest: /usr/local/bin/umbra-ndr
+    mode: "0755"
+  notify: Restart umbra-ndr
+
+- name: The Firebase service account is there, readable by the service alone
+  ansible.builtin.copy:
+    src: "{{ umbra_fcm_credentials }}"
+    dest: /etc/umbra/fcm-service-account.json
+    owner: root
+    group: umbra-ndr
+    mode: "0640"
+  no_log: true
+  notify: Restart umbra-ndr
+
+# The seed of the gateway key is made here one time and never leaves this
+# server; each client and each queue relay pins the key it gives (NTF-127).
+# The file takes its name only once its line checks, thus a failed run
+# leaves no empty seed behind.
+- name: The gateway seed of this server is made one time
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      umask 077
+      tmp=$(mktemp /etc/umbra/ndr.d/.secret.XXXXXX)
+      echo "kem_seed=$(openssl rand -hex 32)" > "$tmp"
+      grep -Eq '^kem_seed=[0-9a-f]{64}$' "$tmp"
+      mv "$tmp" /etc/umbra/ndr.d/20-secret.conf
+    creates: /etc/umbra/ndr.d/20-secret.conf
+
+- name: The public settings of the notification server are there
+  ansible.builtin.copy:
+    dest: /etc/umbra/ndr.d/10-public.conf
+    mode: "0644"
+    content: |
+      listen=0.0.0.0:{{ umbra_service_port }}
+      cert=/etc/umbra/tls/cert.pem
+      key=/etc/umbra/tls/key.pem
+      key_id=1
+      store=/var/lib/umbra-ndr/ndr.db
+      fcm_credentials=/etc/umbra/fcm-service-account.json
+
+- name: The settings file joins the two fragments
+  ansible.builtin.assemble:
+    src: /etc/umbra/ndr.d
+    dest: /etc/umbra/ndr.conf
+    regexp: '^[0-9]+-.*\.conf$'
+    owner: root
+    group: umbra-ndr
+    mode: "0640"
+  notify: Restart umbra-ndr
+
+- name: The service of the notification server is there
+  ansible.builtin.template:
+    src: umbra-ndr.service.j2
+    dest: /etc/systemd/system/umbra-ndr.service
+    mode: "0644"
+  notify: Restart umbra-ndr
+
+- name: The notification server runs
+  ansible.builtin.systemd:
+    name: umbra-ndr
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: The key configuration that the relays and the app pin
+  ansible.builtin.command:
+    cmd: /usr/local/bin/umbra-ndr key-config /etc/umbra/ndr.conf
+  register: ndr_key_config
+  changed_when: false
+
+- name: The key configuration goes to this machine
+  ansible.builtin.copy:
+    content: "{{ ndr_key_config.stdout | trim }}\n"
+    dest: "{{ umbra_out }}/ndr-key-config.hex"
+    mode: "0644"
+  delegate_to: localhost
+  become: false

@@ -1,0 +1,32 @@
+[Unit]
+Description=UMBRA relay (Parts 3 and 10)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=umbra-relay
+Group=umbra-relay
+ExecStart=/usr/local/bin/umbra-relay /etc/umbra/relay.conf
+Restart=on-failure
+RestartSec=5
+# Port 443 without root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+ReadWritePaths=/var/lib/umbra-relay
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

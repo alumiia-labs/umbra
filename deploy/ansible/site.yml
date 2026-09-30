@@ -1,0 +1,76 @@
+# The whole network, in the order in which each part needs the one before:
+#
+#   1. each server: updates, clock, firewall, a certificate for its name;
+#   2. the notification server and the directory, whose public keys the
+#      relays pin;
+#   3. each relay: its identity and its signed descriptor;
+#   4. the signer: the authority keys and the first manifest;
+#   5. each relay: the key set, the manifest, and the service.
+#
+# A second run changes nothing that is there already: no key is made again.
+#
+#   ansible-playbook site.yml
+- name: Each server
+  hosts: all
+  become: true
+  roles:
+    - common
+    - tls
+
+- name: The public outputs have a directory on this machine
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: The output directory is there
+      ansible.builtin.file:
+        path: "{{ umbra_out }}/descriptors"
+        state: directory
+        mode: "0755"
+
+- name: The notification server
+  hosts: ndr
+  become: true
+  roles:
+    - ndr
+
+- name: The directory
+  hosts: directory
+  become: true
+  roles:
+    - directory
+
+- name: Phase 1 of each relay
+  hosts: relays
+  become: true
+  roles:
+    - relay_identity
+
+- name: The signer
+  hosts: signer
+  become: true
+  roles:
+    - signer
+
+- name: Phase 2 of each relay
+  hosts: relays
+  become: true
+  # One relay at a time, thus a restart of the relays leaves the others up.
+  serial: 1
+  roles:
+    - relay
+
+# The public values of the release app: where it fetches the manifest and
+# how it reaches the notification server and the directory. The script
+# scripts/release-network.sh turns build/ into the assets of the release
+# build.
+- name: The network of the release app
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: The network file of the release app is written
+      ansible.builtin.template:
+        src: templates/network.properties.j2
+        dest: "{{ umbra_out }}/network.properties"
+        mode: "0644"

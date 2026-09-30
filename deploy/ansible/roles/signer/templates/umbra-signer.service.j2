@@ -1,0 +1,24 @@
+[Unit]
+Description=UMBRA directory signer: one manifest (Part 10)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=umbra-signer
+Group=umbra-signer
+ExecStart=/usr/local/bin/umbra-signer sign /etc/umbra-signer/sign.conf
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+PrivateNetwork=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+ReadWritePaths=/var/www/umbra/.well-known/umbra
+ReadOnlyPaths=/var/lib/umbra-signer

@@ -75,13 +75,13 @@ column when a crate implements the requirement and a test covers it.
 | `DEV` | 203 | 90 | 0 | 0 | 8 | **301** |
 | `NTF` | 75 | 28 | 0 | 0 | 3 | **106** |
 | `DIS` | 130 | 35 | 0 | 0 | 3 | **168** |
-| `REL` | 160 | 34 | 1 | 0 | 2 | **197** |
+| `REL` | 160 | 34 | 1 | 0 | 3 | **198** |
 | `GRP` | 234 | 65 | 0 | 0 | 6 | **305** |
 | `ATT` | 143 | 45 | 2 | 0 | 3 | **193** |
 | `ABU` | 72 | 30 | 1 | 0 | 0 | **103** |
 | `IMP` | 121 | 41 | 0 | 0 | 2 | **164** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2076 | 628 | 7 | 0 | 55 | **2766** |
+| **All** | 2076 | 628 | 7 | 0 | 56 | **2767** |
 
 ## SCP — Scope and Conventions
 
@@ -1994,7 +1994,7 @@ Source: `spec/10-relay-directory.md`
 | `REL-057` | §10.5.3 | MUST | A client | A client MUST verify the inclusion proof of an entry before it selects the relay of that entry. |  |  |
 | `REL-058` | §10.5.3 | MUST | A client | A client MUST reject an entry with no inclusion proof. |  |  |
 | `REL-059` | §10.5.3 | MUST | (unstated) | If the entry width, the relay count, or the fetch schedule changes, a revision MUST derive both rows again. |  |  |
-| `REL-060` | §10.5.4 | MUST | A client | A directory authority MUST compute the layer of a relay of the chain population one time, with the function above, under the root that listed the relay as pending. |  |  |
+| `REL-060` | §10.5.4 | MUST | A client | Except under `REL-198`, a directory authority MUST compute the layer of a relay of the chain population one time, with the function above, under the root that listed the relay as pending. |  |  |
 | `REL-061` | §10.5.4 | MUST | A client | A client MUST take the layer of a candidate for hop 2 and hop 3 from `flags` bit 1 of its entry, and a relay MUST take its own layer from its own entry. |  |  |
 | `REL-062` | §10.5.4 | MUST NOT | A relay | A relay MUST NOT declare its own layer, and a descriptor carries no layer field. |  |  |
 | `REL-063` | §10.5.3 | MUST NOT | That authority | That authority MUST NOT duplicate that node. |  |  |
@@ -2090,10 +2090,10 @@ Source: `spec/10-relay-directory.md`
 | `REL-153` | §10.6.1 | MUST | A client | A client MUST keep its pins in the store of Part 14 §14.6.4. |  |  |
 | `REL-154` | §10.6.1 | MUST | A client | A client MUST fill an open place with a random draw from the ingress eligible relays of the accepted set. |  |  |
 | `REL-155` | §10.6.1 | MUST NOT | A client | A client MUST NOT dial an ingress relay that is no pin. |  |  |
-| `REL-156` | §10.5.4 | MUST | A directory authority | A directory authority MUST list a relay of the chain population in one root with `flags` bit 2 set and bit 1 clear before it places the relay. |  |  |
+| `REL-156` | §10.5.4 | MUST | A directory authority | Except under `REL-198`, a directory authority MUST list a relay of the chain population in one root with `flags` bit 2 set and bit 1 clear before it places the relay. |  |  |
 | `REL-157` | §10.5.4 | MUST NOT | An authority | An authority MUST NOT set bit 1 in the same root as bit 2. |  |  |
 | `REL-158` | §10.5.4 | MUST NOT | A client | A client MUST NOT select a relay whose entry sets bit 2 for any hop, and a relay MUST NOT open a circuit to one. |  |  |
-| `REL-159` | §10.5.4 | MUST | The relays of the first root of a directory | The relays of the first root of a directory MUST take their layer under `GENESIS_ROOT` at epoch 0, with no pending root. |  |  |
+| `REL-159` | §10.5.4 | MUST | The relays of the first root of a directory | Except under `REL-198`, the relays of the first root of a directory MUST take their layer under `GENESIS_ROOT` at epoch 0, with no pending root. |  |  |
 | `REL-160` | §10.5 | MUST | The consensus digest, source `0x02` of Part 6 §6.6.4, | The consensus digest, source `0x02` of Part 6 §6.6.4, MUST be the SHA3-256 over the preimage that the signatures of the `DirectoryRoot` cover (§10.5.2), with `epoch` the consensus epoch of that root. |  |  |
 | `REL-161` | §10.5 | MUST | A client | A client MUST compare the consensus digest of a contact against the digest of the root that it verified at that epoch, and it MUST show an equivocation warning when the two differ. |  |  |
 | `REL-162` | §10.5 | MUST | A client | A client MUST keep the digest of each root that it verified for the validity of that root, thus a contact one epoch behind still compares. |  |  |
@@ -2132,6 +2132,7 @@ Source: `spec/10-relay-directory.md`
 | `REL-195` | §10.8 | MUST | An authority | An authority MUST compute the fault rate of `REL-080` for an epoch after the end of that epoch, from the shares of that epoch. |  |  |
 | `REL-196` | §10.2 | MUST | A client | A client MUST order the relays of a draw at random in proportion to the rate of their class, with the weights 2, 5, 10, and 20 for C0 to C3. |  |  |
 | `REL-197` | §10.2 | MUST NOT | A directory authority | A directory authority MUST NOT list a relay before a class test verifies C0 or above for it, and it MUST remove a relay whose class test verifies below C0. |  |  |
+| `REL-198` | §10.5.4 | MAY | Under the provisional directory of `REL-126`, an authority | Under the provisional directory of `REL-126`, an authority MAY set the layer of each relay of its own operator in the place of the function above, and it MAY list such a relay placed at once. |  |  |
 
 ## GRP — Private Groups
 

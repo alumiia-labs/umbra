@@ -1,0 +1,5 @@
+- name: Restart umbra-directory
+  ansible.builtin.systemd:
+    name: umbra-directory
+    state: restarted
+    daemon_reload: true

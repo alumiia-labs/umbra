@@ -1130,17 +1130,25 @@ lists the relay, and that root lists it as **pending**. An admission takes
 two roots, because a value that already exists when an operator picks
 `relay_id` is a value that the operator grinds against.
 
-**The pending root.** **[REL-156]** A directory authority MUST list a relay
-of the chain population in one root with `flags` bit 2 set and bit 1 clear
-before it places the relay. **[REL-157]** An authority MUST NOT set bit 1 in
+**[REL-198]** Under the provisional directory of `REL-126`, an authority MAY
+set the layer of each relay of its own operator in the place of the function
+above, and it MAY list such a relay placed at once. The function keeps one
+operator from the position of another; a directory of one operator has no
+other, and a set of four chain relays then holds one at layer 2 and three at
+layer 3, which the function does not promise.
+
+**The pending root.** **[REL-156]** Except under `REL-198`, a directory
+authority MUST list a relay of the chain population in one root with `flags`
+bit 2 set and bit 1 clear before it places the relay. **[REL-157]** An authority MUST NOT set bit 1 in
 the same root as bit 2. **[REL-158]** A client MUST NOT select a relay whose
 entry sets bit 2 for any hop, and a relay MUST NOT open a circuit to one. A
 pending entry carries the address and the keys of the relay, thus an
 operator tests its relay against the directory, and no client routes
 through it.
 
-- **[REL-060]** A directory authority MUST compute the layer of a relay of
-  the chain population one time, with the function above, under the root
+- **[REL-060]** Except under `REL-198`, a directory authority MUST compute
+  the layer of a relay of the chain population one time, with the function
+  above, under the root
   that listed the relay as pending. It MUST set `flags` bit 1 of the first
   entry that clears bit 2 when the value is 3, and it MUST keep that bit in
   each later entry of that `relay_id`. A relay with no queue role serves no
@@ -1156,8 +1164,9 @@ through it.
 - The roots are a public record, thus each party can compute the function
   again for each listed relay. **[REL-152]** A directory authority MUST NOT
   sign a root over an entry whose bit 1 differs from the function.
-- **[REL-159]** The relays of the first root of a directory MUST take their
-  layer under `GENESIS_ROOT` at epoch 0, with no pending root. That root is
+- **[REL-159]** Except under `REL-198`, the relays of the first root of a
+  directory MUST take their layer under `GENESIS_ROOT` at epoch 0, with no
+  pending root. That root is
   the trusted setup of the directory, and no operator submits a relay to it
   after it exists.
 

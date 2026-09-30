@@ -1,0 +1,29 @@
+[Unit]
+Description=UMBRA notification delivery relay (Part 8)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=umbra-ndr
+Group=umbra-ndr
+ExecStart=/usr/local/bin/umbra-ndr /etc/umbra/ndr.conf
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+ReadWritePaths=/var/lib/umbra-ndr
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
