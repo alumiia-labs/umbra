@@ -2331,9 +2331,9 @@ mod tests {
         let BackupUpload { plain, pending } = client.backup_due(now, true).unwrap().unwrap();
         assert!(pending.is_full());
         let full = BackupObject::parse(&plain).unwrap();
-        // The root seed and the recovery code go, and the push token of this
-        // device stays (IDN-180).
-        assert_eq!(tables(&full, TableId::LOCAL_IDENTITY), 2);
+        // The root seed, the recovery code and the mark of the set MAC
+        // (IDN-193) go, and the push token of this device stays (IDN-180).
+        assert_eq!(tables(&full, TableId::LOCAL_IDENTITY), 3);
         assert_eq!(tables(&full, TableId(0x0A)), 0);
         let root = client
             .backup_uploaded(pending, &uploaded(1), epoch, &mut rng)

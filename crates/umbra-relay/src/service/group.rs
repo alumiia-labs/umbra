@@ -347,6 +347,7 @@ impl GroupService {
         // NET-260: the creator authorizes its own `GNEW` under the owner
         // credential of the payload, as a `NEW` goes under `QR_auth_pk`.
         session.accept(command, &new.own_pk)?;
+        session.room()?;
         gate.admit(&new.admission, accepts, now)?;
         let mut group_queue_id = [0u8; 32];
         rng.fill_bytes(&mut group_queue_id);

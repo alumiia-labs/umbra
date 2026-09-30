@@ -67,7 +67,7 @@ impl Mode {
     pub const DEFAULT: Mode = Mode::Instant;
 
     /// Whether the mode registers a push token and the digest queues of
-    /// §8.5 (`NTF-045`, `NTF-069`, `NTF-074`, `NTF-090`, `NTF-106`).
+    /// §8.5 (`NTF-045`, `NTF-090`, `NTF-106`).
     pub const fn registers_push(self) -> bool {
         matches!(self, Mode::Instant)
     }

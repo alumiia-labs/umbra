@@ -1140,7 +1140,7 @@ pub struct ClientNode {
     chunk_admissions: crate::abuse::pow::ChunkAdmissions,
     /// The group-queue commands that wait for a circuit to their relay.
     held_groups: Vec<HeldGroup>,
-    /// The range of each circuit of this node (`WIR-309`). A node for
+    /// The range of each circuit of this node (`WIR-107`). A node for
     /// attachments carries no queue command (Part 12 §12.8).
     range: Range,
     capsules: VecDeque<Vec<u8>>,
@@ -3195,6 +3195,14 @@ impl ClientNode {
     }
 
     /// The circuit that serves an inbound queue.
+    /// Whether a slot serves a queue of the contact `contact`. After a
+    /// rotation or a renewal the contact id names no queue of a slot.
+    fn serves(&self, contact: &[u8; 32]) -> bool {
+        self.queues_of(contact)
+            .iter()
+            .any(|queue| self.slot_of(queue).is_some())
+    }
+
     fn slot_of(&self, queue: &[u8; 32]) -> Option<usize> {
         self.slots
             .iter()
@@ -4077,7 +4085,7 @@ impl ClientNode {
                 .contacts
                 .get(&contact.0)
                 .is_some_and(|held| held.channel.can_send());
-            if can_send && self.slot_of(&contact.0).is_some() {
+            if can_send && self.serves(&contact.0) {
                 self.send_now(contact.0, app, Waiting::Other, now, rng)?;
                 return Ok(CoverSlot::Receipt);
             }
@@ -4094,7 +4102,7 @@ impl ClientNode {
                 .contacts
                 .get(&contact.0)
                 .is_some_and(|held| held.channel.can_send());
-            if can_send && self.slot_of(&contact.0).is_some() {
+            if can_send && self.serves(&contact.0) {
                 self.send_now(contact.0, app, Waiting::Other, now, rng)?;
                 return Ok(CoverSlot::Digest);
             }
@@ -4341,7 +4349,11 @@ impl ClientNode {
             };
             served = true;
             self.current = slot;
-            let session_pk = self.session_pk()?;
+            // A circuit that is not ready yet takes the ACK at a later slot;
+            // it stops no other queue (NET-064).
+            let Ok(session_pk) = self.session_pk() else {
+                continue;
+            };
             let held = self.contacts.get_mut(&contact.0).ok_or(Error::NoPath)?;
             let channel = &mut held.channel;
             channel.restart_hole(self.clock_moved_at);
@@ -4394,7 +4406,9 @@ impl ClientNode {
         rng: &mut R,
     ) -> Result<bool, Error> {
         self.current = self.slot_of(queue).ok_or(Error::NoPath)?;
-        let session_pk = self.session_pk()?;
+        let Ok(session_pk) = self.session_pk() else {
+            return Ok(false);
+        };
         let held = match self.notify.get_mut(queue) {
             Some(held) => held,
             None => self.rendezvous.get_mut(queue).ok_or(Error::NoPath)?,

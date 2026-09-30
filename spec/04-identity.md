@@ -791,6 +791,22 @@ Thus five rules apply, and they apply to each table.
 4. **[IDN-036]** A client MUST update the table MAC at each commit batch. **[IDN-037]** A client MUST NOT
    compute a table MAC by a scan of a table at the unlock. **[IDN-038]** A client MUST verify
    each table MAC at the unlock.
+   **[IDN-193]** The set of tables MUST carry a MAC of the same form, under
+   `table_id = 0x00`: one `row_tag` for each table that the store holds, with
+   the `table_id` of that table as `row_id` and 16 zero bytes as
+   `record_tag`. At the unlock the client MUST verify that MAC, and that its
+   `accum` and `row_count` equal those of the tables whose MAC the client
+   read. A store of an earlier build holds no set MAC, and the client writes
+   it at its next commit together with a mark in the local identity table. A
+   client that holds that mark and finds no set MAC MUST treat the store as
+   a MAC mismatch under `IDN-039`.
+
+   > *Cause.* Each table MAC covers the rows of its own table. A party with
+   > the file that deleted the MAC row of a table and each row of it left
+   > no MAC to fail, and the unlock read the table as one that never held a
+   > row. The set MAC names each table, thus that deletion fails at the
+   > unlock. The mark sits beside the root seed, thus a party that drops the
+   > mark drops the identity.
 5. **[IDN-039]** If a table MAC does not match at the unlock, the client MUST tell the user.
    **[IDN-040]** The client MUST NOT continue silently.
 6. The check at the unlock reads the stored `accum`, and `IDN-037` keeps a scan

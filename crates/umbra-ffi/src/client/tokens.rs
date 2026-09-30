@@ -4,7 +4,10 @@
 //! (`ABU-006`: each verifier keeps its own set).
 
 use umbra_core::{
-    abuse::token::{token_key_id, verify_cross_relay, Token, TokenChallenge, TYPE_CROSS_RELAY},
+    abuse::{
+        pow::PowSolution,
+        token::{token_key_id, verify_cross_relay, Token, TokenChallenge, TYPE_CROSS_RELAY},
+    },
     store::{
         engine::Backend,
         record::{RowId, TableId},
@@ -22,10 +25,12 @@ use crate::Error;
 const TOKENS: TableId = TableId(0x30);
 /// Each key of the cross-relay issuer that the log gave, under the epoch:
 /// the modulus. Each spent nonce of a token that a hello carried, under
-/// the nonce with a leading byte: the epoch.
+/// the nonce with a leading byte: the epoch. Each proof of work that a
+/// hello carried, under its seed and nonce with a leading byte: the epoch.
 const TOKEN_STATE: TableId = TableId(0x31);
 const KEY_ROW: u8 = 1;
 const SPENT_ROW: u8 = 2;
+const WORK_ROW: u8 = 3;
 
 /// The rows of one table, each with its value.
 type Rows = Vec<(RowId, Zeroizing<Vec<u8>>)>;
@@ -175,6 +180,29 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
         let mut batch = open.store.begin();
         batch.put(TOKEN_STATE, row, None, &held.to_be_bytes(), rng)?;
+        batch.commit()?;
+        self.prune_token_state(epoch)?;
+        Ok(true)
+    }
+
+    /// Records the proof of work of a hello that `verify_hello` accepted at
+    /// `epoch`, or returns false for a nonce this device accepted before
+    /// under the same seed (`ABU-074`, `ABU-084`). The row lives as long as
+    /// a spent token nonce (`ABU-056`).
+    pub fn admit_hello_work<R: CryptoRng + ?Sized>(
+        &mut self,
+        solution: &PowSolution,
+        epoch: u32,
+        rng: &mut R,
+    ) -> Result<bool, Error> {
+        let key = [&[WORK_ROW][..], &solution.seed, &solution.nonce].concat();
+        let open = self.open_mut()?;
+        let row = open.store.row_id(TOKEN_STATE, &key);
+        if open.store.get(TOKEN_STATE, &row)?.is_some() {
+            return Ok(false);
+        }
+        let mut batch = open.store.begin();
+        batch.put(TOKEN_STATE, row, None, &epoch.to_be_bytes(), rng)?;
         batch.commit()?;
         self.prune_token_state(epoch)?;
         Ok(true)

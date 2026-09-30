@@ -29,6 +29,9 @@ pub const OVERHEAD: usize = SALT_LEN + aead::NONCE_LEN + aead::TAG_LEN;
 pub struct TableId(pub u8);
 
 impl TableId {
+    /// The set of tables: it holds no row, and its MAC counts each table
+    /// of the store (Part 4 `IDN-193`).
+    pub const SET: TableId = TableId(0x00);
     /// The messages.
     pub const MESSAGE: TableId = TableId(0x01);
     /// The tombstones.

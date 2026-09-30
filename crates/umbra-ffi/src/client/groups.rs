@@ -4127,8 +4127,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     ..
                 } => {
                     self.note_seen(conversation, &group, sender, now, rng)?;
-                    let parsed =
-                        umbra_wire::app::AppMessage::parse(&app, umbra_wire::app::Channel::Group)?;
+                    // GRP-251: a record whose app does not parse is one
+                    // silent drop; it ends no other outcome of the arrival.
+                    let Ok(parsed) =
+                        umbra_wire::app::AppMessage::parse(&app, umbra_wire::app::Channel::Group)
+                    else {
+                        continue;
+                    };
                     // A request of a member that lacks the epoch, and the
                     // notice that one was answered, are no messages.
                     if parsed.kind == AppKind::KeyRequest {
@@ -4185,13 +4190,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         continue;
                     }
                     // GRP-336: a vote is one group record, and each member
-                    // counts it in the order of its sender (WIR-190).
+                    // counts it in the order of its sender (WIR-190): the
+                    // epoch, then the counter, which starts again in each
+                    // epoch (GRP-246).
                     if parsed.kind == AppKind::PollVote {
                         self.take_vote(
                             conversation,
                             parsed.body,
                             sender,
-                            u64::from(counter),
+                            (u64::from(epoch) << 32) | u64::from(counter),
                             now,
                             rng,
                         )?;

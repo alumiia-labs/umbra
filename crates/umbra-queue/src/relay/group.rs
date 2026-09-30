@@ -32,6 +32,11 @@ impl Credential {
     }
 
     fn rotate(&mut self, pk: [u8; 32], now: u64) {
+        // A second GKEY with the same key changes nothing (GRP-363), thus
+        // the key of the epoch before keeps its grace.
+        if pk == self.current {
+            return;
+        }
         // A second GKEY inside a grace replaces the previous key (WIR-397).
         self.previous = Some((self.current, now));
         self.current = pk;

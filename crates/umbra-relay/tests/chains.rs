@@ -747,7 +747,7 @@ fn a_chunk_goes_to_one_relay_and_that_relay_makes_the_two_copies() {
         ChunkOutcome::Refused(_)
     ));
 
-    // A node of queues sends no chunk command (`WIR-309`).
+    // A node of queues sends no chunk command (`WIR-107`).
     let mut queues = client(0x62);
     let refused = queues.chunk(first, chunk_id, ChunkJob::Erase { cred: cred() }, &mut rng);
     assert!(refused.is_err());

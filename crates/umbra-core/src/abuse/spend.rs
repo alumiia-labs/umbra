@@ -8,7 +8,7 @@ use crate::Error;
 /// The spent nonces of one verifier over two epochs.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SpendSet {
-    epochs: [(u32, BTreeSet<[u8; 32]>); 2],
+    epochs: [Option<(u32, BTreeSet<[u8; 32]>)>; 2],
 }
 
 impl SpendSet {
@@ -19,23 +19,29 @@ impl SpendSet {
         if token_epoch != epoch && token_epoch != epoch.wrapping_sub(1) {
             return Err(Error::Stale);
         }
-        // A new current epoch retires the set two epochs back.
-        for (held_epoch, set) in &mut self.epochs {
-            if *held_epoch != epoch && *held_epoch != epoch.wrapping_sub(1) {
-                set.clear();
-                *held_epoch = token_epoch;
+        // A new current epoch retires the set two epochs back. A retired
+        // slot holds no epoch, thus two slots never hold the same one.
+        for slot in &mut self.epochs {
+            if slot
+                .as_ref()
+                .is_some_and(|(held, _)| *held != epoch && *held != epoch.wrapping_sub(1))
+            {
+                *slot = None;
             }
         }
-        let slot = match self.epochs.iter_mut().find(|(e, _)| *e == token_epoch) {
-            Some(slot) => slot,
-            None => self
-                .epochs
-                .iter_mut()
-                .find(|(_, set)| set.is_empty())
-                .ok_or(Error::Stale)?,
-        };
-        slot.0 = token_epoch;
-        if !slot.1.insert(nonce) {
+        let held = self
+            .epochs
+            .iter()
+            .position(|slot| slot.as_ref().is_some_and(|(held, _)| *held == token_epoch));
+        let index = held
+            .or_else(|| self.epochs.iter().position(Option::is_none))
+            .ok_or(Error::Stale)?;
+        let (_, set) = self
+            .epochs
+            .get_mut(index)
+            .ok_or(Error::Stale)?
+            .get_or_insert_with(|| (token_epoch, BTreeSet::new()));
+        if !set.insert(nonce) {
             return Err(Error::Stale);
         }
         Ok(())
@@ -43,7 +49,7 @@ impl SpendSet {
 
     /// The nonces held.
     pub fn len(&self) -> usize {
-        self.epochs.iter().map(|(_, s)| s.len()).sum()
+        self.epochs.iter().flatten().map(|(_, s)| s.len()).sum()
     }
 
     /// Whether nothing is held.
@@ -72,5 +78,20 @@ mod tests {
         set.spend(12, 11, [1; 32]).unwrap();
         assert_eq!(set.spend(12, 11, [3; 32]), Err(Error::Stale));
         assert!(!set.is_empty());
+    }
+
+    #[test]
+    fn a_retired_slot_takes_no_second_label_of_the_same_epoch() {
+        let mut set = SpendSet::default();
+        set.spend(20, 20, [1; 32]).unwrap();
+        set.spend(20, 19, [2; 32]).unwrap();
+        set.spend(21, 20, [3; 32]).unwrap();
+        set.spend(21, 21, [4; 32]).unwrap();
+        // The first spend of epoch 22 is a token of 21: the slot of 20
+        // retires, and the nonce of 21 stays spent.
+        assert_eq!(set.spend(22, 21, [4; 32]), Err(Error::Stale));
+        set.spend(22, 22, [5; 32]).unwrap();
+        assert_eq!(set.spend(22, 22, [5; 32]), Err(Error::Stale));
+        assert_eq!(set.len(), 2);
     }
 }

@@ -275,7 +275,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
     LaunchedEffect(conversation) {
         Core.readDraft(conversation) { chars ->
             composer.set(chars)
-            chars.fill(' ')
+            chars.fill('\u0000')
         }
     }
     DisposableEffect(owner, conversation) {
@@ -633,7 +633,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
             val chars = composer.take() ?: CharArray(0)
             if (utf8Length(chars) > CAPTION_MAX) {
                 composer.set(chars)
-                chars.fill(' ')
+                chars.fill('\u0000')
                 notice = "A caption can be 1 024 bytes at most."
                 return@takeCaption null
             }

@@ -417,6 +417,7 @@ impl QueueService {
             Cmd::New => {
                 let new = NewPayload::parse(command.payload).map_err(|_| Reject::Rejected)?;
                 session.accept(command, &new.qr_auth_pk)?;
+                session.room()?;
                 gate.admit(&new.admission, accepts, now)?;
                 let keys = QueueKeys {
                     recipient_id: random_id(rng),

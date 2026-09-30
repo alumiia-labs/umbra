@@ -973,7 +973,7 @@ impl RelayNode {
         }
         let accepts = Accepts::CrossRelay(&self.issuer_keys);
         let endpoint = self.endpoints.get_mut(&circuit).ok_or(Reject::Rejected)?;
-        // WIR-309, WIR-363: one circuit carries one range.
+        // WIR-107, WIR-363: one circuit carries one range.
         if *endpoint.range.get_or_insert(range) != range {
             return Err(Reject::Rejected);
         }

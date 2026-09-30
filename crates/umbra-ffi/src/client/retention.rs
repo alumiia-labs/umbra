@@ -18,7 +18,7 @@ use umbra_core::{
 use umbra_crypto::rand_core::CryptoRng;
 use zeroize::Zeroizing;
 
-use super::{info_of, Client};
+use super::{conversation_of, info_of, Client};
 use crate::{ConversationId, Delivery, Error, Event, MsgRef};
 
 /// The source device and the causal counter of each message that a peer
@@ -141,11 +141,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 continue;
             }
             if info.stored_at_ms < cutoff_ms {
-                let conversation: [u8; 16] = plain
-                    .get(..16)
-                    .and_then(|bytes| bytes.try_into().ok())
-                    .ok_or(Error::Integrity)?;
-                due.push((ConversationId(conversation), MsgRef(row)));
+                due.push((conversation_of(&plain)?, MsgRef(row)));
             }
         }
         if due.is_empty() {
@@ -161,7 +157,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     *top = (*top).max(counter);
                 }
             }
-            let _ = self.delete_for_me(message);
+            self.delete_if_held(message)?;
             let open = self.open_mut()?;
             let mut batch = open.store.begin();
             batch.delete(SYNC_ORIGIN, message.0);

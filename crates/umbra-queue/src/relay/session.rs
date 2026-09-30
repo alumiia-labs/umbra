@@ -118,6 +118,16 @@ impl Session {
         Ok(())
     }
 
+    /// Refuses a new queue when the session serves `MAX_QUEUES_PER_SESSION`
+    /// already. A relay checks it before it spends the admission of a `NEW`
+    /// or a `GNEW`, thus a refused command costs the client no token.
+    pub fn room(&self) -> Result<(), Reject> {
+        if self.queues.len() >= MAX_QUEUES_PER_SESSION {
+            return Err(Reject::Limit);
+        }
+        Ok(())
+    }
+
     /// Ends the service of `queue_id`, which a `DEL` removed. Its place
     /// serves the next queue (`NET-022`).
     pub fn unbind_queue(&mut self, queue_id: &[u8; 32]) {

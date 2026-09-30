@@ -191,11 +191,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut due = Vec::new();
         for (row, value) in self.open_ref()?.store.list(DEADLINES, None)? {
             let value = Zeroizing::new(value);
-            if (Deadline {
-                at: deadline_at(&value)?,
-            })
-            .due(now)
-            {
+            // A row that does not parse stops no other deadline.
+            let Ok(at) = deadline_at(&value) else {
+                continue;
+            };
+            if (Deadline { at }).due(now) {
                 let conversation: [u8; 16] = value
                     .get(..16)
                     .and_then(|b| b.try_into().ok())
@@ -205,7 +205,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
         for (conversation, message) in &due {
             // A row that a deletion took first leaves its deadline alone.
-            let _ = self.delete_for_me(message);
+            self.delete_if_held(message)?;
             let open = self.open_mut()?;
             let mut batch = open.store.begin();
             batch.delete(DEADLINES, message.0);

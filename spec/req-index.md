@@ -67,7 +67,7 @@ each column when a crate implements the requirement and a test covers it.
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
 | `NET` | 246 | 87 | 1 | 0 | 9 | **343** |
-| `IDN` | 133 | 46 | 1 | 0 | 5 | **185** |
+| `IDN` | 134 | 46 | 1 | 0 | 5 | **186** |
 | `CRY` | 119 | 27 | 0 | 0 | 1 | **147** |
 | `WIR` | 398 | 85 | 0 | 0 | 7 | **490** |
 | `DEV` | 200 | 90 | 0 | 0 | 7 | **297** |
@@ -77,9 +77,9 @@ each column when a crate implements the requirement and a test covers it.
 | `GRP` | 232 | 65 | 0 | 0 | 6 | **303** |
 | `ATT` | 143 | 45 | 2 | 0 | 3 | **193** |
 | `ABU` | 71 | 30 | 1 | 0 | 0 | **102** |
-| `IMP` | 119 | 41 | 0 | 0 | 2 | **162** |
+| `IMP` | 120 | 41 | 0 | 0 | 2 | **163** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2060 | 625 | 7 | 0 | 54 | **2746** |
+| **All** | 2062 | 625 | 7 | 0 | 54 | **2748** |
 
 ## SCP — Scope and Conventions
 
@@ -672,6 +672,7 @@ Source: `spec/04-identity.md`
 | `IDN-190` | §4.7.3 | MUST NOT | A holder | A holder MUST NOT send a share on any channel. |  |  |
 | `IDN-191` | §4.7.3 | MUST | A restore with shares | A restore with shares MUST take `C_user` as `RecoveryDigits` of type `0x0002` and `threshold` shares of type `0x0003`, and it MUST join the shares before the KDF of §4.7.1. |  |  |
 | `IDN-192` | §4.7.3 | MUST | A new split | A new split MUST draw a new `set_id`, and the interface MUST show the holders of the current split alone. |  |  |
+| `IDN-193` | §4.6 | MUST | The set of tables | The set of tables MUST carry a MAC of the same form, under `table_id = 0x00`: one `row_tag` for each table that the store holds, with the `table_id` of that table as `row_id` and 16 zero bytes as `record_tag`. |  |  |
 
 ## CRY — Cryptographic Core
 
@@ -2903,6 +2904,7 @@ Source: `spec/14-implementation.md`
 | `IMP-171` | §14.6.4 | MUST | A client | A client MUST record a voice object of Part 12 into the memory alone. |  |  |
 | `IMP-172` | §14.6.4 | MUST | A client | A client MUST end a recording at `VOICE_MAX_SECONDS` (`ATT-071`), and it MUST drop a recording that the user leaves: a close of the conversation, or a lock. |  |  |
 | `IMP-173` | §14.6.4 | MUST | The encode of a recording | The encode of a recording MUST carry no comment field and no time of the capture (`ATT-155`). |  |  |
+| `IMP-174` | §14.2.1 | MUST | An implementation | An implementation **MUST** turn `zeroize` on: with it off, a secret scalar and a shared secret stay in memory after a drop (Part 5 `CRY-059`) | `chacha20poly1305` 0.11 | `default-features = false` | `aes` + `polyval` | for the onion UIV+ layer only | `sha3` 0.11 | pin to 0.11 to match `ml-kem` and to prevent a duplicate `sha3` 0.12; `features = ["zeroize"]` | `hkdf` 0.13, `hmac` 0.13 | generic over `Sha3_256`; `hmac` with `features = ["zeroize"]`, thus a keyed state is wiped | `subtle` 2, `zeroize` 1 | | |  |  |
 
 ## SEC — Security Considerations
 

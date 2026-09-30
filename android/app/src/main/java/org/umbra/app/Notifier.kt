@@ -8,6 +8,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.os.Build
 
 /**
  * The notifications of the app. A message alert holds no text of the message
@@ -48,9 +49,15 @@ object Notifier {
         PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
     )
 
+    // Below API 33 the platform defines no POST_NOTIFICATIONS, and its check
+    // answers denied; the setting of the user decides there (NTF-014).
     private fun mayPost(context: Context) =
-        context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
-            PackageManager.PERMISSION_GRANTED
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
+                PackageManager.PERMISSION_GRANTED
+        } else {
+            manager(context).areNotificationsEnabled()
+        }
 
     /** The notice of the foreground service, which the platform requires. */
     fun carrier(context: Context): Notification =

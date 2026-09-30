@@ -1076,25 +1076,35 @@ object Core {
                 refreshChats()
                 // DEV-223: the device woke on its mode, and the setting of the
                 // conversation decides what it shows.
-                if (!isVisible) {
+                val client = handle
+                if (!isVisible && client != null) {
                     val preview = Modes.preview(app)
                     val title = chats.firstOrNull { it.conversation.id.contentEquals(event.conversation) }?.title
-                    call { client ->
-                        if (client.shouldAlert(event.message)) {
-                            // NTF-083: the sender and the text only when the
-                            // user turned the preview on.
-                            val text = if (preview) {
-                                val sink = CharSink()
-                                runCatching { client.msgRender(event.message, sink) }
-                                String(sink.chars)
-                            } else {
-                                null
+                    // The worker reads the handle of the message, thus the
+                    // worker frees the event after that read.
+                    worker.execute {
+                        try {
+                            if (client.shouldAlert(event.message)) {
+                                // NTF-083: the sender and the text only when
+                                // the user turned the preview on.
+                                val text = if (preview) {
+                                    val sink = CharSink()
+                                    runCatching { client.msgRender(event.message, sink) }
+                                    String(sink.chars)
+                                } else {
+                                    null
+                                }
+                                main.post {
+                                    Notifier.message(app, Conversation(event.conversation), title.takeIf { preview }, text)
+                                }
                             }
-                            main.post {
-                                Notifier.message(app, Conversation(event.conversation), title.takeIf { preview }, text)
-                            }
+                        } catch (_: FfiException) {
+                            // A lock that overtook the read shows no alert.
+                        } finally {
+                            event.destroy()
                         }
                     }
+                    return
                 }
             }
             is FfiEvent.Delivery -> {

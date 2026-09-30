@@ -108,8 +108,10 @@ const INDEX_VALUE_LEN: usize = 1 + 16 + 32;
 /// registrations, the dead-channel state, the files, and the state of the
 /// backup itself stay on the device (`IDN-180`). The state of each file goes
 /// as one that waits for a tap (`IDN-186`). A timed record stays, and the
-/// timer of its conversation goes (`DEV-215`).
-const BACKED_UP: [TableId; 33] = [
+/// timer of its conversation goes (`DEV-215`). The published entries go
+/// with their rendezvous queues, thus a restored handle keeps its current
+/// `r` (`IDN-108`); blocks and held handle keys go as the user set them.
+const BACKED_UP: [TableId; 37] = [
     super::files::FILE_STATE,
     TableId::MESSAGE,
     TableId::TOMBSTONE,
@@ -143,6 +145,10 @@ const BACKED_UP: [TableId; 33] = [
     super::reset::RESET_NOTICES,
     super::social::SHARES_HELD,
     super::social::SHARES_GIVEN,
+    super::discovery::PUBLISHED,
+    super::discovery::RENDEZVOUS_STATE,
+    super::block::BLOCKED,
+    super::held_handles::HELD_HANDLES,
 ];
 
 /// A backup object that is due: its bytes, which go up as a file of the

@@ -22,7 +22,7 @@
 //!
 //! An epoch is complete when the peer's ciphertext against its key has been
 //! rebuilt. A party starts the next epoch at the first chain start after its
-//! epoch is complete and a limit of §5.5.3 has occurred (`CRY-133`).
+//! epoch is complete and a limit of §5.5.3 has occurred (`CRY-140`).
 
 use alloc::vec::Vec;
 

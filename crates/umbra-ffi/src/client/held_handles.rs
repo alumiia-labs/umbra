@@ -14,7 +14,7 @@ use crate::Error;
 
 /// Each held key, under the canonical label input of its handle: the
 /// version, then `HK_pub`.
-const HELD_HANDLES: TableId = TableId(0x32);
+pub(super) const HELD_HANDLES: TableId = TableId(0x32);
 
 impl<B: Backend, E: SecureElement> Client<B, E> {
     /// The version and the key that this device holds for a handle.

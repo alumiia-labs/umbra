@@ -277,6 +277,21 @@ struct Open<B: Backend> {
     device_set_key: Secret<32>,
     /// The insertion stamp of each message that this device stores.
     stamp: Stamp,
+    /// Whether the store holds the mark that it wrote the MAC of its set
+    /// of tables (`IDN-193`).
+    set_marked: bool,
+}
+
+/// The period of one pass of the scan of `IDN-162`: 24 hours, less one
+/// hour for the steps of the pass.
+const AUDIT_PERIOD: u64 = 23 * 3_600;
+
+/// The place of the scan of `IDN-162`: the index of the next table, and the
+/// start of the pass. A pass starts at the first step after an unlock.
+#[derive(Debug, Default, Clone, Copy)]
+struct Audit {
+    next: usize,
+    started: u64,
 }
 
 /// The local insertion sequence of Part 7 §7.5.3 and Part 11 §11.7: a
@@ -301,6 +316,10 @@ impl Stamp {
 
 /// The setting that holds the floor of [`Stamp`].
 const STAMP_FLOOR: &[u8] = b"insertion-stamp";
+/// The row of the local identity that marks a store whose set of tables
+/// carries a MAC (`IDN-193`). The row sits beside the root seed, thus a
+/// party that drops it drops the identity too.
+const SET_MARK: &[u8] = b"table-set";
 
 enum State<B: Backend> {
     Locked(B),
@@ -319,6 +338,8 @@ pub struct Client<B: Backend, E: SecureElement> {
     files: FileQueues,
     groups: groups::GroupQueues,
     auto_lock: AutoLock,
+    /// The scan of `IDN-162`, one table at each step.
+    audit: Audit,
     /// The records for the sync channels (Part 7 §7.5).
     sync_out: VecDeque<sync::SyncSend>,
     /// The records that a peer handed to this device, which the peer
@@ -623,8 +644,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         )?;
         let mut store = Store::unlock(backend, store_key)?;
         let row = store.row_id(TableId::LOCAL_IDENTITY, ROOT_KEY);
+        let mark = store.row_id(TableId::LOCAL_IDENTITY, SET_MARK);
         let mut batch = store.begin();
         batch.put(TableId::LOCAL_IDENTITY, row, None, seed.expose(), rng)?;
+        batch.put(TableId::LOCAL_IDENTITY, mark, None, &[1], rng)?;
         batch.commit()?;
         let mut client = Client {
             element,
@@ -633,6 +656,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 stamp: Stamp::default(),
                 store,
                 device_set_key: root.device_set_key(),
+                set_marked: true,
             })),
             events: VecDeque::new(),
             outgoing: VecDeque::new(),
@@ -645,6 +669,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             files: FileQueues::default(),
             groups: groups::GroupQueues::default(),
             auto_lock: AutoLock::new(now),
+            audit: Audit::default(),
         };
         // IDN-070: the recovery code comes at the first launch.
         client.recovery_code(rng)?;
@@ -668,6 +693,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             files: FileQueues::default(),
             groups: groups::GroupQueues::default(),
             auto_lock: AutoLock::new(now),
+            audit: Audit::default(),
         }
     }
 
@@ -704,10 +730,20 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 return Err(Error::Integrity);
             }
         };
+        // IDN-193: a store that wrote the MAC of its set of tables and
+        // holds none lost a table to a party with the file.
+        let mark = store.row_id(TableId::LOCAL_IDENTITY, SET_MARK);
+        let set_marked = store.get(TableId::LOCAL_IDENTITY, &mark)?.is_some();
+        if set_marked && !store.indexed() {
+            self.events.push_back(Event::IntegrityFault);
+            return Err(Error::Integrity);
+        }
         let row = store.row_id(TableId::LOCAL_IDENTITY, ROOT_KEY);
-        let seed = store
-            .get(TableId::LOCAL_IDENTITY, &row)?
-            .ok_or(Error::Integrity)?;
+        let seed = Zeroizing::new(
+            store
+                .get(TableId::LOCAL_IDENTITY, &row)?
+                .ok_or(Error::Integrity)?,
+        );
         let seed: [u8; 32] = seed.as_slice().try_into().map_err(|_| Error::Integrity)?;
         let root = RootIdentity::new(Secret::new(seed));
         let floor_row = store.row_id(SETTINGS, STAMP_FLOOR);
@@ -722,6 +758,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 last: floor,
                 kept: floor,
             },
+            set_marked,
         }));
         // Each record that waited for the send path at the lock waits again.
         self.requeue_waiting()?;
@@ -736,21 +773,32 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// run starts above each stamp of this one.
     pub fn keep_stamp<R: CryptoRng + ?Sized>(&mut self, rng: &mut R) -> Result<(), Error> {
         let open = self.open_mut()?;
-        if open.stamp.last == open.stamp.kept {
+        if open.stamp.last == open.stamp.kept && open.set_marked {
             return Ok(());
         }
         let row = open.store.row_id(SETTINGS, STAMP_FLOOR);
+        let mark = open.store.row_id(TableId::LOCAL_IDENTITY, SET_MARK);
         let last = open.stamp.last;
         let mut batch = open.store.begin();
         batch.put(SETTINGS, row, None, &last.to_be_bytes(), rng)?;
+        // IDN-193: the commit writes the MAC of the set of tables, and the
+        // mark says so from now on.
+        if !open.set_marked {
+            batch.put(TableId::LOCAL_IDENTITY, mark, None, &[1], rng)?;
+        }
         batch.commit()?;
         open.stamp.kept = last;
+        open.set_marked = true;
         Ok(())
     }
 
     /// Locks the client: `K_store` leaves RAM, and each record that waits
     /// for the send path stays in the store.
     pub fn lock(&mut self) {
+        // The floor of the insertion stamp survives the lock. A build with
+        // no runtime has no entropy source here, and the tick of its
+        // caller keeps the floor.
+        #[cfg(feature = "runtime")]
         let _ = self.keep_stamp(&mut crate::runtime::OsRng);
         if let State::Unlocked(open) = core::mem::replace(&mut self.state, State::Closed) {
             self.state = State::Locked(open.store.lock());
@@ -2223,6 +2271,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(())
     }
 
+    /// Removes a message as [`Client::delete_for_me`] does, and takes a row
+    /// that a deletion erased first as done. Any other fault stays, thus a
+    /// sweep keeps the row that points at the message.
+    pub(crate) fn delete_if_held(&mut self, message: &MsgRef) -> Result<(), Error> {
+        match self.delete_for_me(message) {
+            Err(Error::NotFound) => Ok(()),
+            other => other,
+        }
+    }
+
     /// The reactions to a message: those of this device first, and each
     /// party in the order of its emoji.
     pub fn reactions(&self, message: &MsgRef) -> Result<Vec<Reaction>, Error> {
@@ -3513,24 +3571,31 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// [`Event::IntegrityFault`].
     pub fn audit(&mut self) -> Result<(), Error> {
         let open = self.open_ref()?;
-        let tables = [
-            FILE_STATE,
-            FILE_DATA,
-            CHUNK_CRED,
-            TableId::MESSAGE,
-            TableId::LOCAL_IDENTITY,
-            TableId::CONTACT,
-            TableId::VERIFICATION,
-            RECEIPT,
-            PENDING,
-            REVISION,
-            REACTION,
-            OUTBOX,
-            INVITATION,
-            CONVERSATION,
-            SETTINGS,
-        ];
+        let tables = open.store.table_ids();
         if tables.iter().any(|table| open.store.audit(*table).is_err()) {
+            self.events.push_back(Event::IntegrityFault);
+            return Err(Error::Integrity);
+        }
+        Ok(())
+    }
+
+    /// One step of the scan of `IDN-162` at `now`: one table, and a pass
+    /// over each table of the store in each `AUDIT_PERIOD`. The platform
+    /// tick calls it, thus no step holds the store for long.
+    pub fn audit_step(&mut self, now: u64) -> Result<(), Error> {
+        let tables = self.open_ref()?.store.table_ids();
+        if self.audit.next == 0 && now.saturating_sub(self.audit.started) < AUDIT_PERIOD {
+            return Ok(());
+        }
+        if self.audit.next == 0 {
+            self.audit.started = now;
+        }
+        let Some(table) = tables.get(self.audit.next).copied() else {
+            self.audit.next = 0;
+            return Ok(());
+        };
+        self.audit.next = self.audit.next.saturating_add(1);
+        if self.open_ref()?.store.audit(table).is_err() {
             self.events.push_back(Event::IntegrityFault);
             return Err(Error::Integrity);
         }

@@ -532,28 +532,32 @@ impl Session {
         hooks: &mut H,
     ) -> Result<Received<'a>, Error> {
         let ctx = Self::peek_ctx(record)?;
-        let (head, rest) = record.split_at(5);
-        let (hdr_nonce, rest) = rest.split_at(12);
+        // The sender picks the length of a record, thus each split checks
+        // it and a short record is one error, never a panic.
+        let (head, rest) = record.split_at_checked(5).ok_or(Error::Length)?;
+        let (hdr_nonce, rest) = rest.split_at_checked(12).ok_or(Error::Length)?;
         let hdr_nonce: [u8; 12] = hdr_nonce.try_into().map_err(|_| Error::Length)?;
-        let (hdr_ct, rest) = rest.split_at(HDR_CT_LEN);
-        let (flen, rest) = rest.split_at(1);
+        let (hdr_ct, rest) = rest.split_at_checked(HDR_CT_LEN).ok_or(Error::Length)?;
+        let (flen, rest) = rest.split_at_checked(1).ok_or(Error::Length)?;
         let frame_len = usize::from(*flen.first().ok_or(Error::Length)?);
         if frame_len != 0 && frame_len != 39 && frame_len != 71 && frame_len != 135 {
             return Err(Error::Length);
         }
-        let (frame, rest) = rest.split_at(frame_len);
-        let (body_nonce, body) = rest.split_at(12);
+        let (frame, rest) = rest.split_at_checked(frame_len).ok_or(Error::Length)?;
+        let (body_nonce, body) = rest.split_at_checked(12).ok_or(Error::Length)?;
         let body_nonce: [u8; 12] = body_nonce.try_into().map_err(|_| Error::Length)?;
         let pt_len = body.len().checked_sub(BODY_TAG_LEN).ok_or(Error::Length)?;
-        let (body_ct, body_tag) = body.split_at(pt_len);
+        let (body_ct, body_tag) = body.split_at_checked(pt_len).ok_or(Error::Length)?;
         let ad_len = 5 + 12 + HDR_CT_LEN + 1 + frame_len;
-        let (ad, _) = record.split_at(ad_len);
+        let (ad, _) = record.split_at_checked(ad_len).ok_or(Error::Length)?;
         let out = out.get_mut(..pt_len).ok_or(Error::Length)?;
 
-        // A skipped key first.
-        if let Some((header, mk)) = self.try_skipped(&hdr_nonce, head, hdr_ct)? {
+        // A skipped key first. The key leaves the store only when the body
+        // opens under it, thus a body that a relay changed costs no key.
+        if let Some((index, header, mk)) = self.try_skipped(&hdr_nonce, head, hdr_ct) {
             out.copy_from_slice(body_ct);
             open(&mk, &body_nonce, ad, out, body_tag)?;
+            self.skipped.swap_remove(index);
             return Ok(Received {
                 ctx,
                 header,
@@ -562,6 +566,11 @@ impl Session {
             });
         }
         let (header, ratchet) = self.decrypt_header(&hdr_nonce, head, hdr_ct)?;
+        // A record below the chain that no skipped key names is a replay:
+        // it moves no chain.
+        if !ratchet && header.n < self.n_r {
+            return Err(Error::Ratchet);
+        }
         if ratchet {
             self.skip(header.pn, now)?;
             let frame_of_step = (frame_len > 0).then_some(frame);
@@ -593,26 +602,19 @@ impl Session {
         self.skipped.len()
     }
 
+    /// The skipped key whose header key opens the header, with its index.
+    /// The caller removes it once the body opens.
     fn try_skipped(
-        &mut self,
+        &self,
         nonce: &[u8; 12],
         ad: &[u8],
         hdr_ct: &[u8],
-    ) -> Result<Option<(Header, Secret<32>)>, Error> {
-        let mut hit = None;
-        for (i, s) in self.skipped.iter().enumerate() {
+    ) -> Option<(usize, Header, Secret<32>)> {
+        self.skipped.iter().enumerate().find_map(|(i, s)| {
             let hk = Secret::new(s.hk);
-            if let Ok(h) = open_header(&hk, nonce, ad, hdr_ct) {
-                if h.n == s.n {
-                    hit = Some((i, h));
-                    break;
-                }
-            }
-        }
-        Ok(hit.map(|(i, h)| {
-            let s = self.skipped.swap_remove(i);
-            (h, Secret::new(s.mk))
-        }))
+            let h = open_header(&hk, nonce, ad, hdr_ct).ok()?;
+            (h.n == s.n).then(|| (i, h, Secret::new(s.mk)))
+        })
     }
 
     fn decrypt_header(

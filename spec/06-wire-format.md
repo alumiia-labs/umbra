@@ -1121,7 +1121,9 @@ manner of §6.4.3 rule 5.
   **[WIR-396]** A relay MUST reject a command under an erased key with a
   `NACK` of reason `REJECTED`. **[WIR-397]** A relay MUST hold one previous
   read key and one previous write key only, thus a second `GKEY` inside a
-  grace replaces the previous key. Part 11 §11.4.1 bounds the rotation rate.
+  grace replaces the previous key. A key that equals the current key is no
+  rotation: that `GKEY` changes neither key (Part 11 `GRP-363`). Part 11
+  §11.4.1 bounds the rotation rate.
 
 **The deletion.**
 

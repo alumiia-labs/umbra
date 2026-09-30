@@ -24,7 +24,7 @@ use crate::{ConversationId, Error};
 /// Each block of this device: a contact under its conversation, a member
 /// under the group and the index. The value is one byte of the kind, and
 /// the count of the records that a block of a group discarded.
-const BLOCKED: TableId = TableId(0x2E);
+pub(super) const BLOCKED: TableId = TableId(0x2E);
 const CONTACT_BLOCK: u8 = 1;
 const MEMBER_BLOCK: u8 = 2;
 const DISCARDED: u8 = 3;

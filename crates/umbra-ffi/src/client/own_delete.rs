@@ -186,7 +186,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let held = self.open_ref()?.store.list(HELD_DELETIONS, None)?;
         for (row, conversation) in held {
             let message = MsgRef(row);
-            let _ = self.delete_for_me(&message);
+            self.delete_if_held(&message)?;
             if let Ok(conversation) = <[u8; 16]>::try_from(conversation.as_slice()) {
                 self.events.push_back(Event::Deleted {
                     conversation: ConversationId(conversation),

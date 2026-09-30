@@ -10,7 +10,7 @@ use super::{HANDLE_LEN, MAX_QUEUES_PER_HANDLE, ROTATE_INTERVAL};
 use crate::Error;
 
 /// The class of the queues under one handle. A handle holds one class
-/// (`NTF-044`, `NTF-070`, `NTF-091`, `NTF-092`).
+/// (`NTF-044`, `NTF-091`, `NTF-092`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HandleClass {
     /// Pairwise queues.

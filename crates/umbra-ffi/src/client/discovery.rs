@@ -562,6 +562,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 if umbra_core::abuse::pow::verify_hello(&entry_pk, epoch, &solution).is_err() {
                     return Ok(None);
                 }
+                if !self.admit_hello_work(&solution, epoch, rng)? {
+                    return Ok(None);
+                }
             }
             _ => return Ok(None),
         }

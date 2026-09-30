@@ -134,8 +134,7 @@ impl ChunkUpload {
 
     /// The `ChunkRef` of the chunk: the first relay in full and the next
     /// two as hints, with a null hint for an absent one (`ATT-141`). A
-    /// fourth relay and beyond go in a further ref of the same chunk
-    /// (`ATT-175`).
+    /// fourth relay and beyond go in a further ref of the same chunk.
     pub fn chunk_refs(&self) -> Result<Vec<ChunkRef>, Error> {
         if !self.is_placed() {
             return Err(Error::Stale);

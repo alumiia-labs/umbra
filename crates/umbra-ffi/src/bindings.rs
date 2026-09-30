@@ -5920,6 +5920,9 @@ impl Handle {
         // DEV-031: the floor of the insertion stamp stays across a run that
         // the platform ends with no lock.
         let _ = inner.client.keep_stamp(&mut OsRng);
+        // IDN-162: one table of the daily scan; a difference raises an
+        // IntegrityFault event.
+        let _ = inner.client.audit_step(now);
         // IDN-063: each key-change notice of a reset goes at its delay.
         if inner.client.send_due_notices(now, &mut OsRng).unwrap_or(0) > 0 {
             let Inner { client, bridge, .. } = &mut *inner;

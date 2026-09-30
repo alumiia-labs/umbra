@@ -89,6 +89,16 @@ pub struct Store<B: Backend> {
     table_key: TableKey,
     row_key: RowKey,
     tables: BTreeMap<TableId, TableState>,
+    /// The MAC state of the set of tables (`IDN-193`).
+    set: TableState,
+    /// Whether the store held the set MAC at the unlock. A store of an
+    /// earlier build holds none, and the next commit writes it.
+    indexed: bool,
+}
+
+/// The tag of one table in the set MAC: a table is a row of the set.
+fn set_tag(table_key: &TableKey, table: TableId) -> [u8; 32] {
+    table_key.row_tag(&[TableId::SET.0], &[table.0], &[0; 16])
 }
 
 impl<B: Backend> Store<B> {
@@ -99,18 +109,53 @@ impl<B: Backend> Store<B> {
         let table_key = TableKey::derive(&store_key);
         let row_key = RowKey::derive(&store_key);
         let mut tables = BTreeMap::new();
+        let mut held_set = None;
+        let mut scanned = TableState::new();
         for (table, stored) in backend.tables()? {
             let state = TableState::restore(stored.accum, stored.row_count, stored.commit_counter);
             state.verify(&table_key, &[table.0], &stored.mac)?;
+            if table == TableId::SET {
+                held_set = Some(state);
+                continue;
+            }
+            scanned.insert(&set_tag(&table_key, table));
             tables.insert(table, state);
         }
+        // IDN-193: a table whose MAC row left the file shows here, since
+        // the set MAC counts each table that the store ever held.
+        let indexed = held_set.is_some();
+        let set = match held_set {
+            Some(held) => {
+                let (held_accum, held_count, _) = held.fields();
+                let (accum, count, _) = scanned.fields();
+                if !umbra_crypto::ct_eq(&held_accum, &accum) || held_count != count {
+                    return Err(Error::Unverified);
+                }
+                held
+            }
+            None => scanned,
+        };
         Ok(Store {
             backend,
             store_key,
             table_key,
             row_key,
             tables,
+            set,
+            indexed,
         })
+    }
+
+    /// Whether the store held the MAC of its set of tables at the unlock.
+    /// A client that wrote that MAC before and finds none holds a store
+    /// that a party with the file changed (`IDN-193`).
+    pub fn indexed(&self) -> bool {
+        self.indexed
+    }
+
+    /// Each table that the store holds, for the scan of `IDN-162`.
+    pub fn table_ids(&self) -> Vec<TableId> {
+        self.tables.keys().copied().collect()
     }
 
     /// Locks the store: the keys leave RAM, and the backend stays.
@@ -308,6 +353,29 @@ impl<B: Backend> Transaction<'_, B> {
                 }
             }
         }
+        // IDN-193: a table that enters the store enters the set MAC, and a
+        // store of an earlier build writes that MAC at its first commit.
+        let mut set = store.set.clone();
+        let mut set_changed = !store.indexed;
+        for table in states.keys() {
+            if !store.tables.contains_key(table) {
+                set.insert(&set_tag(&store.table_key, *table));
+                set_changed = true;
+            }
+        }
+        if set_changed {
+            let mac = set.commit(&store.table_key, &[TableId::SET.0]);
+            let (accum, row_count, commit_counter) = set.fields();
+            writes.push(Write::Table(
+                TableId::SET,
+                StoredTable {
+                    accum,
+                    row_count,
+                    commit_counter,
+                    mac,
+                },
+            ));
+        }
         for (table, state) in &mut states {
             let mac = state.commit(&store.table_key, &[table.0]);
             let (accum, row_count, commit_counter) = state.fields();
@@ -326,6 +394,10 @@ impl<B: Backend> Transaction<'_, B> {
             deletion: self.deletion,
         })?;
         store.tables.extend(states);
+        if set_changed {
+            store.set = set;
+            store.indexed = true;
+        }
         Ok(())
     }
 }
@@ -512,9 +584,35 @@ mod tests {
         assert!(store.get(TableId::MESSAGE, &second).is_err());
 
         // A changed MAC state fails at the unlock.
-        let mut forged = current;
+        let mut forged = current.clone();
         forged.tables.get_mut(&TableId::MESSAGE).unwrap().row_count = 1;
         assert!(Store::unlock(forged, Secret::new(KEY)).is_err());
+
+        // IDN-193: a table whose MAC row and rows left the file fails at
+        // the unlock.
+        let mut dropped = current.clone();
+        dropped.tables.remove(&TableId::CONTACT);
+        dropped
+            .rows_mut()
+            .retain(|(table, _), _| *table != TableId::CONTACT);
+        assert_eq!(
+            Store::unlock(dropped, Secret::new(KEY)).err(),
+            Some(Error::Unverified)
+        );
+        // A store with no set MAC opens and writes one at its next commit.
+        let mut earlier = current;
+        earlier.tables.remove(&TableId::SET);
+        let mut store = Store::unlock(earlier, Secret::new(KEY)).unwrap();
+        assert!(!store.indexed());
+        let mut batch = store.begin();
+        batch
+            .put(TableId::CONTACT, conversation, None, b"alice", &mut Rng(4))
+            .unwrap();
+        batch.commit().unwrap();
+        assert!(store.indexed());
+        assert!(Store::unlock(store.lock(), Secret::new(KEY))
+            .unwrap()
+            .indexed());
     }
 
     #[test]

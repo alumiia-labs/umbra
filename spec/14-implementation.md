@@ -68,13 +68,13 @@ party that measures the count, and it names the time.
 
 | Crate | Configuration |
 | --- | --- |
-| `ml-kem` 0.3 | `default-features = false` |
-| `ml-dsa` 0.1 | `default-features = false`, `features = ["rand_core"]`. **[IMP-004]** An implementation **MUST** turn the `pkcs8` default off. If it stays on, the build inherits `der`, `spki`, `pkcs8`, and `const-oid` |
-| `x25519-dalek` 3 | `default-features = false`, `features = ["static_secrets"]` |
+| `ml-kem` 0.3 | `default-features = false`, `features = ["zeroize"]` |
+| `ml-dsa` 0.1 | `default-features = false`, `features = ["rand_core", "zeroize"]`. **[IMP-004]** An implementation **MUST** turn the `pkcs8` default off. If it stays on, the build inherits `der`, `spki`, `pkcs8`, and `const-oid` |
+| `x25519-dalek` 3 | `default-features = false`, `features = ["static_secrets", "reusable_secrets", "zeroize"]`. **[IMP-174]** An implementation **MUST** turn `zeroize` on: with it off, a secret scalar and a shared secret stay in memory after a drop (Part 5 `CRY-059`) |
 | `chacha20poly1305` 0.11 | `default-features = false` |
 | `aes` + `polyval` | for the onion UIV+ layer only |
-| `sha3` 0.11 | pin to 0.11 to match `ml-kem` and to prevent a duplicate `sha3` 0.12 |
-| `hkdf` 0.13, `hmac` 0.13 | generic over `Sha3_256` |
+| `sha3` 0.11 | pin to 0.11 to match `ml-kem` and to prevent a duplicate `sha3` 0.12; `features = ["zeroize"]` |
+| `hkdf` 0.13, `hmac` 0.13 | generic over `Sha3_256`; `hmac` with `features = ["zeroize"]`, thus a keyed state is wiped |
 | `subtle` 2, `zeroize` 1 | |
 
 ### 14.2.2 Register R2: the auxiliary primitives
