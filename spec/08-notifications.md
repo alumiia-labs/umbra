@@ -431,7 +431,7 @@ Balanced mode, and it states that trade.
 from the CSPRNG at each network change. **[NTF-053]** The client MUST draw it
 again at each change of its ingress relay pair. The phase is the offset of the
 wake inside the interval. One phase across two networks links the two, and Part
-16 §15.3 states that residual.
+15 §15.3 states that residual.
 
 **[NTF-009]** The UI MUST show the trade in one honest line, and **[NTF-010]**
 the UI MUST NOT hide Private mode. **[NTF-011]** Onboarding MUST NOT ask the

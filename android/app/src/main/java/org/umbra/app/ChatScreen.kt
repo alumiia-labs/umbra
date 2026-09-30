@@ -420,6 +420,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
             if (pending.bytes > LARGE_FILE_WARN) {
                 add("Sending uses about ${Files.uplink(context, pending.bytes)} of data.")
             }
+            if (pending.bytes < 0) add("The app that holds this file names no size.")
             if (pending.isOriginal) add(UiText.get(R.string.umbra_ui_att_157))
         }
         ActionSheet(

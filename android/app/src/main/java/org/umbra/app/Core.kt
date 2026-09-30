@@ -1949,7 +1949,8 @@ object Core {
 
     /** Sends a draft at once, or holds it for the view to ask. */
     private fun offer(client: uniffi.umbra_ffi.Handle, pending: PendingSend) {
-        if (pending.bytes > LARGE_FILE_WARN || pending.isOriginal) {
+        // ATT-083: a provider that names no size may hand a large file.
+        if (pending.bytes < 0 || pending.bytes > LARGE_FILE_WARN || pending.isOriginal) {
             main.post {
                 pendingSend?.draft?.destroy()
                 pendingSend = pending

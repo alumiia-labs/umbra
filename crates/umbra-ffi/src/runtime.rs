@@ -272,6 +272,9 @@ impl Persist for NoStore {
 pub enum Update {
     /// The circuit is ready.
     Online,
+    /// The device clock moved against the monotonic source (Part 1
+    /// `SCP-018`), thus the directory correction goes (Part 10 `REL-115`).
+    ClockMoved,
     /// The circuits that hold their three hops, each as its three relays.
     /// It comes at each change of that set.
     Circuits(Vec<[[u8; 32]; 3]>),
@@ -489,6 +492,39 @@ fn settle(
 const COVER_MEAN: Duration = Duration::from_secs(20);
 
 /// The time to the next slot of a Poisson clock.
+/// A monotonic source that runs while the device sleeps. `Instant` stops
+/// in a suspend on Linux and Android, and a night of sleep then reads as a
+/// clock movement; `/proc/uptime` counts the suspend, as `CLOCK_BOOTTIME`
+/// does. A platform with no such file falls back to `Instant`.
+#[derive(Clone, Copy)]
+struct AwakeClock {
+    instant: tokio::time::Instant,
+    uptime: Option<u64>,
+}
+
+impl AwakeClock {
+    fn uptime() -> Option<u64> {
+        let text = std::fs::read_to_string("/proc/uptime").ok()?;
+        let whole = text.split(['.', ' ']).next()?;
+        whole.parse().ok()
+    }
+
+    fn now() -> Self {
+        AwakeClock {
+            instant: tokio::time::Instant::now(),
+            uptime: Self::uptime(),
+        }
+    }
+
+    /// The seconds since `self`.
+    fn elapsed(&self) -> u64 {
+        match (self.uptime, Self::uptime()) {
+            (Some(then), Some(now)) => now.saturating_sub(then),
+            _ => self.instant.elapsed().as_secs(),
+        }
+    }
+}
+
 fn cover_delay(rng: &mut OsRng) -> Duration {
     let mut bytes = [0u8; 4];
     let _ = rng.try_fill_bytes(&mut bytes);
@@ -556,7 +592,7 @@ pub async fn run_client(
     let mut wake_end: Option<tokio::time::Instant> = None;
     // SCP-018: the monotonic source beside the device clock, from which a
     // tick sees a clock movement.
-    let mut clock_base = (tokio::time::Instant::now(), unix_now());
+    let mut clock_base = (AwakeClock::now(), unix_now());
     let ended = 'run: loop {
         // WIR-254, WIR-339: the indices of the records of the user, and the
         // holes of the records of the contacts.
@@ -639,12 +675,13 @@ pub async fn run_client(
                 // SCP-019: a step of the device clock of more than
                 // CLOCK_SKEW against the monotonic source interrupts each
                 // duration that runs.
-                let mono = i128::from(clock_base.0.elapsed().as_secs());
+                let mono = i128::from(clock_base.0.elapsed());
                 let wall = i128::from(now) - i128::from(clock_base.1);
                 if (wall - mono).abs() > i128::from(umbra_core::directory::CLOCK_SKEW) {
                     node.clock_moved(now);
+                    let _ = updates.send(Update::ClockMoved);
                 }
-                clock_base = (tokio::time::Instant::now(), now);
+                clock_base = (AwakeClock::now(), now);
                 node.set_challenge_clock(now);
                 let mut events = node.on_tick(now);
                 // DIS-015: the rendezvous circuits start on their own delay.

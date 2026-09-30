@@ -497,7 +497,7 @@ the derivation.
 8. **[NET-186]** If a channel is dead or silent, the client MUST fetch
    `handle(peer, week)` and `handle(peer, week - 1)`. The `peer` is the contact
    of that channel. The fetch of a week `w` uses `read_sk(peer, w)` under Part
-   13 §12.4.2.
+   12 §12.4.2.
    **[NET-187]** A client MUST repeat that fetch one time in each week while
    the condition holds. **[NET-188]** A client MUST draw the time of each
    fetch from a uniform distribution over 24 hours. The 24 hours start at the
@@ -2433,7 +2433,7 @@ costs **32 860 B**. Each row below uses those four figures.
 > again.
 
 The message rows above use bucket `B1`. Part 6 §6.9 gives bucket `B0` a text
-capacity of 162 bytes. The mix model of this section uses a text of about 350
+capacity of 155 bytes. The mix model of this section uses a text of about 350
 bytes, which needs bucket `B1`. **That 350-byte figure is unverified.** **[NET-092]** An
 implementation MUST measure the text length distribution of a real deployment
 before a revision re-tunes the bucket ladder. The padding overhead of 40.8 %
@@ -2506,8 +2506,9 @@ below rests on the same unverified figure, and it carries the same mark.
 > §7.5.3 keeps a peer signal off a sync channel, thus no receipt is in that
 > count.
 >
-> Part 7 §7.5.1 gives a set of *d* devices *d(d − 1)/2* sync channels. Thus each
-> device holds *d − 1* channels. The phone sends each record on each of those
+> Part 7 §7.5.1 gives a set of *d* devices *d − 1* sync channels, in a star
+> around the device that owns the channels. Thus the phone, which owns them,
+> holds *d − 1* channels. The phone sends each record on each of those
 > channels, under a full ratchet and on the same bucket ladder. A 350-byte
 > record needs bucket `B1`, thus each sync cell costs 2 096 bytes. At 2 devices
 > the row is 278 × 1 × 2 096 = 582 688 bytes.

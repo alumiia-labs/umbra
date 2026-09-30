@@ -1121,7 +1121,7 @@ sparse presence vector of §11.9.7 and the authority path of §11.9.8.
 ### 11.9.0 Each group control object carries a type byte
 
 Part 6 §6.6.3 gives the `GroupControl` wrapper and its type byte. This part
-defines seven objects that travel under application kind `0x10`.
+defines eight objects that travel under application kind `0x10`.
 
 | `control_type` | Object | Where |
 | --- | --- | --- |
@@ -1133,6 +1133,7 @@ defines seven objects that travel under application kind `0x10`.
 | `0x06` | `GroupPresence` | §11.9.7 |
 | `0x07` | `GroupInvitation` | §11.9.1 |
 | `0x08` | `SnapshotNotice` | §11.9.8 |
+| `0x09` | `RekeyRecord` | §11.12 |
 
 **[GRP-125]** A sender MUST wrap each object of that table in a `GroupControl`.
 **[GRP-126]** A receiver MUST take the object type from `control_type` alone.

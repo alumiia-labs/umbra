@@ -351,6 +351,17 @@ impl<'a> Consensus<'a> {
         }
     }
 
+    /// The correction held, which a client keeps across runs (`REL-114`).
+    pub fn correction(&self) -> Option<i64> {
+        self.correction
+    }
+
+    /// Takes the correction that an earlier run kept. A client with none
+    /// applies no `REL-035` until a root gives one (`REL-113`).
+    pub fn set_correction(&mut self, correction: Option<i64>) {
+        self.correction = correction;
+    }
+
     /// A clock movement of Part 1 §1.9 discards the correction (`REL-115`).
     pub fn clock_moved(&mut self) {
         self.correction = None;

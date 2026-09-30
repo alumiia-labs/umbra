@@ -872,6 +872,24 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
                 Ok(())
             }
+            // GRP-119: a moderation epoch that the order did not select goes
+            // again, with each of its acts, while this member holds a role
+            // that moderates.
+            ControlType::ModerationEpoch => {
+                let epoch = umbra_wire::group::control::ModerationEpoch::parse(control.payload)?;
+                let acts: Vec<(u8, [u8; 16])> = epoch
+                    .actions
+                    .iter()
+                    .map(|act| (act.action, act.target))
+                    .collect();
+                let Ok(object) = group.moderate(&acts, rng) else {
+                    return Ok(());
+                };
+                drop(group);
+                self.post_group_control(conversation, &object, now_ms, rng)?;
+                self.apply_own_roster_object(conversation, &object, now_ms, rng)?;
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
@@ -2947,7 +2965,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
         self.roster_moved(conversation, &applied, now_ms / 1_000, rng)?;
         self.drop_passed_adds(conversation)?;
-        // DEV-303: a key that waited for this roster object installs now.
+        // DEV-301: a re-key item that waited for this roster object
+        // applies now, and DEV-303: a key that waited installs now.
+        self.retry_rekey_items(now_ms, rng)?;
         self.retry_epoch_keys(conversation, now_ms, rng)?;
         Ok(applied)
     }
@@ -4859,8 +4879,23 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             ));
         }
         waiting.sort_by_key(|(stored_at, _, _, _)| *stored_at);
+        // GRP-246: a record that no seal took yet takes the slot of the last
+        // tick, as a send then would. GRP-415: one that cannot be sealed any
+        // more fails alone, and the rest go.
+        let tick_ms = self.clock.saturating_mul(1_000);
         for (stored_at, conversation, message, app) in waiting {
-            self.queue_group_post(conversation, Some(message), &app, stored_at, rng)?;
+            if self
+                .queue_group_post(
+                    conversation,
+                    Some(message),
+                    &app,
+                    stored_at.max(tick_ms),
+                    rng,
+                )
+                .is_err()
+            {
+                self.set_delivery(&message, Delivery::Failed, rng)?;
+            }
         }
         Ok(())
     }

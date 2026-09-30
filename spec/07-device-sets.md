@@ -185,7 +185,7 @@ revoked_count || revoked || claim_count || claims || prev_hash || signer_id
 
 Part 5 §5.11 holds the label `"umbra/v1/device-roster"`.
 
-**The five rules of a roster epoch.**
+**The six rules of a roster epoch.**
 
 1. **[DEV-148]** A device MUST sign a roster epoch with its own `DeviceRosterKey_i`. **[DEV-149]** A device
    MUST put its own `DeviceId` in `signer_id`.
@@ -561,14 +561,30 @@ Provision {                      // sealed under the seal key, XChaCha20-Poly130
 ### 7.5.1 The sync channel
 
 The devices in a set communicate over **dedicated sync queues**. Those queues
-use the same relay fabric as the other traffic, and each pair of devices
-establishes its own queues. A set of *d* devices has *d(d−1)/2* sync channels.
+use the same relay fabric as the other traffic. A link of §7.4 opens one sync
+channel, between the device that owns the channels and the new device, and
+only the device that owns the channels starts a link. A set of *d* devices
+thus has *d−1* sync channels, in a star around that device.
+**[DEV-308]** The device that owns the channels MUST publish again, to each
+of its peers, each `SyncedRecord` and each `MutableItem` that it takes from
+one peer, the source included, since each peer takes each counter of the
+publisher (`DEV-055`). A device MUST treat as a peer only a device with a
+sync channel to it. A device that takes, from the device that owns the
+channels, a `SyncedRecord` equal in `scope`, `subject`, `author`, and `inner`
+to one that it published and still retains MUST drop it.
+
+> *Cause.* An earlier draft gave *d(d−1)/2* channels, and the link of §7.4
+> opened one. A record that a linked device composed then reached the owner
+> alone, and each other linked device never read it, while the log of the
+> composing device kept it for each peer that it could not reach. The owner
+> reads each channel already, thus its relay costs one publish for each
+> record, and a new link needs no channel of its own to each other device.
 
 **[DEV-009]** A client MUST NOT add a device to a device set that already holds `MAX_DEVICES`
 devices. **[DEV-010]** A client MUST reject a roster that names more than `MAX_DEVICES`
 devices. §7.8 sets `MAX_DEVICES` to 8. That cap keeps *d* small, and it bounds
-the *d(d−1)/2* fan-out. Thus the design is cheap, and it does not name a primary
-device that becomes one point of failure.
+the fan-out of the relay. The owner of the channels relays, and a claim of
+§7.3.1 moves that duty with the channels.
 
 The sync traffic has these properties:
 
@@ -898,7 +914,12 @@ class in Part 6 §6.6. **[DEV-022]** A client MUST NOT process a kind that decla
   that owns the channels MUST publish, for each group, the new seed and the
   re-key object under the group subject. **[DEV-301]** Each other device MUST
   apply that re-key to its own row of the group, and it MUST keep the seed
-  before it for the grace of Part 11 `GRP-372`.
+  before it for the grace of Part 11 `GRP-372`. **[DEV-309]** A device that
+  does not hold the group yet, or whose roster does not reach the roster
+  epoch before the re-key, MUST keep the item and apply it again after each
+  group state and each roster object that it takes, for 7 days at the most.
+  The group state comes on the chunk path and the roster object on the sync
+  channel, and either one can come after the item.
   **[DEV-302]** An existing device MUST NOT start a second link while the
   sync channel of the last one has not opened, since the new device of that
   link takes its handshake then.
@@ -1631,7 +1652,7 @@ has to be fast and complete.
 ```
 
 **The seed update (step 2d).** `SyncChannelSeed_0` is the seed of the diagram
-of §7.1, and `K_devset` derives it. The seed of epoch *n+1* equals the seed of
+of §7.3, and `K_devset` derives it. The seed of epoch *n+1* equals the seed of
 epoch *n*, except at an epoch that revokes a device. At that epoch the signing
 device makes a new seed, and it sends the input to each remaining device.
 

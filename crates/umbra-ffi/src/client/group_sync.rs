@@ -35,6 +35,14 @@ use crate::{ConversationId, Error};
 /// before the roster object that calls for them (`DEV-303`), under the
 /// group and the epoch. The owner column names the group.
 pub(super) const EPOCH_HELD: TableId = TableId(0x2A);
+/// The re-key items of `DEV-301` that did not apply yet, under the subject
+/// of the group: the time of arrival in seconds, the subject, then the
+/// item. The group
+/// can come later on the chunk path, and the roster epoch before the
+/// re-key on the sync channel.
+const REKEY_HELD: TableId = TableId(0x4E);
+/// A held re-key item that applies in no week applies never.
+const REKEY_HOLD_MAX: u64 = 7 * 86_400;
 /// The synced records of a group that this device does not hold yet, by
 /// their order of arrival: the subject of the group, then the record
 /// (`DEV-299`).
@@ -282,6 +290,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         batch.commit()?;
         self.events.push_back(super::Event::Conversations);
         self.replay_group_records(subject, conversation, rng)?;
+        // DEV-301: a re-key item that came before the group applies now.
+        self.retry_rekey_items(super::unix_now_seconds().saturating_mul(1_000), rng)?;
         Ok(conversation)
     }
 
@@ -403,8 +413,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if self.owns_channels()? {
             return Ok(());
         }
+        // DEV-301: a group that this device does not hold yet takes the
+        // item when it comes.
         let Some(conversation) = self.conversation_of_group_subject(&subject)? else {
-            return Ok(());
+            return self.hold_rekey_item(subject, value, now_ms, rng);
         };
         let seed: [u8; 32] = value
             .get(..32)
@@ -413,9 +425,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let object = value.get(32..).ok_or(Error::Malformed)?;
         let mut group = self.group_of(conversation)?;
         let seed = Secret::new(seed);
-        // A re-key that this row holds already changes nothing.
-        if group.adopt_rekey(object, &seed, now_ms / 1_000).is_err() {
-            return Ok(());
+        match group.adopt_rekey(object, &seed, now_ms / 1_000) {
+            Ok(_) => {}
+            // A re-key that this row holds already changes nothing.
+            Err(umbra_core::Error::Stale) => return Ok(()),
+            // A roster that does not reach the epoch before the re-key
+            // takes the item after the next roster object.
+            Err(_) => return self.hold_rekey_item(subject, value, now_ms, rng),
         }
         self.store_rekeyed(conversation, &group, &seed, rng)?;
         // DEV-303: an epoch key of the new index that came on the group
@@ -442,6 +458,66 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 }
 
 impl<B: Backend, E: SecureElement> Client<B, E> {
+    fn hold_rekey_item<R: CryptoRng + ?Sized>(
+        &mut self,
+        subject: [u8; 32],
+        value: &[u8],
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let open = self.open_mut()?;
+        let row = open.store.row_id(REKEY_HELD, &subject);
+        let held =
+            Zeroizing::new([(now_ms / 1_000).to_be_bytes().as_slice(), &subject, value].concat());
+        let mut batch = open.store.begin();
+        batch.put(REKEY_HELD, row, None, &held, rng)?;
+        Ok(batch.commit()?)
+    }
+
+    /// Applies each held re-key item again (`DEV-301`), after a roster
+    /// object or a group state. An item that still does not apply waits
+    /// again, and one older than `REKEY_HOLD_MAX` goes.
+    pub(super) fn retry_rekey_items<R: CryptoRng + ?Sized>(
+        &mut self,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let held = self.open_ref()?.store.list(REKEY_HELD, None)?;
+        if held.is_empty() {
+            return Ok(());
+        }
+        let open = self.open_mut()?;
+        let mut batch = open.store.begin();
+        for (row, _) in &held {
+            batch.delete(REKEY_HELD, *row);
+        }
+        batch.commit()?;
+        let now = now_ms / 1_000;
+        for (_, plain) in held {
+            let plain = Zeroizing::new(plain);
+            let Some(at) = plain
+                .get(..8)
+                .and_then(|bytes| bytes.try_into().ok())
+                .map(u64::from_be_bytes)
+            else {
+                continue;
+            };
+            if now.saturating_sub(at) > REKEY_HOLD_MAX {
+                continue;
+            }
+            let (Some(subject), Some(item)) = (
+                plain
+                    .get(8..40)
+                    .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok()),
+                plain.get(40..),
+            ) else {
+                continue;
+            };
+            self.on_group_rekey_item(subject, item, now_ms, rng)?;
+        }
+        Ok(())
+    }
+
     /// Keeps an epoch-key record of the next epoch that did not install.
     pub(super) fn hold_epoch_key<R: CryptoRng + ?Sized>(
         &mut self,

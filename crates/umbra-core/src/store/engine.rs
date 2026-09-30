@@ -293,6 +293,13 @@ impl<B: Backend> Transaction<'_, B> {
         self.deletion = true;
     }
 
+    /// Makes the batch a deletion batch with no delete: a put that replaces
+    /// the text of a row leaves the earlier ciphertext in no log (Part 14
+    /// `IMP-154`).
+    pub fn erase_earlier(&mut self) {
+        self.deletion = true;
+    }
+
     /// Discards the record key of a row and keeps the row (`IMP-041`), as
     /// a tombstone and a timer expiry of Part 7 ask. The batch is a
     /// deletion batch.

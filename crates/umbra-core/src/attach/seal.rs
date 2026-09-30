@@ -263,6 +263,13 @@ impl Assembler {
         self.next == self.chunk_count
     }
 
+    /// Whether `chunk` opens as the chunk at `index`, with no change to the
+    /// assembly. A download tests each answer of a relay with it.
+    pub fn opens(&self, index: u32, chunk: &[u8]) -> bool {
+        let last = index.saturating_add(1) == self.chunk_count;
+        open_chunk(&self.key, &self.nonce, index, last, chunk).is_ok()
+    }
+
     /// Opens the next chunk and returns its verified segment, which a media
     /// player may render before the digest check (`ATT-152`).
     pub fn accept(&mut self, chunk: &[u8]) -> Result<&[u8], Error> {

@@ -3,7 +3,7 @@
 //!
 //! The key schedule is generic over the KEM and the KDF hash. The UMBRA
 //! suite is `UMBRA-KEM` with HKDF-SHA3-256 and ChaCha20-Poly1305 under the
-//! suite ids of Part 5 §5.4. The RFC vector runs the same schedule under
+//! suite ids of Part 5 §5.10. The RFC vector runs the same schedule under
 //! DHKEM(X25519, HKDF-SHA256) in the tests, thus the schedule itself is
 //! checked against a published value.
 

@@ -54,7 +54,7 @@ the files, and run the script again.
 
 | File | Bytes | SHA-256 |
 | --- | --- | --- |
-| `rfc9474/deterministic.txt` | 8597 | `e4597e66c3cc601ab5683104f46aaeccd32e39fe78dafa1057e06ab6de10ab4a` |
+| `rfc9474/deterministic.txt` | 8584 | `dc0f91153a509394ff0d6892838ecc9e830b83dd9699e064bb24029e59f6b995` |
 
 ## `rfc9180/` — RFC 9180 HPKE base-mode vector, DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, ChaCha20Poly1305
 
@@ -65,7 +65,7 @@ the files, and run the script again.
 
 | File | Bytes | SHA-256 |
 | --- | --- | --- |
-| `rfc9180/a2_base.txt` | 2719 | `0017b8d661759a04afc6d2d9747118f06c25ef45ca4fc26f50cb6a102ef01e76` |
+| `rfc9180/a2_base.txt` | 2669 | `31230847f739bb37361ed6c6ea120529baaeecf8df96f23dee763eccc29301bf` |
 
 ## `umbra/` — UMBRA-KEM and key-hierarchy vectors (Part 5 rules CRY-045, CRY-046, CRY-121)
 
@@ -81,7 +81,7 @@ the files, and run the script again.
 | `umbra/handshake.json` | 53987 | `abdf59b4e42e8ca686035ce27862adc9e603cba31ec61b60fa0f5bd421bc93a2` |
 | `umbra/hierarchy.json` | 13058 | `5f3417a0b4860a8db82186c261a5c6792a14678625af6a2096dbbf2ce7587f28` |
 | `umbra/kem.json` | 7553 | `378f33f22f375a7f29580e6d56bb4b88a4255f7592539f4015974f77b21d143c` |
-| `umbra/onion.json` | 10288 | `e2b4ef4878ab263e83403bf98340e848127f12e264f9c6bf9fb783358ccf6691` |
+| `umbra/onion.json` | 10290 | `1d3b5728e7eae47f034df015d6d49477c836e7b08034b8f1644fa33048563cb1` |
 | `umbra/schedule.json` | 88172 | `a6d3b1b5c4f8093294a5895715e79dbb077b87ac476b2e9200d78caf089c2b36` |
 | `umbra/wire.json` | 87325 | `7b63696c9c1054d5dc3b6f9e6d66e1906b5d3793486bc53e2e3c6b2032663e3e` |
 

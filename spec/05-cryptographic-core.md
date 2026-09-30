@@ -38,7 +38,7 @@ manner, and it carries a dependency cap of its own.
 | AUX-3 | **ECVRF-Edwards25519-SHA512-TAI** | RFC 9381, classically secure only | Index blinding for handle key transparency, and the probe selection that a relay MUST NOT predict | Part 9 §9.5, Part 10 §10.4.1 |
 | AUX-4 | **Argon2id** | about 3 s for each try on a mid-range device | Human recovery code, and the at-rest passphrase | Part 14 §14.6.4 |
 | AUX-5 | **A keyed function inside the secure element** | HMAC-SHA256 in StrongBox | Entanglement of the at-rest key with the secure element | Part 14 §14.6.4 |
-| AUX-6 | **HPKE under OHTTP** | RFC 9180 and RFC 9458, with `UMBRA-KEM`; the suite is `UMBRA-KEM`, HKDF-SHA3-256, and ChaCha20-Poly1305 under the identifiers of §5.4, and the labels of RFC 9180 §4 hold (CRY-151) | The notification boundary, and the one-time `k_ntf_root` | Part 8 §8.2.3 |
+| AUX-6 | **HPKE under OHTTP** | RFC 9180 and RFC 9458, with `UMBRA-KEM`; the suite is `UMBRA-KEM`, HKDF-SHA3-256, and ChaCha20-Poly1305 under the identifiers of §5.10, and the labels of RFC 9180 §4 hold (CRY-151) | The notification boundary, and the one-time `k_ntf_root` | Part 8 §8.2.3 |
 | AUX-7 | **XChaCha20-Poly1305** | 24-byte random nonce | Storage master key wrap, and each database record | Part 14 §14.6.4 |
 | AUX-8 | **Equi-X** | the `hashx` and `equix` crates, with the JIT off | Proof of work as a surge valve | Part 13 §13.8 |
 | AUX-9 | **Two-aggregator additive secret sharing with Laplace noise** | PrivEx-S2, `b = σ/ε` | The relay statistic that a directory publishes | Part 10 §10.8 |
@@ -342,12 +342,12 @@ relay_bundle                 var      signed, for bootstrapping
 ```
 
 **[CRY-151]** An HPKE of AUX-6 MUST build its `suite_id` as `"HPKE" ||
-kem_id || kdf_id || aead_id` from the identifiers of §5.4, which are `0x0001`
+kem_id || kdf_id || aead_id` from the identifiers of §5.10, which are `0x0001`
 each, and it MUST use `UMBRA-KEM` as the KEM with `Nsecret` of 32, `Nenc` of
 1 120, and `Npk` of 1 216, HKDF-SHA3-256 as the KDF, and ChaCha20-Poly1305 as
 the AEAD, with the labeled extract and expand of RFC 9180 §4 unchanged.
 
-**[CRY-150]** A client MUST write the five fields in the order above, with
+**[CRY-150]** A client MUST write the six fields in the order above, with
 `bundle_len` before `relay_bundle`, and a reader MUST reject a bundle with
 bytes after `relay_bundle`. Part 6 §6.1.1 rule 2 gives each variable field a
 length before it.
@@ -928,7 +928,7 @@ thus `CRY-031` permits the shared label.
 > *Cause.* An earlier draft named `NKhfs` in Part 3 and in Part 10, and no part
 > defined it. Two implementations could not interoperate at the transport layer,
 > and no security argument covered the layer that each message crosses. The
-> relay static ML-KEM key of that draft had no consumer, and Part 10 Part 10
+> relay static ML-KEM key of that draft had no consumer, and Part 10
 > §10.5.3 removes it. An encapsulation to that key would add 1 088 bytes to
 > flight 1. The `EXTEND` cell of Part 3 §3.4.3 would then leave bucket `B1`.
 
@@ -1238,7 +1238,7 @@ raise `MSG_TTL` alone.
 > skipped the key of that message discarded that key on day 14, thus the message
 > arrived and it did not decrypt. U9 of Part 2 §2.4 sets the undecryptable rate
 > below 1 in 10⁵, and that window is 31 days wide on the ordinary path. Part 12
-> Part 12 §12.7.1 corrects the same class of error for `CHUNK_TTL`, and rules
+> §12.7.1 corrects the same class of error for `CHUNK_TTL`, and rules
 > ATT-050 and ATT-051 give the same relation.
 >
 > **This is a trade, and Part 2 §2.4 requires the text to state it.** A skipped
@@ -1510,7 +1510,6 @@ names the object type and its lifetime:
 "umbra/v1/pow"
 "umbra/v1/hello-verifier"
 "umbra/v1/hello-seed"
-"umbra/v1/handle-key"
 "umbra/v1/sas-commit"
 "umbra/v1/sas"
 "umbra/v1/record-key"
@@ -1673,7 +1672,7 @@ primitive register in the same manner.
 > computed the layer assignment under `"umbra/v1/relay-descriptor"`, which
 > already names the descriptor signature. CRY-031 forbids two object types under
 > one label. The note of that draft also said that one label carried three
-> domains. Part 10 Part 10 §10.5.3 gives the leaf hash and the node hash no
+> domains. Part 10 §10.5.3 gives the leaf hash and the node hash no
 > label at all, thus that note described a construction that the text does not
 > hold.
 

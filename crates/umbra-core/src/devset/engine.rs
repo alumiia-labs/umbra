@@ -158,6 +158,10 @@ impl SyncEngine {
 
     /// A device joined the roster (`DEV-009`).
     pub fn add_peer(&mut self, peer: DeviceId) -> Result<(), Error> {
+        // A peer that the engine holds already counts once.
+        if self.peers.contains_key(&peer) {
+            return Ok(());
+        }
         if self.peers.len().saturating_add(1) >= MAX_DEVICES || peer == self.own {
             return Err(Error::NoPath);
         }

@@ -162,6 +162,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     rng,
                 )?;
                 batch.put(REVISION, message.0, None, &[count.saturating_add(1)], rng)?;
+                // IMP-154: the earlier text leaves the log of the store.
+                batch.erase_earlier();
                 batch.commit()?;
                 self.events.push_back(Event::Edited {
                     conversation,

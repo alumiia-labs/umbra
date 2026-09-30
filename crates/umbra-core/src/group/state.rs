@@ -1144,6 +1144,29 @@ impl Group {
         Ok(())
     }
 
+    /// GRP-356: the rotator of the next epoch is no index that a trigger
+    /// since the epoch before excludes, and its record names a roster epoch
+    /// at or above the newest trigger. Thus a removed member cannot post the
+    /// next epoch under a roster epoch in which it was still active.
+    fn check_rotator(&self, epoch: u32, roster_epoch: u32, rotator: u16) -> Result<(), Error> {
+        let current = self.epochs.current().ok_or(Error::NoPath)?;
+        if epoch != current.epoch().saturating_add(1) {
+            return Ok(());
+        }
+        let triggers = self.roster.triggers_since(current.roster_epoch());
+        if triggers
+            .iter()
+            .any(|trigger| trigger.excluded == Some(rotator))
+        {
+            return Err(Error::Unverified);
+        }
+        let newest = triggers.iter().map(|trigger| trigger.roster_epoch).max();
+        if newest.is_some_and(|newest| roster_epoch < newest) {
+            return Err(Error::Unverified);
+        }
+        Ok(())
+    }
+
     /// Installs what an opened slot gives.
     fn finish_install(
         &mut self,
@@ -1162,6 +1185,7 @@ impl Group {
             self.take_owners(payload);
             return Ok(());
         }
+        self.check_rotator(epoch, roster_epoch, payload.rotator)?;
         let secret = EpochSecret::from_secret(Secret::new(*payload.epoch_secret.expose()));
         // GRP-386: the two queue credentials come from `K_e`.
         self.epochs.install(EpochState::new(
@@ -1940,6 +1964,13 @@ mod tests {
         assert_eq!(trigger.excluded, Some(1));
         assert!(member.owes_rotation(now).is_none());
         assert!(third.owes_rotation(now).is_some());
+        // GRP-356: a rotation by the removed index, or one that names the
+        // roster epoch before the removal, installs nowhere.
+        let next_epoch = third.epoch() + 1;
+        let removed_at = third.roster().epoch_index();
+        assert!(third.check_rotator(next_epoch, removed_at, 1).is_err());
+        assert!(third.check_rotator(next_epoch, removed_at - 1, 0).is_err());
+        assert!(third.check_rotator(next_epoch, removed_at, 0).is_ok());
 
         let first_epoch = creator.epoch();
         let rotation = creator.rotate(now, &mut rng).unwrap();

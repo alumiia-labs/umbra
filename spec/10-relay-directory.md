@@ -373,7 +373,7 @@ SealedReport {                   // 157 bytes, the L6 record of kind 0x08
 }
 ```
 
-The `ReportQueue` is **3 504 bytes**. Part 5 §5.11 holds the label. The
+The `ReportQueue` is **3 480 bytes**. Part 5 §5.11 holds the label. The
 signature covers each field but `sig`, after the label, under the key of the
 authority at `authority_index` in the current `DirectoryKeySet`. The
 `RelayManifest` of §10.5.5 carries the report queues after its entries.

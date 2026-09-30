@@ -234,7 +234,9 @@ pub(super) fn shape_of(descriptor: &FileDescriptor) -> Shape {
 pub(super) fn fetchable(body: &[u8]) -> Option<FileDescriptor> {
     let descriptor = AttachmentBody::parse(body).ok()?.descriptor;
     let is_in_reach = !descriptor.refs.is_empty() && descriptor.refs.len() <= MAX_DESCRIPTOR_REFS;
-    is_in_reach.then_some(descriptor)
+    // ATT-142: a descriptor of a conversation names three replicas.
+    let names_each = umbra_core::attach::manifest::reject_null_hints(&descriptor.refs).is_ok();
+    (is_in_reach && names_each).then_some(descriptor)
 }
 
 /// The state row of a file that a contact sent, and its descriptor when

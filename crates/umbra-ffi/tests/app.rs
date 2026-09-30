@@ -323,6 +323,8 @@ fn network_of(ports: &[u16]) -> Network {
                     prefix: Some(vec![10, number]),
                     holds_files: false,
                     identity_pk: Vec::new(),
+                    roles: None,
+                    prefix_v6: None,
                 }
             })
             .collect(),

@@ -2,8 +2,10 @@
 """Regenerate spec/req-index.md from the requirement markers in spec/.
 
 The index has one row per marker. This tool:
-  * keeps the row of every marker that still exists, verbatim, but corrects
-    its Section column to the section that holds the marker now;
+  * keeps the row of every marker that still exists, but corrects its
+    Section column to the section that holds the marker now, and replaces
+    its Requirement cell with the sentence after the marker when the kept
+    text no longer appears in the specification;
   * removes the row of every marker that no longer exists;
   * adds a row for every marker that has no row, with the key word, the
     binder, and the requirement sentence extracted from the text that follows
@@ -106,8 +108,14 @@ def keyword_and_binder(sentence: str):
     return "MUST", "(unstated)"
 
 
+def normalized(text: str) -> str:
+    """Text with no emphasis, no code marks, and single spaces."""
+    text = text.replace("**", "").replace("`", "").replace("*", "")
+    return re.sub(r"\s+", " ", text).strip().rstrip(".")
+
+
 def collect_markers():
-    """id -> (prefix, number, section, sentence)"""
+    """id -> (prefix, number, section, sentence, text after the marker)"""
     out = {}
     for fname, part in FILE_PART.items():
         path = SPEC / fname
@@ -130,7 +138,9 @@ def collect_markers():
                     continue
                 after = text[m.end():]
                 sentence = extract_sentence(after)
-                out[rid] = (rid[:3], int(rid[4:]), sec_at[start], sentence)
+                nxt = MARKER_RE.search(after)
+                segment = after[: nxt.start()] if nxt else after
+                out[rid] = (rid[:3], int(rid[4:]), sec_at[start], sentence, normalized(segment))
     return out
 
 
@@ -150,11 +160,16 @@ def main(argv):
     markers = collect_markers()
     lines, rows = load_rows()
 
-    kept, added, removed = 0, [], []
+    kept, added, removed, refreshed = 0, [], [], []
     new_rows = {}
-    for rid, (prefix, num, sec, sentence) in markers.items():
+    for rid, (prefix, num, sec, sentence, segment) in markers.items():
         if rid in rows:
-            new_rows[rid] = f"| `{rid}` | §{sec} |{rows[rid]}"
+            cells = rows[rid].split("|")
+            # cells: key word, binder, requirement, module, test, ""
+            if len(cells) >= 5 and normalized(cells[2]) not in segment:
+                cells[2] = f" {sentence} "
+                refreshed.append(rid)
+            new_rows[rid] = f"| `{rid}` | §{sec} |" + "|".join(cells)
             kept += 1
         else:
             kw, binder = keyword_and_binder(sentence)
@@ -198,7 +213,7 @@ def main(argv):
             out.append(new_rows[rid])
         out.append("")
 
-    print(f"markers: {len(markers)}  kept rows: {kept}  added: {len(added)}  removed: {len(removed)}")
+    print(f"markers: {len(markers)}  kept rows: {kept}  added: {len(added)}  removed: {len(removed)}  refreshed: {len(refreshed)}")
     if added:
         print("added:", ", ".join(added))
     if removed:

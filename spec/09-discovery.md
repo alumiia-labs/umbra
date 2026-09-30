@@ -558,14 +558,14 @@ auditor holds the intent of the holder.
 
 **The key-set rotation.**
 
-13. **[DIS-064]** A client MUST accept a `LogKeySet` only with 2 or more valid
+14. **[DIS-064]** A client MUST accept a `LogKeySet` only with 2 or more valid
     ML-DSA-65 signatures from the **previous** key set. Each of those
     signatures covers `"umbra/v1/tree-head-keyset" || version ||`
     `keyset_epoch || SHA3-256(the new canonical key set)`. Part 5 §5.11 holds
     that label.
-14. **[DIS-065]** A client MUST reject a `LogKeySet` whose `keyset_epoch` is at
+15. **[DIS-065]** A client MUST reject a `LogKeySet` whose `keyset_epoch` is at
     or below the `keyset_epoch` that the client holds.
-15. **[DIS-066]** A client build MUST ship the genesis `LogKeySet`. Part 15
+16. **[DIS-066]** A client build MUST ship the genesis `LogKeySet`. Part 15
     §15.5 puts the build under binary transparency.
 
 Two signers rotate the third out when an auditor stops, disputes, or receives
@@ -576,14 +576,14 @@ directory.
 `SignedTreeHead` that passes rules 5 to 11. The loss of one signer does not put
 a client in that state, because two signers suffice. The loss of two does.
 
-16. **[DIS-067]** In the degraded read, a client MUST complete a lookup of
+17. **[DIS-067]** In the degraded read, a client MUST complete a lookup of
     §9.4. **[DIS-068]** In the degraded read, a client MUST show the result of
     a lookup as unverified.
-17. **[DIS-069]** In the degraded read, a client MUST NOT send the hello of
+18. **[DIS-069]** In the degraded read, a client MUST NOT send the hello of
     §9.6 step 2 without an explicit user confirmation.
-18. **[DIS-070]** In the degraded read, a client MUST NOT replace a held
+19. **[DIS-070]** In the degraded read, a client MUST NOT replace a held
     `HK_pub` with a resolved value that differs.
-19. **[DIS-071]** In the degraded read, a client MUST NOT show a split-view
+20. **[DIS-071]** In the degraded read, a client MUST NOT show a split-view
     warning under `DIS-034`. The client holds no accepted head to compare
     against.
 
@@ -691,7 +691,7 @@ send flight 1 of Part 5 §5.4.2 to the `queue_address` of those fields.
 **[DIS-131]** A client MUST end a hello with one `Admission` of Part 13 §13.2,
 inside the AEAD of the hello. **[DIS-132]** That `Admission` MUST hold a
 cross-relay token of Part 13 §13.3.1 or a `PowSolution` of Part 13 §13.4. Part
-14 §13.4 gives the verification at the addressee, and the queue relay reads a
+13 §13.4 gives the verification at the addressee, and the queue relay reads a
 padded message and nothing more.
 
 **[DIS-182]** An addressee MUST admit a hello under a cross-relay token only

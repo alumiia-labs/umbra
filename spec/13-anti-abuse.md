@@ -385,10 +385,10 @@ The verification takes about 50 µs. Thus one relay core absorbs about 20 000
 puzzle checks each second.
 
 **The challenge.** A verifier publishes its current effort in a signed object.
-The `verifier_id` of a relay is its `relay_id` of Part 10 §10.5.3. The issuer of
-§13.9 and the handle directory each hold an ML-DSA-65 identity key that the log
-of §13.5 lists. The `verifier_id` of each of those two is the SHA3-256 of that
-key. §13.4 derives the `verifier_id` of an addressee from its published key.
+The `verifier_id` of a relay is its `relay_id` of Part 10 §10.5.3. The handle
+directory holds an ML-DSA-65 identity key that the log of §13.5 lists, and its
+`verifier_id` is the SHA3-256 of that key. `ABU-109` gives the `verifier_id` of
+the issuer of §13.9. §13.4 derives the `verifier_id` of an addressee from its published key.
 
 ```
 PowChallenge {
@@ -513,9 +513,9 @@ the third constraint above. Part 5 §5.11 holds the label `"umbra/v1/pow"`.
 > unknown target under `ABU-008`. Tor publishes `pow-params` in the descriptor.
 > UMBRA serves a separate signed object beside the descriptor. The effort is a
 > fast-moving pressure signal, and the descriptor is bound to a consensus epoch
-> of one hour. The relay signs the object, and the directory serves it. Thus
-> one relay cannot give one client a private effort without the directory as a
-> witness.
+> of one hour. The relay signs the object, and each carrier of the manifest
+> serves it under `ABU-064` and `ABU-104`. Thus one relay cannot give one
+> client a private effort that no carrier holds.
 
 ### 13.8.1 The allocation of attachment storage
 

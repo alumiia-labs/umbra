@@ -69,6 +69,13 @@ object Notifier {
             .setOngoing(true)
             .build()
 
+    /** The form of an alert on a secure lock screen: that one exists. */
+    private fun lockScreen(context: Context): Notification =
+        Notification.Builder(context, MESSAGE_CHANNEL)
+            .setSmallIcon(R.drawable.ic_stat_umbra)
+            .setContentTitle("New message")
+            .build()
+
     /** One alert for each conversation. A later record updates that alert. */
     fun message(context: Context, conversation: Conversation, title: String? = null, text: String? = null) {
         if (!mayPost(context)) return
@@ -79,32 +86,33 @@ object Notifier {
             .setGroup(conversation.label)
             .setAutoCancel(true)
             .setContentIntent(openApp(context))
-            // The lock screen shows that an alert exists, and no more.
-            .setVisibility(Notification.VISIBILITY_SECRET)
+            // NTF-119: the lock screen shows that an alert exists, and no
+            // more.
+            .setVisibility(Notification.VISIBILITY_PRIVATE)
+            .setPublicVersion(lockScreen(context))
             .build()
         manager(context).notify(MESSAGE_TAG, conversation.hashCode(), alert)
     }
 
     /**
      * The alert of a push (Part 8 rule `NTF-014`). It names no conversation,
-     * and a later push takes its place.
+     * and a later push takes its place with no second sound, thus a digest
+     * push and a re-push make no alert of each record (`NTF-018`).
      */
     fun pushed(context: Context) {
         if (!mayPost(context)) return
         val alert = Notification.Builder(context, MESSAGE_CHANNEL)
             .setSmallIcon(R.drawable.ic_stat_umbra)
             .setContentTitle("New message")
+            .setOnlyAlertOnce(true)
             .setAutoCancel(true)
             .setContentIntent(openApp(context))
-            .setVisibility(Notification.VISIBILITY_SECRET)
+            .setVisibility(Notification.VISIBILITY_PRIVATE)
+            .setPublicVersion(lockScreen(context))
             .build()
         manager(context).notify(MESSAGE_TAG, PUSH_ID, alert)
     }
 
-    /**
-     * A locked client takes no record. The user learns it one time for each
-     * lock, and the notice makes no sound.
-     */
     /** A contact request arrived. The line names no sender. */
     fun request(context: Context) {
         if (!mayPost(context)) return
@@ -113,11 +121,16 @@ object Notifier {
             .setContentTitle("New contact request")
             .setAutoCancel(true)
             .setContentIntent(openApp(context))
-            .setVisibility(Notification.VISIBILITY_SECRET)
+            .setVisibility(Notification.VISIBILITY_PRIVATE)
+            .setPublicVersion(lockScreen(context))
             .build()
         manager(context).notify(MESSAGE_TAG, REQUEST_ID, alert)
     }
 
+    /**
+     * A locked client takes no record. The user learns it one time for each
+     * lock, and the notice makes no sound.
+     */
     fun locked(context: Context) {
         if (!mayPost(context)) return
         val notice = Notification.Builder(context, CARRIER_CHANNEL)

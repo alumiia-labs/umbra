@@ -28,6 +28,11 @@ umbra/
 
 The dependency direction is strictly downward. A cycle is a build failure.
 
+Two crates of the layout do not exist in the reference implementation today.
+`umbra-web` waits for the web client, which is on hold, and `umbra-simd` waits
+for a SIMD path, which no crate needs yet. Thus each crate of the workspace
+forbids `unsafe` today, and the exception below has no crate to apply to.
+
 > *Cause.* An earlier draft held an `umbra-nse` crate for the notification
 > extension of a platform that this revision defers, and §14.6.3 records what
 > an iOS revision revisits.
@@ -61,10 +66,9 @@ on `no_std` and on `wasm32`. That graph is
 about 65k LOC, and it has no open OSV or RustSec advisory at the pinned
 versions.
 
-**The figure of 37 comes from a trial resolution outside this repository.** The
-reference implementation holds no workspace `Cargo.toml` file at the date of
-this draft. Thus 37 is not a measurement of this repository. §14.2.4 names the
-party that measures the count, and it names the time.
+**The figure of 37 comes from a trial resolution outside this repository.**
+`DEPENDENCIES.md` holds the measurement of this repository, which the script
+of §14.2.4 writes.
 
 | Crate | Configuration |
 | --- | --- |
@@ -363,10 +367,11 @@ two cases the source did not change.
   `tests/vectors/PROVENANCE.md` file that records the upstream commit of each
   corpus. **[IMP-036]** A test MUST NOT fetch a vector at test time.
 
-  **This repository holds no corpus today.** It holds the specification only,
-  and `tests/vectors/` is empty. That path is frozen, thus the first commit that
-  adds a corpus also runs the unfreeze procedure. §14.1 gives the target layout,
-  and the crates of that layout do not exist today either.
+  **The repository holds part of that set today.** `tests/vectors/` holds the
+  NIST ACVP files of ML-KEM and ML-DSA, the C2SP CCTV vectors of ML-KEM, the
+  RFC 9180 and RFC 9474 vectors, and the vectors of UMBRA itself. The CAVP
+  corpus and `testvectors_v1` are not vendored yet, thus `IMP-034` stays open
+  for them.
 - A test cross-tests each primitive against one independent implementation, **on
   the two endiannesses**.
 - **Cross-backend byte-equality is a CI invariant.** **[IMP-019]** The portable build, the
@@ -887,6 +892,7 @@ read flight 1 already drops the copy (Part 6 `WIR-503`).
 
 | `table_id` | Table | One row |
 | --- | --- | --- |
+| `0x00` | Set of tables | No row. Its MAC counts each table of the store (Part 4 `IDN-193`) |
 | `0x01` | Messages | One message, under its conversation and its `msg_ref` |
 | `0x02` | Tombstones | One deleted message |
 | `0x03` | Contacts | One contact: the `RecipientId` of its inbound queue, and the stored channel |
@@ -904,6 +910,67 @@ read flight 1 already drops the copy (Part 6 `WIR-503`).
 | `0x0F` | File states | The file of one message, under the row of that message: whether this device uploads it, wants it, holds it, or failed at its transfer, and the media fields of its descriptor (Part 12 §12.3) |
 | `0x10` | Files | The plaintext of the file of one message, under the row of that message |
 | `0x11` | Chunk credentials | For a file that this device uploaded: the `chunk_id`, the `cred_sk`, and the relays of each chunk, until the erase (Part 12 rules `ATT-160` and `ATT-161`) |
+| `0x12` | Group | The stored form of a group: its roster, its epochs, and its replicas. |
+| `0x13` | Group Queue | The group queues that a creator asked for and that no relay named yet. A row holds the `group_id`, the replica index, and the relay. |
+| `0x14` | Group Join | The offers that this device got and that the user did not answer, and the join records that an admin of this device did not act on. A row holds the `group_id` and then the `JoinRecord`, or nothing for an offer. The owner column names the pairwise conversation. |
+| `0x15` | Group Member | The contact behind a member index, for each member that an admin of this device brought in. The roster names no contact, thus a member that another admin added has no row here and the view shows its index alone. A row holds the pairwise conversation, and its owner column names the group. |
+| `0x16` | Group Presence | The activity clocks of §11.9.7: for each member that an admin of this device watches, the time of its last record or presence record, and for each group, the time of the last record of this device. A row holds a `BE64` of seconds, and its owner column names the group. |
+| `0x17` | Group Owners | For each group, the member indices that held the owner credentials of this device when it last took or drew them (`GRP-401`). A member that leaves that set leaves with credentials that the relay still takes, thus its departure calls for new ones. The owner column names the group. |
+| `0x18` | Group Grants | The granting epochs on the authority path to a current role (`GRP-068`). A row holds one `GroupControl`, under the group and the `epoch_index` of the grant, and its owner column names the group. A grant on no path leaves when the next snapshot is built (`GRP-069`). |
+| `0x19` | Notify Relay | The root of each queue relay: `relay_id`, `k_ntf_root`, `relay_idx`. |
+| `0x1A` | Notify Group | Each handle group: `handle`, `relay_id`, `k_tok`, the removal secret, the registration state, and the count of its queues. |
+| `0x1B` | Notify Queue | Each queue with a binding: `recipient_id`, `handle`, `queue_alias`, and whether its `NBIND` left. |
+| `0x1C` | Group Notify | The notify queue of each group of Part 8 §8.5.2: its `RecipientId`, its encoded `QueueAddress`, the time of the last `GNREG` at each of the two replicas, the time the queue was made, and the queue that it replaces until that one leaves (`NTF-105`). |
+| `0x1D` | Notify State | The stored form of each notify queue of Part 8 §8.5.2, under its `RecipientId`. |
+| `0x1E` | Dead Channel | The dead-channel state of each contact, by conversation. |
+| `0x1F` | Backup Index | The hash of each row that the last backup object carried, by the table and the surrogate identifier of the row: a delta holds the rows whose hash moved and the rows that left (`IDN-179`). |
+| `0x20` | Backup State | The state of the backup of this device: the schedule and the entries of the root with the credentials of their chunks. A backup carries neither. |
+| `0x21` | Device Self | The identity of this device, with the flag of its channels. |
+| `0x22` | Device Roster | The current roster epoch of the set. |
+| `0x23` | Device Peers | The sync channel of each other device, by its conversation. |
+| `0x24` | Sync State | The stored form of the sync engine. |
+| `0x25` | Sync Sent | The body of each published record, by its counter, until each peer acknowledged it. |
+| `0x26` | Ended Channels | Each sync channel that a revocation ended, by its conversation. The node of the run that ended it still holds it, and the store takes no state of it again. |
+| `0x27` | Rendezvous State | The stored form of each rendezvous queue, under its `RecipientId`. |
+| `0x28` | Published | Each entry that this device publishes, under its identifier. |
+| `0x29` | Requests | Each contact request that waits for the user, under its identifier. |
+| `0x2A` | Epoch Held | The epoch-key records that a device that does not own the channels read before the roster object that calls for them (`DEV-303`), under the group and the epoch. The owner column names the group. |
+| `0x2B` | Group Records Held | The synced records of a group that this device does not hold yet, by their order of arrival: the subject of the group, then the record (`DEV-299`). |
+| `0x2C` | Group State Due | The groups whose state waits to go to the other devices of the set, by their conversation. A row stays until the descriptor went out, thus an app that ends before the upload sends it at its next run. |
+| `0x2D` | Directory Heads | Each head of the log that this device accepted, under its `tree_size` (`DIS-063`): the size, the root, the timestamp, and the time of the acceptance. |
+| `0x2E` | Blocked | Each block of this device: a contact under its conversation, a member under the group and the index. The value is one byte of the kind, and the count of the records that a block of a group discarded. |
+| `0x2F` | Own Epoch | The last roster object that this device posted to a group, under the group conversation. An epoch of another member can take its place under the order of `GRP-117`, and this device then posts it again against the new head (`GRP-119`). |
+| `0x30` | Tokens | Each token that this device holds, under its nonce: the epoch, then the encoded token. |
+| `0x31` | Token State | Each key of the cross-relay issuer that the log gave, under the epoch: the modulus. Each spent nonce of a token that a hello carried, under the nonce with a leading byte: the epoch. Each proof of work that a hello carried, under its seed and nonce with a leading byte: the epoch. |
+| `0x32` | Held Handles | Each held key, under the canonical label input of its handle: the version, then `HK_pub`. |
+| `0x33` | Gossip | The gossip state. Each value starts with its kind byte, thus a listing tells the rows apart. |
+| `0x34` | Timers | The setting of each conversation: the seconds, the time of the change, and whether the user made it. |
+| `0x35` | Deadlines | The deadline of each timed record, under the row of its message: the conversation and the time of the erasure in seconds. |
+| `0x36` | Polls | The close time of each poll, under the row of its message: the conversation and the time in seconds, or 0 for no close. |
+| `0x37` | Votes | The last vote of each voter on each poll. |
+| `0x38` | Mentioned | The mark of each message of a group that names this member (Part 11 §11.11), under the row of the message. The mention list itself stays in the record, and no view shows it (`GRP-141`). |
+| `0x39` | Moderated | The moderation state of each message of a group, under the row of the message: the conversation, the action, and the role of the actor. A target that did not arrive yet takes its state at its arrival. |
+| `0x3A` | Mod Notes | One row for each moderation epoch that this device applied: the conversation, the time, the role of the actor, and the count of each act (`GRP-089`). |
+| `0x3B` | Group Sender | The member index that sent each message of a group that arrived, under the row of the message: the conversation and the index. |
+| `0x3C` | Roster Notes | One row for each change of a roster that this device applied: the conversation, the time, the kind, the member index, and the role. |
+| `0x3D` | Key Changes | The notice that waits for the answer of the user in each conversation, under the row of the conversation: the conversation, the new X25519 key, the new ML-KEM key, and the time of its arrival. |
+| `0x3E` | Reset Notices | The key-change notices that wait for their delay: the conversation, the time at which the notice goes, and the record. |
+| `0x3F` | Shares Held | The last share that each contact gave to this user, under the row of the conversation: the conversation, the time, and the `RecoveryShare` body. |
+| `0x40` | Shares Given | The share of the current split that each holder took, under the row of the conversation: the conversation, the time, and the index, the threshold, and the count. |
+| `0x41` | Group Unsent | Each record of this device that no replica accepted yet, as it was sealed, with its credentials, its message, and its place in the order of the posts. The next session sends the same bytes (`GRP-392`). A roster object moves the group of this device at its seal, thus a lost one splits the group. A presence is no such record. |
+| `0x42` | Intros | One row for each introduction that waits: the kind, the conversation of the other party of the record, the third conversation of a request of this device, the two names, and the invitation of an offer. |
+| `0x43` | Send Index | The message of this device that each `send_index` of a conversation named, under the row of the conversation and the index. The index wraps at 65 536, and a later record takes the place of an earlier one. |
+| `0x44` | Key Asked | Each key request of this device that waits for its supply, and the time of each request to a peer for its rate (`WIR-337`, `WIR-347`). |
+| `0x45` | Roster Hashes | The SHA3-256 of each roster epoch that this device applied, by its index (`DEV-228`). |
+| `0x46` | Roster Parent | The `Parent` of the head, in one row. |
+| `0x47` | Roster Forks | Each fork that the view shows, by its index, its signer and its kind. |
+| `0x48` | Sync Holes | Each hole of a source device, by the device: the device, the first and the last counter, the time that this device first saw it, and the label. |
+| `0x49` | Drafts | The draft of each conversation, as UTF-8, by the conversation. |
+| `0x4A` | Recovery | The state of the recovery of each group: `WANTED` and the time of the request, or `NOTICED`, the roster epoch and the descriptor. |
+| `0x4B` | Catchup In | The descriptor of each catch-up object that a peer sent, by the conversation of its sync channel. |
+| `0x4C` | Sync Origin | The source device and the causal counter of each message that a peer synced, by the row of the message. |
+| `0x4D` | Held Deletions | Each message that a deletion of another device names after a restore, by its row, with its conversation. It waits for the user (`DEV-118`). |
+| `0x4E` | Rekey Held | The re-key items of `DEV-301` that did not apply yet, under the subject of the group: the time of arrival in seconds, the subject, then the item. The group can come later on the chunk path, and the roster epoch before the re-key on the sync channel. |
 
 The stored form of a row is local to one device, and no peer reads it. This
 part gives it no byte layout. **[IMP-130]** A stored object MUST start with a
@@ -1021,14 +1088,13 @@ version byte, and a client MUST reject a row whose version it does not read.
 
 The high-water mark of `DEV-089` rests on the sender-chain position of a
 record. The node of 0.2.0-draft gives the store a record and no position,
-thus the store applies each edit in the order of its arrival on the one
-receiving chain of a pairwise channel. A second device of a sender, which
-Part 7 adds, needs that position on the surface of the node first.
+thus the store applies each edit in the order of its arrival. Each queue
+delivers in order, and the one device that reads a pairwise queue publishes
+each edit on the sync channels in the order that it took it, thus the order
+holds but for a late resend of an earlier edit.
 
-A handshake between its flight 1 and its flight 3 has no stored form in
-0.2.0-draft. A run that ends inside that window loses that one handshake: the
-invitation is spent, and the invitee holds a contact that gets no answer.
-Part 15 §15.3 holds that residual.
+`IMP-169` and `IMP-170` keep a handshake between its flight 1 and its flight 3
+in the store, thus a run that ends inside that window loses no handshake.
 
 ### 14.6.5 No hardware attestation for anti-abuse
 

@@ -2,7 +2,7 @@
 //! Notification Delivery Relay of Part 8 §8.2 (`NTF-002`, `NTF-115`).
 //!
 //! The encapsulation follows RFC 9458 §4.3 and §4.4 with the suite ids of
-//! Part 5 §5.4 in the header and in the key configuration. The inner
+//! Part 5 §5.10 in the header and in the key configuration. The inner
 //! message is an NDR request of Part 8 §8.2.7 and no Binary HTTP message,
 //! thus the labels name that media type, as RFC 9458 §4.6 permits for
 //! another application (`NTF-126`).

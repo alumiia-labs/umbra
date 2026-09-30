@@ -408,6 +408,23 @@ pub struct RelayEndpoint {
     /// challenge (Part 13 `ABU-068`). A network from a descriptor text
     /// names none.
     pub identity_pk: Vec<u8>,
+    /// The hops that the relay serves, as its signed entry gives them. A
+    /// pending entry serves none (Part 10 `REL-158`). A network from a
+    /// descriptor text names none, and the layer gives the hops.
+    pub roles: Option<HopRoles>,
+    /// The 6 bytes of the IPv6 /48, when the entry names an address.
+    pub prefix_v6: Option<Vec<u8>>,
+}
+
+/// The hops that one relay serves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct HopRoles {
+    /// The first hop.
+    pub ingress: bool,
+    /// A hop inside a chain.
+    pub chain: bool,
+    /// The last hop, which holds queues.
+    pub queue: bool,
 }
 
 /// The network of the client: a set of relays for its chains. The first
@@ -575,6 +592,12 @@ fn endpoints_of(set: &RelaySet) -> Vec<RelayEndpoint> {
             prefix: None,
             holds_files: relay.has_attachment_role && relay.candidate.is_exit(),
             identity_pk: relay.identity_pk.clone(),
+            roles: Some(HopRoles {
+                ingress: relay.candidate.ingress,
+                chain: relay.candidate.chain,
+                queue: relay.candidate.queue,
+            }),
+            prefix_v6: relay.candidate.v6_prefix.map(|prefix| prefix.to_vec()),
         })
         .collect()
 }
@@ -644,6 +667,8 @@ pub fn parse_network(text: String, root_ca_path: Option<String>) -> Result<Netwo
                     prefix: None,
                     holds_files: false,
                     identity_pk: Vec::new(),
+                    roles: None,
+                    prefix_v6: None,
                 };
                 if has_facts {
                     read_facts(&mut relay, facts)?;
@@ -760,6 +785,19 @@ fn relay_info(endpoint: &RelayEndpoint) -> Result<RelayInfo, FfiError> {
             .get(..2)
             .and_then(|octets| octets.try_into().ok()),
     };
+    let v6_prefix = match &endpoint.prefix_v6 {
+        Some(prefix) => {
+            Some(<[u8; 6]>::try_from(prefix.as_slice()).map_err(|_| FfiError::Malformed)?)
+        }
+        None => None,
+    };
+    // REL-158: the hops of a signed entry stand; a descriptor text gives
+    // them by its layer.
+    let roles = endpoint.roles.unwrap_or(HopRoles {
+        ingress: endpoint.layer == 1,
+        chain: endpoint.layer != 1,
+        queue: endpoint.layer == 3,
+    });
     Ok(RelayInfo {
         candidate: Candidate {
             relay_id: key.relay_id,
@@ -768,10 +806,10 @@ fn relay_info(endpoint: &RelayEndpoint) -> Result<RelayInfo, FfiError> {
             bloc: BlocList::v1().bloc_of(&country),
             asn: endpoint.asn,
             v4_prefix: Some(prefix.ok_or(FfiError::Malformed)?),
-            v6_prefix: None,
-            ingress: endpoint.layer == 1,
-            chain: endpoint.layer != 1,
-            queue: endpoint.layer == 3,
+            v6_prefix,
+            ingress: roles.ingress,
+            chain: roles.chain,
+            queue: roles.queue,
             layer: endpoint.layer,
         },
         key,
@@ -1932,6 +1970,10 @@ impl Inner {
         let mut candidates = Vec::new();
         for endpoint in self.relays.iter().filter(|relay| relay.layer == 3) {
             let info = relay_info(endpoint)?;
+            // REL-158: a relay that holds no queue role serves no group.
+            if !info.candidate.queue {
+                continue;
+            }
             // NET-344: a provisional directory counts each relay as its own
             // operator, and the bloc still counts.
             candidates.push(GroupRelay {
@@ -3986,6 +4028,9 @@ impl Handle {
         let (keyset, _) = DirectoryKeySet::parse(&keyset).map_err(|_| FfiError::Malformed)?;
         let is_provisional = keyset.independent_count < umbra_core::directory::AUTHORITY_FLOOR;
         let mut consensus = Consensus::new(keyset, floor).map_err(|_| FfiError::Malformed)?;
+        // REL-035, REL-113: the correction of an earlier run makes a root
+        // that is too old stale, although it names the stored epoch.
+        consensus.set_correction(inner.client.directory_correction()?);
         let manifest = RelayManifest::parse(&manifest).map_err(|_| FfiError::Malformed)?;
         let set = RelaySet::accept(&mut consensus, &manifest, &BlocList::v1(), unix_now())
             .map_err(|cause| match cause {
@@ -3993,6 +4038,11 @@ impl Handle {
                 umbra_core::Error::Malformed => FfiError::Malformed,
                 _ => FfiError::Unverified,
             })?;
+        if let Some(correction) = consensus.correction() {
+            inner
+                .client
+                .set_directory_correction(correction, &mut OsRng)?;
+        }
         // The pins stay while the set lists them and their lifetime runs,
         // and an open place takes a random eligible relay (Part 10 §10.6.1).
         let now = consensus.client_clock(unix_now()).unwrap_or_else(unix_now);

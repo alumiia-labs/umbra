@@ -153,8 +153,8 @@ is between 126 and 65 535 bytes, thus the frame header is 4 bytes at each
 bucket. A client frame therefore adds 8 bytes, and a relay frame adds 4 bytes.
 
 **[WIR-499]** A sender MUST put an `UMBRA_SESSION` capsule in a frame with the
-7-bit length form of RFC 6455 §5.2, because that capsule is 47, 35, or 15
-bytes. Its frame header is 2 bytes. **[WIR-500]** A receiver MUST reject a
+7-bit length form of RFC 6455 §5.2, because that capsule is 47, 35, 23, or
+15 bytes. Its frame header is 2 bytes. **[WIR-500]** A receiver MUST reject a
 frame in the 16-bit length form whose length is below 126, and a frame in the
 64-bit length form. Thus each length has one frame form.
 
@@ -409,10 +409,10 @@ endpoints of the measurement.
 > §6.6. The value `0x02` is `DATA` here, `IDS` in §6.4, a retired L6 kind in
 > §6.4.2, an epoch-key record in §6.4.6, `ek` in §6.5, and an attachment
 > descriptor in §6.6. The value
-> `0x04` is `EXTENDED` here, `ct2` in §6.5, and Edit in §6.6. The value `0x05`
-> is `DESTROY` here, a handshake record in §6.4.2, `mac` in §6.5, and Delete
-> in §6.6. The value `0x07` is
-> `MEAS_ECHO` here, and §6.4 gives it no queue command. Rule 7 of §6.1.1 keeps
+> `0x04` is `EXTENDED` here, `ILINK` in §6.4, `ct2` in §6.5, and Edit in
+> §6.6. The value `0x05` is `DESTROY` here, `IPUT` in §6.4, a handshake record
+> in §6.4.2, a retired braid kind in §6.5, and Delete in §6.6. The value
+> `0x07` is `MEAS_ECHO` here, and `IBLOB` in §6.4. Rule 7 of §6.1.1 keeps
 > them apart.
 
 **[WIR-011]** The padding in `body` MUST be zero bytes after one marker byte of `0x80`. This
@@ -709,8 +709,8 @@ QueueE2E {
    > carries it, thus it gives the derivation the same separation.
 2. **[WIR-018]** A party MUST use ChaCha20-Poly1305 with a 12-byte nonce and a 16-byte tag.
    **The L6 overhead is 32 bytes.** That total is 1 byte of `version`, 12 bytes
-   of `nonce`, and the 16-byte tag. It also holds the 2-byte true length of rule
-   5, which sits inside the ciphertext. **[WIR-106]** A revision MUST count that true
+   of `nonce`, and the 16-byte tag. It also holds the 1-byte `kind` and the
+   2-byte true length of rule 5, which sit inside the ciphertext. **[WIR-106]** A revision MUST count that true
    length in each capacity row of §6.9.
 3. **[WIR-019]** A sender MUST draw `nonce` from the device CSPRNG for each record.
    **[WIR-020]** A sender MUST NOT use a counter. **[WIR-021]** A sender MUST NOT
@@ -1703,7 +1703,7 @@ wrapper because the queue names the group.
 
 ### 6.6.3 The group control record
 
-Kind `0x10` carries a group control record. Part 11 gives seven such objects,
+Kind `0x10` carries a group control record. Part 11 gives eight such objects,
 and this structure gives the type byte that names each one. A group control
 record travels as the `app` of a `GroupQueueRecord` (§6.4.6), except a
 `JoinRecord` and a `GroupInvitation`, which travel on the pairwise channel
@@ -1891,9 +1891,9 @@ every current role holder, concatenated, as `GRP-068` keeps it.
 
 A `JoinRecord` is 1 345 bytes as an `AppMessage`, thus it uses bucket `B1`.
 An offer is 3 973 bytes and the name as an `AppMessage`, thus it uses bucket
-`B2`. An admit is 510 bytes as an `AppMessage` at 3 members (a one-segment
+`B2`. An admit is 574 bytes as an `AppMessage` at 3 members (a one-segment
 descriptor of 257 bytes), thus it uses bucket `B1`; at `GROUP_MAX` the
-descriptor of a 21-segment snapshot is 2 657 bytes, the admit is 2 910
+descriptor of a 21-segment snapshot is 2 657 bytes, the admit is 2 974
 bytes, and it uses bucket `B2`. A granting epoch carries an ML-DSA-65
 signature of 3 309 bytes and a roster public key of 1 952 bytes, thus a path
 at `ROLE_HOLDER_MAX` is about 86 KB and fits no cell. The authority path
@@ -1907,7 +1907,7 @@ therefore travels in the `RosterSnapshot` in every case, under Part 11
   that is not valid UTF-8.
 - **[WIR-439]** A parser MUST reject a `replica_count` that is not
   `GROUP_REPLICAS`. **[WIR-440]** A parser MUST reject an admit whose
-  `body_len` does not equal 185 plus `desc_len`.
+  `body_len` does not equal 249 plus `desc_len`.
 - **[WIR-474]** A parser MUST reject an admit that carries a granting epoch.
   The `RosterSnapshot` below carries the authority path.
 - **[WIR-443]** A client MUST send a `JoinRecord` and a `GroupInvitation` on

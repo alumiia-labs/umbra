@@ -1044,10 +1044,25 @@ impl Download {
         let Some((index, _)) = self.waiting.remove(&handle) else {
             return Ok(false);
         };
+        // ATT-150: a chunk that does not open under its tag is one bad
+        // replica, and the next replica serves it (ATT-019).
+        let opens = match &outcome {
+            ChunkOutcome::Fetched(bytes) => {
+                let position = u32::try_from(index).map_err(|_| Error::Malformed)?;
+                self.assembler
+                    .as_ref()
+                    .is_some_and(|assembler| assembler.opens(position, bytes))
+            }
+            _ => false,
+        };
         let wanted = self.wanted.get_mut(index).ok_or(Error::Malformed)?;
         wanted.answers = wanted.answers.saturating_add(1);
         match outcome {
-            ChunkOutcome::Fetched(bytes) => wanted.bytes = Some(bytes),
+            ChunkOutcome::Fetched(bytes) if opens => wanted.bytes = Some(bytes),
+            ChunkOutcome::Fetched(_) => {
+                wanted.refusals = wanted.refusals.saturating_add(1);
+                self.ask(node, index, rng)?;
+            }
             // ATT-019: the next replica. WIR-317 gives one reason to an
             // unknown chunk, and the read secret of a descriptor is right.
             ChunkOutcome::Refused(Reject::Rejected) => {
@@ -1098,6 +1113,13 @@ impl ChunkFetch {
         rng: &mut R,
     ) -> Result<Self, Error> {
         if descriptor.level != Level::Data {
+            return Err(Error::Malformed);
+        }
+        // ATT-026, ATT-029: the key commitment holds before any chunk opens,
+        // and ATT-067: the refs name each chunk of the padded size.
+        crate::attach::seal::verify_commit(descriptor)?;
+        let chunk_count = descriptor.padded_size / umbra_wire::descriptor::CHUNK_SIZE;
+        if usize::try_from(chunk_count).ok() != Some(descriptor.refs.len()) {
             return Err(Error::Malformed);
         }
         let position = usize::try_from(index).map_err(|_| Error::Malformed)?;

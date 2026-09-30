@@ -172,6 +172,17 @@ def main(argv):
                 continue
             if in_fence:
                 continue
+            # A "Part N §X" that wraps after "Part" names its part on this
+            # line, and the bare-section check would read §X as a section
+            # of the part that holds it.
+            if re.search(r"\bPart\s*$", prev):
+                w = re.match(r"^\s*(?:>\s*)?(\d+)(?:\s+§([\d.]+[\d]))?", raw)
+                if w:
+                    p = int(w.group(1))
+                    if p not in sections:
+                        problems["dangling-part-ref"].append(f"Part {p} at {fname}:{no}")
+                    elif w.group(2) and w.group(2) not in sections[p]:
+                        problems["dangling-section-ref"].append(f"Part {p} §{w.group(2)} at {fname}:{no}")
             prev = raw
             for m in RULE_REF_RE.finditer(raw):
                 rid = m.group(1)

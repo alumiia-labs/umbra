@@ -446,6 +446,11 @@ impl Bridge {
                 }
                 None
             }
+            // REL-115: a clock movement discards the directory correction.
+            Update::ClockMoved => {
+                client.clear_directory_correction()?;
+                None
+            }
             // NET-218: a record that a full queue refused goes again.
             Update::Tick => {
                 if client.resend_held(now_ms / 1_000)? {

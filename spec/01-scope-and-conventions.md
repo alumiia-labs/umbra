@@ -32,7 +32,7 @@ implementation. A developer does not have to read the reference implementation.
 The web client is the same core in a browser extension, and it is a linked
 device of a device set; Part 14 §14.7 gives its form and its limits. An iOS
 client and a native desktop shell are deferred to a later revision, and Part
-15 §14.6.3 records what such a revision must revisit. The core stays
+14 §14.6.3 records what such a revision must revisit. The core stays
 platform-neutral, thus the deferral changes the scope of this text and not
 the design.
 

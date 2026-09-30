@@ -1045,7 +1045,7 @@ above that size on a metered network without a user action.
 > to rebuild one chunk, against 1 read under a replica.
 >
 > `ATT-016` gates any change to `REPLICAS` on a measurement of the relay churn
-> over 45 days. No party has that measurement. **[ATT-124]** A revision that
+> over 28 days. No party has that measurement. **[ATT-124]** A revision that
 > takes the code above MUST make that measurement first, and it MUST state the
 > §12.2.2 concession or the device cost in the Part 2 §2.4 table.
 

@@ -116,11 +116,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             return Ok(None);
         };
         let roster = Roster::parse(&roster)?;
+        // DEV-308: the channels form a star around the device that owns
+        // them, thus a peer is a device with a sync channel to this one.
+        let channels = self.peer_channels()?;
         let others: Vec<DeviceId> = roster
             .devices
             .iter()
             .map(|entry| entry.device_id)
-            .filter(|device| *device != identity.device_id)
+            .filter(|device| *device != identity.device_id && channels.contains_key(device))
             .collect();
         // A device whose link the user confirmed takes each record from
         // then on, and its sync channel sends them when it opens. The
@@ -657,6 +660,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .map(|(device, channel)| (channel, device))
             .collect();
         let mut out = Vec::new();
+        // DEV-308: the device that owns the channels relays what one peer
+        // publishes to each peer, and a peer drops its own record when the
+        // relay brings it back.
+        let relays = self.owns_channels()? && engine.peers().count() > 1;
+        let mut relay_records: Vec<(Origin, Vec<u8>, u32)> = Vec::new();
+        let mut relay_items: Vec<(u8, Vec<u8>, Vec<u8>)> = Vec::new();
         // DEV-075: a record past `SYNC_MAX_AGE` waits for no resend.
         let floor = engine.retained_floor();
         engine.expire(now);
@@ -674,6 +683,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     inner,
                     expires_in,
                 }) => {
+                    if relays {
+                        relay_records.push((origin, inner.clone(), expires_in));
+                    } else if self.is_own_echo(&origin, &inner)? {
+                        continue;
+                    }
                     if let Some(conversation) = self.conversation_of_subject(&origin.subject)? {
                         out.push(Synced {
                             conversation,
@@ -691,6 +705,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
                 Ok(Taken::Acknowledged) => acked = true,
                 Ok(Taken::Mutable { item, key, value }) => {
+                    if relays {
+                        relay_items.push((item, key.clone(), value.clone()));
+                    }
                     // An item that does not apply ends no batch.
                     let _ = self.apply_mutable(item, &key, &value, rng);
                 }
@@ -715,7 +732,62 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             self.prune_sync_sent(below.max(engine.acked_by_all()))?;
         }
         self.keep_history_holes(&engine, now, rng)?;
+        // DEV-308: each peer takes each counter of this device, thus the
+        // relay goes to each peer, the source too.
+        for (origin, inner, expires_in) in relay_records {
+            let counter = engine.counter().saturating_add(1);
+            let Ok(published) =
+                engine.publish(&inner, origin, counter_ref(counter), expires_in, now)
+            else {
+                continue;
+            };
+            self.put_engine(&engine, Some((published.counter, &published.body)), rng)?;
+            self.queue_to_peers(&engine, &published.body, rng)?;
+        }
+        for (item, key, value) in relay_items {
+            let counter = engine.counter().saturating_add(1);
+            let Ok(published) =
+                engine.publish_mutable(item, &key, &value, counter_ref(counter), now)
+            else {
+                continue;
+            };
+            self.put_engine(&engine, Some((published.counter, &published.body)), rng)?;
+            self.queue_to_peers(&engine, &published.body, rng)?;
+        }
         Ok(out)
+    }
+
+    /// Queues one body to each peer of the engine.
+    fn queue_to_peers<R: CryptoRng + ?Sized>(
+        &mut self,
+        engine: &SyncEngine,
+        body: &[u8],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let channels = self.peer_channels()?;
+        for peer in engine.peers() {
+            if let Some(channel) = channels.get(peer) {
+                self.queue_sync(*channel, body, None, rng)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether a record that the owner of the channels relayed is one that
+    /// this device published: its body waits in `SYNC_SENT` until the owner
+    /// acknowledges it, and the relay comes before that acknowledgment
+    /// (`DEV-308`).
+    fn is_own_echo(&self, origin: &Origin, inner: &[u8]) -> Result<bool, Error> {
+        for (_, value) in self.open_ref()?.store.list(SYNC_SENT, None)? {
+            let value = Zeroizing::new(value);
+            let Some(Ok(record)) = value.get(8..).map(SyncedRecord::parse) else {
+                continue;
+            };
+            if record.origin == *origin && record.inner == inner {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// A body for a resend at `now`: a timed record carries the period that

@@ -10,3 +10,6 @@
 android/gradlew text eol=lf
 *.bat text eol=crlf
 *.jar binary
+# The vector corpora keep the bytes whose hash PROVENANCE.md records, on
+# each platform.
+tests/vectors/** text eol=lf

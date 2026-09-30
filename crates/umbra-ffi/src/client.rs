@@ -100,7 +100,7 @@ use umbra_wire::app::{
     signal::{ReactionAction, ReactionBody, ReceiptBody, TypingState},
     AppKind, AppMessage, Channel,
 };
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     draft::Draft, ConversationId, ConversationSummary, Delivery, DueReceipt, Error, Event,
@@ -238,6 +238,9 @@ pub const AUTO_DOWNLOAD_DEFAULT: u64 = umbra_core::attach::LARGE_FILE_WARN;
 /// The highest epoch of a directory root that this device verified
 /// (Part 10 rule `REL-034`).
 const DIRECTORY_EPOCH_SETTING: &[u8] = b"directory-epoch";
+/// The clock correction of the relay directory in seconds, signed
+/// (Part 10 `REL-114`).
+const DIRECTORY_CORRECTION_SETTING: &[u8] = b"directory-correction";
 /// The pinned ingress relays of this device (Part 10 §10.6.1).
 const INGRESS_PINS_SETTING: &[u8] = b"ingress-pins";
 /// The idle limit under the setting "when the app leaves the screen". The
@@ -340,6 +343,8 @@ pub struct Client<B: Backend, E: SecureElement> {
     auto_lock: AutoLock,
     /// The scan of `IDN-162`, one table at each step.
     audit: Audit,
+    /// The last clock of the platform tick, in seconds, or 0 before one.
+    clock: u64,
     /// The records for the sync channels (Part 7 §7.5).
     sync_out: VecDeque<sync::SyncSend>,
     /// The records that a peer handed to this device, which the peer
@@ -670,6 +675,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             groups: groups::GroupQueues::default(),
             auto_lock: AutoLock::new(now),
             audit: Audit::default(),
+            clock: 0,
         };
         // IDN-070: the recovery code comes at the first launch.
         client.recovery_code(rng)?;
@@ -694,6 +700,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             groups: groups::GroupQueues::default(),
             auto_lock: AutoLock::new(now),
             audit: Audit::default(),
+            clock: 0,
         }
     }
 
@@ -802,7 +809,22 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let _ = self.keep_stamp(&mut crate::runtime::OsRng);
         if let State::Unlocked(open) = core::mem::replace(&mut self.state, State::Closed) {
             self.state = State::Locked(open.store.lock());
+            // IMP-126, IMP-127: each queue in RAM leaves with the key, and
+            // its plaintext is wiped. The store holds each record again at
+            // the unlock: the send queue in its rows, and a sync record in
+            // its retained body, which the next run sends again.
+            for outgoing in &mut self.outgoing {
+                outgoing.app.zeroize();
+            }
+            for send in &mut self.sync_out {
+                send.app.zeroize();
+            }
             self.outgoing.clear();
+            self.sync_out.clear();
+            self.synced_out.clear();
+            self.subjects.clear();
+            self.typing_sent.clear();
+            self.held_sends.clear();
             // A file job holds the file in the clear, and a group job an
             // owner credential, thus both leave the memory with the key.
             // The store brings them back at the unlock.
@@ -814,6 +836,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
     /// The clock of the platform. An idle client locks itself.
     pub fn tick(&mut self, now: u64) {
+        self.clock = now;
         if self.is_unlocked() && self.auto_lock.due(now) {
             self.lock();
         }
@@ -1607,6 +1630,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 Planned::Delete(table, row) => batch.delete(*table, *row),
             }
         }
+        // IMP-154: an edit keeps no earlier text in the log of the store.
+        if events
+            .iter()
+            .any(|event| matches!(event, Event::Edited { .. }))
+        {
+            batch.erase_earlier();
+        }
         batch.commit()?;
         self.events.extend(events);
         // DEV-304: each other device of the set holds a copy of the message.
@@ -1834,6 +1864,49 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         };
         let epoch: [u8; 8] = plain.as_slice().try_into().map_err(|_| Error::Integrity)?;
         Ok(u64::from_be_bytes(epoch))
+    }
+
+    /// The clock correction of the relay directory, if the device holds
+    /// one (`REL-113`, `REL-114`).
+    pub fn directory_correction(&self) -> Result<Option<i64>, Error> {
+        let store = &self.open_ref()?.store;
+        let row = store.row_id(SETTINGS, DIRECTORY_CORRECTION_SETTING);
+        let Some(plain) = store.get(SETTINGS, &row)? else {
+            return Ok(None);
+        };
+        let value: [u8; 8] = plain.as_slice().try_into().map_err(|_| Error::Integrity)?;
+        Ok(Some(i64::from_be_bytes(value)))
+    }
+
+    /// Keeps the clock correction that an accepted root gave (`REL-114`,
+    /// `REL-044`).
+    pub fn set_directory_correction<R: CryptoRng + ?Sized>(
+        &mut self,
+        correction: i64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        if self.directory_correction()? == Some(correction) {
+            return Ok(());
+        }
+        let open = self.open_mut()?;
+        let row = open.store.row_id(SETTINGS, DIRECTORY_CORRECTION_SETTING);
+        let mut batch = open.store.begin();
+        batch.put(SETTINGS, row, None, &correction.to_be_bytes(), rng)?;
+        batch.commit()?;
+        Ok(())
+    }
+
+    /// Discards the clock correction after a clock movement (`REL-115`).
+    pub fn clear_directory_correction(&mut self) -> Result<(), Error> {
+        if self.directory_correction()?.is_none() {
+            return Ok(());
+        }
+        let open = self.open_mut()?;
+        let row = open.store.row_id(SETTINGS, DIRECTORY_CORRECTION_SETTING);
+        let mut batch = open.store.begin();
+        batch.delete(SETTINGS, row);
+        batch.commit()?;
+        Ok(())
     }
 
     /// Keeps the epoch of a root that the device verified. The value only
@@ -2120,6 +2193,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
+        // DEV-031: a message stores the insertion stamp, which a clock that
+        // moved back leaves above the clock; the marker covers each one.
+        let now_ms = now_ms.max(self.open_ref()?.stamp.last);
         let (read_up_to, name) = self.conversation_meta(conversation)?;
         if now_ms <= read_up_to {
             return Ok(());
@@ -2533,6 +2609,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             rng,
         )?;
         batch.put(REVISION, message.0, None, &[count.saturating_add(1)], rng)?;
+        // IMP-154: the earlier text leaves the log of the store.
+        batch.erase_earlier();
         if !is_group {
             batch.put(
                 TableId::MESSAGE,
@@ -3579,6 +3657,31 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(())
     }
 
+    /// Discards each pending reference older than `REF_ORPHAN_TTL` at
+    /// `now` (`DEV-095`).
+    fn sweep_pending_refs(&mut self, now: u64) -> Result<(), Error> {
+        let mut gone = Vec::new();
+        for (row, entry) in self.open_ref()?.store.list(PENDING, None)? {
+            let entry = Zeroizing::new(entry);
+            let at = entry
+                .get(32..40)
+                .and_then(|bytes| bytes.try_into().ok())
+                .map(u64::from_be_bytes);
+            if at.is_none_or(|at| now.saturating_sub(at) >= REF_ORPHAN_TTL) {
+                gone.push(row);
+            }
+        }
+        if gone.is_empty() {
+            return Ok(());
+        }
+        let open = self.open_mut()?;
+        let mut batch = open.store.begin();
+        for row in gone {
+            batch.delete(PENDING, row);
+        }
+        Ok(batch.commit()?)
+    }
+
     /// One step of the scan of `IDN-162` at `now`: one table, and a pass
     /// over each table of the store in each `AUDIT_PERIOD`. The platform
     /// tick calls it, thus no step holds the store for long.
@@ -3589,6 +3692,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
         if self.audit.next == 0 {
             self.audit.started = now;
+            // DEV-095: a pending reference above REF_ORPHAN_TTL goes, thus
+            // an expired one takes no place under REF_ORPHAN_MAX.
+            self.sweep_pending_refs(now)?;
         }
         let Some(table) = tables.get(self.audit.next).copied() else {
             self.audit.next = 0;
