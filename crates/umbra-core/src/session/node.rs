@@ -1180,6 +1180,9 @@ pub struct ClientNode {
     /// Whether the directory is provisional, which permits a chain of one
     /// operator (`NET-340`).
     bootstrap: bool,
+    /// The time of the last clock movement that the runtime saw. Each hole
+    /// timer that began before it starts again there (`SCP-019`).
+    clock_moved_at: u64,
     /// The report queues of the manifest that verified: the address, and
     /// the key that a report seals to (`REL-168`).
     report_queues: Vec<([u8; QUEUE_ADDRESS_LEN], [u8; 32])>,
@@ -1330,6 +1333,7 @@ impl ClientNode {
             report_queues: Vec::new(),
             removed_links: Vec::new(),
             bootstrap: false,
+            clock_moved_at: 0,
             background_report: false,
             report_build: None,
             clock: 0,
@@ -4229,6 +4233,15 @@ impl ClientNode {
         self.removed_links = removed;
     }
 
+    /// Takes a clock movement of the device at `now`: the device clock moved
+    /// by more than `CLOCK_SKEW` against the monotonic source. Each hole
+    /// timer then runs from `now`, thus no `ACK` crosses a hole and no relay
+    /// deletes a record on an interrupted duration (Part 1 `SCP-018` to
+    /// `SCP-021`).
+    pub fn clock_moved(&mut self, now: u64) {
+        self.clock_moved_at = self.clock_moved_at.max(now);
+    }
+
     /// Takes whether the key set of the directory is provisional, which
     /// permits the bootstrap relaxation (`NET-340`, `NET-341`).
     pub fn set_bootstrap(&mut self, bootstrap: bool) {
@@ -4331,6 +4344,7 @@ impl ClientNode {
             let session_pk = self.session_pk()?;
             let held = self.contacts.get_mut(&contact.0).ok_or(Error::NoPath)?;
             let channel = &mut held.channel;
+            channel.restart_hole(self.clock_moved_at);
             let Some((point, encoded)) =
                 channel.acknowledge_on(&queue, &session_pk, random(rng), now)?
             else {
@@ -4385,6 +4399,7 @@ impl ClientNode {
             Some(held) => held,
             None => self.rendezvous.get_mut(queue).ok_or(Error::NoPath)?,
         };
+        held.inbound.restart_hole(self.clock_moved_at);
         let Some((point, encoded)) = held.inbound.acknowledge(&session_pk, random(rng), now)?
         else {
             return Ok(false);
@@ -5256,6 +5271,7 @@ impl ClientNode {
         };
         let session_pk = self.session_pk()?;
         // A flight that the device read needs no second delivery.
+        half.inbound.restart_hole(self.clock_moved_at);
         if let Some((point, encoded)) = half.inbound.acknowledge(&session_pk, random(rng), now)? {
             half.inbound.acknowledged(point);
             self.queue_command(encoded, Waiting::Other)?;

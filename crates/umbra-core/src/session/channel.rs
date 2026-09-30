@@ -497,6 +497,11 @@ impl Inbound {
     pub fn acknowledged(&mut self, point: AckPoint) {
         self.cursor.acknowledged(point);
     }
+
+    /// Starts the hole timer again after a clock movement at `from`.
+    pub fn restart_hole(&mut self, from: u64) {
+        self.cursor.restart_hole(from);
+    }
 }
 
 /// A record that the channel took from a `MSG`.
@@ -796,6 +801,15 @@ impl PairwiseChannel {
     /// Commits an `ACK` that the device sent.
     pub fn acknowledged(&mut self, point: AckPoint) {
         self.inbound.acknowledged(point);
+    }
+
+    /// Starts the hole timer of each inbound queue again after a clock
+    /// movement at `from`.
+    pub fn restart_hole(&mut self, from: u64) {
+        self.inbound.restart_hole(from);
+        if let Some(previous) = self.previous.as_mut() {
+            previous.restart_hole(from);
+        }
     }
 
     /// The `ACK` of the inbound queue `queue` that the cursor offers at

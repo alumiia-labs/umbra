@@ -554,6 +554,9 @@ pub async fn run_client(
     // NET-100: the end of a push-wake session, or none for a run of the
     // screen or of the carrier.
     let mut wake_end: Option<tokio::time::Instant> = None;
+    // SCP-018: the monotonic source beside the device clock, from which a
+    // tick sees a clock movement.
+    let mut clock_base = (tokio::time::Instant::now(), unix_now());
     let ended = 'run: loop {
         // WIR-254, WIR-339: the indices of the records of the user, and the
         // holes of the records of the contacts.
@@ -633,6 +636,15 @@ pub async fn run_client(
             // ends with its last circuit.
             _ = tick.tick() => {
                 let now = unix_now();
+                // SCP-019: a step of the device clock of more than
+                // CLOCK_SKEW against the monotonic source interrupts each
+                // duration that runs.
+                let mono = i128::from(clock_base.0.elapsed().as_secs());
+                let wall = i128::from(now) - i128::from(clock_base.1);
+                if (wall - mono).abs() > i128::from(umbra_core::directory::CLOCK_SKEW) {
+                    node.clock_moved(now);
+                }
+                clock_base = (tokio::time::Instant::now(), now);
                 node.set_challenge_clock(now);
                 let mut events = node.on_tick(now);
                 // DIS-015: the rendezvous circuits start on their own delay.

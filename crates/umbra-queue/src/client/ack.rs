@@ -107,6 +107,17 @@ impl AckCursor {
         true
     }
 
+    /// Starts the hole timer again at `from` when it began before it: a
+    /// clock movement at `from` interrupted it, and the point then crosses
+    /// no hole on that duration (Part 1 `SCP-019`, `SCP-021`).
+    pub fn restart_hole(&mut self, from: u64) {
+        if let Some(since) = self.hole_since.as_mut() {
+            if *since < from {
+                *since = from;
+            }
+        }
+    }
+
     /// The lowest sequence the recipient did not receive above the cursor,
     /// if one exists below a received record.
     pub fn hole(&self) -> Option<u32> {
@@ -220,6 +231,19 @@ mod tests {
         let mut c = AckCursor::new(10);
         c.receive(12, 1_000);
         assert_eq!(c.ack_point(1_000 + ACK_HOLE_TIMEOUT - 1), None);
+        // SCP-019, SCP-021: a clock movement starts the timer again, and
+        // the point crosses no hole on the interrupted duration.
+        let mut moved = AckCursor::new(10);
+        moved.receive(12, 1_000);
+        moved.restart_hole(1_000 + ACK_HOLE_TIMEOUT);
+        assert_eq!(moved.ack_point(1_000 + ACK_HOLE_TIMEOUT), None);
+        assert_eq!(moved.ack_point(1_000 + 2 * ACK_HOLE_TIMEOUT - 1), None);
+        assert!(
+            moved
+                .ack_point(1_000 + 2 * ACK_HOLE_TIMEOUT)
+                .unwrap()
+                .crosses_hole
+        );
         let p = c.ack_point(1_000 + ACK_HOLE_TIMEOUT).unwrap();
         assert_eq!(
             p,
