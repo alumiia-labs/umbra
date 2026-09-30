@@ -24,7 +24,10 @@ operator, one provider, and one country carry the traffic.
     needs 100 Mbit/s or more.
   - The signer takes the smallest plan.
 - A domain. Give each server an A record: `entry-east.<domain>`, and so on.
-- SSH as root, or as a user with sudo, to each server, from this machine.
+- SSH with a key, as root or as a user with sudo, to each server, from this
+  machine. OVH's Debian images log in as `debian`: put
+  `ansible_user: debian` beside each `ansible_host`. The run turns off
+  password logins, and it stops first if that user holds no key.
 - The Firebase service account JSON of the app's project, for pushes.
 - Ansible 2.15 or newer and Docker, on this machine. WSL works: run the
   playbooks from Debian in WSL.
@@ -101,6 +104,18 @@ Run it again after:
 - **Keep `build/`.** It holds no secret, and git ignores it.
 
 ## How it runs
+
+- **Hardening.** Each server gets the following:
+  - SSH by key alone, with no forwarding. fail2ban bans an address after 5
+    SSH failures in 10 minutes.
+  - The kernel settings of a server that routes nothing: no forged source,
+    no redirects, SYN cookies, and no process that reads another's memory.
+  - No crash dumps, since a dump of a service could hold its keys.
+  - A journal that keeps 7 days, because a relay sees client addresses.
+- **Services.** Each service runs as its own user, in a systemd sandbox:
+  - a read-only system, and write access to its own folder alone;
+  - a syscall filter and no new privileges;
+  - no capabilities beyond port 443 for the relay.
 
 - **The manifest.** The signer signs a manifest at two minutes past each
   hour; a root lives three hours. Each relay fetches the manifest from

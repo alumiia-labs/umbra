@@ -1,0 +1,154 @@
+# The hardening of each server: SSH by key alone, a ban on repeated SSH
+# failures, the kernel settings of a server that routes nothing, no crash
+# dump that could hold a key, and a short log. Each change sits in a file
+# of its own, thus Debian updates keep their own files.
+
+# SSH by key alone locks out a user with no key, thus the run checks the
+# key of the user it connects as first.
+- name: The user of Ansible logs in with a key
+  ansible.builtin.shell:
+    cmd: |
+      home=$(getent passwd {{ ansible_user | default('root') }} | cut -d: -f6)
+      test -s "$home/.ssh/authorized_keys"
+  changed_when: false
+  register: umbra_has_key
+  failed_when: false
+
+- name: SSH takes keys alone once a key is there
+  ansible.builtin.assert:
+    that: umbra_has_key.rc == 0
+    fail_msg: >-
+      The user {{ ansible_user | default('root') }} holds no authorized_keys.
+      Copy your SSH key to it first (ssh-copy-id), or this run would lock you out.
+
+- name: The packages of the hardening are there
+  ansible.builtin.apt:
+    name:
+      - fail2ban
+      - python3-systemd
+    state: present
+
+- name: SSH takes keys alone, and no forwarding
+  ansible.builtin.copy:
+    dest: /etc/ssh/sshd_config.d/10-umbra.conf
+    mode: "0644"
+    content: |
+      # Written by Ansible (deploy/ansible/roles/hardening).
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PermitRootLogin prohibit-password
+      PermitEmptyPasswords no
+      MaxAuthTries 3
+      LoginGraceTime 30
+      X11Forwarding no
+      AllowAgentForwarding no
+      AllowTcpForwarding no
+      PermitTunnel no
+      ClientAliveInterval 300
+      ClientAliveCountMax 2
+    validate: /usr/sbin/sshd -t -f %s
+  notify: Reload ssh
+
+# Debian 12 and later log SSH to the journal alone, thus the jail reads
+# the journal.
+- name: Repeated SSH failures take a ban
+  ansible.builtin.copy:
+    dest: /etc/fail2ban/jail.d/umbra.local
+    mode: "0644"
+    content: |
+      # Written by Ansible (deploy/ansible/roles/hardening).
+      [sshd]
+      enabled = true
+      backend = systemd
+      maxretry = 5
+      findtime = 10m
+      bantime = 1h
+      banaction = nftables
+  notify: Restart fail2ban
+
+- name: fail2ban runs
+  ansible.builtin.service:
+    name: fail2ban
+    enabled: true
+    state: started
+
+- name: The kernel settings of a server that routes nothing
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/90-umbra.conf
+    mode: "0644"
+    content: |
+      # Written by Ansible (deploy/ansible/roles/hardening).
+      # Network: no forged source, no redirect, no source route, and SYN
+      # cookies under a flood of new connections.
+      net.ipv4.conf.all.rp_filter = 1
+      net.ipv4.conf.default.rp_filter = 1
+      net.ipv4.conf.all.accept_redirects = 0
+      net.ipv4.conf.default.accept_redirects = 0
+      net.ipv6.conf.all.accept_redirects = 0
+      net.ipv6.conf.default.accept_redirects = 0
+      net.ipv4.conf.all.send_redirects = 0
+      net.ipv4.conf.default.send_redirects = 0
+      net.ipv4.conf.all.accept_source_route = 0
+      net.ipv6.conf.all.accept_source_route = 0
+      net.ipv4.conf.all.log_martians = 1
+      net.ipv4.tcp_syncookies = 1
+      net.ipv4.icmp_echo_ignore_broadcasts = 1
+      net.ipv4.ip_forward = 0
+      # Kernel: no address and no log for an unprivileged process, and no
+      # process reads the memory of another.
+      kernel.kptr_restrict = 2
+      kernel.dmesg_restrict = 1
+      kernel.yama.ptrace_scope = 2
+      kernel.unprivileged_bpf_disabled = 1
+      net.core.bpf_jit_harden = 2
+      kernel.kexec_load_disabled = 1
+      fs.protected_hardlinks = 1
+      fs.protected_symlinks = 1
+      fs.protected_fifos = 2
+      fs.protected_regular = 2
+      # No crash dump of a process that held a key.
+      fs.suid_dumpable = 0
+  notify: Apply sysctl
+
+- name: The drop-in directories of systemd are there
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - /etc/systemd/coredump.conf.d
+    - /etc/systemd/journald.conf.d
+
+- name: No crash dump reaches the disk
+  ansible.builtin.copy:
+    dest: "{{ item.dest }}"
+    mode: "0644"
+    content: "{{ item.content }}"
+  loop:
+    - dest: /etc/security/limits.d/90-umbra.conf
+      content: "* hard core 0\n"
+    - dest: /etc/systemd/coredump.conf.d/90-umbra.conf
+      content: "[Coredump]\nStorage=none\nProcessSizeMax=0\n"
+
+# The relays learn the address of each client that connects (Part 2
+# §2.7), thus the logs of a server stay short.
+- name: The journal keeps seven days at most
+  ansible.builtin.copy:
+    dest: /etc/systemd/journald.conf.d/90-umbra.conf
+    mode: "0644"
+    content: |
+      [Journal]
+      MaxRetentionSec=7day
+      SystemMaxUse=200M
+  notify: Restart journald
+
+- name: Services that the network does not use are off
+  ansible.builtin.service:
+    name: "{{ item }}"
+    enabled: false
+    state: stopped
+  loop:
+    - rpcbind
+    - avahi-daemon
+    - cups
+  failed_when: false

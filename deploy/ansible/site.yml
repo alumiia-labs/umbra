@@ -15,6 +15,7 @@
   become: true
   roles:
     - common
+    - hardening
     - tls
 
 - name: The public outputs have a directory on this machine
