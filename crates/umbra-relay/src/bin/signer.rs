@@ -6,7 +6,8 @@
 //! `NET-350` hold. The keys stay off the relays.
 //!
 //! ```text
-//! umbra-signer keygen <key directory>
+//! umbra-signer keygen <key directory> [<keyset epoch>]
+//! umbra-signer rotate <old key directory> <new key directory> <key chain file>
 //! umbra-signer sign <settings file>
 //! ```
 //!
@@ -15,11 +16,19 @@
 //! key set that the app and each relay pin. It refuses a directory that
 //! holds a seed already.
 //!
+//! `rotate` signs the key set of the new directory, which `keygen` made
+//! under a higher epoch, with each old key (`REL-036`), and adds that link
+//! to the key chain file (`REL-199`). The `keys` line of the settings then
+//! names the new directory, and each relay and each app walks the chain to
+//! it (`REL-200`). Keep the old directory offline until each build that
+//! ships its key set is gone.
+//!
 //! `sign` reads one `key=value` pair on each line:
 //!
 //! ```text
 //! keys=/etc/umbra-signer/keys
 //! out=/var/www/umbra/.well-known/umbra
+//! keychain=/var/lib/umbra-signer/keychain
 //! relay=<descriptor file>,<operator name>,<class 0 to 3>,<ingress|middle|exit>
 //! report_queue=<authority index>,<queue file>
 //! verdicts=<file of verdicts>
@@ -61,7 +70,7 @@ use umbra_crypto::{hash::sha3_256, rand_core::TryRng, secret::Secret, sign::Sign
 use umbra_relay::server::OsRng;
 
 /// The epoch of the first key set.
-const KEYSET_EPOCH: u64 = 1;
+const FIRST_KEYSET_EPOCH: u64 = 1;
 /// The one operator of a provisional directory.
 const INDEPENDENT_COUNT: u8 = 1;
 
@@ -105,7 +114,7 @@ fn write_whole(path: &Path, bytes: &[u8], secret: bool) -> Result<(), &'static s
     std::fs::rename(&temporary, path).map_err(|_| "a file does not take its name")
 }
 
-fn keygen(dir: &Path) -> Result<(), &'static str> {
+fn keygen(dir: &Path, keyset_epoch: u64) -> Result<(), &'static str> {
     // The keys go into a directory beside the one named and take its name
     // at the end, thus a keygen that stops half-way leaves no key there.
     let holds_any = std::fs::read_dir(dir).is_ok_and(|mut entries| entries.next().is_some());
@@ -134,7 +143,7 @@ fn keygen(dir: &Path) -> Result<(), &'static str> {
         )?;
         keys.push(SigningKey::from_seed(seed));
     }
-    let keyset = keyset_bytes_with(&keys, KEYSET_EPOCH, INDEPENDENT_COUNT)
+    let keyset = keyset_bytes_with(&keys, keyset_epoch, INDEPENDENT_COUNT)
         .map_err(|_| "the key set does not build")?;
     write_whole(&staging.join("keyset.bin"), &keyset, false)?;
     // An empty directory of that name gives way to the keys.
@@ -168,6 +177,52 @@ fn read_keys(dir: &Path) -> Result<(Vec<SigningKey>, Vec<u8>), &'static str> {
         return Err("keyset.bin names other keys than the seeds");
     }
     Ok((keys, keyset))
+}
+
+/// Signs the key set of `new` under each key of `old` (`REL-036`), and adds
+/// the link to the key chain at `chain` (`REL-199`).
+fn rotate(old: &Path, new: &Path, chain: &Path) -> Result<(), &'static str> {
+    let (old_keys, old_keyset) = read_keys(old)?;
+    let (_, new_keyset) = read_keys(new)?;
+    let (old_parsed, _) =
+        DirectoryKeySet::parse(&old_keyset).map_err(|_| "the old keyset.bin does not parse")?;
+    let (new_parsed, _) =
+        DirectoryKeySet::parse(&new_keyset).map_err(|_| "the new keyset.bin does not parse")?;
+    if new_parsed.keyset_epoch <= old_parsed.keyset_epoch {
+        return Err("the new key set needs a higher epoch: keygen <dir> <epoch>");
+    }
+    let link = umbra_core::directory::keychain::sign_keyset(&old_keys, &new_keyset, &mut OsRng)
+        .map_err(|_| "the new key set does not sign")?;
+    let held = std::fs::read(chain).ok();
+    let mut links: Vec<&[u8]> = match &held {
+        Some(bytes) => umbra_core::directory::keychain::links(bytes)
+            .map_err(|_| "the key chain file does not parse")?,
+        None => Vec::new(),
+    };
+    // A rotation runs one time: a chain that reaches this epoch takes no
+    // second link of it.
+    let reached = links.iter().any(|held| {
+        DirectoryKeySet::parse(held)
+            .is_ok_and(|(set, _)| set.keyset_epoch >= new_parsed.keyset_epoch)
+    });
+    if reached {
+        return Err("the key chain reaches that epoch already");
+    }
+    links.push(&link);
+    let encoded =
+        umbra_core::directory::keychain::encode(&links).map_err(|_| "the key chain is full")?;
+    // The chain walks from the old set to the new one, as each client will.
+    umbra_core::directory::keychain::advance(&old_keyset, &encoded)
+        .ok()
+        .filter(|reached| *reached == new_keyset)
+        .ok_or("the key chain does not reach the new key set")?;
+    write_whole(chain, &encoded, false)?;
+    println!(
+        "keychain links={} newest epoch={}",
+        links.len(),
+        new_parsed.keyset_epoch
+    );
+    Ok(())
 }
 
 /// The place of one relay.
@@ -206,6 +261,7 @@ fn sign(settings: &str) -> Result<(), &'static str> {
     let text = std::fs::read_to_string(settings).map_err(|_| "the settings file does not read")?;
     let mut key_dir = None;
     let mut out = None;
+    let mut keychain: Option<PathBuf> = None;
     let mut relays = Vec::new();
     let mut report_queues = Vec::new();
     let mut expelled: Vec<[u8; 32]> = Vec::new();
@@ -218,6 +274,7 @@ fn sign(settings: &str) -> Result<(), &'static str> {
         match line.split_once('=') {
             Some(("keys", value)) => key_dir = Some(PathBuf::from(value)),
             Some(("out", value)) => out = Some(PathBuf::from(value)),
+            Some(("keychain", value)) => keychain = Some(PathBuf::from(value)),
             Some(("relay", value)) => {
                 relays.push(read_relay(value).ok_or("a relay line does not parse")?);
             }
@@ -252,6 +309,33 @@ fn sign(settings: &str) -> Result<(), &'static str> {
     let out = out.ok_or("the settings file needs a line: out=<output directory>")?;
     let (keys, keyset) = read_keys(&key_dir)?;
     let (parsed, _) = DirectoryKeySet::parse(&keyset).map_err(|_| "keyset.bin does not parse")?;
+    // REL-200: each relay and each app reaches the key set of the manifest
+    // through the chain alone, thus the signer signs under the set that
+    // the chain ends at, and under the first set before any rotation. A
+    // key directory of no rotation would leave each client with no network.
+    let chain = keychain.as_ref().and_then(|path| std::fs::read(path).ok());
+    let newest = match &chain {
+        Some(bytes) => umbra_core::directory::keychain::links(bytes)
+            .map_err(|_| "the key chain file does not parse")?
+            .last()
+            .and_then(|link| DirectoryKeySet::parse(link).ok())
+            .map(|(set, used)| (set.keyset_epoch, used)),
+        None => None,
+    };
+    match (&chain, newest) {
+        (Some(bytes), Some((_, used))) => {
+            let links = umbra_core::directory::keychain::links(bytes)
+                .map_err(|_| "the key chain file does not parse")?;
+            let last = links.last().and_then(|link| link.get(..used));
+            if last != Some(keyset.as_slice()) {
+                return Err("the keys are not the newest set of the key chain; run rotate first");
+            }
+        }
+        _ if parsed.keyset_epoch > FIRST_KEYSET_EPOCH => {
+            return Err("a key set after the first one needs its key chain: the keychain= line");
+        }
+        _ => {}
+    }
     // REL-198: the signer places the relays of one operator alone.
     if parsed.independent_count >= AUTHORITY_FLOOR {
         return Err("the key set is no provisional directory, thus the signer places no relay");
@@ -386,6 +470,10 @@ fn sign(settings: &str) -> Result<(), &'static str> {
     std::fs::create_dir_all(&out).map_err(|_| "the output directory does not open")?;
     write_whole(&out.join("manifest"), &manifest, false)?;
     write_whole(&out.join("keyset.bin"), &keyset, false)?;
+    // REL-199: the chain of each rotation, beside the manifest.
+    if let Some(chain) = keychain.as_ref().and_then(|path| std::fs::read(path).ok()) {
+        write_whole(&out.join("keychain"), &chain, false)?;
+    }
     println!(
         "epoch={epoch} relays={} manifest={} bytes report_queues={} removed_links={}",
         relays.len(),
@@ -405,14 +493,30 @@ fn main() -> ExitCode {
     let work: Box<dyn FnOnce() -> Result<(), &'static str> + Send> = match arguments.as_slice() {
         [command, dir] if command == "keygen" => {
             let dir = PathBuf::from(dir);
-            Box::new(move || keygen(&dir))
+            Box::new(move || keygen(&dir, FIRST_KEYSET_EPOCH))
+        }
+        [command, dir, epoch] if command == "keygen" => {
+            let dir = PathBuf::from(dir);
+            let Ok(epoch) = epoch.parse::<u64>() else {
+                eprintln!("the keyset epoch is a number");
+                return ExitCode::from(2);
+            };
+            Box::new(move || keygen(&dir, epoch))
+        }
+        [command, old, new, chain] if command == "rotate" => {
+            let (old, new, chain) = (PathBuf::from(old), PathBuf::from(new), PathBuf::from(chain));
+            Box::new(move || rotate(&old, &new, &chain))
         }
         [command, settings] if command == "sign" => {
             let settings = settings.clone();
             Box::new(move || sign(&settings))
         }
         _ => {
-            eprintln!("usage: umbra-signer keygen <key directory>\n       umbra-signer sign <settings file>");
+            eprintln!(
+                "usage: umbra-signer keygen <key directory> [<keyset epoch>]\n       \
+                 umbra-signer rotate <old key directory> <new key directory> <key chain file>\n       \
+                 umbra-signer sign <settings file>"
+            );
             return ExitCode::from(2);
         }
     };

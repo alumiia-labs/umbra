@@ -502,6 +502,9 @@ pub struct Carried {
     pub manifest: std::sync::Mutex<Option<Vec<u8>>>,
     /// The file of the manifest and what a new one must verify against.
     pub manifest_source: Option<ManifestSource>,
+    /// The key chain of the signer, which this relay carries beside the
+    /// manifest (Part 10 `REL-199`), or none before the first rotation.
+    pub keychain: std::sync::Mutex<Option<Vec<u8>>>,
     /// The gateway, for a relay with the OHTTP relay role.
     pub ohttp: Option<OhttpForward>,
     /// The gateway of the directory and the issuer, for a relay with that
@@ -527,7 +530,9 @@ pub struct ManifestSource {
     /// The file of the manifest.
     pub path: std::path::PathBuf,
     /// The key set of the authorities.
-    pub keyset: Vec<u8>,
+    pub keyset: std::sync::Mutex<Vec<u8>>,
+    /// The file of the key set, which a rotation of `REL-200` writes.
+    pub keyset_path: std::path::PathBuf,
     /// The identifier of this relay.
     pub relay_id: [u8; 32],
     /// The static key of this relay.
@@ -572,30 +577,100 @@ fn is_newer(fresh: &[u8], held: Option<&[u8]>, now: u64) -> bool {
     holds && held_epoch.is_none_or(|held| epoch >= held)
 }
 
+/// The file of the key chain, beside the file of the manifest.
+fn keychain_path(source: &ManifestSource) -> std::path::PathBuf {
+    source.path.with_file_name("keychain.bin")
+}
+
+/// Fetches the key chain of the carrier and keeps it, in RAM and on the
+/// disk, to serve it beside the manifest (`REL-199`). A chain that does
+/// not parse takes no place; each client verifies each link itself.
+async fn fetch_keychain_into(
+    carried: &Carried,
+    source: &ManifestSource,
+    dial: &Dial,
+    tls: Arc<rustls::ClientConfig>,
+) -> Option<Vec<u8>> {
+    let chain = native::fetch_keychain(dial, tls).await.ok()?;
+    umbra_core::directory::keychain::links(&chain).ok()?;
+    let held = carried.keychain.lock().ok()?.clone();
+    if held.as_deref() != Some(chain.as_slice()) {
+        let _ = write_atomically(&keychain_path(source), &chain);
+        if let Ok(mut slot) = carried.keychain.lock() {
+            *slot = Some(chain.clone());
+        }
+    }
+    Some(chain)
+}
+
 /// Fetches the manifest of the carrier, and writes it over the file when it
 /// verifies and still places this relay. A manifest that does not verify
 /// never takes the place of one that does.
 async fn fetch_manifest_into(
+    carried: &Carried,
     source: &ManifestSource,
     dial: &Dial,
     tls: Arc<rustls::ClientConfig>,
     now: u64,
 ) {
-    let Ok(fresh) = native::fetch_manifest(dial, tls).await else {
+    let chain = fetch_keychain_into(carried, source, dial, tls.clone()).await;
+    let Ok(fresh) = native::fetch_manifest(dial, tls.clone()).await else {
         return;
     };
     let held = std::fs::read(&source.path).ok();
     if held.as_deref() == Some(fresh.as_slice()) || !is_newer(&fresh, held.as_deref(), now) {
         return;
     }
-    if crate::placement::placement(&fresh, &source.keyset, &source.relay_id, &source.s, now)
-        .is_err()
-    {
+    let Some(keyset) = source.keyset() else {
+        return;
+    };
+    let placed = |keyset: &[u8]| {
+        crate::placement::placement(&fresh, keyset, &source.relay_id, &source.s, now).is_ok()
+    };
+    let part = source.path.with_extension("part");
+    if !placed(&keyset) {
+        // REL-200: a manifest under another key set takes the key chain of
+        // the carrier, walked from the set this relay holds.
+        let Some(chain) = chain else {
+            return;
+        };
+        let Ok(next) = umbra_core::directory::keychain::advance(&keyset, &chain) else {
+            return;
+        };
+        if next == keyset || !placed(&next) {
+            return;
+        }
+        // The manifest waits beside its file first, thus a stop between
+        // the two renames leaves a pair that a start can mend.
+        if std::fs::write(&part, &fresh).is_err() {
+            eprintln!("relay: the manifest of the new key set does not write");
+            return;
+        }
+        if !write_atomically(&source.keyset_path, &next) {
+            eprintln!("relay: the key set file does not write; a rotation waits");
+            return;
+        }
+        if let Ok(mut held) = source.keyset.lock() {
+            *held = next;
+        }
+        let _ = std::fs::rename(&part, &source.path);
         return;
     }
-    let part = source.path.with_extension("part");
     if std::fs::write(&part, &fresh).is_ok() {
         let _ = std::fs::rename(&part, &source.path);
+    }
+}
+
+/// Writes `bytes` to `path` under another name, then renames it.
+fn write_atomically(path: &std::path::Path, bytes: &[u8]) -> bool {
+    let part = path.with_extension("part");
+    std::fs::write(&part, bytes).is_ok() && std::fs::rename(&part, path).is_ok()
+}
+
+impl ManifestSource {
+    /// The key set that this relay holds now.
+    pub fn keyset(&self) -> Option<Vec<u8>> {
+        self.keyset.lock().ok().map(|held| held.clone())
     }
 }
 
@@ -606,6 +681,14 @@ async fn reload_manifest(carried: Arc<Carried>, tls: Arc<rustls::ClientConfig>) 
     let Some(source) = carried.manifest_source.as_ref() else {
         return;
     };
+    // The chain of the last run serves until a fetch gives a newer one.
+    if let Ok(chain) = std::fs::read(keychain_path(source)) {
+        if umbra_core::directory::keychain::links(&chain).is_ok() {
+            if let Ok(mut slot) = carried.keychain.lock() {
+                *slot = Some(chain);
+            }
+        }
+    }
     let mut reads: u32 = 0;
     loop {
         tokio::time::sleep(MANIFEST_READ_PERIOD).await;
@@ -614,7 +697,7 @@ async fn reload_manifest(carried: Arc<Carried>, tls: Arc<rustls::ClientConfig>) 
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_or(0, |at| at.as_secs());
-                fetch_manifest_into(source, dial, tls.clone(), now).await;
+                fetch_manifest_into(&carried, source, dial, tls.clone(), now).await;
             }
             reads = reads.wrapping_add(1);
         }
@@ -634,9 +717,10 @@ async fn reload_manifest(carried: Arc<Carried>, tls: Arc<rustls::ClientConfig>) 
         if served {
             continue;
         }
-        if crate::placement::placement(&fresh, &source.keyset, &source.relay_id, &source.s, now)
-            .is_err()
-        {
+        let Some(keyset) = source.keyset() else {
+            continue;
+        };
+        if crate::placement::placement(&fresh, &keyset, &source.relay_id, &source.s, now).is_err() {
             continue;
         }
         if let Ok(mut held) = carried.manifest.lock() {
@@ -666,8 +750,8 @@ async fn answer_receipt_query<S>(
     let keyset = carried
         .manifest_source
         .as_ref()
-        .map(|source| source.keyset.as_slice());
-    let query = match (request, keyset) {
+        .and_then(ManifestSource::keyset);
+    let query = match (request, keyset.as_deref()) {
         (Ok(request), Some(keyset)) if request.method == "POST" => DirectoryKeySet::parse(keyset)
             .ok()
             .and_then(|(set, _)| ReceiptQuery::verify(&request.body, &set).ok()),
@@ -716,8 +800,8 @@ async fn answer_stat_query<S>(
     let keyset = carried
         .manifest_source
         .as_ref()
-        .map(|source| source.keyset.as_slice());
-    let query = match (request, keyset) {
+        .and_then(ManifestSource::keyset);
+    let query = match (request, keyset.as_deref()) {
         (Ok(request), Some(keyset)) if request.method == "POST" => DirectoryKeySet::parse(keyset)
             .ok()
             .and_then(|(set, _)| StatQuery::verify(&request.body, &set).ok()),
@@ -856,6 +940,31 @@ pub async fn serve_connection_until<S>(
             let _ = tokio::time::timeout_at(post_end, async {
                 stream.write_all(head.as_bytes()).await?;
                 stream.write_all(&bundle).await?;
+                stream.shutdown().await
+            })
+            .await;
+            return;
+        }
+        if native::asks_keychain(&inbound) && inbound.windows(4).any(|w| w == b"\r\n\r\n") {
+            // REL-199: the key chain, or 404 before the first rotation.
+            let chain = carried
+                .keychain
+                .lock()
+                .map(|held| held.clone())
+                .unwrap_or_default();
+            let _ = tokio::time::timeout_at(post_end, async {
+                match &chain {
+                    Some(bytes) => {
+                        let head = native::manifest_response_head(bytes.len());
+                        stream.write_all(head.as_bytes()).await?;
+                        stream.write_all(bytes).await?;
+                    }
+                    None => {
+                        stream
+                            .write_all(b"HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n")
+                            .await?;
+                    }
+                }
                 stream.shutdown().await
             })
             .await;

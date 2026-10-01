@@ -1,11 +1,17 @@
 # Phase 2 of a relay: the key set and the first manifest of the signer,
 # then the service. Later manifests arrive on their own from the signer
 # (the `manifest_from` line).
+# The relay walks the key chain of the signer itself (REL-200) and writes
+# the newer set here. A run that reached the signer hands it the newest
+# set; each run gives a relay with no set the one in build/.
 - name: The key set that this relay verifies each manifest under is there
   ansible.builtin.copy:
     src: "{{ umbra_out }}/keyset.bin"
-    dest: /etc/umbra/keyset.bin
+    dest: /var/lib/umbra-relay/keyset.bin
+    owner: umbra-relay
+    group: umbra-relay
     mode: "0644"
+    force: "{{ hostvars[groups['signer'][0]].umbra_signed | default(false) }}"
   notify: Restart umbra-relay
 
 # A root is valid for three hours, thus the relay takes the manifest that

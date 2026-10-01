@@ -894,9 +894,37 @@ fits one `B3` cell.
 9. **[REL-038]** The offline recovery arrangement MUST hold one key of the 7. That key gives
    a rotation when a legal order or a compromise removes an authority, and the
    remaining authorities cannot reach 5 without it.
-10. **[REL-039]** A client build MUST ship the genesis `DirectoryKeySet`. Part 15 §15.5 puts
-    the build under binary transparency, thus that key set is under the same
-    scrutiny as the code.
+10. **[REL-039]** A client build MUST ship the genesis `DirectoryKeySet`, or a later set
+    that the key chain below reaches from it. Part 15 §15.5 puts the build
+    under binary transparency, thus that key set is under the same scrutiny
+    as the code.
+
+**The key chain.** A client shipped with one key set reaches each later one
+through the chain of rotations:
+
+```
+KeyChain {
+    version     u8          // 0x01
+    count       u8          // 1 to 28
+    links       [count] { len u32, SignedKeySet }   // in ascending keyset_epoch
+}
+```
+
+- **[REL-199]** A carrier of Part 3 §3.10 that serves the manifest MUST serve
+  the `KeyChain` of each rotation since the genesis key set at
+  `/.well-known/umbra/keychain`, under the rules of Part 3 `NET-316` and
+  `NET-317`, with a body of 1 MiB at most. Before the first rotation no
+  chain exists, and the carrier answers `404`.
+- **[REL-200]** A client or a relay that holds a key set under which a
+  manifest does not verify MUST fetch the `KeyChain` and walk it from the set
+  it holds: it passes over each link at or below the held `keyset_epoch`,
+  and it accepts each later link under `REL-036` and `REL-037` in order. It
+  MUST keep the newest set that it accepted in its store, and it MUST keep
+  the set that it held when a link does not verify. A client MUST start
+  from the newer of the set in its store and the set that its build ships,
+  by `keyset_epoch`, thus a build that ships a set after a leaked one
+  trusts no link that the leaked set signed. Thus a rotation reaches a
+  build that predates it.
 
 > *Cause.* An earlier draft said "one 5-of-7 threshold signature" and "a
 > threshold public key". Part 5 §5.1 lists no threshold construction, and the

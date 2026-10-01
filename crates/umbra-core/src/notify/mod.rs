@@ -13,6 +13,7 @@ pub mod ndr;
 pub mod push;
 pub mod token;
 pub mod wake;
+pub mod wakekey;
 
 /// The epoch length of the key schedule of §8.2.3, in seconds.
 pub const EPOCH_SECONDS: u64 = 86_400;

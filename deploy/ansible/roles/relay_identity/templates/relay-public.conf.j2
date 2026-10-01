@@ -12,7 +12,8 @@ family={{ umbra_family }}
 class={{ class }}
 roles={{ umbra_roles }}
 manifest=/var/lib/umbra-relay/manifest.bin
-keyset=/etc/umbra/keyset.bin
+# A rotation of the key set (Part 10 REL-200) writes this file.
+keyset=/var/lib/umbra-relay/keyset.bin
 {% set signer = groups['signer'][0] %}
 manifest_from={{ signer }}.{{ umbra_domain }},{{ hostvars[signer]['ansible_host'] }},443
 {% if inventory_hostname in groups['entry'] %}

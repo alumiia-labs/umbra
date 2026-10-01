@@ -17,6 +17,8 @@ use umbra_core::{
 use umbra_crypto::{aead, hash::sha3_256, rand_core::CryptoRng, secret::Secret};
 use umbra_wire::ndr::{encode_token, NdrRequest, TokenCarrier, NDR_REQUEST_LEN, PUSH_TOKEN_MAX};
 
+use zeroize::Zeroizing;
+
 use super::{Client, SETTINGS};
 use crate::Error;
 
@@ -552,6 +554,72 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .collect();
         self.put_rows(&rows, rng)?;
         Ok(unbound)
+    }
+
+    /// The wake table of Part 8 `NTF-135`: each root that a binding uses,
+    /// and each queue alias with the conversation of its queue. The
+    /// platform seals it under its keystore, thus a locked client opens a
+    /// blob with it (`NTF-136`).
+    pub fn wake_table(&self) -> Result<Zeroizing<Vec<u8>>, Error> {
+        let mut roots: Vec<[u8; 32]> = Vec::new();
+        let mut keep = |root: &Secret<32>| {
+            if !roots.contains(root.expose()) {
+                roots.push(*root.expose());
+            }
+        };
+        for relay in self.notify_relays()? {
+            keep(&relay.root);
+        }
+        for group in self.notify_groups()? {
+            if let Some(root) = &group.root {
+                keep(root);
+            }
+        }
+        let store = &self.open_ref()?.store;
+        // A contact row starts with the RecipientId of its inbound queue.
+        let mut conversations: Vec<([u8; 32], [u8; 16])> = Vec::new();
+        for (row, plain) in store.list(TableId::CONTACT, None)? {
+            let plain = Zeroizing::new(plain);
+            if let Some(recipient) = plain.get(..32).and_then(|id| <[u8; 32]>::try_from(id).ok()) {
+                conversations.push((recipient, row));
+            }
+        }
+        let aliases = store
+            .list(NOTIFY_QUEUE, None)?
+            .iter()
+            .filter_map(|(_, bytes)| Queue::parse(bytes).ok())
+            .map(|queue| {
+                let conversation = conversations
+                    .iter()
+                    .find(|(recipient, _)| *recipient == queue.recipient_id)
+                    .map_or([0; 16], |(_, conversation)| *conversation);
+                (queue.alias, conversation)
+            })
+            .collect();
+        let table = umbra_core::notify::wakekey::WakeTable { roots, aliases };
+        let encoded = Zeroizing::new(table.encode()?);
+        let umbra_core::notify::wakekey::WakeTable { mut roots, .. } = table;
+        zeroize::Zeroize::zeroize(&mut roots);
+        Ok(encoded)
+    }
+
+    /// NTF-084: three blobs in a row did not open, thus each root is lost
+    /// or the clock moved. Each group is due at once, and the rotation of
+    /// `NTF-007` gives it a fresh root, one group in each run.
+    pub fn renew_push_roots<R: CryptoRng + ?Sized>(&mut self, rng: &mut R) -> Result<(), Error> {
+        let rows: Vec<_> = self
+            .notify_groups()?
+            .into_iter()
+            .filter(|group| group.state != RETIRED)
+            .map(|group| {
+                let due = Group {
+                    rotated_at: 0,
+                    ..group
+                };
+                (NOTIFY_GROUP, due.handle.to_vec(), due.encode())
+            })
+            .collect();
+        self.put_rows(&rows, rng)
     }
 
     /// The count of the queues whose `NBIND` left, and of the groups that

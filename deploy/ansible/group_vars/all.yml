@@ -36,6 +36,10 @@ umbra_service_port: 8443
 # all; a list of your own addresses closes it to each other one.
 umbra_ssh_from: []
 
+# The key directory that the signer signs with. A rotation of the key set
+# (README, "Rotating the directory keys") moves it to a new directory.
+umbra_signer_keys: /var/lib/umbra-signer/keys
+
 # The directory on this machine where the playbooks put what the servers
 # made in public: descriptors, the key set, the pins of the app.
 umbra_out: "{{ playbook_dir }}/build"

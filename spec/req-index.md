@@ -73,15 +73,15 @@ column when a crate implements the requirement and a test covers it.
 | `CRY` | 120 | 27 | 0 | 0 | 1 | **148** |
 | `WIR` | 398 | 85 | 0 | 0 | 7 | **490** |
 | `DEV` | 203 | 90 | 0 | 0 | 8 | **301** |
-| `NTF` | 75 | 28 | 0 | 0 | 3 | **106** |
+| `NTF` | 78 | 28 | 0 | 0 | 3 | **109** |
 | `DIS` | 130 | 35 | 0 | 0 | 3 | **168** |
-| `REL` | 160 | 34 | 1 | 0 | 3 | **198** |
+| `REL` | 162 | 34 | 1 | 0 | 3 | **200** |
 | `GRP` | 234 | 65 | 0 | 0 | 6 | **305** |
 | `ATT` | 143 | 45 | 2 | 0 | 3 | **193** |
 | `ABU` | 72 | 30 | 1 | 0 | 0 | **103** |
 | `IMP` | 121 | 41 | 0 | 0 | 2 | **164** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2076 | 628 | 7 | 0 | 56 | **2767** |
+| **All** | 2081 | 628 | 7 | 0 | 56 | **2772** |
 
 ## SCP — Scope and Conventions
 
@@ -1753,6 +1753,9 @@ Source: `spec/08-notifications.md`
 | `NTF-132` | §8.5.2 | MUST | (unstated) | A client that leaves a group, that the group removes, or whose group closes MUST send a `GNUNREG` for its notify queue to each replica while it holds a read key of the group. |  |  |
 | `NTF-133` | §8.5.2 | MUST | A client | A client MUST end a notify queue that it drops with a `DEL` of Part 6 §6.4. |  |  |
 | `NTF-134` | §8.2.7 | MUST | An NDR | An NDR MUST refuse an `NPUSH` whose carrier it does not serve, and it MUST NOT post to an address that no provider of its own names. |  |  |
+| `NTF-135` | §8.4.1 | MUST | An Android client in Instant mode | An Android client in Instant mode MUST hold a **wake table** outside `K_store`: each `k_ntf_root` that a binding of §8.2.3 uses, and each `queue_alias` with the conversation of its queue. |  |  |
+| `NTF-136` | §8.4.1 | MUST | A locked client | A locked client MUST open each blob with that table under `NTF-075` to `NTF-079`. |  |  |
+| `NTF-137` | §8.4.1 | MUST | A client | A client MUST delete the wake table and its keystore key at a local wipe of Part 7 `DEV-008`, and when the mode leaves Instant. |  |  |
 
 ## DIS — Discovery, Handles, and Key Transparency
 
@@ -2133,6 +2136,8 @@ Source: `spec/10-relay-directory.md`
 | `REL-196` | §10.2 | MUST | A client | A client MUST order the relays of a draw at random in proportion to the rate of their class, with the weights 2, 5, 10, and 20 for C0 to C3. |  |  |
 | `REL-197` | §10.2 | MUST NOT | A directory authority | A directory authority MUST NOT list a relay before a class test verifies C0 or above for it, and it MUST remove a relay whose class test verifies below C0. |  |  |
 | `REL-198` | §10.5.4 | MAY | Under the provisional directory of `REL-126`, an authority | Under the provisional directory of `REL-126`, an authority MAY set the layer of each relay of its own operator in the place of the function above, and it MAY list such a relay placed at once. |  |  |
+| `REL-199` | §10.5.2 | MUST | A carrier of Part 3 §3.10 that serves the manifest | A carrier of Part 3 §3.10 that serves the manifest MUST serve the `KeyChain` of each rotation since the genesis key set at `/.well-known/umbra/keychain`, under the rules of Part 3 `NET-316` and `NET-317`, with a body of 1 MiB at most. |  |  |
+| `REL-200` | §10.5.2 | MUST | (unstated) | A client or a relay that holds a key set under which a manifest does not verify MUST fetch the `KeyChain` and walk it from the set it holds: it passes over each link at or below the held `keyset_epoch`, and it accepts each later link under `REL-036` and `REL-037` in order. |  |  |
 
 ## GRP — Private Groups
 

@@ -7,7 +7,11 @@ import java.util.Properties
 import uniffi.umbra_ffi.FfiException
 import uniffi.umbra_ffi.Handle
 import uniffi.umbra_ffi.Network
+import uniffi.umbra_ffi.advanceKeySet
+import uniffi.umbra_ffi.fetchKeyChain
 import uniffi.umbra_ffi.fetchManifest
+import uniffi.umbra_ffi.newestKeySet
+import uniffi.umbra_ffi.VerifiedNetwork
 
 /**
  * The network of the release build. The relay directory of Part 10 gives it:
@@ -23,6 +27,7 @@ object BuildNetwork {
     private const val DIRECTORY_PINS = "umbra-directory-pins.bin"
     private const val NETWORK = "umbra-network.properties"
     private const val MANIFEST = "umbra-manifest.bin"
+    private const val HELD_KEYSET = "umbra-keyset-held.bin"
     private const val CARRIER_PORT: UShort = 443u
 
     /** Whether the time of the last manifest differs from the device clock. */
@@ -76,9 +81,53 @@ object BuildNetwork {
         null
     }
 
+    /**
+     * REL-200: a key set that the chain of a carrier reaches from the one
+     * held and that `manifest` verifies under, with the network of that
+     * manifest, or null. Each carrier gets its turn, thus a carrier with a
+     * short chain stops no rotation.
+     */
+    private fun advanced(
+        pins: Pinned,
+        held: ByteArray,
+        manifest: ByteArray,
+        client: Handle,
+    ): Pair<ByteArray, VerifiedNetwork>? {
+        for ((host, address) in pins.carriers) {
+            val next = try {
+                advanceKeySet(held, fetchKeyChain(host, address, CARRIER_PORT, null))
+            } catch (unreachable: FfiException) {
+                continue
+            }
+            if (next.contentEquals(held)) continue
+            val verified = try {
+                client.networkOfManifest(manifest, next, 0uL, pins.invitationHost, null)
+            } catch (refused: FfiException) {
+                continue
+            }
+            return next to verified
+        }
+        return null
+    }
+
+    /** Writes a file under another name and renames it, thus a stop leaves the old one. */
+    private fun writeWhole(file: File, bytes: ByteArray) {
+        val part = File(file.parentFile, file.name + ".part")
+        part.writeBytes(bytes)
+        if (!part.renameTo(file)) {
+            file.delete()
+            part.renameTo(file)
+        }
+    }
+
     fun network(context: Context, client: Handle): Network? {
         val pins = pinned(context) ?: return null
         val kept = File(context.filesDir, MANIFEST)
+        // REL-200: the newer of the set of the last rotation that this
+        // device took and the one the build ships; a damaged file gives
+        // way to the shipped set.
+        val heldFile = File(context.filesDir, HELD_KEYSET)
+        val keyset = newestKeySet(heldFile.takeIf { it.exists() }?.readBytes(), pins.keyset)
         // NET-318: one carrier after the other, and the web roots vouch for
         // each; the manifest carries its own signatures, thus a carrier needs
         // no trust.
@@ -91,11 +140,15 @@ object BuildNetwork {
         }
         for (manifest in listOfNotNull(fresh, kept.takeIf { it.exists() }?.readBytes())) {
             val verified = try {
-                client.networkOfManifest(manifest, pins.keyset, 0uL, pins.invitationHost, null)
+                client.networkOfManifest(manifest, keyset, 0uL, pins.invitationHost, null)
             } catch (refused: FfiException) {
-                continue
+                // A manifest under a later key set: the chain moves the
+                // held set to it, and the device keeps the new one.
+                val (next, retried) = advanced(pins, keyset, manifest, client) ?: continue
+                writeWhole(heldFile, next)
+                retried
             }
-            if (manifest === fresh) kept.writeBytes(manifest)
+            if (manifest === fresh) writeWhole(kept, manifest)
             isClockCorrected = verified.isClockCorrected
             isProvisional = verified.isProvisional
             return verified.network.copy(

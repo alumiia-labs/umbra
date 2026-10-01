@@ -86,8 +86,10 @@ Run it again after:
 
 ## After the first run
 
-- **Back up the signer keys.** Copy `/var/lib/umbra-signer/keys` from
-  `signer-west` to an offline place. Without those keys, no new manifest
+- **Back up the signer keys.** Copy `/var/lib/umbra-signer` from
+  `signer-west` to an offline place: each key directory and the key chain.
+  Without the chain, an app that ships an older key set cannot reach the
+  new one. Without those keys, no new manifest
   verifies under the key set that the app ships. The network then stops
   within three hours of the last manifest.
 - **Give the release app its network.** Run `bash scripts/release-network.sh`
@@ -126,6 +128,38 @@ Run it again after:
   uses the certificate.
 - **The firewall** opens 22, 80 and 443. It opens 8443 on the notification
   server and the directory, to the relays alone.
+
+## Rotating the directory keys
+
+Rotate the keys when a signer key leaks or is lost, or when an independent
+authority joins (Part 10 `REL-036`). The old keys sign the new set. Each
+relay and each installed app then walks the chain to the new set by itself
+(`REL-200`), so no app update is needed.
+
+On `signer-west`:
+
+```sh
+sudo -u umbra-signer umbra-signer keygen /var/lib/umbra-signer/keys-2 2
+sudo -u umbra-signer umbra-signer rotate /var/lib/umbra-signer/keys     /var/lib/umbra-signer/keys-2 /var/lib/umbra-signer/keychain
+```
+
+The second argument of `keygen` is the epoch of the new set: one above the
+current one. Then:
+
+1. Set `umbra_signer_keys: /var/lib/umbra-signer/keys-2` in
+   `group_vars/all.yml`.
+2. Run `ansible-playbook site.yml`. The signer then signs under the new keys
+   and publishes the chain at `/.well-known/umbra/keychain`.
+3. Run `scripts/release-network.sh`, so that the next app build ships the new
+   set. An app takes the newer of the set it ships and the set it reached
+   through the chain.
+4. Back up `keys-2` and `/var/lib/umbra-signer/keychain` offline, as above.
+5. Move the old key directory offline. Keep it until no build that ships the
+   old set is still in use.
+
+The signer refuses to sign under keys that the chain does not end at, thus
+a mistyped `umbra_signer_keys` stops the hourly manifest rather than every
+app.
 
 ## Checks
 

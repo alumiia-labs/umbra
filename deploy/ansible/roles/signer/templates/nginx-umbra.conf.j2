@@ -17,6 +17,12 @@ server {
         add_header Cache-Control "no-cache" always;
     }
 
+    # Part 10 REL-199: each rotation of the key set since the first one.
+    location = /.well-known/umbra/keychain {
+        default_type application/octet-stream;
+        add_header Cache-Control "no-cache" always;
+    }
+
     location / {
         return 404;
     }

@@ -35,6 +35,8 @@
 # The seven seeds are made here one time and never leave this server. Keep
 # a copy of /var/lib/umbra-signer/keys offline: without it no new manifest
 # verifies under the key set that the app ships.
+# The first key set alone; a later one comes from `rotate` (README), and
+# the signer refuses keys that the key chain does not reach.
 - name: The authority keys are made one time
   become: true
   become_user: umbra-signer

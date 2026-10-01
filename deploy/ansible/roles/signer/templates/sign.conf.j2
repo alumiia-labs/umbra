@@ -1,7 +1,8 @@
 # Written by Ansible (deploy/ansible/roles/signer). The inventory gives
 # each relay, its class, and its place.
-keys=/var/lib/umbra-signer/keys
+keys={{ umbra_signer_keys }}
 out=/var/www/umbra/.well-known/umbra
+keychain=/var/lib/umbra-signer/keychain
 {% for relay in groups['relays'] %}
 {% set place = 'ingress' if relay in groups['entry'] else 'exit' if relay in groups['exit'] else 'middle' %}
 relay=/etc/umbra-signer/descriptors/{{ relay }}.desc,{{ umbra_operator }},{{ hostvars[relay]['class'] }},{{ place }}

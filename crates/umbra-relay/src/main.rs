@@ -24,14 +24,16 @@
 //! ```text
 //! identity_seed=<64 hex characters>
 //! manifest=/var/lib/umbra/manifest.bin
-//! keyset=/etc/umbra/keyset.bin
+//! keyset=/var/lib/umbra/keyset.bin
 //! manifest_from=<host name>,<IPv4 address>,<port>
 //! ```
 //!
 //! The `manifest_from` line names the HTTPS carrier of the signer: the
 //! relay fetches `/.well-known/umbra/manifest` there each five minutes, and
 //! a manifest that verifies and still places the relay takes the place of
-//! the file.
+//! the file. A rotation of the key set (Part 10 `REL-200`) writes the
+//! `keyset` file, thus it sits where the relay may write. The relay also
+//! carries the key chain of the signer at `/.well-known/umbra/keychain`.
 //!
 //! The lines `max_connections=` and `max_conns_per_ip=` change the limits of
 //! Part 3 `NET-333` and `NET-334`. An ingress relay alone applies the second
@@ -277,7 +279,8 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
     let manifest_source = match (values.get("manifest"), values.get("keyset"), &manifest) {
         (Some(path), Some(keyset), Some(_)) => Some(ManifestSource {
             path: std::path::PathBuf::from(path),
-            keyset: std::fs::read(keyset).ok()?,
+            keyset: std::sync::Mutex::new(std::fs::read(keyset).ok()?),
+            keyset_path: std::path::PathBuf::from(keyset),
             relay_id: relay.relay_id,
             s: relay.s,
             fetch: match values.get("manifest_from") {

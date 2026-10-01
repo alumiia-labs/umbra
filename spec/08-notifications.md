@@ -537,27 +537,33 @@ carrier of a build that holds no other one.
   auto-lock again. An action of the user alone does that. Thus a peer that
   writes each 10 minutes does not keep `K_store` in RAM.
 
-> **Open in 0.2.0-draft: a wake of a locked client.** Part 14 rule `IMP-119`
-> locks the client after 15 minutes with no action of the user, and the
-> ceiling is 30 minutes. A locked client holds no `K_store`, thus it holds no
-> queue key, no ratchet, and no key of the blob of §8.2.2. No carrier of this
-> section delivers a record to it. A push reaches the device, and nothing on
-> the device opens it. Thus each mode of §8.3 delivers for the idle time of the
-> auto-lock, and after that time it delivers when the user unlocks. Two
-> remedies exist, and the owner of the specification picks one.
->
-> 1. A **wake key** outside `K_store`: the key schedule of §8.2.3 sits under a
->    keystore key that needs no passphrase. A locked client opens the 69-byte
->    blob and shows "a message waits" for the conversation of `queue_alias`.
->    The record stays at the relay until the unlock. A seized device in the
->    AFU state gives the wake key, which opens blobs and no message.
-> 2. A **receive state** outside `K_store`: the queue keys and the ratchets
->    stay in RAM under a lock, and the lock covers the message store alone.
->    The alert then holds the text. A seized device in the AFU state gives
->    each later message of each channel.
->
-> Remedy 1 keeps the claim of Part 14 §14.6.4 and costs the latency of the
-> unlock. This revision ships neither, and Part 15 §15.3 holds the residual.
+**The wake of a locked client.** Part 14 rule `IMP-119` locks the client
+after 15 minutes with no action of the user. A locked client holds no
+`K_store`, thus it holds no queue key and no ratchet, and no carrier of this
+section delivers a record to it. The **wake key** lets it open the blob of
+§8.2.2 all the same, and show which conversation waits.
+
+- **[NTF-135]** An Android client in Instant mode MUST hold a **wake table**
+  outside `K_store`: each `k_ntf_root` that a binding of §8.2.3 uses, and
+  each `queue_alias` with the conversation of its queue. It MUST seal the
+  table under a key of the platform keystore that needs no user
+  authentication, and it MUST write the table again while it is open, after
+  each change of a binding and when it leaves the foreground.
+- **[NTF-136]** A locked client MUST open each blob with that table under
+  `NTF-075` to `NTF-079`. It MUST show that a message waits in the
+  conversation of `queue_alias`, grouped under `NTF-089`, with no text of a
+  message and no name of a contact. It MUST NOT fetch or acknowledge the
+  record, which stays at the relay until the unlock.
+- **[NTF-137]** A client MUST delete the wake table and its keystore key at a
+  local wipe of Part 7 `DEV-008`, and when the mode leaves Instant.
+
+> *Cause.* An earlier draft left the locked client open: each push showed a
+> line that named nothing, and the record waited for the unlock in silence.
+> A second remedy kept the queue keys and the ratchets in RAM under the lock,
+> and a seized device in the AFU state then gave each later message. The wake
+> key gives such a device the roots of the blobs alone: which conversation
+> took a push, and no message. Thus the claim of Part 14 §14.6.4 holds, and
+> Part 15 §15.3 records the rest.
 
 **Private mode does not use FCM on Android.** §8.3 wakes the device on a fixed
 clock of 20 or 30 minutes, and a message arrival does not change that clock.

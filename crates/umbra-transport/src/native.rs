@@ -155,6 +155,11 @@ pub const CHALLENGES_PATH: &str = "/.well-known/umbra/challenges";
 /// 3 387 bytes for each of 3 000 relays is below 10 MiB.
 pub const CHALLENGES_MAX: usize = 16 << 20;
 const MANIFEST_TIMEOUT: Duration = Duration::from_secs(20);
+/// The path of the key chain of the directory, beside the manifest (Part 10
+/// `REL-199`).
+pub const KEYCHAIN_PATH: &str = "/.well-known/umbra/keychain";
+/// The largest key chain that a client reads (`REL-199`).
+pub const KEYCHAIN_MAX: usize = 1 << 20;
 
 /// The head of a response to a manifest request, for a carrier that holds
 /// `len` bytes.
@@ -168,6 +173,12 @@ pub fn manifest_response_head(len: usize) -> String {
 /// Whether a complete request head asks for the relay manifest.
 pub fn asks_manifest(head: &[u8]) -> bool {
     head.starts_with(format!("GET {MANIFEST_PATH} HTTP/1.1\r\n").as_bytes())
+}
+
+/// Whether the head of a request asks for the key chain (Part 10
+/// `REL-199`).
+pub fn asks_keychain(head: &[u8]) -> bool {
+    head.starts_with(format!("GET {KEYCHAIN_PATH} HTTP/1.1\r\n").as_bytes())
 }
 
 /// Whether the head of a request asks for the challenges of the relays.
@@ -201,6 +212,20 @@ pub async fn fetch_manifest(
     timeout(
         MANIFEST_TIMEOUT,
         fetch_carried(dial, config, MANIFEST_PATH, MANIFEST_MAX),
+    )
+    .await
+    .map_err(|_| NativeError::Timeout)?
+}
+
+/// Reads the key chain of the directory from an HTTPS carrier (Part 10
+/// `REL-199`), under the deadline of a manifest.
+pub async fn fetch_keychain(
+    dial: &Dial,
+    config: Arc<ClientConfig>,
+) -> Result<Vec<u8>, NativeError> {
+    timeout(
+        MANIFEST_TIMEOUT,
+        fetch_carried(dial, config, KEYCHAIN_PATH, KEYCHAIN_MAX),
     )
     .await
     .map_err(|_| NativeError::Timeout)?

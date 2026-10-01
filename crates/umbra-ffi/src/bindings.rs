@@ -515,6 +515,121 @@ pub fn fetch_manifest(
         .map_err(|_| FfiError::Offline)
 }
 
+/// Reads the key chain of the directory from an HTTPS carrier (Part 10
+/// `REL-199`), as [`fetch_manifest`] reads the manifest.
+#[uniffi::export]
+pub fn fetch_key_chain(
+    host: String,
+    ipv4: Vec<u8>,
+    port: u16,
+    root_ca_path: Option<String>,
+) -> Result<Vec<u8>, FfiError> {
+    let address: [u8; 4] = ipv4
+        .as_slice()
+        .try_into()
+        .map_err(|_| FfiError::Malformed)?;
+    let dial = Dial {
+        host,
+        addr_v4: Some(address),
+        addr_v6: None,
+        port,
+    };
+    let tls = match &root_ca_path {
+        Some(path) => native::tls_config_with_root_file(path),
+        None => native::tls_config(),
+    }
+    .map_err(|_| FfiError::Malformed)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| FfiError::Offline)?;
+    runtime
+        .block_on(native::fetch_keychain(&dial, tls))
+        .map_err(|_| FfiError::Offline)
+}
+
+/// Walks the key chain `chain` forward from the key set `held` (Part 10
+/// `REL-200`), and returns the newest key set that it accepted: `held`
+/// itself when no link is newer. A link that does not verify gives
+/// `Unverified`, and the caller keeps `held`.
+#[uniffi::export]
+pub fn advance_key_set(held: Vec<u8>, chain: Vec<u8>) -> Result<Vec<u8>, FfiError> {
+    umbra_core::directory::keychain::advance(&held, &chain).map_err(|cause| match cause {
+        umbra_core::Error::Malformed => FfiError::Malformed,
+        _ => FfiError::Unverified,
+    })
+}
+
+/// What a locked client learned from one push blob (Part 8 `NTF-136`).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct WakeOutcome {
+    /// 0 the blob opened, 1 its epoch is outside the window and no open ran
+    /// (`NTF-076`), 2 no root opened it (`NTF-077`), 3 the blob or the
+    /// table does not parse.
+    pub status: u8,
+    /// The conversation of the queue of the blob, or none.
+    pub conversation: Option<Vec<u8>>,
+    /// The records that wait at the relay.
+    pub waiting: u8,
+    /// Whether the sender marked the record urgent.
+    pub urgent: bool,
+}
+
+/// Opens a push blob of a locked client with its wake table at `now`
+/// (Part 8 `NTF-135`, `NTF-136`). The caller counts each status 2 toward
+/// `NTF_FAIL_MAX` and sets the count back at status 0.
+#[uniffi::export]
+pub fn open_wake_blob(table: Vec<u8>, blob: Vec<u8>, now: u64) -> WakeOutcome {
+    use umbra_core::notify::wakekey::{WakeTable, Woken};
+    let table = Zeroizing::new(table);
+    let none = |status| WakeOutcome {
+        status,
+        conversation: None,
+        waiting: 0,
+        urgent: false,
+    };
+    let Ok(parsed) = WakeTable::parse(&table) else {
+        return none(3);
+    };
+    let outcome = match parsed.open(&blob, now) {
+        Ok(Woken::Opened {
+            conversation,
+            waiting,
+            urgent,
+        }) => WakeOutcome {
+            status: 0,
+            conversation: conversation.map(|id| id.to_vec()),
+            waiting,
+            urgent,
+        },
+        Ok(Woken::OutsideWindow) => none(1),
+        Ok(Woken::Failed) => none(2),
+        Err(_) => none(3),
+    };
+    let WakeTable { mut roots, .. } = parsed;
+    zeroize::Zeroize::zeroize(&mut roots);
+    outcome
+}
+
+/// The newer of the key set that a device holds from a rotation and the one
+/// that its build ships, by `keyset_epoch` (Part 10 `REL-200`). A held set
+/// that does not parse gives way to the shipped one, thus a damaged file
+/// costs the device no network.
+#[uniffi::export]
+pub fn newest_key_set(held: Option<Vec<u8>>, shipped: Vec<u8>) -> Vec<u8> {
+    use umbra_core::directory::root::DirectoryKeySet;
+    let epoch = |bytes: &[u8]| {
+        DirectoryKeySet::parse(bytes)
+            .ok()
+            .filter(|(_, used)| *used == bytes.len())
+            .map(|(set, _)| set.keyset_epoch)
+    };
+    match held {
+        Some(held) if epoch(&held) > epoch(&shipped) => held,
+        _ => shipped,
+    }
+}
+
 /// One relay of a circuit, as the view of the connection shows it.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct Hop {
@@ -4233,6 +4348,21 @@ impl Handle {
                 epoch: warning.epoch,
             })
             .collect())
+    }
+
+    /// The wake table of Part 8 `NTF-135`, for the platform to seal under
+    /// its keystore. The caller overwrites the bytes after the seal.
+    pub fn wake_table(&self) -> Result<Vec<u8>, FfiError> {
+        let table = locked(&self.inner).client.wake_table()?;
+        Ok(table.to_vec())
+    }
+
+    /// NTF-084: three blobs in a row did not open, thus each push root is
+    /// made again, one group in each run.
+    pub fn renew_push_roots(&self) -> Result<(), FfiError> {
+        let mut inner = locked(&self.inner);
+        inner.client.renew_push_roots(&mut OsRng)?;
+        Ok(())
     }
 
     /// Takes the FCM registration token that Firebase gave, or none when
