@@ -38,6 +38,9 @@ pub(super) const DEVICE_PEERS: TableId = TableId(0x23);
 /// of the run that ended it still holds it, and the store takes no state of
 /// it again.
 pub(super) const ENDED_CHANNELS: TableId = TableId(0x26);
+/// The key of the mark that a verified epoch revoked this device
+/// (`DEV-181`), under the settings.
+const REMOVED_FROM_SET: &[u8] = b"removed-from-set";
 
 const SELF_KEY: &[u8] = b"self";
 const ROSTER_KEY: &[u8] = b"roster";
@@ -289,6 +292,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         };
         let bytes = sign_roster(&next, &identity.roster_key(), rng)?;
         self.put_roster(&bytes, rng)?;
+        // DEV-313: the revoked device learns of it once, on the channel
+        // that ends now, thus it can show it (`DEV-181`).
+        if let Some(channel) = self.peer_channels()?.get(&device).copied() {
+            self.queue_roster(channel, &bytes, rng)?;
+        }
         self.end_sync_channel(device, rng)?;
         Ok(bytes)
     }
@@ -345,6 +353,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
         next.verify_successor(&previous, &Roster::hash(&current))?;
         if next.revokes(&identity.device_id) {
+            // DEV-181: the user learns that another device removed this one.
+            let open = self.open_mut()?;
+            let row = open.store.row_id(SETTINGS, REMOVED_FROM_SET);
+            let mut batch = open.store.begin();
+            batch.put(SETTINGS, row, None, &[1], rng)?;
+            batch.commit()?;
+            self.events.push_back(crate::Event::Conversations);
             return Ok(false);
         }
         let gone: Vec<DeviceId> = next
@@ -358,6 +373,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             self.end_sync_channel(device, rng)?;
         }
         Ok(true)
+    }
+
+    /// Whether a verified epoch of the set revoked this device (`DEV-181`).
+    pub fn removed_from_set(&self) -> Result<bool, Error> {
+        let store = &self.open_ref()?.store;
+        let row = store.row_id(SETTINGS, REMOVED_FROM_SET);
+        Ok(store.get(SETTINGS, &row)?.is_some())
     }
 
     /// Ends the sync channel of a device: its row and its contact go, thus

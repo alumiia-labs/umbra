@@ -871,18 +871,28 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(roster) = self.roster_bytes()? else {
             return Ok(());
         };
+        let channels: Vec<ConversationId> = self.peer_channels()?.into_values().collect();
+        for channel in channels {
+            self.queue_roster(channel, &roster, rng)?;
+        }
+        Ok(())
+    }
+
+    /// Queues one roster epoch on one sync channel.
+    pub(super) fn queue_roster<R: CryptoRng + ?Sized>(
+        &mut self,
+        channel: ConversationId,
+        roster: &[u8],
+        rng: &mut R,
+    ) -> Result<(), Error> {
         let body = DeviceSetBody::Control {
             control_type: ControlType::RosterEpoch,
-            payload: &roster,
+            payload: roster,
         };
         let mut encoded = vec![0u8; roster.len().saturating_add(16)];
         let used = body.encode(&mut encoded)?;
         encoded.truncate(used);
-        let channels: Vec<ConversationId> = self.peer_channels()?.into_values().collect();
-        for channel in channels {
-            self.queue_sync(channel, &encoded, None, rng)?;
-        }
-        Ok(())
+        self.queue_sync(channel, &encoded, None, rng)
     }
 
     /// Starts the resend of each record that a peer did not acknowledge, at

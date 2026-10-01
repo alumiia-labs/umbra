@@ -480,6 +480,8 @@ private fun ConnectionNote() {
         fault?.let { add(it) }
         Core.degraded?.let { add(it) }
         if (BuildNetwork.isProvisional) add(UiText.get(R.string.umbra_ui_rel_126))
+        // DEV-181: another device of the set removed this one.
+        if (Core.removedFromSet) add("Another device removed this one from your devices.")
         if (Core.online && BuildNetwork.isClockCorrected) add(UiText.get(R.string.umbra_ui_rel_116))
         // GRP-229: a group record outside its slot window.
         // NTF-078: the same line for blobs that did not open while locked.

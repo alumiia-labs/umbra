@@ -86,39 +86,54 @@ impl SqliteNdrStore {
         fault(connection.pragma_update(None, "synchronous", "FULL"))?;
         fault(connection.execute_batch(
             "CREATE TABLE IF NOT EXISTS registrations (
-                handle       BLOB PRIMARY KEY,
-                nonce        BLOB NOT NULL,
-                ct_token     BLOB NOT NULL,
-                removal_hash BLOB NOT NULL
+                handle        BLOB PRIMARY KEY,
+                nonce         BLOB NOT NULL,
+                ct_token      BLOB NOT NULL,
+                removal_hash  BLOB NOT NULL,
+                registered_at INTEGER NOT NULL DEFAULT 0
             ) WITHOUT ROWID;",
         ))?;
+        // A file of an earlier build holds no time of registration.
+        let has_time = fault(connection.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('registrations') WHERE name = 'registered_at'",
+            [],
+            |row| row.get::<_, i64>(0),
+        ))? > 0;
+        if !has_time {
+            fault(connection.execute_batch(
+                "ALTER TABLE registrations ADD COLUMN registered_at INTEGER NOT NULL DEFAULT 0;",
+            ))?;
+        }
         Ok(SqliteNdrStore { connection })
     }
 }
 
 impl NdrStore for SqliteNdrStore {
     fn load(&mut self) -> Result<Vec<([u8; HANDLE_LEN], Held)>, StoreFault> {
-        let mut statement = fault(
-            self.connection
-                .prepare("SELECT handle, nonce, ct_token, removal_hash FROM registrations"),
-        )?;
+        let mut statement = fault(self.connection.prepare(
+            "SELECT handle, nonce, ct_token, removal_hash, registered_at FROM registrations",
+        ))?;
         let rows = fault(statement.query_map([], |row| {
             Ok((
                 row.get::<_, Vec<u8>>(0)?,
                 row.get::<_, Vec<u8>>(1)?,
                 row.get::<_, Vec<u8>>(2)?,
                 row.get::<_, Vec<u8>>(3)?,
+                row.get::<_, i64>(4)?,
             ))
         }))?;
+        // A row of an earlier build lives its full time from this start.
+        let now = unix_now();
         let mut out = Vec::new();
         for row in rows {
-            let (handle, nonce, ct_token, removal_hash) = fault(row)?;
+            let (handle, nonce, ct_token, removal_hash, at) = fault(row)?;
             out.push((
                 handle.try_into().map_err(|_| StoreFault)?,
                 Held {
                     nonce: nonce.try_into().map_err(|_| StoreFault)?,
                     ct_token,
                     removal_hash: removal_hash.try_into().map_err(|_| StoreFault)?,
+                    registered_at: u64::try_from(at).ok().filter(|at| *at > 0).unwrap_or(now),
                 },
             ));
         }
@@ -133,13 +148,15 @@ impl NdrStore for SqliteNdrStore {
         for change in changes {
             match change {
                 NdrChange::Registered { handle, held } => fault(transaction.execute(
-                    "INSERT OR REPLACE INTO registrations (handle, nonce, ct_token, removal_hash)
-                     VALUES (?1, ?2, ?3, ?4)",
+                    "INSERT OR REPLACE INTO registrations
+                     (handle, nonce, ct_token, removal_hash, registered_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
                     params![
                         handle.as_slice(),
                         held.nonce.as_slice(),
                         held.ct_token,
-                        held.removal_hash.as_slice()
+                        held.removal_hash.as_slice(),
+                        i64::try_from(held.registered_at).unwrap_or(i64::MAX)
                     ],
                 ))?,
                 NdrChange::Unregistered { handle } => fault(transaction.execute(
@@ -163,6 +180,16 @@ pub struct Gateway {
     pub key_id: u8,
     /// The key pair.
     pub pair: KeyPair,
+}
+
+/// How often the NDR drops the registrations past their time (`NTF-138`).
+const SWEEP_EVERY: Duration = Duration::from_secs(3_600);
+
+/// The time now, in seconds.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
 }
 
 struct State {
@@ -240,7 +267,7 @@ async fn serve(
         return;
     };
     let stepped = match state.lock() {
-        Ok(mut state) => state.step(|ndr| ndr.handle(&plain)),
+        Ok(mut state) => state.step(|ndr| ndr.handle(&plain, unix_now())),
         Err(_) => None,
     };
     let Some((mut answer, delivery)) = stepped else {
@@ -288,6 +315,17 @@ pub async fn run_ndr(
         store,
         broken: false,
     }));
+    // NTF-138: a registration that no `NREG` renewed leaves, at the start
+    // and each hour after it.
+    let sweeping = state.clone();
+    tokio::spawn(async move {
+        loop {
+            if let Ok(mut state) = sweeping.lock() {
+                let _ = state.step(|ndr| ndr.expire(unix_now()));
+            }
+            tokio::time::sleep(SWEEP_EVERY).await;
+        }
+    });
     let gateway = Arc::new(gateway);
     let held = Arc::new(tokio::sync::Semaphore::new(CONNECTION_MAX));
     loop {
@@ -313,5 +351,66 @@ pub async fn run_ndr(
             })
             .await;
         });
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_file_of_an_earlier_build_opens_and_each_row_takes_a_time() {
+        let directory = std::env::temp_dir().join(format!("umbra-ndr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("ndr.db");
+        let path = path.to_str().unwrap();
+        {
+            let old = Connection::open(path).unwrap();
+            old.execute_batch(
+                "CREATE TABLE registrations (
+                    handle       BLOB PRIMARY KEY,
+                    nonce        BLOB NOT NULL,
+                    ct_token     BLOB NOT NULL,
+                    removal_hash BLOB NOT NULL
+                ) WITHOUT ROWID;",
+            )
+            .unwrap();
+            old.execute(
+                "INSERT INTO registrations VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    [7u8; HANDLE_LEN].as_slice(),
+                    [1u8; 24].as_slice(),
+                    vec![2u8; 40],
+                    [3u8; 32].as_slice()
+                ],
+            )
+            .unwrap();
+        }
+        // NTF-138: the row of the earlier build lives its full time from
+        // this start, and a new row keeps the time of its NREG.
+        let mut store = SqliteNdrStore::open(path).unwrap();
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded[0].1.registered_at + 60 >= unix_now());
+        let held = Held {
+            nonce: [4; 24],
+            ct_token: vec![5; 40],
+            removal_hash: [6; 32],
+            registered_at: 1_700_000_000,
+        };
+        store
+            .commit(&[NdrChange::Registered {
+                handle: [8; HANDLE_LEN],
+                held: held.clone(),
+            }])
+            .unwrap();
+        drop(store);
+        let mut again = SqliteNdrStore::open(path).unwrap();
+        let loaded = again.load().unwrap();
+        assert!(loaded.contains(&([8; HANDLE_LEN], held)));
+        drop(again);
+        let _ = std::fs::remove_dir_all(&directory);
     }
 }

@@ -21,6 +21,18 @@ pub struct Held {
     pub ct_token: Vec<u8>,
     /// `SHA3-256` of the removal secret (`NTF-124`).
     pub removal_hash: [u8; 32],
+    /// The time of the `NREG` that made or moved it, in seconds
+    /// (`NTF-138`).
+    pub registered_at: u64,
+}
+
+/// The time that a registration lives after its last `NREG` (`NTF-138`).
+pub const NDR_REG_TTL: u64 = 60 * 86_400;
+
+/// Whether a registration made at `registered_at` lived past
+/// `NDR_REG_TTL` at `now`.
+const fn expired(registered_at: u64, now: u64) -> bool {
+    now.saturating_sub(registered_at) >= NDR_REG_TTL
 }
 
 /// One change of the stored registrations.
@@ -120,14 +132,29 @@ impl Ndr {
 
     /// Serves one request. A push gives the delivery that the server hands
     /// to the provider. Each refusal gives one answer (`WIR-032`).
-    pub fn handle(&mut self, request: &[u8]) -> (NdrResponse, Option<Delivery>) {
+    pub fn handle(&mut self, request: &[u8], now: u64) -> (NdrResponse, Option<Delivery>) {
         match NdrRequest::parse(request) {
-            Ok(parsed) => self.serve(parsed),
+            Ok(parsed) => self.serve(parsed, now),
             Err(_) => (NdrResponse::Refused, None),
         }
     }
 
-    fn serve(&mut self, request: NdrRequest<'_>) -> (NdrResponse, Option<Delivery>) {
+    /// Drops each registration that no `NREG` renewed inside
+    /// `NDR_REG_TTL` (`NTF-138`). The result is the count that left.
+    pub fn expire(&mut self, now: u64) -> usize {
+        let gone: Vec<[u8; HANDLE_LEN]> = self
+            .held
+            .iter()
+            .filter(|(_, held)| expired(held.registered_at, now))
+            .map(|(handle, _)| *handle)
+            .collect();
+        for handle in &gone {
+            self.drop_handle(*handle);
+        }
+        gone.len()
+    }
+
+    fn serve(&mut self, request: NdrRequest<'_>, now: u64) -> (NdrResponse, Option<Delivery>) {
         match request {
             NdrRequest::Register {
                 handle,
@@ -150,6 +177,7 @@ impl Ndr {
                     nonce,
                     ct_token: ct_token.to_vec(),
                     removal_hash,
+                    registered_at: now,
                 };
                 self.held.insert(handle, held.clone());
                 self.changes.push(NdrChange::Registered { handle, held });
@@ -178,6 +206,11 @@ impl Ndr {
                 let Some(held) = self.held.get(&handle) else {
                     return (NdrResponse::Gone, None);
                 };
+                // NTF-138: a registration past its time is gone too.
+                if expired(held.registered_at, now) {
+                    self.drop_handle(handle);
+                    return (NdrResponse::Gone, None);
+                }
                 let split = held.ct_token.len().saturating_sub(aead::TAG_LEN);
                 let (Some(body), Some(tag)) =
                     (held.ct_token.get(..split), held.ct_token.get(split..))
@@ -231,6 +264,8 @@ mod tests {
     use umbra_crypto::secret::Secret;
     use umbra_wire::ndr::{encode_token, NDR_REQUEST_LEN, PUSH_TOKEN_MAX};
 
+    const NOW: u64 = 1_700_000_000;
+
     fn request(request: &NdrRequest<'_>) -> [u8; NDR_REQUEST_LEN] {
         let mut out = [0u8; NDR_REQUEST_LEN];
         request.encode(&mut out).unwrap();
@@ -257,13 +292,22 @@ mod tests {
         };
         let mut ndr = Ndr::default();
         let hash = sha3_256(&[removal.expose()]);
-        assert_eq!(ndr.handle(&register([0; 32], hash)).0, NdrResponse::Taken);
+        assert_eq!(
+            ndr.handle(&register([0; 32], hash), NOW).0,
+            NdrResponse::Taken
+        );
         assert_eq!(ndr.take_changes().len(), 1);
         // NTF-124: the same registration again, whose answer was lost, is
         // taken when it carries the secret that the device holds; with no
         // secret it moves nothing.
-        assert_eq!(ndr.handle(&register([0; 32], hash)).0, NdrResponse::Refused);
-        assert_eq!(ndr.handle(&register([9; 32], hash)).0, NdrResponse::Taken);
+        assert_eq!(
+            ndr.handle(&register([0; 32], hash), NOW).0,
+            NdrResponse::Refused
+        );
+        assert_eq!(
+            ndr.handle(&register([9; 32], hash), NOW).0,
+            NdrResponse::Taken
+        );
         assert_eq!(ndr.take_changes().len(), 1);
 
         // The push brings `k_tok`, and the delivery names the endpoint.
@@ -275,37 +319,61 @@ mod tests {
                 blob: [6; BLOB_LEN],
             })
         };
-        let (answer, delivery) = ndr.handle(&push(*group.k_tok.expose()));
+        let (answer, delivery) = ndr.handle(&push(*group.k_tok.expose()), NOW);
         assert_eq!(answer, NdrResponse::Taken);
         let delivery = delivery.unwrap();
         assert_eq!(delivery.carrier, TokenCarrier::Fcm);
         assert_eq!(&delivery.target[..], b"fcm-device-1");
         assert_eq!(u64::from(delivery.ttl), PUSH_TTL_MESSAGE);
-        assert_eq!(ndr.handle(&push([0; 32])).0, NdrResponse::Refused);
+        assert_eq!(ndr.handle(&push([0; 32]), NOW).0, NdrResponse::Refused);
+        // NTF-138: the registration lives `NDR_REG_TTL` after its NREG, and
+        // a sweep before that keeps it.
+        let last = NOW + NDR_REG_TTL - 1;
+        assert_eq!(ndr.expire(last), 0);
+        assert_eq!(
+            ndr.handle(&push(*group.k_tok.expose()), last).0,
+            NdrResponse::Taken
+        );
+        let mut later = Ndr::restore(ndr.held.clone());
+        assert_eq!(
+            later
+                .handle(&push(*group.k_tok.expose()), NOW + NDR_REG_TTL)
+                .0,
+            NdrResponse::Gone
+        );
+        assert!(later.is_empty());
+        let mut swept = Ndr::restore(ndr.held.clone());
+        assert_eq!(swept.expire(NOW + NDR_REG_TTL), 1);
+        assert_eq!(
+            swept.take_changes(),
+            alloc::vec![NdrChange::Unregistered {
+                handle: group.handle
+            }]
+        );
 
         // NTF-124: a registration over a held handle needs the secret of
         // the one it replaces, and so does the removal.
         assert_eq!(
-            ndr.handle(&register([1; 32], [5; 32])).0,
+            ndr.handle(&register([1; 32], [5; 32]), NOW).0,
             NdrResponse::Refused
         );
         let wrong = request(&NdrRequest::Unregister {
             handle: group.handle,
             removal: Secret::new([1; 32]),
         });
-        assert_eq!(ndr.handle(&wrong).0, NdrResponse::Refused);
+        assert_eq!(ndr.handle(&wrong, NOW).0, NdrResponse::Refused);
         assert!(ndr.take_changes().is_empty());
         let right = request(&NdrRequest::Unregister {
             handle: group.handle,
             removal,
         });
-        assert_eq!(ndr.handle(&right).0, NdrResponse::Taken);
+        assert_eq!(ndr.handle(&right, NOW).0, NdrResponse::Taken);
         assert!(ndr.is_empty());
         // NTF-124: the removal again, whose answer was lost, is taken.
-        assert_eq!(ndr.handle(&right).0, NdrResponse::Taken);
+        assert_eq!(ndr.handle(&right, NOW).0, NdrResponse::Taken);
         // NTF-125: a push to a handle that left is gone.
         assert_eq!(
-            ndr.handle(&push(*group.k_tok.expose())).0,
+            ndr.handle(&push(*group.k_tok.expose()), NOW).0,
             NdrResponse::Gone
         );
 
@@ -317,15 +385,18 @@ mod tests {
         )
         .unwrap();
         let other = group.registration(&plain[..n], [5; 24]).unwrap();
-        let taken = ndr.handle(&request(&NdrRequest::Register {
-            handle: group.handle,
-            nonce: other.nonce,
-            ct_token: &other.ct_token,
-            removal_hash: hash,
-            prior: Secret::new([9; 32]),
-        }));
+        let taken = ndr.handle(
+            &request(&NdrRequest::Register {
+                handle: group.handle,
+                nonce: other.nonce,
+                ct_token: &other.ct_token,
+                removal_hash: hash,
+                prior: Secret::new([9; 32]),
+            }),
+            NOW,
+        );
         assert_eq!(taken.0, NdrResponse::Taken);
-        let (answer, delivery) = ndr.handle(&push(*group.k_tok.expose()));
+        let (answer, delivery) = ndr.handle(&push(*group.k_tok.expose()), NOW);
         assert_eq!(answer, NdrResponse::Refused);
         assert!(delivery.is_none());
     }
@@ -336,6 +407,7 @@ mod tests {
             nonce: [1; 24],
             ct_token: alloc::vec![2; 40],
             removal_hash: [3; 32],
+            registered_at: NOW,
         };
         let mut ndr = Ndr::restore([([7; 16], held.clone()), ([8; 16], held)]);
         assert_eq!(ndr.len(), 2);
@@ -346,6 +418,6 @@ mod tests {
             ndr.take_changes(),
             [NdrChange::Unregistered { handle: [7; 16] }]
         );
-        assert_eq!(ndr.handle(&[0; 12]).0, NdrResponse::Refused);
+        assert_eq!(ndr.handle(&[0; 12], NOW).0, NdrResponse::Refused);
     }
 }

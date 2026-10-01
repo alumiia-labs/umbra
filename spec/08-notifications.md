@@ -206,6 +206,7 @@ or after the one that the device computes.
 | Parameter | Value |
 | --- | --- |
 | `NTF_FAIL_MAX` | 3 consecutive failed opens, counted by the device from the last open that succeeded |
+| `NDR_REG_TTL` | 60 days after the `NREG` that made or last moved a registration (`NTF-138`) |
 
 > *Cause.* An earlier draft gave the epoch key no acceptance window and no
 > failure rule. A device whose clock ran a day behind opened no blob, showed
@@ -377,6 +378,13 @@ PushToken   { carrier u8, target }         // the plaintext of ct_token, at most
   `NPUSH` for a handle that it does not hold, thus a device that left
   Instant mode stops the pushes of its queue relays. A queue relay MUST
   stop pushing to a handle that got the answer `gone`.
+- **[NTF-138]** The NDR MUST drop a registration `NDR_REG_TTL` after the
+  `NREG` that made or last moved it, and it MUST answer `gone` to an `NPUSH`
+  for it from then on. A device rotates each handle in 7 days under
+  `NTF-007`, thus a live device never meets the bound, and a lost device
+  leaves no registration behind for good. A device that stays locked past
+  the bound registers each handle group again as its rotation comes due
+  after the unlock, one group in each session under `NTF-081`.
 - **[NTF-134]** An NDR MUST refuse an `NPUSH` whose carrier it does not
   serve, and it MUST NOT post to an address that no provider of its own
   names. The reference NDR serves carrier `0x02` alone, thus a caller that

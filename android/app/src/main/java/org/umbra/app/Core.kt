@@ -367,14 +367,20 @@ object Core {
     /** The holes in the synced history (Part 7 §7.5.5). */
     val historyHoles = mutableStateListOf<uniffi.umbra_ffi.FfiHistoryHole>()
 
+    /** Whether another device of the set removed this one (`DEV-181`). */
+    var removedFromSet by mutableStateOf(false)
+        private set
+
     fun readDevices() = call { client ->
         val list = client.devices()
         val owns = client.ownsChannels()
+        val removed = client.removedFromSet()
         val forks = client.rosterForks()
         val holes = client.historyHoles()
         val held = client.heldDeletions().toInt()
         main.post {
             heldDeletions = held
+            removedFromSet = removed
             historyHoles.clear()
             historyHoles.addAll(holes)
             devices.clear()

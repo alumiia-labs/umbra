@@ -980,6 +980,11 @@ impl Handle {
         Ok(())
     }
 
+    /// Whether another device of the set removed this one (`DEV-181`).
+    pub fn removed_from_set(&self) -> Result<bool, FfiError> {
+        Ok(locked(&self.inner).client.removed_from_set()?)
+    }
+
     /// Whether this device owns the channels of the set, thus whether it
     /// can offer a link (`DEV-287`).
     pub fn owns_channels(&self) -> Result<bool, FfiError> {

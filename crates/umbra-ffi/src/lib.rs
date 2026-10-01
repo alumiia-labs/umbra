@@ -2007,7 +2007,10 @@ mod tests {
         let calls = client.ndr_calls_due(&mut rng).unwrap();
         assert_eq!(calls.len(), 3);
         for call in &calls {
-            assert_eq!(ndr.handle(&call.request[..]).0, NdrResponse::Taken);
+            assert_eq!(
+                ndr.handle(&call.request[..], 1_700_000_000).0,
+                NdrResponse::Taken
+            );
             client.ndr_call_taken(call, &mut rng).unwrap();
         }
         assert!(client.ndr_calls_due(&mut rng).unwrap().is_empty());
@@ -2032,7 +2035,7 @@ mod tests {
         }
         .encode(&mut push)
         .unwrap();
-        let delivery = ndr.handle(&push).1.unwrap();
+        let delivery = ndr.handle(&push, 1_700_000_000).1.unwrap();
         assert_eq!(&delivery.target[..], first.as_bytes());
 
         // NTF-124: a new endpoint moves each held handle on its removal
@@ -2045,15 +2048,24 @@ mod tests {
         let calls = client.ndr_calls_due(&mut rng).unwrap();
         assert_eq!(calls.len(), 3);
         for call in &calls {
-            assert_eq!(ndr.handle(&call.request[..]).0, NdrResponse::Taken);
+            assert_eq!(
+                ndr.handle(&call.request[..], 1_700_000_000).0,
+                NdrResponse::Taken
+            );
             client.ndr_call_taken(call, &mut rng).unwrap();
         }
-        assert_eq!(&ndr.handle(&push).1.unwrap().target[..], second.as_bytes());
+        assert_eq!(
+            &ndr.handle(&push, 1_700_000_000).1.unwrap().target[..],
+            second.as_bytes()
+        );
         client.set_push_token(None, &mut rng).unwrap();
         let calls = client.ndr_calls_due(&mut rng).unwrap();
         assert!(calls.iter().all(|call| call.is_removal));
         for call in &calls {
-            assert_eq!(ndr.handle(&call.request[..]).0, NdrResponse::Taken);
+            assert_eq!(
+                ndr.handle(&call.request[..], 1_700_000_000).0,
+                NdrResponse::Taken
+            );
             client.ndr_call_taken(call, &mut rng).unwrap();
         }
         assert!(ndr.is_empty());
@@ -2682,7 +2694,10 @@ mod tests {
         }
         let mut ndr = Ndr::default();
         for call in client.ndr_calls_due(&mut rng).unwrap() {
-            assert_eq!(ndr.handle(&call.request[..]).0, NdrResponse::Taken);
+            assert_eq!(
+                ndr.handle(&call.request[..], 1_700_000_000).0,
+                NdrResponse::Taken
+            );
             client.ndr_call_taken(&call, &mut rng).unwrap();
         }
         let before = client.binding_of(&[0; 32]).unwrap().unwrap();
@@ -2710,7 +2725,10 @@ mod tests {
         let calls = client.ndr_calls_due(&mut rng).unwrap();
         assert_eq!(calls.len(), 2);
         for call in &calls {
-            assert_eq!(ndr.handle(&call.request[..]).0, NdrResponse::Taken);
+            assert_eq!(
+                ndr.handle(&call.request[..], 1_700_000_000).0,
+                NdrResponse::Taken
+            );
             client.ndr_call_taken(call, &mut rng).unwrap();
         }
         assert!(client.ndr_calls_due(&mut rng).unwrap().is_empty());
@@ -2726,8 +2744,14 @@ mod tests {
             .unwrap();
             out
         };
-        assert_eq!(ndr.handle(&push(&before)).0, NdrResponse::Gone);
-        assert_eq!(ndr.handle(&push(&after)).0, NdrResponse::Taken);
+        assert_eq!(
+            ndr.handle(&push(&before), 1_700_000_000).0,
+            NdrResponse::Gone
+        );
+        assert_eq!(
+            ndr.handle(&push(&after), 1_700_000_000).0,
+            NdrResponse::Taken
+        );
         assert_eq!(ndr.len(), 1);
     }
 
@@ -4441,6 +4465,78 @@ mod tests {
         let notes = alice.roster_notes(alice_chat).unwrap();
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].kind, NOTE_LOST);
+    }
+
+    #[test]
+    fn a_revoked_device_hears_of_it_and_shows_it() {
+        use umbra_core::devset::{
+            link::{sign_roster, DeviceIdentity, LinkHello},
+            roster::Roster,
+        };
+
+        let mut rng = Rng(119);
+        let mut phone = new_client(&mut rng);
+        phone.ensure_device_set("Phone", &mut rng).unwrap();
+        let own = phone.device_identity().unwrap().unwrap();
+        let hello = |identity: &DeviceIdentity| LinkHello {
+            device_id: identity.device_id,
+            device_pk: identity.device_key().public().clone(),
+            roster_pk: identity.roster_key().verifying_key().to_bytes().to_vec(),
+            label: identity.label,
+            ct: umbra_crypto::kem::Ciphertext::from_bytes(&[0; umbra_crypto::kem::CIPHERTEXT_LEN])
+                .unwrap(),
+        };
+        let laptop = DeviceIdentity::generate("Laptop", &mut rng);
+        let tablet = DeviceIdentity::generate("Tablet", &mut rng);
+        let e1 = phone.sign_linked_device(&hello(&laptop), &mut rng).unwrap();
+        phone.commit_roster(&e1, &mut rng).unwrap();
+        let e2 = phone.sign_linked_device(&hello(&tablet), &mut rng).unwrap();
+        phone.commit_roster(&e2, &mut rng).unwrap();
+        let tablet_channel = phone.conversation_for(&[0x7C; 32]).unwrap();
+        phone
+            .set_pending_peer(tablet.device_id, &tablet.label, &mut rng)
+            .unwrap();
+        phone.mark_device_peer(tablet_channel, &mut rng).unwrap();
+        while phone.take_sync_send().is_some() {}
+
+        // DEV-313: the epoch that revokes the tablet goes to the tablet once,
+        // on the channel that ends.
+        let e3 = phone.revoke_device(tablet.device_id, &mut rng).unwrap();
+        let sends: Vec<_> = core::iter::from_fn(|| phone.take_sync_send()).collect();
+        assert!(sends.iter().any(|send| send.peer == tablet_channel));
+        assert!(!phone.removed_from_set().unwrap());
+
+        // DEV-180, DEV-181: the laptop revokes the phone at epoch 4. The
+        // phone takes no such epoch, and it shows that it was removed.
+        let head = Roster::parse(&e3).unwrap();
+        let next = |signer: &DeviceIdentity, rng: &mut Rng| {
+            let mut revoked = head.revoked.clone();
+            revoked.push(own.device_id);
+            let roster = Roster {
+                epoch: head.epoch + 1,
+                devices: head
+                    .devices
+                    .iter()
+                    .filter(|entry| entry.device_id != own.device_id)
+                    .cloned()
+                    .collect(),
+                revoked,
+                claims: Vec::new(),
+                prev_hash: Roster::hash(&e3),
+                signer_id: signer.device_id,
+                sig: head.sig,
+            };
+            sign_roster(&roster, &signer.roster_key(), rng).unwrap()
+        };
+        // An epoch that the revoked tablet signs does not verify, and the
+        // phone shows nothing.
+        let forged = next(&tablet, &mut rng);
+        assert!(phone.apply_roster(&forged, &mut rng).is_err());
+        assert!(!phone.removed_from_set().unwrap());
+        let removal = next(&laptop, &mut rng);
+        assert!(!phone.apply_roster(&removal, &mut rng).unwrap());
+        assert!(phone.removed_from_set().unwrap());
+        assert_eq!(phone.roster_bytes().unwrap().unwrap(), e3);
     }
 
     #[test]

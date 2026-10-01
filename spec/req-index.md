@@ -72,8 +72,8 @@ column when a crate implements the requirement and a test covers it.
 | `IDN` | 134 | 46 | 1 | 0 | 5 | **186** |
 | `CRY` | 120 | 27 | 0 | 0 | 1 | **148** |
 | `WIR` | 398 | 85 | 0 | 0 | 7 | **490** |
-| `DEV` | 204 | 90 | 0 | 0 | 8 | **302** |
-| `NTF` | 78 | 28 | 0 | 0 | 3 | **109** |
+| `DEV` | 205 | 90 | 0 | 0 | 8 | **303** |
+| `NTF` | 79 | 28 | 0 | 0 | 3 | **110** |
 | `DIS` | 130 | 35 | 0 | 0 | 3 | **168** |
 | `REL` | 162 | 34 | 1 | 0 | 3 | **200** |
 | `GRP` | 235 | 65 | 0 | 0 | 6 | **306** |
@@ -81,7 +81,7 @@ column when a crate implements the requirement and a test covers it.
 | `ABU` | 72 | 30 | 1 | 0 | 0 | **103** |
 | `IMP` | 121 | 41 | 0 | 0 | 2 | **164** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2083 | 628 | 7 | 0 | 56 | **2774** |
+| **All** | 2085 | 628 | 7 | 0 | 56 | **2776** |
 
 ## SCP — Scope and Conventions
 
@@ -1641,6 +1641,7 @@ Source: `spec/07-device-sets.md`
 | `DEV-310` | §7.5.3 | MAY | A device | A device MAY forget the winner of a delivery item once it holds more than 65 536 of them, the oldest by `lamport` first, and it keeps the winner of each item of another table. |  |  |
 | `DEV-311` | §7.4 | MUST | The snapshot | The snapshot MUST carry the causal counter of the existing device at the confirmation of `DEV-283`, and the new device MUST start the contiguous point of `DEV-055` for that peer at that counter. |  |  |
 | `DEV-312` | §7.5.5 | MUST | A device | A device MUST also start that resend when a relay refused a sync record of that peer or no path took it, and when a record waited for a channel of the peer that the run did not hold yet. |  |  |
+| `DEV-313` | §7.7 | MUST | The signer of an epoch with a new `revoked` entry | The signer of an epoch with a new `revoked` entry MUST send that epoch once on the sync channel of each device that it revokes, before it deletes that channel under step 2a. |  |  |
 
 ## NTF — Notifications
 
@@ -1757,6 +1758,7 @@ Source: `spec/08-notifications.md`
 | `NTF-135` | §8.4.1 | MUST | An Android client in Instant mode | An Android client in Instant mode MUST hold a **wake table** outside `K_store`: each `k_ntf_root` that a binding of §8.2.3 uses, and each `queue_alias` with the conversation of its queue. |  |  |
 | `NTF-136` | §8.4.1 | MUST | A locked client | A locked client MUST open each blob with that table under `NTF-075` to `NTF-079`. |  |  |
 | `NTF-137` | §8.4.1 | MUST | A client | A client MUST delete the wake table and its keystore key at a local wipe of Part 7 `DEV-008`, and when the mode leaves Instant. |  |  |
+| `NTF-138` | §8.2.7 | MUST | The NDR | The NDR MUST drop a registration `NDR_REG_TTL` after the `NREG` that made or last moved it, and it MUST answer `gone` to an `NPUSH` for it from then on. |  |  |
 
 ## DIS — Discovery, Handles, and Key Transparency
 

@@ -1706,6 +1706,11 @@ SyncSeedUpdate {
   **[DEV-256]** A device MUST reject a sync channel from a revoked device.
   **[DEV-257]** After a device applies the epoch that revokes a device, it MUST
   NOT accept a sync record from that device.
+- **[DEV-313]** The signer of an epoch with a new `revoked` entry MUST send
+  that epoch once on the sync channel of each device that it revokes, before
+  it deletes that channel under step 2a. Thus an honest device learns of its
+  removal and shows it under `DEV-181`. The epoch tells that device nothing
+  that it does not hold.
 - **[DEV-262]** A device that applies an epoch with a new `revoked` entry MUST
   start the group re-key of Part 11 §11.12 for each group of the user. The
   ratchet step of step 2b heals a pairwise channel and no group key, and Part
