@@ -1230,7 +1230,13 @@ a new sync queue is rare.
    resend each retained record. **[DEV-071]** A device MUST do that resend when a sync
    acknowledgment arrives. **[DEV-072]** A device MUST also do that resend at a new sync
    queue. A rotation or a `QUEUE_IDLE_TTL` deletion makes a new sync queue, and
-   the counter survives that queue.
+   the counter survives that queue. **[DEV-312]** A device MUST also start
+   that resend when a relay refused a sync record of that peer or no path
+   took it, and when a record waited for a channel of the peer that the run
+   did not hold yet. Thus a lost last record goes in the same run, and not at
+   the next one. A device starts it so at most once for each peer in a run,
+   and a record that a full queue holds waits for the acknowledgment of
+   `DEV-071`.
 4. **[DEV-073]** A device MUST pace a resend at the ordinary send rate of that sync channel. **[DEV-074]** A
    device MUST NOT resend in one burst. A burst at a reconnect is a device-set
    beacon. A resend

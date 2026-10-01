@@ -1236,7 +1236,11 @@ other member is needed or created. Part 6 §6.6.3 gives the layouts of
 3. **[GRP-310]** The inviting admin MUST post a plain epoch of §11.9.2 that
    adds the joiner, with the `JoinRecord` fields and the new `index`, as a
    group record to each replica. **[GRP-311]** The admin MUST take `GSEQ`
-   from each replica before step 4.
+   from each replica before step 4, except under `GRP-424`. A replica whose
+   ARQ for the add ended under Part 3 rule `NET-271` gives no `GSEQ`.
+   **[GRP-424]** The admin MUST then send the admit with a `seq_of_add` of 0
+   for that replica, and for a replica that the group took after the add, and
+   the joiner reads it from its start.
 4. **[GRP-312]** The admin MUST then send a `GroupInvitation` of stage `0x02`
    (an admit) on the pairwise channel. It carries `group_id`, the `index`, the
    epoch `e`, its `t_e`, `t_join`, `K_{e,t_join}` (or the history-window key of §11.3.2),

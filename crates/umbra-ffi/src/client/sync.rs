@@ -902,6 +902,31 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         self.put_engine(&engine, None, rng)
     }
 
+    /// A sync record to `channel` reached no relay, or the channel of its
+    /// peer was not up. Each record that the peer did not acknowledge goes
+    /// again, paced by [`Client::resend_one`] (`DEV-312`, `DEV-073`).
+    pub fn sync_send_lost<R: CryptoRng + ?Sized>(
+        &mut self,
+        channel: ConversationId,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let Some(mut engine) = self.sync_engine()? else {
+            return Ok(());
+        };
+        let Some(peer) = self
+            .peer_channels()?
+            .into_iter()
+            .find_map(|(device, held)| (held == channel).then_some(device))
+        else {
+            return Ok(());
+        };
+        if !engine.peers().any(|held| *held == peer) {
+            return Ok(());
+        }
+        engine.new_queue(&peer);
+        self.put_engine(&engine, None, rng)
+    }
+
     /// Queues the next record of a resend, one at each call, thus a resend
     /// is no burst (`DEV-073`, `DEV-074`). The result is whether one went.
     pub fn resend_one<R: CryptoRng + ?Sized>(

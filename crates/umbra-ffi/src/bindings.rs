@@ -2401,7 +2401,7 @@ impl Inner {
                 // that waited for it goes now.
                 self.pump_groups();
             }
-            GroupUpdate::Posted { tag, relay, .. } => {
+            GroupUpdate::Posted { tag, relay, seq } => {
                 // GRP-195: one replica accepted, thus the record is accepted.
                 let Some(GroupWork::Post {
                     message,
@@ -2420,6 +2420,13 @@ impl Inner {
                     .group_replica_reached(conversation, &relay, true, &mut OsRng);
                 if let Some(row) = unsent {
                     let _ = self.client.group_post_accepted(&row, &relay, &mut OsRng);
+                    // GRP-311: the `seq` of an add goes into its admit.
+                    let _ = self
+                        .client
+                        .add_answered(&row, &relay, seq, unix_now_ms(), &mut OsRng);
+                    if let Some(running) = self.bridge.as_mut() {
+                        let _ = running.flush(&mut self.client, &mut OsRng);
+                    }
                 }
                 if let Some(message) = message {
                     let _ =
@@ -4765,6 +4772,9 @@ impl Handle {
             // A group record takes a fresh nonce, thus the group work comes
             // back at the start of a run and not at the unlock.
             client.resume_group_work(&mut OsRng)?;
+            // GRP-424: an add whose replicas gave up ended above, and its
+            // admit goes with the `seq` that it has.
+            client.pump_admits(unix_now_ms(), &mut OsRng)?;
             // GRP-370: a member that a rival re-key put out and that did not
             // ask an admin yet asks now.
             client.ask_lost_groups(unix_now_ms(), &mut OsRng)?;

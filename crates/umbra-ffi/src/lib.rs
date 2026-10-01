@@ -515,6 +515,33 @@ mod tests {
         text.encode_utf16().collect()
     }
 
+    /// Each replica takes `post` as a relay would: a `GSEQ` of 7 at the
+    /// first and 9 at the second.
+    fn answer_post(
+        client: &mut Client<MemoryBackend, Element>,
+        post: &crate::client::GroupPost,
+        rng: &mut Rng,
+    ) {
+        let Some(row) = post.unsent else {
+            return;
+        };
+        for (replica, seq) in post.replicas.iter().zip([7, 9]) {
+            client
+                .group_post_accepted(&row, &replica.relay, rng)
+                .unwrap();
+            client
+                .add_answered(&row, &replica.relay, seq, 1_700_000_003_500, rng)
+                .unwrap();
+        }
+    }
+
+    /// Each waiting post goes, and each replica answers it.
+    fn answer_posts(client: &mut Client<MemoryBackend, Element>, rng: &mut Rng) {
+        while let Some(post) = client.take_group_post() {
+            answer_post(client, &post, rng);
+        }
+    }
+
     fn new_client(rng: &mut Rng) -> Client<MemoryBackend, Element> {
         Client::create(
             MemoryBackend::default(),
@@ -2765,6 +2792,22 @@ mod tests {
         ConversationId,
         ConversationId,
     ) {
+        group_of_two_with(admin, joiner, rng, false)
+    }
+
+    /// The group of two, where the second replica gives up on each post
+    /// when `give_up` holds (`GRP-424`).
+    fn group_of_two_with(
+        admin: &mut Client<MemoryBackend, Element>,
+        joiner: &mut Client<MemoryBackend, Element>,
+        rng: &mut Rng,
+        give_up: bool,
+    ) -> (
+        ConversationId,
+        ConversationId,
+        ConversationId,
+        ConversationId,
+    ) {
         let peer_at_admin = ContactId([0x51; 32]);
         let peer_at_joiner = ContactId([0x52; 32]);
         let pair_at_admin = admin.conversation_for(&peer_at_admin.0).unwrap();
@@ -2795,7 +2838,9 @@ mod tests {
         let admission = admin
             .add_joiner(&joiners[0], 1_700_000_003_000, rng)
             .unwrap();
-        while admin.take_group_post().is_some() {}
+        // GRP-311: the snapshot uploaded before any replica answered, thus
+        // the admit waits for the `GSEQ` of the add at each.
+        let posts: Vec<_> = core::iter::from_fn(|| admin.take_group_post()).collect();
         admin
             .admit_joiner(
                 &joiners[0],
@@ -2805,6 +2850,34 @@ mod tests {
                 rng,
             )
             .unwrap();
+        assert!(admin.take_outgoing().is_none());
+        if give_up {
+            for post in &posts {
+                let Some(row) = post.unsent else {
+                    continue;
+                };
+                let (first, second) = (post.replicas[0].relay, post.replicas[1].relay);
+                admin.group_post_accepted(&row, &first, rng).unwrap();
+                admin
+                    .add_answered(&row, &first, 7, 1_700_000_004_100, rng)
+                    .unwrap();
+                for _ in 0..umbra_queue::params::SEND_MAX_ATTEMPTS {
+                    admin
+                        .group_post_sent(&row, &second, 1_700_000_004_100, rng)
+                        .unwrap();
+                }
+            }
+            assert!(admin.take_outgoing().is_none());
+            // GRP-424: the next run ends the ARQ of the second replica, and
+            // the admit goes with the one `seq` that came.
+            admin.resume_group_work(rng).unwrap();
+            while admin.take_group_post().is_some() {}
+            admin.pump_admits(1_700_000_004_200, rng).unwrap();
+        } else {
+            for post in &posts {
+                answer_post(admin, post, rng);
+            }
+        }
         let admit = admin.take_outgoing().unwrap();
         deliver(joiner, &peer_at_joiner, &admit.app, 1_700_000_004_500, rng);
         let member = joiner
@@ -2816,6 +2889,13 @@ mod tests {
                 rng,
             )
             .unwrap();
+        // GRP-311, GRP-313: the joiner reads each replica from the `seq` of
+        // the add there.
+        let held = joiner.group_of(member).unwrap();
+        let replicas = held.replicas().unwrap();
+        let expected = if give_up { [7, 0] } else { [7, 9] };
+        assert_eq!([replicas.cursor(0), replicas.cursor(1)], expected);
+        drop(held);
         while admin.next_event().is_some() {}
         while joiner.next_event().is_some() {}
         (group, member, pair_at_admin, pair_at_joiner)
@@ -2868,6 +2948,7 @@ mod tests {
         let admission = admin
             .add_joiner(&joiners[0], 1_700_000_003_000, &mut rng)
             .unwrap();
+        answer_posts(&mut admin, &mut rng);
         admin
             .admit_joiner(
                 &joiners[0],
@@ -3063,7 +3144,7 @@ mod tests {
             .add_joiner(&joiners[0], 1_700_000_016_000, &mut rng)
             .unwrap();
         assert_eq!(admission.index, 3);
-        while admin.take_group_post().is_some() {}
+        answer_posts(&mut admin, &mut rng);
         admin
             .admit_joiner(
                 &joiners[0],
@@ -3230,6 +3311,7 @@ mod tests {
             .add_joiner(&joiners[0], 1_700_000_013_000, &mut rng)
             .unwrap();
         let add = admin.take_group_post().unwrap();
+        answer_post(&mut admin, &add, &mut rng);
         while admin.take_group_post().is_some() {}
         admin
             .admit_joiner(
@@ -3283,6 +3365,7 @@ mod tests {
             .unwrap();
         assert_ne!(second.snapshot, first.snapshot);
         let again = admin.take_group_post().unwrap();
+        answer_post(&mut admin, &again, &mut rng);
         while admin.take_group_post().is_some() {}
         owner
             .on_group_record(&[0xC3; 32], 4, &again.record, 1_700_000_016_500, &mut rng)
@@ -3406,6 +3489,8 @@ mod tests {
         let add = admin.take_group_post().unwrap();
         assert_eq!(add.message, None);
         assert!(admin.take_group_post().is_none());
+        // GRP-311: each replica returns the `seq` of the add.
+        answer_post(&mut admin, &add, &mut rng);
 
         // GRP-323: the roster moves after the add, and a second press gives
         // the snapshot of the add, which the joiner verifies against it.
@@ -4562,6 +4647,71 @@ mod tests {
             .unwrap();
         assert!(phone.history_holes(now).unwrap().is_empty());
         assert!(phone.catch_up_fetches().unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_admit_whose_second_replica_gave_up_goes_with_the_one_seq() {
+        let mut rng = Rng(118);
+        let mut admin = new_client(&mut rng);
+        let mut joiner = new_client(&mut rng);
+        let (group, member, _, _) = group_of_two_with(&mut admin, &mut joiner, &mut rng, true);
+        assert_eq!(admin.group_info(group).unwrap().members, 2);
+        assert_eq!(joiner.group_info(member).unwrap().members, 2);
+    }
+
+    #[test]
+    fn a_sync_record_that_no_relay_took_goes_again_at_once() {
+        use umbra_core::devset::link::{DeviceIdentity, LinkHello};
+
+        let mut rng = Rng(117);
+        let mut phone = new_client(&mut rng);
+        phone.ensure_device_set("Phone", &mut rng).unwrap();
+        let laptop = DeviceIdentity::generate("Laptop", &mut rng);
+        let hello = LinkHello {
+            device_id: laptop.device_id,
+            device_pk: laptop.device_key().public().clone(),
+            roster_pk: laptop.roster_key().verifying_key().to_bytes().to_vec(),
+            label: laptop.label,
+            ct: umbra_crypto::kem::Ciphertext::from_bytes(&[0; umbra_crypto::kem::CIPHERTEXT_LEN])
+                .unwrap(),
+        };
+        let roster = phone.sign_linked_device(&hello, &mut rng).unwrap();
+        phone.commit_roster(&roster, &mut rng).unwrap();
+        let peer = phone.conversation_for(&[0x7A; 32]).unwrap();
+        phone
+            .set_pending_peer(laptop.device_id, &laptop.label, &mut rng)
+            .unwrap();
+        phone.mark_device_peer(peer, &mut rng).unwrap();
+        // A group goes to the other devices of the set (DEV-298).
+        let relays = [[0xA1; 32], [0xB2; 32]];
+        let group = phone.create_group("Sync", relays, 1_000, &mut rng).unwrap();
+        let group_id = phone.group_info(group).unwrap().group_id;
+        phone
+            .group_queue_made(&group_id, 0, relays[0], [0xC3; 32], &mut rng)
+            .unwrap();
+        phone
+            .group_queue_made(&group_id, 1, relays[1], [0xD4; 32], &mut rng)
+            .unwrap();
+        while phone.take_sync_send().is_some() {}
+        // A record of the user goes to the laptop on the sync channel.
+        let text = record(umbra_wire::app::AppKind::Text, [1; 16], b"to the laptop");
+        phone
+            .publish_sync(group, &text, true, None, 1_500, &mut rng)
+            .unwrap();
+        let first: Vec<_> = core::iter::from_fn(|| phone.take_sync_send()).collect();
+        assert!(first.iter().any(|send| send.peer == peer));
+        assert!(!phone.resend_one(2_000, &mut rng).unwrap());
+
+        // DEV-069: no relay took it, and the resend starts now and not at
+        // the next run, one record at each call (DEV-073).
+        phone.sync_send_lost(peer, &mut rng).unwrap();
+        assert!(phone.resend_one(2_000, &mut rng).unwrap());
+        let again: Vec<_> = core::iter::from_fn(|| phone.take_sync_send()).collect();
+        assert_eq!(again.len(), 1);
+        assert_eq!(again[0].peer, peer);
+        // A channel that names no peer starts nothing.
+        let stranger = phone.conversation_for(&[0x7B; 32]).unwrap();
+        phone.sync_send_lost(stranger, &mut rng).unwrap();
     }
 
     #[test]

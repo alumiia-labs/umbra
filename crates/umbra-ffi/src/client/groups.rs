@@ -232,6 +232,80 @@ pub(super) const MENTIONED: TableId = TableId(0x38);
 /// roster object moves the group of this device at its seal, thus a lost
 /// one splits the group. A presence is no such record.
 const GROUP_UNSENT: TableId = TableId(0x41);
+/// The add of each joiner whose admit waits for the `GSEQ` of the add at
+/// each replica (`GRP-311`), under the row of the kept record of the add:
+/// the row of the join, the joiner, the group, the index, the relay of each
+/// replica that the add went to, the replicas that answered, the `seq` at
+/// each, then the descriptor of the snapshot once it uploaded.
+const ADD_SEQ: TableId = TableId(0x53);
+/// The version of an `ADD_SEQ` row (`IMP-130`).
+const ADD_SEQ_VERSION: u8 = 0x01;
+/// An `ADD_SEQ` row up to its descriptor.
+const ADD_SEQ_HEAD: usize = 1 + 16 + 16 + 32 + 2 + 64 + 1 + 4 + 4;
+
+/// One `ADD_SEQ` row.
+struct AddSeq {
+    join_row: RowId,
+    from: ConversationId,
+    group_id: [u8; 32],
+    index: u16,
+    /// The relay of each replica that the add went to.
+    relays: [[u8; 32]; GROUP_REPLICAS],
+    /// Bit `i` is set when replica `i` returned its `GSEQ`.
+    answered: u8,
+    seqs: [u32; 2],
+    descriptor: Option<Vec<u8>>,
+}
+
+impl AddSeq {
+    fn encode(&self) -> Vec<u8> {
+        let descriptor = self.descriptor.as_deref().unwrap_or_default();
+        let mut out = Vec::with_capacity(ADD_SEQ_HEAD.saturating_add(descriptor.len()));
+        out.push(ADD_SEQ_VERSION);
+        out.extend_from_slice(&self.join_row);
+        out.extend_from_slice(&self.from.0);
+        out.extend_from_slice(&self.group_id);
+        out.extend_from_slice(&self.index.to_be_bytes());
+        for relay in &self.relays {
+            out.extend_from_slice(relay);
+        }
+        out.push(self.answered);
+        out.extend_from_slice(&self.seqs[0].to_be_bytes());
+        out.extend_from_slice(&self.seqs[1].to_be_bytes());
+        out.extend_from_slice(descriptor);
+        out
+    }
+
+    fn parse(bytes: &[u8]) -> Result<Self, Error> {
+        let (head, descriptor) = bytes
+            .split_at_checked(ADD_SEQ_HEAD)
+            .ok_or(Error::Integrity)?;
+        let mut r = umbra_wire::codec::Reader::new(head);
+        if r.u8()? != ADD_SEQ_VERSION {
+            return Err(Error::Integrity);
+        }
+        let join_row: RowId = r.take(16)?.try_into().map_err(|_| Error::Integrity)?;
+        let from = ConversationId(r.take(16)?.try_into().map_err(|_| Error::Integrity)?);
+        let group_id: [u8; 32] = r.take(32)?.try_into().map_err(|_| Error::Integrity)?;
+        let index = r.u16()?;
+        let relays = [
+            r.take(32)?.try_into().map_err(|_| Error::Integrity)?,
+            r.take(32)?.try_into().map_err(|_| Error::Integrity)?,
+        ];
+        let answered = r.u8()?;
+        let seqs = [r.u32()?, r.u32()?];
+        Ok(Self {
+            join_row,
+            from,
+            group_id,
+            index,
+            relays,
+            answered,
+            seqs,
+            descriptor: (!descriptor.is_empty()).then(|| descriptor.to_vec()),
+        })
+    }
+}
 const GROUP_NOTIFY_LEN_V1: usize = 32 + umbra_wire::address::LEN + 16;
 const GROUP_NOTIFY_LEN: usize = GROUP_NOTIFY_LEN_V1 + 8 + 1 + 32 + umbra_wire::address::LEN;
 /// A registration lives 7 days plus `CLOCK_SKEW` at a group-queue relay
@@ -1828,7 +1902,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let add = group.add_object(&parsed).map_err(|_| Error::Malformed)?;
         // GRP-310, GRP-389: the add goes to each replica first, thus its
         // record names the roster epoch that every member holds.
+        let queued = self.groups.posts.len();
         self.post_group_control(conversation, &add, now_ms, rng)?;
+        // GRP-311: the kept record of the add takes the `GSEQ` of each
+        // replica, and the admit names them.
+        let add_row = if self.groups.posts.len() > queued {
+            self.groups
+                .posts
+                .back()
+                .and_then(|post| Some((post.unsent?, post.replicas.map(|replica| replica.relay))))
+        } else {
+            None
+        };
         let index = self.apply_own_roster_object(conversation, &add, now_ms, rng)?;
         let Applied::Added(index) = index else {
             return Err(Error::Malformed);
@@ -1838,6 +1923,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let path = self.authority_path(conversation, &group)?;
         let snapshot = group.snapshot(&path).map_err(|_| Error::Malformed)?;
         self.note_member_contact(conversation, index, joiner.from, rng)?;
+        // A row of an earlier add of this join is stale now.
+        let stale: Vec<RowId> = self
+            .add_seqs()?
+            .into_iter()
+            .filter(|(_, earlier)| earlier.join_row == row)
+            .map(|(stale, _)| stale)
+            .collect();
         let mut entry = vec![ADDED];
         entry.extend_from_slice(&joiner.from.0);
         entry.extend_from_slice(&joiner.group_id);
@@ -1846,6 +1938,22 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         batch.put(GROUP_JOIN, row, Some(joiner.from.0), &entry, rng)?;
+        for stale in stale {
+            batch.delete(ADD_SEQ, stale);
+        }
+        if let Some((add_row, relays)) = add_row {
+            let held = AddSeq {
+                join_row: row,
+                from: joiner.from,
+                group_id: joiner.group_id,
+                index,
+                relays,
+                answered: 0,
+                seqs: [0; 2],
+                descriptor: None,
+            };
+            batch.put(ADD_SEQ, add_row, None, &held.encode(), rng)?;
+        }
         batch.commit()?;
         Ok(GroupAdmission { snapshot, index })
     }
@@ -1866,6 +1974,178 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !self.owns_channels()? {
             return Err(Error::NotFound);
         }
+        let row = self.join_row(joiner.from, &joiner.group_id)?;
+        // GRP-311: the admit waits for the `GSEQ` of the add at each
+        // replica, and the descriptor waits with it.
+        let waiting = self
+            .add_seqs()?
+            .into_iter()
+            .find(|(_, held)| held.join_row == row);
+        if let Some((add_row, mut held)) = waiting {
+            held.descriptor = Some(descriptor.to_vec());
+            let open = self.open_mut()?;
+            let mut batch = open.store.begin();
+            batch.put(ADD_SEQ, add_row, None, &held.encode(), rng)?;
+            batch.commit()?;
+            return self.pump_admits(now_ms, rng);
+        }
+        // A join row of an earlier build kept no add, thus the joiner
+        // subscribes from the start of each replica.
+        self.send_admit(
+            joiner.from,
+            &joiner.group_id,
+            index,
+            descriptor,
+            [0; 2],
+            now_ms,
+            rng,
+        )
+    }
+
+    /// Each held `ADD_SEQ` row under the row of its add.
+    fn add_seqs(&self) -> Result<Vec<(RowId, AddSeq)>, Error> {
+        let store = &self.open_ref()?.store;
+        let mut out = Vec::new();
+        for (row, plain) in store.list(ADD_SEQ, None)? {
+            if let Ok(held) = AddSeq::parse(&plain) {
+                out.push((row, held));
+            }
+        }
+        Ok(out)
+    }
+
+    /// A replica returned the `GSEQ` of a kept record. When the record is
+    /// the add of a joiner, the `seq` goes into its admit (`GRP-311`).
+    pub fn add_answered<R: CryptoRng + ?Sized>(
+        &mut self,
+        row: &RowId,
+        relay: &[u8; 32],
+        seq: u32,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let Some(plain) = self.open_ref()?.store.get(ADD_SEQ, row)? else {
+            return Ok(());
+        };
+        let mut held = AddSeq::parse(&plain)?;
+        // The replicas that the add went to, which the group may have
+        // replaced since.
+        if let Some(which) = held.relays.iter().position(|held| held == relay) {
+            if let Some(slot) = held.seqs.get_mut(which) {
+                *slot = seq;
+                held.answered |= 1 << which;
+            }
+            let open = self.open_mut()?;
+            let mut batch = open.store.begin();
+            batch.put(ADD_SEQ, *row, None, &held.encode(), rng)?;
+            batch.commit()?;
+        }
+        self.pump_admits(now_ms, rng)
+    }
+
+    /// Sends each admit whose snapshot uploaded and whose add each replica
+    /// answered, or whose add no replica takes any more: a replica that
+    /// gave up gives no `seq`, and the joiner reads it from its start
+    /// (`GRP-424`). A
+    /// row of a join that left goes.
+    pub fn pump_admits<R: CryptoRng + ?Sized>(
+        &mut self,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let mut done = Vec::new();
+        for (add_row, held) in self.add_seqs()? {
+            // A join that was asked again or that left, and a group that
+            // closed or is gone, take no admit of this add.
+            let current = matches!(
+                self.join_entry(&held.join_row)?,
+                Some(JoinEntry::Added { index, .. }) if index == held.index
+            );
+            let open_group = match self.conversation_of_group(&held.group_id) {
+                Ok(conversation) => !self.group_closed(conversation)?,
+                Err(_) => false,
+            };
+            if !current || !open_group {
+                done.push(add_row);
+                continue;
+            }
+            let Some(descriptor) = held.descriptor.as_deref() else {
+                continue;
+            };
+            let ended = self
+                .open_ref()?
+                .store
+                .get(GROUP_UNSENT, &add_row)?
+                .is_none();
+            if held.answered != 0b11 && !ended {
+                continue;
+            }
+            // Each `seq` goes to the replica of the admit with the same
+            // relay, and a replica that came since takes 0.
+            let seqs = self.seqs_of_admit(&held)?;
+            // A fault of one admit ends its row, and no other row.
+            let _ = self.send_admit(
+                held.from,
+                &held.group_id,
+                held.index,
+                descriptor,
+                seqs,
+                now_ms,
+                rng,
+            );
+            done.push(add_row);
+        }
+        if done.is_empty() {
+            return Ok(());
+        }
+        let open = self.open_mut()?;
+        let mut batch = open.store.begin();
+        for row in done {
+            batch.delete(ADD_SEQ, row);
+        }
+        Ok(batch.commit()?)
+    }
+
+    /// The `seq` of the add at each replica of the group as it stands, in
+    /// the order of its references.
+    fn seqs_of_admit(&self, held: &AddSeq) -> Result<[u32; 2], Error> {
+        let conversation = self.conversation_of_group(&held.group_id)?;
+        let group = self.group_of(conversation)?;
+        let mut seqs = [0u32; 2];
+        for (index, seq) in seqs.iter_mut().enumerate() {
+            let Some(relay) = group
+                .replicas()
+                .and_then(|replicas| replicas.reference(index))
+                .map(|reference| reference.relay_id)
+            else {
+                continue;
+            };
+            if let Some(at) = held.relays.iter().position(|held| *held == relay) {
+                if held.answered & (1 << at) != 0 {
+                    *seq = held.seqs.get(at).copied().unwrap_or(0);
+                }
+            }
+        }
+        Ok(seqs)
+    }
+
+    /// Step 4 of §11.9.1: the admit on the pairwise channel (`GRP-312`).
+    #[allow(clippy::too_many_arguments)]
+    fn send_admit<R: CryptoRng + ?Sized>(
+        &mut self,
+        from: ConversationId,
+        group_id: &[u8; 32],
+        index: u16,
+        descriptor: &[u8],
+        seqs: [u32; 2],
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let joiner = GroupJoiner {
+            from,
+            group_id: *group_id,
+            is_added: true,
+        };
         let conversation = self.conversation_of_group(&joiner.group_id)?;
         let group = self.group_of(conversation)?;
         let row = self.join_row(joiner.from, &joiner.group_id)?;
@@ -1878,7 +2158,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             _ => group.roster().epoch_index(),
         };
         let body = group
-            .admit_at(index, roster_epoch, 0, descriptor, now_ms / 1_000)
+            .admit_at(index, roster_epoch, 0, descriptor, seqs, now_ms / 1_000)
             .map_err(|_| Error::Malformed)?;
         self.send_pairwise_control(joiner.from, &body, now_ms, rng)?;
         // GRP-420: the row stays while the add is the head, thus an epoch

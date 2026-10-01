@@ -5,7 +5,7 @@
 //! batch with the ratchet state that opened them. The bridge holds no
 //! socket and no task, thus a test drives it with plain values.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use tokio::sync::mpsc::UnboundedSender;
 use umbra_core::{
@@ -61,6 +61,14 @@ pub struct Bridge {
     commands: UnboundedSender<Command>,
     contacts: BTreeMap<ConversationId, ContactId>,
     sent: BTreeMap<u64, MsgRef>,
+    /// The sync channel of each sync record in flight, thus a record that
+    /// no relay took starts the resend of its peer (`DEV-312`).
+    sync_sent: BTreeMap<u64, ConversationId>,
+    /// The sync channels whose record waited for a channel of this run.
+    sync_waiting: BTreeSet<ConversationId>,
+    /// The sync channels whose resend this run started again once, thus a
+    /// channel that stays dead makes no endless resend.
+    sync_restarted: BTreeSet<ConversationId>,
     next_tag: u64,
     /// Whether the run is a push-wake session, which carries no record on
     /// a sync channel (Part 3 `NET-097`).
@@ -78,6 +86,9 @@ impl Bridge {
             commands,
             contacts,
             sent: BTreeMap::new(),
+            sync_sent: BTreeMap::new(),
+            sync_waiting: BTreeSet::new(),
+            sync_restarted: BTreeSet::new(),
             next_tag: 0,
             is_wake: false,
         }
@@ -317,7 +328,10 @@ impl Bridge {
         } else {
             client.take_sync_send()
         } {
+            // The store retains the record (`DEV-065`), and the channel
+            // of the peer starts its resend when it comes.
             let Some(contact) = self.contacts.get(&send.peer).copied() else {
+                self.sync_waiting.insert(send.peer);
                 continue;
             };
             let tag = self.next_tag;
@@ -328,12 +342,29 @@ impl Bridge {
                 tag,
             };
             if self.commands.send(command).is_ok() {
+                self.sync_sent.insert(tag, send.peer);
                 if let Some(message) = send.message {
                     self.sent.insert(tag, message);
                 }
             }
         }
         Ok(())
+    }
+
+    /// A sync record that no relay took starts the paced resend of its
+    /// peer now, and not at the next run (`DEV-312`, `DEV-073`).
+    fn sync_lost<B: Backend, E: SecureElement, R: CryptoRng + ?Sized>(
+        &mut self,
+        client: &mut Client<B, E>,
+        tag: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        match self.sync_sent.remove(&tag) {
+            Some(channel) if self.sync_restarted.insert(channel) => {
+                client.sync_send_lost(channel, rng)
+            }
+            _ => Ok(()),
+        }
     }
 
     /// Applies one update of the runtime to the client.
@@ -380,6 +411,9 @@ impl Bridge {
                 self.contacts.insert(conversation, contact);
                 if is_device {
                     client.mark_device_peer(conversation, rng)?;
+                    if self.sync_waiting.remove(&conversation) {
+                        client.sync_send_lost(conversation, rng)?;
+                    }
                     Some(NetEvent::DeviceLinked(conversation))
                 } else {
                     // DEV-294: each device of the set holds the conversation.
@@ -406,6 +440,7 @@ impl Bridge {
                 Some(NetEvent::Verified(conversation))
             }
             Update::Sent(tag) => {
+                self.sync_sent.remove(&tag);
                 if let Some(message) = self.sent.remove(&tag) {
                     client.set_delivery(&message, Delivery::Accepted, rng)?;
                 }
@@ -413,12 +448,14 @@ impl Bridge {
             }
             // IMP-074: a failed record names its cause.
             Update::Failed(tag) => {
+                self.sync_lost(client, tag, rng)?;
                 if let Some(message) = self.sent.remove(&tag) {
                     client.fail(&message, crate::FailureCause::Refused, rng)?;
                 }
                 None
             }
             Update::Unsent(tag) => {
+                self.sync_lost(client, tag, rng)?;
                 if let Some(message) = self.sent.remove(&tag) {
                     client.fail(&message, crate::FailureCause::NoPath, rng)?;
                 }
@@ -448,6 +485,10 @@ impl Bridge {
             }
             // IMP-082: the record stays queued while the queue is full.
             Update::Held(tag) => {
+                // DEV-067: a sync record that a full queue holds stays in
+                // the store, and the acknowledgment of the peer, once it
+                // reads its queue, starts the resend (`DEV-071`).
+                self.sync_sent.remove(&tag);
                 if let Some(message) = self.sent.remove(&tag) {
                     client.hold_for_room(&message, now_ms / 1_000, rng)?;
                 }

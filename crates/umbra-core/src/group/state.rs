@@ -1681,27 +1681,35 @@ impl Group {
             self.roster.epoch_index(),
             history_window_seconds,
             descriptor,
+            [0; 2],
             now,
         )
     }
 
     /// The admit at `roster_epoch`, the roster epoch of the add and of its
     /// snapshot (`GRP-323`). The roster can move between the add and the
-    /// admit, and the joiner checks the two against each other.
+    /// admit, and the joiner checks the two against each other. `seqs` is
+    /// the `seq` of the add at each replica, from its `GSEQ` (`GRP-311`),
+    /// and the joiner subscribes from there.
+    #[allow(clippy::too_many_arguments)]
     pub fn admit_at(
         &self,
         index: u16,
         roster_epoch: u32,
         history_window_seconds: u64,
         descriptor: &[u8],
+        seqs: [u32; 2],
         now: u64,
     ) -> Result<Vec<u8>, Error> {
         let current = self.epochs.current().ok_or(Error::NoPath)?;
         let replicas = self.replicas.as_ref().ok_or(Error::NoPath)?;
-        let refs = [
+        let mut refs = [
             *replicas.reference(0).ok_or(Error::NoPath)?,
             *replicas.reference(1).ok_or(Error::NoPath)?,
         ];
+        for (reference, seq) in refs.iter_mut().zip(seqs) {
+            reference.seq_of_add = seq;
+        }
         let slot = admit_slot(slot_of(now), current.start_slot(), history_window_seconds);
         // GRP-423: an admin that joined inside the epoch holds no `K_e`,
         // thus it derives from its own chain, and the history window ends
