@@ -57,6 +57,7 @@ pub use discovery::{ContactRequest, EntryKind, Published, PROFILE_NAME_MAX};
 pub use files::{DownloadJob, ErasureJob, FileExtras, FileInfo, FileState, UploadJob};
 use files::{FileQueues, CHUNK_CRED, FILE_DATA, FILE_STATE};
 pub use gossip::{GossipWarning, HeadCheck};
+#[cfg(feature = "bindings")]
 pub(crate) use groups::EPOCH_CHUNKS_MAX;
 pub use groups::{
     EpochUpload, GroupAdmitWaiting, GroupInfo, GroupJoiner, GroupOffer, GroupPost, GroupQueueJob,

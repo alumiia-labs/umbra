@@ -1,10 +1,12 @@
 package org.umbra.app
 
 import android.content.Context
+import android.util.Base64
 import com.google.firebase.FirebaseApp
 import com.google.firebase.messaging.FirebaseMessaging
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
+import uniffi.umbra_ffi.openWakeBlob
 
 /**
  * The FCM carrier of Part 8 §8.4.1. A build with the `google-services.json`
@@ -52,13 +54,50 @@ class PushService : FirebaseMessagingService() {
 
     /**
      * NTF-014: each push of high priority shows an alert that the user
-     * sees. The blob names no conversation that this build reads while
-     * locked, thus the alert names none, and the lock screen shows that it
-     * exists and no more (`NTF-119`).
+     * sees. An open client takes the record over its own run. A locked one
+     * opens the blob with the wake table, and the alert of the conversation
+     * shows that a message waits, with no name and no text (`NTF-136`); the
+     * record stays at the relay. The lock screen shows that an alert exists
+     * and no more (`NTF-119`).
      */
     override fun onMessageReceived(message: RemoteMessage) {
-        Notifier.pushed(applicationContext)
-        // An open client takes the record over its own run.
-        if (Core.isOpen()) Core.wake(applicationContext)
+        val app = applicationContext
+        // The blob opens in each state, thus an open client counts it too
+        // (NTF-078, NTF-079).
+        val conversation = waiting(app, message.data["b"])
+        if (Core.isOpen()) {
+            Notifier.pushed(app)
+            Core.wake(app)
+            return
+        }
+        // A locked client reads no setting of a conversation, thus each
+        // later push of one conversation makes no second sound.
+        if (conversation != null) {
+            Notifier.message(app, conversation, quiet = true)
+        } else {
+            Notifier.pushed(app)
+        }
+    }
+
+    /** The conversation of a blob that the wake table opens, or none. */
+    private fun waiting(app: android.content.Context, encoded: String?): Conversation? {
+        if (Modes.mode(app) != NotifyMode.Instant) return null
+        val blob = encoded?.let {
+            runCatching { Base64.decode(it, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP) }
+                .getOrNull()
+        } ?: return null
+        val table = WakeStore.read(app) ?: return null
+        val outcome = try {
+            openWakeBlob(table, blob, (System.currentTimeMillis() / 1_000).toULong())
+        } finally {
+            table.fill(0)
+        }
+        // NTF-076: a blob outside the window ran no open, thus it counts
+        // toward no failure.
+        when (outcome.status.toInt()) {
+            0 -> WakeStore.opened(app)
+            2 -> WakeStore.failed(app)
+        }
+        return outcome.conversation?.let(::Conversation)
     }
 }

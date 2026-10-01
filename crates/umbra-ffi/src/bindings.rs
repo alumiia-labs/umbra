@@ -1242,6 +1242,9 @@ pub enum FfiEvent {
     DeviceLinked,
     /// Another device of the set added a conversation or named one.
     Conversations,
+    /// A binding of the push path changed, thus the platform writes the
+    /// wake table again with [`Handle::wake_table`] (Part 8 `NTF-135`).
+    WakeTable,
     /// A contact request arrived on a link or a handle of this device.
     /// [`Handle::contact_requests`] gives it.
     ContactRequest,
@@ -3444,6 +3447,7 @@ impl Inner {
                     conversation: conversation.0.to_vec(),
                 },
                 Event::Conversations => FfiEvent::Conversations,
+                Event::WakeTable => FfiEvent::WakeTable,
                 Event::File { message } => FfiEvent::File {
                     // A message that a deletion took since has no
                     // conversation, and the view of none changes.
@@ -4353,8 +4357,9 @@ impl Handle {
     /// The wake table of Part 8 `NTF-135`, for the platform to seal under
     /// its keystore. The caller overwrites the bytes after the seal.
     pub fn wake_table(&self) -> Result<Vec<u8>, FfiError> {
-        let table = locked(&self.inner).client.wake_table()?;
-        Ok(table.to_vec())
+        let mut table = locked(&self.inner).client.wake_table()?;
+        // The bytes move out whole, thus no second copy waits for a wipe.
+        Ok(core::mem::take(&mut *table))
     }
 
     /// NTF-084: three blobs in a row did not open, thus each push root is

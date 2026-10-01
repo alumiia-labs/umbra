@@ -20,7 +20,7 @@ use umbra_wire::ndr::{encode_token, NdrRequest, TokenCarrier, NDR_REQUEST_LEN, P
 use zeroize::Zeroizing;
 
 use super::{Client, SETTINGS};
-use crate::Error;
+use crate::{Error, Event};
 
 /// The root of each queue relay: `relay_id`, `k_ntf_root`, `relay_idx`.
 const NOTIFY_RELAY: TableId = TableId(0x19);
@@ -295,7 +295,21 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             batch.delete(table, row);
         }
         batch.commit()?;
+        let binds = |table: &TableId| [NOTIFY_RELAY, NOTIFY_GROUP, NOTIFY_QUEUE].contains(table);
+        if rows.iter().any(|(table, ..)| binds(table))
+            || deleted.iter().any(|(table, _)| binds(table))
+        {
+            self.wake_changed();
+        }
         Ok(())
+    }
+
+    /// NTF-135: the wake table of the platform follows each change of a
+    /// binding. One waiting event covers each change before it.
+    pub(crate) fn wake_changed(&mut self) {
+        if !self.events.contains(&Event::WakeTable) {
+            self.events.push_back(Event::WakeTable);
+        }
     }
 
     /// The hash of the contact set, for `NTF-008`.
@@ -575,9 +589,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 keep(root);
             }
         }
+        // A group notify queue names its group by its own row.
+        let mut conversations = self.group_notify_conversations()?;
         let store = &self.open_ref()?.store;
         // A contact row starts with the RecipientId of its inbound queue.
-        let mut conversations: Vec<([u8; 32], [u8; 16])> = Vec::new();
         for (row, plain) in store.list(TableId::CONTACT, None)? {
             let plain = Zeroizing::new(plain);
             if let Some(recipient) = plain.get(..32).and_then(|id| <[u8; 32]>::try_from(id).ok()) {

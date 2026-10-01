@@ -867,6 +867,15 @@ fn a_group_record_wakes_a_member_that_went_away_through_its_notify_queue() {
     }
     // NTF-093: the GNREG of each replica leaves with the next pump.
     std::thread::sleep(Duration::from_secs(2));
+    // NTF-135: the wake table of a locked Bob names the group.
+    let table = bob.wake_table().unwrap();
+    let bob_group = bob
+        .summaries()
+        .unwrap()
+        .into_iter()
+        .map(|summary| summary.conversation)
+        .find(|conversation| bob.is_group(conversation.clone()).unwrap_or(false))
+        .unwrap();
 
     // NTF-096, WIR-526: Bob leaves, a record of Alice reaches the group
     // queue, its relay deposits a digest into the notify queue of Bob, and
@@ -881,17 +890,19 @@ fn a_group_record_wakes_a_member_that_went_away_through_its_notify_queue() {
         .expect("no push reached the endpoint of Bob")
         .unwrap();
     assert_eq!(blob.len(), umbra_wire::ndr::BLOB_LEN);
+    // NTF-136: the table opens the blob, and its alias names the group.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let woken = umbra_ffi::bindings::open_wake_blob(table, blob, now);
+    assert_eq!(woken.status, 0);
+    assert_eq!(woken.conversation, Some(bob_group.clone()));
+    assert!(woken.waiting >= 1);
 
     // NTF-132, NTF-133: Bob comes back and leaves the group. His notify queue leaves
     // both replicas and ends, and his pairwise queue stays bound.
     bob.clone().connect(networks[1].clone()).unwrap();
-    let bob_group = bob
-        .summaries()
-        .unwrap()
-        .into_iter()
-        .map(|summary| summary.conversation)
-        .find(|conversation| bob.is_group(conversation.clone()).unwrap_or(false))
-        .unwrap();
     let start = Instant::now();
     while bob.leave_group(bob_group.clone()).is_err() {
         assert!(start.elapsed() < STEP, "Bob could not leave");

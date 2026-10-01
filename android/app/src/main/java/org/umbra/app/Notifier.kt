@@ -76,8 +76,17 @@ object Notifier {
             .setContentTitle("New message")
             .build()
 
-    /** One alert for each conversation. A later record updates that alert. */
-    fun message(context: Context, conversation: Conversation, title: String? = null, text: CharArray? = null) {
+    /**
+     * One alert for each conversation. A later record updates that alert,
+     * and a `quiet` update makes no second sound (`NTF-018`).
+     */
+    fun message(
+        context: Context,
+        conversation: Conversation,
+        title: String? = null,
+        text: CharArray? = null,
+        quiet: Boolean = false,
+    ) {
         if (!mayPost(context)) {
             text?.fill('\u0000')
             return
@@ -87,6 +96,7 @@ object Notifier {
             .setContentTitle(title ?: "New message")
             .apply { if (text != null && text.isNotEmpty()) setContentText(java.nio.CharBuffer.wrap(text)) }
             .setGroup(conversation.label)
+            .setOnlyAlertOnce(quiet)
             .setAutoCancel(true)
             .setContentIntent(openApp(context))
             // NTF-119: the lock screen shows that an alert exists, and no

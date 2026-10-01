@@ -329,6 +329,10 @@ pub enum Event {
     },
     /// Another device of the set added a conversation or named one.
     Conversations,
+    /// A binding of the push path changed: a root, a handle group, or a
+    /// queue alias. The platform writes the wake table again (Part 8
+    /// `NTF-135`).
+    WakeTable,
     /// A contact offered a group of Part 11. The user sees the offers of
     /// A contact asks to introduce the user to a third party, or it
     /// introduces the user to one (Part 6 §6.6.7). The view reads
@@ -3569,7 +3573,10 @@ mod tests {
             1_700_000_000_000,
             &mut rng,
         );
-        // The floor of the stamp lives through a lock.
+        // The floor of the stamp lives through a lock. A build with no
+        // runtime keeps it at the tick of its caller, and this test is that
+        // caller.
+        client.keep_stamp(&mut rng).unwrap();
         client.lock();
         client
             .unlock(&units("correct horse"), 1_600_000_000)

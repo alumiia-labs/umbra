@@ -318,6 +318,13 @@ object Core {
             ownsChannels = owns
             restoreNote = null
             phase = Phase.Open
+            // NTF-084: three blobs in a row did not open while locked.
+            if (WakeStore.isRenewDue(app)) {
+                call {
+                    it.renewPushRoots()
+                    WakeStore.renewed(app)
+                }
+            }
             // The user opened the client, thus a view is on the
             // screen, and the platform permits the start.
             DeliveryService.start(app)
@@ -621,7 +628,7 @@ object Core {
         }
     }
 
-    private fun scheduleMaintenance() {
+    private fun scheduleMaintenance(app: Context) {
         if (maintains) return
         maintains = true
         main.postDelayed(object : Runnable {
@@ -631,6 +638,9 @@ object Core {
                     return
                 }
                 maintainDirectory()
+                // NTF-135: a run rotates roots and makes queues, thus the
+                // table follows each change within one round.
+                refreshWake(app)
                 main.postDelayed(this, MAINTAIN_MS)
             }
         }, MAINTAIN_MS)
@@ -995,6 +1005,8 @@ object Core {
                 it.close()
             }
             handle = null
+            // NTF-137: the wake table lies outside the store.
+            runCatching { WakeStore.delete(app) }
             (app.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager)
                 .clearApplicationUserData()
         }
@@ -1027,6 +1039,13 @@ object Core {
             while (true) {
                 opened.tick()
                 val event = opened.waitEvent(1_000u) ?: continue
+                // NTF-135: a binding changed, and the table follows it here,
+                // before the next tick can run the auto-lock.
+                if (event is FfiEvent.WakeTable) {
+                    writeWake(app, opened)
+                    event.destroy()
+                    continue
+                }
                 main.post { apply(event, app) }
             }
         }
@@ -1044,7 +1063,7 @@ object Core {
                 readConnection()
                 readDirectory()
                 maintainDirectory()
-                scheduleMaintenance()
+                scheduleMaintenance(app)
             }
             is FfiEvent.Circuits -> readConnection()
             is FfiEvent.Offline -> {
@@ -1114,7 +1133,8 @@ object Core {
                 if (!isVisible && client != null) {
                     // GRP-229: while the clock may be wrong, no alert
                     // shows a preview (Part 14 §14.9.2).
-                    val preview = Modes.preview(app) && chats.none { it.isClockSuspect }
+                    val preview = Modes.preview(app) && chats.none { it.isClockSuspect } &&
+                        !WakeStore.isClockSuspect(app)
                     val title = chats.firstOrNull { it.conversation.id.contentEquals(event.conversation) }?.title
                     // The worker reads the handle of the message, thus the
                     // worker frees the event after that read.
@@ -1221,6 +1241,8 @@ object Core {
                 if (!isVisible) Notifier.locked(app)
             }
             is FfiEvent.IntegrityFault -> fault = "The local store does not verify."
+            // The drain thread wrote the table already.
+            is FfiEvent.WakeTable -> {}
             // Another device of the set added a conversation, named one, or
             // changed the set.
             is FfiEvent.Conversations -> {
@@ -1292,6 +1314,8 @@ object Core {
         // The client makes cover cells while a view is on the screen only.
         call { it.setForeground(nowVisible) }
         if (nowVisible) Notifier.clear(context)
+        // NTF-135: the table is written before a lock can take the keys.
+        if (!nowVisible) refreshWake(context)
         // The setting "Immediately" locks when the last view leaves.
         if (!nowVisible && autoLockSeconds == 0L && phase == Phase.Open) lock()
         if (nowVisible && !online && phase == Phase.Open) {
@@ -1301,6 +1325,36 @@ object Core {
     }
 
     fun lock() = call { it.lock() }
+
+    /**
+     * Writes the wake table of a client in Instant mode (Part 8 `NTF-135`),
+     * thus a locked client opens each push blob. A build with no push holds
+     * none.
+     */
+    fun refreshWake(context: Context) {
+        val app = context.applicationContext
+        if (Modes.mode(app) != NotifyMode.Instant || !Push.isAvailable(app)) return
+        call { client -> writeWake(app, client) }
+    }
+
+    /** One write of the table. `WakeStore` checks the mode at the write itself. */
+    private fun writeWake(app: Context, client: Handle) {
+        if (!Push.isAvailable(app)) return
+        // A lock that came first leaves the table of the last write.
+        val table = try {
+            client.wakeTable()
+        } catch (locked: FfiException) {
+            return
+        }
+        try {
+            WakeStore.write(app, table)
+        } catch (fault: Exception) {
+            // The table of the last write serves until the next one.
+            if (BuildConfig.DEBUG) android.util.Log.w("umbra-core", "the wake table did not write", fault)
+        } finally {
+            table.fill(0)
+        }
+    }
 
     /** Whether the client is open, thus it holds the keys of its queues. */
     fun isOpen() = phase == Phase.Open

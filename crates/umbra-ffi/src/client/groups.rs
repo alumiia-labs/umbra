@@ -238,6 +238,9 @@ const GROUP_NOTIFY_LEN: usize = GROUP_NOTIFY_LEN_V1 + 8 + 1 + 32 + umbra_wire::a
 /// (`NTF-102`), thus a device registers again after 6 days.
 pub const NOTIFY_REREGISTER: u64 = 6 * 86_400;
 
+/// A `RecipientId` of a queue, with the conversation of that queue.
+pub type QueueOf = ([u8; 32], [u8; 16]);
+
 /// The notify queue of one group, as its row holds it.
 struct NotifyRow {
     queue: [u8; 32],
@@ -3858,6 +3861,19 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(out)
     }
 
+    /// Each notify queue of a group with the group (Part 8 `NTF-135`): the
+    /// queue of its row and the one that it replaces.
+    pub fn group_notify_conversations(&self) -> Result<Vec<QueueOf>, Error> {
+        let mut out = Vec::new();
+        for conversation in self.group_conversations()? {
+            if let Some(row) = self.group_notify_row(conversation)? {
+                out.push((row.queue, conversation.0));
+                out.extend(row.previous.map(|(queue, _)| (queue, conversation.0)));
+            }
+        }
+        Ok(out)
+    }
+
     /// Whether a group wants a notify queue: it is open, and this device
     /// is a member of it. A device that left or was removed holds none
     /// (`NTF-132`).
@@ -3949,6 +3965,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             batch.put(GROUP_NOTIFY, key, None, &row.encode(), rng)?;
         }
         batch.commit()?;
+        self.wake_changed();
         Ok(())
     }
 
@@ -3983,6 +4000,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut batch = open.store.begin();
         batch.put(GROUP_NOTIFY, row, None, &value, rng)?;
         batch.commit()?;
+        self.wake_changed();
         Ok(())
     }
 

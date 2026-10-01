@@ -101,16 +101,20 @@ object Modes {
                 cancelClock(app)
                 Push.opened(app)
                 Poll.schedule(app)
+                Core.refreshWake(app)
             }
             NotifyMode.Private -> {
                 // NTF-039: no token, thus no push of high priority.
                 Core.clearPushToken()
+                // NTF-137: no push, thus no wake table.
+                WakeStore.delete(app)
                 Work.getInstance(app).cancelUniqueWork(Poll.NAME)
                 drawPhase(app)
                 scheduleClock(app)
             }
             NotifyMode.Off -> {
                 Core.clearPushToken()
+                WakeStore.delete(app)
                 Work.getInstance(app).cancelUniqueWork(Poll.NAME)
                 cancelClock(app)
             }
