@@ -466,8 +466,9 @@ wake inside the interval. One phase across two networks links the two, and Part
 **[NTF-009]** The UI MUST show the trade in one honest line, and **[NTF-010]**
 the UI MUST NOT hide Private mode. **[NTF-011]** Onboarding MUST NOT ask the
 user to select a threat model. **[NTF-082]** The settings MUST offer the
-high-risk configuration, which selects Private notifications and disables the
-content preview. **[NTF-083]** A build MUST ship Instant mode with the content
+high-risk configuration, which is Private notifications with the content
+preview off: one screen holds the two controls, and a shortcut that sets both
+adds nothing that the user cannot do. **[NTF-083]** A build MUST ship Instant mode with the content
 preview off as the default of each Profile. That default applies to each build
 that holds a carrier of §8.4.1.
 

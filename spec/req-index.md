@@ -1703,7 +1703,7 @@ Source: `spec/08-notifications.md`
 | `NTF-079` | §8.2.3 | MUST | One open that succeeds | One open that succeeds MUST reset the count. |  |  |
 | `NTF-080` | §8.2.5 | MUST | A device | A device MUST rotate one handle group of §8.2.1 at a time. |  |  |
 | `NTF-081` | §8.2.5 | MUST NOT | A device | A device MUST NOT rotate two handle groups inside one session. |  |  |
-| `NTF-082` | §8.3 | MUST | The settings | The settings MUST offer the high-risk configuration, which selects Private notifications and disables the content preview. |  |  |
+| `NTF-082` | §8.3 | MUST | The settings | The settings MUST offer the high-risk configuration, which is Private notifications with the content preview off: one screen holds the two controls, and a shortcut that sets both adds nothing that the user cannot do. |  |  |
 | `NTF-083` | §8.3 | MUST | A build | A build MUST ship Instant mode with the content preview off as the default of each Profile. |  |  |
 | `NTF-084` | §8.2.3 | MUST | The client | The client MUST then establish `k_ntf_root` again at the next foreground session. |  |  |
 | `NTF-086` | §8.4.3 | MUST | A queue relay | A queue relay MUST set it to `PUSH_TTL_DIGEST` for a digest push. |  |  |

@@ -84,15 +84,6 @@ object Modes {
         apply(context)
     }
 
-    /**
-     * The high-risk configuration of `NTF-082`: Private notifications, and
-     * no content preview.
-     */
-    fun highRisk(context: Context) {
-        setPreview(context, false)
-        setMode(context, NotifyMode.Private)
-    }
-
     /** Puts the carriers of the mode in place: the token, the poll, the clock. */
     fun apply(context: Context) {
         val app = context.applicationContext
@@ -222,19 +213,13 @@ fun NotificationsScreen(onBack: () -> Unit) {
                 }
                 HorizontalDivider(color = Palette.Divider)
             }
+            // NTF-082: the two controls of the high-risk configuration sit
+            // on this one screen.
             ToggleRow("Show sender and text", preview) {
                 preview = it
                 Modes.setPreview(context, it)
             }
             HorizontalDivider(color = Palette.Divider)
-            Spacer(Modifier.height(16.dp))
-            SecondaryButton("Use the high-risk configuration") {
-                Modes.highRisk(context)
-                mode = Modes.mode(context)
-                preview = Modes.preview(context)
-            }
-            Spacer(Modifier.height(12.dp))
-            Note("Private mode, and no sender or text in an alert.")
         }
     }
 }
