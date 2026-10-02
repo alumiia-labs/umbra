@@ -573,13 +573,26 @@ fun LetterAvatar(name: String, seed: Int, size: Int = 44, icon: String? = null) 
 
 /** The bar of a view under the tabs: the word mark and the lock. */
 @Composable
-fun BrandBar(onConnection: () -> Unit) {
+fun BrandBar(onConnection: () -> Unit, onProfile: () -> Unit) {
     Row(
-        Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, top = 8.dp),
+        Modifier.fillMaxWidth().padding(start = 12.dp, end = 8.dp, top = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        BrandMark(size = 22.dp)
-        Spacer(Modifier.width(10.dp))
+        // The profile of the user opens from its picture. A device that does
+        // not own the channels publishes no profile (DEV-287).
+        if (Core.ownsChannels) {
+            Box(
+                Modifier
+                    .size(48.dp)
+                    .press(role = Role.Button, label = "Profile", onClick = onProfile),
+                contentAlignment = Alignment.Center,
+            ) { ProfilePicture(Core.myPicture, Core.myName.ifEmpty { "Me" }, 32) }
+            Spacer(Modifier.width(4.dp))
+        } else {
+            Spacer(Modifier.width(8.dp))
+            BrandMark(size = 22.dp)
+            Spacer(Modifier.width(10.dp))
+        }
         Text(
             "UMBRA",
             letterSpacing = 4.sp,

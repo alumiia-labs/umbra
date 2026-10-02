@@ -330,6 +330,7 @@ object Core {
             DeliveryService.start(app)
             refreshJoinFlow()
             readDevices()
+            readProfile()
             // Part 8 §8.3: the carriers of the mode of this device.
             Modes.apply(app)
             readTyping()
@@ -564,7 +565,10 @@ object Core {
                 }
             }
             client.setProfilePicture(picture)
-            main.post { onPicture(picture) }
+            main.post {
+                onPicture(picture)
+                myPicture = picture
+            }
         }
     }
 
@@ -572,6 +576,25 @@ object Core {
     fun setProfile(name: String, welcome: String) = directory { client ->
         client.setProfileName(name)
         client.setWelcome(welcome)
+        main.post { myName = name.trim() }
+    }
+
+    /** The name of the profile, for the picture of the top bar. */
+    var myName by mutableStateOf("")
+        private set
+
+    /** The picture of the profile, or none. */
+    var myPicture by mutableStateOf(ByteArray(0))
+        private set
+
+    /** Reads the name and the picture that the top bar shows. */
+    fun readProfile() = call { client ->
+        val name = client.profileName()
+        val picture = client.profilePicture()
+        main.post {
+            myName = name
+            myPicture = picture
+        }
     }
 
     /** What a profile link shows, or nothing when the lookup fails. */

@@ -316,13 +316,30 @@ fun HandleScreen(onBack: () -> Unit) {
                     Spacer(Modifier.height(8.dp))
                 }
                 SecondaryButton("Copy handle") { copySensitive(context, handle, "UMBRA handle") }
-                Spacer(Modifier.height(20.dp))
-                ProfileFields()
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(24.dp))
                 QuietButton("New key and queue") { Core.rotateHandleKey() }
                 QuietButton("Release handle") { Core.releaseHandle() }
                 DirectoryState("Writing the release.")
             }
+        }
+    }
+}
+
+/**
+ * The profile of the user: the picture, the name, and the welcome text of
+ * the profile blob (Part 9 §9.3.1), and the ways that people find it.
+ */
+@Composable
+fun ProfileScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
+    LaunchedEffect(Unit) { Core.readDirectory() }
+    Column(Modifier.fillMaxSize()) {
+        BackBar("Profile", onBack = onBack)
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
+            ProfileFields()
+            Spacer(Modifier.height(16.dp))
+            HorizontalDivider(color = Palette.Divider)
+            OpenRow("globe", "Your handle", Core.myHandle ?: "None") { push(Screen.Handle) }
+            OpenRow("link", "Reusable links") { push(Screen.PublicLinks) }
         }
     }
 }
@@ -348,28 +365,27 @@ private fun ProfileFields() {
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { picked ->
         if (picked != null) Core.setProfilePicture(context, picked) { picture = it }
     }
-    Row(verticalAlignment = Alignment.CenterVertically) {
+    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
         Box(
             Modifier
                 .clip(CircleShape)
                 .press(role = Role.Button, label = "Choose a picture") {
                     picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
                 },
-        ) { ProfilePicture(picture, name, 72) }
-        Spacer(Modifier.width(16.dp))
-        // The two actions start at one edge beside the picture.
-        Column(Modifier.width(IntrinsicSize.Max), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            InlineButton("Choose picture", modifier = Modifier.fillMaxWidth()) {
+        ) { ProfilePicture(picture, name.ifEmpty { "Me" }, 104) }
+        Spacer(Modifier.height(12.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            InlineButton(if (picture.isEmpty()) "Add picture" else "Change") {
                 picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
             }
             if (picture.isNotEmpty()) {
-                InlineButton("Remove picture", modifier = Modifier.fillMaxWidth()) {
+                InlineButton("Remove") {
                     Core.setProfilePicture(context, null) { picture = it }
                 }
             }
         }
     }
-    Spacer(Modifier.height(12.dp))
+    Spacer(Modifier.height(20.dp))
     OutlinedTextField(
         value = name,
         onValueChange = { name = it.take(32) },
@@ -386,8 +402,8 @@ private fun ProfileFields() {
         maxLines = 4,
         modifier = Modifier.fillMaxWidth(),
     )
-    Spacer(Modifier.height(8.dp))
-    SecondaryButton(
+    Spacer(Modifier.height(12.dp))
+    PrimaryButton(
         "Save",
         enabled = Core.online && !Core.directoryBusy && (name to welcome) != saved,
     ) {

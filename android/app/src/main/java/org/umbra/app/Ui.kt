@@ -72,6 +72,7 @@ sealed interface Screen {
     data object PublicLinks : Screen
     data class PublicLinkView(val id: List<Byte>) : Screen
     data object Handle : Screen
+    data object Profile : Screen
     data object Requests : Screen
     data class Chat(val conversation: Conversation) : Screen
     data class ContactDetails(val conversation: Conversation) : Screen
@@ -225,6 +226,7 @@ private fun OpenApp() {
             Screen.PublicLinks -> PublicLinksScreen(pop, push)
             is Screen.PublicLinkView -> PublicLinkScreen(top.id, pop)
             Screen.Handle -> HandleScreen(pop)
+            Screen.Profile -> ProfileScreen(pop, push)
             Screen.Requests -> RequestsScreen(pop)
             else -> {
                 val chat = Core.chats.firstOrNull { it.conversation == top.contact }
@@ -402,7 +404,7 @@ private fun UnlockScreen() {
 @Composable
 private fun TabsScreen(tab: Tab, onTab: (Tab) -> Unit, push: (Screen) -> Unit) {
     Column(Modifier.fillMaxSize()) {
-        BrandBar { push(Screen.Connection) }
+        BrandBar(onConnection = { push(Screen.Connection) }, onProfile = { push(Screen.Profile) })
         Box(Modifier.weight(1f)) {
             when (tab) {
                 Tab.Chats -> ChatsTab(push)
