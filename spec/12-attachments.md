@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 12: Attachments and Large Objects
 
 **Status:** Draft
-**Version:** 0.9.0-draft
+**Version:** 0.9.1-draft
 **Date:** 2026-10-02
 
 ---

@@ -1,0 +1,416 @@
+package com.alumiialabs.umbra
+
+import android.app.Activity
+import android.content.Context
+import android.util.TypedValue
+import android.view.Gravity
+import android.view.WindowManager
+import android.widget.TextView
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
+
+/**
+ * The prompts of Part 4 §4.7.6: the user can dismiss the one that asks for
+ * the recovery code, and after two dismissals it comes no more (`IDN-052`,
+ * `IDN-053`). A user that looked at the code gets none.
+ */
+object RecoveryPrompt {
+    private const val PREFERENCES = "umbra-recovery"
+    private const val DISMISSED = "dismissed"
+    private const val SEEN = "seen"
+
+    /** Whether this launch dismissed the prompt. */
+    private var isHiddenNow by mutableStateOf(false)
+
+    fun isDue(context: Context): Boolean {
+        if (isHiddenNow) return false
+        val preferences = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
+        return !preferences.getBoolean(SEEN, false) && preferences.getInt(DISMISSED, 0) < 2
+    }
+
+    fun dismiss(context: Context) {
+        val preferences = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
+        preferences.edit().putInt(DISMISSED, preferences.getInt(DISMISSED, 0) + 1).apply()
+        isHiddenNow = true
+    }
+
+    fun seen(context: Context) {
+        context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
+            .edit().putBoolean(SEEN, true).apply()
+        isHiddenNow = true
+    }
+}
+
+/** The line that asks for the recovery code. It never blocks a view (`IDN-051`). */
+@Composable
+fun RecoveryPromptLine(push: (Screen) -> Unit) {
+    val context = LocalContext.current
+    // The code of a linked device is the code of the device that owns the
+    // backup, and the prompt shows there.
+    if (!RecoveryPrompt.isDue(context) || !Core.ownsChannels) return
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .background(Palette.Container, RoundedCornerShape(16.dp))
+            .clickable(role = Role.Button) { push(Screen.RecoveryCode) }
+            .padding(start = 16.dp, top = 12.dp, bottom = 12.dp, end = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        FaIcon("key", size = 18.dp, tint = Palette.Action)
+        Spacer(Modifier.width(12.dp))
+        Text("Write down your recovery code", Modifier.weight(1f))
+        Box(
+            Modifier
+                .size(36.dp)
+                .clip(CircleShape)
+                .press(role = Role.Button, label = "Dismiss") { RecoveryPrompt.dismiss(context) },
+            contentAlignment = Alignment.Center,
+        ) { FaIcon("xmark", label = "Dismiss", size = 14.dp, tint = Palette.TextSecondary) }
+    }
+}
+
+/**
+ * The recovery code as the 87 digits of Part 4 §4.7.7. The digits stay in
+ * a `CharArray` that the view wipes when it leaves, the window takes no
+ * screenshot while it shows, and no copy goes to the clipboard.
+ */
+@Composable
+fun RecoveryCodeScreen(onBack: () -> Unit, push: (Screen) -> Unit = {}) {
+    val context = LocalContext.current
+    var digits by remember { mutableStateOf<CharArray?>(null) }
+    LaunchedEffect(Unit) {
+        Core.recoveryCode { digits = it }
+        RecoveryPrompt.seen(context)
+    }
+    DisposableEffect(Unit) {
+        val window = (context as? Activity)?.window
+        window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        onDispose {
+            window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            digits?.fill('\u0000')
+        }
+    }
+    Column(Modifier.fillMaxSize()) {
+        BackBar("Recovery code", onBack = onBack)
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
+            val shown = digits
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .background(Color.White, RoundedCornerShape(24.dp))
+                    .border(1.dp, Palette.Divider, RoundedCornerShape(24.dp))
+                    .padding(vertical = 20.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                if (shown != null) DigitRows(shown)
+            }
+            Spacer(Modifier.height(16.dp))
+            Note(backupLine(context, Core.lastBackupAt))
+            Spacer(Modifier.height(8.dp))
+            // IMP-050: the backup of the platform holds nothing of UMBRA.
+            Note(UiText.get(R.string.umbra_ui_imp_050))
+            Spacer(Modifier.height(16.dp))
+            EntryRow(RowEntry("user-group", "Recovery with contacts") { push(Screen.SocialRecovery) })
+            EntryRow(RowEntry("key", "Root seed") { push(Screen.RootSeed) })
+        }
+    }
+}
+
+/**
+ * Digits that a view shows once, with no screenshot and no clipboard, and
+ * that it wipes when it leaves: the user half, or a share of a contact.
+ */
+@Composable
+fun SecretDigitsScreen(title: String, note: String, onBack: () -> Unit, load: ((CharArray) -> Unit) -> Unit) {
+    val context = LocalContext.current
+    var digits by remember { mutableStateOf<CharArray?>(null) }
+    LaunchedEffect(Unit) { load { digits = it } }
+    DisposableEffect(Unit) {
+        val window = (context as? Activity)?.window
+        window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        onDispose {
+            window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            digits?.fill('\u0000')
+        }
+    }
+    Column(Modifier.fillMaxSize()) {
+        BackBar(title, onBack = onBack)
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .background(Color.White, RoundedCornerShape(24.dp))
+                    .border(1.dp, Palette.Divider, RoundedCornerShape(24.dp))
+                    .padding(vertical = 20.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                digits?.let { DigitRows(it) }
+            }
+            Spacer(Modifier.height(16.dp))
+            Note(note)
+        }
+    }
+}
+
+/**
+ * Social recovery of Part 4 §4.7.3: one share of the social half for each
+ * chosen contact. The view states which half each holder takes, and that
+ * the shares alone recover nothing (`IDN-087`, `IDN-088`).
+ */
+@Composable
+fun SocialRecoveryScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
+    val contacts = Core.chats.filter { !it.isGroup }
+    val chosen = remember { mutableStateListOf<List<Byte>>() }
+    var threshold by remember { mutableStateOf(3) }
+    var given by remember { mutableStateOf(emptyList<uniffi.umbra_ffi.FfiGivenShare>()) }
+    var isSent by remember { mutableStateOf(false) }
+    LaunchedEffect(isSent) { Core.sharesGiven { given = it } }
+    val count = chosen.size
+    val needed = threshold.coerceIn(2, maxOf(2, count))
+    Column(Modifier.fillMaxSize()) {
+        BackBar("Recovery with contacts", onBack = onBack)
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
+            Spacer(Modifier.height(8.dp))
+            // IDN-087, IDN-088: which half each holder takes, and what the
+            // pieces do alone.
+            Note(
+                UiText.get(R.string.umbra_ui_idn_088) + " $needed pieces and your user half restore your account. " +
+                    UiText.get(R.string.umbra_ui_idn_087),
+            )
+            if (given.isNotEmpty()) {
+                val names = given.map { share ->
+                    contacts.firstOrNull { it.conversation.id.contentEquals(share.conversation) }?.title ?: "A contact"
+                }
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    "Held by ${names.joinToString(", ")}, ${given.first().threshold} of ${given.first().count} needed",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Palette.TextSecondary,
+                    modifier = Modifier.subline(),
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            for (chat in contacts) {
+                val key = chat.conversation.id.toList()
+                ToggleRow(chat.title, key in chosen) { on -> if (on) chosen.add(key) else chosen.remove(key) }
+                HorizontalDivider(color = Palette.Divider)
+            }
+            if (count >= 2) {
+                Text(
+                    "Pieces needed",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = Palette.TextSecondary,
+                    modifier = Modifier.padding(top = 16.dp, bottom = 4.dp).subline(),
+                )
+                for (k in 2..count) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .pressShadeInColumn()
+                            .press(role = Role.RadioButton) { threshold = k }
+                            .padding(horizontal = PressInset, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioMark(isChosen = needed == k)
+                        Spacer(Modifier.width(14.dp))
+                        Text("$k of $count")
+                    }
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+            PrimaryButton("Send the pieces", enabled = count >= 2) {
+                val holders = contacts.filter { it.conversation.id.toList() in chosen }.map { it.conversation }
+                Core.splitSocial(holders, needed) { isSent = !isSent }
+                chosen.clear()
+            }
+            Spacer(Modifier.height(8.dp))
+            SecondaryButton("Show your user half") { push(Screen.UserHalf) }
+            Spacer(Modifier.height(20.dp))
+        }
+    }
+}
+
+/** The time of the last backup, which is a fact that the user cannot know. */
+private fun backupLine(context: Context, atSeconds: Long?): String =
+    if (atSeconds == null) {
+        "No backup yet."
+    } else {
+        "Last backup: ${timeLabel(context, atSeconds * 1_000)}."
+    }
+
+/**
+ * The groups of five in rows of three. The breaks go into the array itself,
+ * and the view shows that array, thus the wipe of the screen clears it.
+ */
+@Composable
+private fun DigitRows(digits: CharArray) {
+    val ink = Palette.Text.toArgb()
+    AndroidView(
+        factory = { context ->
+            TextView(context).apply {
+                styleAsApp(this, mono = true)
+                gravity = Gravity.CENTER
+                setLineSpacing(0f, 1.5f)
+            }
+        },
+        update = { view ->
+            view.setTextColor(ink)
+            view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
+            var group = 0
+            for (at in digits.indices) {
+                if (digits[at] == ' ' || digits[at] == '\n') {
+                    group++
+                    digits[at] = if (group % 3 == 0) '\n' else ' '
+                }
+            }
+            view.setText(digits, 0, digits.size)
+        },
+    )
+}
+
+/**
+ * The restore of a first launch (Part 4 §4.7.2): a new passphrase for this
+ * device and the recovery code. A restore that finds no identity stays
+ * here and shows no message list (`IDN-156`).
+ */
+@Composable
+fun RestoreForm(onCancel: () -> Unit) {
+    val context = LocalContext.current
+    val passphrase = rememberPlatformField()
+    val code = rememberPlatformField()
+    // Part 4 §4.7.3: the user half and the shares of contacts, in the place
+    // of the whole code.
+    var withShares by remember { mutableStateOf(false) }
+    var shareCount by remember { mutableStateOf(3) }
+    val shares = remember { List(8) { PlatformFieldState() } }
+    val isRunning = Core.restoreNote != null
+    Column(Modifier.fillMaxWidth()) {
+        if (isRunning) {
+            Text(Core.restoreNote.orEmpty(), color = Palette.TextSecondary)
+            return@Column
+        }
+        FramedPlatformField(code, if (withShares) "User half" else "Recovery code", isPassphrase = false)
+        if (withShares) {
+            for (index in 0 until shareCount) {
+                Spacer(Modifier.height(8.dp))
+                FramedPlatformField(shares[index], "Share ${index + 1}", isPassphrase = false)
+            }
+            if (shareCount < shares.size) {
+                InlineButton("Add a share") { shareCount++ }
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+        FramedPlatformField(passphrase, "New passphrase", isPassphrase = true)
+        Spacer(Modifier.height(14.dp))
+        PrimaryButton("Restore") {
+            val digits = code.take()
+            val phrase = passphrase.take()
+            val taken = if (withShares) shares.take(shareCount).mapNotNull { it.take() } else emptyList()
+            if (digits != null && phrase != null) {
+                Core.restore(context, phrase, digits, taken)
+            } else {
+                digits?.fill('\u0000')
+                phrase?.fill('\u0000')
+                taken.forEach { it.fill('\u0000') }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        SecondaryButton(if (withShares) "Use the recovery code" else "Use shares of contacts") {
+            withShares = !withShares
+        }
+        Spacer(Modifier.height(8.dp))
+        SecondaryButton("Back", onClick = onCancel)
+    }
+}
+
+/**
+ * The full identity reset of Part 7 §7.7.1. It is visible and slow on
+ * purpose: the screen states what changes, and a second sheet asks again.
+ */
+@Composable
+fun ResetIdentityScreen(onBack: () -> Unit) {
+    val context = LocalContext.current
+    var isAsking by remember { mutableStateOf(false) }
+    var result by remember { mutableStateOf<String?>(null) }
+    var fault by remember { mutableStateOf<String?>(null) }
+    Column(Modifier.fillMaxSize()) {
+        BackBar("Reset identity", onBack = onBack)
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
+            Text("UMBRA makes a new identity for this device.")
+            Spacer(Modifier.height(12.dp))
+            for (line in listOf(
+                "Each contact gets your new key, and cannot write to you until they accept it.",
+                "Each group moves you to new keys.",
+                "Your public links and your handle end.",
+                "Your messages and your contacts stay.",
+            )) {
+                Text("· $line", color = Palette.TextSecondary, modifier = Modifier.padding(bottom = 6.dp))
+            }
+            Spacer(Modifier.height(16.dp))
+            result?.let {
+                Note(it)
+                return@Column
+            }
+            fault?.let {
+                Note(it, isError = true)
+                Spacer(Modifier.height(12.dp))
+            }
+            if (Core.devices.size > 1) {
+                // DEV-307: the other devices leave the set first.
+                Note("Remove your other devices first.")
+            } else {
+                DangerButton("Reset identity") { isAsking = true }
+            }
+        }
+    }
+    if (isAsking) {
+        ActionSheet(
+            "Reset your identity?",
+            listOf(
+                RowEntry("rotate", "Reset identity") {
+                    Core.resetIdentity(context) { done ->
+                        if (done == null) fault = "Remove your other devices first." else result = done
+                    }
+                },
+            ),
+            note = "You cannot undo this.",
+            onDismiss = { isAsking = false },
+        )
+    }
+}

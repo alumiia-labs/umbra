@@ -13,18 +13,17 @@ if (file("google-services.json").exists()) {
 // The semantic version of the app, the same as the Rust workspace and the
 // specification. The code grows with each one: major, minor, then patch, three
 // digits each.
-val appVersion = "0.9.0"
+val appVersion = "0.9.1"
 val (versionMajor, versionMinor, versionPatch) = appVersion.split(".").map(String::toInt)
 
 android {
-    namespace = "org.umbra.app"
+    namespace = "com.alumiialabs.umbra"
     compileSdk {
         version = release(37)
     }
 
     defaultConfig {
-        // The store identity, which never changes once published; the Kotlin
-        // namespace stays org.umbra.app.
+        // The store identity, which never changes once published.
         applicationId = "com.alumiialabs.umbra"
         // The NDK build of scripts/android.sh links against this level.
         minSdk = 29
