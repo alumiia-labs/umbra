@@ -13,7 +13,7 @@ if (file("google-services.json").exists()) {
 // The semantic version of the app, the same as the Rust workspace and the
 // specification. The code grows with each one: major, minor, then patch, three
 // digits each.
-val appVersion = "0.9.1"
+val appVersion = "0.9.2"
 val (versionMajor, versionMinor, versionPatch) = appVersion.split(".").map(String::toInt)
 
 android {
@@ -50,7 +50,14 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // R8 drops the code that the app never calls, and the resources
+            // that nothing names; proguard-rules.pro keeps the Rust bindings.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
         }
     }
 

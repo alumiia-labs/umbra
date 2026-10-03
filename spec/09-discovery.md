@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 9: Discovery, Handles, and Key Transparency
 
 **Status:** Draft
-**Version:** 0.9.1-draft
+**Version:** 0.9.2-draft
 **Date:** 2026-10-02
 
 ---
