@@ -8,6 +8,7 @@ import java.nio.CharBuffer
 import android.graphics.drawable.GradientDrawable
 import android.text.InputType
 import android.text.TextUtils
+import android.text.method.PasswordTransformationMethod
 import android.util.TypedValue
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
@@ -111,6 +112,24 @@ class PlatformFieldState {
         field.setSelection(field.length())
     }
 
+    /** Whether a passphrase field shows its characters. Hidden by default. */
+    var isShown by mutableStateOf(false)
+        private set
+
+    /**
+     * Shows the characters of a passphrase field, or hides them again. The input type
+     * stays a password, thus the keyboard still learns nothing (IMP-057);
+     * only the dots go.
+     */
+    fun toggleShown() {
+        val shown = !isShown
+        isShown = shown
+        val field = view ?: return
+        val (start, end) = field.selectionStart to field.selectionEnd
+        field.transformationMethod = if (shown) null else PasswordTransformationMethod.getInstance()
+        if (start >= 0) field.setSelection(start, end)
+    }
+
     /** Makes the field empty. */
     fun clear() {
         view?.editableText?.clear()
@@ -178,6 +197,9 @@ fun PlatformInput(
                         InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
                 }
                 this.maxLines = maxLines
+                // A password type sets a monospace face of the platform; the
+                // field keeps the font of the app.
+                styleAsApp(this)
                 addTextChangedListener(object : android.text.TextWatcher {
                     override fun beforeTextChanged(text: CharSequence?, start: Int, count: Int, after: Int) = Unit
 
@@ -230,14 +252,27 @@ fun styleAsApp(view: TextView, mono: Boolean = false) {
 /** A field of the platform inside the outlined frame of the mockups. */
 @Composable
 fun FramedPlatformField(state: PlatformFieldState, label: String, isPassphrase: Boolean) {
-    Column(
+    Row(
         Modifier
             .fillMaxWidth()
-            .border(1.dp, Palette.Outline, RoundedCornerShape(10.dp))
-            .padding(horizontal = 14.dp, vertical = 8.dp),
+            .border(1.dp, Palette.Outline, RoundedCornerShape(10.dp)),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(label, style = MaterialTheme.typography.labelSmall, color = Palette.TextSecondary)
-        PlatformInput(state, hint = "", isPassphrase = isPassphrase, modifier = Modifier.fillMaxWidth())
+        Column(
+            Modifier
+                .weight(1f)
+                .padding(start = 14.dp, end = if (isPassphrase) 0.dp else 14.dp, top = 8.dp, bottom = 8.dp),
+        ) {
+            Text(label, style = MaterialTheme.typography.labelSmall, color = Palette.TextSecondary)
+            PlatformInput(state, hint = "", isPassphrase = isPassphrase, modifier = Modifier.fillMaxWidth())
+        }
+        // A passphrase shows its characters at a tap, and hides them again.
+        if (isPassphrase) {
+            IconAction(
+                if (state.isShown) "eye-slash" else "eye",
+                if (state.isShown) "Hide passphrase" else "Show passphrase",
+            ) { state.toggleShown() }
+        }
     }
 }
 
