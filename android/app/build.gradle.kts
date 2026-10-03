@@ -10,6 +10,11 @@ if (file("google-services.json").exists()) {
     apply(plugin = "com.google.gms.google-services")
 }
 
+// A calendar version, year.month.release, as the Rust workspace holds it. The
+// code grows with each one: YY, MM, then three digits of the release.
+val appVersion = "2026.10.0"
+val (versionYear, versionMonth, versionRelease) = appVersion.split(".").map(String::toInt)
+
 android {
     namespace = "org.umbra.app"
     compileSdk {
@@ -23,8 +28,8 @@ android {
         // The NDK build of scripts/android.sh links against this level.
         minSdk = 29
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = (versionYear - 2000) * 100_000 + versionMonth * 1_000 + versionRelease
+        versionName = appVersion
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
         }
