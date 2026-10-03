@@ -10,8 +10,9 @@ if (file("google-services.json").exists()) {
     apply(plugin = "com.google.gms.google-services")
 }
 
-// A calendar version, year.month.release, as the Rust workspace holds it. The
-// code grows with each one: YY, MM, then three digits of the release.
+// A calendar version of the app: year.month.release, where the release counts
+// from 0 in each month. The Rust crates keep a semantic version of their own.
+// The code grows with each one: YY, MM, then three digits of the release.
 val appVersion = "2026.10.0"
 val (versionYear, versionMonth, versionRelease) = appVersion.split(".").map(String::toInt)
 
