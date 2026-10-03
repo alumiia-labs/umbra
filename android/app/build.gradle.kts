@@ -10,11 +10,11 @@ if (file("google-services.json").exists()) {
     apply(plugin = "com.google.gms.google-services")
 }
 
-// A calendar version of the app: year.month.release, where the release counts
-// from 0 in each month. The Rust crates keep a semantic version of their own.
-// The code grows with each one: YY, MM, then three digits of the release.
-val appVersion = "2026.10.0"
-val (versionYear, versionMonth, versionRelease) = appVersion.split(".").map(String::toInt)
+// The semantic version of the app, the same as the Rust workspace and the
+// specification. The code grows with each one: major, minor, then patch, three
+// digits each.
+val appVersion = "0.9.0"
+val (versionMajor, versionMinor, versionPatch) = appVersion.split(".").map(String::toInt)
 
 android {
     namespace = "org.umbra.app"
@@ -29,7 +29,7 @@ android {
         // The NDK build of scripts/android.sh links against this level.
         minSdk = 29
         targetSdk = 36
-        versionCode = (versionYear - 2000) * 100_000 + versionMonth * 1_000 + versionRelease
+        versionCode = versionMajor * 1_000_000 + versionMinor * 1_000 + versionPatch
         versionName = appVersion
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")

@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 7: Device Sets, History Sync, and Revocation
 
 **Status:** Draft
-**Version:** 0.2.0-draft
-**Date:** 2026-09-11
+**Version:** 0.9.0-draft
+**Date:** 2026-10-02
 
 ---
 
