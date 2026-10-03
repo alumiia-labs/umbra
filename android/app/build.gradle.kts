@@ -17,7 +17,9 @@ android {
     }
 
     defaultConfig {
-        applicationId = "org.umbra.app"
+        // The store identity, which never changes once published; the Kotlin
+        // namespace stays org.umbra.app.
+        applicationId = "com.alumiialabs.umbra"
         // The NDK build of scripts/android.sh links against this level.
         minSdk = 29
         targetSdk = 36
@@ -118,6 +120,9 @@ androidComponents {
 dependencies {
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.activity.compose)
+    // Play services brings Fragment 1.0, whose activity drops the results
+    // of the permission request; this takes the version that delivers them.
+    implementation(libs.androidx.fragment)
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.compose.ui)
     // The QR code of an invitation link and of a safety number. The core of
