@@ -317,7 +317,13 @@ fun HandleScreen(onBack: () -> Unit) {
                 }
                 SecondaryButton("Copy handle") { copySensitive(context, handle, "UMBRA handle") }
                 Spacer(Modifier.height(24.dp))
-                QuietButton("New key and queue") { Core.rotateHandleKey() }
+                // Part 9 §9.9: a new key and a new rendezvous queue at one tap.
+                QuietButton("Reset contact requests") { Core.rotateHandleKey() }
+                Note(
+                    "Anyone who looked up your handle before has to look it up again to send " +
+                        "you a request. Your handle and your contacts stay the same.",
+                )
+                Spacer(Modifier.height(8.dp))
                 QuietButton("Release handle") { Core.releaseHandle() }
                 DirectoryState("Writing the release.")
             }
