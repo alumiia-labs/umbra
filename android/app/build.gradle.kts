@@ -49,6 +49,17 @@ android {
     }
 
     buildTypes {
+        // -Pumbra.minify=true shrinks a debug build as R8 shrinks the release,
+        // thus a build for the devnet runs the code that ships.
+        debug {
+            if (project.findProperty("umbra.minify") == "true") {
+                isMinifyEnabled = true
+                proguardFiles(
+                    getDefaultProguardFile("proguard-android-optimize.txt"),
+                    "proguard-rules.pro",
+                )
+            }
+        }
         release {
             // R8 drops the code that the app never calls, and the resources
             // that nothing names; proguard-rules.pro keeps the Rust bindings.
