@@ -57,11 +57,13 @@ fun ConnectionStatus(onOpen: () -> Unit) {
         LinkState.Connecting -> "Connecting"
         LinkState.Down -> "Offline"
     }
+    // The press shade is square and fills the height of the bar, as the lock
+    // button beside it does.
     Row(
         Modifier
-            .clip(RoundedCornerShape(16.dp))
+            .height(48.dp)
             .press(role = Role.Button, label = "Connection") { onOpen() }
-            .padding(horizontal = 10.dp, vertical = 8.dp),
+            .padding(horizontal = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         StatusDot(state)
