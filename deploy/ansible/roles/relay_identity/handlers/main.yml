@@ -1,4 +1,4 @@
 # A relay that phase 2 did not start yet has nothing to restart.
 - name: Restart umbra-relay
   ansible.builtin.shell:
-    cmd: systemctl daemon-reload; systemctl try-restart umbra-relay.service || true
+    cmd: systemctl daemon-reload; systemctl try-restart 'umbra-relay@*.service' || true

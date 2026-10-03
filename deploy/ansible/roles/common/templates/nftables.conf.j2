@@ -26,7 +26,13 @@ table inet filter {
 {% endif %}
     # Let's Encrypt proves the name on port 80.
     tcp dport 80 accept
-{% if inventory_hostname in groups['relays'] or inventory_hostname in groups['signer'] %}
+{% if inventory_hostname in groups['relays'] %}
+    # Each relay of this server, on its own port.
+{% for relay in hostvars[inventory_hostname]['relays'] %}
+    tcp dport {{ relay.port }} accept
+{% endfor %}
+{% endif %}
+{% if inventory_hostname in groups['signer'] %}
     tcp dport 443 accept
 {% endif %}
 {% if inventory_hostname in groups['ndr'] or inventory_hostname in groups['directory'] %}

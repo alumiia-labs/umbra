@@ -1,17 +1,25 @@
 # Deploying the UMBRA network
 
-These playbooks install the launch network on Debian: seven servers at
-OVHcloud US, over two sites.
+These playbooks install the launch network on Debian: four servers at
+OVHcloud US, over two sites. A server can run two relays; the inventory
+lists the relays of each server.
 
 | Server | Site | Runs |
 |---|---|---|
-| `entry-east` | Vint Hill, Virginia | Entry relay (the two gateways' OHTTP relay) |
-| `entry-west` | Hillsboro, Oregon | Entry relay |
-| `middle-east` | Virginia | Middle relay |
-| `exit-east` | Virginia | Exit relay and the notification server (`umbra-ndr`, port 8443) |
-| `exit-west-1` | Oregon | Exit relay and the directory (`umbra-directory`, port 8443) |
-| `exit-west-2` | Oregon | Exit relay |
-| `signer-west` | Oregon | The directory signer; it signs the relay list each hour, and nginx serves it |
+| `east-1` | Vint Hill, Virginia | Entry relay `entry-east` (port 443), exit relay `exit-1` (port 9443), and the notification server (`umbra-ndr`, port 8443) |
+| `east-2` | Vint Hill, Virginia | Middle relay (port 443) and exit relay `exit-3` (port 9443) |
+| `west-1` | Hillsboro, Oregon | Entry relay `entry-west` (port 443), exit relay `exit-2` (port 9443), and the directory (`umbra-directory`, port 8443) |
+| `signer-west` | Hillsboro, Oregon | The directory signer; it signs the relay list each hour, and nginx serves it |
+
+Three exit relays hold the two replicas of a group and the three copies of
+a file. An entry relay takes port 443, since phones reach it. Each relay
+runs as `umbra-relay@<name>`, with its files in `/etc/umbra/relays/<name>`
+and `/var/lib/umbra-relay/<name>`.
+
+The trade of two relays on one server: a chain whose entry and exit relay
+share a server shows that server both ends. The operator runs every server
+during the launch anyway; the trade is against one who breaks into one
+server. The app avoids such a chain when it has another (Part 3 `NET-351`).
 
 With one operator, the directory is *provisional* (Part 10 `REL-126`). The
 app shows that, and the rules of Part 3 `NET-340` and `NET-350` let one
@@ -19,15 +27,15 @@ operator, one provider, and one country carry the traffic.
 
 ## What you need
 
-- Seven Debian 12 or 13 servers.
-  - An entry relay needs a plan with 250 Mbit/s or more. Each other relay
-    needs 100 Mbit/s or more.
-  - The signer takes the smallest plan.
-- A domain. Give each server an A record: `entry-east.<domain>`, and so on.
+- Four Debian 12 or 13 servers. OVH's VPS-1 (500 Mbit/s) serves each.
+  - A server with two relays states the share of each: class 1 (250 Mbit/s)
+    for each on a 500 Mbit/s plan. An entry relay needs class 1 or more.
+- A domain. Give each server an A record: `east-1.<domain>`, `east-2.<domain>`,
+  `west-1.<domain>`, and `signer-west.<domain>`.
 - SSH with a key, as root or as a user with sudo, to each server, from this
-  machine. OVH's Debian images log in as `debian`: put
-  `ansible_user: debian` beside each `ansible_host`. The run turns off
-  password logins, and it stops first if that user holds no key.
+  machine. OVH's Debian images log in as `debian`, which the example
+  inventory sets. The run turns off password logins, and it stops first if
+  that user holds no key.
 - The Firebase service account JSON of the app's project, for pushes.
 - Ansible 2.15 or newer and Docker, on this machine. WSL works: run the
   playbooks from Debian in WSL.
@@ -54,9 +62,11 @@ In `group_vars/all.yml`:
 Copy `inventory.example.yml` to `inventory.yml`. In `inventory.yml`:
 
 - Put each server's address in `ansible_host`.
-- Put each relay's class in `class`: 0, 1, 2 or 3 for 100, 250, 500 or
-  1 000 Mbit/s, in both directions. State only what the plan holds.
-- An entry relay needs class 1 or more.
+- Each relay under `relays` has a name, a role (`entry`, `middle`, or
+  `exit`), a port, and a class: 0, 1, 2 or 3 for 100, 250, 500 or
+  1 000 Mbit/s, in both directions. State only what the plan holds, split
+  between the relays of one server.
+- An entry relay takes port 443 and class 1 or more.
 
 ## Run
 
@@ -117,7 +127,7 @@ Run it again after:
 - **Services.** Each service runs as its own user, in a systemd sandbox:
   - a read-only system, and write access to its own folder alone;
   - a syscall filter and no new privileges;
-  - no capabilities beyond port 443 for the relay.
+  - no capabilities beyond the low port of a relay.
 
 - **The manifest.** The signer signs a manifest at two minutes past each
   hour; a root lives three hours. Each relay fetches the manifest from
@@ -126,8 +136,9 @@ Run it again after:
   lists it.
 - **Certificates** renew on their own. A renewal restarts the service that
   uses the certificate.
-- **The firewall** opens 22, 80 and 443. It opens 8443 on the notification
-  server and the directory, to the relays alone.
+- **The firewall** opens 22, 80, and the port of each relay of the server
+  (443, 9443). It opens 443 on the signer, and 8443 on the notification
+  server and the directory, to the relay servers alone.
 
 ## Rotating the directory keys
 

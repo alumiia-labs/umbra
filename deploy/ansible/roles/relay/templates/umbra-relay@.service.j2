@@ -1,12 +1,12 @@
 [Unit]
-Description=UMBRA relay (Parts 3 and 10)
+Description=UMBRA relay %i (Parts 3 and 10)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 User=umbra-relay
 Group=umbra-relay
-ExecStart=/usr/local/bin/umbra-relay /etc/umbra/relay.conf
+ExecStart=/usr/local/bin/umbra-relay /etc/umbra/relays/%i/relay.conf
 Restart=on-failure
 RestartSec=5
 # Port 443 without root.
@@ -36,7 +36,7 @@ SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
 UMask=0077
 LimitCORE=0
-ReadWritePaths=/var/lib/umbra-relay
+ReadWritePaths=/var/lib/umbra-relay/%i
 LimitNOFILE=65536
 
 [Install]

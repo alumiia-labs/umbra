@@ -100,6 +100,7 @@ fn relay_info(index: usize) -> RelayInfo {
             asn: index as u32 + 1,
             v4_prefix: Some([10, index as u8]),
             v6_prefix: None,
+            v4: None,
             ingress: LAYERS[index] == 1,
             chain: LAYERS[index] != 1,
             queue: LAYERS[index] == 3,

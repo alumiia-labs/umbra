@@ -30,6 +30,9 @@ pub struct Candidate {
     pub v4_prefix: Option<[u8; 2]>,
     /// The IPv6 /48, if the relay has an IPv6 address.
     pub v6_prefix: Option<[u8; 6]>,
+    /// The IPv4 address, if the relay has one: two relays of one address
+    /// run on one server (`NET-351`).
+    pub v4: Option<[u8; 4]>,
     /// Whether the entry carries the ingress flag.
     pub ingress: bool,
     /// Whether the descriptor offers the chain role.
@@ -147,6 +150,7 @@ impl Candidate {
             asn: d.asn,
             v4_prefix,
             v6_prefix,
+            v4: (d.addr_v4 != [0; 4]).then_some(d.addr_v4),
             // §10.6.1: an ingress relay holds 250 Mbit/s or more.
             ingress: placed && entry.ingress() && entry.class >= INGRESS_CLASS_MIN,
             chain: placed && d.roles & roles::CHAIN != 0,
@@ -194,6 +198,9 @@ pub struct Chain {
     /// Whether two hops share an autonomous system or a prefix under the
     /// bootstrap relaxation of `NET-350`.
     pub one_network: bool,
+    /// Whether hop 1 and hop 3 run on one server, the last resort of
+    /// `NET-351`.
+    pub one_host: bool,
 }
 
 /// The relaxations that one selection pass permits.
@@ -207,6 +214,9 @@ pub struct Relax {
     pub bloc: bool,
     /// Two hops may share an autonomous system or a prefix (`NET-350`).
     pub network: bool,
+    /// Hop 1 and hop 3 may share an IPv4 address, thus one server, when no
+    /// other chain stands (`NET-351`).
+    pub host: bool,
 }
 
 impl Relax {
@@ -216,6 +226,7 @@ impl Relax {
         operator: false,
         bloc: false,
         network: false,
+        host: false,
     };
 }
 
@@ -265,12 +276,21 @@ pub fn check(
     if hop2_shares && !relax.hop2 {
         return Err(Error::NoPath);
     }
+    // NET-351: a server that runs hop 1 and hop 3 sees both ends of the
+    // circuit, thus such a chain is the last resort of a bootstrap network.
+    // Without the relaxation of NET-350, invariant 3 keeps two hops of one
+    // address apart already, by their prefix.
+    let one_host = hop1.v4.is_some() && hop1.v4 == hop3.v4;
+    if one_host && relax.network && !relax.host {
+        return Err(Error::NoPath);
+    }
     Ok(Chain {
         hops: [hop1.relay_id, hop2.relay_id, hop3.relay_id],
         relaxed: hop2_shares,
         one_operator,
         one_bloc: shares_ends,
         one_network,
+        one_host,
     })
 }
 
@@ -318,8 +338,12 @@ pub fn select_avoiding(
         network: true,
         ..bloc
     };
+    let host = Relax {
+        host: true,
+        ..network
+    };
     let levels: &[Relax] = if bootstrap {
-        &[strict, hop2, operator, both, bloc, network]
+        &[strict, hop2, operator, both, bloc, network, host]
     } else {
         &[strict, hop2]
     };
@@ -536,6 +560,7 @@ mod tests {
             asn: u32::from(id),
             v4_prefix: Some([id, 0]),
             v6_prefix: None,
+            v4: Some([id, 0, 0, 1]),
             ingress,
             chain: true,
             queue: true,
@@ -581,6 +606,21 @@ mod tests {
         abroad.bloc = BlocList::v1().bloc_of(b"CH");
         let first = select_avoiding(&ingress, &[hop2, hop3, abroad], &[], true).unwrap();
         assert!(!first.one_bloc);
+
+        // NET-351: an exit on the server of the entry relay serves only when
+        // no other exit does.
+        let mut beside = same_provider;
+        beside.relay_id = [8; 32];
+        beside.v4 = ingress.v4;
+        let first = select_avoiding(&ingress, &[hop2, beside, same_provider], &[], true).unwrap();
+        assert_eq!(first.hops[2], same_provider.relay_id);
+        assert!(!first.one_host);
+        let last = select_avoiding(&ingress, &[hop2, beside], &[], true).unwrap();
+        assert!(last.one_host);
+        assert_eq!(
+            select_avoiding(&ingress, &[hop2, beside], &[], false),
+            Err(Error::NoPath)
+        );
     }
 
     #[test]
@@ -660,7 +700,8 @@ mod tests {
                     hop2: false,
                     operator: false,
                     bloc: false,
-                    network: false
+                    network: false,
+                    host: false
                 }
             )
             .unwrap(),
@@ -670,6 +711,7 @@ mod tests {
                 one_operator: false,
                 one_bloc: false,
                 one_network: false,
+                one_host: false,
             }
         );
         // Wrong layer order, an ingress at hop 2, a shared ASN.
@@ -681,7 +723,8 @@ mod tests {
                 hop2: false,
                 operator: false,
                 bloc: false,
-                network: false
+                network: false,
+                host: false
             }
         )
         .is_err());
@@ -696,7 +739,8 @@ mod tests {
                 hop2: false,
                 operator: false,
                 bloc: false,
-                network: false
+                network: false,
+                host: false
             }
         )
         .is_err());
@@ -709,7 +753,8 @@ mod tests {
                 hop2: true,
                 operator: false,
                 bloc: false,
-                network: false
+                network: false,
+                host: false
             }
         )
         .is_err());
@@ -722,7 +767,8 @@ mod tests {
                 hop2: false,
                 operator: false,
                 bloc: false,
-                network: false
+                network: false,
+                host: false
             }
         )
         .is_err());
@@ -735,7 +781,8 @@ mod tests {
                     hop2: true,
                     operator: false,
                     bloc: false,
-                    network: false
+                    network: false,
+                    host: false
                 }
             )
             .unwrap()
@@ -761,7 +808,8 @@ mod tests {
                 hop2: false,
                 operator: false,
                 bloc: false,
-                network: false
+                network: false,
+                host: false
             }
         )
         .is_err());
@@ -774,7 +822,8 @@ mod tests {
                     hop2: false,
                     operator: true,
                     bloc: false,
-                    network: false
+                    network: false,
+                    host: false
                 }
             )
             .unwrap()
@@ -800,7 +849,8 @@ mod tests {
                 hop2: true,
                 operator: true,
                 bloc: false,
-                network: false
+                network: false,
+                host: false
             }
         )
         .is_err());

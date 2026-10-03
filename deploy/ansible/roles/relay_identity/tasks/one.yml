@@ -1,0 +1,81 @@
+# Phase 1 of one relay, `relay` of the loop in main.yml.
+- name: "The relay {{ relay.name }} is stated"
+  ansible.builtin.assert:
+    that:
+      - relay.name is match('^[a-z0-9-]+$')
+      - relay.role in ['entry', 'middle', 'exit']
+      - relay.class is defined and relay.class | int in [0, 1, 2, 3]
+      - relay.role != 'entry' or relay.class | int >= 1
+      # Phones reach an entry relay, and a network that lets out port 443
+      # alone still reaches it.
+      - relay.role != 'entry' or relay.port | int == 443
+    fail_msg: >-
+      Relay {{ relay.name }}: a name of a-z, 0-9 and -, a role of entry, middle
+      or exit, and a class of 0 to 3. An entry relay takes port 443 and class 1
+      or more.
+
+- name: "The directories of {{ relay.name }} are there"
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: umbra-relay
+    mode: "0750"
+  loop:
+    - { path: "/etc/umbra/relays/{{ relay.name }}", owner: root }
+    - { path: "/etc/umbra/relays/{{ relay.name }}/relay.d", owner: root }
+    - { path: "/var/lib/umbra-relay/{{ relay.name }}", owner: umbra-relay }
+
+# The identity seed and the static key never leave this server. A new
+# identity is a new relay to every client, thus the file stays across
+# each run and each reinstall of the binary. It takes its name only once
+# its two lines check.
+- name: "The identity of {{ relay.name }} is made one time"
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      umask 077
+      dir=/etc/umbra/relays/{{ relay.name }}/relay.d
+      tmp=$(mktemp "$dir/.secret.XXXXXX")
+      /usr/local/bin/umbra-relay keygen | grep -v '^#' > "$tmp"
+      grep -Eq '^identity_seed=[0-9a-f]{64}$' "$tmp"
+      grep -Eq '^static_secret=[0-9a-f]{64}$' "$tmp"
+      mv "$tmp" "$dir/20-secret.conf"
+    creates: "/etc/umbra/relays/{{ relay.name }}/relay.d/20-secret.conf"
+
+- name: "The public settings of {{ relay.name }} are there"
+  ansible.builtin.template:
+    src: relay-public.conf.j2
+    dest: "/etc/umbra/relays/{{ relay.name }}/relay.d/10-public.conf"
+    mode: "0644"
+  vars:
+    umbra_fqdn: "{{ inventory_hostname }}.{{ umbra_domain }}"
+    umbra_roles: >-
+      {{ 'chain,ingress' if relay.role == 'entry'
+         else 'queue,chain,attachment' if relay.role == 'exit'
+         else 'chain' }}
+  notify: Restart umbra-relay
+
+- name: "The settings file of {{ relay.name }} joins its two fragments"
+  ansible.builtin.assemble:
+    src: "/etc/umbra/relays/{{ relay.name }}/relay.d"
+    dest: "/etc/umbra/relays/{{ relay.name }}/relay.conf"
+    regexp: '^[0-9]+-.*\.conf$'
+    owner: root
+    group: umbra-relay
+    mode: "0640"
+  notify: Restart umbra-relay
+
+- name: "The descriptor of {{ relay.name }} is signed"
+  ansible.builtin.command:
+    cmd: >-
+      /usr/local/bin/umbra-relay sign-descriptor
+      /etc/umbra/relays/{{ relay.name }}/relay.conf
+      /var/lib/umbra-relay/{{ relay.name }}/relay.desc
+  changed_when: false
+
+- name: "The descriptor of {{ relay.name }} goes to this machine, for the signer"
+  ansible.builtin.fetch:
+    src: "/var/lib/umbra-relay/{{ relay.name }}/relay.desc"
+    dest: "{{ umbra_out }}/descriptors/{{ relay.name }}.desc"
+    flat: true

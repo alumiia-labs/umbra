@@ -1,12 +1,14 @@
-# Phase 1 of a relay: its identity, made here one time, and its signed
-# descriptor, which goes to the signer (Part 10 REL-047, REL-048).
-- name: The user and the directories of the relay are there
+# Phase 1 of each relay of this server: its identity, made here one time,
+# and its signed descriptor, which goes to the signer (Part 10 REL-047,
+# REL-048). One server can run several relays; `relays` in the inventory
+# names them.
+- name: The user and the directories of the relays are there
   ansible.builtin.include_role:
     name: common
     tasks_from: service_user
   vars:
     umbra_service: umbra-relay
-    umbra_fragments: relay.d
+    umbra_fragments: relays
 
 - name: The binary of the relay is there
   ansible.builtin.copy:
@@ -15,62 +17,17 @@
     mode: "0755"
   notify: Restart umbra-relay
 
-# The identity seed and the static key never leave this server. A new
-# identity is a new relay to every client, thus the file stays across
-# each run and each reinstall of the binary. It takes its name only once
-# its two lines check.
-- name: The identity of this relay is made one time
-  ansible.builtin.shell:
-    cmd: |
-      set -eu
-      umask 077
-      tmp=$(mktemp /etc/umbra/relay.d/.secret.XXXXXX)
-      /usr/local/bin/umbra-relay keygen | grep -v '^#' > "$tmp"
-      grep -Eq '^identity_seed=[0-9a-f]{64}$' "$tmp"
-      grep -Eq '^static_secret=[0-9a-f]{64}$' "$tmp"
-      mv "$tmp" /etc/umbra/relay.d/20-secret.conf
-    creates: /etc/umbra/relay.d/20-secret.conf
-
-- name: The role of this relay
-  ansible.builtin.set_fact:
-    umbra_fqdn: "{{ inventory_hostname }}.{{ umbra_domain }}"
-    umbra_roles: >-
-      {{ 'chain,ingress' if inventory_hostname in groups['entry']
-         else 'queue,chain,attachment' if inventory_hostname in groups['exit']
-         else 'chain' }}
-
-- name: The class of this relay is stated
+- name: The relays of this server are stated
   ansible.builtin.assert:
     that:
-      - class is defined
-      - class | int in [0, 1, 2, 3]
-      - inventory_hostname not in groups['entry'] or class | int >= 1
-    fail_msg: Give each relay a class of 0 to 3 in the inventory; an entry relay needs 1 or more.
+      - relays is defined
+      - relays | length > 0
+      - relays | map(attribute='port') | unique | length == relays | length
+    fail_msg: Give each relay server a list `relays`, each relay on a port of its own.
 
-- name: The public settings of the relay are there
-  ansible.builtin.template:
-    src: relay-public.conf.j2
-    dest: /etc/umbra/relay.d/10-public.conf
-    mode: "0644"
-  notify: Restart umbra-relay
-
-- name: The settings file joins the two fragments
-  ansible.builtin.assemble:
-    src: /etc/umbra/relay.d
-    dest: /etc/umbra/relay.conf
-    regexp: '^[0-9]+-.*\.conf$'
-    owner: root
-    group: umbra-relay
-    mode: "0640"
-  notify: Restart umbra-relay
-
-- name: The descriptor of this relay is signed
-  ansible.builtin.command:
-    cmd: /usr/local/bin/umbra-relay sign-descriptor /etc/umbra/relay.conf /var/lib/umbra-relay/relay.desc
-  changed_when: false
-
-- name: The descriptor goes to this machine, for the signer
-  ansible.builtin.fetch:
-    src: /var/lib/umbra-relay/relay.desc
-    dest: "{{ umbra_out }}/descriptors/{{ inventory_hostname }}.desc"
-    flat: true
+- name: Each relay of this server
+  ansible.builtin.include_tasks: one.yml
+  loop: "{{ relays }}"
+  loop_control:
+    loop_var: relay
+    label: "{{ relay.name }}"

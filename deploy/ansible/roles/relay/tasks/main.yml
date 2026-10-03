@@ -1,55 +1,16 @@
-# Phase 2 of a relay: the key set and the first manifest of the signer,
-# then the service. Later manifests arrive on their own from the signer
-# (the `manifest_from` line).
-# The relay walks the key chain of the signer itself (REL-200) and writes
-# the newer set here. A run that reached the signer hands it the newest
-# set; each run gives a relay with no set the one in build/.
-- name: The key set that this relay verifies each manifest under is there
-  ansible.builtin.copy:
-    src: "{{ umbra_out }}/keyset.bin"
-    dest: /var/lib/umbra-relay/keyset.bin
-    owner: umbra-relay
-    group: umbra-relay
-    mode: "0644"
-    force: "{{ hostvars[groups['signer'][0]].umbra_signed | default(false) }}"
-  notify: Restart umbra-relay
-
-# A root is valid for three hours, thus the relay takes the manifest that
-# the signer made in this same run. A run that did not reach the signer,
-# as one with --limit, leaves the manifest that the relay fetched itself.
-- name: The newest manifest is there
-  ansible.builtin.copy:
-    src: "{{ umbra_out }}/manifest"
-    dest: /var/lib/umbra-relay/manifest.bin
-    owner: umbra-relay
-    group: umbra-relay
-    mode: "0644"
-  when: hostvars[groups['signer'][0]].umbra_signed | default(false)
-
-- name: The service of the relay is there
+# Phase 2 of each relay of this server: the key set and the first manifest
+# of the signer, then the service. Later manifests arrive on their own from
+# the signer (the `manifest_from` line).
+- name: The service unit of the relays is there
   ansible.builtin.template:
-    src: umbra-relay.service.j2
-    dest: /etc/systemd/system/umbra-relay.service
+    src: umbra-relay@.service.j2
+    dest: /etc/systemd/system/umbra-relay@.service
     mode: "0644"
   notify: Restart umbra-relay
 
-- name: The relay runs
-  ansible.builtin.systemd:
-    name: umbra-relay
-    enabled: true
-    state: started
-    daemon_reload: true
-
-# A relay reads its next layer and its replicas at its start, thus a relay
-# set with a relay more or less takes a restart of each relay; the play
-# goes one relay at a time.
-- name: The relay takes a changed relay set
-  ansible.builtin.systemd:
-    name: umbra-relay
-    state: restarted
-  when: hostvars[groups['signer'][0]].umbra_relay_set.changed | default(false)
-
-- name: The relay answers on its port
-  ansible.builtin.wait_for:
-    port: 443
-    timeout: 30
+- name: Each relay of this server
+  ansible.builtin.include_tasks: one.yml
+  loop: "{{ relays }}"
+  loop_control:
+    loop_var: relay
+    label: "{{ relay.name }}"

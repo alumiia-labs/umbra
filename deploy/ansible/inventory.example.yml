@@ -1,49 +1,46 @@
-# The launch network: OVHcloud US, Debian, seven servers over two sites.
-# Copy this file to inventory.yml (which git ignores) and fill in the
+# The launch network: OVHcloud US, Debian, four servers over two sites.
+# Copy this file to inventory.yml (which git ignores), and put in the
 # addresses of the servers that OVH gave you.
 #
-# `class` is the capacity class the relay states under the provisional
-# directory (Part 10 §10.2): 0 = 100, 1 = 250, 2 = 500, 3 = 1000 Mbit/s,
-# in both directions. An entry relay needs class 1 or more. State only what
-# the plan of the server holds.
+# A server can run several relays. Each relay under `relays` has:
+#   name   a name of its own, used for its files and its service;
+#   role   entry, middle, or exit;
+#   port   443 for an entry relay, which phones reach, and another port
+#          (9443) for the second relay of a server;
+#   class  the capacity it states under the provisional directory (Part 10
+#          §10.2): 0 = 100, 1 = 250, 2 = 500, 3 = 1000 Mbit/s, in both
+#          directions. An entry relay needs 1 or more. When two relays share
+#          one server, state the share of each, not the whole link.
+#
+# OVH's Debian images log in as `debian`.
 all:
+  vars:
+    ansible_user: debian
   children:
-    entry:
+    relays:
       hosts:
-        entry-east:
+        east-1:
           ansible_host: 203.0.113.10   # Vint Hill, Virginia
-          class: 1
-        entry-west:
+          relays:
+            - { name: entry-east, role: entry, port: 443, class: 1 }
+            - { name: exit-1, role: exit, port: 9443, class: 1 }
+        east-2:
+          ansible_host: 203.0.113.11   # Vint Hill, Virginia
+          relays:
+            - { name: middle, role: middle, port: 443, class: 1 }
+            - { name: exit-3, role: exit, port: 9443, class: 1 }
+        west-1:
           ansible_host: 203.0.113.20   # Hillsboro, Oregon
-          class: 1
-    middle:
-      hosts:
-        middle-east:
-          ansible_host: 203.0.113.11   # Virginia
-          class: 0
-    exit:
-      hosts:
-        exit-east:
-          ansible_host: 203.0.113.12   # Virginia; runs the notification server
-          class: 0
-        exit-west-1:
-          ansible_host: 203.0.113.21   # Oregon; runs the handle directory
-          class: 0
-        exit-west-2:
-          ansible_host: 203.0.113.22   # Oregon
-          class: 0
+          relays:
+            - { name: entry-west, role: entry, port: 443, class: 1 }
+            - { name: exit-2, role: exit, port: 9443, class: 1 }
     ndr:
       hosts:
-        exit-east:
+        east-1:
     directory:
       hosts:
-        exit-west-1:
+        west-1:
     signer:
       hosts:
         signer-west:
-          ansible_host: 203.0.113.23   # Oregon; signs the relay list each hour
-    relays:
-      children:
-        entry:
-        middle:
-        exit:
+          ansible_host: 203.0.113.21   # Hillsboro, Oregon; signs the relay list each hour

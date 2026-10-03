@@ -932,6 +932,10 @@ fn relay_info(endpoint: &RelayEndpoint) -> Result<RelayInfo, FfiError> {
             asn: endpoint.asn,
             v4_prefix: Some(prefix.ok_or(FfiError::Malformed)?),
             v6_prefix,
+            // NET-351: two relays of one address run on one server.
+            v4: <[u8; 4]>::try_from(endpoint.ipv4.as_slice())
+                .ok()
+                .filter(|address| *address != [0; 4]),
             ingress: roles.ingress,
             chain: roles.chain,
             queue: roles.queue,

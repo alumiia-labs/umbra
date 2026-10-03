@@ -56,7 +56,7 @@
 - name: Phase 2 of each relay
   hosts: relays
   become: true
-  # One relay at a time, thus a restart of the relays leaves the others up.
+  # One server at a time, thus a restart of its relays leaves the others up.
   serial: 1
   roles:
     - relay

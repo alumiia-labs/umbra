@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 3: Network Architecture
 
 **Status:** Draft
-**Version:** 0.10.1-draft
+**Version:** 0.11.0-draft
 **Date:** 2026-10-02
 
 ---
@@ -1400,6 +1400,12 @@ and invariant 1 then holds no chain.
   three hops stay three relays. The route view names the country of each
   hop, and the note of `NET-343` names the one operator, thus the user sees
   the relaxation under `NET-201`.
+- Under the same state, one server can run several relays, each on a port of
+  its own. **[NET-351]** A client MUST NOT put hop 1 and hop 3 on one IPv4
+  address while a chain holds without it, after each relaxation of `NET-350`.
+  A server that runs both ends of a circuit links the address of the client
+  to its queues, and the operator of a provisional network runs every server
+  anyway; the rule keeps that link from one who breaks into one server.
 - **[NET-343]** A client MUST show the user each circuit whose chain holds two
   relays of one operator or of one family. That display makes the path visible
   under `NET-034`.

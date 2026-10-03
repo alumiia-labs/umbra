@@ -1,5 +1,3 @@
 - name: Restart umbra-relay
-  ansible.builtin.systemd:
-    name: umbra-relay
-    state: restarted
-    daemon_reload: true
+  ansible.builtin.shell:
+    cmd: systemctl daemon-reload && systemctl restart {{ relays | map(attribute='name') | map('regex_replace', '^(.*)$', 'umbra-relay@\1.service') | join(' ') }}

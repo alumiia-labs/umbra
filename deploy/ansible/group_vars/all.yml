@@ -1,7 +1,7 @@
 # The settings of the whole network. Fill in each value marked FILL.
 
 # The domain under which each server gets a name: <inventory name>.<domain>,
-# as entry-east.example.org. Point an A record at each server first.
+# as east-1.example.org. Point an A record at each server first.
 umbra_domain: example.org            # FILL
 
 # The address that Let's Encrypt writes to about the certificates.

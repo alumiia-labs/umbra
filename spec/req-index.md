@@ -68,7 +68,7 @@ column when a crate implements the requirement and a test covers it.
 | --- | --- | --- | --- | --- | --- | --- |
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
-| `NET` | 250 | 88 | 1 | 0 | 9 | **348** |
+| `NET` | 250 | 89 | 1 | 0 | 9 | **349** |
 | `IDN` | 134 | 46 | 1 | 0 | 5 | **186** |
 | `CRY` | 120 | 27 | 0 | 0 | 1 | **148** |
 | `WIR` | 398 | 85 | 0 | 0 | 7 | **490** |
@@ -81,7 +81,7 @@ column when a crate implements the requirement and a test covers it.
 | `ABU` | 72 | 30 | 1 | 0 | 0 | **103** |
 | `IMP` | 121 | 41 | 0 | 0 | 2 | **164** |
 | `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2085 | 628 | 7 | 0 | 56 | **2776** |
+| **All** | 2085 | 629 | 7 | 0 | 56 | **2777** |
 
 ## SCP — Scope and Conventions
 
@@ -487,6 +487,7 @@ Source: `spec/03-network-architecture.md`
 | `NET-348` | §3.2.6 | MUST | (unstated) | While no record of the contact has arrived on the new queue, the owner MUST send that record again at the start of each run and after each `ADDRESS_RESEND` of 6 hours: a run that ends before the record leaves loses it. |  |  |
 | `NET-349` | §3.5.2 | MUST | The relay | The relay MUST send such a drain in steps of at most 256 KiB for each circuit at each tick of its own fixed clock, and it MUST hold at most 40 MiB of drains for one circuit: one drain then fills no link that the circuits of other clients share, and the steps follow no arrival. |  |  |
 | `NET-350` | §3.4.6 | MUST | (unstated) | Under the same state, a client MAY put hop 1 and hop 3 in one bloc, and after that it MAY put two hops in one autonomous system or one prefix, each only when no chain holds without it, in that order. |  |  |
+| `NET-351` | §3.4.6 | MUST NOT | A client | A client MUST NOT put hop 1 and hop 3 on one IPv4 address while a chain holds without it, after each relaxation of `NET-350`. |  |  |
 
 ## IDN — Identity
 

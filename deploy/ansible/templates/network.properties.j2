@@ -1,10 +1,16 @@
 # Written by Ansible (deploy/ansible/site.yml). Public values alone.
-# The carriers of the manifest (Part 3 §3.10): the two entry relays, which
-# the app reaches anyway, and the signer.
-{% set carriers = groups['entry'] + groups['signer'] %}
+# The carriers of the manifest (Part 3 §3.10): the servers of the entry
+# relays, which the app reaches anyway on port 443, and the signer.
+{% set ns = namespace(entries=[]) %}
+{% for host in groups['relays'] %}
+{% if hostvars[host]['relays'] | selectattr('role', 'equalto', 'entry') | list %}
+{% set ns.entries = ns.entries + [host] %}
+{% endif %}
+{% endfor %}
+{% set carriers = ns.entries + groups['signer'] %}
 carriers={% for host in carriers %}{{ host }}.{{ umbra_domain }},{{ hostvars[host]['ansible_host'] }}{{ ';' if not loop.last else '' }}{% endfor %}
 
-{% set route = groups['entry'][0] %}
+{% set route = ns.entries[0] %}
 # NTF-127 and DIS-163: the app reaches the two gateways through the OHTTP
 # relay of an entry relay.
 ndr_relay=https://{{ route }}.{{ umbra_domain }}/ohttp,{{ hostvars[route]['ansible_host'] }}

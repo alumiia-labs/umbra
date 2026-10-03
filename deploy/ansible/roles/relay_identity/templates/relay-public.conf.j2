@@ -1,22 +1,23 @@
-# Written by Ansible (deploy/ansible/roles/relay_identity).
-listen=0.0.0.0:443
+# Written by Ansible (deploy/ansible/roles/relay_identity), for the relay
+# {{ relay.name }} of {{ inventory_hostname }}.
+listen=0.0.0.0:{{ relay.port }}
 cert=/etc/umbra/tls/cert.pem
 key=/etc/umbra/tls/key.pem
-store=/var/lib/umbra-relay/relay.db
+store=/var/lib/umbra-relay/{{ relay.name }}/relay.db
 chunk_capacity={{ umbra_chunk_capacity }}
-public={{ umbra_fqdn }},{{ ansible_host }},443
+public={{ umbra_fqdn }},{{ ansible_host }},{{ relay.port }}
 operator={{ umbra_operator }}
 country={{ umbra_country }}
 asn={{ umbra_asn }}
 family={{ umbra_family }}
-class={{ class }}
+class={{ relay.class }}
 roles={{ umbra_roles }}
-manifest=/var/lib/umbra-relay/manifest.bin
+manifest=/var/lib/umbra-relay/{{ relay.name }}/manifest.bin
 # A rotation of the key set (Part 10 REL-200) writes this file.
-keyset=/var/lib/umbra-relay/keyset.bin
+keyset=/var/lib/umbra-relay/{{ relay.name }}/keyset.bin
 {% set signer = groups['signer'][0] %}
 manifest_from={{ signer }}.{{ umbra_domain }},{{ hostvars[signer]['ansible_host'] }},443
-{% if inventory_hostname in groups['entry'] %}
+{% if relay.role == 'entry' %}
 {% set ndr_host = groups['ndr'][0] %}
 {% set directory_host = groups['directory'][0] %}
 # Part 8 §8.2 and Part 9 §9.12: this entry relay forwards the OHTTP
@@ -24,12 +25,18 @@ manifest_from={{ signer }}.{{ umbra_domain }},{{ hostvars[signer]['ansible_host'
 ohttp_gateway=https://{{ ndr_host }}.{{ umbra_domain }}:{{ umbra_service_port }}/gateway
 directory_gateway=https://{{ directory_host }}.{{ umbra_domain }}:{{ umbra_service_port }}/gateway
 {% endif %}
-{% if inventory_hostname in groups['exit'] %}
-{% set route_host = groups['entry'][0] %}
+{% if relay.role == 'exit' %}
+{% set ns = namespace(route=none) %}
+{% for host in groups['relays'] %}
+{% if ns.route is none and hostvars[host]['relays'] | selectattr('role', 'equalto', 'entry') | list %}
+{% set ns.route = host %}
+{% endif %}
+{% endfor %}
 # NTF-127: a queue relay pushes through the OHTTP relay of an entry relay,
-# and it takes the issuer keys through the same route (Part 13 §13.5).
-ndr_route=https://{{ route_host }}.{{ umbra_domain }}/ohttp
+# and it takes the issuer keys through the same route (Part 13 §13.5). The
+# entry relay answers on port 443.
+ndr_route=https://{{ ns.route }}.{{ umbra_domain }}/ohttp
 ndr_key_config={{ lookup('file', umbra_out + '/ndr-key-config.hex') | trim }}
-directory_route=https://{{ route_host }}.{{ umbra_domain }}/directory
+directory_route=https://{{ ns.route }}.{{ umbra_domain }}/directory
 directory_pins={{ lookup('file', umbra_out + '/directory-pins.hex') | trim }}
 {% endif %}

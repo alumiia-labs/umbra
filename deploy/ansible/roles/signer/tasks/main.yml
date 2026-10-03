@@ -49,7 +49,7 @@
     src: "{{ umbra_out }}/descriptors/{{ item }}.desc"
     dest: "/etc/umbra-signer/descriptors/{{ item }}.desc"
     mode: "0644"
-  loop: "{{ groups['relays'] }}"
+  loop: "{{ groups['relays'] | map('extract', hostvars, 'relays') | flatten | map(attribute='name') | list }}"
 
 # The relay lines change when a relay comes or goes, or a class changes;
 # phase 2 restarts each relay then (roles/relay).
