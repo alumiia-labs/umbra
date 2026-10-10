@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 14: Implementation Requirements and Assurance
 
 **Status:** Draft
-**Version:** 0.18.0
+**Version:** 0.18.1
 **Date:** 2026-10-10
 
 ---
@@ -353,7 +353,6 @@ release builds.
 - A canonical re-encode check runs on each parsed signature and on each parsed
   ciphertext.
 - Prefer a one-shot ML-KEM API over an incremental or stateful API.
-- The rule number `IMP-019` is retired, and no rule uses it.
 
 > Four of the thirteen reported vulnerabilities in libcrux were errors in the
 > specification or in the proof. Formal verification structurally cannot find
@@ -372,7 +371,6 @@ proof-lines for each implementation-line. At that rate, the verification of a
 protocol core is a commitment of multiple engineer-years. libcrux spent that
 effort and reached only 58.4 % checked coverage.
 
-The rule number `IMP-020` is retired, and no rule uses it.
 
 ## 14.6 Platform delivery
 
@@ -1317,7 +1315,7 @@ each one a form that holds, or it states the residual.
 
 **This is a trade, and Part 2 §2.4 requires the text to state it.** Each
 browser vendor operates the one store that its browser installs from, thus
-each vendor is a gatekeeper of the web client, and Part 15 §15.2.11 records
+each vendor is a gatekeeper of the web client, and Part 15 §15.2.9 records
 that. A user without the extension has no web client, and a link in a message
 does not give one.
 
@@ -1427,7 +1425,6 @@ the record construction of §14.6.4.
   the `wasm-unstable-single-threaded` feature of UniFFI stays off.
   **[IMP-113]** The `umbra-web` crate MUST NOT add more transitive crates than
   its row in §14.2.3.
-- The rule numbers `IMP-114` and `IMP-115` are retired, and no rule uses them.
 - **Constant time.** The browser compiles the WebAssembly binary, thus the
   source-level ban of §14.5.1 is the one control of the project. Part 15 §15.3
   holds the row.
@@ -1440,7 +1437,6 @@ that assumption. The release build pins its toolchain (§14.5.1) and holds
 `Cargo.lock`. No independent party rebuilds a release, and the project runs
 no binary transparency log. Part 15 §15.5 states the result.
 
-The rule numbers `IMP-032` and `IMP-033` are retired, and no rule uses them.
 
 ## 14.9 Degraded states and the interface
 

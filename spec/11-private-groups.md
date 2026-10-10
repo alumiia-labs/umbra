@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 11: Private Groups (2–500)
 
 **Status:** Draft
-**Version:** 0.18.0
+**Version:** 0.18.1
 **Date:** 2026-10-10
 
 ---
@@ -488,7 +488,6 @@ sealed before the add carries no tag for the joiner in its tag vector of
 chain, and it MUST hand no slot key before the oldest slot that the chain
 holds.
 
-The rule numbers `GRP-049`, `GRP-233` and `GRP-234` are retired, and no rule uses them.
 
 > *Cause.* A design that holds three sender-key generations for each member
 > on a device for 7 days lets a seized device open every record of every

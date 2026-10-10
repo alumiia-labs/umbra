@@ -1,4 +1,4 @@
-//! The wake rules at the client (Part 8 §8.3, §8.4.1, §8.4.3, §8.2.6): the
+//! The wake rules at the client (Part 8 §8.3, §8.4.1, §8.4.2, §8.2.6): the
 //! three modes and their carriers, the fixed clock of Private mode with
 //! its random phase, the bound of a push-wake session, and the drain of a
 //! rendezvous queue in each mode.

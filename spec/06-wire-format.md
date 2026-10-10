@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 6: Wire Format and Encoding
 
 **Status:** Draft
-**Version:** 0.18.0
+**Version:** 0.18.1
 **Date:** 2026-10-10
 
 ---
@@ -1895,7 +1895,7 @@ wait, the client MUST split them across two records.
 
 ### 6.6.2 The group record
 
-This section number is reserved. Kind `0x12` is reserved. A group
+Kind `0x12` is reserved. A group
 content record is the `app` of a `GroupQueueRecord` (§6.4.6), and it needs no
 wrapper because the queue names the group.
 
@@ -2484,7 +2484,6 @@ reject a `type` that is not `0x01`, `0x02`, or `0x03`.
 
 > *Cause.* A join that opens a pairwise channel to each member opens 499
 > channels at `GROUP_MAX`. The group queue of §6.4.5 needs none of them.
-> The rule identifiers `WIR-343` to `WIR-345` are retired.
 
 > *Cause.* Part 4 §4.2.2 gives each contact relation its own identity, and Part
 > 2 §2.3 goal G9 says that two contacts cannot show that they share a
@@ -3115,7 +3114,6 @@ part of `GroupQueueRecord`, the fixed fields of `ContentPlain`, or
 > *Cause.* A group record travels on a group queue only (§6.4.5), and the
 > relay knows the queue kind from the command. Thus a capacity of its own
 > for the group record tells the relay nothing more, and the table gives one.
-> The rule identifiers `WIR-305` to `WIR-307` are retired.
 
 **[WIR-103]** A client MUST compute the bucket from the capacity table. **[WIR-104]** A client MUST NOT put a
 message in a bucket that does not hold it. The capacity of this table is a

@@ -33,7 +33,7 @@ object WakeStore {
     /** The hash of the table of the last write, thus an equal table costs no seal. */
     private var written: ByteArray? = null
 
-    /** `NTF_FAIL_MAX` of Part 8 §8.4.3. */
+    /** `NTF_FAIL_MAX` of Part 8 §8.4.2. */
     private const val FAIL_MAX = 3
 
     private fun file(context: Context) = File(context.noBackupFilesDir, FILE)

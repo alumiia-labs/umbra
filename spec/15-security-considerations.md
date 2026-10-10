@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 15: Security Considerations and Known Limitations
 
 **Status:** Draft
-**Version:** 0.18.0
+**Version:** 0.18.1
 **Date:** 2026-10-10
 
 ---
@@ -56,7 +56,7 @@ project tracks it as one.**
 | **Google (FCM)** | The mapping from a device push token to an account. The wake times and the wake count. Each push has one form and one expiry (Part 8 rule `NTF-086`), thus not which wake is a group message. A client in Private mode or in Off mode holds no push token. A device with no FCM takes its wakes from the socket and the poll of Part 8 §8.4.1. Each gives Google nothing | The provider defines it | Which accounts have UMBRA installed in Instant mode under FCM, and at what times UMBRA woke them. **Treat this mapping as adversarial.** |
 | **Platform cloud services (backup and sync)** | No UMBRA data, under Part 14 §14.6.6. A file that the user saved to the media store, and a screenshot | The provider defines it | Part 2 §2.2 models this party as A7. The platform backup carries no container of the client, because `IMP-048` excludes it. A saved file is a user action, and `IMP-046` warns before the first one |
 | **Invitation host** | The time and the client address of each browser open of an invitation link, without the fragment | The project defines it | Part 4 §4.3.1. A device with the client opens no browser, thus the host sees an open by a party without the client only. The host cannot read the fragment, because a browser does not send it |
-| **App stores, and extension stores when the deferred web client ships** | The legal identity of the developer, the registration of the signing key, and then the listing of the web extension | Permanent | The power to remove or replace the application, or the extension, in a jurisdiction. Refer to §15.5 and §15.2.11. |
+| **App stores, and extension stores when the deferred web client ships** | The legal identity of the developer, the registration of the signing key, and then the listing of the web extension | Permanent | The power to remove or replace the application, or the extension, in a jurisdiction. Refer to §15.5 and §15.2.9. |
 | **Build infrastructure** | The release signing authority | Permanent | **The power to ship a malicious update.** This is the target with the highest value in the system. |
 
 ### 15.1.1 "We keep no logs" is not a defense
@@ -184,25 +184,14 @@ address does not give a list of the users of UMBRA (G8). Second, a client holds
 two pinned ingress relays (Part 10 §10.6.1). Thus the loss of one relay does not
 stop delivery (U6).
 
-### 15.2.8 Retired numbers
-
-Retired numbers of this part: §15.2.8, §15.2.10, and items 5 and 6 of §15.7.
-Each one is the number of a limit of a platform that this specification defers.
-Android is the v1 platform, and a deployment can operate its own NDR (Part 8
-§8.7). A retired number does not return.
-
-### 15.2.9 Multi-device history exposure
+### 15.2.8 Multi-device history exposure
 
 The seizure of one linked device exposes the synced history of that device (Part
 7 §7.2). Part 7 §7.2 accepts this trade for multi-device operation with
 history sync. The mitigations
 limit the exposure, and they do not remove it.
 
-### 15.2.10 Retired
-
-This number is retired, and §15.2.8 holds the list.
-
-### 15.2.11 Web distribution has one gatekeeper for each browser
+### 15.2.9 Web distribution has one gatekeeper for each browser
 
 v1 defers the web client (Part 1 §1.1), and this section holds when
 it ships. The web client of Part 14 §14.7 is a browser extension, and each
@@ -325,7 +314,7 @@ that browser. UMBRA accepts this residual, and §15.3 holds the row.
 | The bytes of a deleted record in the storage engine of the browser, until that engine compacts | A6, with the browser profile | Part 14 §14.7.4. `IMP-108` overwrites the salt and the ciphertext before the delete, and no rule of the engine bounds the compaction. UMBRA accepts this residual |
 | The passphrase rate of a web client, against a party that runs script inside the browser profile | A6, A7 | Part 14 §14.7.4. `IMP-106` binds the wrap to a non-extractable key, which stops a copied store and not a script in the profile. UMBRA accepts this residual |
 | The constant-time property of the web client, at the compiler of the browser | A6 | Part 14 §14.7.6. The source-level ban of Part 14 §14.5.1 holds at the source, and no test runs against the code that the browser executes. UMBRA accepts this residual |
-| The extension listing, at each browser vendor | The browser vendor | §15.2.11 and §15.5. No rule checks the listed bundle |
+| The extension listing, at each browser vendor | The browser vendor | §15.2.9 and §15.5. No rule checks the listed bundle |
 
 **[SEC-018]** A revision that adds a residual leak MUST add a row to this table.
 **[SEC-019]** A revision that removes a leak MUST remove its row in the same
@@ -338,7 +327,7 @@ commit. §15.8 makes this table a published promise.
 | Relay seizure and log correlation | Part 3 §3.2 — two unrelated queue IDs, and a key set for each queue |
 | A join of the sender and the recipient across two relays | Part 3 §3.4.6 — operator, jurisdiction, and ASN disjointness, enforced in code |
 | Latency-injection correlation (ToB #7, not corrected upstream) | Part 3 §3.5.3 — a randomized delivery delay, with named distributions |
-| A message-existence oracle from the packet counts (ToB #2) | Part 8 §8.4.3 — a fetch response with a constant size and a constant count |
+| A message-existence oracle from the packet counts (ToB #2) | Part 8 §8.4.2 — a fetch response with a constant size and a constant count |
 | Compulsion of a TLS key (Lavabit) | Part 5 §5.4.9 and Part 3 §3.4.4 — the circuit handshake at each hop and the onion layers sit below TLS. Thus a TLS key of a relay opens the cells of its links and no layer. The key set of a circuit lives at most `CIRCUIT_MAX_AGE`. The `identity_pk` and the `ntor_pk` of a relay have no stated lifetime in v1, and `relay_id` is the hash of `identity_pk`. Thus a compelled static key of a relay lets its holder act as that relay from then on |
 | Deanonymization of a sealed sender through delivery receipts | Part 3 §3.5.4 — a receipt is an ordinary padded message, and it is off by default. A receipt rides a cover slot, and it replaces the cover cell of that slot |
 | Bandwidth inflation (177×, 420×, 28×) | Part 10 §10.2 — discrete classes limit it to 2.5× in one 7-day epoch and to 10× over the ladder |
@@ -371,7 +360,6 @@ proof for an update, and no independent party rebuilds a release. Trust
 assumption 4 of Part 2 §2.6 thus rests on the release signer and on the
 store. §15.1 holds the row of the app stores.
 
-The rule numbers `SEC-005` to `SEC-011`, `SEC-020`, and `SEC-021` are retired, and no rule uses them.
 
 ## 15.6 Legal and governance requirements
 
@@ -385,7 +373,6 @@ technical capability notice, and in Australia under TOLA. No rule of this
 part makes a modified release impossible, and §15.5 states that v1 does not
 make it detectable.
 
-The rule numbers `SEC-012` to `SEC-014` are retired, and no rule uses them.
 
 ### 15.6.1 Funding
 
@@ -417,9 +404,7 @@ have no open problem is not finished. Such a specification is unexamined.
    in part on a *behavioral* rule. A relay can disobey that rule silently, and a
    client cannot detect that. UMBRA inherits this problem from SimpleX, and the
    problem has no solution today.
-5. Retired (§15.2.8).
-6. Retired (§15.2.8).
-7. **Signature monoculture.** ML-DSA-65 alone signs the long-lived objects that
+5. **Signature monoculture.** ML-DSA-65 alone signs the long-lived objects that
    a third party verifies. Those objects are the directory roots and the
    transparency tree heads. A lattice break
    permits a retroactive rewrite of the archived state.
@@ -428,10 +413,10 @@ have no open problem is not finished. Such a specification is unexamined.
    in the message core this is one point of cryptanalytic failure. UMBRA
    accepts that risk to keep the set of signed-object primitives minimal (Part 5
    §5.1).
-8. **Formal analysis.** No peer-reviewed analysis of SimpleX exists. Thus UMBRA
+6. **Formal analysis.** No peer-reviewed analysis of SimpleX exists. Thus UMBRA
    inherits no assurance from its closest reference system. No formal
    analysis of the handshake, the ratchet, or the group key schedule of UMBRA
-   exists. The rule number `SEC-015` is retired, and no rule uses it.
+   exists.
 
 ## 15.8 A standing instruction
 

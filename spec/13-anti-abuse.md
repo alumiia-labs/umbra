@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 13: Anti-Abuse Without Identifiers
 
 **Status:** Draft
-**Version:** 0.18.0
+**Version:** 0.18.1
 **Date:** 2026-10-10
 
 ---
@@ -273,7 +273,6 @@ and an Issuer shows which Origins a client visits.
 >
 > This part uses no ARC credential, and kind `0x02` of the `Admission` is
 > reserved.
-> The rule numbers `ABU-050` to `ABU-055` are retired, and no rule uses them.
 
 ## 13.5 Key transparency for issuers — mandatory
 
@@ -618,7 +617,6 @@ A batch of 256 tokens costs about 7 minutes of a phone under that rule. Thus a
 token that a user buys with time costs what the puzzle of one relay costs at
 its maximum. Path 3 does not undercut the valve of §13.8.
 
-- The rule numbers `ABU-090` and `ABU-091` are retired, and no rule uses them.
 
 This method gives the same unlinkability between the payer and the traffic as
 Chaumian ecash. It also gives **no custody, no token economics, and no

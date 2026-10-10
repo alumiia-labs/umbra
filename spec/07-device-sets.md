@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 7: Device Sets, History Sync, and Revocation
 
 **Status:** Draft
-**Version:** 0.18.0
+**Version:** 0.18.1
 **Date:** 2026-10-10
 
 ---
@@ -142,7 +142,7 @@ DeviceEntry {
 }
 
 OwnerClaim {
-    scope          u8           // 0x01 a pairwise identity, 0x02 retired,
+    scope          u8           // 0x01 a pairwise identity, 0x02 reserved,
                                 // 0x03 each subject of an absent device,
                                 // 0x04 the group sender owner
     subject        [32]u8       // a blinded subject, see below
@@ -938,7 +938,7 @@ class in Part 6 §6.6. **[DEV-022]** A client MUST NOT process a kind that decla
 | Mutable state | `0x20` sub-kind `0x01` | The last writer wins, under `DEV-270` |
 | Ephemeral | `0x08` | The client does not store it |
 | Control | `0x0D`, `0x10`, `0x20` sub-kind `0x02`, `0x30`, `0x31`, `0x32`, `0x33`, `0x34`, `0x35`, `0x38` | Part 4 §4.7.3 gives `0x0D`. Part 11 gives `0x10`. §7.5.5 gives `0x20` sub-kind `0x02`, which is the sync acknowledgment. Part 4 §4.5.1 gives `0x30`. Part 9 §9.5.3 gives `0x31`. §7.5.8 gives `0x32`. Part 6 §6.6.10 gives `0x33`. Part 6 §6.6.11 gives `0x34` and `0x35`. Part 6 §6.6.12 gives `0x38` |
-| Wrapper | `0x09`, and `0x20` sub-kind `0x03` | Part 6 §6.6.5 gives the rich record, and `DEV-268` gives the synced record. Kind `0x12` of Part 6 §6.6.2 is retired; a group content record is the `app` of a group record of Part 11 §11.3, and its own kind gives its class. **[DEV-174]** A client MUST take the class from `inner_kind`. **[DEV-175]** A client MUST NOT give a wrapper a class of its own |
+| Wrapper | `0x09`, and `0x20` sub-kind `0x03` | Part 6 §6.6.5 gives the rich record, and `DEV-268` gives the synced record. Kind `0x12` of Part 6 §6.6.2 is reserved; a group content record is the `app` of a group record of Part 11 §11.3, and its own kind gives its class. **[DEV-174]** A client MUST take the class from `inner_kind`. **[DEV-175]** A client MUST NOT give a wrapper a class of its own |
 
 - **Insertion** is commutative. **[DEV-024]** A client MUST identify each message by the
   triple (conversation, sender, `msg_ref`) of Part 6 §6.6. **[DEV-025]** A client MUST remove
@@ -2166,7 +2166,7 @@ MUST remove each other device under §7.7 before the reset.
 | `SYNC_ACK_MAX_DELAY` | 6 h |
 | Roster epoch rate limit | 1 in 10 s for each device |
 | `OWNER_CLAIM_MAX` | 8 claims in one roster epoch or in one claim record (§7.3.1) |
-| `OWNER_CLAIM_RATE` | 4 claim records of scope `0x01` or `0x04` for each device each day (§7.3.1). Scope `0x02` is retired |
+| `OWNER_CLAIM_RATE` | 4 claim records of scope `0x01` or `0x04` for each device each day (§7.3.1). Scope `0x02` is reserved |
 | `OWNER_ABSENCE` | 24 h, measured by the claimant from the last record it took from the absent device (§7.3.1). `DRAIN_QUIET` of Part 3 §3.2.6 is the time that the session of the claimant reads the sync channel first (`DEV-315`) |
 | `OWNER_ABSENCE_RATE` | 1 roster epoch with a claim of scope `0x03` for each device each hour (§7.3.1) |
 | `SYNC_INTERACTIVE_RATE` | 4 interactive sync records each minute, as the refill rate of the bucket (§7.5.1) |

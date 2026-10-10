@@ -1,4 +1,4 @@
-//! The push scheduler of a queue relay (Part 8 §8.4.3, §8.5): the
+//! The push scheduler of a queue relay (Part 8 §8.4.2, §8.5): the
 //! coalescing window for each handle, the expiry of a push, and the
 //! re-push when no drain follows.
 

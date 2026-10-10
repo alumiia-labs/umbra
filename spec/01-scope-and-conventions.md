@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 1: Scope, Conventions, and Terminology
 
 **Status:** Draft
-**Version:** 0.18.0
+**Version:** 0.18.1
 **Date:** 2026-10-10
 
 ---
@@ -370,7 +370,7 @@ examples. Without the table below a maintainer finds the dependents by hand.
 | `SEND_MAX_ATTEMPTS`, `SEND_GIVE_UP` | Part 3 §3.7 | Part 14 §14.9 |
 | `RELAY_LOOP_RATE` | Part 3 §3.6.3 | none |
 | `NTF_FAIL_MAX` | Part 8 §8.2.3 | Part 14 §14.9.2 |
-| `PUSH_TTL_MESSAGE`, `PUSH_TTL_DIGEST`, `REPUSH_INTERVAL`, `REPUSH_MAX` | Part 8 §8.4.3 | Part 2 §2.4 |
+| `PUSH_TTL_MESSAGE`, `PUSH_TTL_DIGEST`, `REPUSH_INTERVAL`, `REPUSH_MAX` | Part 8 §8.4.2 | Part 2 §2.4 |
 | `NDR_REQUEST_LEN`, `PUSH_TOKEN_MAX` | Part 8 §8.2.7 | |
 | `POW_LOOKUP_FLOOR` | Part 13 §13.13 | Part 9 §9.4.1 |
 | `POW_CHUNK_FLOOR`, `POW_CHUNK_ALLOWANCE` | Part 13 §13.13 | Part 12 §12.10 |

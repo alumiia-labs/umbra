@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 2: Threat Model and Security Goals
 
 **Status:** Draft
-**Version:** 0.18.0
+**Version:** 0.18.1
 **Date:** 2026-10-10
 
 ---
@@ -403,7 +403,7 @@ adds a trade MUST add a row to this table.
 | The manual verification is a six-digit code, thus an active adversary at the first contact passes one ceremony in 10⁶ | Part 4 §4.5.2 |
 | A delivery receipt and a read receipt are off by default. Thus a sender does not learn that a record arrived unless the peer opts in | Part 3 §3.5.4 |
 | A typing indicator is off by default, thus a peer does not learn that a user composes unless that user opts in | Part 6 §6.6.9 |
-| Each push lives 24 hours at the provider, a digest push too. Thus a seizure there exposes one day of 69-byte blobs in place of one hour. Thus the provider cannot tell a group wake from a pairwise wake by the expiry | Part 8 §8.4.3 |
+| Each push lives 24 hours at the provider, a digest push too. Thus a seizure there exposes one day of 69-byte blobs in place of one hour. Thus the provider cannot tell a group wake from a pairwise wake by the expiry | Part 8 §8.4.2 |
 | A device that fails three consecutive blob opens shows a clock state. Thus a wrong clock is visible, and a preview stops until the root is fresh | Part 8 §8.2.3, Part 14 §14.9.2 |
 | A client takes its time from the signed directory root. Thus a device clock that is wrong by more than one hour stops nothing, and the client shows one line for it | Part 10 §10.5.2, Part 14 §14.9.2 |
 | A sender re-encodes each media object and removes its metadata fields. Thus a recipient gets a smaller file with no location, and the original needs one selection for each send | Part 12 §12.3 |
@@ -429,7 +429,7 @@ those rules has to check the goal again.
 | --- | --- | --- |
 | U1 | Part 3 §3.10 carriers, Part 4 §4.2.5 `IDN-015`, Part 4 §4.7.6 `IDN-054`, Part 13 §13.2.1 | A scripted first launch on a mid-tier Android device on 4G |
 | U2 | Part 3 §3.9 modes, Part 3 §3.5.2 pacing, Part 7 §7.5.1 `DEV-193`, Part 7 §7.5.4 | A two-party send, from the ratchet owner and from a peer device |
-| U3 | Part 8 §8.3 modes, Part 8 §8.4.1, Part 8 §8.4.3 | A locked and idle device, in Instant mode and in Private mode |
+| U3 | Part 8 §8.3 modes, Part 8 §8.4.1, Part 8 §8.4.2 | A locked and idle device, in Instant mode and in Private mode |
 | U4 | Part 3 §3.12 idle table, Part 3 §3.6.2 tier C, Part 3 §3.12 `NET-096` and `NET-097` and `NET-099` and `NET-100`, Part 4 §4.7.2 `IDN-080`, Part 6 §6.2.3 `WIR-361`, Part 8 §8.5 `WAKE_COALESCE_WINDOW` | A 24 h idle capture of the background bytes, in Instant mode, with the arrival count of the model day |
 | U4b | Part 3 §3.12 idle table and its Private notifications paragraph, Part 8 §8.3 modes | No target in v1. A 24 h idle capture of the background bytes at each cadence of Private mode reports the figure |
 | U5 | Part 3 §3.12 battery, Part 8 §8.4.1, Part 8 §8.8 | A 24 h idle run with no arrival, and a run with a scripted arrival count, on stock Android **and** GrapheneOS, with a power monitor |

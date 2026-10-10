@@ -23,6 +23,8 @@ changes a requirement in `spec/`.
 
 - A new requirement takes the next free number in its part.
 - A retired number does not return. A later requirement does not reuse it.
+  A number below the highest number of its part that has no row in this
+  index is retired.
 - The numbers in each part rise in document order. A revision that adds a
   requirement to an earlier section takes the next free number, thus a number
   can be out of document order after a revision.
@@ -1696,7 +1698,7 @@ Source: `spec/08-notifications.md`
 | `NTF-012` | §8.4.1 | MUST NOT | A client | A client MUST NOT hold the push-wake session longer than 6 s. |  |  |
 | `NTF-013` | §8.4.1 | MUST NOT | A client | A client MUST NOT build a spare circuit in a push-wake session. |  |  |
 | `NTF-014` | §8.4.1 | MUST | A high-priority FCM message | A high-priority FCM message MUST always cause a notification that the user can see. |  |  |
-| `NTF-017` | §8.4.3 | MUST | (unstated) | The response path for a message fetch MUST carry padding to a constant number of fixed cells. |  |  |
+| `NTF-017` | §8.4.2 | MUST | (unstated) | The response path for a message fetch MUST carry padding to a constant number of fixed cells. |  |  |
 | `NTF-018` | §8.5 | MUST NOT | A group above `GROUP_ALL_NOTIFY_MAX` members | A group above `GROUP_ALL_NOTIFY_MAX` members MUST NOT make one alert for each record at the device. |  |  |
 | `NTF-019` | §8.5 | MUST | A queue relay | A queue relay MUST apply the window to each handle, whatever the class of the conversation behind it. |  |  |
 | `NTF-027` | §8.7 | MUST | This text is normative, and it | This text is normative, and it MUST appear in the security documentation that the user reads: |  |  |
@@ -1723,10 +1725,10 @@ Source: `spec/08-notifications.md`
 | `NTF-051` | §8.5 | MUST | An implementation | An implementation MUST measure the coalesced share in a real deployment before a revision re-tunes the window. |  |  |
 | `NTF-052` | §8.3 | MUST | A client in Private mode | A client in Private mode MUST draw the phase of its fixed clock from the CSPRNG at each network change. |  |  |
 | `NTF-053` | §8.3 | MUST | The client | The client MUST draw it again at each change of its ingress relay pair. |  |  |
-| `NTF-065` | §8.4.3 | MUST | A queue relay | A queue relay MUST set the push expiry to `PUSH_TTL_MESSAGE` for a message push. |  |  |
-| `NTF-066` | §8.4.3 | MUST | (unstated) | If no drain of a handle follows a push inside `REPUSH_INTERVAL`, the queue relay MUST hand one more push. |  |  |
-| `NTF-067` | §8.4.3 | MUST NOT | A queue relay | A queue relay MUST NOT hand more than `REPUSH_MAX` re-pushes for one message. |  |  |
-| `NTF-068` | §8.4.3 | MUST | (unstated) | At each session open, and at each session resume, a client MUST run the peek of Part 3 §3.7 item 4 on each queue of that session. |  |  |
+| `NTF-065` | §8.4.2 | MUST | A queue relay | A queue relay MUST set the push expiry to `PUSH_TTL_MESSAGE` for a message push. |  |  |
+| `NTF-066` | §8.4.2 | MUST | (unstated) | If no drain of a handle follows a push inside `REPUSH_INTERVAL`, the queue relay MUST hand one more push. |  |  |
+| `NTF-067` | §8.4.2 | MUST NOT | A queue relay | A queue relay MUST NOT hand more than `REPUSH_MAX` re-pushes for one message. |  |  |
+| `NTF-068` | §8.4.2 | MUST | (unstated) | At each session open, and at each session resume, a client MUST run the peek of Part 3 §3.7 item 4 on each queue of that session. |  |  |
 | `NTF-075` | §8.2.3 | MUST | A receiver | A receiver MUST accept a blob whose `epoch` is inside the window. |  |  |
 | `NTF-076` | §8.2.3 | MUST | A receiver | A receiver MUST reject a blob outside that window without an AEAD open. |  |  |
 | `NTF-077` | §8.2.3 | MUST | A receiver | A receiver MUST count the consecutive failed opens of blobs inside the window. |  |  |
@@ -1737,7 +1739,7 @@ Source: `spec/08-notifications.md`
 | `NTF-082` | §8.3 | MUST | The settings | The settings MUST offer the high-risk configuration, which is Private notifications with the content preview off: one screen holds the two controls, and a shortcut that sets both adds nothing that the user cannot do. |  |  |
 | `NTF-083` | §8.3 | MUST | A build | A build MUST ship Instant mode with the content preview off as the default of each Profile. |  |  |
 | `NTF-084` | §8.2.3 | MUST | The client | The client MUST then establish `k_ntf_root` again at the next foreground session. |  |  |
-| `NTF-086` | §8.4.3 | MUST | A queue relay | A queue relay MUST set the same `PUSH_TTL_MESSAGE` for a digest push. |  |  |
+| `NTF-086` | §8.4.2 | MUST | A queue relay | A queue relay MUST set the same `PUSH_TTL_MESSAGE` for a digest push. |  |  |
 | `NTF-087` | §8.3 | MUST | An implementation | An implementation MUST measure the wake cost of the fixed clock on a mid-range Android device, with a power monitor, before a revision re-tunes the cadence of Private mode. |  |  |
 | `NTF-088` | §8.4.1 | MUST NOT | A party that dispatches a push | A party that dispatches a push MUST NOT set a collapse key on a message push. |  |  |
 | `NTF-089` | §8.4.1 | MUST | An Android client | An Android client MUST group the tray by the conversation of `queue_alias` after the AEAD open, with a notification group of the platform. |  |  |

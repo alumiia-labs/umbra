@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 8: Notifications and Mobile Delivery
 
 **Status:** Draft
-**Version:** 0.18.0
+**Version:** 0.18.1
 **Date:** 2026-10-10
 
 ---
@@ -713,14 +713,7 @@ settings. v1 does not ask for that permission.
 > specification that says differently gives an application that does not deliver
 > messages.
 
-### 8.4.2 Retired numbers
-
-This part holds these retired numbers: §8.4.2 and §8.7.1, and the
-retired rules `NTF-020` to `NTF-025`. iOS is outside the v1 scope under
-Part 14 §14.6.3. Rule `NTF-017` is in §8.4.3. A retired number does not
-return.
-
-### 8.4.3 Padding, expiry, the re-push, and the peek
+### 8.4.2 Padding, expiry, the re-push, and the peek
 
 **Padding requirement.** **[NTF-017]** The response path for a message fetch
 MUST carry padding to a constant number of fixed cells. This rule applies for
@@ -751,7 +744,6 @@ platform.
 | Parameter | Value |
 | --- | --- |
 | `PUSH_TTL_MESSAGE` | 86 400 s. The provider measures it from the hand-off |
-| `PUSH_TTL_DIGEST` | Retired. `NTF-086` gives each push `PUSH_TTL_MESSAGE` |
 | `REPUSH_INTERVAL` | 1 h. The queue relay measures it from the hand-off of the previous push for that handle |
 | `REPUSH_MAX` | 3 re-pushes for one message |
 
@@ -948,10 +940,6 @@ from its live session, and it MUST show an alert through the notification API
 of the browser while the browser runs. The phone of the user carries the
 notification of the device set at each other time, under §8.4.1.
 
-Rules `NTF-020` to `NTF-025` are retired. They bound a Web
-Push path of a hosted page that Part 14 §14.7 does not ship, and a retired
-number does not return.
-
 > *Cause.* Web Push needs a push service that the browser vendor operates, and
 > a subscription there is a durable identifier at a party that Part 15 §15.1
 > would have to list. A linked device with an open socket needs no such party,
@@ -987,7 +975,6 @@ the user reads:
 - **[NTF-029]** The client MUST take the route to the NDR from the pin of its
   build (`NTF-127`) and from no relay. Thus the NDR does not follow the relays
   that the user chose, and a relay cannot point the client at another NDR.
-- The rule numbers `NTF-028` and `NTF-030` are retired, and no rule uses them.
 - **[NTF-109]** A deployment MAY operate its own Notification Delivery Relay.
   The NDR of the project is one such deployment, and a self-hosted build that
   operates no NDR points at it.
@@ -1006,11 +993,6 @@ the user reads:
 > project, thus a deployment can operate the full notification path. The NDR stays a separate trust role with its own
 > attestation track, and Part 10 §10.10 gives the cause that keeps it out of
 > the relay reputation.
-
-### 8.7.1 Retired
-
-This section is retired, and §8.4.2 lists the retired numbers of this part.
-`NTF-109` of §8.7 lets a deployment operate its own NDR.
 
 ## 8.8 Estimated cost
 
