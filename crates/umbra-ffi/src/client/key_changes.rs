@@ -153,6 +153,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         batch.put(TableId::CONTACT, conversation.0, None, &changed, rng)?;
         batch.delete(KEY_CHANGES, conversation.0);
         batch.commit()?;
+        // DEV-319: each other device of the set takes the new key.
+        let _ = self.publish_channel_entry(conversation, rng);
         self.events.push_back(Event::Conversations);
         Ok((ContactId(contact), key))
     }

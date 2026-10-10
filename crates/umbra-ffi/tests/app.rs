@@ -3591,8 +3591,9 @@ fn a_linked_device_reads_and_writes_a_group() {
 }
 
 /// DEV-314 to DEV-316: the phone that owns the channels is lost. The laptop
-/// takes the set over after `OWNER_ABSENCE`, renews the channel of the
-/// contact, and the two talk again with no key change.
+/// takes the set over after `OWNER_ABSENCE`, renews the channel of each
+/// contact, and they talk again with no key change. DEV-319: one contact
+/// came after the link of the laptop.
 #[test]
 fn a_linked_device_takes_over_the_set_of_a_lost_phone_and_its_contact_talks_on() {
     let _turn = DEVICE_TESTS
@@ -3645,6 +3646,27 @@ fn a_linked_device_takes_over_the_set_of_a_lost_phone_and_its_contact_talks_on()
         std::thread::sleep(Duration::from_millis(200));
     }
 
+    // DEV-319: Carol becomes a contact of Alice after the link. The laptop
+    // takes the conversation, and what a renewal of its channel needs.
+    let carol = launch(&directory, "carol.db", 4);
+    carol.clone().connect(network_for(&carol)).unwrap();
+    alice.invite().unwrap();
+    let link = wait_for(&alice, |event| match event {
+        FfiEvent::Invitation { link } => Some(link),
+        _ => None,
+    });
+    carol.accept(link).unwrap();
+    let with_carol = wait_for_contact(&alice);
+    let carol_conversation = wait_for_contact(&carol);
+    tick_until(
+        &[&alice, &laptop],
+        || {
+            let count = laptop.take_over_count().unwrap();
+            count.contacts == 2 && count.unreachable == 0
+        },
+        "the laptop did not take the channel of Carol",
+    );
+
     // The phone is lost.
     alice.disconnect();
 
@@ -3664,7 +3686,7 @@ fn a_linked_device_takes_over_the_set_of_a_lost_phone_and_its_contact_talks_on()
     assert!(laptop.can_take_over().unwrap());
     // DEV-235: what the phone owns.
     let count = laptop.take_over_count().unwrap();
-    assert_eq!((count.contacts, count.groups, count.unreachable), (1, 0, 0));
+    assert_eq!((count.contacts, count.groups, count.unreachable), (2, 0, 0));
     laptop.take_over(code.clone()).unwrap();
     // DEV-316: the new recovery code, as digits of type 0x0001.
     let digits = code.0.lock().unwrap().clone();
@@ -3718,6 +3740,35 @@ fn a_linked_device_takes_over_the_set_of_a_lost_phone_and_its_contact_talks_on()
     // change and no prompt.
     assert!(bob.key_change(bob_conversation.clone()).unwrap().is_none());
 
+    // DEV-319: the laptop never held the channel of Carol. It renews that
+    // channel from the item of the phone, and the two talk.
+    let draft = laptop.new_draft(with_carol.clone()).unwrap();
+    draft.set_text(units("carol, this is the laptop")).unwrap();
+    laptop.send_draft(draft).unwrap();
+    let start = Instant::now();
+    while !holds_text(&carol, &carol_conversation, "carol, this is the laptop") {
+        assert!(
+            start.elapsed() < Duration::from_secs(120),
+            "Carol did not read the record of the laptop"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let draft = carol.new_draft(carol_conversation.clone()).unwrap();
+    draft.set_text(units("hello laptop")).unwrap();
+    carol.send_draft(draft).unwrap();
+    let start = Instant::now();
+    while !holds_text(&laptop, &with_carol, "hello laptop") {
+        assert!(
+            start.elapsed() < Duration::from_secs(120),
+            "the laptop did not read the record of Carol"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert!(carol
+        .key_change(carol_conversation.clone())
+        .unwrap()
+        .is_none());
+
     // The channel carries more records in each direction.
     let draft = bob.new_draft(bob_conversation.clone()).unwrap();
     draft.set_text(units("good to read you")).unwrap();
@@ -3743,7 +3794,7 @@ fn a_linked_device_takes_over_the_set_of_a_lost_phone_and_its_contact_talks_on()
     );
     assert_eq!(alice.invite().err(), Some(FfiError::NotFound));
     assert_eq!(alice.devices().unwrap().len(), 2);
-    for handle in [&alice, &laptop, &bob] {
+    for handle in [&alice, &laptop, &bob, &carol] {
         handle.disconnect();
     }
     let _ = std::fs::remove_dir_all(&directory);

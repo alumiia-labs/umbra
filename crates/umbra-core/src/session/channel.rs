@@ -122,6 +122,15 @@ impl Outbound {
         writer.bytes(&self.relay_id);
     }
 
+    /// The end from the stored form that [`PairwiseChannel::stored_outbound`]
+    /// gives.
+    pub(crate) fn from_stored(bytes: &[u8]) -> Result<Self, Error> {
+        let mut reader = Reader::new(bytes);
+        let outbound = Outbound::restore(&mut reader)?;
+        reader.end()?;
+        Ok(outbound)
+    }
+
     pub(crate) fn restore(reader: &mut Reader<'_>) -> Result<Self, Error> {
         Ok(Outbound {
             sender_id: reader.array()?,
@@ -610,6 +619,19 @@ impl PairwiseChannel {
             previous,
             opened: alloc::collections::VecDeque::new(),
         })
+    }
+
+    /// The writer side of the queue of the peer in a stored channel, in
+    /// its stored form. It holds no ratchet and no queue of this device.
+    pub fn stored_outbound(bytes: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error> {
+        let mut reader = Reader::new(bytes);
+        if !matches!(reader.u8()?, 0x01 | STORED_VERSION) {
+            return Err(Error::Malformed);
+        }
+        let outbound = Outbound::restore(&mut reader)?;
+        let mut writer = Writer::new();
+        outbound.export(&mut writer);
+        Ok(writer.finish())
     }
 
     /// A channel over a ratchet that the handshake of Part 5 §5.4 made.

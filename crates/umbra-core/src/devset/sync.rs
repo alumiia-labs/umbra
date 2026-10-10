@@ -9,7 +9,7 @@
 
 use alloc::{collections::BTreeMap, vec::Vec};
 
-use umbra_crypto::stored;
+use umbra_crypto::{stored, zeroize::Zeroizing};
 use umbra_wire::codec::{Reader, Writer};
 
 use super::{
@@ -132,6 +132,14 @@ pub const ITEM_GROUP_STATE: u8 = 14;
 /// The item of the re-key of the member in a group: the new seed and the
 /// re-key object (`DEV-300`).
 pub const ITEM_GROUP_REKEY: u8 = 15;
+/// The item of the channel of a contact: the pairwise key of the peer and
+/// the writer side of its queue (`DEV-319`), under the subject of the
+/// contact.
+pub const ITEM_CHANNEL: u8 = 16;
+/// The length of the writer side of a queue in [`ChannelEntry`]: the
+/// `SenderId`, the `QS_auth` private key, the queue end-to-end key, and the
+/// `relay_id`.
+pub const CHANNEL_END_LEN: usize = 128;
 
 /// An entry of the local identity table for a pairwise identity, the value
 /// of [`ITEM_IDENTITY_ENTRY`] under the subject of that identity
@@ -167,6 +175,52 @@ impl IdentityEntry {
         };
         r.finish()?;
         Ok(entry)
+    }
+}
+
+/// The value of the item of the channel of a contact (`DEV-319`): what a
+/// device that takes the set over needs for the renewal of Part 3 §3.2.6.
+/// It holds no ratchet and no queue of the device that owns the channel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelEntry {
+    /// The pairwise salt.
+    pub salt: [u8; 16],
+    /// The key of the conversation.
+    pub conversation: [u8; 32],
+    /// The pairwise X25519 key of the peer.
+    pub peer_static: [u8; 32],
+    /// The writer side of the queue of the peer.
+    pub outbound: Zeroizing<Vec<u8>>,
+}
+
+impl ChannelEntry {
+    /// The 209 bytes: kind `0x01`, the salt, the key, the key of the peer,
+    /// and the writer side.
+    pub fn encode(&self) -> Zeroizing<Vec<u8>> {
+        let mut out = Zeroizing::new(Vec::with_capacity(81 + self.outbound.len()));
+        out.push(0x01);
+        out.extend_from_slice(&self.salt);
+        out.extend_from_slice(&self.conversation);
+        out.extend_from_slice(&self.peer_static);
+        out.extend_from_slice(&self.outbound);
+        out
+    }
+
+    /// Reads an entry.
+    pub fn parse(bytes: &[u8]) -> Result<Self, Error> {
+        let mut r = Reader::new(bytes);
+        if r.u8()? != 0x01 {
+            return Err(Error::Malformed);
+        }
+        let (salt, conversation, peer_static) = (r.array()?, r.array()?, r.array()?);
+        let outbound = Zeroizing::new(r.take(CHANNEL_END_LEN)?.to_vec());
+        r.finish()?;
+        Ok(ChannelEntry {
+            salt,
+            conversation,
+            peer_static,
+            outbound,
+        })
     }
 }
 

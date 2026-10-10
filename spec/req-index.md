@@ -72,7 +72,7 @@ column when a crate implements the requirement and a test covers it.
 | `IDN` | 134 | 46 | 1 | 0 | 5 | **186** |
 | `CRY` | 120 | 27 | 0 | 0 | 1 | **148** |
 | `WIR` | 409 | 86 | 0 | 0 | 7 | **502** |
-| `DEV` | 209 | 91 | 0 | 0 | 8 | **308** |
+| `DEV` | 211 | 91 | 0 | 0 | 8 | **310** |
 | `NTF` | 77 | 28 | 0 | 0 | 3 | **108** |
 | `DIS` | 130 | 35 | 0 | 0 | 3 | **168** |
 | `REL` | 162 | 34 | 1 | 0 | 3 | **200** |
@@ -81,7 +81,7 @@ column when a crate implements the requirement and a test covers it.
 | `ABU` | 71 | 29 | 1 | 0 | 0 | **101** |
 | `IMP` | 115 | 41 | 0 | 0 | 2 | **158** |
 | `SEC` | 4 | 3 | 0 | 0 | 1 | **8** |
-| **All** | 2081 | 628 | 6 | 0 | 54 | **2769** |
+| **All** | 2083 | 628 | 6 | 0 | 54 | **2771** |
 
 ## SCP — Scope and Conventions
 
@@ -1661,6 +1661,8 @@ Source: `spec/07-device-sets.md`
 | `DEV-316` | §7.7 | MUST | A claimant | A claimant MUST keep its epoch and its own ownership in one commit of its store. |  |  |
 | `DEV-317` | §7.7 | MUST | A device that owns the channels | A device that owns the channels MUST fold a claim of scope `0x03` that names it, from each verified epoch that it takes. |  |  |
 | `DEV-318` | §7.7 | MUST | Before a take-over, the interface | Before a take-over, the interface MUST show the count of `DEV-235`. |  |  |
+| `DEV-319` | §7.5.3 | MUST | The device that owns the channels | The device that owns the channels MUST publish the item of the channel of a contact when it makes the contact. |  |  |
+| `DEV-320` | §7.5.3 | MUST | A device that owns no channel | A device that owns no channel MUST keep the newest item of each contact in its store, in the place of each older form of that channel, the form of its link snapshot included. |  |  |
 
 ## NTF — Notifications
 

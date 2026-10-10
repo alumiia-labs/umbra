@@ -5170,6 +5170,161 @@ mod tests {
     }
 
     #[test]
+    fn a_contact_made_after_the_link_renews_at_a_take_over() {
+        use umbra_core::{
+            devset::{sync::CHANNEL_END_LEN, OWNER_ABSENCE},
+            session::node::{bare_contact_state, stored_channel_end, StateChange},
+        };
+
+        let (mut phone, mut laptop, identity, contact, _, mut rng) = phone_and_laptop(361);
+        // The sync channel of the laptop at the phone.
+        let to_laptop = ContactId([0x7D; 32]);
+        let change = StateChange::Contact {
+            contact: to_laptop,
+            state: zeroize::Zeroizing::new(vec![0x04, 5, 6]),
+        };
+        phone
+            .commit_network(&[change], &[], HEARD * 1_000, &mut rng)
+            .unwrap();
+        let channel = phone.conversation_for(&to_laptop.0).unwrap();
+        phone
+            .set_pending_peer(identity.device_id, &identity.label, &mut rng)
+            .unwrap();
+        phone.mark_device_peer(channel, &mut rng).unwrap();
+        while phone.take_sync_send().is_some() {}
+        let from_phone = ContactId([0x7C; 32]);
+        let sync = |phone: &mut Client<MemoryBackend, Element>,
+                    laptop: &mut Client<MemoryBackend, Element>,
+                    rng: &mut Rng| {
+            let mut count = 0;
+            while let Some(send) = phone.take_sync_send() {
+                assert_eq!(send.peer, channel);
+                deliver(laptop, &from_phone, &send.app, HEARD * 1_000, rng);
+                count += 1;
+            }
+            count
+        };
+
+        // The phone makes a contact after the link. The stored form here
+        // is one that holds the key of the peer and the queue of the peer.
+        let carol = ContactId([0x66; 32]);
+        let state = |end: u8| StateChange::Contact {
+            contact: carol,
+            state: bare_contact_state(&[4; 16], &[5; 32], &carol.0, &[end; CHANNEL_END_LEN])
+                .unwrap(),
+        };
+        phone
+            .commit_network(&[state(7)], &[], HEARD * 1_000, &mut rng)
+            .unwrap();
+        let conversation = phone.conversation_for(&carol.0).unwrap();
+        // A new contact is no move, thus the commit alone publishes none.
+        assert!(phone.take_sync_send().is_none());
+        phone
+            .publish_identity_entry(conversation, &mut rng)
+            .unwrap();
+        phone.publish_channel_entry(conversation, &mut rng).unwrap();
+        // DEV-319: the item holds what the renewal needs and no more. The
+        // stored form of the phone is that of a test, and the item is 209
+        // bytes for each form.
+        assert_eq!(sync(&mut phone, &mut laptop, &mut rng), 2);
+        let end_of = |client: &Client<MemoryBackend, Element>| {
+            let stored = client.stored_network().unwrap();
+            let (_, state) = stored
+                .contacts
+                .iter()
+                .find(|(held, _)| *held == conversation)
+                .unwrap();
+            let (peer, end) = stored_channel_end(state).unwrap().unwrap();
+            (peer, end.to_vec())
+        };
+        // DEV-320: the laptop holds the contact as one that a node
+        // restores, and no contact is out of its reach.
+        assert_eq!(end_of(&laptop), ([5; 32], vec![7; CHANNEL_END_LEN]));
+        assert!(!laptop.holds_no_channel(conversation).unwrap());
+        let count = laptop.take_over_count().unwrap();
+        assert_eq!((count.contacts, count.unreachable), (2, 0));
+        // DEV-287: it publishes no channel itself.
+        laptop
+            .publish_channel_entry(conversation, &mut rng)
+            .unwrap();
+        assert!(laptop.take_sync_send().is_none());
+
+        // The peer moves to a new queue. The commit of the phone publishes
+        // the item again, and the laptop follows.
+        phone
+            .commit_network(&[state(8)], &[], HEARD * 1_000, &mut rng)
+            .unwrap();
+        assert_eq!(sync(&mut phone, &mut laptop, &mut rng), 1);
+        assert_eq!(end_of(&laptop).1, vec![8; CHANNEL_END_LEN]);
+        // A commit that moves nothing publishes nothing.
+        phone
+            .commit_network(&[state(8)], &[], HEARD * 1_000, &mut rng)
+            .unwrap();
+        assert_eq!(sync(&mut phone, &mut laptop, &mut rng), 0);
+
+        // The take-over lists the two contacts for their renewal.
+        laptop
+            .take_over(HEARD + OWNER_ABSENCE + 120, &mut rng)
+            .unwrap();
+        let mut stale = laptop.restored_stale().unwrap();
+        stale.sort_unstable();
+        assert_eq!(stale, [contact.0, carol.0]);
+        assert_eq!(end_of(&laptop).1, vec![8; CHANNEL_END_LEN]);
+        laptop.audit().unwrap();
+
+        // The laptop links a device before the renewal of Carol ends. The
+        // snapshot carries the form that the laptop holds, and the new
+        // device can renew from it in its turn.
+        let head = laptop.roster_bytes().unwrap().unwrap();
+        let snapshot = laptop
+            .link_snapshot(HEARD + OWNER_ABSENCE + 200, &head, b"bundle", 0)
+            .unwrap();
+        let restored =
+            crate::client::RestoredBackup::assemble(core::slice::from_ref(&snapshot)).unwrap();
+        assert_eq!(restored.contact_count(), 2);
+        let mut third = Client::create_with_seed(
+            MemoryBackend::default(),
+            Element([3; 32]),
+            &units("third phrase"),
+            CHEAP,
+            HEARD,
+            restored.seed(),
+            &mut Rng(363),
+        )
+        .unwrap();
+        third.apply_restore(&restored, &mut rng).unwrap();
+        assert_eq!(end_of(&third), ([5; 32], vec![8; CHANNEL_END_LEN]));
+    }
+
+    #[test]
+    fn a_device_that_owns_no_channel_reads_no_rendezvous_queue() {
+        use umbra_core::{devset::OWNER_ABSENCE, session::node::StateChange};
+
+        let (mut phone, mut laptop, _, _, _, mut rng) = phone_and_laptop(371);
+        // The snapshot of a link carries the rendezvous queues of the phone.
+        let queue = || StateChange::RendezvousQueue {
+            queue: [0x31; 32],
+            state: zeroize::Zeroizing::new(vec![1, 2, 3]),
+        };
+        for client in [&mut phone, &mut laptop] {
+            client
+                .commit_network(&[queue()], &[], HEARD * 1_000, &mut rng)
+                .unwrap();
+        }
+        // DEV-287: each queue has one reader, the device that owns the
+        // channels.
+        assert_eq!(phone.stored_network().unwrap().rendezvous_queues.len(), 1);
+        assert!(laptop
+            .stored_network()
+            .unwrap()
+            .rendezvous_queues
+            .is_empty());
+        // After a take-over the laptop is that device.
+        laptop.take_over(HEARD + OWNER_ABSENCE, &mut rng).unwrap();
+        assert_eq!(laptop.stored_network().unwrap().rendezvous_queues.len(), 1);
+    }
+
+    #[test]
     fn a_peer_that_lags_takes_a_catch_up_object_and_applies_each_record() {
         use umbra_core::devset::{
             engine::SyncEngine,

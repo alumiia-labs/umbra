@@ -122,8 +122,8 @@ pub struct FfiTakeOverCount {
     pub contacts: u32,
     /// The groups of the set.
     pub groups: u32,
-    /// The contacts that came after the link of this device. A take-over
-    /// renews none of them.
+    /// The contacts whose channel did not reach this device before the
+    /// loss (`DEV-319`). A take-over renews none of them.
     pub unreachable: u32,
 }
 

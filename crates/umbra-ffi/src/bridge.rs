@@ -469,6 +469,8 @@ impl Bridge {
                 } else {
                     // DEV-294: each device of the set holds the conversation.
                     client.publish_identity_entry(conversation, rng)?;
+                    // DEV-319: and what a renewal of its channel needs.
+                    client.publish_channel_entry(conversation, rng)?;
                     self.flush(client, rng)?;
                     Some(NetEvent::Contact(conversation))
                 }

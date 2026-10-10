@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 7: Device Sets, History Sync, and Revocation
 
 **Status:** Draft
-**Version:** 0.15.0
+**Version:** 0.16.0
 **Date:** 2026-10-10
 
 ---
@@ -38,6 +38,11 @@ result is an identity compromise and not only a history compromise. Revocation
 (§7.7) stops the future traffic only if the attacker did not keep the
 `RootIdentity`. If the attacker kept it, the user has to do the full identity
 reset of §7.7.1.
+
+Each linked device also holds, for each contact, the pairwise key of that
+contact and the credentials that write to the queue of that contact
+(`DEV-319`). The snapshot of a link gives them for each contact of that
+moment, and the sync channel gives them for each later one.
 
 The mitigations below are all mandatory:
 
@@ -547,9 +552,11 @@ Provision {                      // sealed under the seal key, XChaCha20-Poly130
 - **[DEV-287]** The existing device keeps the ownership of each pairwise
   ratchet and of each group sender at the link. The new device owns nothing
   until it takes the set over under §7.7. Until then it MUST NOT read the
-  queue of a contact, send a group record, or write a backup of Part 4
-  §4.7.2: each queue has one reader, and the backup root of a week has one
-  writer. The device that owns the channels alone signs an epoch that adds a
+  queue of a contact or a rendezvous queue of Part 9 §9.6, send a group
+  record, or write a backup of Part 4 §4.7.2: each queue has one reader, and
+  the backup root of a week has one writer. The snapshot carries each
+  rendezvous queue of a published entry, and the new device reads none of
+  them. The device that owns the channels alone signs an epoch that adds a
   device. It alone signs an epoch that revokes a device with no claim.
   **A set whose owning device is lost or seized recovers on a linked device,
   through the take-over of §7.7, after `OWNER_ABSENCE`.** That device then
@@ -987,6 +994,7 @@ class in Part 6 §6.6. **[DEV-022]** A client MUST NOT process a kind that decla
   | An entry of the local identity table of Part 4 §4.7.2 | Each pairwise identity |
   | The state of a group that the device that owns the channels made or joined after a link | Each group |
   | The re-key of the member in a group after a removal | Each group |
+  | The channel of a contact, as a renewal needs it (`DEV-319`) | Each pairwise identity |
 
   **[DEV-197]** A client MUST converge each item of that table across the device
   set. **[DEV-294]** The item of an entry of the local identity table takes
@@ -999,6 +1007,53 @@ class in Part 6 §6.6. **[DEV-022]** A client MUST NOT process a kind that decla
   channels MUST publish, at the start of each run, the item of each contact
   that its engine does not hold, and a receiver MUST hold a synced record
   whose subject names no conversation until the item comes. **[DEV-198]** A later version that adds a chat-list item MUST add a row.
+
+  **[DEV-319]** The device that owns the channels MUST publish the item of
+  the channel of a contact when it makes the contact. It MUST publish that
+  item again when the contact gives a new `QueueAddress` (Part 3 `NET-179`),
+  when a renewal replaces the channel (Part 3 `NET-329`), and when the user
+  accepts a new key of the contact (Part 4 §4.5.1). At the start of each
+  run it MUST publish the item of each contact whose item its engine does
+  not hold. The item takes the subject of `DEV-226` as its key. Its value
+  is 209 bytes:
+
+  ```
+  ChannelEntry {
+      kind          u8        // 0x01
+      salt          [16]u8    // the salt of Part 4 §4.2.2
+      conversation  [32]u8    // the key of the conversation, as in DEV-294
+      peer_static   [32]u8    // the pairwise X25519 key of the contact
+      sender_id     [32]u8    // the queue that the contact reads
+      qs_auth_sk    [32]u8    // the key that signs a SEND to that queue
+      k_qe          [32]u8    // the queue end-to-end key of Part 6 WIR-017
+      relay_id      [32]u8    // the relay of that queue
+  }
+  ```
+
+  The item holds what the renewal of Part 3 `NET-326` needs, and no more. It
+  MUST NOT hold a ratchet key, a message key, or a key of a queue that the
+  publisher reads. A device that owns no channel MUST NOT publish the item.
+  **[DEV-320]** A device that owns no channel MUST keep the newest item of
+  each contact in its store, in the place of each older form of that
+  channel, the form of its link snapshot included. It MUST reject an item
+  whose subject the salt does not give, an item whose `writer` is not the
+  device that owns the channels, and an item that names a sync channel. It
+  MUST hold the conversation as `DEV-294` requires. Until a take-over it
+  MUST NOT write to the queue that the item names. The device that owns the
+  channels MUST NOT apply an item of this row, and it MUST NOT publish one
+  again under `DEV-308`.
+
+  > *Cause.* The take-over of §7.7 renews each channel under the pairwise
+  > identities. The claimant must know the key of the contact, and it must
+  > reach a queue that the contact reads. The entry of `DEV-294` holds
+  > neither, and a snapshot holds them as they stood at the link. Without
+  > this item, a contact that came after the link is lost at a take-over.
+  > So is a contact whose queue moved. The item gives a linked device no
+  > ratchet. Thus it reads no record of the channel with it. `DEV-308`
+  > carries each other item from one linked device to each other one. An
+  > item of this row from a linked device would move the renewal of a
+  > contact to a queue of the writer, thus the device that owns the
+  > channels alone writes it.
 
   **[DEV-304]** The device that owns the channels MUST publish the delivery
   state of each message that it sent when that state becomes delivered,
@@ -1926,12 +1981,13 @@ revokes a device, and writes the backups.
   Recovery Code.
 
 > *Cause of the renewal.* The absent device holds the ratchet of each
-> channel, and it knows each queue. The claimant holds each channel as the
-> snapshot of its link held it (`DEV-004`). A ratchet step needs a record of
-> the peer, and a rotation needs a record on the current ratchet. The
-> claimant can make neither. The pairwise identities are the same on each device of the set (Part 4
-> §4.2.2). Thus the claimant makes each channel again from them, as a
-> restored device does, and no contact sees a key change (`DEV-131`).
+> channel, and it knows each queue. The claimant holds no current ratchet:
+> it holds the item of `DEV-319`, or the snapshot of its link (`DEV-004`).
+> A ratchet step needs a record of the peer, and a rotation needs a record
+> on the current ratchet. The claimant can make neither. The pairwise
+> identities are the same on each device of the set (Part 4 §4.2.2). Thus
+> the claimant makes each channel again from them, as a restored device
+> does, and no contact sees a key change (`DEV-131`).
 >
 > *Cause of the new Recovery Code.* A linked device holds no Recovery Code of
 > the set (`DEV-295`), and the absent device holds the one that the user
@@ -1948,14 +2004,16 @@ revokes a device, and writes the backups.
 >    the other, and neither learns of it. Each one then owns a set of one
 >    device. Each contact holds one channel, which is the one of the renewal
 >    that ended last, and the other device finds that channel dead.
-> 3. The claimant holds the channel of each contact as the snapshot of its
->    link held it. No sync record carries a later ratchet or a later queue
->    address. A contact whose queue moved since then reads its old queue no
->    more. The bundle of the renewal goes to that queue, and the channel
->    waits under Part 3 §3.2.6 rule 8. For a contact that the owning device made after
->    that link, the claimant holds the conversation and the salt of `DEV-294`
->    alone. It renews no such channel, and the two parties need a new
->    invitation.
+> 3. The claimant renews a channel from the newest item of `DEV-319` that
+>    it took. A contact can move its queue after the absent device took its
+>    last record. Such a contact gave its new address to the absent device
+>    alone, and it reads its old queue for `ROTATE_GRACE` more. A bundle of
+>    a renewal that comes after that time finds no queue, and the channel
+>    waits under Part 3 §3.2.6 rule 8. A contact whose item did not reach
+>    the claimant before the loss has the entry of `DEV-294` alone there, or
+>    no entry. The claimant renews no such channel, and the two parties
+>    need a new invitation. The view of `DEV-235` counts each contact that
+>    has the entry alone.
 > 4. No verifier measures the absence. A linked device in hostile hands can
 >    sign the epoch of a take-over at any time. The device that owns the
 >    channels then stops under `DEV-317`. Such a device holds the

@@ -44,8 +44,10 @@ pub struct TakeOverCount {
     pub contacts: u32,
     /// The groups of the set.
     pub groups: u32,
-    /// The contacts that came after the link of this device. This device
-    /// holds no key of their channels, and a take-over renews none of them.
+    /// The contacts whose conversation this device holds with no item of
+    /// the channel (`DEV-319`): the device that owned the channels was lost
+    /// before that item came, or it ran a version before the item. A
+    /// take-over renews none of them.
     pub unreachable: u32,
 }
 
@@ -139,7 +141,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     }
 
     /// Whether this device holds the conversation of a contact and no key
-    /// of its channel (`DEV-294`). No node restores such a contact.
+    /// of its channel: the entry of `DEV-294` came, and the item of
+    /// `DEV-319` did not. No node restores such a contact.
     pub fn holds_no_channel(&self, conversation: ConversationId) -> Result<bool, Error> {
         self.is_shadow_contact(conversation)
     }

@@ -5259,9 +5259,9 @@ impl Handle {
                 if !*owns_channels && !device_peers.contains(conversation) {
                     continue;
                 }
-                // DEV-294: a device that took the set over holds the
-                // conversation of a contact that came after its link, and
-                // no key of that channel.
+                // DEV-294: a device that took the set over can hold the
+                // conversation of a contact whose channel never reached it
+                // (`DEV-319`), and no key of that channel.
                 if client.holds_no_channel(*conversation)? {
                     continue;
                 }

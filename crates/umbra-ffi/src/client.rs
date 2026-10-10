@@ -1072,7 +1072,34 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
             kept.push(change);
         }
+        // DEV-319: a channel whose peer moved to a new queue, or that a
+        // renewal made again, goes to the other devices of the set. The
+        // bridge publishes the channel of a new contact.
+        let mut moved: Vec<ConversationId> = Vec::new();
+        for change in &kept {
+            let StateChange::Contact { contact, state } = change else {
+                continue;
+            };
+            let conversation = self.conversation_for(&contact.0)?;
+            let held = self
+                .open_ref()?
+                .store
+                .get(TableId::CONTACT, &conversation.0)?
+                .map(Zeroizing::new);
+            let before = held
+                .as_ref()
+                .and_then(|plain| plain.get(QUEUE_ID_LEN..))
+                .and_then(Self::channel_end_of);
+            if before.is_some() && before != Self::channel_end_of(state) {
+                moved.push(conversation);
+            }
+        }
         self.commit_records(&kept, &records, now_ms, rng)?;
+        for conversation in moved {
+            // The batch is in the store, and an item that did not go ends
+            // no run.
+            let _ = self.publish_channel_entry(conversation, rng);
+        }
         // DEV-290: an invitation that left the node waits for no retirement.
         let ended: Vec<[u8; 32]> = changes
             .iter()
@@ -2227,9 +2254,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for (_, plain) in store.list(NOTIFY_STATE, None)? {
             notify_queues.push(state_of(plain)?);
         }
+        // DEV-287: the snapshot of a link carries the rendezvous queues of
+        // the device that owns the channels, and that device reads them. A
+        // second reader would take a hello away from it.
         let mut rendezvous_queues = Vec::new();
-        for (_, plain) in store.list(discovery::RENDEZVOUS_STATE, None)? {
-            rendezvous_queues.push(state_of(plain)?);
+        if self.owns_channels()? {
+            for (_, plain) in store.list(discovery::RENDEZVOUS_STATE, None)? {
+                rendezvous_queues.push(state_of(plain)?);
+            }
         }
         Ok(StoredNetwork {
             contacts,
@@ -5617,6 +5649,122 @@ mod tests {
             .commit_network(&[], &[(channel, far(0x42))], T0, &mut rng)
             .unwrap();
         assert!(took(&client));
+    }
+
+    #[test]
+    fn the_item_of_a_channel_comes_from_the_device_that_owns_the_channels_alone() {
+        use umbra_core::{
+            devset::{
+                engine::SyncEngine,
+                sync::{ChannelEntry, CHANNEL_END_LEN, ITEM_CHANNEL},
+            },
+            session::node::stored_channel_end,
+        };
+        let (mut client, mut rng, contact, conversation) = client_with_contact(321);
+        let (peer, _) = link_device(&mut client, &mut rng);
+        let own = client.device_identity().unwrap().unwrap().device_id;
+        let channel = ContactId([0x7C; 32]);
+        let change = StateChange::Contact {
+            contact: channel,
+            state: contact_state(6),
+        };
+        client.commit_network(&[change], &[], T0, &mut rng).unwrap();
+        let subject = client.subject_of(conversation).unwrap().unwrap();
+        let entry = |end: u8| ChannelEntry {
+            salt: [5; 16],
+            conversation: contact.0,
+            peer_static: [6; 32],
+            outbound: Zeroizing::new(vec![end; CHANNEL_END_LEN]),
+        };
+        let mut engine = SyncEngine::new(peer, &[own]).unwrap();
+        let mut item = |end: u8, writer, key: &[u8; 32], msg_id: u8| {
+            let item = engine
+                .relay_mutable(
+                    ITEM_CHANNEL,
+                    key,
+                    &entry(end).encode(),
+                    u64::from(msg_id),
+                    writer,
+                    [msg_id; 16],
+                    10,
+                )
+                .unwrap();
+            record(AppKind::DeviceSet, [msg_id; 16], &item.body)
+        };
+        let end_of = |client: &TestClient| {
+            let stored = client.stored_network().unwrap();
+            let (_, state) = stored
+                .contacts
+                .iter()
+                .find(|(held, _)| *held == conversation)
+                .unwrap();
+            stored_channel_end(state)
+                .ok()
+                .flatten()
+                .map(|(_, end)| end.to_vec())
+        };
+        // DEV-320: the device that owns the channels takes no such item.
+        client
+            .commit_network(
+                &[],
+                &[(channel, item(7, peer, &subject, 0x41))],
+                T0,
+                &mut rng,
+            )
+            .unwrap();
+        assert_eq!(end_of(&client), None);
+
+        // The same store as the one of a linked device, whose one peer
+        // owns the channels.
+        let open = client.open_mut().unwrap();
+        let row = open.store.row_id(super::devices::DEVICE_SELF, b"self");
+        let mut identity = open
+            .store
+            .get(super::devices::DEVICE_SELF, &row)
+            .unwrap()
+            .unwrap();
+        identity[0] = 0;
+        let mut batch = open.store.begin();
+        batch
+            .put(super::devices::DEVICE_SELF, row, None, &identity, &mut rng)
+            .unwrap();
+        batch.commit().unwrap();
+        // An item that another device wrote changes nothing, and neither
+        // does one whose subject names another contact.
+        client
+            .commit_network(
+                &[],
+                &[(channel, item(8, [0xEE; 16], &subject, 0x42))],
+                T0,
+                &mut rng,
+            )
+            .unwrap();
+        assert_eq!(end_of(&client), None);
+        client
+            .commit_network(
+                &[],
+                &[(channel, item(8, peer, &[0x11; 32], 0x43))],
+                T0,
+                &mut rng,
+            )
+            .unwrap();
+        assert_eq!(end_of(&client), None);
+        // The item of the device that owns the channels gives the contact
+        // the form that a node restores, with the key of the peer.
+        client
+            .commit_network(
+                &[],
+                &[(channel, item(9, peer, &subject, 0x44))],
+                T0,
+                &mut rng,
+            )
+            .unwrap();
+        assert_eq!(end_of(&client), Some(vec![9; CHANNEL_END_LEN]));
+        assert!(!client.is_shadow_contact(conversation).unwrap());
+        assert_eq!(client.identity_keys(conversation).unwrap().1, [6; 32]);
+        // The conversation keeps its row, and no second one comes.
+        assert_eq!(client.conversations().unwrap(), [conversation]);
+        client.audit().unwrap();
     }
 
     #[test]

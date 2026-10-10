@@ -216,9 +216,9 @@ fun TakeOverScreen(onBack: () -> Unit) {
                 count?.unreachable?.takeIf { it > 0u }?.let { late ->
                     add(
                         if (late == 1u) {
-                            "1 contact is newer than this device and needs a new invitation."
+                            "1 contact did not reach this device in time and needs a new invitation."
                         } else {
-                            "$late contacts are newer than this device and need a new invitation."
+                            "$late contacts did not reach this device in time and need a new invitation."
                         },
                     )
                 }

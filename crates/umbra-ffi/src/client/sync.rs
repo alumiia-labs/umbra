@@ -19,9 +19,9 @@ use umbra_core::{
         engine::{SyncEngine, Taken},
         roster::{ClaimScope, OwnerClaim, Roster},
         sync::{
-            group_subject, restamp_expires_in, IdentityEntry, Origin, SyncedRecord, AUTHOR_PEER,
-            AUTHOR_USER, ITEM_CONTACT_NAME, ITEM_DELIVERY, ITEM_GROUP_REKEY, ITEM_GROUP_STATE,
-            ITEM_IDENTITY_ENTRY, SCOPE_GROUP, SCOPE_PAIRWISE,
+            group_subject, restamp_expires_in, ChannelEntry, IdentityEntry, Origin, SyncedRecord,
+            AUTHOR_PEER, AUTHOR_USER, ITEM_CHANNEL, ITEM_CONTACT_NAME, ITEM_DELIVERY,
+            ITEM_GROUP_REKEY, ITEM_GROUP_STATE, ITEM_IDENTITY_ENTRY, SCOPE_GROUP, SCOPE_PAIRWISE,
         },
         DeviceId,
     },
@@ -449,6 +449,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if !engine.holds_mutable(ITEM_IDENTITY_ENTRY, &subject) {
                 self.publish_identity_entry(conversation, rng)?;
             }
+            // DEV-319: a channel whose item no device took yet, as the one
+            // of a contact from before this rule.
+            if !engine.holds_mutable(ITEM_CHANNEL, &subject) {
+                self.publish_channel_entry(conversation, rng)?;
+            }
         }
         Ok(())
     }
@@ -674,6 +679,99 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         self.publish_mutable(ITEM_IDENTITY_ENTRY, &subject, &entry.encode(), rng)
     }
 
+    /// Publishes what a renewal needs of the channel of a contact: the
+    /// pairwise key of the peer and the writer side of its queue
+    /// (`DEV-319`). A device that takes the set over renews the channel
+    /// from it. The item holds no ratchet and no queue of this device. A
+    /// device that owns no channel publishes none.
+    pub fn publish_channel_entry<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        if !self.owns_channels()? || self.is_device_peer(conversation)? {
+            return Ok(());
+        }
+        let Some(subject) = self.subject_of(conversation)? else {
+            return Ok(());
+        };
+        let row = Zeroizing::new(
+            self.open_ref()?
+                .store
+                .get(TableId::CONTACT, &conversation.0)?
+                .ok_or(Error::NotFound)?,
+        );
+        let state = row.get(32..).ok_or(Error::Integrity)?;
+        let Some((peer_static, outbound)) = Self::channel_end_of(state) else {
+            return Ok(());
+        };
+        let entry = ChannelEntry {
+            salt: umbra_core::session::node::stored_contact_salt(state)?,
+            conversation: row
+                .get(..32)
+                .and_then(|key| key.try_into().ok())
+                .ok_or(Error::Integrity)?,
+            peer_static,
+            outbound,
+        };
+        self.publish_mutable(ITEM_CHANNEL, &subject, &entry.encode(), rng)
+    }
+
+    /// The pairwise key of the peer and the writer side of its queue in a
+    /// stored contact, or none for a form that holds none.
+    pub(super) fn channel_end_of(state: &[u8]) -> Option<umbra_core::session::node::ChannelEnd> {
+        umbra_core::session::node::stored_channel_end(state)
+            .ok()
+            .flatten()
+    }
+
+    /// Takes the channel of a contact from the device that owns the
+    /// channels (`DEV-320`). The store keeps it in the form that a node
+    /// restores for a renewal. That form takes the place of an older one,
+    /// thus this device holds no ratchet of a channel that moved on.
+    fn apply_channel_entry<R: CryptoRng + ?Sized>(
+        &mut self,
+        subject: [u8; 32],
+        value: &[u8],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        if self.owns_channels()? {
+            return Ok(());
+        }
+        let entry = ChannelEntry::parse(value)?;
+        let pairwise = self.root_identity()?.pairwise_identity(&entry.salt);
+        let peers = self.device_peers()?;
+        let open = self.open_mut()?;
+        let named = OwnerClaim::subject(
+            &open.device_set_key,
+            ClaimScope::Pairwise,
+            &pairwise.public().to_bytes(),
+        );
+        let row = open.store.row_id(TableId::CONTACT, &entry.conversation);
+        // The subject must name the salt, and a sync channel is no contact.
+        if named != subject || peers.contains(&ConversationId(row)) {
+            return Err(Error::Integrity);
+        }
+        let state = umbra_core::session::node::bare_contact_state(
+            &entry.salt,
+            &entry.peer_static,
+            &entry.conversation,
+            &entry.outbound,
+        )?;
+        let is_new = open.store.get(TableId::CONTACT, &row)?.is_none();
+        let plain = Zeroizing::new([entry.conversation.as_slice(), &state].concat());
+        let mut batch = open.store.begin();
+        batch.put(TableId::CONTACT, row, None, &plain, rng)?;
+        batch.commit()?;
+        if is_new {
+            self.subjects.insert(ConversationId(row), subject);
+            self.events.push_back(Event::Conversations);
+        }
+        // DEV-294: each record that came before the conversation takes
+        // its place now.
+        self.replay_pairwise_records(&subject, ConversationId(row), rng)
+    }
+
     /// Publishes the delivery state of a message that this device sent, to
     /// each other device of the set (`DEV-304`): a message that another
     /// device handed to it, and one of its own, whose copy the other devices
@@ -804,6 +902,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     self.events.push_back(Event::Conversations);
                 }
             }
+            ITEM_CHANNEL => self.apply_channel_entry(subject, value, rng)?,
             ITEM_GROUP_STATE => self.on_group_state_item(subject, value)?,
             super::alerts::ITEM_ALERT => self.apply_alert_item(&subject, value, rng)?,
             super::drafts::ITEM_DRAFT => self.apply_draft_item(&subject, value, rng)?,
@@ -1133,8 +1232,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     lamport,
                     writer,
                 }) => {
-                    if relays {
+                    // DEV-320: the device that owns the channels alone writes
+                    // the item of a channel. One of another writer changes
+                    // nothing, and it goes to no other device.
+                    let is_channel = item == ITEM_CHANNEL;
+                    if relays && !is_channel {
                         relay_items.push((item, key.clone(), value.clone(), lamport, writer));
+                    }
+                    if is_channel && writer != *source {
+                        continue;
                     }
                     // An item that does not apply ends no batch.
                     let _ = self.apply_mutable(item, &key, &value, rng);

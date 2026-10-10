@@ -1143,6 +1143,21 @@ struct Contact {
     refused: VecDeque<(Zeroizing<Vec<u8>>, Option<CoverSlot>)>,
 }
 
+/// A contact whose channel this device never held (Part 7 `DEV-319`): the
+/// device took the set over, and the device that owned the channels gave
+/// it the pairwise key of the peer and the writer side of the queue of the
+/// peer. It holds no ratchet and no queue of its own. The renewal of
+/// `NET-326` makes its channel, and the contact is then a [`Contact`].
+struct Bare {
+    salt: [u8; 16],
+    peer_static: [u8; 32],
+    outbound: Outbound,
+    /// The records of the user that wait for the renewal (`NET-325`).
+    waiting_sends: VecDeque<(Vec<u8>, Option<u64>)>,
+    /// The time of the swept renewal (`NET-180`), or zero.
+    sweep_at: u64,
+}
+
 /// A candidate address of a peer (`NET-190`). It never becomes the address
 /// that the channel writes to. Only a record of kind `0x33` of the peer
 /// that opens under the ratchet gives one (`NET-179`), or the end of a
@@ -1228,13 +1243,78 @@ pub fn shadow_contact_state(salt: &[u8; 16]) -> Vec<u8> {
 /// The version of [`shadow_contact_state`].
 const SHADOW_VERSION: u8 = 0x10;
 
+/// The version byte of the stored form of a contact with no channel
+/// ([`bare_contact_state`]).
+const BARE_VERSION: u8 = 0x11;
+
+/// The stored form of a contact whose channel another device of the set
+/// owns, with what a renewal of Part 3 §3.2.6 needs (Part 7 `DEV-319`): the
+/// salt, the pairwise key of the peer, the contact, and the writer side of
+/// the queue of the peer as [`stored_channel_end`] gives it. It holds no
+/// ratchet. A node restores it as a contact that waits for its renewal.
+pub fn bare_contact_state(
+    salt: &[u8; 16],
+    peer_static: &[u8; 32],
+    contact: &[u8; 32],
+    outbound: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, Error> {
+    // The end must restore, thus no store takes a form that no node reads.
+    Outbound::from_stored(outbound)?;
+    bare_state(salt, peer_static, contact, outbound, 0)
+}
+
+fn bare_state(
+    salt: &[u8; 16],
+    peer_static: &[u8; 32],
+    contact: &[u8; 32],
+    outbound: &[u8],
+    sweep_at: u64,
+) -> Result<Zeroizing<Vec<u8>>, Error> {
+    let mut writer = Writer::new();
+    writer.u8(BARE_VERSION);
+    writer.bytes(salt);
+    writer.bytes(peer_static);
+    writer.bytes(contact);
+    writer.var(outbound)?;
+    writer.u64(sweep_at);
+    Ok(writer.finish())
+}
+
+/// The pairwise key of a peer, and the writer side of its queue in its
+/// stored form.
+pub type ChannelEnd = ([u8; 32], Zeroizing<Vec<u8>>);
+
+/// What a renewal needs of a stored contact, for the other devices of the
+/// set (Part 7 `DEV-319`): the pairwise key of the peer, and the writer
+/// side of the queue of the peer in its stored form. The result is none
+/// for the form of [`shadow_contact_state`].
+pub fn stored_channel_end(state: &[u8]) -> Result<Option<ChannelEnd>, Error> {
+    let mut reader = Reader::new(state);
+    let version = match state.first() {
+        Some(&SHADOW_VERSION) => return Ok(None),
+        _ => contact_version(&mut reader)?,
+    };
+    let _salt: [u8; 16] = reader.array()?;
+    let peer_static: [u8; 32] = reader.array()?;
+    if version == BARE_VERSION {
+        let _contact: [u8; 32] = reader.array()?;
+        return Ok(Some((peer_static, Zeroizing::new(reader.var()?.to_vec()))));
+    }
+    if version != 0x01 {
+        let _inbound_relay: [u8; 32] = reader.array()?;
+    }
+    let outbound = PairwiseChannel::stored_outbound(reader.var()?)?;
+    Ok(Some((peer_static, outbound)))
+}
+
 fn contact_version(reader: &mut Reader<'_>) -> Result<u8, Error> {
     match reader.u8()? {
         version @ (0x01
         | STORED_VERSION
         | CONTACT_ROTATION_VERSION
         | CONTACT_STALE_VERSION
-        | CONTACT_STORED_VERSION) => Ok(version),
+        | CONTACT_STORED_VERSION
+        | BARE_VERSION) => Ok(version),
         _ => Err(Error::Malformed),
     }
 }
@@ -1490,6 +1570,8 @@ pub struct ClientNode {
     /// The contacts whose handshake runs, by `RecipientId`.
     halves: BTreeMap<[u8; 32], Half>,
     contacts: BTreeMap<[u8; 32], Contact>,
+    /// The contacts that hold no channel yet, by their identifier.
+    bare: BTreeMap<[u8; 32], Bare>,
     /// The notify queues of Part 8 §8.5.2, by `RecipientId`.
     notify: BTreeMap<[u8; 32], NotifyQueue>,
     /// The rendezvous queues of Part 9 §9.6, by `RecipientId`. Each has
@@ -1700,6 +1782,7 @@ impl ClientNode {
             watched_waits: VecDeque::new(),
             halves: BTreeMap::new(),
             contacts: BTreeMap::new(),
+            bare: BTreeMap::new(),
             rotating: BTreeSet::new(),
             admitting: BTreeMap::new(),
             renewing: BTreeSet::new(),
@@ -1772,6 +1855,21 @@ impl ClientNode {
                 });
                 continue;
             }
+            if let Some(bare) = self.bare.get(&id) {
+                let mut outbound = Writer::new();
+                bare.outbound.export(&mut outbound);
+                changes.push(StateChange::Contact {
+                    contact: ContactId(id),
+                    state: bare_state(
+                        &bare.salt,
+                        &bare.peer_static,
+                        &id,
+                        &outbound.finish(),
+                        bare.sweep_at,
+                    )?,
+                });
+                continue;
+            }
             let Some(contact) = self.contacts.get(&id) else {
                 continue;
             };
@@ -1816,6 +1914,23 @@ impl ClientNode {
         let version = contact_version(&mut reader)?;
         let salt = reader.array()?;
         let peer_static = reader.array()?;
+        if version == BARE_VERSION {
+            let id: [u8; 32] = reader.array()?;
+            let outbound = Outbound::from_stored(reader.var()?)?;
+            let sweep_at = reader.u64()?;
+            reader.end()?;
+            self.bare.insert(
+                id,
+                Bare {
+                    salt,
+                    peer_static,
+                    outbound,
+                    waiting_sends: VecDeque::new(),
+                    sweep_at,
+                },
+            );
+            return Ok(ContactId(id));
+        }
         let inbound_relay = if version == 0x01 {
             ANY_RELAY
         } else {
@@ -2337,6 +2452,18 @@ impl ClientNode {
                     fault.and(self.send_control(contact, AppKind::QueueAddress, &own, now, rng));
             }
         }
+        // DEV-319: a contact with no channel waits for its renewal as a
+        // stale one does, after a delay of its own (`NET-180`).
+        for (id, held) in &mut self.bare {
+            if held.sweep_at == 0 {
+                held.sweep_at =
+                    now.saturating_add(sweep_delay(u64::from_be_bytes(random(rng))).max(1));
+                self.moved.insert(*id);
+            }
+            if !self.renewing.contains(id) && now >= held.sweep_at {
+                stale.push(*id);
+            }
+        }
         // NET-325: a stale channel with no renewal that runs starts one.
         for contact in stale {
             fault = fault.and(self.start_renewal(contact, rng));
@@ -2448,6 +2575,10 @@ impl ClientNode {
     /// it sends nothing on its ratchet, and a renewal starts at the next
     /// check.
     pub fn mark_stale(&mut self, contact: &ContactId) -> Result<(), Error> {
+        // A contact with no channel waits for its renewal already.
+        if self.bare.contains_key(&contact.0) {
+            return Ok(());
+        }
         let held = self.contacts.get_mut(&contact.0).ok_or(Error::NoPath)?;
         held.stale = true;
         self.moved.insert(contact.0);
@@ -2460,12 +2591,14 @@ impl ClientNode {
         self.contacts
             .get(&contact.0)
             .map(|held| held.sweep_at)
+            .or_else(|| self.bare.get(&contact.0).map(|held| held.sweep_at))
             .filter(|at| *at != 0)
     }
 
     /// Whether the channel of a contact waits for its renewal.
     pub fn is_stale(&self, contact: &ContactId) -> bool {
         self.contacts.get(&contact.0).is_some_and(|held| held.stale)
+            || self.bare.contains_key(&contact.0)
     }
 
     /// Starts the renewal of a stale channel, as the responder, when none
@@ -2569,6 +2702,11 @@ impl ClientNode {
         };
         let nonce = random(rng);
         let sealed = match (&half.setup, half.renews) {
+            (_, Some(contact)) if step == STEP_OFFER && self.bare.contains_key(&contact) => {
+                let held = self.bare.get(&contact).ok_or(Error::NoPath)?;
+                held.outbound
+                    .seal_record(L6Kind::Renewal, &half.bundle, nonce)?
+            }
             (_, Some(contact)) if step == STEP_OFFER => {
                 let held = self.contacts.get(&contact).ok_or(Error::NoPath)?;
                 // NET-330: with a candidate address of the peer the bundle
@@ -2743,7 +2881,9 @@ impl ClientNode {
         let replaces = self
             .contacts
             .get(&contact)
-            .is_some_and(|held| held.peer_static == finished.peer_static);
+            .map(|held| held.peer_static)
+            .or_else(|| self.bare.get(&contact).map(|held| held.peer_static))
+            .is_some_and(|peer_static| peer_static == finished.peer_static);
         if !replaces {
             self.renewal_ended(&contact);
             self.owe_del(half.inbound, half.inbound_relay, false, now, 0)?;
@@ -2757,25 +2897,53 @@ impl ClientNode {
                 .owe_del(half.inbound, half.inbound_relay, false, now, 0)
                 .map(|()| Vec::new());
         };
-        let held = self.contacts.get_mut(&contact).ok_or(Error::NoPath)?;
-        let old = core::mem::replace(
-            &mut held.channel,
-            PairwiseChannel::new(ratchet, finished.outbound, half.inbound),
-        );
-        let old_relay = core::mem::replace(&mut held.inbound_relay, half.inbound_relay);
-        let previous_relay = core::mem::replace(&mut held.previous_relay, ANY_RELAY);
-        held.since = now;
-        held.rotated_at = 0;
-        held.own_address = finished.own_address;
-        held.stale = false;
-        // NET-190: the handshake ended with the pairwise key of the peer,
-        // and its queue is the address of the peer.
-        held.candidate = None;
-        // NET-292: the first ratchet record of the initiator opens the
-        // sending chain of the responder, behind flight 3.
-        held.opens = !half.opening.is_empty();
-        held.flight = finished.flight;
-        held.refused.clear();
+        let channel = PairwiseChannel::new(ratchet, finished.outbound, half.inbound);
+        // DEV-319: the renewal of a contact with no channel makes its
+        // first one, and no queue of an old channel owes a `DEL`.
+        let old = if let Some(bare) = self.bare.remove(&contact) {
+            self.contacts.insert(
+                contact,
+                Contact {
+                    channel,
+                    inbound_relay: half.inbound_relay,
+                    peer_static: bare.peer_static,
+                    salt: bare.salt,
+                    waiting_sends: bare.waiting_sends,
+                    ceremony: None,
+                    since: now,
+                    previous_relay: ANY_RELAY,
+                    rotated_at: 0,
+                    own_address: finished.own_address,
+                    stale: false,
+                    sweep_at: 0,
+                    address_sent: 0,
+                    // NET-292, as below.
+                    flight: finished.flight,
+                    opens: !half.opening.is_empty(),
+                    candidate: None,
+                    refused: VecDeque::new(),
+                },
+            );
+            None
+        } else {
+            let held = self.contacts.get_mut(&contact).ok_or(Error::NoPath)?;
+            let old = core::mem::replace(&mut held.channel, channel);
+            let old_relay = core::mem::replace(&mut held.inbound_relay, half.inbound_relay);
+            let previous_relay = core::mem::replace(&mut held.previous_relay, ANY_RELAY);
+            held.since = now;
+            held.rotated_at = 0;
+            held.own_address = finished.own_address;
+            held.stale = false;
+            // NET-190: the handshake ended with the pairwise key of the
+            // peer, and its queue is the address of the peer.
+            held.candidate = None;
+            // NET-292: the first ratchet record of the initiator opens the
+            // sending chain of the responder, behind flight 3.
+            held.opens = !half.opening.is_empty();
+            held.flight = finished.flight;
+            held.refused.clear();
+            Some((old, old_relay, previous_relay))
+        };
         self.moved.insert(contact);
         self.renewing.remove(&contact);
         self.rotating.remove(&contact);
@@ -2800,9 +2968,11 @@ impl ClientNode {
             _ => true,
         });
         let mut events = Vec::new();
-        let (inbound, previous) = old.into_inbounds();
-        ended.push((inbound, old_relay));
-        ended.extend(previous.map(|previous| (previous, previous_relay)));
+        if let Some((old, old_relay, previous_relay)) = old {
+            let (inbound, previous) = old.into_inbounds();
+            ended.push((inbound, old_relay));
+            ended.extend(previous.map(|previous| (previous, previous_relay)));
+        }
         // NET-329, WIR-044: each queue of the old channel and of each other
         // renewal owes its `DEL`, each after a delay of its own. The store
         // holds each one until its `DEL` left, thus one goes in each run
@@ -2852,8 +3022,14 @@ impl ClientNode {
     /// notice (Part 4 §4.5.1): the next handshake with that contact binds
     /// it (`IDN-060`), and the stored state takes it.
     pub fn set_peer_key(&mut self, contact: &ContactId, key: [u8; 32]) -> Result<(), Error> {
-        let held = self.contacts.get_mut(&contact.0).ok_or(Error::NoPath)?;
-        held.peer_static = key;
+        match (
+            self.contacts.get_mut(&contact.0),
+            self.bare.get_mut(&contact.0),
+        ) {
+            (Some(held), _) => held.peer_static = key,
+            (None, Some(held)) => held.peer_static = key,
+            (None, None) => return Err(Error::NoPath),
+        }
         self.moved.insert(contact.0);
         Ok(())
     }
@@ -3043,11 +3219,14 @@ impl ClientNode {
 
     /// Ends the swept time of a contact whose rotation or renewal starts.
     fn clear_sweep(&mut self, contact: &[u8; 32]) {
-        if let Some(held) = self.contacts.get_mut(contact) {
-            if held.sweep_at != 0 {
-                held.sweep_at = 0;
-                self.moved.insert(*contact);
-            }
+        let sweep_at = match (self.contacts.get_mut(contact), self.bare.get_mut(contact)) {
+            (Some(held), _) => &mut held.sweep_at,
+            (None, Some(held)) => &mut held.sweep_at,
+            (None, None) => return,
+        };
+        if *sweep_at != 0 {
+            *sweep_at = 0;
+            self.moved.insert(*contact);
         }
     }
 
@@ -6114,6 +6293,14 @@ impl ClientNode {
         rng: &mut R,
     ) -> Result<u64, Error> {
         let user_handle = self.handle();
+        // DEV-319: a contact with no channel holds each record until its
+        // renewal, as a stale one does.
+        if let Some(held) = self.bare.get_mut(&contact.0) {
+            held.waiting_sends
+                .push_back((app.to_vec(), Some(user_handle)));
+            self.start_renewal(contact.0, rng)?;
+            return Ok(user_handle);
+        }
         let held = self.contacts.get(&contact.0).ok_or(Error::NoPath)?;
         // NET-325: a stale channel holds each record until its renewal.
         if held.stale {
@@ -7715,13 +7902,18 @@ impl ClientNode {
         // static key that the peer holds (Part 3 §3.2.6).
         let (salt, renews) = match &keys.purpose {
             Purpose::Renew { contact } | Purpose::RenewAccept { contact, .. } => {
-                let Some(held) = self.contacts.get(contact) else {
+                let salt = self
+                    .contacts
+                    .get(contact)
+                    .map(|held| held.salt)
+                    .or_else(|| self.bare.get(contact).map(|held| held.salt));
+                let Some(salt) = salt else {
                     // The contact left while the relay made the queue.
                     self.renewing.remove(contact);
                     self.owe_del(inbound, queue_relay, false, self.clock, 0)?;
                     return Ok(Vec::new());
                 };
-                (held.salt, Some(*contact))
+                (salt, Some(*contact))
             }
             _ => (keys.salt, None),
         };
@@ -9342,6 +9534,75 @@ mod tests {
         let again: Vec<[u8; 32]> = net.node(ALICE).halves.keys().copied().collect();
         assert_eq!(again.len(), 1);
         assert_ne!(again, offered);
+    }
+
+    #[test]
+    fn a_contact_with_no_channel_renews_from_the_key_and_the_queue_of_the_peer() {
+        let mut net = Net::new();
+        net.join(0x41, 3, None, &EXITS);
+        net.join(0x61, 3, None, &EXITS);
+        let [alice, bob] = contacts(&mut net);
+        net.commit(ALICE);
+        // DEV-319: what a device of the set that never held the channel
+        // has of it. That form holds no ratchet and no queue of the user.
+        let full = net.parties[ALICE].contacts[&alice.0].clone();
+        let salt = stored_contact_salt(&full).unwrap();
+        let (peer_static, outbound) = stored_channel_end(&full).unwrap().unwrap();
+        let bare = bare_contact_state(&salt, &peer_static, &alice.0, &outbound).unwrap();
+        assert!(bare.len() < full.len() / 4);
+        assert!(stored_channel_end(&shadow_contact_state(&salt))
+            .unwrap()
+            .is_none());
+        // The form gives the same end again, and the two pairwise keys.
+        assert_eq!(
+            stored_channel_end(&bare).unwrap().unwrap().1.to_vec(),
+            outbound.to_vec()
+        );
+        let root = RootIdentity::new(Secret::new([0x41; 32]));
+        assert_eq!(
+            stored_contact_keys(&bare, &root).ok(),
+            stored_contact_keys(&full, &root).ok()
+        );
+        // A form whose end does not restore is no stored contact.
+        assert!(bare_contact_state(&salt, &peer_static, &alice.0, &outbound[1..]).is_err());
+
+        // The device that takes the set over starts from that form alone.
+        let old_queue = net.node(ALICE).inbound_queue(&alice).unwrap().0;
+        net.parties[ALICE].contacts.clear();
+        net.parties[ALICE].contacts.insert(alice.0, bare.to_vec());
+        net.restart(ALICE);
+        net.run();
+        net.take(ALICE);
+        assert!(net.node(ALICE).is_stale(&alice));
+        assert!(net.node(ALICE).inbound_queue(&alice).is_none());
+        let subs = net.count(ALICE, Cmd::Sub);
+
+        // A record of the user waits, and it starts the renewal at once.
+        let now = net.now;
+        net.node(ALICE)
+            .send(&alice, &text(1), now, &mut Rng(21))
+            .unwrap();
+        net.run();
+        let events = net.take(ALICE);
+        assert!(events.contains(&ClientEvent::ChannelRenewed { contact: alice }));
+        assert!(!net.node(ALICE).is_stale(&alice));
+        assert_eq!(messages(&net.take(BOB)), 1);
+        // The channel is new: its queue is not the one of the device that
+        // owned the channel before, and that queue took no `SUB`.
+        let new_queue = net.node(ALICE).inbound_queue(&alice).unwrap().0;
+        assert_ne!(new_queue, old_queue);
+        assert_eq!(net.count(ALICE, Cmd::Sub), subs + 1);
+        // The peer writes on the new channel, and the store holds the full
+        // form from here on.
+        let now = net.now;
+        net.node(BOB)
+            .send(&bob, &text(2), now, &mut Rng(22))
+            .unwrap();
+        net.run();
+        assert_eq!(messages(&net.take(ALICE)), 1);
+        net.commit(ALICE);
+        let stored = net.parties[ALICE].contacts[&alice.0].clone();
+        assert_eq!(stored.first(), Some(&CONTACT_STORED_VERSION));
     }
 
     /// Runs the checks of a client until its inbound queue for a contact
