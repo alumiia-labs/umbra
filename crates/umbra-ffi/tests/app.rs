@@ -3590,6 +3590,165 @@ fn a_linked_device_reads_and_writes_a_group() {
     let _ = std::fs::remove_dir_all(&directory);
 }
 
+/// DEV-314 to DEV-316: the phone that owns the channels is lost. The laptop
+/// takes the set over after `OWNER_ABSENCE`, renews the channel of the
+/// contact, and the two talk again with no key change.
+#[test]
+fn a_linked_device_takes_over_the_set_of_a_lost_phone_and_its_contact_talks_on() {
+    let _turn = DEVICE_TESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let relays = tokio::runtime::Runtime::new().unwrap();
+    let network = start_signed_network(&relays);
+    let directory = std::env::temp_dir().join(format!("umbra-takeover-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let network_for = |handle: &Handle| {
+        handle
+            .network_of_manifest(
+                network.manifest.clone(),
+                network.keyset.clone(),
+                0,
+                HOST.into(),
+                Some(CA.into()),
+            )
+            .unwrap()
+            .network
+    };
+    let alice = launch(&directory, "alice.db", 1);
+    let bob = launch(&directory, "bob.db", 2);
+    for handle in [&alice, &bob] {
+        handle.clone().connect(network_for(handle)).unwrap();
+    }
+    alice.invite().unwrap();
+    let link = wait_for(&alice, |event| match event {
+        FfiEvent::Invitation { link } => Some(link),
+        _ => None,
+    });
+    bob.accept(link).unwrap();
+    let alice_conversation = wait_for_contact(&alice);
+    let bob_conversation = wait_for_contact(&bob);
+
+    let laptop = link_new_device(&alice, &directory, "laptop.db", 3, &network_for);
+    // The ratchet of the phone moves on after the snapshot of the link, and
+    // the laptop takes the record of Bob on the sync channel.
+    let draft = bob.new_draft(bob_conversation.clone()).unwrap();
+    draft.set_text(units("after the link")).unwrap();
+    bob.send_draft(draft).unwrap();
+    wait_for_text(&alice, &alice_conversation, "after the link");
+    let start = Instant::now();
+    while !holds_text(&laptop, &alice_conversation, "after the link") {
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "no copy on the laptop"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    // The phone is lost.
+    alice.disconnect();
+
+    // DEV-231: the laptop takes no set over before `OWNER_ABSENCE`.
+    assert!(!laptop.owns_channels().unwrap());
+    assert!(!laptop.can_take_over().unwrap());
+    let code = Arc::new(View::default());
+    assert_eq!(laptop.take_over(code.clone()).err(), Some(FfiError::Busy));
+    assert!(code.0.lock().unwrap().is_empty());
+    // A record that the user composes on the laptop waits for the phone.
+    let draft = laptop.new_draft(alice_conversation.clone()).unwrap();
+    draft.set_text(units("while the phone was away")).unwrap();
+    laptop.send_draft(draft).unwrap();
+
+    // The clock of the laptop passes `OWNER_ABSENCE`.
+    laptop.age_owner_absence().unwrap();
+    assert!(laptop.can_take_over().unwrap());
+    // DEV-235: what the phone owns.
+    let count = laptop.take_over_count().unwrap();
+    assert_eq!((count.contacts, count.groups, count.unreachable), (1, 0, 0));
+    laptop.take_over(code.clone()).unwrap();
+    // DEV-316: the new recovery code, as digits of type 0x0001.
+    let digits = code.0.lock().unwrap().clone();
+    assert_eq!(recovery_digits_kind(digits), 1);
+    assert!(laptop.owns_channels().unwrap());
+    assert!(!laptop.can_take_over().unwrap());
+    let devices = laptop.devices().unwrap();
+    assert_eq!(devices.len(), 1);
+    assert!(devices[0].is_self);
+
+    // The run ended with the take-over, and the app starts the next one.
+    laptop.clone().connect(network_for(&laptop)).unwrap();
+
+    // Bob writes to the queue of the lost phone. NET-325 to NET-329: the
+    // laptop renews the channel, and NET-193 sends the record of Bob again
+    // on the new one.
+    let draft = bob.new_draft(bob_conversation.clone()).unwrap();
+    draft.set_text(units("are you there")).unwrap();
+    bob.send_draft(draft).unwrap();
+    let start = Instant::now();
+    while !holds_text(&laptop, &alice_conversation, "are you there") {
+        assert!(
+            start.elapsed() < Duration::from_secs(120),
+            "the laptop did not read the record of Bob"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    // The laptop sends on the channel that it owns now.
+    let draft = laptop.new_draft(alice_conversation.clone()).unwrap();
+    draft.set_text(units("on the laptop now")).unwrap();
+    laptop.send_draft(draft).unwrap();
+    let start = Instant::now();
+    while !holds_text(&bob, &bob_conversation, "on the laptop now") {
+        assert!(
+            start.elapsed() < Duration::from_secs(120),
+            "Bob did not read the record of the laptop"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    // DEV-316: the record that waited for the phone went from the laptop.
+    let start = Instant::now();
+    while !holds_text(&bob, &bob_conversation, "while the phone was away") {
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "the record that waited did not go"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    // DEV-131: the pairwise identity did not change, thus Bob sees no key
+    // change and no prompt.
+    assert!(bob.key_change(bob_conversation.clone()).unwrap().is_none());
+
+    // The channel carries more records in each direction.
+    let draft = bob.new_draft(bob_conversation.clone()).unwrap();
+    draft.set_text(units("good to read you")).unwrap();
+    bob.send_draft(draft).unwrap();
+    let start = Instant::now();
+    while !holds_text(&laptop, &alice_conversation, "good to read you") {
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "no second record of Bob"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    // DEV-317: the phone comes back. The epoch of the take-over reaches it
+    // on the sync channel. It shows that it left the set, it owns no
+    // channel, and its run of the queues of the contacts ends.
+    assert!(alice.owns_channels().unwrap());
+    alice.clone().connect(network_for(&alice)).unwrap();
+    tick_until(
+        &[&alice, &laptop],
+        || alice.removed_from_set().unwrap() && !alice.owns_channels().unwrap(),
+        "the phone did not learn of the take-over",
+    );
+    assert_eq!(alice.invite().err(), Some(FfiError::NotFound));
+    assert_eq!(alice.devices().unwrap().len(), 2);
+    for handle in [&alice, &laptop, &bob] {
+        handle.disconnect();
+    }
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
 /// DEV-298 to DEV-301: a group that the phone makes after two links reaches
 /// each linked device, and the device that stays follows the re-key of a
 /// removal and reads the group on.

@@ -5,6 +5,7 @@
 //! A linked device owns no pairwise ratchet and no group sender at the link
 //! (`DEV-287`), thus its runtime reaches no queue of a contact: each queue
 //! has one reader, and that reader is the device that owns the channel.
+//! The take-over of `takeover.rs` moves that ownership to a linked device.
 
 use umbra_core::{
     devset::{
@@ -46,7 +47,7 @@ const REMOVED_FROM_SET: &[u8] = b"removed-from-set";
 /// The contacts whose queue rotation a revocation owes (Part 7 §7.7 step
 /// 2c), under the settings: the conversation of each one in turn. A
 /// conversation leaves the row when its queue rotated.
-const ROTATION_OWED: &[u8] = b"rotation-owed";
+pub(super) const ROTATION_OWED: &[u8] = b"rotation-owed";
 /// The sync channel of each revoked device that still waits for the notice
 /// of its revocation (`DEV-313`), under the settings. The value holds the
 /// conversation of the channel and then the device, in turn.
@@ -63,8 +64,14 @@ pub const REVOCATION_NOTICE_TTL: u64 = umbra_queue::params::MSG_TTL;
 /// in seconds. The node keeps the time of each rotation that it took.
 const ROTATION_ASK_EVERY: u64 = 60;
 
-const SELF_KEY: &[u8] = b"self";
+pub(super) const SELF_KEY: &[u8] = b"self";
 const ROSTER_KEY: &[u8] = b"roster";
+
+/// One write that commits with a roster epoch.
+pub(super) enum RowWrite {
+    Put(TableId, RowId, Zeroizing<Vec<u8>>),
+    Delete(TableId, RowId),
+}
 /// The epochs below the head that a device keeps for a peer that missed
 /// one (`DEV-229`), each in the roster table under its index.
 const ROSTER_CHAIN_KEPT: u64 = 8;
@@ -123,7 +130,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .is_none_or(|plain| plain.first() == Some(&1)))
     }
 
-    fn put_device_identity<R: CryptoRng + ?Sized>(
+    pub(super) fn put_device_identity<R: CryptoRng + ?Sized>(
         &mut self,
         identity: &DeviceIdentity,
         owns: bool,
@@ -153,6 +160,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         bytes: &[u8],
         rng: &mut R,
     ) -> Result<(), Error> {
+        self.put_roster_with(bytes, Vec::new(), rng)
+    }
+
+    /// [`Client::put_roster`], with each write of `writes` in the commit of
+    /// the epoch. Thus a fault leaves the epoch and what follows from it
+    /// together, or neither.
+    pub(super) fn put_roster_with<R: CryptoRng + ?Sized>(
+        &mut self,
+        bytes: &[u8],
+        writes: Vec<RowWrite>,
+        rng: &mut R,
+    ) -> Result<(), Error> {
         let epoch = Roster::parse(bytes)?.epoch;
         let superseded = match self.roster_bytes()? {
             Some(current) if Roster::parse(&current)?.epoch.saturating_add(1) == epoch => {
@@ -179,6 +198,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             batch.put(DEVICE_ROSTER, kept_row, None, &current, rng)?;
             if let Some(old_row) = old_row {
                 batch.delete(DEVICE_ROSTER, old_row);
+            }
+        }
+        for write in &writes {
+            match write {
+                RowWrite::Put(table, row, plain) => batch.put(*table, *row, None, plain, rng)?,
+                RowWrite::Delete(table, row) => batch.delete(*table, *row),
             }
         }
         Ok(batch.commit()?)
@@ -386,7 +411,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // before it holds the epoch. Thus a run that is not up now, or a
         // crash after the epoch, loses no rotation and no notice.
         let channel = self.peer_channels()?.get(&device).copied();
-        self.owe_revocation(device, channel, &bytes, rng)?;
+        self.owe_revocation(device, channel, &bytes, true, rng)?;
         self.put_roster(&bytes, rng)?;
         // DEV-313: the revoked device learns of it once, on the channel
         // that ends when a relay took the notice, thus it can show it
@@ -432,15 +457,22 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
     /// Keeps what the revocation of `device` owes, in one commit. Each
     /// contact gets a new queue (Part 7 §7.7 step 2c). The revoked device
-    /// gets the notice on its sync channel (`DEV-313`).
-    fn owe_revocation<R: CryptoRng + ?Sized>(
+    /// gets the notice on its sync channel (`DEV-313`). A take-over renews
+    /// each channel (`DEV-316`), and a renewal makes each queue new, thus
+    /// it owes no rotation.
+    pub(super) fn owe_revocation<R: CryptoRng + ?Sized>(
         &mut self,
         device: DeviceId,
         channel: Option<ConversationId>,
         epoch: &[u8],
+        rotates: bool,
         rng: &mut R,
     ) -> Result<(), Error> {
-        let owed = self.rotations_to_owe()?;
+        let owed = if rotates {
+            self.rotations_to_owe()?
+        } else {
+            Vec::new()
+        };
         let mut leaving = self.setting(LEAVING_CHANNELS)?.unwrap_or_default();
         let notice_key = [REVOCATION_NOTICE, device.as_slice()].concat();
         let notice = [super::unix_now_seconds().to_be_bytes().as_slice(), epoch].concat();
@@ -591,7 +623,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// start empties it. A notice that goes again with no chain would not
     /// verify at a device that missed an epoch. That device would never
     /// learn of its removal.
-    fn queue_revocation_notice<R: CryptoRng + ?Sized>(
+    pub(super) fn queue_revocation_notice<R: CryptoRng + ?Sized>(
         &mut self,
         channel: ConversationId,
         epoch: &[u8],
@@ -748,8 +780,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             return Ok(false);
         }
         next.verify_successor(&previous, &Roster::hash(&current))?;
+        let before: Vec<DeviceId> = previous.devices.iter().map(|d| d.device_id).collect();
         if next.revokes(&identity.device_id) {
             self.mark_removed_from_set(rng)?;
+            // DEV-317: the epoch stays out of the store, and its claim
+            // still ends the ownership of this device.
+            self.fold_claims(&before, &next, rng)?;
             return Ok(false);
         }
         let gone: Vec<DeviceId> = next
@@ -768,6 +804,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             self.rotation_asked = 0;
         }
         self.put_roster(bytes, rng)?;
+        self.fold_claims(&before, &next, rng)?;
         for device in gone {
             self.end_sync_channel(device, rng)?;
         }
@@ -1136,6 +1173,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             return Err(Error::Integrity);
         }
         self.put_device_identity(identity, false, rng)?;
+        // DEV-230: with no record of the existing device yet, its absence
+        // counts from the link.
+        self.note_owner_heard(super::unix_now_seconds(), rng)?;
         // IDN-183 is for a restore: a linked device renews no contact, and
         // DEV-117 holds no deletion of the other devices.
         self.remove_setting(super::own_delete::HOLDS_DELETIONS)?;

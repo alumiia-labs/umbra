@@ -44,6 +44,7 @@ pub use retention::{HISTORY_AGE_ALL, HISTORY_AGE_MIN};
 pub use snapshot_recovery::SnapshotJob;
 mod social;
 mod sync;
+mod takeover;
 mod timers;
 mod tokens;
 mod typing;
@@ -78,6 +79,7 @@ pub use roster_notes::{
 };
 pub use social::{GivenShare, HeldShare};
 pub use sync::SyncSend;
+pub use takeover::TakeOverCount;
 pub use timers::{timer_body, TimerSetting, TIMER_VALUES};
 pub use typing::{EPHEMERAL, TYPING_INTERVAL_MS, TYPING_TTL_MS};
 use umbra_core::{

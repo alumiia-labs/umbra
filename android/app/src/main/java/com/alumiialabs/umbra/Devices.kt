@@ -39,6 +39,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import uniffi.umbra_ffi.Device
+import uniffi.umbra_ffi.FfiTakeOverCount
 import uniffi.umbra_ffi.LinkStatus
 
 /**
@@ -108,6 +109,14 @@ fun HeldDeletionsPrompt() {
 @Composable
 fun DevicesScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
     LaunchedEffect(Unit) { Core.readDevices() }
+    // DEV-315: a take-over waits for a run that read the sync channel, thus
+    // its row can come while the view shows.
+    LaunchedEffect(Core.ownsChannels) {
+        while (!Core.ownsChannels) {
+            delay(5_000)
+            Core.readTakeOver()
+        }
+    }
     var removing by remember { mutableStateOf<Device?>(null) }
     removing?.let { device ->
         // DEV-119, DEV-120: the deletions of that device since the last
@@ -161,9 +170,80 @@ fun DevicesScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                     }
                 }
             }
+            if (Core.canTakeOver) {
+                EntryRow(RowEntry("triangle-exclamation", "Owning device lost?") { push(Screen.TakeOver) })
+            }
             Column(Modifier.padding(20.dp)) {
                 if (Core.ownsChannels) {
                     PrimaryButton("Link a device") { push(Screen.LinkDevice) }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * The take-over of a set whose owning device is lost (Part 7 §7.7): what
+ * that device owns (`DEV-235`), what changes (`DEV-318`), one confirmation,
+ * and then the new recovery code.
+ */
+@Composable
+fun TakeOverScreen(onBack: () -> Unit) {
+    val context = LocalContext.current
+    var count by remember { mutableStateOf<FfiTakeOverCount?>(null) }
+    var digits by remember { mutableStateOf<CharArray?>(null) }
+    var isRunning by remember { mutableStateOf(false) }
+    var isRefused by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { Core.takeOverCount { count = it } }
+    digits?.let { held ->
+        SecretDigitsScreen("New recovery code", "The code of the lost device opens no new backup.", onBack) { show ->
+            show(held)
+        }
+        return
+    }
+    Column(Modifier.fillMaxSize()) {
+        BackBar("Owning device lost", onBack = onBack)
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
+            Text("This device takes over.")
+            Spacer(Modifier.height(12.dp))
+            val lines = buildList {
+                count?.let { held ->
+                    val contacts = if (held.contacts == 1u) "1 contact" else "${held.contacts} contacts"
+                    val groups = if (held.groups == 1u) "1 group" else "${held.groups} groups"
+                    add("$contacts and $groups move to this device.")
+                }
+                add("Each contact gets a new connection.")
+                count?.unreachable?.takeIf { it > 0u }?.let { late ->
+                    add(
+                        if (late == 1u) {
+                            "1 contact is newer than this device and needs a new invitation."
+                        } else {
+                            "$late contacts are newer than this device and need a new invitation."
+                        },
+                    )
+                }
+                add("Your other devices leave. Link them again.")
+                add("The recovery code changes.")
+            }
+            for (line in lines) {
+                Text("· $line", color = Palette.TextSecondary, modifier = Modifier.padding(bottom = 6.dp))
+            }
+            Spacer(Modifier.height(16.dp))
+            if (isRefused) {
+                Note("The owning device is not lost yet.", isError = true)
+                Spacer(Modifier.height(12.dp))
+            }
+            DangerButton("Take over", enabled = !isRunning) {
+                isRunning = true
+                isRefused = false
+                Core.takeOver(context) { code ->
+                    isRunning = false
+                    if (code == null) {
+                        isRefused = true
+                    } else {
+                        RecoveryPrompt.seen(context)
+                        digits = code
+                    }
                 }
             }
         }

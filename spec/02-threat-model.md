@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 2: Threat Model and Security Goals
 
 **Status:** Draft
-**Version:** 0.14.0
+**Version:** 0.15.0
 **Date:** 2026-10-10
 
 ---
@@ -305,9 +305,11 @@ implementation to them in the same manner.
 > sync record to another device of the set. A linked device that composes
 > waits for the unlock of the owner. The ownership claim of Part 7 §7.3.1
 > is the designed bound: a device claims after `OWNER_TIMEOUT` of 90 s, at
-> most `OWNER_CLAIM_RATE` times each day. The v1 client builds no claim
+> most `OWNER_CLAIM_RATE` times each day. v1 builds no claim of that scope
 > (Part 7 rule `DEV-287`), thus in v1 the wait has no bound but the
-> unlock. The second clause of U2 thus covers an unlocked
+> unlock. An owner that is gone for `OWNER_ABSENCE` of 24 h is absent, and
+> a linked device then takes the set over under Part 7 §7.7. The second
+> clause of U2 thus covers an unlocked
 > owner alone. In Instant mode a locked client still shows which
 > conversation waits, under Part 8 rule `NTF-136`, and U3 measures that
 > alert. Part 15 §15.3 holds the row.
@@ -369,7 +371,7 @@ adds a trade MUST add a row to this table.
 | An accepted key-change notice ends the post-compromise healing for that contact | Part 4 §4.5.1 |
 | A backup write costs about 492 KB each day on the chunk path, and U4 counts that cost | Part 3 §3.12 |
 | A send from a device that does not own the ratchet waits for the next wake of the owner device | Part 7 §7.5.4 |
-| The client locks after 15 minutes and a locked client holds no key. Thus a locked owner device sends nothing for a linked device, reads no queue, and carries no sync record, until the unlock. v1 builds no ownership claim, thus the unlock is the one bound | Part 7 §7.5.4, Part 8 §8.4.1, Part 14 §14.6.4 |
+| The client locks after 15 minutes and a locked client holds no key. Thus a locked owner device sends nothing for a linked device, reads no queue, and carries no sync record, until the unlock. v1 builds no ownership claim after `OWNER_TIMEOUT`, thus the unlock is the one bound below `OWNER_ABSENCE` | Part 7 §7.5.4, Part 8 §8.4.1, Part 14 §14.6.4 |
 | A provisional network runs on the relays of one operator. A client then builds a chain of one operator, and that operator joins the address of the client to its queues. Thus G6, G7 and G8 do not hold against that operator until the directory reaches the authority floor | Part 3 §3.4.6 |
 | The file of an attachment lives `CHUNK_TTL` of 14 days at a relay, and a message lives `MSG_TTL` of 45 days. Thus a recipient that returns after 14 days gets the message and not its file, and the uploader pays less storage | Part 12 §12.7.1 |
 | A resume sends no frame again, thus a connection that drops with a frame in flight costs each circuit of its session again. v1 ships TLS over TCP alone, thus a network with no TCP/443 carries no client | Part 3 §3.8, Part 3 §3.12, Part 6 §6.2.3 |
@@ -384,7 +386,8 @@ adds a trade MUST add a row to this table.
 | A moderation epoch names no author, and a member folds each superseded epoch, thus the chain is not an audit log | Part 11 §11.9.6 |
 | A group carries no delivery receipt, no read receipt, and no typing indicator, thus a sender in a group does not learn that a record arrived | Part 11 §11.6 |
 | A member that leaves a group reads the group until any other member rotates the epoch, one backoff after the first member comes online | Part 11 §11.4.1 |
-| An absence claim moves each ratchet of an absent device in one record, thus a device that is offline for `OWNER_ABSENCE` loses its ownership with no notice | Part 7 §7.3.1 |
+| An absence claim moves each ratchet of an absent device in one roster epoch, thus a device that owns the channels and that is offline for `OWNER_ABSENCE` can lose its ownership, and it learns of it when it returns | Part 7 §7.3.1 |
+| A take-over of a device set removes each other linked device, and it renews each channel from the state of the link of the device that takes over. Thus the user links each other device again, and a contact that came after that link needs a new invitation | Part 7 §7.7 |
 | A catch-up object puts the backlog of an absence on the chunk path at once, thus a relay reads that backlog as one attachment | Part 7 §7.5.1 |
 | A save to the media store and a screenshot stay as user actions, thus one tap moves a plaintext out of the encrypted store | Part 14 §14.6.6 |
 | The accessibility tree stays whole, thus an enabled accessibility service reads each rendered message | Part 14 §14.6.6 |

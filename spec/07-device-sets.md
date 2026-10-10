@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 7: Device Sets, History Sync, and Revocation
 
 **Status:** Draft
-**Version:** 0.14.0
+**Version:** 0.15.0
 **Date:** 2026-10-10
 
 ---
@@ -148,7 +148,8 @@ MUST compute `subject` as `SHA3-256(K_set || scope || value)`. For scope `0x01`
 the value is the pairwise identity public key, which is the 32-byte X25519
 public key of Part 4 §4.5. The scope `0x02` is reserved. For scope
 `0x03` the value is the
-`device_id` of the absent device, and §7.5.4 gives that claim. For scope
+`device_id` of the absent device, and §7.7 gives the take-over that carries
+that claim. For scope
 `0x04` the value is 32 zero bytes, thus one claim names the group sender owner
 of Part 11 §11.12 for every group of the user, and §7.5.4 gives that claim.
 
@@ -254,7 +255,9 @@ ratchet ownership and the group sender ownership.
 - **[DEV-160]** A device that changes the owner of a subject MUST publish
   that change in an `OwnerClaimRecord`. The record below is the one timely
   carrier. DEV-184 forbids a roster epoch for a claim alone, and the next
-  device event has no bound.
+  device event has no bound. A claim of scope `0x03` is the one exception.
+  It changes the owner of each subject of a device that leaves the set, and
+  `DEV-314` puts it in the roster epoch that revokes that device.
 - **[DEV-161]** A roster epoch MUST NOT carry more than `OWNER_CLAIM_MAX` claims. §7.8 gives
   that value.
 - **[DEV-162]** A device MUST NOT name a subject two times in one epoch.
@@ -299,9 +302,9 @@ claim_seq || claim_count || claims || signer_id
 A claim record travels as a device-set control record of §7.5.5, with the
 `control_type` value `0x03`.
 
-- **[DEV-183]** A device MUST publish an ownership change in an
-  `OwnerClaimRecord`. **[DEV-184]** A device MUST NOT publish a roster epoch
-  whose only change is an ownership claim.
+- **[DEV-183]** A device MUST publish an ownership change of scope `0x01` or
+  `0x04` in an `OwnerClaimRecord`. **[DEV-184]** A device MUST NOT publish a
+  roster epoch whose only change is an ownership claim.
 - **[DEV-185]** A verifier MUST find `signer_id` in the `devices` list of the
   roster epoch that `roster_epoch` names. **[DEV-186]** A verifier MUST verify
   `sig` against the `mldsa_pk` of that entry. **[DEV-187]** A verifier MUST
@@ -322,19 +325,36 @@ A claim record travels as a device-set control record of §7.5.5, with the
 - **[DEV-192]** A device MUST NOT put a claim of scope `0x02` in a record, and
   a verifier MUST reject a record that holds one. **[DEV-234]** A device MUST NOT
   put a claim of scope `0x03` together with a claim of a different scope in
-  one record.
+  one record or in one roster epoch.
 
 **The absence claim.** A claim of scope `0x03` takes each subject that one
-absent device owns. The device that publishes it is the claimant.
+absent device owns. The device that publishes it is the claimant. v1 uses
+the claim for one case: the absent device is the device that owns the
+channels of the set, and the claimant takes the set over (§7.7).
 
 - **[DEV-230]** A claimant MUST measure an absence from its own receive time
   of the last record from that device. That record arrived on their sync
-  channel. **[DEV-231]** A claimant MUST NOT publish a claim of scope
+  channel. A claimant that took no record yet measures from its link.
+  **[DEV-231]** A claimant MUST NOT publish a claim of scope
   `0x03` before that absence reaches `OWNER_ABSENCE`. §7.8 gives that value,
   and it is far above `OWNER_TIMEOUT`.
-- **[DEV-232]** A device MUST NOT send more than `OWNER_ABSENCE_RATE` claim
-  records that hold a claim of scope `0x03`. DEV-191 does not count such a
-  record.
+- **[DEV-315]** Before a claim of scope `0x03`, the current session of the
+  claimant MUST read their sync channel for `DRAIN_QUIET`. Part 3 §3.2.6
+  gives that value. The claimant MUST NOT publish the claim when that read
+  gave a record of the absent device. A device sends its highest roster
+  epoch on each sync channel at the start of each run (`DEV-229`). Thus a
+  claimant that was off for `OWNER_ABSENCE` itself finds that record, and it
+  takes nothing from a device that runs.
+- **[DEV-314]** A claimant MUST publish a claim of scope `0x03` in a roster
+  epoch that it signs, and in no `OwnerClaimRecord`. The claim MUST name the
+  claimant as `owner`, and the epoch MUST hold no other claim. The epoch MUST
+  name the absent device in `revoked`. It MUST also name there each device to
+  which the claimant has no sync channel. The claimant cannot give such a
+  device a seed, an epoch, or a record. `DEV-184` permits the epoch, because
+  it revokes a device.
+- **[DEV-232]** A device MUST NOT sign more than `OWNER_ABSENCE_RATE` roster
+  epochs that hold a claim of scope `0x03`. DEV-191 does not count such an
+  epoch.
 - **[DEV-233]** A device MUST apply a claim of scope `0x03` to each subject
   that the absent device owns. The ownership at the point where the fold
   reaches that claim applies. A later claim of scope `0x01` names one subject
@@ -350,6 +370,12 @@ absent device owns. The device that publishes it is the claimant.
 > the user. One absence claim moves each subject at once. Part 3 §3.12 gives
 > the cost of that claim on the day of a loss, and Part 2 §2.4 states the
 > trade.
+>
+> *Cause of the roster epoch as the carrier.* The absent device must leave
+> the set with its ownership. A claim record that moved the ownership and
+> left the device in `devices` would keep its roster signing authority, its
+> sync channel, and its place as a reader of each queue. One signed object
+> that does both leaves no state between the two.
 
 **The retention of a claim.** A device applies a claim once, and it does not
 audit the chain later.
@@ -520,22 +546,19 @@ Provision {                      // sealed under the seal key, XChaCha20-Poly130
   device shows it as a contact.
 - **[DEV-287]** The existing device keeps the ownership of each pairwise
   ratchet and of each group sender at the link. The new device owns nothing
-  until a claim of §7.3.1 or §7.5.4. Until then it MUST NOT read the queue of
-  a contact, send a group record, or write a backup of Part 4 §4.7.2: each
-  queue has one reader, and the backup root of a week has one writer.
-  The v1 client publishes no claim and applies none. Thus the
-  device that owns the channels at the first link owns them for the life of
-  the set. That device alone signs an epoch that adds or revokes a device. **A
-  set whose owning device is lost or seized thus cannot revoke that device,
-  cannot link a device, and sends and reads nothing more.** The other
-  devices keep the history that they hold. The user recovers through the
-  restore of Part 4 §4.7 on a new device, with the Recovery Code that the
-  owning device held and that the user wrote down (`DEV-295`). That new
-  device starts a new set. Part 4 §4.7 gives what a restore renews at the
-  contacts of the user. A user with no Recovery Code recovers nothing of
-  the set. Steps 1 and 3 of §7.7 and the absence claim of §7.3.1 describe
-  the path that a later version builds. They are not a property of
-  v1.
+  until it takes the set over under §7.7. Until then it MUST NOT read the
+  queue of a contact, send a group record, or write a backup of Part 4
+  §4.7.2: each queue has one reader, and the backup root of a week has one
+  writer. The device that owns the channels alone signs an epoch that adds a
+  device. It alone signs an epoch that revokes a device with no claim.
+  **A set whose owning device is lost or seized recovers on a linked device,
+  through the take-over of §7.7, after `OWNER_ABSENCE`.** That device then
+  owns the channels. A user that holds the Recovery Code can also restore on
+  a new device under Part 4 §4.7, and that device starts a new set. v1
+  builds the claim of scope `0x03` alone. It builds no claim of scope `0x01`
+  and no claim of scope `0x04`, thus no device takes one subject after
+  `OWNER_TIMEOUT`. A linked device waits for the unlock of an owning device
+  that is locked, and §7.5.4 states that limit.
 - **[DEV-290]** The existing device MUST keep the roster of epoch *n+1* only
   when the sync channel of the new device opens. A link that ends before
   that leaves epoch *n* in force. A link that the user cancels, or that
@@ -1084,8 +1107,9 @@ ratchet state for the contact *c*. If the two devices send, the ratchet forks.
   broadcast of an `OwnerClaimRecord` of §7.3.1. The pair (`roster_epoch`,
   `claim_seq`) gives the order of the claims, and the device ID breaks a tie.
   **[DEV-169]** A device MUST NOT claim the ownership of a
-  subject before `OWNER_TIMEOUT` passes. The v1 client builds
-  no claim, and `DEV-287` states what follows from that.
+  subject before `OWNER_TIMEOUT` passes. v1 builds no claim of scope `0x01`
+  and no claim of scope `0x04`, and `DEV-287` states what follows from that.
+  The claim of scope `0x03` waits for `OWNER_ABSENCE` under `DEV-231`.
 - At a change of the ownership, the new owner takes the **next DH ratchet
   step of the channel**. That is the step of Part 5 §5.5 that follows the next record
   of the peer under a new ratchet key. A sender cannot step alone, because the
@@ -1123,10 +1147,12 @@ takes no record. Thus a locked owner sends nothing for another device, reads
 no pairwise queue, and publishes no sync record again under `DEV-308`.
 Each other device of the set waits for the unlock of that owner. The claim of `DEV-049`
 is the designed bound of that wait, at `OWNER_TIMEOUT` and under
-`OWNER_CLAIM_RATE`. The v1 client builds no claim (`DEV-287`),
-thus in v1 the wait ends at the unlock of the owner and at no
-other time. A linked device shows the composed record as `queued` for that
-time. Part 2 §2.4 states the trade, and Part 15 §15.3 holds the row.
+`OWNER_CLAIM_RATE`. v1 builds no claim of that scope (`DEV-287`),
+thus in v1 the wait ends at the unlock of the owner. An owner that stays
+away for `OWNER_ABSENCE` is absent, and the take-over of §7.7 ends the wait
+then. A linked device shows the composed record as `queued` for that
+time, and it sends that record itself after a take-over. Part 2 §2.4 states
+the trade, and Part 15 §15.3 holds the row.
 
 This design costs one round trip when a device that is not the owner sends
 first. In exchange it removes the full class of ratchet-fork bugs. The
@@ -1764,8 +1790,11 @@ Revocation is the mitigation that makes history sync tolerable. Thus revocation
 has to be fast and complete.
 
 ```
-1. Any remaining device publishes roster epoch n+1 with the device in `revoked`.
-   That device signs the epoch with its own DeviceRosterKey (§7.3.1 rule 3).
+1. One remaining device publishes roster epoch n+1 with the device in `revoked`,
+   and it signs the epoch with its own DeviceRosterKey (§7.3.1 rule 3).
+   The device that owns the channels signs it for a linked device. A linked
+   device signs it for an absent device that owns the channels (the take-over
+   below).
 2. Every remaining device, on observing epoch n+1:
      a. deletes the sync channels to the revoked device;
      b. takes the next DH ratchet step on every pairwise channel it owns, which
@@ -1773,7 +1802,8 @@ has to be fast and complete.
      c. rotates every queue the revoked device knew;
      d. derives the sync channel seed of epoch n+1 from the seed update;
      e. starts the group re-key of Part 11 §11.12 for each group of the user.
-3. Ratchet ownership held by the revoked device is claimed per §7.5.4.
+3. The ownership that an absent device held moves to the signer of step 1, in
+   the claim of scope 0x03 of that epoch (§7.3.1, DEV-314).
 ```
 
 **The seed update (step 2d).** `SyncChannelSeed_0` is the seed of the diagram
@@ -1854,6 +1884,88 @@ session that ends before a rotation, lose no rotation.
 > input from the signer is a value that the revoked device does not see,
 > because DEV-255 gives it no sync channel. The chain over the old seed binds
 > each update to the seed before it.
+
+**The take-over of a set whose owning device is absent.** One device owns
+the channels of a set (`DEV-287`): it reads each queue, and it sends each
+record. When the user loses that device, a linked device takes the set
+over. That device is the claimant of §7.3.1. Its epoch is the epoch of step
+1, and it carries the claim of `DEV-314`. The sync channels form a star
+around the device that owns them (§7.5.1), thus the claimant reaches no
+other linked device. Its epoch revokes each one of them with the absent
+device. From that epoch on, the claimant is the device that owns the
+channels. It reads the queues, sends, posts to each group, links a device,
+revokes a device, and writes the backups.
+
+- **[DEV-316]** A claimant MUST keep its epoch and its own ownership in one
+  commit of its store. In that commit it MUST mark the channel of each
+  contact stale under Part 3 rule `NET-325`, as a restore does (Part 4
+  `IDN-183`). The renewal of Part 3 §3.2.6 then gives each contact a new
+  session and new queues. The claimant then sends each record of the user
+  that waited for the absent device. That renewal is step 2b and step 2c of
+  a take-over, and the claimant owes no other rotation. In the same commit
+  the claimant MUST make a new Recovery Code under Part 4 §4.7.1, and it
+  MUST erase its state of the backup. It MUST drop each sync record that it
+  retained for the absent device. It MUST start the group re-key of step 2e.
+  It MUST look up each handle that it publishes, as Part 4 rule `IDN-109`
+  requires after a restore.
+- **[DEV-317]** A device that owns the channels MUST fold a claim of scope
+  `0x03` that names it, from each verified epoch that it takes. That holds
+  also for an epoch that `DEV-180` forbids it to apply. From that fold on,
+  the device owns no channel. It MUST NOT read the queue of a contact, MUST
+  NOT send a record to a contact or to a group, and MUST NOT write a backup.
+  It MUST end the session that reads those queues at once, and it MUST erase
+  the parked session of Part 6 §6.2.3. It shows the event under `DEV-181`.
+  The claimant sends its epoch to the absent device as the notice of
+  `DEV-313`. Thus a device that returns learns of the take-over on the sync
+  channel. An epoch that revokes a device and holds no such claim moves no
+  ownership.
+- **[DEV-318]** Before a take-over, the interface MUST show the count of
+  `DEV-235`. It MUST show that each other device leaves the set, and that
+  each contact gets a new connection. The interface MUST get one explicit
+  confirmation of the user. After the take-over it MUST show the new
+  Recovery Code.
+
+> *Cause of the renewal.* The absent device holds the ratchet of each
+> channel, and it knows each queue. The claimant holds each channel as the
+> snapshot of its link held it (`DEV-004`). A ratchet step needs a record of
+> the peer, and a rotation needs a record on the current ratchet. The
+> claimant can make neither. The pairwise identities are the same on each device of the set (Part 4
+> §4.2.2). Thus the claimant makes each channel again from them, as a
+> restored device does, and no contact sees a key change (`DEV-131`).
+>
+> *Cause of the new Recovery Code.* A linked device holds no Recovery Code of
+> the set (`DEV-295`), and the absent device holds the one that the user
+> wrote down. A backup under that code would give the absent device each
+> later record of the set.
+>
+> **The residuals of a take-over.** UMBRA accepts each one, and Part 15 §15.3
+> holds the rows.
+>
+> 1. Each other linked device leaves the set, and it gets no notice, because
+>    the claimant has no channel to it. The user links it again under §7.4,
+>    after the local wipe of `DEV-008`.
+> 2. Two linked devices that take the set over at the same time each revoke
+>    the other, and neither learns of it. Each one then owns a set of one
+>    device. Each contact holds one channel, which is the one of the renewal
+>    that ended last, and the other device finds that channel dead.
+> 3. The claimant holds the channel of each contact as the snapshot of its
+>    link held it. No sync record carries a later ratchet or a later queue
+>    address. A contact whose queue moved since then reads its old queue no
+>    more. The bundle of the renewal goes to that queue, and the channel
+>    waits under Part 3 §3.2.6 rule 8. For a contact that the owning device made after
+>    that link, the claimant holds the conversation and the salt of `DEV-294`
+>    alone. It renews no such channel, and the two parties need a new
+>    invitation.
+> 4. No verifier measures the absence. A linked device in hostile hands can
+>    sign the epoch of a take-over at any time. The device that owns the
+>    channels then stops under `DEV-317`. Such a device holds the
+>    `RootIdentity` already (§7.2), thus it gains no key from the epoch. The
+>    user restores under Part 4 §4.7 and then resets the identity under
+>    §7.7.1.
+> 5. An absent device that signed two or more epochs which the claimant did
+>    not take verifies no epoch of the claimant. It shows the fork of
+>    `DEV-182` when it returns, and it keeps its ownership in its own store.
+>    Each contact that renewed its channel takes no record from it.
 
 **Properties:**
 
@@ -1956,8 +2068,8 @@ MUST remove each other device under §7.7 before the reset.
 | Roster epoch rate limit | 1 in 10 s for each device |
 | `OWNER_CLAIM_MAX` | 8 claims in one roster epoch or in one claim record (§7.3.1) |
 | `OWNER_CLAIM_RATE` | 4 claim records of scope `0x01` or `0x04` for each device each day (§7.3.1). Scope `0x02` is retired |
-| `OWNER_ABSENCE` | 24 h, measured by the claimant from the last record it took from the absent device (§7.3.1) |
-| `OWNER_ABSENCE_RATE` | 1 claim record of scope `0x03` for each device each hour (§7.3.1) |
+| `OWNER_ABSENCE` | 24 h, measured by the claimant from the last record it took from the absent device (§7.3.1). `DRAIN_QUIET` of Part 3 §3.2.6 is the time that the session of the claimant reads the sync channel first (`DEV-315`) |
+| `OWNER_ABSENCE_RATE` | 1 roster epoch with a claim of scope `0x03` for each device each hour (§7.3.1) |
 | `SYNC_INTERACTIVE_RATE` | 4 interactive sync records each minute, as the refill rate of the bucket (§7.5.1) |
 | `SYNC_INTERACTIVE_BURST` | 12 tokens in the bucket (§7.5.1) |
 | `SYNC_CATCHUP_LAG` | 360 records behind the counter of the device (§7.5.1) |

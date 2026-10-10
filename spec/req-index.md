@@ -72,7 +72,7 @@ column when a crate implements the requirement and a test covers it.
 | `IDN` | 134 | 46 | 1 | 0 | 5 | **186** |
 | `CRY` | 120 | 27 | 0 | 0 | 1 | **148** |
 | `WIR` | 409 | 86 | 0 | 0 | 7 | **502** |
-| `DEV` | 205 | 90 | 0 | 0 | 8 | **303** |
+| `DEV` | 209 | 91 | 0 | 0 | 8 | **308** |
 | `NTF` | 77 | 28 | 0 | 0 | 3 | **108** |
 | `DIS` | 130 | 35 | 0 | 0 | 3 | **168** |
 | `REL` | 162 | 34 | 1 | 0 | 3 | **200** |
@@ -81,7 +81,7 @@ column when a crate implements the requirement and a test covers it.
 | `ABU` | 71 | 29 | 1 | 0 | 0 | **101** |
 | `IMP` | 115 | 41 | 0 | 0 | 2 | **158** |
 | `SEC` | 4 | 3 | 0 | 0 | 1 | **8** |
-| **All** | 2077 | 627 | 6 | 0 | 54 | **2764** |
+| **All** | 2081 | 628 | 6 | 0 | 54 | **2769** |
 
 ## SCP — Scope and Conventions
 
@@ -1528,7 +1528,7 @@ Source: `spec/07-device-sets.md`
 | `DEV-180` | §7.3.1 | MUST NOT | A device | A device MUST NOT apply a roster epoch that names its own `DeviceId` in `revoked`. |  |  |
 | `DEV-181` | §7.3.1 | MUST | That device | That device MUST show that event to the user. |  |  |
 | `DEV-182` | §7.7 | MUST | (unstated) | A device that finds that a peer applied a different epoch at one index MUST show the fork. |  |  |
-| `DEV-183` | §7.3.1 | MUST | A device | A device MUST publish an ownership change in an `OwnerClaimRecord`. |  |  |
+| `DEV-183` | §7.3.1 | MUST | A device | A device MUST publish an ownership change of scope `0x01` or `0x04` in an `OwnerClaimRecord`. |  |  |
 | `DEV-184` | §7.3.1 | MUST NOT | A device | A device MUST NOT publish a roster epoch whose only change is an ownership claim. |  |  |
 | `DEV-185` | §7.3.1 | MUST | A verifier | A verifier MUST find `signer_id` in the `devices` list of the roster epoch that `roster_epoch` names. |  |  |
 | `DEV-186` | §7.3.1 | MUST | A verifier | A verifier MUST verify `sig` against the `mldsa_pk` of that entry. |  |  |
@@ -1576,7 +1576,7 @@ Source: `spec/07-device-sets.md`
 | `DEV-229` | §7.3.1 | MUST NOT | A device | A device MUST NOT retain a signed claim record or a superseded roster epoch after the fold. |  |  |
 | `DEV-230` | §7.3.1 | MUST | A claimant | A claimant MUST measure an absence from its own receive time of the last record from that device. |  |  |
 | `DEV-231` | §7.3.1 | MUST NOT | A claimant | A claimant MUST NOT publish a claim of scope `0x03` before that absence reaches `OWNER_ABSENCE`. |  |  |
-| `DEV-232` | §7.3.1 | MUST NOT | A device | A device MUST NOT send more than `OWNER_ABSENCE_RATE` claim records that hold a claim of scope `0x03`. |  |  |
+| `DEV-232` | §7.3.1 | MUST NOT | A device | A device MUST NOT sign more than `OWNER_ABSENCE_RATE` roster epochs that hold a claim of scope `0x03`. |  |  |
 | `DEV-233` | §7.3.1 | MUST | A device | A device MUST apply a claim of scope `0x03` to each subject that the absent device owns. |  |  |
 | `DEV-234` | §7.3.1 | MUST NOT | A device | A device MUST NOT put a claim of scope `0x03` together with a claim of a different scope in one record. |  |  |
 | `DEV-235` | §7.3.1 | MUST | (unstated) | Before a claimant publishes a claim of scope `0x03`, it MUST show how many subjects the absent device owns. |  |  |
@@ -1656,6 +1656,11 @@ Source: `spec/07-device-sets.md`
 | `DEV-311` | §7.4 | MUST | The snapshot | The snapshot MUST carry the causal counter of the existing device at the confirmation of `DEV-283`, and the new device MUST start the contiguous point of `DEV-055` for that peer at that counter. |  |  |
 | `DEV-312` | §7.5.5 | MUST | A device | A device MUST also start that resend when a relay refused a sync record of that peer or no path took it, and when a record waited for a channel of the peer that the run did not hold yet. |  |  |
 | `DEV-313` | §7.7 | MUST | The signer of an epoch with a new `revoked` entry | The signer of an epoch with a new `revoked` entry MUST send that epoch once on the sync channel of each device that it revokes, before it deletes that channel under step 2a. |  |  |
+| `DEV-314` | §7.3.1 | MUST | A claimant | A claimant MUST publish a claim of scope `0x03` in a roster epoch that it signs, and in no `OwnerClaimRecord`. |  |  |
+| `DEV-315` | §7.3.1 | MUST NOT | A claimant | Before a claim of scope `0x03`, the current session of the claimant MUST read their sync channel for `DRAIN_QUIET`. |  |  |
+| `DEV-316` | §7.7 | MUST | A claimant | A claimant MUST keep its epoch and its own ownership in one commit of its store. |  |  |
+| `DEV-317` | §7.7 | MUST | A device that owns the channels | A device that owns the channels MUST fold a claim of scope `0x03` that names it, from each verified epoch that it takes. |  |  |
+| `DEV-318` | §7.7 | MUST | Before a take-over, the interface | Before a take-over, the interface MUST show the count of `DEV-235`. |  |  |
 
 ## NTF — Notifications
 

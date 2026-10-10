@@ -445,9 +445,50 @@ object Core {
     var removedFromSet by mutableStateOf(false)
         private set
 
+    /** Whether this device can take the set over now (Part 7 `DEV-231`, `DEV-315`). */
+    var canTakeOver by mutableStateOf(false)
+        private set
+
+    fun readTakeOver() = call { client ->
+        val can = !client.ownsChannels() && client.canTakeOver()
+        main.post { canTakeOver = can }
+    }
+
+    /** What the lost device owns (Part 7 `DEV-235`). */
+    fun takeOverCount(onCount: (uniffi.umbra_ffi.FfiTakeOverCount) -> Unit) = call { client ->
+        val count = client.takeOverCount()
+        main.post { onCount(count) }
+    }
+
+    /**
+     * Takes the set over (Part 7 `DEV-314`). The view gets the digits of the
+     * new recovery code, or nothing when the core refused. The network runs
+     * again as the device that owns the channels.
+     */
+    fun takeOver(context: Context, onDone: (CharArray?) -> Unit) {
+        val app = context.applicationContext
+        call { client ->
+            val sink = CharSink()
+            try {
+                client.takeOver(sink)
+            } catch (refused: FfiException) {
+                main.post { onDone(null) }
+                return@call
+            }
+            main.post {
+                canTakeOver = false
+                connect(app, force = true)
+                readDevices()
+                refreshChats()
+                onDone(sink.chars)
+            }
+        }
+    }
+
     fun readDevices() = call { client ->
         val list = client.devices()
         val owns = client.ownsChannels()
+        val takes = !owns && client.canTakeOver()
         val removed = client.removedFromSet()
         val forks = client.rosterForks()
         val holes = client.historyHoles()
@@ -455,6 +496,7 @@ object Core {
         main.post {
             heldDeletions = held
             removedFromSet = removed
+            canTakeOver = takes
             historyHoles.clear()
             historyHoles.addAll(holes)
             devices.clear()

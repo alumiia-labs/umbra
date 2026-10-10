@@ -114,6 +114,19 @@ pub struct FfiRosterFork {
     pub kind: u8,
 }
 
+/// What the absent device owns, for the view before a take-over (Part 7
+/// `DEV-235`).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FfiTakeOverCount {
+    /// The contacts of the set.
+    pub contacts: u32,
+    /// The groups of the set.
+    pub groups: u32,
+    /// The contacts that came after the link of this device. A take-over
+    /// renews none of them.
+    pub unreachable: u32,
+}
+
 /// What one transfer of a link does.
 pub(super) enum LinkStep {
     WriteOffer,
@@ -476,6 +489,54 @@ impl Inner {
         for contact in client.rotation_owed(now).unwrap_or_default() {
             let _ = running.rotate_swept(umbra_core::session::node::ContactId(contact));
         }
+    }
+
+    /// Ends the run of a device that owned the channels and that owns none
+    /// any more (`DEV-317`): an epoch of another device took them. The
+    /// parked session goes too, since its circuits carry the queues of the
+    /// contacts (`WIR-549`). The platform starts the next run, which reads
+    /// the sync channels alone. The result is whether a run ended.
+    pub(super) fn end_run_of_lost_ownership(&mut self) -> bool {
+        if !self.owns_channels || self.client.owns_channels().unwrap_or(true) {
+            return false;
+        }
+        self.owns_channels = false;
+        self.end_run_for_ownership();
+        // The cause that asks the platform for a new run with no fault.
+        self.net_events
+            .push_back(super::NetEvent::Offline(super::Ended::Aged));
+        true
+    }
+
+    /// Ends the run that is up, as a disconnect does, and erases the
+    /// parked session. No node of the old ownership commits after this.
+    fn end_run_for_ownership(&mut self) {
+        self.resume.clear();
+        self.run = self.run.wrapping_add(1);
+        self.bridge = None;
+        self.transfers = None;
+        self.groups = None;
+        self.group_reading.clear();
+        self.spawner = None;
+        self.circuits.clear();
+        self.circuits_changed = true;
+        self.online_since = None;
+    }
+
+    /// Whether the user can take the set over at `now` (`DEV-231`,
+    /// `DEV-315`): the absence reached `OWNER_ABSENCE`, and the run that is
+    /// up read the sync channel for `DRAIN_QUIET`. The owning device writes
+    /// its roster to that channel at the start of each of its runs. Thus a
+    /// device that was off itself takes no set from an owner that lives.
+    fn may_take_over(&mut self, now: u64) -> Result<bool, FfiError> {
+        if !self.client.may_take_over(now, &mut OsRng)? {
+            return Ok(false);
+        }
+        let quiet = std::time::Duration::from_secs(umbra_core::session::node::DRAIN_QUIET);
+        Ok(self.bridge.is_some()
+            && self
+                .online_since
+                .is_some_and(|(run, since)| run == self.run && since.elapsed() >= quiet))
     }
 
     /// The expiry of each step, and the read of a slot that holds nothing
@@ -1174,6 +1235,59 @@ impl Handle {
         Ok(())
     }
 
+    /// Whether the user can take the set over now (Part 7 §7.7): this
+    /// device owns no channel, the device that owns them is absent for
+    /// `OWNER_ABSENCE`, and the run read the sync channel for `DRAIN_QUIET`
+    /// (`DEV-231`, `DEV-315`).
+    pub fn can_take_over(&self) -> Result<bool, FfiError> {
+        locked(&self.inner).may_take_over(unix_now())
+    }
+
+    /// What the absent device owns, for the view before a take-over
+    /// (`DEV-235`).
+    pub fn take_over_count(&self) -> Result<FfiTakeOverCount, FfiError> {
+        let count = locked(&self.inner).client.take_over_count()?;
+        Ok(FfiTakeOverCount {
+            contacts: count.contacts,
+            groups: count.groups,
+            unreachable: count.unreachable,
+        })
+    }
+
+    /// Takes the set over (`DEV-314` to `DEV-316`): this device revokes
+    /// each other device, owns each channel, and renews each contact. The
+    /// new recovery code goes into `sink` as [`Handle::recovery_code`]
+    /// gives it (`IMP-037`). The run ends here, and the platform starts
+    /// the network again. A call before `can_take_over` gives `Busy`, and a
+    /// call on the device that owns the channels gives `NotFound`.
+    pub fn take_over(&self, sink: Arc<dyn super::TextSink>) -> Result<(), FfiError> {
+        let mut held = super::HeldText::default();
+        {
+            let mut inner = locked(&self.inner);
+            let now = unix_now();
+            if inner.client.owns_channels()? {
+                return Err(FfiError::NotFound);
+            }
+            if !inner.may_take_over(now)? {
+                return Err(FfiError::Busy);
+            }
+            inner.client.take_over(now, &mut OsRng)?;
+            // The node of this run holds no contact, and the next run
+            // restores each one. A circuit of this run carries no queue of
+            // a contact either.
+            inner.end_run_for_ownership();
+            inner.owns_channels = true;
+            inner.client.render_recovery_code(&mut held, &mut OsRng)?;
+        }
+        if let Some(runtime) = locked(&self.runtime).take() {
+            runtime.shutdown_background();
+        }
+        locked(&self.run_done).take();
+        held.give(sink.as_ref());
+        self.changed.notify_all();
+        Ok(())
+    }
+
     /// Whether another device of the set removed this one (`DEV-181`).
     pub fn removed_from_set(&self) -> Result<bool, FfiError> {
         Ok(locked(&self.inner).client.removed_from_set()?)
@@ -1263,6 +1377,22 @@ impl Handle {
                 added_epoch: device.added_epoch,
             })
             .collect())
+    }
+}
+
+#[cfg(feature = "sockets-test")]
+impl Handle {
+    /// Moves the two clocks of a take-over past their periods, as a wait
+    /// of `OWNER_ABSENCE` in a run that is up does. For a test over real
+    /// sockets alone.
+    pub fn age_owner_absence(&self) -> Result<(), FfiError> {
+        let mut inner = locked(&self.inner);
+        inner.client.age_owner_absence(unix_now(), &mut OsRng)?;
+        let quiet = std::time::Duration::from_secs(umbra_core::session::node::DRAIN_QUIET);
+        if let Some((_, since)) = inner.online_since.as_mut() {
+            *since = since.checked_sub(quiet).unwrap_or(*since);
+        }
+        Ok(())
     }
 }
 

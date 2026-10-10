@@ -1065,6 +1065,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .into_iter()
             .map(|(device, channel)| (channel, device))
             .collect();
+        // DEV-230: the absence of the device that owns the channels counts
+        // from the last record of its sync channel.
+        if !self.owns_channels()? && bodies.iter().any(|(held, _)| devices.contains_key(held)) {
+            self.note_owner_heard(now, rng)?;
+        }
         let mut out = Vec::new();
         // DEV-308: the device that owns the channels relays what one peer
         // publishes to each peer, and a peer drops its own record when the

@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 4: Identity
 
 **Status:** Draft
-**Version:** 0.14.0
+**Version:** 0.15.0
 **Date:** 2026-10-10
 
 ---
@@ -984,6 +984,12 @@ BackupRootKey = Argon2id(RecoveryCode, salt, m ≥ 64 MiB, t ≥ 3)
 CSPRNG outputs. **[IDN-071]** A client MUST derive `BackupRootKey` from the two
 halves together. **[IDN-072]** A party MUST NOT derive `BackupRootKey` from one
 half.
+
+A device that takes a device set over under Part 7 §7.7 makes a new code in
+the same manner (Part 7 rule `DEV-316`). The device that the set lost held
+the code before. The shares of a split of §4.7.3 belong to that code, and
+they open no backup of the new one. Thus the user writes the new code down
+and splits it again.
 
 **[IDN-177]** A client MUST derive `BackupRootKey` with `salt` of the 20
 bytes `"umbra/v1/backup-salt"`, with `m` of exactly 64 MiB, with `t` of

@@ -1672,6 +1672,10 @@ struct Inner {
     /// Whether the connect that runs is the one of a push-wake session, for
     /// the first flush of its bridge (`NET-097`).
     wake_next: bool,
+    /// The run that came online, and the moment of it. A take-over waits
+    /// for a run that read the sync channel for `DRAIN_QUIET`
+    /// (`DEV-315`).
+    online_since: Option<(u64, std::time::Instant)>,
     /// The idle time of the auto-lock since the last action of the user
     /// (`IMP-119`, `SCP-018`). A monotonic source that counts the sleep of
     /// the device gives it. A locked client holds none.
@@ -4245,6 +4249,7 @@ fn handle_of(database_path: String, client: Client<SqliteBackend, ForeignElement
             peer_drop_due: true,
             link_erasures_due: true,
             wake_next: false,
+            online_since: None,
             idle_watch: None,
         }),
         changed: Condvar::new(),
@@ -4294,6 +4299,13 @@ impl Persist for HandleStore {
             .client
             .commit_network(&changes, received, unix_now_ms(), &mut OsRng)
             .is_ok();
+        // DEV-317: an epoch of this batch took the channels from this
+        // device. The run ends before one more record leaves on them.
+        if inner.end_run_of_lost_ownership() {
+            drop(inner);
+            handle.changed.notify_all();
+            return committed;
+        }
         // A record of a contact goes to the devices of the set, and one
         // that a peer handed to this device goes to its contact.
         let Inner { client, bridge, .. } = &mut *inner;
@@ -4456,6 +4468,7 @@ impl Handle {
             pending_grants,
             invitation_host,
             pending_faults,
+            online_since,
             ..
         } = &mut *inner;
         let ended = matches!(update, Update::Offline(_));
@@ -4608,6 +4621,9 @@ impl Handle {
             // A network that came back takes each NDR call at once.
             Update::Online => {
                 ndr_retry.clear();
+                if online_since.is_none_or(|(held, _)| held != run) {
+                    *online_since = Some((run, std::time::Instant::now()));
+                }
                 // NET-190: the node of a new run holds no candidate address,
                 // and the store gives each one again. The store also says
                 // whether the candidate took its record of `NET-191` in an
@@ -5241,6 +5257,12 @@ impl Handle {
             let mut contacts = BTreeMap::new();
             for (conversation, state) in &stored.contacts {
                 if !*owns_channels && !device_peers.contains(conversation) {
+                    continue;
+                }
+                // DEV-294: a device that took the set over holds the
+                // conversation of a contact that came after its link, and
+                // no key of that channel.
+                if client.holds_no_channel(*conversation)? {
                     continue;
                 }
                 let contact = node
@@ -7005,6 +7027,9 @@ impl Handle {
             return;
         }
         inner.pump_link(now);
+        // DEV-317: an epoch that came outside a batch of the queues, as in
+        // a catch-up object, took the channels from this device.
+        inner.end_run_of_lost_ownership();
         inner.pump_sync_resend(now);
         // DEV-210: a timed message goes at its deadline, on each device.
         let _ = inner.client.sweep_timed(now);

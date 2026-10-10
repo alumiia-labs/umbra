@@ -180,6 +180,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // path.
         if rival.revokes(&own) {
             self.mark_removed_from_set(rng)?;
+            // DEV-317: a rival that takes the set over ends the ownership
+            // of this device as a successor does.
+            let before: Vec<DeviceId> = parent.signers.iter().map(|(id, _)| *id).collect();
+            self.fold_claims(&before, &rival, rng)?;
             return Ok(false);
         }
         let label = label_of(&rival.signer_id, &[&rival, &head]);

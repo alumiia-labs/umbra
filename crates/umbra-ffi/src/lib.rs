@@ -4896,6 +4896,279 @@ mod tests {
         assert_eq!(phone.roster_forks().unwrap().len(), 2);
     }
 
+    /// The time of the last record of the phone on the sync channel of the
+    /// laptop, in seconds.
+    const HEARD: u64 = 1_900_000_000;
+
+    /// A phone with one contact and two linked devices, the store of the
+    /// laptop from the snapshot of its link, and the roster epoch of that
+    /// link. The laptop took one record of the phone at `HEARD`.
+    #[allow(clippy::type_complexity)]
+    fn phone_and_laptop(
+        seed: u64,
+    ) -> (
+        Client<MemoryBackend, Element>,
+        Client<MemoryBackend, Element>,
+        umbra_core::devset::link::DeviceIdentity,
+        ContactId,
+        Vec<u8>,
+        Rng,
+    ) {
+        use crate::client::RestoredBackup;
+        use umbra_core::{
+            devset::link::{DeviceIdentity, LinkHello},
+            session::node::StateChange,
+        };
+        use umbra_wire::app::devset::{ControlType, DeviceSetBody};
+
+        let mut rng = Rng(seed);
+        let mut phone = new_client(&mut rng);
+        let contact = ContactId([9; 32]);
+        let change = StateChange::Contact {
+            contact,
+            state: zeroize::Zeroizing::new(vec![0x04, 2, 3]),
+        };
+        phone
+            .commit_network(&[change], &[], HEARD * 1_000, &mut rng)
+            .unwrap();
+        phone.ensure_device_set("Phone", &mut rng).unwrap();
+        let hello = |identity: &DeviceIdentity| LinkHello {
+            device_id: identity.device_id,
+            device_pk: identity.device_key().public().clone(),
+            roster_pk: identity.roster_key().verifying_key().to_bytes().to_vec(),
+            label: identity.label,
+            ct: umbra_crypto::kem::Ciphertext::from_bytes(&[0; umbra_crypto::kem::CIPHERTEXT_LEN])
+                .unwrap(),
+        };
+        let tablet = DeviceIdentity::generate("Tablet", &mut rng);
+        let laptop_identity = DeviceIdentity::generate("Laptop", &mut rng);
+        let e1 = phone.sign_linked_device(&hello(&tablet), &mut rng).unwrap();
+        phone.commit_roster(&e1, &mut rng).unwrap();
+        let e2 = phone
+            .sign_linked_device(&hello(&laptop_identity), &mut rng)
+            .unwrap();
+        let snapshot = phone.link_snapshot(HEARD, &e2, b"bundle", 0).unwrap();
+        phone.commit_roster(&e2, &mut rng).unwrap();
+
+        let restored = RestoredBackup::assemble(core::slice::from_ref(&snapshot)).unwrap();
+        let mut laptop = Client::create_with_seed(
+            MemoryBackend::default(),
+            Element([2; 32]),
+            &units("laptop phrase"),
+            CHEAP,
+            HEARD,
+            restored.seed(),
+            &mut Rng(seed + 1),
+        )
+        .unwrap();
+        laptop.apply_restore(&restored, &mut rng).unwrap();
+        laptop.apply_link(&laptop_identity, &mut rng).unwrap();
+        // The sync channel to the phone, as the node stored it.
+        let channel = ContactId([0x7C; 32]);
+        let change = StateChange::Contact {
+            contact: channel,
+            state: zeroize::Zeroizing::new(vec![0x04, 5, 6]),
+        };
+        laptop
+            .commit_network(&[change], &[], HEARD * 1_000, &mut rng)
+            .unwrap();
+        let sync = laptop.conversation_for(&channel.0).unwrap();
+        laptop.mark_device_peer(sync, &mut rng).unwrap();
+        // DEV-230: the phone sends its head, and the laptop keeps the time.
+        let body = DeviceSetBody::Control {
+            control_type: ControlType::RosterEpoch,
+            payload: &e2,
+        };
+        let mut encoded = vec![0u8; e2.len() + 16];
+        let used = body.encode(&mut encoded).unwrap();
+        let head = record(
+            umbra_wire::app::AppKind::DeviceSet,
+            [0x51; 16],
+            &encoded[..used],
+        );
+        deliver(&mut laptop, &channel, &head, HEARD * 1_000, &mut rng);
+        while laptop.take_sync_send().is_some() {}
+        (phone, laptop, laptop_identity, contact, e2, rng)
+    }
+
+    #[test]
+    fn a_linked_device_takes_the_set_over_after_the_absence_of_the_owning_device() {
+        use umbra_core::{
+            devset::{
+                roster::{ClaimScope, OwnerClaim, Roster},
+                OWNER_ABSENCE,
+            },
+            session::node::{shadow_contact_state, StateChange},
+        };
+
+        let (mut phone, mut laptop, identity, contact, e2, mut rng) = phone_and_laptop(331);
+        let own = identity.device_id;
+        let absent = phone.device_identity().unwrap().unwrap().device_id;
+        assert!(!laptop.owns_channels().unwrap());
+        assert_eq!(laptop.roster_bytes().unwrap().unwrap(), e2);
+        // A contact that the phone made after the link: the laptop holds
+        // its conversation and no key of its channel (DEV-294).
+        let late = StateChange::Contact {
+            contact: ContactId([0x55; 32]),
+            state: zeroize::Zeroizing::new(shadow_contact_state(&[3; 16])),
+        };
+        laptop
+            .commit_network(&[late], &[], HEARD * 1_000, &mut rng)
+            .unwrap();
+        // DEV-235: what the absent device owns.
+        let count = laptop.take_over_count().unwrap();
+        assert_eq!((count.contacts, count.groups, count.unreachable), (2, 0, 1));
+
+        // DEV-231: no claim before `OWNER_ABSENCE`.
+        let early = HEARD + OWNER_ABSENCE - 1;
+        assert!(!laptop.may_take_over(early, &mut rng).unwrap());
+        assert!(matches!(
+            laptop.take_over(early, &mut rng),
+            Err(Error::Busy)
+        ));
+        assert!(!laptop.owns_channels().unwrap());
+        assert_eq!(laptop.roster_bytes().unwrap().unwrap(), e2);
+        // The device that owns the channels takes no set over.
+        let due = HEARD + OWNER_ABSENCE;
+        assert!(!phone.may_take_over(due, &mut rng).unwrap());
+        assert!(matches!(
+            phone.take_over(due, &mut rng),
+            Err(Error::NotFound)
+        ));
+
+        let code_of = |client: &mut Client<MemoryBackend, Element>, rng: &mut Rng| {
+            let mut view = View::default();
+            client.render_recovery_code(&mut view, rng).unwrap();
+            view.0
+        };
+        let code_before = code_of(&mut laptop, &mut rng);
+        let code_of_phone = code_of(&mut phone, &mut rng);
+
+        assert!(laptop.may_take_over(due, &mut rng).unwrap());
+        let epoch = laptop.take_over(due, &mut rng).unwrap();
+        // DEV-314: the epoch revokes each other device, and its one claim
+        // of scope 0x03 names the phone and gives the laptop the set.
+        assert!(laptop.owns_channels().unwrap());
+        assert_eq!(laptop.roster_bytes().unwrap().unwrap(), epoch);
+        let roster = Roster::parse(&epoch).unwrap();
+        let before = Roster::parse(&e2).unwrap();
+        assert_eq!(roster.epoch, before.epoch + 1);
+        assert_eq!(roster.prev_hash, Roster::hash(&e2));
+        assert_eq!(roster.signer_id, own);
+        assert_eq!(roster.devices.len(), 1);
+        assert_eq!(roster.devices[0].device_id, own);
+        assert_eq!(roster.revoked.len(), 2);
+        assert!(before
+            .devices
+            .iter()
+            .filter(|entry| entry.device_id != own)
+            .all(|entry| roster.revoked.contains(&entry.device_id)));
+        roster
+            .verify_successor(&before, &Roster::hash(&e2))
+            .unwrap();
+        assert_eq!(roster.claims.len(), 1);
+        assert_eq!(roster.claims[0].scope, ClaimScope::Absence);
+        assert_eq!(roster.claims[0].owner, own);
+        let set_key = phone.root_identity().unwrap().device_set_key();
+        assert_eq!(
+            roster.claims[0].subject,
+            OwnerClaim::subject(&set_key, ClaimScope::Absence, &absent)
+        );
+
+        // DEV-316: each contact whose channel the laptop holds waits for
+        // its renewal, as after a restore. The late contact holds none.
+        assert_eq!(laptop.restored_stale().unwrap(), [contact.0]);
+        // DEV-316: a new recovery code, which the phone never held.
+        let code_after = code_of(&mut laptop, &mut rng);
+        assert_ne!(code_after, code_before);
+        assert_ne!(code_after, code_of_phone);
+        assert_eq!(code_of(&mut laptop, &mut rng), code_after);
+        assert!(laptop.last_backup_at().unwrap().is_none());
+
+        // DEV-313: the epoch goes to the phone on the channel that ends.
+        let sync = laptop.conversation_for(&[0x7C; 32]).unwrap();
+        let sends: Vec<_> = core::iter::from_fn(|| laptop.take_sync_send()).collect();
+        assert!(!sends.is_empty());
+        assert!(sends.iter().all(|send| send.peer == sync));
+        assert!(laptop.is_leaving_channel(sync).unwrap());
+        // The next run sends the notice again.
+        laptop.end_revoked_channels(&mut rng).unwrap();
+        assert!(laptop.take_sync_send().is_some());
+        while laptop.take_sync_send().is_some() {}
+        // A relay took the notice, and the channel ends.
+        let notice = MsgRef(sync.0);
+        laptop
+            .set_delivery(&notice, Delivery::Accepted, &mut rng)
+            .unwrap();
+        assert!(laptop.is_ended_channel(sync).unwrap());
+        assert!(laptop.device_peers().unwrap().is_empty());
+
+        // The laptop owns the set, thus it takes none over again.
+        assert!(!laptop.may_take_over(due + OWNER_ABSENCE, &mut rng).unwrap());
+        assert!(matches!(
+            laptop.take_over(due + OWNER_ABSENCE, &mut rng),
+            Err(Error::NotFound)
+        ));
+        laptop.audit().unwrap();
+    }
+
+    #[test]
+    fn a_former_owner_that_takes_the_epoch_of_a_take_over_leaves_the_set() {
+        use umbra_core::devset::{
+            link::{sign_roster, DeviceIdentity, LinkHello},
+            roster::Roster,
+            OWNER_ABSENCE,
+        };
+
+        let (mut phone, mut laptop, identity, contact, e2, mut rng) = phone_and_laptop(341);
+        let epoch = laptop.take_over(HEARD + OWNER_ABSENCE, &mut rng).unwrap();
+
+        // An epoch that revokes the phone with no claim moves no ownership
+        // (DEV-180, DEV-181): the phone shows it, and it owns its channels.
+        let mut plain = Roster::parse(&epoch).unwrap();
+        plain.claims.clear();
+        let plain = sign_roster(&plain, &identity.roster_key(), &mut rng).unwrap();
+        assert!(!phone.apply_roster(&plain, &mut rng).unwrap());
+        assert!(phone.removed_from_set().unwrap());
+        assert!(phone.owns_channels().unwrap());
+
+        // DEV-317: the phone comes back and takes the epoch of the
+        // take-over. It does not apply it, and it owns nothing more.
+        let mut draft = phone.new_draft(phone.conversation_for(&contact.0).unwrap());
+        draft.set_text(&units("still here")).unwrap();
+        phone.send_draft(draft, HEARD * 1_000, &mut rng).unwrap();
+        assert!(!phone.apply_roster(&epoch, &mut rng).unwrap());
+        assert!(phone.removed_from_set().unwrap());
+        assert!(!phone.owns_channels().unwrap());
+        assert_eq!(phone.roster_bytes().unwrap().unwrap(), e2);
+        // No record of the phone leaves on a channel that it owns no more.
+        assert!(phone.take_outgoing().is_none());
+        // A device that an epoch removed takes no set over.
+        assert!(!phone
+            .may_take_over(HEARD + 3 * OWNER_ABSENCE, &mut rng)
+            .unwrap());
+
+        // The same epoch as a rival: the phone signed its own epoch 3
+        // first, and the take-over comes at that index.
+        let (mut phone, mut laptop, _, _, _, mut rng) = phone_and_laptop(351);
+        let epoch = laptop.take_over(HEARD + OWNER_ABSENCE, &mut rng).unwrap();
+        let third = DeviceIdentity::generate("Third", &mut rng);
+        let hello = LinkHello {
+            device_id: third.device_id,
+            device_pk: third.device_key().public().clone(),
+            roster_pk: third.roster_key().verifying_key().to_bytes().to_vec(),
+            label: third.label,
+            ct: umbra_crypto::kem::Ciphertext::from_bytes(&[0; umbra_crypto::kem::CIPHERTEXT_LEN])
+                .unwrap(),
+        };
+        let e3 = phone.sign_linked_device(&hello, &mut rng).unwrap();
+        phone.commit_roster(&e3, &mut rng).unwrap();
+        assert!(!phone.apply_roster(&epoch, &mut rng).unwrap());
+        assert!(phone.removed_from_set().unwrap());
+        assert!(!phone.owns_channels().unwrap());
+        assert_eq!(phone.roster_bytes().unwrap().unwrap(), e3);
+    }
+
     #[test]
     fn a_peer_that_lags_takes_a_catch_up_object_and_applies_each_record() {
         use umbra_core::devset::{

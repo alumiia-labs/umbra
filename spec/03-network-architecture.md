@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 3: Network Architecture
 
 **Status:** Draft
-**Version:** 0.14.0
+**Version:** 0.15.0
 **Date:** 2026-10-10
 
 ---
@@ -482,7 +482,9 @@ gives it the ratchet key of the initiator.
    **[NET-181]** A client MUST draw that delay from an exponential distribution
    with a mean of `SWEEP_SPREAD`. Part 7 §7.5.6 gives that parameter, and Part
    4 rule `IDN-063` uses the same rule for a key-change notice. A revocation of
-   Part 7 §7.7 and a restore under `DEV-135` are two such operations.
+   Part 7 §7.7 and a restore under `DEV-135` are two such operations. A
+   take-over of Part 7 §7.7 renews each channel as a restore does, and it is
+   a third.
 
 **A dead channel.** A channel to a contact is **dead** for a client when one of
 two conditions holds. The first condition is a `NACK` with reason `REJECTED`
@@ -2975,9 +2977,12 @@ costs **32 860 B**. Each row below uses those four figures.
 > cover clock and it takes no cover slot. **[NET-135]** A revision that changes
 > `OWNER_CLAIM_RATE` or the `OwnerClaimRecord` width MUST derive this row again.
 >
-> An absence claim of Part 7 §7.3.1 is not in the model day. Part 7 §7.8 bounds
-> it at `OWNER_ABSENCE_RATE`, which is 1 record each hour. Thus the day of a
-> loss costs at most 24 × 8 240 = 197 760 bytes on one channel.
+> An absence claim of Part 7 §7.3.1 is not in the model day. It travels in
+> the roster epoch of a take-over, which names one device. With 8 tombstones
+> that epoch is 60 + 3 225 + 128 + 49 + 3 309 = 6 771 bytes, thus it uses
+> bucket `B2` at 8 240 bytes on the wire. The claimant sends it one time, on
+> one sync channel, after the epochs that it keeps (Part 7 rule `DEV-313`).
+> The renewal of each contact after it costs what a restore costs (§3.2.6).
 >
 > A catch-up object of Part 7 §7.5.1 is not in the model day. A peer that was
 > absent for 7 days holds 1 946 records at about 350 bytes, which is about

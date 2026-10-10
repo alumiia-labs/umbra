@@ -69,6 +69,7 @@ sealed interface Screen {
     data object RootSeed : Screen
     data object Devices : Screen
     data object LinkDevice : Screen
+    data object TakeOver : Screen
     data object PublicLinks : Screen
     data class PublicLinkView(val id: List<Byte>) : Screen
     data object Handle : Screen
@@ -225,6 +226,7 @@ private fun OpenApp() {
             ) { loaded -> Core.rootSeed(loaded) }
             Screen.Devices -> DevicesScreen(pop, push)
             Screen.LinkDevice -> LinkDeviceScreen(pop)
+            Screen.TakeOver -> TakeOverScreen(pop)
             Screen.PublicLinks -> PublicLinksScreen(pop, push)
             is Screen.PublicLinkView -> PublicLinkScreen(top.id, pop)
             Screen.Handle -> HandleScreen(pop)

@@ -38,7 +38,7 @@ use umbra_crypto::{
     zeroize::Zeroizing,
 };
 
-use super::Client;
+use super::{devices::RowWrite, Client};
 use crate::{Error, Sink};
 
 /// The row of the recovery code in the local identity table.
@@ -89,6 +89,35 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let units: Zeroizing<Vec<u16>> = Zeroizing::new(digits.encode_utf16().collect());
         sink.put(&units);
         Ok(())
+    }
+
+    /// The writes that give this device a new recovery code and no state
+    /// of a backup (`DEV-316`). The absent device held the code before.
+    /// The next backup is a full object under a root that the absent
+    /// device cannot derive.
+    pub(super) fn new_recovery_code_writes<R: CryptoRng + ?Sized>(
+        &self,
+        rng: &mut R,
+    ) -> Result<Vec<RowWrite>, Error> {
+        let store = &self.open_ref()?.store;
+        // IDN-070: two independent outputs of the CSPRNG.
+        let mut code = Zeroizing::new(vec![0u8; 32]);
+        let (user, social) = code.split_at_mut(16);
+        rng.fill_bytes(user);
+        rng.fill_bytes(social);
+        let mut writes = vec![
+            RowWrite::Put(
+                TableId::LOCAL_IDENTITY,
+                store.row_id(TableId::LOCAL_IDENTITY, RECOVERY_CODE_KEY),
+                code,
+            ),
+            RowWrite::Delete(BACKUP_STATE, store.row_id(BACKUP_STATE, STATE_KEY)),
+            RowWrite::Delete(BACKUP_STATE, store.row_id(BACKUP_STATE, ROOT_KEY_KEY)),
+        ];
+        for (row, _) in store.list(BACKUP_INDEX, None)? {
+            writes.push(RowWrite::Delete(BACKUP_INDEX, row));
+        }
+        Ok(writes)
     }
 }
 

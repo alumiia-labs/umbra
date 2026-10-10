@@ -196,6 +196,16 @@ impl Ownership {
         self.table.get(subject)
     }
 
+    /// Names the device that established `subject` (`DEV-159`). A subject
+    /// that a claim named already keeps that claim.
+    pub fn establish(&mut self, subject: [u8; 32], device: DeviceId) {
+        self.table.entry(subject).or_insert(Owned {
+            owner: device,
+            at: (0, 0),
+            signer: device,
+        });
+    }
+
     fn apply(&mut self, subject: [u8; 32], candidate: Owned) {
         let replace = match self.table.get(&subject) {
             None => true,
@@ -397,6 +407,15 @@ mod tests {
         };
         table.fold_record(&absence);
         assert_eq!(table.owner(&[7; 32]).unwrap().owner, [1; 16]);
+        // DEV-159: a subject that no claim named belongs to the device
+        // that established it, and a claim takes it from there.
+        let mut fresh = Ownership::new();
+        fresh.establish([6; 32], [2; 16]);
+        fresh.establish([6; 32], [3; 16]);
+        assert_eq!(fresh.owner(&[6; 32]).unwrap().owner, [2; 16]);
+        fresh.register_absence_subject([8; 32], [2; 16]);
+        fresh.fold_record(&absence);
+        assert_eq!(fresh.owner(&[6; 32]).unwrap().owner, [1; 16]);
         assert!(may_claim_after_timeout(OWNER_TIMEOUT));
         assert!(!may_claim_absence(OWNER_ABSENCE - 1));
         let mut rate = ClaimRate::default();
