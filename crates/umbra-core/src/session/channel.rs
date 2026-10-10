@@ -530,12 +530,13 @@ pub enum Received {
         /// The `AppMessage` bytes.
         bytes: Vec<u8>,
     },
-    /// The bundle of a channel renewal (Part 3 §3.2.6). No ratchet covers
+    /// The record of a channel renewal (Part 3 §3.2.6). No ratchet covers
     /// it: the queue end-to-end layer alone does, as for a flight.
     Renewal {
         /// The sequence number of the `MSG`.
         seq: u32,
-        /// The bundle, in the layout of Part 5 §5.4.1.
+        /// The `RenewalRecord` of Part 6 §6.4.2: the proof of the guard,
+        /// and the bundle.
         bundle: Vec<u8>,
     },
     /// A record that the queue already delivered.

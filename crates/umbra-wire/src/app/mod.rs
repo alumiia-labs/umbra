@@ -6,6 +6,7 @@
 
 pub mod devset;
 pub mod edit;
+pub mod guard;
 pub mod keys;
 pub mod poll;
 pub mod recovery;
@@ -96,6 +97,8 @@ pub enum AppKind {
     VerifyCommit = 0x36,
     /// A `VerifyReveal`, 32 bytes.
     VerifyReveal = 0x37,
+    /// A `RenewalGuard` of Part 3 §3.2.6, 36 bytes.
+    RenewalGuard = 0x38,
 }
 
 impl AppKind {
@@ -125,6 +128,7 @@ impl AppKind {
             0x35 => AppKind::KeySupply,
             0x36 => AppKind::VerifyCommit,
             0x37 => AppKind::VerifyReveal,
+            0x38 => AppKind::RenewalGuard,
             _ => return Err(Error::Malformed),
         })
     }
@@ -151,7 +155,8 @@ impl AppKind {
             | AppKind::ConversationTimer
             | AppKind::QueueAddress
             | AppKind::KeyRequest
-            | AppKind::KeySupply => Class::Control,
+            | AppKind::KeySupply
+            | AppKind::RenewalGuard => Class::Control,
         }
     }
 }
@@ -246,6 +251,12 @@ pub(crate) fn check_body(kind: AppKind, body: &[u8], channel: Channel) -> Result
         {
             return Err(Error::Malformed);
         }
+        // WIR-551: a guard goes on a pairwise channel alone.
+        AppKind::RenewalGuard
+            if body.len() != guard::RENEWAL_GUARD_LEN || channel != Channel::Pairwise =>
+        {
+            return Err(Error::Malformed);
+        }
         // IDN-187: a share goes on a pairwise channel alone.
         AppKind::RecoveryShare
             if body.len() != recovery::RECOVERY_SHARE_LEN || channel != Channel::Pairwise =>
@@ -305,7 +316,7 @@ mod tests {
         out[1] = 0x12;
         assert!(AppMessage::parse(&out, Channel::Pairwise).is_err());
         // A kind that the table does not list fails (`WIR-433`).
-        for unlisted in [0x0E, 0x0F, 0x11, 0x38] {
+        for unlisted in [0x0E, 0x0F, 0x11, 0x39] {
             out[1] = unlisted;
             assert!(AppMessage::parse(&out, Channel::Group).is_err());
         }

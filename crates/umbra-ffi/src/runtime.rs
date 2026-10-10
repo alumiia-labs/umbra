@@ -240,6 +240,18 @@ pub enum Command {
         /// The new X25519 key of the peer.
         key: [u8; 32],
     },
+    /// The answer of the user to a renewal bundle that came with no proof
+    /// of the guard (Part 3 `NET-355`).
+    AnswerRenewal {
+        /// The contact.
+        contact: ContactId,
+        /// Whether the user accepted the bundle.
+        accept: bool,
+    },
+    /// End each delay of `NET-180` that runs. For a test over real sockets
+    /// alone.
+    #[cfg(feature = "sockets-test")]
+    EndSweeps,
     /// Send the `NKEY` of an inbound queue. An [`Update::NotifyKey`]
     /// follows with the notification key of its relay (Part 8 §8.2.3).
     NotifyQueue([u8; 32]),
@@ -1569,6 +1581,10 @@ pub async fn run_client(
                     continue;
                 }
                 ClientEvent::ChannelRenewed { contact } => Update::ChannelRenewed(contact),
+                // NET-355: the store holds the bundle that waits, in the
+                // batch of this call, and the client reads the question
+                // from there.
+                ClientEvent::RenewalAsked { .. } | ClientEvent::RenewalAskEnded { .. } => continue,
                 // A run that pauses reads on to the `SessionPaused`.
                 ClientEvent::CircuitLost | ClientEvent::CircuitAged if pausing.is_some() => {
                     continue
@@ -1708,6 +1724,14 @@ pub async fn run_client(
                 }
                 Command::PeerKey { contact, key } => {
                     let _ = node.set_peer_key(&contact, key);
+                }
+                Command::AnswerRenewal { contact, accept } => {
+                    let _ = node.answer_renewal(&contact, accept, &mut rng);
+                }
+                #[cfg(feature = "sockets-test")]
+                Command::EndSweeps => {
+                    node.end_sweeps(now);
+                    next_rotation_check = tokio::time::Instant::now();
                 }
                 Command::NotifyQueue(recipient_id) => {
                     let _ = node.notify_queue(&recipient_id, &mut rng);

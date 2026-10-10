@@ -3768,6 +3768,10 @@ fn a_linked_device_takes_over_the_set_of_a_lost_phone_and_its_contact_talks_on()
         .key_change(carol_conversation.clone())
         .unwrap()
         .is_none());
+    // NET-355: each bundle of the laptop opened the guard that the phone
+    // set, thus no contact got a question.
+    assert_eq!(bob.renewal_ask(bob_conversation.clone()).unwrap(), None);
+    assert_eq!(carol.renewal_ask(carol_conversation.clone()).unwrap(), None);
 
     // The channel carries more records in each direction.
     let draft = bob.new_draft(bob_conversation.clone()).unwrap();
@@ -3795,6 +3799,176 @@ fn a_linked_device_takes_over_the_set_of_a_lost_phone_and_its_contact_talks_on()
     assert_eq!(alice.invite().err(), Some(FfiError::NotFound));
     assert_eq!(alice.devices().unwrap().len(), 2);
     for handle in [&alice, &laptop, &bob, &carol] {
+        handle.disconnect();
+    }
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// NET-354 to NET-357: the phone removes the laptop from the set. The laptop
+/// holds the pairwise identity, the queue of Bob, and the renewal guard of
+/// the time before the removal. It offers a renewal to Bob. Bob gets a
+/// question and no new channel, and the phone and Bob talk on. The notice
+/// of the removal never reaches the laptop, as with a device that the user
+/// lost: its store is the one from before the removal.
+#[test]
+fn a_removed_device_that_offers_a_renewal_gives_the_contact_a_question_and_no_channel() {
+    let _turn = DEVICE_TESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let relays = tokio::runtime::Runtime::new().unwrap();
+    let network = start_signed_network(&relays);
+    let directory = std::env::temp_dir().join(format!("umbra-guard-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let network_for = |handle: &Handle| {
+        handle
+            .network_of_manifest(
+                network.manifest.clone(),
+                network.keyset.clone(),
+                0,
+                HOST.into(),
+                Some(CA.into()),
+            )
+            .unwrap()
+            .network
+    };
+    let alice = launch(&directory, "alice.db", 1);
+    let bob = launch(&directory, "bob.db", 2);
+    for handle in [&alice, &bob] {
+        handle.clone().connect(network_for(handle)).unwrap();
+    }
+    alice.invite().unwrap();
+    let link = wait_for(&alice, |event| match event {
+        FfiEvent::Invitation { link } => Some(link),
+        _ => None,
+    });
+    bob.accept(link).unwrap();
+    let alice_conversation = wait_for_contact(&alice);
+    let bob_conversation = wait_for_contact(&bob);
+    let exchange = |from: &Arc<Handle>, at: &[u8], to: &Arc<Handle>, held: &[u8], text: &str| {
+        let draft = from.new_draft(at.to_vec()).unwrap();
+        draft.set_text(units(text)).unwrap();
+        from.send_draft(draft).unwrap();
+        let start = Instant::now();
+        while !holds_text(to, held, text) {
+            assert!(start.elapsed() < Duration::from_secs(120), "no {text}");
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    };
+    exchange(&bob, &bob_conversation, &alice, &alice_conversation, "one");
+
+    // The laptop joins the set, and it holds what a renewal of the channel
+    // of Bob needs (DEV-319).
+    let laptop = link_new_device(&alice, &directory, "laptop.db", 3, &network_for);
+    tick_until(
+        &[&alice, &laptop],
+        || {
+            let count = laptop.take_over_count().unwrap();
+            count.contacts == 1 && count.unreachable == 0
+        },
+        "the laptop did not take the channel of Bob",
+    );
+    let laptop_id = laptop
+        .devices()
+        .unwrap()
+        .into_iter()
+        .find(|device| device.is_self)
+        .unwrap()
+        .device_id;
+    // The phone removes the laptop while it has no connection: the store
+    // holds what the removal owes, and no notice leaves yet.
+    alice.disconnect();
+    alice.remove_device(laptop_id).unwrap();
+    assert_eq!(alice.devices().unwrap().len(), 1);
+
+    // The laptop is in hostile hands. It takes the set over, as such a
+    // device can (Part 7 §7.7), with the store from before the removal.
+    laptop.age_owner_absence().unwrap();
+    let code = Arc::new(View::default());
+    laptop.take_over(code).unwrap();
+    assert!(laptop.owns_channels().unwrap());
+    assert!(!laptop.removed_from_set().unwrap());
+
+    // The phone comes back. NET-357: it sets a new guard for Bob, and the
+    // record goes after the delay of that contact, which a test cannot
+    // wait for.
+    alice.clone().connect(network_for(&alice)).unwrap();
+    wait_for(&alice, |event| match event {
+        FfiEvent::Online => Some(()),
+        _ => None,
+    });
+    alice.clone().tick();
+    alice.end_sweeps().unwrap();
+    // The run sends the guard record at its next step. Part 7 §7.7 step
+    // 2c: the rotation is what keeps the laptop from the queue that it
+    // knew. Until Bob writes to the new queue, a device with the store of
+    // the laptop can take the subscription of the old one (Part 15 §15.3).
+    assert!(alice.owes_rotation(alice_conversation.clone()).unwrap());
+    let start = Instant::now();
+    while alice.owes_rotation(alice_conversation.clone()).unwrap() {
+        assert!(
+            start.elapsed() < Duration::from_secs(180),
+            "the queue did not rotate"
+        );
+        alice.clone().tick();
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    // The address of the new queue went before this record on the ratchet.
+    exchange(&alice, &alice_conversation, &bob, &bob_conversation, "two");
+    exchange(
+        &bob,
+        &bob_conversation,
+        &alice,
+        &alice_conversation,
+        "three",
+    );
+    assert_eq!(bob.renewal_ask(bob_conversation.clone()).unwrap(), None);
+    assert!(alice.owns_channels().unwrap());
+
+    // The laptop offers a renewal to Bob with the secret of the earlier
+    // guard.
+    laptop.clone().connect(network_for(&laptop)).unwrap();
+    let draft = laptop.new_draft(alice_conversation.clone()).unwrap();
+    draft.set_text(units("from the laptop")).unwrap();
+    laptop.send_draft(draft).unwrap();
+
+    // NET-355: Bob gets the question, and no handshake runs.
+    wait_for(&bob, |event| match event {
+        FfiEvent::RenewalAsk { conversation } if conversation == bob_conversation => Some(()),
+        _ => None,
+    });
+    assert!(bob.renewal_ask(bob_conversation.clone()).unwrap().is_some());
+    assert!(bob.key_change(bob_conversation.clone()).unwrap().is_none());
+    // The channel of Bob is the one of the phone: the two exchange a
+    // record in each direction, and the laptop reads none of them.
+    exchange(&alice, &alice_conversation, &bob, &bob_conversation, "four");
+    exchange(&bob, &bob_conversation, &alice, &alice_conversation, "five");
+    assert!(!holds_text(&bob, &bob_conversation, "from the laptop"));
+    assert!(!holds_text(&laptop, &alice_conversation, "five"));
+    assert!(alice.owns_channels().unwrap());
+    assert!(bob.renewal_ask(bob_conversation.clone()).unwrap().is_some());
+
+    // The user of Bob refuses. The question goes, and the channel stays.
+    bob.answer_renewal(bob_conversation.clone(), false).unwrap();
+    tick_until(
+        &[&bob],
+        || bob.renewal_ask(bob_conversation.clone()).unwrap().is_none(),
+        "the question stayed",
+    );
+    assert_eq!(
+        bob.answer_renewal(bob_conversation.clone(), true).err(),
+        Some(FfiError::NotFound)
+    );
+    exchange(&alice, &alice_conversation, &bob, &bob_conversation, "six");
+    exchange(
+        &bob,
+        &bob_conversation,
+        &alice,
+        &alice_conversation,
+        "seven",
+    );
+    assert!(!holds_text(&bob, &bob_conversation, "from the laptop"));
+    for handle in [&alice, &laptop, &bob] {
         handle.disconnect();
     }
     let _ = std::fs::remove_dir_all(&directory);

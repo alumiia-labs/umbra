@@ -31,7 +31,7 @@ RULES = [
     "GRP-050", "GRP-087", "GRP-090", "GRP-199", "GRP-229", "GRP-374",
     "ATT-157", "ABU-040", "ABU-041", "IMP-047", "IMP-050",
     "REL-116", "REL-126", "IMP-082", "NET-343", "DEV-114", "IMP-074",
-    "NET-201", "IMP-077",
+    "NET-201", "IMP-077", "NET-359",
 ]
 
 # The rules that hold no string of the plain name: each of their strings has

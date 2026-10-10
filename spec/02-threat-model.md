@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 2: Threat Model and Security Goals
 
 **Status:** Draft
-**Version:** 0.17.1
+**Version:** 0.18.0
 **Date:** 2026-10-10
 
 ---
@@ -388,7 +388,8 @@ adds a trade MUST add a row to this table.
 | A member that leaves a group reads the group until any other member rotates the epoch, one backoff after the first member comes online | Part 11 §11.4.1 |
 | An absence claim moves each ratchet of an absent device in one roster epoch, thus a device that owns the channels and that is offline for `OWNER_ABSENCE` can lose its ownership, and it learns of it when it returns | Part 7 §7.3.1 |
 | A take-over of a device set removes each other linked device, and it renews each channel from what the lost device synced last. Thus the user links each other device again, and a contact that the lost device made in its last moments needs a new invitation | Part 7 §7.7 |
-| Each linked device holds the pairwise key of each contact and the credentials that write to the queue of each contact, thus a take-over reaches each contact | Part 7 §7.5.3 |
+| Each linked device holds the pairwise key of each contact, the credentials that write to the queue of each contact, and the secret of the renewal guard of each contact. Thus a take-over reaches each contact, and it asks no contact a question | Part 7 §7.5.3 |
+| A restore from a backup that is older than the newest renewal guard of a contact waits for the user of that contact, who accepts the new connection or refuses it | Part 3 §3.2.6, Part 4 §4.7.2 |
 | A catch-up object puts the backlog of an absence on the chunk path at once, thus a relay reads that backlog as one attachment | Part 7 §7.5.1 |
 | A save to the media store and a screenshot stay as user actions, thus one tap moves a plaintext out of the encrypted store | Part 14 §14.6.6 |
 | The accessibility tree stays whole, thus an enabled accessibility service reads each rendered message | Part 14 §14.6.6 |

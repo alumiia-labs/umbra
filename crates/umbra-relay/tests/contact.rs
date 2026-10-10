@@ -1684,10 +1684,13 @@ fn a_ceremony_gives_one_code_and_only_the_user_verifies() {
 
 #[test]
 fn a_stored_contact_of_the_first_version_continues() {
-    // The tail of version 0x05: the contact, the time of the queue, the
-    // state of a rotation, the own address, the stale flag, and the time
-    // of a swept rotation.
-    const TAIL: usize = 32 + 8 + 32 + 8 + 1 + 129 + 1 + 8;
+    // The renewal guard of version 0x06: the guard of this device, the
+    // guard of the peer, and the flag of a bundle that waits.
+    const GUARD: usize = (4 + 32 + 8 + 1) + (4 + 32 + 1) + 1;
+    // The tail of version 0x06: the contact, the time of the queue, the
+    // state of a rotation, the own address, the stale flag, the time of a
+    // swept rotation, and the renewal guard.
+    const TAIL: usize = 32 + 8 + 32 + 8 + 1 + 129 + 1 + 8 + GUARD;
     const ALICE: usize = 0;
     const BOB: usize = 1;
     let mut network = Network::new();
@@ -1707,8 +1710,8 @@ fn a_stored_contact_of_the_first_version_continues() {
     // queue, the state of a rotation, and the address of the own queue,
     // which the bundle of the inviter gave.
     for state in network.stored[ALICE].contacts.values_mut() {
-        assert_eq!(state[0], 0x05);
-        assert_eq!(state[state.len() - 139], 1);
+        assert_eq!(state[0], 0x06);
+        assert_eq!(state[state.len() - GUARD - 139], 1);
         state[0] = 0x01;
         state.truncate(state.len() - TAIL);
         state.drain(1 + 16 + 32..1 + 16 + 32 + 32);
@@ -1726,13 +1729,14 @@ fn a_stored_contact_of_the_first_version_continues() {
     assert!(network.stored[ALICE]
         .contacts
         .values()
-        .all(|state| state[0] == 0x05 && state[49..81] == queue_relay));
+        .all(|state| state[0] == 0x06 && state[49..81] == queue_relay));
 
     // Version 0x02 named the relay and held no tail. A contact of the first
     // version holds no address of its own queue, thus its tail ends with
     // the flag of none, the stale flag, and no swept time.
     for state in network.stored[ALICE].contacts.values_mut() {
-        assert_eq!(state[state.len() - 10..], [0; 10]);
+        let end = state.len() - GUARD;
+        assert_eq!(state[end - 10..end], [0; 10]);
         state[0] = 0x02;
         state.truncate(state.len() - (TAIL - 129));
     }
@@ -1747,9 +1751,9 @@ fn a_stored_contact_of_the_first_version_continues() {
 
     // Version 0x04 held the stale flag and no swept time.
     for state in network.stored[ALICE].contacts.values_mut() {
-        assert_eq!(state[0], 0x05);
+        assert_eq!(state[0], 0x06);
         state[0] = 0x04;
-        state.truncate(state.len() - 8);
+        state.truncate(state.len() - 8 - GUARD);
     }
     network.restart(ALICE, 0x41);
     let now = network.now;
@@ -1758,6 +1762,24 @@ fn a_stored_contact_of_the_first_version_continues() {
         .unwrap();
     network.settle();
     assert_eq!(messages_of(network.take_events(ALICE)), [b"once more"]);
+
+    // Version 0x05 held the swept time and no renewal guard.
+    for state in network.stored[ALICE].contacts.values_mut() {
+        assert_eq!(state[0], 0x06);
+        state[0] = 0x05;
+        state.truncate(state.len() - GUARD);
+    }
+    network.restart(ALICE, 0x41);
+    let now = network.now;
+    network.clients[BOB]
+        .send(&bob_contact, &text(6, "and again"), now, &mut Rng(6))
+        .unwrap();
+    network.settle();
+    assert_eq!(messages_of(network.take_events(ALICE)), [b"and again"]);
+    assert!(network.stored[ALICE]
+        .contacts
+        .values()
+        .all(|state| state[0] == 0x06));
 }
 
 /// Part 10 §10.4.2: each relay link carries receipts both ways. The dialing

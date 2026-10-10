@@ -34,6 +34,7 @@ mod notify;
 mod own_delete;
 mod polls;
 mod quota;
+mod renewal_guard;
 mod reset;
 mod retention;
 mod roster_fork;
@@ -1072,10 +1073,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
             kept.push(change);
         }
-        // DEV-319: a channel whose peer moved to a new queue, or that a
-        // renewal made again, goes to the other devices of the set. The
-        // bridge publishes the channel of a new contact.
+        // DEV-319: a channel whose peer moved to a new queue, that a
+        // renewal made again, or that took a new renewal guard, goes to the
+        // other devices of the set. The bridge publishes the channel of a
+        // new contact.
         let mut moved: Vec<ConversationId> = Vec::new();
+        let mut asked: Vec<ConversationId> = Vec::new();
         for change in &kept {
             let StateChange::Contact { contact, state } = change else {
                 continue;
@@ -1093,12 +1096,24 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if before.is_some() && before != Self::channel_end_of(state) {
                 moved.push(conversation);
             }
+            // NET-355: a bundle of the contact waits for the user, or it
+            // waits no more.
+            let waited = held
+                .as_ref()
+                .and_then(|plain| plain.get(QUEUE_ID_LEN..))
+                .is_some_and(Self::asks_renewal);
+            if waited != Self::asks_renewal(state) {
+                asked.push(conversation);
+            }
         }
         self.commit_records(&kept, &records, now_ms, rng)?;
         for conversation in moved {
             // The batch is in the store, and an item that did not go ends
             // no run.
             let _ = self.publish_channel_entry(conversation, rng);
+        }
+        for conversation in asked {
+            self.events.push_back(Event::RenewalAsk { conversation });
         }
         // DEV-290: an invitation that left the node waits for no retirement.
         let ended: Vec<[u8; 32]> = changes
@@ -5432,6 +5447,148 @@ mod tests {
         client.audit().unwrap();
     }
 
+    /// The stored form of a contact with the renewal guard `guard`, as a
+    /// node gives it after it set that guard.
+    fn guarded_state(contact: &ContactId, guard: u8) -> Zeroizing<Vec<u8>> {
+        use umbra_core::{
+            devset::sync::CHANNEL_END_LEN,
+            session::node::{bare_contact_state, ChannelEnd},
+        };
+        let end = ChannelEnd {
+            peer_static: [5; 32],
+            outbound: Zeroizing::new(vec![7; CHANNEL_END_LEN]),
+            guard_seq: u32::from(guard),
+            guard_secret: Zeroizing::new([0xA0 + guard; 32]),
+        };
+        bare_contact_state(&[4; 16], &contact.0, &end).unwrap()
+    }
+
+    #[test]
+    fn a_new_guard_after_a_removal_goes_to_the_devices_that_stay_alone() {
+        use umbra_core::devset::link::{DeviceIdentity, LinkHello};
+        let mut rng = Rng(331);
+        let mut client = Client::create(
+            MemoryBackend::default(),
+            Element([1; 32]),
+            &units("correct horse"),
+            Cost { m_kib: 64, t: 1 },
+            1_000,
+            &mut rng,
+        )
+        .unwrap();
+        // Two contacts, each with its first guard.
+        let contacts = [ContactId([9; 32]), ContactId([10; 32])];
+        let commit = |client: &mut TestClient, guard: u8, rng: &mut Rng| {
+            let changes: Vec<StateChange> = contacts
+                .iter()
+                .map(|contact| StateChange::Contact {
+                    contact: *contact,
+                    state: guarded_state(contact, guard),
+                })
+                .collect();
+            client.commit_network(&changes, &[], T0, rng).unwrap();
+        };
+        commit(&mut client, 1, &mut rng);
+        let conversations: Vec<ConversationId> = contacts
+            .iter()
+            .map(|contact| client.conversation_for(&contact.0).unwrap())
+            .collect();
+        // A tablet and a laptop join the set, each on its sync channel.
+        let (tablet, to_tablet) = link_device(&mut client, &mut rng);
+        let laptop = DeviceIdentity::generate("Laptop", &mut rng);
+        let hello = LinkHello {
+            device_id: laptop.device_id,
+            device_pk: laptop.device_key().public().clone(),
+            roster_pk: laptop.roster_key().verifying_key().to_bytes().to_vec(),
+            label: laptop.label,
+            ct: umbra_crypto::kem::Ciphertext::from_bytes(&[0; umbra_crypto::kem::CIPHERTEXT_LEN])
+                .unwrap(),
+        };
+        let epoch = client.sign_linked_device(&hello, &mut rng).unwrap();
+        client.commit_roster(&epoch, &mut rng).unwrap();
+        let to_laptop = client.conversation_for(&[0x7D; 32]).unwrap();
+        client
+            .set_pending_peer(laptop.device_id, &laptop.label, &mut rng)
+            .unwrap();
+        client.mark_device_peer(to_laptop, &mut rng).unwrap();
+        while client.take_sync_send().is_some() {}
+        // The channel of each device as the node stored it.
+        for queue in [[0x7C; 32], [0x7D; 32]] {
+            let change = StateChange::Contact {
+                contact: ContactId(queue),
+                state: contact_state(6),
+            };
+            client.commit_network(&[change], &[], T0, &mut rng).unwrap();
+        }
+        let secret = |guard: u8| [0xA0 + guard; 32];
+        let sends = |client: &mut TestClient| -> Vec<(ConversationId, Vec<u8>)> {
+            core::iter::from_fn(|| client.take_sync_send())
+                .map(|send| (send.peer, send.app))
+                .collect()
+        };
+
+        // DEV-319: each device of the set holds the guard of each contact.
+        for conversation in &conversations {
+            client
+                .publish_channel_entry(*conversation, &mut rng)
+                .unwrap();
+        }
+        let first = sends(&mut client);
+        for device in [to_tablet, to_laptop] {
+            let held = first
+                .iter()
+                .filter(|(peer, app)| *peer == device && carries(app, &secret(1)))
+                .count();
+            assert_eq!(held, 2);
+        }
+
+        // The user removes the tablet. Part 7 §7.7 step 2: each contact
+        // owes a rotation, and the node sets a new guard with it.
+        client.revoke_device(tablet, &mut rng).unwrap();
+        let owed = client.rotation_owed(5_000).unwrap();
+        assert_eq!(owed.len(), 2);
+        assert!(contacts.iter().all(|contact| owed.contains(&contact.0)));
+        sends(&mut client);
+        commit(&mut client, 2, &mut rng);
+        // NET-357: the new secret of each contact goes to the laptop, and
+        // no record with it goes to the tablet.
+        let second = sends(&mut client);
+        let held = second
+            .iter()
+            .filter(|(peer, app)| *peer == to_laptop && carries(app, &secret(2)))
+            .count();
+        assert_eq!(held, 2);
+        assert!(!second
+            .iter()
+            .any(|(peer, app)| *peer == to_tablet && carries(app, &secret(2))));
+        // A commit that holds the same guard publishes nothing.
+        commit(&mut client, 2, &mut rng);
+        assert!(sends(&mut client).is_empty());
+        client.audit().unwrap();
+    }
+
+    #[test]
+    fn a_contact_with_no_bundle_that_waits_asks_the_user_nothing() {
+        let (mut client, mut rng, contact, conversation) = client_with_contact(332);
+        // A stored contact of an earlier form holds no question.
+        assert_eq!(client.renewal_ask(conversation).unwrap(), None);
+        assert!(client.renewal_contact(conversation).is_err());
+        assert!(client
+            .answer_renewal_stored(conversation, true, &mut rng)
+            .is_err());
+        // A form with no channel holds none, and a commit of it tells the
+        // view nothing.
+        while client.next_event().is_some() {}
+        let change = StateChange::Contact {
+            contact,
+            state: guarded_state(&contact, 1),
+        };
+        client.commit_network(&[change], &[], T0, &mut rng).unwrap();
+        assert_eq!(client.renewal_ask(conversation).unwrap(), None);
+        assert!(!core::iter::from_fn(|| client.next_event())
+            .any(|event| matches!(event, crate::Event::RenewalAsk { .. })));
+    }
+
     /// A handle at rotation 2 and version 1, as a claim and one rotation
     /// left it.
     fn held_handle() -> super::Published {
@@ -5675,6 +5832,8 @@ mod tests {
             conversation: contact.0,
             peer_static: [6; 32],
             outbound: Zeroizing::new(vec![end; CHANNEL_END_LEN]),
+            guard_seq: u32::from(end),
+            guard_secret: Zeroizing::new([end; 32]),
         };
         let mut engine = SyncEngine::new(peer, &[own]).unwrap();
         let mut item = |end: u8, writer, key: &[u8; 32], msg_id: u8| {
@@ -5701,7 +5860,7 @@ mod tests {
             stored_channel_end(state)
                 .ok()
                 .flatten()
-                .map(|(_, end)| end.to_vec())
+                .map(|end| (end.outbound.to_vec(), end.guard_seq, *end.guard_secret))
         };
         // DEV-320: the device that owns the channels takes no such item.
         client
@@ -5759,7 +5918,11 @@ mod tests {
                 &mut rng,
             )
             .unwrap();
-        assert_eq!(end_of(&client), Some(vec![9; CHANNEL_END_LEN]));
+        // The renewal guard comes with it, for the bundle of a take-over.
+        assert_eq!(
+            end_of(&client),
+            Some((vec![9; CHANNEL_END_LEN], 9, [9; 32]))
+        );
         assert!(!client.is_shadow_contact(conversation).unwrap());
         assert_eq!(client.identity_keys(conversation).unwrap().1, [6; 32]);
         // The conversation keeps its row, and no second one comes.

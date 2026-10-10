@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 6: Wire Format and Encoding
 
 **Status:** Draft
-**Version:** 0.17.1
+**Version:** 0.18.0
 **Date:** 2026-10-10
 
 ---
@@ -880,11 +880,12 @@ QueueE2E {
    `0x03` are reserved. The value
    `0x04` names a `NotifyDigest` (Part 8 §8.5.1).
    The value `0x05` names a handshake record, which the text after rule 6
-   gives. The value `0x06` names a renewal record: a bundle of Part 5
-   §5.4.1 of a party whose ratchet is stale (Part 3 §3.2.6, `NET-326`).
+   gives. The value `0x06` names a renewal record: the `RenewalRecord` of
+   a party whose ratchet is stale (Part 3 §3.2.6, `NET-326`), which the
+   text after rule 6 gives.
    **[WIR-023]** A receiver MUST reject an unknown kind and a reserved kind.
    **[WIR-528]** A receiver MUST take the content of a renewal record as a
-   bundle in the layout of Part 5 §5.4.1, and it MUST read it on the queue of
+   `RenewalRecord`, and it MUST read it on the queue of
    a contact whose handshake is complete. No ratchet covers the record.
    The value `0x07` names a hello: the sealed envelope of Part 9 `DIS-143`.
    **[WIR-534]** A receiver MUST read a hello record on a rendezvous queue of
@@ -941,6 +942,34 @@ HandshakeRecord {                 // the content of an L6 record of kind 0x05
 > flight from a ratchet record before it has a ratchet. The `flight` byte
 > costs one byte, and it lets a receiver drop a late flight with no trial
 > decryption of a 2 339-byte record.
+
+**The renewal record.** The bundle of a channel renewal travels as an L6
+record of kind `0x06`, with the proof of the renewal guard of Part 3 rule
+`NET-354` before it. No ratchet covers the record, because the ratchet of its
+sender is stale.
+
+```
+RenewalRecord {                   // the content of an L6 record of kind 0x06
+    guard_seq       u32           // the guard that `secret` opens; 0 with no proof
+    secret          [32]u8        // R of that guard; 32 zero bytes with no proof
+    bundle          var           // the bundle, in the layout of Part 5 §5.4.1
+}
+```
+
+- **[WIR-552]** A sender that holds a renewal guard for the contact MUST
+  write its `guard_seq` and its `R`. A sender that holds none MUST write a
+  `guard_seq` of 0 and a `secret` of 32 zero bytes. A receiver MUST drop a
+  record whose `guard_seq` is 0 and whose `secret` is not 32 zero bytes, and
+  a record of fewer than 36 bytes. Thus the form with no proof has one
+  encoding. The `bundle` takes the rest of the record, and its own length
+  field ends it (Part 5 `CRY-150`).
+- A sender takes the smallest bucket whose L7 row of §6.9 holds the record,
+  as `WIR-502` gives for a flight.
+
+> *Cause.* A fixed prefix costs 36 bytes, and it gives the record one layout
+> with a proof and with none. A flag byte before an optional field gives
+> two lengths for one bundle, and a relay reads no length of the record in
+> each case (rule 6).
 
 > *Cause.* A relay parses `payload_len` in the clear. Without this rule a
 > relay reads the exact plaintext length of each record. That length separates
@@ -1691,6 +1720,7 @@ client MUST NOT copy that raw value into a different row.
 | `0x35` | Key supply (§6.6.11) | Control |
 | `0x36` | Verification commit (Part 4 §4.5.2) | Ephemeral |
 | `0x37` | Verification reveal (Part 4 §4.5.2) | Ephemeral |
+| `0x38` | Renewal guard (§6.6.12, Part 3 §3.2.6) | Control |
 
 **[WIR-362]** A parser MUST reject a body of kind `0x36` whose length is
 not 64, and a body of kind `0x37` whose length is not 32. Part 4 §4.5.2 gives
@@ -1767,6 +1797,7 @@ namespace.
 For kind `0x10` the body is a `GroupControl`, and §6.6.3 gives that structure.
 For kind `0x31` the body is a `DigestBody`, and §6.6.4 gives that structure.
 For kind `0x33` the body is a `QueueAddress`, and §6.6.10 gives that structure.
+For kind `0x38` the body is a `RenewalGuard`, and §6.6.12 gives that structure.
 
 **[WIR-433]** A parser MUST reject a `kind` or an `inner_kind` that the
 table above does not list, and one that the table marks as reserved.
@@ -2719,6 +2750,40 @@ record.
 > scope `0x02` goes on the group queue and not in the supply body, thus one
 > answer serves every member that lacks the key.
 
+### 6.6.12 The renewal guard
+
+A renewal guard is the commitment that a party gives its contact for the
+renewal of Part 3 §3.2.6. Part 3 rules `NET-354` to `NET-358` give the
+construction of the commitment, the times at which a party sets a guard, and
+the check of a bundle against it. This section gives the structure and the
+parser rules.
+
+```
+RenewalGuard {                    // kind 0x38, 37 bytes
+    version         u8            // 0x01
+    guard_seq       u32           // the counter of the guard, from 1
+    commitment      [32]u8        // SHA3-256( "umbra/v1/renewal-guard" || R )
+}
+```
+
+As the body of an `AppMessage` of kind `0x38` the record is 67 bytes, thus it
+uses bucket `B0`. The record carries no `R`. The `R` of a guard leaves its
+device in the `RenewalRecord` of §6.4.2 alone.
+
+1. **[WIR-551]** A parser MUST reject a `RenewalGuard` whose `version` is not
+   `0x01`, a body of kind `0x38` whose `body_len` is not 37, and a
+   `guard_seq` of 0.
+2. **[WIR-553]** A client MUST NOT send a record of kind `0x38` on a group
+   channel, and a parser MUST reject one there. A receiver MUST accept a
+   record of kind `0x38` only from the receiving chain of the session, as
+   `WIR-330` gives for a queue address.
+
+> *Cause.* The guard changes what a later bundle of the contact must hold.
+> Thus the record needs the authorization of the ratchet direction, and no
+> other party of a channel can set the guard of a peer. The `guard_seq` of 0
+> is the value of no guard in a `RenewalRecord` and in the sync item of
+> Part 7 rule `DEV-319`, thus no guard record holds it.
+
 ## 6.7 Version negotiation
 
 ```
@@ -2781,6 +2846,11 @@ cover these cases:
   - A `kind` of `0x05`.
 - The queue end-to-end record of §6.4.2, with one boundary vector for each row
   of the capacity table of §6.9.
+- The `RenewalRecord` of §6.4.2, with a proof and with none, and the
+  `RenewalGuard` of §6.6.12. **[WIR-554]** The parser MUST reject a
+  `RenewalRecord` with a `guard_seq` of 0 and one nonzero byte of `secret`,
+  a `RenewalRecord` of 35 bytes, a `RenewalGuard` of 36 bytes, and a
+  `RenewalGuard` with a `guard_seq` of 0.
 - The length pair of §6.4.2 rule 6, at each of the four buckets. **[WIR-098]** A vector MUST
   hold a `SEND` and the `MSG` that a relay makes from that `SEND`. **[WIR-099]** The vector
   MUST assert both `payload_len` values. **[WIR-100]** The vector MUST assert one bucket for

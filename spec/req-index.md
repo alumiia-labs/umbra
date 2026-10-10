@@ -68,10 +68,10 @@ column when a crate implements the requirement and a test covers it.
 | --- | --- | --- | --- | --- | --- | --- |
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
-| `NET` | 252 | 89 | 1 | 0 | 9 | **351** |
-| `IDN` | 134 | 46 | 1 | 0 | 5 | **186** |
+| `NET` | 257 | 90 | 1 | 0 | 9 | **357** |
+| `IDN` | 135 | 46 | 1 | 0 | 5 | **187** |
 | `CRY` | 120 | 27 | 0 | 0 | 1 | **148** |
-| `WIR` | 409 | 86 | 0 | 0 | 7 | **502** |
+| `WIR` | 412 | 87 | 0 | 0 | 7 | **506** |
 | `DEV` | 211 | 91 | 0 | 0 | 8 | **310** |
 | `NTF` | 77 | 28 | 0 | 0 | 3 | **108** |
 | `DIS` | 130 | 35 | 0 | 0 | 3 | **168** |
@@ -81,7 +81,7 @@ column when a crate implements the requirement and a test covers it.
 | `ABU` | 71 | 29 | 1 | 0 | 0 | **101** |
 | `IMP` | 115 | 41 | 0 | 0 | 2 | **158** |
 | `SEC` | 4 | 3 | 0 | 0 | 1 | **8** |
-| **All** | 2091 | 628 | 6 | 0 | 54 | **2779** |
+| **All** | 2100 | 630 | 6 | 0 | 54 | **2790** |
 
 ## SCP — Scope and Conventions
 
@@ -490,6 +490,12 @@ Source: `spec/03-network-architecture.md`
 | `NET-351` | §3.4.6 | MUST NOT | A client | A client MUST NOT put hop 1 and hop 3 on one IPv4 address while a chain holds without it, after each relaxation of `NET-350`. |  |  |
 | `NET-352` | §3.4.3 | MUST | A queue relay | A queue relay MUST hold at most one subscription for a queue. |  |  |
 | `NET-353` | §3.4.3 | MUST | A relay of layer 2 or 3 that holds a `DirectoryRoot` | A relay of layer 2 or 3 that holds a `DirectoryRoot` MUST answer a build cell on a link with no `RelayHello` as the build of a **measurement candidate**, under the limits of a client link and under Part 10 rule `REL-205`. |  |  |
+| `NET-354` | §3.2.6 | MUST | A client | A client MUST hold, for each contact, one secret `R` and one counter `guard_seq`. |  |  |
+| `NET-355` | §3.2.6 | MUST NOT | A client that holds a guard of a contact | A client that holds a guard of a contact MUST NOT run the handshake of `NET-327` for a bundle of that contact by itself, unless the record of the bundle carries an `R` whose commitment equals the commitment that the client holds. |  |  |
+| `NET-356` | §3.2.6 | MUST | A client | A client MUST set a new guard for a contact when a handshake with that contact ends. |  |  |
+| `NET-357` | §3.2.6 | MUST | A client | A client MUST set a new guard for each contact when a device leaves its device set under Part 7 §7.7 step 2. |  |  |
+| `NET-358` | §3.2.6 | MUST | A client | A client MUST set the first guard of a channel that holds no guard of this client and whose handshake ended. |  |  |
+| `NET-359` | §3.2.6 | MUST | The question of `NET-355` | The question of `NET-355` MUST state that an acceptance gives the conversation to the device that sent the request. |  |  |
 
 ## IDN — Identity
 
@@ -683,6 +689,7 @@ Source: `spec/04-identity.md`
 | `IDN-191` | §4.7.3 | MUST | A restore with shares | A restore with shares MUST take `C_user` as `RecoveryDigits` of type `0x0002` and `threshold` shares of type `0x0003`, and it MUST join the shares before the KDF of §4.7.1. |  |  |
 | `IDN-192` | §4.7.3 | MUST | A new split | A new split MUST draw a new `set_id`, and the interface MUST show the holders of the current split alone. |  |  |
 | `IDN-193` | §4.6 | MUST | The set of tables | The set of tables MUST carry a MAC of the same form, under `table_id = 0x00`: one `row_tag` for each table that the store holds, with the `table_id` of that table as `row_id` and 16 zero bytes as `record_tag`. |  |  |
+| `IDN-194` | §4.7.2 | MUST | A backup object | A backup object MUST carry the renewal guard of each contact in the row of that contact: the `guard_seq` and the secret `R` of Part 3 rule `NET-354`. |  |  |
 
 ## CRY — Cryptographic Core
 
@@ -1325,7 +1332,7 @@ Source: `spec/06-wire-format.md`
 | `WIR-525` | §6.2.2 | MUST | A sender | v1 keeps no resend window. |  |  |
 | `WIR-526` | §6.4 | MUST | (unstated) | A relay that writes a digest of Part 8 §8.5 into a queue at another relay MUST send it as the value of one `UMBRA_DEPOSIT` capsule, on a connection of §6.2.1 that it opens for deposits. |  |  |
 | `WIR-527` | §6.4 | MUST | A relay | A relay MUST hold the `corr_id` of each of the last 4 096 deposits that it took, and it MUST drop a deposit that repeats one. |  |  |
-| `WIR-528` | §6.4.2 | MUST | A receiver | A receiver MUST take the content of a renewal record as a bundle in the layout of Part 5 §5.4.1, and it MUST read it on the queue of a contact whose handshake is complete. |  |  |
+| `WIR-528` | §6.4.2 | MUST | A receiver | A receiver MUST take the content of a renewal record as a `RenewalRecord`, and it MUST read it on the queue of a contact whose handshake is complete. |  |  |
 | `WIR-529` | §6.4 | MUST | (unstated) | A relay that sends its proof-of-work challenge to a carrier of the manifest (Part 13 `ABU-102`) MUST send it as the value of one `UMBRA_CHALLENGE` capsule, on a connection of §6.2.1 that it opens for that challenge. |  |  |
 | `WIR-531` | §6.6 | MAY | A sender | A sender MAY put the trailer after the descriptor. |  |  |
 | `WIR-532` | §6.6 | MUST | A parser | A parser MUST reject a body of kind `0x02` whose bytes after the descriptor are not one complete trailer, with or without its caption. |  |  |
@@ -1347,6 +1354,10 @@ Source: `spec/06-wire-format.md`
 | `WIR-548` | §6.2.3 | MUST NOT | A session between two relays | A session between two relays MUST NOT park, and it MUST NOT resume: a lost link between two relays ends each circuit on it. |  |  |
 | `WIR-549` | §6.2.3 | MUST | A client | A client MUST hold the state of a session that it can resume in the memory of its process alone. |  |  |
 | `WIR-550` | §6.2.3 | MUST | A client | A client MUST set `sent` to its next `seq`, and `received` to the count of the frames of the relay that it accepted. |  |  |
+| `WIR-551` | §6.6.12 | MUST | A parser | A parser MUST reject a `RenewalGuard` whose `version` is not `0x01`, a body of kind `0x38` whose `body_len` is not 37, and a `guard_seq` of 0. |  |  |
+| `WIR-552` | §6.4.2 | MUST | A sender that holds a renewal guard for the contact | A sender that holds a renewal guard for the contact MUST write its `guard_seq` and its `R`. |  |  |
+| `WIR-553` | §6.6.12 | MUST NOT | A client | A client MUST NOT send a record of kind `0x38` on a group channel, and a parser MUST reject one there. |  |  |
+| `WIR-554` | §6.8 | MUST | The parser | The parser MUST reject a `RenewalRecord` with a `guard_seq` of 0 and one nonzero byte of `secret`, a `RenewalRecord` of 35 bytes, a `RenewalGuard` of 36 bytes, and a `RenewalGuard` with a `guard_seq` of 0. |  |  |
 
 ## DEV — Device Sets
 

@@ -38,6 +38,7 @@ use umbra_wire::{
     app::{
         devset::{ControlType as DevType, DeviceSetBody},
         edit::{DeleteBody, DeleteScope, EditBody},
+        guard::{RenewalGuard, RENEWAL_GUARD_LEN},
         keys::{
             DigestBody, DigestSource, KeyChangeNotice, KeyRequest, KeyScope, KeySupply,
             SupplyStatus,
@@ -74,7 +75,7 @@ use umbra_wire::{
         GkeyPayload, GseqPayload,
     },
     nack::{NackPayload, Reason},
-    queue::{self, L6Kind},
+    queue::{self, L6Kind, RenewalRecord, RENEWAL_PROOF_LEN},
     ratchet::{PqFrame, RatchetRecord},
     session::{SessionControl, SessionFrame},
 };
@@ -317,7 +318,62 @@ fn queue_records() -> Value {
             "msg_head": hex(&msg[..20]),
         }));
     }
-    json!({ "qe": hex(&[0x01; 32]), "sender_id": hex(&[0x02; 32]), "nonce": hex(&[0x03; 12]), "rows": out })
+    json!({
+        "qe": hex(&[0x01; 32]),
+        "sender_id": hex(&[0x02; 32]),
+        "nonce": hex(&[0x03; 12]),
+        "rows": out,
+        "renewal": renewal_records(&key),
+    })
+}
+
+/// The renewal record of §6.4.2, with a proof of the guard and with none,
+/// and its rejection cases (`WIR-552`, `WIR-554`).
+fn renewal_records(key: &QueueKey) -> Value {
+    let bundle = [0xb5u8; 40];
+    let secret = [0xb6u8; 32];
+    let proved = RenewalRecord {
+        proof: Some((7, &secret)),
+        bundle: &bundle,
+    };
+    let bare = RenewalRecord {
+        proof: None,
+        bundle: &bundle,
+    };
+    let mut with_proof = vec![0u8; proved.len()];
+    proved.encode(&mut with_proof).unwrap();
+    let mut no_proof = vec![0u8; bare.len()];
+    bare.encode(&mut no_proof).unwrap();
+    assert_eq!(with_proof.len(), RENEWAL_PROOF_LEN + bundle.len());
+    assert!(RenewalRecord::parse(&with_proof).unwrap() == proved);
+    assert!(RenewalRecord::parse(&no_proof).unwrap() == bare);
+    assert!(no_proof[..RENEWAL_PROOF_LEN].iter().all(|b| *b == 0));
+    // A counter of zero with one nonzero byte of the secret, and a record
+    // that is shorter than the proof.
+    let mut bad = no_proof.clone();
+    bad[RENEWAL_PROOF_LEN - 1] = 1;
+    assert!(RenewalRecord::parse(&bad).is_err());
+    assert!(RenewalRecord::parse(&with_proof[..RENEWAL_PROOF_LEN - 1]).is_err());
+    // The record under the queue end-to-end layer, as kind 0x06.
+    let mut send = vec![0u8; Bucket::B0.l6_record()];
+    queue::seal(
+        key,
+        [0x03; 12],
+        &[0x02; 32],
+        L6Kind::Renewal,
+        &with_proof,
+        Bucket::B0,
+        &mut send,
+    )
+    .unwrap();
+    let mut plain = vec![0u8; Bucket::B0.l6_record()];
+    let (kind, len) = queue::open(key, &[0x02; 32], &send, Bucket::B0, &mut plain).unwrap();
+    assert_eq!((kind, &plain[..len]), (L6Kind::Renewal, &with_proof[..]));
+    json!({
+        "with_proof": hex(&with_proof),
+        "no_proof": hex(&no_proof),
+        "send_tag": hex(&send[send.len() - 16..]),
+    })
 }
 
 fn edit_and_delete() -> Value {
@@ -1305,6 +1361,34 @@ fn app_bodies() -> Value {
     assert_eq!(n, 1_217);
     assert_eq!(KeyChangeNotice::parse(&buf[..n]).unwrap(), notice);
     put("key_change", n, &buf);
+
+    // The renewal guard of §6.6.12 and its rejection cases (`WIR-551`,
+    // `WIR-553`, `WIR-554`).
+    let guard = RenewalGuard {
+        guard_seq: 7,
+        commitment: sha3_256(&[b"umbra/v1/renewal-guard", &[0xb6; 32]]),
+    };
+    let bytes = guard.encode().unwrap();
+    assert_eq!(bytes.len(), RENEWAL_GUARD_LEN);
+    assert_eq!(RenewalGuard::parse(&bytes).unwrap(), guard);
+    assert!(RenewalGuard::parse(&bytes[..RENEWAL_GUARD_LEN - 1]).is_err());
+    let mut zero = bytes;
+    zero[1..5].copy_from_slice(&[0; 4]);
+    assert!(RenewalGuard::parse(&zero).is_err());
+    let mut version = bytes;
+    version[0] = 0x02;
+    assert!(RenewalGuard::parse(&version).is_err());
+    let message = AppMessage {
+        kind: AppKind::RenewalGuard,
+        msg_id: [0xb7; 16],
+        sent_at: 0,
+        body: &bytes,
+    };
+    let mut record = vec![0u8; message.len()];
+    assert_eq!(message.encode(&mut record).unwrap(), 67);
+    assert!(AppMessage::parse(&record, Channel::Pairwise).is_ok());
+    assert!(AppMessage::parse(&record, Channel::Group).is_err());
+    put("renewal_guard", bytes.len(), &bytes);
 
     // The payloads of an IPUT and of an IBLOB at B0, with the zero fill.
     let iput = iput_payload(&[0xaa; 24], b"invitation", Bucket::B0).unwrap();

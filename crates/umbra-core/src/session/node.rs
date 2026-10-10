@@ -44,7 +44,7 @@ use umbra_transport::link::ClientLink;
 use umbra_wire::{
     address::{QueueAddress, LEN as QUEUE_ADDRESS_LEN},
     admission::Admission,
-    app::{AppKind, AppMessage, Channel},
+    app::{guard::RenewalGuard, AppKind, AppMessage, Channel},
     bucket::{Bucket, COMMAND_HEADER},
     capsule,
     cell::{pad_body, Cell, CellCommand},
@@ -53,7 +53,7 @@ use umbra_wire::{
         encode_gsub, split_gmsg, GkeyPayload, GnewPayload, GroupCmd, GseqPayload, GKEY_LEN,
         GNEW_NONE_LEN, NOTIFY_REGISTRATION_LEN,
     },
-    queue::L6Kind,
+    queue::{L6Kind, RenewalRecord},
     session::SessionControl,
 };
 
@@ -250,6 +250,20 @@ pub enum ClientEvent {
     /// A renewal replaced the channel of a contact (Part 3 §3.2.6). Each
     /// record with no delivery receipt goes again.
     ChannelRenewed {
+        /// The contact.
+        contact: ContactId,
+    },
+    /// A renewal bundle of the peer came with no proof of the guard that
+    /// this device holds (`NET-355`). The bundle waits, no handshake runs,
+    /// and the user answers with [`ClientNode::answer_renewal`].
+    RenewalAsked {
+        /// The contact.
+        contact: ContactId,
+    },
+    /// The bundle of [`ClientEvent::RenewalAsked`] waits no more for the
+    /// user: its offer ended, or a bundle with the proof renewed the
+    /// channel.
+    RenewalAskEnded {
         /// The contact.
         contact: ContactId,
     },
@@ -947,6 +961,12 @@ enum Waiting {
     LastFlight([u8; 32]),
     /// A `SEND` of the first ratchet record to this contact (`NET-292`).
     Opening([u8; 32]),
+    /// A `SEND` of the renewal guard of this counter to this contact
+    /// (`NET-354`).
+    Guard {
+        contact: [u8; 32],
+        seq: u32,
+    },
     /// A `SEND` of a record that the node made for this contact, with the
     /// record: it goes again after a `LIMIT` or a `BUSY` (`NET-218`).
     Node {
@@ -1141,6 +1161,83 @@ struct Contact {
     /// slot that it carries. One goes again in a slot of the cover clock
     /// (`NET-071`, `NET-218`), and at no other time.
     refused: VecDeque<(Zeroizing<Vec<u8>>, Option<CoverSlot>)>,
+    /// The renewal guard that this device set for the contact (`NET-354`).
+    guard: OwnGuard,
+    /// The newest guard of the peer (`NET-354`).
+    peer_guard: PeerGuard,
+    /// The bundle of the peer that came with no proof of its guard, until
+    /// the user answers or its offer ends (`NET-355`).
+    kept: Option<KeptBundle>,
+    /// Whether the channel is the sync channel of a device of this set,
+    /// which carries no guard. A run holds it, and the caller gives it to
+    /// the next run with [`ClientNode::mark_device`].
+    device: bool,
+    /// Whether a relay refused the guard record with `REJECTED` in this
+    /// run. It goes no more until the peer gives an address (`NET-217`).
+    guard_refused: bool,
+}
+
+/// The renewal guard of this device for one contact (Part 3 §3.2.6): the
+/// secret `R` that a renewal bundle of this device set reveals, under a
+/// counter. The contact holds the commitment to it.
+struct OwnGuard {
+    /// The counter, from 1. Zero is no guard.
+    seq: u32,
+    secret: Zeroizing<[u8; 32]>,
+    /// The time before which the record of the guard does not go
+    /// (`NET-180`), or zero.
+    at: u64,
+    /// Whether no relay acknowledged the record of this guard yet.
+    owed: bool,
+}
+
+impl OwnGuard {
+    fn none() -> Self {
+        OwnGuard {
+            seq: 0,
+            secret: Zeroizing::new([0; 32]),
+            at: 0,
+            owed: false,
+        }
+    }
+
+    /// The guard after this one, with a new secret.
+    fn next<R: CryptoRng + ?Sized>(seq: u32, at: u64, rng: &mut R) -> Self {
+        OwnGuard {
+            seq: seq.saturating_add(1),
+            secret: Zeroizing::new(random(rng)),
+            at,
+            owed: true,
+        }
+    }
+}
+
+/// The guard that a peer set: its counter and the commitment to its
+/// secret.
+#[derive(Clone, Copy, Default)]
+struct PeerGuard {
+    /// The counter. Zero is no guard.
+    seq: u32,
+    commitment: [u8; 32],
+    /// Whether a handshake ended after this guard came. The first guard
+    /// under the new ratchet then takes its place, whatever its counter:
+    /// a peer that came back from a backup counts from an older value.
+    spent: bool,
+}
+
+/// A renewal bundle that waits for the answer of the user.
+struct KeptBundle {
+    bundle: Vec<u8>,
+    /// The time of its arrival, from which `INVITE_TTL` counts.
+    since: u64,
+    /// Whether the user accepted it. Its handshake then starts, in this
+    /// run or in a later one.
+    accepted: bool,
+}
+
+/// The commitment of a renewal guard to its secret (`NET-354`).
+fn guard_commitment(secret: &[u8; 32]) -> [u8; 32] {
+    umbra_crypto::hash::sha3_256(&[umbra_crypto::labels::RENEWAL_GUARD, secret])
 }
 
 /// A contact whose channel this device never held (Part 7 `DEV-319`): the
@@ -1156,6 +1253,10 @@ struct Bare {
     waiting_sends: VecDeque<(Vec<u8>, Option<u64>)>,
     /// The time of the swept renewal (`NET-180`), or zero.
     sweep_at: u64,
+    /// The counter of the newest guard that the device that owned the
+    /// channel set, and its secret (`DEV-319`). Zero is no guard.
+    guard_seq: u32,
+    guard_secret: Zeroizing<[u8; 32]>,
 }
 
 /// A candidate address of a peer (`NET-190`). It never becomes the address
@@ -1243,51 +1344,82 @@ pub fn shadow_contact_state(salt: &[u8; 16]) -> Vec<u8> {
 /// The version of [`shadow_contact_state`].
 const SHADOW_VERSION: u8 = 0x10;
 
-/// The version byte of the stored form of a contact with no channel
-/// ([`bare_contact_state`]).
+/// The version byte of the stored form of a contact with no channel, of
+/// the earlier form: it holds no renewal guard.
 const BARE_VERSION: u8 = 0x11;
+
+/// The version byte of the stored form of a contact with no channel
+/// ([`bare_contact_state`]). It adds the renewal guard to version `0x11`.
+const BARE_GUARD_VERSION: u8 = 0x12;
 
 /// The stored form of a contact whose channel another device of the set
 /// owns, with what a renewal of Part 3 §3.2.6 needs (Part 7 `DEV-319`): the
-/// salt, the pairwise key of the peer, the contact, and the writer side of
-/// the queue of the peer as [`stored_channel_end`] gives it. It holds no
-/// ratchet. A node restores it as a contact that waits for its renewal.
+/// salt, the pairwise key of the peer, the contact, the writer side of the
+/// queue of the peer, and the renewal guard, as [`stored_channel_end`]
+/// gives them. It holds no ratchet. A node restores it as a contact that
+/// waits for its renewal.
 pub fn bare_contact_state(
     salt: &[u8; 16],
-    peer_static: &[u8; 32],
     contact: &[u8; 32],
-    outbound: &[u8],
+    end: &ChannelEnd,
 ) -> Result<Zeroizing<Vec<u8>>, Error> {
     // The end must restore, thus no store takes a form that no node reads.
-    Outbound::from_stored(outbound)?;
-    bare_state(salt, peer_static, contact, outbound, 0)
+    Outbound::from_stored(&end.outbound)?;
+    let bare = BareState {
+        salt,
+        peer_static: &end.peer_static,
+        contact,
+        outbound: &end.outbound,
+        sweep_at: 0,
+        guard_seq: end.guard_seq,
+        guard_secret: &end.guard_secret,
+    };
+    bare.encode()
 }
 
-fn bare_state(
-    salt: &[u8; 16],
-    peer_static: &[u8; 32],
-    contact: &[u8; 32],
-    outbound: &[u8],
+struct BareState<'a> {
+    salt: &'a [u8; 16],
+    peer_static: &'a [u8; 32],
+    contact: &'a [u8; 32],
+    outbound: &'a [u8],
     sweep_at: u64,
-) -> Result<Zeroizing<Vec<u8>>, Error> {
-    let mut writer = Writer::new();
-    writer.u8(BARE_VERSION);
-    writer.bytes(salt);
-    writer.bytes(peer_static);
-    writer.bytes(contact);
-    writer.var(outbound)?;
-    writer.u64(sweep_at);
-    Ok(writer.finish())
+    guard_seq: u32,
+    guard_secret: &'a [u8; 32],
 }
 
-/// The pairwise key of a peer, and the writer side of its queue in its
-/// stored form.
-pub type ChannelEnd = ([u8; 32], Zeroizing<Vec<u8>>);
+impl BareState<'_> {
+    fn encode(&self) -> Result<Zeroizing<Vec<u8>>, Error> {
+        let mut writer = Writer::new();
+        writer.u8(BARE_GUARD_VERSION);
+        writer.bytes(self.salt);
+        writer.bytes(self.peer_static);
+        writer.bytes(self.contact);
+        writer.var(self.outbound)?;
+        writer.u64(self.sweep_at);
+        writer.u32(self.guard_seq);
+        writer.bytes(self.guard_secret);
+        Ok(writer.finish())
+    }
+}
+
+/// What a renewal needs of the channel of a contact (Part 7 `DEV-319`).
+#[derive(Clone, PartialEq, Eq)]
+pub struct ChannelEnd {
+    /// The pairwise key of the peer.
+    pub peer_static: [u8; 32],
+    /// The writer side of the queue of the peer, in its stored form.
+    pub outbound: Zeroizing<Vec<u8>>,
+    /// The counter of the newest renewal guard of the set for this
+    /// contact, or zero for a contact with none.
+    pub guard_seq: u32,
+    /// The secret of that guard, or 32 zero bytes.
+    pub guard_secret: Zeroizing<[u8; 32]>,
+}
 
 /// What a renewal needs of a stored contact, for the other devices of the
-/// set (Part 7 `DEV-319`): the pairwise key of the peer, and the writer
-/// side of the queue of the peer in its stored form. The result is none
-/// for the form of [`shadow_contact_state`].
+/// set (Part 7 `DEV-319`): the pairwise key of the peer, the writer side
+/// of the queue of the peer in its stored form, and the renewal guard. The
+/// result is none for the form of [`shadow_contact_state`].
 pub fn stored_channel_end(state: &[u8]) -> Result<Option<ChannelEnd>, Error> {
     let mut reader = Reader::new(state);
     let version = match state.first() {
@@ -1296,15 +1428,219 @@ pub fn stored_channel_end(state: &[u8]) -> Result<Option<ChannelEnd>, Error> {
     };
     let _salt: [u8; 16] = reader.array()?;
     let peer_static: [u8; 32] = reader.array()?;
-    if version == BARE_VERSION {
+    if matches!(version, BARE_VERSION | BARE_GUARD_VERSION) {
         let _contact: [u8; 32] = reader.array()?;
-        return Ok(Some((peer_static, Zeroizing::new(reader.var()?.to_vec()))));
+        let outbound = Zeroizing::new(reader.var()?.to_vec());
+        let _sweep_at = reader.u64()?;
+        let (guard_seq, guard_secret) = if version == BARE_GUARD_VERSION {
+            (reader.u32()?, Zeroizing::new(reader.array()?))
+        } else {
+            (0, Zeroizing::new([0; 32]))
+        };
+        return Ok(Some(ChannelEnd {
+            peer_static,
+            outbound,
+            guard_seq,
+            guard_secret,
+        }));
     }
     if version != 0x01 {
         let _inbound_relay: [u8; 32] = reader.array()?;
     }
     let outbound = PairwiseChannel::stored_outbound(reader.var()?)?;
-    Ok(Some((peer_static, outbound)))
+    let tail = contact_tail(&mut reader, version)?;
+    Ok(Some(ChannelEnd {
+        peer_static,
+        outbound,
+        guard_seq: tail.guard.seq,
+        guard_secret: tail.guard.secret,
+    }))
+}
+
+/// Whether a renewal bundle of the peer waits for the answer of the user
+/// in a stored contact (`NET-355`), with the time of its arrival in
+/// seconds.
+pub fn stored_renewal_ask(state: &[u8]) -> Result<Option<u64>, Error> {
+    let mut reader = Reader::new(state);
+    let version = match state.first() {
+        Some(&SHADOW_VERSION) => return Ok(None),
+        _ => contact_version(&mut reader)?,
+    };
+    if version != CONTACT_GUARD_VERSION {
+        return Ok(None);
+    }
+    let _salt: [u8; 16] = reader.array()?;
+    let _peer_static: [u8; 32] = reader.array()?;
+    let _inbound_relay: [u8; 32] = reader.array()?;
+    reader.var()?;
+    let tail = contact_tail(&mut reader, version)?;
+    Ok(tail
+        .kept
+        .filter(|kept| !kept.accepted)
+        .map(|kept| kept.since))
+}
+
+/// The answer of the user to the bundle that waits in a stored contact,
+/// for a store with no node that runs (`NET-355`). An accepted bundle
+/// starts its handshake at the next run, and a refused one goes.
+pub fn stored_with_renewal_answer(state: &[u8], accept: bool) -> Result<Zeroizing<Vec<u8>>, Error> {
+    let mut reader = Reader::new(state);
+    if contact_version(&mut reader)? != CONTACT_GUARD_VERSION {
+        return Err(Error::Malformed);
+    }
+    let salt: [u8; 16] = reader.array()?;
+    let peer_static: [u8; 32] = reader.array()?;
+    let inbound_relay: [u8; 32] = reader.array()?;
+    let channel = reader.var()?;
+    let mut tail = contact_tail(&mut reader, CONTACT_GUARD_VERSION)?;
+    match (&mut tail.kept, accept) {
+        (Some(kept), true) => kept.accepted = true,
+        (Some(_), false) => tail.kept = None,
+        (None, _) => return Err(Error::NoPath),
+    }
+    let mut writer = Writer::new();
+    writer.u8(CONTACT_GUARD_VERSION);
+    writer.bytes(&salt);
+    writer.bytes(&peer_static);
+    writer.bytes(&inbound_relay);
+    writer.var(channel)?;
+    tail.export(&mut writer)?;
+    Ok(writer.finish())
+}
+
+/// What a stored contact holds behind its channel.
+struct ContactTail {
+    id: Option<[u8; 32]>,
+    since: u64,
+    previous_relay: [u8; 32],
+    rotated_at: u64,
+    own_address: Option<Zeroizing<Vec<u8>>>,
+    stale: bool,
+    sweep_at: u64,
+    guard: OwnGuard,
+    peer_guard: PeerGuard,
+    kept: Option<KeptBundle>,
+    flight: Vec<u8>,
+    opens: bool,
+}
+
+impl ContactTail {
+    /// Writes the tail in the form of [`CONTACT_GUARD_VERSION`].
+    fn export(&self, writer: &mut Writer) -> Result<(), Error> {
+        writer.bytes(&self.id.ok_or(Error::Malformed)?);
+        writer.u64(self.since);
+        writer.bytes(&self.previous_relay);
+        writer.u64(self.rotated_at);
+        match &self.own_address {
+            Some(address) => {
+                writer.u8(1);
+                writer.bytes(address);
+            }
+            None => writer.u8(0),
+        }
+        writer.u8(u8::from(self.stale));
+        writer.u64(self.sweep_at);
+        writer.u32(self.guard.seq);
+        writer.bytes(self.guard.secret.as_slice());
+        writer.u64(self.guard.at);
+        writer.flag(self.guard.owed);
+        writer.u32(self.peer_guard.seq);
+        writer.bytes(&self.peer_guard.commitment);
+        writer.flag(self.peer_guard.spent);
+        match &self.kept {
+            Some(kept) => {
+                writer.u8(1);
+                writer.var(&kept.bundle)?;
+                writer.u64(kept.since);
+                writer.flag(kept.accepted);
+            }
+            None => writer.u8(0),
+        }
+        // The form ends here for a contact whose handshake left nothing
+        // to send. An invitee adds flight 3 and the state of its first
+        // ratchet record until a relay acknowledged them.
+        if !self.flight.is_empty() || self.opens {
+            writer.var(&self.flight)?;
+            writer.flag(self.opens);
+        }
+        Ok(())
+    }
+}
+
+/// Reads what a stored contact of `version` holds behind its channel. A
+/// form of an earlier version holds no guard.
+fn contact_tail(reader: &mut Reader<'_>, version: u8) -> Result<ContactTail, Error> {
+    // A form of version 0x03 names the contact, which stays the first
+    // queue after a rotation, and the state of the rotation.
+    let has_tail = version >= CONTACT_ROTATION_VERSION;
+    let (id, since, previous_relay, rotated_at) = if has_tail {
+        (
+            Some(reader.array()?),
+            reader.u64()?,
+            reader.array()?,
+            reader.u64()?,
+        )
+    } else {
+        (None, 0, ANY_RELAY, 0)
+    };
+    let own_address = if has_tail && reader.u8()? == 1 {
+        Some(Zeroizing::new(reader.take(QUEUE_ADDRESS_LEN)?.to_vec()))
+    } else {
+        None
+    };
+    let stale = version >= CONTACT_STALE_VERSION && reader.u8()? == 1;
+    let sweep_at = if version >= CONTACT_STORED_VERSION {
+        reader.u64()?
+    } else {
+        0
+    };
+    let (guard, peer_guard, kept) = if version >= CONTACT_GUARD_VERSION {
+        let guard = OwnGuard {
+            seq: reader.u32()?,
+            secret: Zeroizing::new(reader.array()?),
+            at: reader.u64()?,
+            owed: reader.flag()?,
+        };
+        let peer_guard = PeerGuard {
+            seq: reader.u32()?,
+            commitment: reader.array()?,
+            spent: reader.flag()?,
+        };
+        let kept = match reader.u8()? {
+            0 => None,
+            1 => Some(KeptBundle {
+                bundle: reader.var()?.to_vec(),
+                since: reader.u64()?,
+                accepted: reader.flag()?,
+            }),
+            _ => return Err(Error::Malformed),
+        };
+        (guard, peer_guard, kept)
+    } else {
+        (OwnGuard::none(), PeerGuard::default(), None)
+    };
+    // The tail of an invitee whose flight 3 holds no relay acknowledgment
+    // yet.
+    let (flight, opens) = if reader.end().is_err() {
+        (reader.var()?.to_vec(), reader.flag()?)
+    } else {
+        (Vec::new(), false)
+    };
+    reader.end()?;
+    Ok(ContactTail {
+        id,
+        since,
+        previous_relay,
+        rotated_at,
+        own_address,
+        stale,
+        sweep_at,
+        guard,
+        peer_guard,
+        kept,
+        flight,
+        opens,
+    })
 }
 
 fn contact_version(reader: &mut Reader<'_>) -> Result<u8, Error> {
@@ -1314,7 +1650,9 @@ fn contact_version(reader: &mut Reader<'_>) -> Result<u8, Error> {
         | CONTACT_ROTATION_VERSION
         | CONTACT_STALE_VERSION
         | CONTACT_STORED_VERSION
-        | BARE_VERSION) => Ok(version),
+        | CONTACT_GUARD_VERSION
+        | BARE_VERSION
+        | BARE_GUARD_VERSION) => Ok(version),
         _ => Err(Error::Malformed),
     }
 }
@@ -1414,9 +1752,14 @@ const CONTACT_ROTATION_VERSION: u8 = 0x03;
 /// and the stale flag of a channel renewal (Part 3 §3.2.6).
 const CONTACT_STALE_VERSION: u8 = 0x04;
 
-/// The version byte of a stored contact. It adds the time of the swept
-/// rotation or renewal of `NET-180` to version `0x04`.
+/// The version byte of a stored contact of the earlier form. It adds the
+/// time of the swept rotation or renewal of `NET-180` to version `0x04`.
 const CONTACT_STORED_VERSION: u8 = 0x05;
+
+/// The version byte of a stored contact. It adds the renewal guard of
+/// `NET-354` to version `0x05`: the guard of this device, the guard of the
+/// peer, and the bundle that waits for the answer of the user.
+const CONTACT_GUARD_VERSION: u8 = 0x06;
 
 /// The version byte of a stored invitation that renews a contact: version
 /// `0x02` and then the contact.
@@ -1858,15 +2201,18 @@ impl ClientNode {
             if let Some(bare) = self.bare.get(&id) {
                 let mut outbound = Writer::new();
                 bare.outbound.export(&mut outbound);
+                let state = BareState {
+                    salt: &bare.salt,
+                    peer_static: &bare.peer_static,
+                    contact: &id,
+                    outbound: &outbound.finish(),
+                    sweep_at: bare.sweep_at,
+                    guard_seq: bare.guard_seq,
+                    guard_secret: &bare.guard_secret,
+                };
                 changes.push(StateChange::Contact {
                     contact: ContactId(id),
-                    state: bare_state(
-                        &bare.salt,
-                        &bare.peer_static,
-                        &id,
-                        &outbound.finish(),
-                        bare.sweep_at,
-                    )?,
+                    state: state.encode()?,
                 });
                 continue;
             }
@@ -1874,7 +2220,7 @@ impl ClientNode {
                 continue;
             };
             let mut writer = Writer::new();
-            writer.u8(CONTACT_STORED_VERSION);
+            writer.u8(CONTACT_GUARD_VERSION);
             writer.bytes(&contact.salt);
             writer.bytes(&contact.peer_static);
             writer.bytes(&contact.inbound_relay);
@@ -1892,6 +2238,22 @@ impl ClientNode {
             }
             writer.u8(u8::from(contact.stale));
             writer.u64(contact.sweep_at);
+            writer.u32(contact.guard.seq);
+            writer.bytes(contact.guard.secret.as_slice());
+            writer.u64(contact.guard.at);
+            writer.flag(contact.guard.owed);
+            writer.u32(contact.peer_guard.seq);
+            writer.bytes(&contact.peer_guard.commitment);
+            writer.flag(contact.peer_guard.spent);
+            match &contact.kept {
+                Some(kept) => {
+                    writer.u8(1);
+                    writer.var(&kept.bundle)?;
+                    writer.u64(kept.since);
+                    writer.flag(kept.accepted);
+                }
+                None => writer.u8(0),
+            }
             // The form ends here for a contact whose handshake left
             // nothing to send. An invitee adds flight 3 and the state of
             // its first ratchet record until a relay acknowledged them.
@@ -1914,10 +2276,15 @@ impl ClientNode {
         let version = contact_version(&mut reader)?;
         let salt = reader.array()?;
         let peer_static = reader.array()?;
-        if version == BARE_VERSION {
+        if matches!(version, BARE_VERSION | BARE_GUARD_VERSION) {
             let id: [u8; 32] = reader.array()?;
             let outbound = Outbound::from_stored(reader.var()?)?;
             let sweep_at = reader.u64()?;
+            let (guard_seq, guard_secret) = if version == BARE_GUARD_VERSION {
+                (reader.u32()?, Zeroizing::new(reader.array()?))
+            } else {
+                (0, Zeroizing::new([0; 32]))
+            };
             reader.end()?;
             self.bare.insert(
                 id,
@@ -1927,6 +2294,8 @@ impl ClientNode {
                     outbound,
                     waiting_sends: VecDeque::new(),
                     sweep_at,
+                    guard_seq,
+                    guard_secret,
                 },
             );
             return Ok(ContactId(id));
@@ -1937,38 +2306,21 @@ impl ClientNode {
             reader.array()?
         };
         let channel = PairwiseChannel::restore(reader.var()?)?;
-        // A form of version 0x03 names the contact, which stays the first
-        // queue after a rotation, and the state of the rotation.
-        let has_tail = version >= CONTACT_ROTATION_VERSION;
-        let (id, since, previous_relay, rotated_at) = if has_tail {
-            (
-                reader.array()?,
-                reader.u64()?,
-                reader.array()?,
-                reader.u64()?,
-            )
-        } else {
-            (*channel.inbound().recipient_id(), 0, ANY_RELAY, 0)
-        };
-        let own_address = if has_tail && reader.u8()? == 1 {
-            Some(Zeroizing::new(reader.take(QUEUE_ADDRESS_LEN)?.to_vec()))
-        } else {
-            None
-        };
-        let stale = version >= CONTACT_STALE_VERSION && reader.u8()? == 1;
-        let sweep_at = if version >= CONTACT_STORED_VERSION {
-            reader.u64()?
-        } else {
-            0
-        };
-        // The tail of an invitee whose flight 3 holds no relay
-        // acknowledgment yet.
-        let (flight, opens) = if reader.end().is_err() {
-            (reader.var()?.to_vec(), reader.flag()?)
-        } else {
-            (Vec::new(), false)
-        };
-        reader.end()?;
+        let ContactTail {
+            id,
+            since,
+            previous_relay,
+            rotated_at,
+            own_address,
+            stale,
+            sweep_at,
+            guard,
+            peer_guard,
+            kept,
+            flight,
+            opens,
+        } = contact_tail(&mut reader, version)?;
+        let id = id.unwrap_or(*channel.inbound().recipient_id());
         // A store of version 0x01 came from a network with one queue relay,
         // thus the two queues of its contact live at one relay, and the
         // channel names the relay of the outbound one.
@@ -2001,9 +2353,23 @@ impl ClientNode {
                 opens,
                 candidate: None,
                 refused: VecDeque::new(),
+                guard,
+                peer_guard,
+                kept,
+                device: false,
+                guard_refused: false,
             },
         );
         Ok(ContactId(id))
+    }
+
+    /// Names a restored contact as the sync channel of a device of this
+    /// set (Part 7 `DEV-286`). Such a channel carries no renewal guard
+    /// (`NET-354`).
+    pub fn mark_device(&mut self, contact: &ContactId) {
+        if let Some(held) = self.contacts.get_mut(&contact.0) {
+            held.device = true;
+        }
     }
 
     /// Takes an invitation of an earlier run from its stored form, and
@@ -2344,7 +2710,31 @@ impl ClientNode {
                 .map(|relay| relay.relay_id)
                 .collect()
         };
+        let mut owed = Vec::new();
+        let mut expired = Vec::new();
+        let mut accepted = Vec::new();
         for (id, held) in &mut self.contacts {
+            if let Some(kept) = held.kept.as_mut() {
+                if restarts {
+                    kept.since = now;
+                    self.moved.insert(*id);
+                }
+                if now.saturating_sub(kept.since) >= crate::identity::INVITE_TTL {
+                    expired.push(*id);
+                } else if kept.accepted {
+                    accepted.push(*id);
+                }
+            }
+            // NET-358: a channel from before the guard takes its first one,
+            // after a delay of its own (`NET-180`).
+            if held.guard.seq == 0 && !held.device && !held.stale {
+                let at = now.saturating_add(sweep_delay(u64::from_be_bytes(random(rng))).max(1));
+                held.guard = OwnGuard::next(0, at, rng);
+                self.moved.insert(*id);
+            }
+            if held.guard.owed {
+                owed.push(*id);
+            }
             if restarts {
                 let queue = held.channel.inbound().recipient_id();
                 let is_old = now.saturating_sub(held.since) >= rotate_age(&held.salt, queue);
@@ -2467,6 +2857,25 @@ impl ClientNode {
         // NET-325: a stale channel with no renewal that runs starts one.
         for contact in stale {
             fault = fault.and(self.start_renewal(contact, rng));
+        }
+        // NET-355: the offer of a bundle that waits for the user ends at
+        // `INVITE_TTL`, as each other offer does.
+        for contact in expired {
+            if let Some(held) = self.contacts.get_mut(&contact) {
+                let asked = held.kept.take().is_some_and(|kept| !kept.accepted);
+                self.moved.insert(contact);
+                if asked {
+                    out.push(ClientEvent::RenewalAskEnded {
+                        contact: ContactId(contact),
+                    });
+                }
+            }
+        }
+        for contact in accepted {
+            fault = fault.and(self.answer_kept(contact, rng));
+        }
+        for contact in owed {
+            fault = fault.and(self.send_guard(contact, now, rng));
         }
         // NET-191: a candidate address whose record waited for a circuit,
         // or for the sending chain.
@@ -2701,14 +3110,26 @@ impl ClientNode {
             return Ok(None);
         };
         let nonce = random(rng);
+        // NET-326: the bundle carries the secret of the newest guard that
+        // this device holds for the contact, or none.
+        let offer = |seq: u32, secret: &[u8; 32]| -> Result<Zeroizing<Vec<u8>>, Error> {
+            let record = RenewalRecord {
+                proof: (seq != 0).then_some((seq, secret)),
+                bundle: &half.bundle,
+            };
+            let mut out = Zeroizing::new(alloc::vec![0u8; record.len()]);
+            record.encode(&mut out)?;
+            Ok(out)
+        };
         let sealed = match (&half.setup, half.renews) {
             (_, Some(contact)) if step == STEP_OFFER && self.bare.contains_key(&contact) => {
                 let held = self.bare.get(&contact).ok_or(Error::NoPath)?;
-                held.outbound
-                    .seal_record(L6Kind::Renewal, &half.bundle, nonce)?
+                let record = offer(held.guard_seq, &held.guard_secret)?;
+                held.outbound.seal_record(L6Kind::Renewal, &record, nonce)?
             }
             (_, Some(contact)) if step == STEP_OFFER => {
                 let held = self.contacts.get(&contact).ok_or(Error::NoPath)?;
+                let record = offer(held.guard.seq, &held.guard.secret)?;
                 // NET-330: with a candidate address of the peer the bundle
                 // goes there. The channel takes no address from it: the
                 // end of the handshake gives one (`NET-190`).
@@ -2718,13 +3139,12 @@ impl ClientNode {
                     .and_then(|candidate| QueueAddress::parse(&candidate.address).ok());
                 match candidate {
                     Some(address) => {
-                        Outbound::new(&address).seal_record(L6Kind::Renewal, &half.bundle, nonce)?
+                        Outbound::new(&address).seal_record(L6Kind::Renewal, &record, nonce)?
                     }
-                    None => {
-                        held.channel
-                            .outbound()
-                            .seal_record(L6Kind::Renewal, &half.bundle, nonce)?
-                    }
+                    None => held
+                        .channel
+                        .outbound()
+                        .seal_record(L6Kind::Renewal, &record, nonce)?,
                 }
             }
             _ if half.resend.is_empty() => return Ok(None),
@@ -2806,40 +3226,36 @@ impl ClientNode {
         self.send_now(contact, &app, Waiting::Opening(contact), now, rng)
     }
 
-    /// A renewal bundle of the peer arrived (`NET-327`). Its static key
-    /// must be the one that the contact holds. When both channels are
-    /// stale, the party with the lower static key answers, and the other
-    /// one waits for that answer (`NET-328`).
+    /// A renewal record of the peer arrived (`NET-327`). The static key
+    /// of its bundle must be the one that the contact holds. When both
+    /// channels are stale, the party with the lower static key answers,
+    /// and the other one waits for that answer (`NET-328`). A bundle that
+    /// does not open the guard of the peer runs no handshake: it waits for
+    /// the answer of the user (`NET-355`).
     fn on_renewal<R: CryptoRng + ?Sized>(
         &mut self,
         contact: [u8; 32],
-        bundle: &[u8],
+        record: &[u8],
+        now: u64,
         rng: &mut R,
     ) -> Result<Vec<ClientEvent>, Error> {
         let Some(held) = self.contacts.get(&contact) else {
             return Ok(Vec::new());
         };
+        let Ok(record) = RenewalRecord::parse(record) else {
+            return Ok(Vec::new());
+        };
+        let bundle = record.bundle;
         let Ok(parsed) = Bundle::parse(bundle) else {
             return Ok(Vec::new());
         };
         if parsed.responder_static_x25519 != held.peer_static || Invitee::check(bundle).is_err() {
             return Ok(Vec::new());
         }
-        let is_answering = self
-            .halves
-            .values()
-            .any(|half| half.renews == Some(contact) && matches!(half.setup, Setup::Accepting(_)));
         // NET-327: an answer also runs while the relay makes its queue, or
         // while that queue waits for a circuit or for a credential. A
         // second bundle in that time starts no second one.
-        let answers = |purpose: &Purpose| matches!(purpose, Purpose::RenewAccept { contact: held, .. } if *held == contact);
-        let is_starting = self.deferred.iter().any(|(purpose, _)| answers(purpose))
-            || self.admitting.values().any(|keys| answers(&keys.purpose))
-            || self
-                .waiting
-                .values()
-                .any(|waiting| matches!(waiting, Waiting::Queue(keys) if answers(&keys.purpose)));
-        if is_answering || is_starting {
+        if self.answers_renewal(&contact) {
             return Ok(Vec::new());
         }
         if held.stale {
@@ -2847,6 +3263,27 @@ impl ClientNode {
             if own > held.peer_static {
                 return Ok(Vec::new());
             }
+        }
+        // NET-355: a contact that holds a guard of the peer answers the
+        // bundle that opens it, and no other one.
+        let opens = record
+            .proof
+            .is_some_and(|(_, secret)| guard_commitment(secret) == held.peer_guard.commitment);
+        if held.peer_guard.seq != 0 && !held.device && !opens {
+            let held = self.contacts.get_mut(&contact).ok_or(Error::NoPath)?;
+            // The newest bundle takes the place of one that waits, and the
+            // user sees one question.
+            let asks = held.kept.as_ref().is_none_or(|kept| kept.accepted);
+            held.kept = Some(KeptBundle {
+                bundle: bundle.to_vec(),
+                since: now,
+                accepted: false,
+            });
+            self.moved.insert(contact);
+            let event = ClientEvent::RenewalAsked {
+                contact: ContactId(contact),
+            };
+            return Ok(asks.then_some(event).into_iter().collect());
         }
         self.renewing.insert(contact);
         // A record of a peer ends no run: with no queue for the answer the
@@ -2862,6 +3299,155 @@ impl ClientNode {
             self.renewal_ended(&contact);
         }
         Ok(Vec::new())
+    }
+
+    /// Whether a handshake that answers a bundle of `contact` runs, or
+    /// starts: the relay makes its queue, or that queue waits for a
+    /// circuit or for a credential.
+    fn answers_renewal(&self, contact: &[u8; 32]) -> bool {
+        let answers = |purpose: &Purpose| matches!(purpose, Purpose::RenewAccept { contact: held, .. } if held == contact);
+        self.halves
+            .values()
+            .any(|half| half.renews == Some(*contact) && matches!(half.setup, Setup::Accepting(_)))
+            || self.deferred.iter().any(|(purpose, _)| answers(purpose))
+            || self.admitting.values().any(|keys| answers(&keys.purpose))
+            || self
+                .waiting
+                .values()
+                .any(|waiting| matches!(waiting, Waiting::Queue(keys) if answers(&keys.purpose)))
+    }
+
+    /// Whether a renewal bundle of a contact waits for the answer of the
+    /// user (`NET-355`).
+    pub fn renewal_asked(&self, contact: &ContactId) -> bool {
+        self.contacts
+            .get(&contact.0)
+            .and_then(|held| held.kept.as_ref())
+            .is_some_and(|kept| !kept.accepted)
+    }
+
+    /// The answer of the user to the bundle that waits for a contact
+    /// (`NET-355`). An accepted bundle runs its handshake, as a bundle
+    /// with the proof does. A refused one goes, and the channel stays.
+    pub fn answer_renewal<R: CryptoRng + ?Sized>(
+        &mut self,
+        contact: &ContactId,
+        accept: bool,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let held = self.contacts.get_mut(&contact.0).ok_or(Error::NoPath)?;
+        let kept = held.kept.as_mut().ok_or(Error::NoPath)?;
+        self.moved.insert(contact.0);
+        if !accept {
+            held.kept = None;
+            return Ok(());
+        }
+        kept.accepted = true;
+        self.answer_kept(contact.0, rng)
+    }
+
+    /// Starts the handshake of the bundle that the user accepted, when
+    /// none runs for the contact (`NET-327`). The bundle stays in the
+    /// store until its handshake holds a queue, thus a run that ends first
+    /// loses no answer of the user.
+    fn answer_kept<R: CryptoRng + ?Sized>(
+        &mut self,
+        contact: [u8; 32],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let Some(bundle) = self
+            .contacts
+            .get(&contact)
+            .and_then(|held| held.kept.as_ref())
+            .filter(|kept| kept.accepted)
+            .map(|kept| kept.bundle.clone())
+        else {
+            return Ok(());
+        };
+        if self.answers_renewal(&contact) {
+            return Ok(());
+        }
+        self.renewing.insert(contact);
+        let asked = self.make_queue(Purpose::RenewAccept { contact, bundle }, rng);
+        if asked.is_err() {
+            self.renewal_ended(&contact);
+        }
+        Ok(())
+    }
+
+    /// Sets a new renewal guard for a contact (`NET-354`): a new secret
+    /// under the next counter. Its record goes at `at` or after.
+    fn new_guard<R: CryptoRng + ?Sized>(&mut self, contact: &[u8; 32], at: u64, rng: &mut R) {
+        let Some(held) = self.contacts.get_mut(contact).filter(|held| !held.device) else {
+            return;
+        };
+        held.guard = OwnGuard::next(held.guard.seq, at, rng);
+        held.guard_refused = false;
+        self.moved.insert(*contact);
+    }
+
+    /// Sends the record of the guard of a contact while no relay
+    /// acknowledged it (`NET-354`). It goes under the ratchet, behind the
+    /// records that open the chains of a new channel (`NET-292`).
+    fn send_guard<R: CryptoRng + ?Sized>(
+        &mut self,
+        contact: [u8; 32],
+        now: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let Some(held) = self.contacts.get(&contact) else {
+            return Ok(());
+        };
+        let waits = !held.guard.owed
+            || held.guard_refused
+            || held.stale
+            || held.opens
+            || !held.flight.is_empty()
+            || !held.channel.can_send()
+            || now < held.guard.at;
+        // One that waits for its `QUOTA` goes no second time.
+        let is_out = self.waiting.values().any(
+            |waiting| matches!(waiting, Waiting::Guard { contact: held, .. } if *held == contact),
+        );
+        if waits || is_out {
+            return Ok(());
+        }
+        let seq = held.guard.seq;
+        let body = RenewalGuard {
+            guard_seq: seq,
+            commitment: guard_commitment(&held.guard.secret),
+        }
+        .encode()?;
+        let record = AppMessage {
+            kind: AppKind::RenewalGuard,
+            msg_id: random(rng),
+            sent_at: now.saturating_mul(1_000),
+            body: &body,
+        };
+        let mut app = alloc::vec![0u8; record.len()];
+        record.encode(&mut app)?;
+        self.send_now(contact, &app, Waiting::Guard { contact, seq }, now, rng)
+    }
+
+    /// A record of kind `0x38` of the peer arrived under the ratchet
+    /// (`NET-354`). The guard with the higher counter stays. After a
+    /// handshake, the first guard under the new ratchet takes the place of
+    /// the one that the handshake spent.
+    fn on_guard(&mut self, contact: [u8; 32], body: &[u8]) {
+        let Ok(guard) = RenewalGuard::parse(body) else {
+            return;
+        };
+        let Some(held) = self.contacts.get_mut(&contact).filter(|held| !held.device) else {
+            return;
+        };
+        if held.peer_guard.spent || guard.guard_seq > held.peer_guard.seq {
+            held.peer_guard = PeerGuard {
+                seq: guard.guard_seq,
+                commitment: guard.commitment,
+                spent: false,
+            };
+            self.moved.insert(contact);
+        }
     }
 
     /// The renewal of a contact completed: the new channel replaces the
@@ -2898,6 +3484,7 @@ impl ClientNode {
                 .map(|()| Vec::new());
         };
         let channel = PairwiseChannel::new(ratchet, finished.outbound, half.inbound);
+        let mut asked = false;
         // DEV-319: the renewal of a contact with no channel makes its
         // first one, and no queue of an old channel owes a `DEL`.
         let old = if let Some(bare) = self.bare.remove(&contact) {
@@ -2922,6 +3509,18 @@ impl ClientNode {
                     opens: !half.opening.is_empty(),
                     candidate: None,
                     refused: VecDeque::new(),
+                    // The guard of the device that owned the channel: the
+                    // next one counts from it.
+                    guard: OwnGuard {
+                        seq: bare.guard_seq,
+                        secret: bare.guard_secret,
+                        at: 0,
+                        owed: false,
+                    },
+                    peer_guard: PeerGuard::default(),
+                    kept: None,
+                    device: false,
+                    guard_refused: false,
                 },
             );
             None
@@ -2942,8 +3541,14 @@ impl ClientNode {
             held.opens = !half.opening.is_empty();
             held.flight = finished.flight;
             held.refused.clear();
+            // NET-356: the handshake spent the guard of the peer.
+            held.peer_guard.spent = held.peer_guard.seq != 0;
+            asked = held.kept.take().is_some_and(|kept| !kept.accepted);
             Some((old, old_relay, previous_relay))
         };
+        // NET-356: the bundle of a renewal showed the secret of the guard,
+        // thus each party sets a new one.
+        self.new_guard(&contact, 0, rng);
         self.moved.insert(contact);
         self.renewing.remove(&contact);
         self.rotating.remove(&contact);
@@ -2984,6 +3589,12 @@ impl ClientNode {
         }
         self.send_closing(contact, now, rng)?;
         self.send_waiting(contact, now, rng)?;
+        self.send_guard(contact, now, rng)?;
+        if asked {
+            events.push(ClientEvent::RenewalAskEnded {
+                contact: ContactId(contact),
+            });
+        }
         events.push(ClientEvent::ChannelRenewed {
             contact: ContactId(contact),
         });
@@ -3001,10 +3612,33 @@ impl ClientNode {
     ) -> Result<(), Error> {
         let held = self.contacts.get_mut(&contact.0).ok_or(Error::NoPath)?;
         if held.sweep_at == 0 {
-            held.sweep_at = now.saturating_add(sweep_delay(u64::from_be_bytes(random(rng))).max(1));
+            let at = now.saturating_add(sweep_delay(u64::from_be_bytes(random(rng))).max(1));
+            held.sweep_at = at;
             self.moved.insert(contact.0);
+            // NET-357: the device that left the set holds the secret of
+            // the guard. The new guard goes with the rotation.
+            self.new_guard(&contact.0, at, rng);
         }
         Ok(())
+    }
+
+    /// Ends each delay of `NET-180` that runs, as a wait of that time in a
+    /// run that is up does. For a test over real sockets alone.
+    #[cfg(any(test, feature = "sockets-test"))]
+    pub fn end_sweeps(&mut self, now: u64) {
+        for (id, held) in &mut self.contacts {
+            if held.sweep_at > now || held.guard.at > now {
+                held.sweep_at = held.sweep_at.min(now);
+                held.guard.at = held.guard.at.min(now);
+                self.moved.insert(*id);
+            }
+        }
+        for (id, held) in &mut self.bare {
+            if held.sweep_at > now {
+                held.sweep_at = now;
+                self.moved.insert(*id);
+            }
+        }
     }
 
     /// Makes a new queue for a contact at the next rotation check, whatever
@@ -6505,7 +7139,9 @@ impl ClientNode {
                 Waiting::UserSend(handle) => Some(handle),
                 _ => None,
             };
-            held.waiting_sends.push_back((app.to_vec(), user_handle));
+            if !matches!(waiting, Waiting::Guard { .. }) {
+                held.waiting_sends.push_back((app.to_vec(), user_handle));
+            }
             return Ok(());
         }
         let channel = &self.contacts.get(&contact).ok_or(Error::NoPath)?.channel;
@@ -6522,7 +7158,9 @@ impl ClientNode {
                 Waiting::UserSend(handle) => Some(handle),
                 _ => None,
             };
-            if !matches!(waiting, Waiting::Opening(_)) {
+            // The guard waits in the contact too, and a later check sends
+            // it.
+            if !matches!(waiting, Waiting::Opening(_) | Waiting::Guard { .. }) {
                 let held = self.contacts.get_mut(&contact).ok_or(Error::NoPath)?;
                 held.waiting_sends.push_back((app.to_vec(), user_handle));
             }
@@ -6548,6 +7186,7 @@ impl ClientNode {
                 }
             }
             Waiting::Opening(contact) => Waiting::Opening(contact),
+            Waiting::Guard { contact, seq } => Waiting::Guard { contact, seq },
             Waiting::Carried(slot) => Waiting::Node {
                 contact,
                 app: Zeroizing::new(app.to_vec()),
@@ -6707,6 +7346,9 @@ impl ClientNode {
                 self.send_flight(id, rng)?;
             } else if self.contacts.contains_key(&id) {
                 self.send_closing(id, now, rng)?;
+                if self.next_handle == before {
+                    self.send_guard(id, now, rng)?;
+                }
                 if self.next_handle == before {
                     self.send_refused(id, now, rng)?;
                 }
@@ -7248,6 +7890,15 @@ impl ClientNode {
         for contact in opening {
             self.send_opening(contact, now, rng)?;
         }
+        let guards: Vec<[u8; 32]> = self
+            .contacts
+            .iter()
+            .filter(|(_, held)| held.guard.owed && *held.channel.outbound().relay_id() == exit)
+            .map(|(id, _)| *id)
+            .collect();
+        for contact in guards {
+            self.send_guard(contact, now, rng)?;
+        }
         let (due, held): (Vec<HeldChunk>, Vec<HeldChunk>) = core::mem::take(&mut self.held_chunks)
             .into_iter()
             .partition(|held| held.relay == exit && held.class == ready_class);
@@ -7545,6 +8196,17 @@ impl ClientNode {
                                 self.moved.insert(contact);
                             }
                         }
+                        self.send_guard(contact, now, rng)?;
+                    }
+                    // The relay holds the guard of this counter. A newer
+                    // guard still owes its record.
+                    (Some(Waiting::Guard { contact, seq }), Cmd::Quota) => {
+                        if let Some(held) = self.contacts.get_mut(&contact) {
+                            if held.guard.seq == seq {
+                                held.guard.owed = false;
+                                self.moved.insert(contact);
+                            }
+                        }
                     }
                     // NET-054: the relay holds the batch of receipts or
                     // the digest, and the caller erases it now.
@@ -7671,6 +8333,24 @@ impl ClientNode {
                                     held.flight = Vec::new();
                                     held.opens = false;
                                     self.moved.insert(contact);
+                                }
+                                if reason == Reject::Rejected {
+                                    out.push(ClientEvent::ChannelDead {
+                                        contact: ContactId(contact),
+                                    });
+                                }
+                            } else {
+                                self.resends.insert(contact);
+                            }
+                            continue;
+                        }
+                        Some(Waiting::Guard { contact, .. }) => {
+                            if matches!(reason, Reject::Rejected | Reject::Version) {
+                                // NET-217: the record goes no more to this
+                                // queue. The next address of the peer
+                                // takes it.
+                                if let Some(held) = self.contacts.get_mut(&contact) {
+                                    held.guard_refused = true;
                                 }
                                 if reason == Reject::Rejected {
                                     out.push(ClientEvent::ChannelDead {
@@ -8028,6 +8708,19 @@ impl ClientNode {
                         Invitee::accept(&bundle, &own_address(), rng)
                             .map(|accepted| (peer_static, accepted))
                     });
+                // NET-355: the bundle that the user accepted leaves the
+                // contact here. Its handshake holds it from now on, or it
+                // gives no flight 1.
+                if let Some(held) = renews.and_then(|contact| self.contacts.get_mut(&contact)) {
+                    if held
+                        .kept
+                        .as_ref()
+                        .is_some_and(|kept| kept.accepted && kept.bundle == bundle)
+                    {
+                        held.kept = None;
+                        self.moved.extend(renews);
+                    }
+                }
                 let Ok((peer_static, (invitee, flight1, to))) = accepted else {
                     if let Some(contact) = renews {
                         self.renewal_ended(&contact);
@@ -8230,9 +8923,10 @@ impl ClientNode {
             // the channel.
             let rotated = rotated && matches!(received, Received::App { .. });
             if let Received::Renewal { bundle, .. } = &received {
-                out.extend(self.on_renewal(contact, bundle, rng)?);
+                out.extend(self.on_renewal(contact, bundle, now, rng)?);
                 return Ok(out);
             }
+            let mut guard_record = None;
             if let Received::App { bytes, .. } = received {
                 let parsed = AppMessage::parse(&bytes, Channel::Pairwise).ok();
                 // NET-190: a record that opened under the ratchet arrived.
@@ -8257,6 +8951,7 @@ impl ClientNode {
                         if let Some(address) = moved {
                             held.channel.accept_address(&address);
                             held.candidate = None;
+                            held.guard_refused = false;
                             // NET-191: the peer holds the address of this
                             // queue as a candidate, and the address of
                             // this device confirms it there.
@@ -8276,6 +8971,11 @@ impl ClientNode {
                         let answers = field(32).unwrap_or([0; 32]);
                         ceremony_record = field(0).map(|value| (kind, value, answers));
                     }
+                    // The guard is for the node, and the conversation shows
+                    // no record of it.
+                    Some(AppKind::RenewalGuard) => {
+                        guard_record = parsed.map(|parsed| parsed.body.to_vec());
+                    }
                     _ => out.push(ClientEvent::Message {
                         contact: ContactId(contact),
                         app: bytes,
@@ -8285,6 +8985,9 @@ impl ClientNode {
             if let Some((kind, value, answers)) = ceremony_record {
                 out.extend(self.on_verification(contact, kind, value, answers, now, rng)?);
             }
+            if let Some(body) = guard_record {
+                self.on_guard(contact, &body);
+            }
             if skipped_more {
                 self.bound_skipped();
             }
@@ -8293,6 +8996,7 @@ impl ClientNode {
             }
             // The record opened the sending chain of an inviter.
             self.send_waiting(contact, now, rng)?;
+            self.send_guard(contact, now, rng)?;
             if rotated {
                 out.extend(self.end_rotation(contact, now, rng)?);
             }
@@ -8467,10 +9171,18 @@ impl ClientNode {
                 opens,
                 candidate: None,
                 refused: VecDeque::new(),
+                guard: OwnGuard::none(),
+                peer_guard: PeerGuard::default(),
+                kept: None,
+                device: half.device,
+                guard_refused: false,
             },
         );
+        // NET-356: each party sets its first guard when the handshake ends.
+        self.new_guard(&queue_id, 0, rng);
         self.moved.insert(queue_id);
         self.send_closing(queue_id, now, rng)?;
+        self.send_guard(queue_id, now, rng)?;
         Ok(alloc::vec![ClientEvent::ContactReady {
             contact: ContactId(queue_id),
             peer_static,
@@ -9442,6 +10154,26 @@ mod tests {
         assert_eq!(net.count(ALICE, Cmd::Sub), subs + 2);
     }
 
+    /// The renewal record of `bundle` as `party` seals it for `contact`:
+    /// with the secret of the guard that the party holds, or with none.
+    fn record_of(
+        net: &mut Net,
+        party: usize,
+        contact: &ContactId,
+        bundle: &[u8],
+        proves: bool,
+    ) -> Vec<u8> {
+        let held = &net.node(party).contacts[&contact.0];
+        let (seq, secret) = (held.guard.seq, *held.guard.secret);
+        let record = RenewalRecord {
+            proof: proves.then_some((seq, &secret)),
+            bundle,
+        };
+        let mut out = alloc::vec![0u8; record.len()];
+        record.encode(&mut out).unwrap();
+        out
+    }
+
     /// Marks the channel of Alice stale and runs her checks until her
     /// renewal makes its queue.
     fn offer(net: &mut Net, alice: &ContactId) {
@@ -9547,24 +10279,36 @@ mod tests {
         // has of it. That form holds no ratchet and no queue of the user.
         let full = net.parties[ALICE].contacts[&alice.0].clone();
         let salt = stored_contact_salt(&full).unwrap();
-        let (peer_static, outbound) = stored_channel_end(&full).unwrap().unwrap();
-        let bare = bare_contact_state(&salt, &peer_static, &alice.0, &outbound).unwrap();
+        let end = stored_channel_end(&full).unwrap().unwrap();
+        // The guard of the first handshake goes with the end.
+        assert_eq!(end.guard_seq, 1);
+        let bare = bare_contact_state(&salt, &alice.0, &end).unwrap();
         assert!(bare.len() < full.len() / 4);
         assert!(stored_channel_end(&shadow_contact_state(&salt))
             .unwrap()
             .is_none());
         // The form gives the same end again, and the two pairwise keys.
-        assert_eq!(
-            stored_channel_end(&bare).unwrap().unwrap().1.to_vec(),
-            outbound.to_vec()
-        );
+        assert!(stored_channel_end(&bare).unwrap().unwrap() == end);
         let root = RootIdentity::new(Secret::new([0x41; 32]));
         assert_eq!(
             stored_contact_keys(&bare, &root).ok(),
             stored_contact_keys(&full, &root).ok()
         );
         // A form whose end does not restore is no stored contact.
-        assert!(bare_contact_state(&salt, &peer_static, &alice.0, &outbound[1..]).is_err());
+        let short = ChannelEnd {
+            outbound: Zeroizing::new(end.outbound[1..].to_vec()),
+            ..end.clone()
+        };
+        assert!(bare_contact_state(&salt, &alice.0, &short).is_err());
+        // A form of the earlier version holds no guard, and it restores.
+        let mut earlier = bare[..bare.len() - 36].to_vec();
+        earlier[0] = BARE_VERSION;
+        let read = stored_channel_end(&earlier).unwrap().unwrap();
+        assert_eq!(read.guard_seq, 0);
+        assert!(read.outbound == end.outbound);
+        assert!(node_of(0x41, None, &EXITS)
+            .restore_contact(&earlier)
+            .is_ok());
 
         // The device that takes the set over starts from that form alone.
         let old_queue = net.node(ALICE).inbound_queue(&alice).unwrap().0;
@@ -9602,7 +10346,13 @@ mod tests {
         assert_eq!(messages(&net.take(ALICE)), 1);
         net.commit(ALICE);
         let stored = net.parties[ALICE].contacts[&alice.0].clone();
-        assert_eq!(stored.first(), Some(&CONTACT_STORED_VERSION));
+        assert_eq!(stored.first(), Some(&CONTACT_GUARD_VERSION));
+        // NET-356: the bundle showed the secret of the guard of the device
+        // that owned the channel, the peer asked no question, and the new
+        // guard counts from that one.
+        assert!(!events.contains(&ClientEvent::RenewalAsked { contact: alice }));
+        assert!(!net.node(BOB).renewal_asked(&bob));
+        assert_eq!(stored_channel_end(&stored).unwrap().unwrap().guard_seq, 2);
     }
 
     /// Runs the checks of a client until its inbound queue for a contact
@@ -10077,6 +10827,7 @@ mod tests {
             qe: Secret::new([0x33; 32]),
         };
         let (_, bundle) = Inviter::issue(&identity, queue, &mut Rng(3)).unwrap();
+        let bundle = record_of(&mut net, ALICE, &alice, &bundle, true);
         let news = |net: &mut Net| {
             net.node(BOB)
                 .waiting
@@ -10086,19 +10837,472 @@ mod tests {
         };
         // NET-327: the answer runs from the `NEW` of its queue on.
         net.node(BOB)
-            .on_renewal(bob.0, &bundle, &mut Rng(4))
+            .on_renewal(bob.0, &bundle, 1_000, &mut Rng(4))
             .unwrap();
         assert_eq!(news(&mut net), 1);
         net.node(BOB)
-            .on_renewal(bob.0, &bundle, &mut Rng(5))
+            .on_renewal(bob.0, &bundle, 1_000, &mut Rng(5))
             .unwrap();
         assert_eq!(news(&mut net), 1);
         net.run();
         assert_eq!(net.node(BOB).halves.len(), 1);
         net.node(BOB)
-            .on_renewal(bob.0, &bundle, &mut Rng(6))
+            .on_renewal(bob.0, &bundle, 1_000, &mut Rng(6))
             .unwrap();
         assert_eq!(news(&mut net), 0);
+    }
+
+    fn renewed(events: &[ClientEvent], contact: ContactId) -> bool {
+        events.contains(&ClientEvent::ChannelRenewed { contact })
+    }
+
+    fn asked(events: &[ClientEvent], contact: ContactId) -> bool {
+        events.contains(&ClientEvent::RenewalAsked { contact })
+    }
+
+    /// The counter and the secret of the guard that `party` set.
+    fn own_guard(net: &mut Net, party: usize, contact: &ContactId) -> (u32, [u8; 32], bool) {
+        let guard = &net.node(party).contacts[&contact.0].guard;
+        (guard.seq, *guard.secret, guard.owed)
+    }
+
+    /// The guard of its peer that `party` holds.
+    fn held_guard(net: &mut Net, party: usize, contact: &ContactId) -> (u32, [u8; 32], bool) {
+        let guard = net.node(party).contacts[&contact.0].peer_guard;
+        (guard.seq, guard.commitment, guard.spent)
+    }
+
+    /// A renewal record with no secret, under the pairwise identity of
+    /// Alice: what a party that holds that identity and no guard seals.
+    fn bare_offer(net: &mut Net, alice: &ContactId, tag: u8) -> Vec<u8> {
+        let salt = net.node(ALICE).contacts[&alice.0].salt;
+        let identity = net.node(ALICE).root.pairwise_identity(&salt);
+        let queue = QueueAddress {
+            relay_id: [3; 32],
+            sender_id: [tag; 32],
+            qs_auth_sk: Secret::new([0x32; 32]),
+            qe: Secret::new([0x33; 32]),
+        };
+        let (_, bundle) = Inviter::issue(&identity, queue, &mut Rng(u64::from(tag))).unwrap();
+        record_of(net, ALICE, alice, &bundle, false)
+    }
+
+    #[test]
+    fn each_handshake_sets_a_guard_and_a_bundle_with_its_secret_renews_with_no_question() {
+        let mut net = Net::new();
+        let [alice, bob] = contacts(&mut net);
+        // NET-356: each party set its first guard, a relay took its
+        // record, and the peer holds the commitment.
+        let mut first = Vec::new();
+        for (party, own, other, peer) in [(ALICE, alice, BOB, bob), (BOB, bob, ALICE, alice)] {
+            let (seq, secret, owed) = own_guard(&mut net, party, &own);
+            assert_eq!((seq, owed), (1, false));
+            assert_eq!(
+                held_guard(&mut net, other, &peer),
+                (1, guard_commitment(&secret), false)
+            );
+            first.push(secret);
+        }
+
+        // NET-355: the bundle of Alice opens her guard, and Bob answers it.
+        offer(&mut net, &alice);
+        let (at_alice, at_bob) = (net.take(ALICE), net.take(BOB));
+        assert!(renewed(&at_alice, alice) && renewed(&at_bob, bob));
+        assert!(!asked(&at_bob, bob) && !asked(&at_alice, alice));
+        assert!(!net.node(BOB).renewal_asked(&bob));
+        // The conversation shows no record of a guard.
+        assert_eq!(messages(&at_alice) + messages(&at_bob), 0);
+
+        // NET-356: the renewal showed the secret, and each party set the
+        // next guard under the new ratchet.
+        for (party, own, other, peer) in [(ALICE, alice, BOB, bob), (BOB, bob, ALICE, alice)] {
+            let (seq, secret, owed) = own_guard(&mut net, party, &own);
+            assert_eq!((seq, owed), (2, false));
+            assert!(!first.contains(&secret));
+            assert_eq!(
+                held_guard(&mut net, other, &peer),
+                (2, guard_commitment(&secret), false)
+            );
+        }
+        // The store holds the guard, and a second renewal opens it.
+        net.restart(ALICE);
+        net.restart(BOB);
+        net.run();
+        net.take(ALICE);
+        net.take(BOB);
+        offer(&mut net, &alice);
+        let at_bob = net.take(BOB);
+        assert!(renewed(&at_bob, bob) && !asked(&at_bob, bob));
+        assert_eq!(own_guard(&mut net, ALICE, &alice).0, 3);
+    }
+
+    #[test]
+    fn a_bundle_with_no_secret_waits_for_the_user_and_an_accept_runs_its_handshake() {
+        let mut net = Net::new();
+        let [alice, bob] = contacts(&mut net);
+        // A device that holds the pairwise identity and no guard.
+        net.node(ALICE).contacts.get_mut(&alice.0).unwrap().guard = OwnGuard::none();
+        let queue = net.node(BOB).inbound_queue(&bob).unwrap().0;
+        offer(&mut net, &alice);
+        // NET-355: Bob runs no handshake, and the user sees one question.
+        assert_eq!(net.take(BOB), [ClientEvent::RenewalAsked { contact: bob }]);
+        assert!(net.node(BOB).renewal_asked(&bob));
+        assert!(net.node(BOB).halves.is_empty());
+        assert!(!net.node(BOB).renewing.contains(&bob.0));
+        assert!(!renewed(&net.take(ALICE), alice));
+        // The channel of Bob is the one from before, and it carries a
+        // record.
+        assert_eq!(net.node(BOB).inbound_queue(&bob).unwrap().0, queue);
+        let now = net.now;
+        net.node(BOB)
+            .send(&bob, &text(1), now, &mut Rng(11))
+            .unwrap();
+        net.run();
+        assert_eq!(messages(&net.take(ALICE)), 1);
+
+        // The store holds the question across a run.
+        net.restart(BOB);
+        net.run();
+        net.take(BOB);
+        assert!(net.node(BOB).renewal_asked(&bob));
+        let stored = net.parties[BOB].contacts[&bob.0].clone();
+        assert_eq!(stored_renewal_ask(&stored).unwrap(), Some(now));
+        let refused = stored_with_renewal_answer(&stored, false).unwrap();
+        assert_eq!(stored_renewal_ask(&refused).unwrap(), None);
+        assert!(stored_with_renewal_answer(&refused, true).is_err());
+
+        // The user accepts, and the handshake runs.
+        net.node(BOB)
+            .answer_renewal(&bob, true, &mut Rng(12))
+            .unwrap();
+        assert!(!net.node(BOB).renewal_asked(&bob));
+        net.run();
+        assert!(renewed(&net.take(ALICE), alice));
+        let events = net.take(BOB);
+        assert!(renewed(&events, bob) && !asked(&events, bob));
+        assert!(net.node(BOB).contacts[&bob.0].kept.is_none());
+        assert_ne!(net.node(BOB).inbound_queue(&bob).unwrap().0, queue);
+        // NET-356: the guard of Alice counts from zero, and Bob takes it in
+        // the place of the one that the handshake spent.
+        let (seq, secret, _) = own_guard(&mut net, ALICE, &alice);
+        assert_eq!(seq, 1);
+        assert_eq!(
+            held_guard(&mut net, BOB, &bob),
+            (1, guard_commitment(&secret), false)
+        );
+        let now = net.now;
+        net.node(ALICE)
+            .send(&alice, &text(2), now, &mut Rng(13))
+            .unwrap();
+        net.run();
+        assert_eq!(messages(&net.take(BOB)), 1);
+    }
+
+    #[test]
+    fn an_accept_in_the_store_runs_its_handshake_at_the_next_run() {
+        let mut net = Net::new();
+        let [alice, bob] = contacts(&mut net);
+        net.node(ALICE).contacts.get_mut(&alice.0).unwrap().guard = OwnGuard::none();
+        offer(&mut net, &alice);
+        assert!(asked(&net.take(BOB), bob));
+        net.commit(BOB);
+        // The user answers while no node runs.
+        let stored = net.parties[BOB].contacts[&bob.0].clone();
+        let accepted = stored_with_renewal_answer(&stored, true).unwrap();
+        assert_eq!(stored_renewal_ask(&accepted).unwrap(), None);
+        net.parties[BOB].contacts.insert(bob.0, accepted.to_vec());
+        net.restart(BOB);
+        net.run();
+        net.take(BOB);
+        assert!(!net.node(BOB).renewal_asked(&bob));
+        let now = net.now;
+        net.node(BOB).rotate_due(now, &mut Rng(14)).unwrap();
+        net.run();
+        assert!(renewed(&net.take(BOB), bob));
+        assert!(renewed(&net.take(ALICE), alice));
+    }
+
+    #[test]
+    fn a_bundle_with_the_secret_of_an_earlier_guard_waits_for_the_user() {
+        let mut net = Net::new();
+        let [alice, bob] = contacts(&mut net);
+        // What a device that leaves the set holds: the guard of that time.
+        let (old_seq, old_secret, _) = own_guard(&mut net, ALICE, &alice);
+        // NET-357: the revocation sets a new guard. Its record goes with
+        // the rotation, after the delay of that contact (`NET-180`).
+        let now = net.now;
+        net.node(ALICE)
+            .rotate_swept(&alice, now, &mut Rng(5))
+            .unwrap();
+        let at = net.node(ALICE).sweep_time(&alice).unwrap();
+        let (seq, secret, owed) = own_guard(&mut net, ALICE, &alice);
+        assert_eq!((seq, owed), (2, true));
+        assert_ne!(secret, old_secret);
+        assert_eq!(net.node(ALICE).contacts[&alice.0].guard.at, at);
+        net.node(ALICE).rotate_due(at - 1, &mut Rng(6)).unwrap();
+        net.run();
+        assert_eq!(held_guard(&mut net, BOB, &bob).0, 1);
+        // The same request again sets no second guard.
+        net.node(ALICE)
+            .rotate_swept(&alice, now, &mut Rng(7))
+            .unwrap();
+        assert_eq!(own_guard(&mut net, ALICE, &alice).0, 2);
+        net.now = at;
+        net.node(ALICE).rotate_due(at, &mut Rng(8)).unwrap();
+        net.run();
+        assert_eq!(
+            held_guard(&mut net, BOB, &bob),
+            (2, guard_commitment(&secret), false)
+        );
+        assert!(!own_guard(&mut net, ALICE, &alice).2);
+        net.take(ALICE);
+        net.take(BOB);
+
+        // The device that left the set offers a renewal with its secret.
+        net.node(ALICE).contacts.get_mut(&alice.0).unwrap().guard = OwnGuard {
+            seq: old_seq,
+            secret: Zeroizing::new(old_secret),
+            at: 0,
+            owed: false,
+        };
+        let queue = net.node(BOB).inbound_queue(&bob).unwrap().0;
+        offer(&mut net, &alice);
+        assert_eq!(net.take(BOB), [ClientEvent::RenewalAsked { contact: bob }]);
+        assert!(net.node(BOB).halves.is_empty());
+        assert!(!renewed(&net.take(ALICE), alice));
+
+        // NET-355: a second bundle takes the place of the first, and the
+        // user sees no second question.
+        let first = net.node(BOB).contacts[&bob.0]
+            .kept
+            .as_ref()
+            .unwrap()
+            .bundle
+            .clone();
+        let second = bare_offer(&mut net, &alice, 0x71);
+        let now = net.now;
+        let events = net
+            .node(BOB)
+            .on_renewal(bob.0, &second, now, &mut Rng(9))
+            .unwrap();
+        assert!(events.is_empty());
+        let kept = net.node(BOB).contacts[&bob.0]
+            .kept
+            .as_ref()
+            .unwrap()
+            .bundle
+            .clone();
+        assert_ne!(kept, first);
+        assert!(net.node(BOB).renewal_asked(&bob));
+
+        // The user refuses: the bundle goes, and the channel stays.
+        net.node(BOB)
+            .answer_renewal(&bob, false, &mut Rng(10))
+            .unwrap();
+        net.run();
+        assert!(!net.node(BOB).renewal_asked(&bob));
+        assert!(net.node(BOB).halves.is_empty());
+        assert_eq!(net.node(BOB).inbound_queue(&bob).unwrap().0, queue);
+        assert_eq!(held_guard(&mut net, BOB, &bob).0, 2);
+        assert!(net
+            .node(BOB)
+            .answer_renewal(&bob, true, &mut Rng(11))
+            .is_err());
+    }
+
+    #[test]
+    fn a_contact_that_holds_no_guard_of_the_peer_answers_a_bundle_with_no_secret() {
+        let mut net = Net::new();
+        let [alice, bob] = contacts(&mut net);
+        // Two parties from before the guard.
+        net.node(BOB).contacts.get_mut(&bob.0).unwrap().peer_guard = PeerGuard::default();
+        net.node(ALICE).contacts.get_mut(&alice.0).unwrap().guard = OwnGuard::none();
+        offer(&mut net, &alice);
+        let events = net.take(BOB);
+        assert!(renewed(&events, bob) && !asked(&events, bob));
+        assert!(renewed(&net.take(ALICE), alice));
+        // The handshake that ended gives each party a guard.
+        assert_eq!(held_guard(&mut net, BOB, &bob).0, 1);
+    }
+
+    #[test]
+    fn the_guard_with_the_higher_counter_stays_and_a_late_lower_one_changes_nothing() {
+        let mut net = Net::new();
+        let [_, bob] = contacts(&mut net);
+        let body = |seq: u32, tag: u8| {
+            let guard = RenewalGuard {
+                guard_seq: seq,
+                commitment: [tag; 32],
+            };
+            guard.encode().unwrap()
+        };
+        net.node(BOB).on_guard(bob.0, &body(5, 0x55));
+        assert_eq!(held_guard(&mut net, BOB, &bob), (5, [0x55; 32], false));
+        // A record that the queue gave late, and one with the same counter.
+        net.node(BOB).on_guard(bob.0, &body(3, 0x33));
+        net.node(BOB).on_guard(bob.0, &body(5, 0x66));
+        net.node(BOB).on_guard(bob.0, &[0; 37]);
+        assert_eq!(held_guard(&mut net, BOB, &bob), (5, [0x55; 32], false));
+        net.node(BOB).on_guard(bob.0, &body(6, 0x66));
+        assert_eq!(held_guard(&mut net, BOB, &bob), (6, [0x66; 32], false));
+        // NET-356: after a handshake the first guard stays, whatever its
+        // counter, and the order holds again from it.
+        net.node(BOB)
+            .contacts
+            .get_mut(&bob.0)
+            .unwrap()
+            .peer_guard
+            .spent = true;
+        net.node(BOB).on_guard(bob.0, &body(2, 0x22));
+        assert_eq!(held_guard(&mut net, BOB, &bob), (2, [0x22; 32], false));
+        net.node(BOB).on_guard(bob.0, &body(1, 0x11));
+        assert_eq!(held_guard(&mut net, BOB, &bob), (2, [0x22; 32], false));
+        // The sync channel of a device carries no guard.
+        net.node(BOB).mark_device(&bob);
+        net.node(BOB).on_guard(bob.0, &body(9, 0x99));
+        assert_eq!(held_guard(&mut net, BOB, &bob).0, 2);
+    }
+
+    #[test]
+    fn a_bundle_that_waits_for_the_user_ends_at_the_lifetime_of_an_invitation() {
+        let mut net = Net::new();
+        let [alice, bob] = contacts(&mut net);
+        let record = bare_offer(&mut net, &alice, 0x72);
+        let now = net.now;
+        let events = net
+            .node(BOB)
+            .on_renewal(bob.0, &record, now, &mut Rng(4))
+            .unwrap();
+        assert_eq!(events, [ClientEvent::RenewalAsked { contact: bob }]);
+        let end = now + crate::identity::INVITE_TTL;
+        let events = net.node(BOB).rotate_due(end - 1, &mut Rng(5)).unwrap();
+        assert!(!events.contains(&ClientEvent::RenewalAskEnded { contact: bob }));
+        assert!(net.node(BOB).renewal_asked(&bob));
+        let events = net.node(BOB).rotate_due(end, &mut Rng(6)).unwrap();
+        assert!(events.contains(&ClientEvent::RenewalAskEnded { contact: bob }));
+        assert!(!net.node(BOB).renewal_asked(&bob));
+        assert!(net.node(BOB).halves.is_empty());
+    }
+
+    #[test]
+    fn a_stored_contact_from_before_the_guard_restores_and_sets_its_first_guard_after_a_delay() {
+        let mut net = Net::new();
+        let [alice, bob] = contacts(&mut net);
+        net.commit(ALICE);
+        // The form of version 0x05 ends before the guard. Alice made the
+        // invitation, thus her form holds no flight behind it.
+        const GUARD: usize = (4 + 32 + 8 + 1) + (4 + 32 + 1) + 1;
+        let full = net.parties[ALICE].contacts[&alice.0].clone();
+        let mut earlier = full[..full.len() - GUARD].to_vec();
+        earlier[0] = CONTACT_STORED_VERSION;
+        assert_eq!(stored_renewal_ask(&earlier).unwrap(), None);
+        assert_eq!(stored_channel_end(&earlier).unwrap().unwrap().guard_seq, 0);
+        net.parties[ALICE].contacts.insert(alice.0, earlier);
+        net.node(BOB).contacts.get_mut(&bob.0).unwrap().peer_guard = PeerGuard::default();
+        net.restart(ALICE);
+        net.run();
+        assert_eq!(own_guard(&mut net, ALICE, &alice).0, 0);
+
+        // NET-358: the first check sets the guard, and its record goes
+        // after a delay of its own.
+        let now = net.now;
+        net.node(ALICE).rotate_due(now, &mut Rng(5)).unwrap();
+        net.run();
+        let (seq, secret, owed) = own_guard(&mut net, ALICE, &alice);
+        let at = net.node(ALICE).contacts[&alice.0].guard.at;
+        assert_eq!((seq, owed), (1, true));
+        assert!(at > now);
+        assert_eq!(held_guard(&mut net, BOB, &bob).0, 0);
+        // The store holds the time, and a later run sends the record.
+        net.restart(ALICE);
+        net.run();
+        net.now = at;
+        net.node(ALICE).rotate_due(at, &mut Rng(6)).unwrap();
+        net.run();
+        assert_eq!(
+            held_guard(&mut net, BOB, &bob),
+            (1, guard_commitment(&secret), false)
+        );
+        assert!(!own_guard(&mut net, ALICE, &alice).2);
+    }
+
+    #[test]
+    fn the_record_of_a_guard_goes_again_until_a_relay_takes_it() {
+        let mut net = Net::new();
+        let [alice, bob] = contacts(&mut net);
+        let now = net.now;
+        net.node(ALICE)
+            .rotate_swept(&alice, now, &mut Rng(5))
+            .unwrap();
+        let at = net.node(ALICE).sweep_time(&alice).unwrap();
+        // NET-218: the relay is busy, and the record waits for a slot of
+        // the cover clock.
+        net.busy = 1;
+        net.now = at;
+        net.node(ALICE)
+            .send_guard(alice.0, at, &mut Rng(6))
+            .unwrap();
+        net.run();
+        assert!(own_guard(&mut net, ALICE, &alice).2);
+        assert_eq!(held_guard(&mut net, BOB, &bob).0, 1);
+        // An acknowledgment that is due takes the first slot (`NET-064`).
+        let mut slots = Vec::new();
+        while slots.last() != Some(&CoverSlot::Retransmission) && slots.len() < 3 {
+            let slot = net
+                .node(ALICE)
+                .on_cover_slot(false, None, None, at, &mut Rng(7))
+                .unwrap();
+            slots.push(slot);
+            net.run();
+        }
+        assert_eq!(slots.last(), Some(&CoverSlot::Retransmission));
+        assert!(!own_guard(&mut net, ALICE, &alice).2);
+        assert_eq!(held_guard(&mut net, BOB, &bob).0, 2);
+        // A guard that a relay took goes no second time.
+        let sends = net.count(ALICE, Cmd::Send);
+        net.node(ALICE)
+            .send_guard(alice.0, at, &mut Rng(8))
+            .unwrap();
+        net.run();
+        assert_eq!(net.count(ALICE, Cmd::Send), sends);
+    }
+
+    #[test]
+    fn a_guard_that_a_relay_refuses_goes_no_more_in_that_run_and_again_in_the_next() {
+        let mut net = Net::new();
+        let [alice, bob] = contacts(&mut net);
+        let now = net.now;
+        net.node(ALICE)
+            .rotate_swept(&alice, now, &mut Rng(5))
+            .unwrap();
+        let at = net.node(ALICE).sweep_time(&alice).unwrap();
+        net.now = at;
+        // The relay holds the queue of Bob no more.
+        let queue = net.node(BOB).inbound_queue(&bob).unwrap().0;
+        let sender = sender_of(&net, queue);
+        let held = net.queues.remove(&sender).unwrap();
+        net.node(ALICE)
+            .send_guard(alice.0, at, &mut Rng(6))
+            .unwrap();
+        net.run();
+        // NET-217: the refusal ends the sends of that record, and the
+        // channel is dead.
+        assert!(net
+            .take(ALICE)
+            .contains(&ClientEvent::ChannelDead { contact: alice }));
+        assert!(own_guard(&mut net, ALICE, &alice).2);
+        let sends = net.count(ALICE, Cmd::Send);
+        net.node(ALICE)
+            .send_guard(alice.0, at, &mut Rng(7))
+            .unwrap();
+        net.run();
+        assert_eq!(net.count(ALICE, Cmd::Send), sends);
+        // The store holds the guard as owed, and the next run sends it.
+        net.queues.insert(sender, held);
+        net.restart(ALICE);
+        net.run();
+        assert!(!own_guard(&mut net, ALICE, &alice).2);
+        assert_eq!(held_guard(&mut net, BOB, &bob).0, 2);
     }
 
     #[test]

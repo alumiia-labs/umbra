@@ -1346,6 +1346,13 @@ pub enum FfiEvent {
         /// Whether the change was a deletion.
         is_delete: bool,
     },
+    /// A contact asks for a new connection with no proof of its renewal
+    /// guard, or that question ended (Part 3 `NET-355`).
+    /// [`Handle::renewal_ask`] gives the state.
+    RenewalAsk {
+        /// The conversation.
+        conversation: Vec<u8>,
+    },
     /// The contact deleted a message of a conversation, and a placeholder
     /// stands in its place.
     Deleted {
@@ -3732,6 +3739,9 @@ impl Inner {
                 Event::Deleted { conversation, .. } => FfiEvent::Deleted {
                     conversation: conversation.0.to_vec(),
                 },
+                Event::RenewalAsk { conversation } => FfiEvent::RenewalAsk {
+                    conversation: conversation.0.to_vec(),
+                },
                 Event::Conversations => FfiEvent::Conversations,
                 Event::WakeTable => FfiEvent::WakeTable,
                 Event::File { message } => FfiEvent::File {
@@ -5279,6 +5289,10 @@ impl Handle {
                 let contact = node
                     .restore_contact(state)
                     .map_err(|_| FfiError::Integrity)?;
+                // NET-354: a sync channel carries no renewal guard.
+                if device_peers.contains(conversation) {
+                    node.mark_device(&contact);
+                }
                 contacts.insert(*conversation, contact);
             }
             // IDN-183: each contact of a restore is stale until its renewal
@@ -6104,6 +6118,35 @@ impl Handle {
         let (contact, key) = client.accept_key_change(conversation, &mut OsRng)?;
         if let Some(running) = bridge {
             running.peer_key(contact, key)?;
+        }
+        drop(inner);
+        self.changed.notify_all();
+        Ok(())
+    }
+
+    /// The arrival time, in milliseconds, of the request of a contact for
+    /// a new connection that waits for the answer of the user, or none
+    /// (Part 3 `NET-355`). The conversation takes each message meanwhile.
+    pub fn renewal_ask(&self, conversation: Vec<u8>) -> Result<Option<u64>, FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        Ok(locked(&self.inner).client.renewal_ask(conversation)?)
+    }
+
+    /// Answers the request of a contact for a new connection (`NET-355`).
+    /// An accepted request runs its handshake, and the channel of the
+    /// conversation is then the one of that handshake. A refused request
+    /// goes, and the channel stays. The node of a run that is up takes the
+    /// answer. With no run the store takes it, for the next one.
+    pub fn answer_renewal(&self, conversation: Vec<u8>, accept: bool) -> Result<(), FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        let mut inner = locked(&self.inner);
+        let Inner { client, bridge, .. } = &mut *inner;
+        let contact = client.renewal_contact(conversation)?;
+        let told = bridge
+            .as_ref()
+            .is_some_and(|running| running.answer_renewal(contact, accept).is_ok());
+        if !told {
+            client.answer_renewal_stored(conversation, accept, &mut OsRng)?;
         }
         drop(inner);
         self.changed.notify_all();

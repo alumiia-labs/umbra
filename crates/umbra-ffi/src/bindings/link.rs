@@ -1394,6 +1394,23 @@ impl Handle {
         }
         Ok(())
     }
+
+    /// Asks the run for each rotation that a revocation owes, and ends
+    /// each delay of Part 3 `NET-180` that runs, as a wait of that time
+    /// does. For a test over real sockets alone.
+    pub fn end_sweeps(&self) -> Result<(), FfiError> {
+        let mut inner = locked(&self.inner);
+        inner.pump_revocation(unix_now());
+        let running = inner.bridge.as_ref().ok_or(FfiError::Offline)?;
+        Ok(running.end_sweeps()?)
+    }
+
+    /// Whether a revocation still owes the queue of a conversation its
+    /// rotation (Part 7 §7.7 step 2c). For a test over real sockets alone.
+    pub fn owes_rotation(&self, conversation: Vec<u8>) -> Result<bool, FfiError> {
+        let conversation = super::conversation_of(&conversation)?;
+        Ok(locked(&self.inner).client.owes_rotation(conversation)?)
+    }
 }
 
 /// Makes the store of a new device from the snapshot of a link: as

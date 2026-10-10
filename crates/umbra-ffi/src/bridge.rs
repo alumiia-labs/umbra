@@ -119,6 +119,19 @@ impl Bridge {
         self.command(Command::PeerKey { contact, key })
     }
 
+    /// The answer of the user to a renewal bundle that waits (Part 3
+    /// `NET-355`).
+    pub fn answer_renewal(&self, contact: ContactId, accept: bool) -> Result<(), Error> {
+        self.command(Command::AnswerRenewal { contact, accept })
+    }
+
+    /// Ends each delay of `NET-180` that runs. For a test over real sockets
+    /// alone.
+    #[cfg(feature = "sockets-test")]
+    pub fn end_sweeps(&self) -> Result<(), Error> {
+        self.command(Command::EndSweeps)
+    }
+
     /// The dead-channel blob of the peer gave `address`, a candidate
     /// address (`NET-190`). `dead` says whether the channel is dead, and
     /// `sent` whether the candidate took its record of `NET-191` in an

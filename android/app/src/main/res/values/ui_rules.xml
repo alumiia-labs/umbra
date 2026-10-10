@@ -32,6 +32,7 @@
     <string name="umbra_ui_dis_084">A different party now holds %1$s.</string>
     <string name="umbra_ui_wir_341">A message did not open, and its sender holds it no more.</string>
     <string name="umbra_ui_net_103">Some messages did not arrive.</string>
+    <string name="umbra_ui_net_359">If you accept, the device that asks takes this chat.</string>
     <string name="umbra_ui_rel_116">The clock of this device differs from the network time by more than one hour.</string>
     <string name="umbra_ui_rel_126">The relay directory is provisional.</string>
     <string name="umbra_ui_net_343">one operator</string>

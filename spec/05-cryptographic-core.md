@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 5: Cryptographic Core
 
 **Status:** Draft
-**Version:** 0.17.1
+**Version:** 0.18.0
 **Date:** 2026-10-10
 
 ---
@@ -1595,9 +1595,10 @@ names the object type and its lifetime:
 "umbra/v1/client-rng"
 "umbra/v1/quota-holder"
 "umbra/v1/ndr-removal"
+"umbra/v1/renewal-guard"
 ```
 
-> *The cause of the last eight labels.* The two verifier labels take the
+> *The cause of the last nine labels.* The two verifier labels take the
 > `verifier_id` of Part 9 `DIS-165` and Part 13 `ABU-109` apart from the seed
 > of the same proof of work, as `hello-seed` and `hello-verifier` are apart
 > (`CRY-031`). `relay-ntf`, `ndr`, and `directory` derive the key pair of a
@@ -1607,7 +1608,9 @@ names the object type and its lifetime:
 > `quota-holder` names the holder of a chunk quota at a relay (Part 12).
 > `ndr-removal` gives the removal secret of the next registration of a
 > handle from the one before it, thus each registration takes a fresh secret
-> and a lost answer can be sent again (Part 8 `NTF-124`).
+> and a lost answer can be sent again (Part 8 `NTF-124`). `renewal-guard`
+> is the prefix of the commitment of Part 3 rule `NET-354`. Thus no other
+> hash of this specification over a 32-byte value opens a renewal guard.
 >
 > *The construction under six labels.* No other part gives these, thus
 > this note gives each one in full.

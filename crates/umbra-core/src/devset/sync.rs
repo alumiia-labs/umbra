@@ -132,9 +132,9 @@ pub const ITEM_GROUP_STATE: u8 = 14;
 /// The item of the re-key of the member in a group: the new seed and the
 /// re-key object (`DEV-300`).
 pub const ITEM_GROUP_REKEY: u8 = 15;
-/// The item of the channel of a contact: the pairwise key of the peer and
-/// the writer side of its queue (`DEV-319`), under the subject of the
-/// contact.
+/// The item of the channel of a contact: the pairwise key of the peer,
+/// the writer side of its queue, and the renewal guard (`DEV-319`), under
+/// the subject of the contact.
 pub const ITEM_CHANNEL: u8 = 16;
 /// The length of the writer side of a queue in [`ChannelEntry`]: the
 /// `SenderId`, the `QS_auth` private key, the queue end-to-end key, and the
@@ -181,7 +181,7 @@ impl IdentityEntry {
 /// The value of the item of the channel of a contact (`DEV-319`): what a
 /// device that takes the set over needs for the renewal of Part 3 §3.2.6.
 /// It holds no ratchet and no queue of the device that owns the channel.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ChannelEntry {
     /// The pairwise salt.
     pub salt: [u8; 16],
@@ -191,22 +191,30 @@ pub struct ChannelEntry {
     pub peer_static: [u8; 32],
     /// The writer side of the queue of the peer.
     pub outbound: Zeroizing<Vec<u8>>,
+    /// The counter of the newest renewal guard for the contact (Part 3
+    /// `NET-354`), or zero for a contact with none.
+    pub guard_seq: u32,
+    /// The secret of that guard, or 32 zero bytes.
+    pub guard_secret: Zeroizing<[u8; 32]>,
 }
 
 impl ChannelEntry {
-    /// The 209 bytes: kind `0x01`, the salt, the key, the key of the peer,
-    /// and the writer side.
+    /// The 245 bytes: kind `0x01`, the salt, the key, the key of the peer,
+    /// the writer side, the counter of the guard, and its secret.
     pub fn encode(&self) -> Zeroizing<Vec<u8>> {
-        let mut out = Zeroizing::new(Vec::with_capacity(81 + self.outbound.len()));
+        let mut out = Zeroizing::new(Vec::with_capacity(117 + self.outbound.len()));
         out.push(0x01);
         out.extend_from_slice(&self.salt);
         out.extend_from_slice(&self.conversation);
         out.extend_from_slice(&self.peer_static);
         out.extend_from_slice(&self.outbound);
+        out.extend_from_slice(&self.guard_seq.to_be_bytes());
+        out.extend_from_slice(self.guard_secret.as_slice());
         out
     }
 
-    /// Reads an entry.
+    /// Reads an entry. An entry with no guard holds a counter of zero and
+    /// 32 zero bytes, and no other entry holds that counter (`DEV-319`).
     pub fn parse(bytes: &[u8]) -> Result<Self, Error> {
         let mut r = Reader::new(bytes);
         if r.u8()? != 0x01 {
@@ -214,12 +222,19 @@ impl ChannelEntry {
         }
         let (salt, conversation, peer_static) = (r.array()?, r.array()?, r.array()?);
         let outbound = Zeroizing::new(r.take(CHANNEL_END_LEN)?.to_vec());
+        let guard_seq = r.u32()?;
+        let guard_secret = Zeroizing::new(r.array()?);
         r.finish()?;
+        if guard_seq == 0 && *guard_secret != [0; 32] {
+            return Err(Error::Malformed);
+        }
         Ok(ChannelEntry {
             salt,
             conversation,
             peer_static,
             outbound,
+            guard_seq,
+            guard_secret,
         })
     }
 }
@@ -697,6 +712,24 @@ mod tests {
         };
         assert_eq!(IdentityEntry::parse(&entry.encode()).unwrap(), entry);
         assert!(IdentityEntry::parse(&entry.encode()[..48]).is_err());
+        // DEV-319: the item of a channel, with a guard and with none.
+        let channel = ChannelEntry {
+            salt: [5; 16],
+            conversation: [6; 32],
+            peer_static: [7; 32],
+            outbound: Zeroizing::new(vec![8; CHANNEL_END_LEN]),
+            guard_seq: 3,
+            guard_secret: Zeroizing::new([9; 32]),
+        };
+        let bytes = channel.encode();
+        assert_eq!(bytes.len(), 245);
+        assert!(ChannelEntry::parse(&bytes).unwrap() == channel);
+        assert!(ChannelEntry::parse(&bytes[..209]).is_err());
+        let mut none = bytes.to_vec();
+        none[209..213].copy_from_slice(&[0; 4]);
+        assert!(ChannelEntry::parse(&none).is_err());
+        none[213..].copy_from_slice(&[0; 32]);
+        assert_eq!(ChannelEntry::parse(&none).unwrap().guard_seq, 0);
         // DEV-292: a scope or an author that the layout does not name.
         let other_scope = SyncedRecord {
             origin: Origin {

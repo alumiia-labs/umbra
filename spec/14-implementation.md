@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 14: Implementation Requirements and Assurance
 
 **Status:** Draft
-**Version:** 0.17.1
+**Version:** 0.18.0
 **Date:** 2026-10-10
 
 ---
@@ -914,7 +914,7 @@ read flight 1 already drops the copy (Part 6 `WIR-503`).
 | `0x00` | Set of tables | No row. Its MAC counts each table of the store (Part 4 `IDN-193`) |
 | `0x01` | Messages | One message, under its conversation and its `msg_ref` |
 | `0x02` | Tombstones | One deleted message |
-| `0x03` | Contacts | One contact: the `RecipientId` of its inbound queue, and the stored channel |
+| `0x03` | Contacts | One contact: the `RecipientId` of its inbound queue, and the stored channel. The row also holds the renewal guard of Part 3 rule `NET-354`: the secret and the counter of this device, the commitment and the counter of the contact, and a renewal bundle that waits for the answer of the user (Part 3 `NET-355`) |
 | `0x04` | Queues | Reserved for the queues of the path selection of Part 3 §3.4.6 |
 | `0x05` | Verifications | One verification of Part 4 §4.5 |
 | `0x06` | Local identity | The root seed, the Recovery Code, the seed of each group, and the mark of `IDN-193`. The row `discovery-roots` holds each identity root from before a reset that still gives the key of a published entry. For each root it holds its seed, a count, and the name of each entry that the root serves. A name leaves the row when the log shows a later rotation of its entry or when its entry goes. A root leaves the row with its last name (`DEV-306`). Part 4 calls these rows, the pairwise salts of the rows of `0x03`, and the rotation counters of the rows of `0x28` together the local identity table |

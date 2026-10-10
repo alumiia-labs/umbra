@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 7: Device Sets, History Sync, and Revocation
 
 **Status:** Draft
-**Version:** 0.17.1
+**Version:** 0.18.0
 **Date:** 2026-10-10
 
 ---
@@ -40,9 +40,12 @@ result is an identity compromise and not only a history compromise. Revocation
 reset of §7.7.1.
 
 Each linked device also holds, for each contact, the pairwise key of that
-contact and the credentials that write to the queue of that contact
-(`DEV-319`). The snapshot of a link gives them for each contact of that
-moment, and the sync channel gives them for each later one.
+contact, the credentials that write to the queue of that contact, and the
+secret of the renewal guard of that contact (`DEV-319`). The snapshot of a
+link gives them for each contact of that moment, and the sync channel gives
+them for each later one. A revocation gives each contact a new guard (§7.7
+step 2f), thus the secret that a removed device holds opens no guard from
+then on.
 
 The mitigations below are all mandatory:
 
@@ -934,7 +937,7 @@ class in Part 6 §6.6. **[DEV-022]** A client MUST NOT process a kind that decla
 | Peer signal | `0x06`, `0x07` | Part 3 §3.5.4 gives the rules. **[DEV-023]** A client MUST NOT put a peer signal on a sync channel |
 | Mutable state | `0x20` sub-kind `0x01` | The last writer wins, under `DEV-270` |
 | Ephemeral | `0x08` | The client does not store it |
-| Control | `0x0D`, `0x10`, `0x20` sub-kind `0x02`, `0x30`, `0x31`, `0x32`, `0x33`, `0x34`, `0x35` | Part 4 §4.7.3 gives `0x0D`. Part 11 gives `0x10`. §7.5.5 gives `0x20` sub-kind `0x02`, which is the sync acknowledgment. Part 4 §4.5.1 gives `0x30`. Part 9 §9.5.3 gives `0x31`. §7.5.8 gives `0x32`. Part 6 §6.6.10 gives `0x33`. Part 6 §6.6.11 gives `0x34` and `0x35` |
+| Control | `0x0D`, `0x10`, `0x20` sub-kind `0x02`, `0x30`, `0x31`, `0x32`, `0x33`, `0x34`, `0x35`, `0x38` | Part 4 §4.7.3 gives `0x0D`. Part 11 gives `0x10`. §7.5.5 gives `0x20` sub-kind `0x02`, which is the sync acknowledgment. Part 4 §4.5.1 gives `0x30`. Part 9 §9.5.3 gives `0x31`. §7.5.8 gives `0x32`. Part 6 §6.6.10 gives `0x33`. Part 6 §6.6.11 gives `0x34` and `0x35`. Part 6 §6.6.12 gives `0x38` |
 | Wrapper | `0x09`, and `0x20` sub-kind `0x03` | Part 6 §6.6.5 gives the rich record, and `DEV-268` gives the synced record. Kind `0x12` of Part 6 §6.6.2 is retired; a group content record is the `app` of a group record of Part 11 §11.3, and its own kind gives its class. **[DEV-174]** A client MUST take the class from `inner_kind`. **[DEV-175]** A client MUST NOT give a wrapper a class of its own |
 
 - **Insertion** is commutative. **[DEV-024]** A client MUST identify each message by the
@@ -1011,11 +1014,12 @@ class in Part 6 §6.6. **[DEV-022]** A client MUST NOT process a kind that decla
   **[DEV-319]** The device that owns the channels MUST publish the item of
   the channel of a contact when it makes the contact. It MUST publish that
   item again when the contact gives a new `QueueAddress` (Part 3 `NET-179`),
-  when a renewal replaces the channel (Part 3 `NET-329`), and when the user
-  accepts a new key of the contact (Part 4 §4.5.1). At the start of each
-  run it MUST publish the item of each contact whose item its engine does
-  not hold. The item takes the subject of `DEV-226` as its key. Its value
-  is 209 bytes:
+  when a renewal replaces the channel (Part 3 `NET-329`), when the user
+  accepts a new key of the contact (Part 4 §4.5.1), and when it sets a new
+  renewal guard for the contact (Part 3 `NET-356` to `NET-358`). At the
+  start of each run it MUST publish the item of each contact whose item its
+  engine does not hold. The item takes the subject of `DEV-226` as its key.
+  Its value is 245 bytes:
 
   ```
   ChannelEntry {
@@ -1027,6 +1031,8 @@ class in Part 6 §6.6. **[DEV-022]** A client MUST NOT process a kind that decla
       qs_auth_sk    [32]u8    // the key that signs a SEND to that queue
       k_qe          [32]u8    // the queue end-to-end key of Part 6 WIR-017
       relay_id      [32]u8    // the relay of that queue
+      guard_seq     u32       // the newest renewal guard, Part 3 NET-354; 0 for none
+      guard_secret  [32]u8    // the R of that guard; 32 zero bytes for none
   }
   ```
 
@@ -1038,6 +1044,8 @@ class in Part 6 §6.6. **[DEV-022]** A client MUST NOT process a kind that decla
   channel, the form of its link snapshot included. It MUST reject an item
   whose subject the salt does not give, an item whose `writer` is not the
   device that owns the channels, and an item that names a sync channel. It
+  MUST reject an item whose `guard_seq` is 0 and whose `guard_secret` is not
+  32 zero bytes. It
   MUST hold the conversation as `DEV-294` requires. Until a take-over it
   MUST NOT write to the queue that the item names. The device that owns the
   channels MUST NOT apply an item of this row, and it MUST NOT publish one
@@ -1048,7 +1056,10 @@ class in Part 6 §6.6. **[DEV-022]** A client MUST NOT process a kind that decla
   > reach a queue that the contact reads. The entry of `DEV-294` holds
   > neither, and a snapshot holds them as they stood at the link. Without
   > this item, a contact that came after the link is lost at a take-over.
-  > So is a contact whose queue moved. The item gives a linked device no
+  > So is a contact whose queue moved. The secret of the renewal guard lets
+  > the bundle of the claimant open the guard that the contact holds. Without
+  > it each contact asks its user at a take-over (Part 3 `NET-355`). The item
+  > gives a linked device no
   > ratchet. Thus it reads no record of the channel with it. `DEV-308`
   > carries each other item from one linked device to each other one. An
   > item of this row from a linked device would move the renewal of a
@@ -1856,7 +1867,9 @@ has to be fast and complete.
         follows the next record of the peer (§7.5.4);
      c. rotates every queue the revoked device knew;
      d. derives the sync channel seed of epoch n+1 from the seed update;
-     e. starts the group re-key of Part 11 §11.12 for each group of the user.
+     e. starts the group re-key of Part 11 §11.12 for each group of the user;
+     f. sets a new renewal guard on every pairwise channel it owns (Part 3
+        NET-357).
 3. The ownership that an absent device held moves to the signer of step 1, in
    the claim of scope 0x03 of that epoch (§7.3.1, DEV-314).
 ```
@@ -1932,6 +1945,21 @@ that list, with the delay of Part 3 `NET-180`. A contact leaves the list
 when its new queue exists. Thus a revocation with no connection, and a
 session that ends before a rotation, lose no rotation.
 
+**The guard of step 2f goes with the rotation.** The request for the
+rotation of a contact sets the new renewal guard of that contact, one time
+for each revocation. The device keeps the new secret in its store with the
+time of the rotation, and the guard record goes at that time (Part 3
+`NET-357`). The item of `DEV-319` carries the new secret to each remaining
+device. `DEV-313` puts no sync record on the channel of the revoked device.
+Thus that device holds the secret of the guard before, and no later one.
+
+> *Cause of step 2f.* Step 2b and step 2c cut the revoked device from the
+> records of a channel. They do not cut it from the contact. That device
+> holds the pairwise identity and the writer side of the queue of the
+> contact, thus it can offer the contact a renewal of Part 3 §3.2.6. After
+> step 2f its bundle opens no guard, and the contact asks its user before
+> a handshake runs (Part 3 `NET-355`).
+
 > *Cause.* A derivation from `K_devset`
 > alone gives the seed that the revoked device holds, because §7.3 says that
 > device holds the `RootIdentity`. With no new input, step 2d changes
@@ -1955,7 +1983,11 @@ revokes a device, and writes the backups.
   commit of its store. In that commit it MUST mark the channel of each
   contact stale under Part 3 rule `NET-325`, as a restore does (Part 4
   `IDN-183`). The renewal of Part 3 §3.2.6 then gives each contact a new
-  session and new queues. The claimant then sends each record of the user
+  session and new queues. The bundle of each renewal carries the secret of
+  the renewal guard from the item of `DEV-319`, thus a contact that holds
+  that guard asks its user no question (Part 3 `NET-355`). At the end of
+  each renewal the claimant sets the next guard (Part 3 `NET-356`). The
+  claimant then sends each record of the user
   that waited for the absent device. That renewal is step 2b and step 2c of
   a take-over, and the claimant owes no other rotation. In the same commit
   the claimant MUST make a new Recovery Code under Part 4 §4.7.1, and it
@@ -2013,12 +2045,16 @@ revokes a device, and writes the backups.
 >    the claimant before the loss has the entry of `DEV-294` alone there, or
 >    no entry. The claimant renews no such channel, and the two parties
 >    need a new invitation. The view of `DEV-235` counts each contact that
->    has the entry alone.
+>    has the entry alone. A contact whose newest renewal guard did not
+>    reach the claimant gets a bundle with an older secret. That contact
+>    asks its user under Part 3 rule `NET-355`.
 > 4. No verifier measures the absence. A linked device in hostile hands can
 >    sign the epoch of a take-over at any time. The device that owns the
 >    channels then stops under `DEV-317`. Such a device holds the
->    `RootIdentity` already (§7.2), thus it gains no key from the epoch. The
->    user restores under Part 4 §4.7 and then resets the identity under
+>    `RootIdentity` already (§7.2), thus it gains no key from the epoch.
+>    Until the user revokes that device, it holds the newest renewal guard
+>    of each contact, and each contact answers its bundle with no question.
+>    The user restores under Part 4 §4.7 and then resets the identity under
 >    §7.7.1.
 > 5. An absent device that signed two or more epochs which the claimant did
 >    not take verifies no epoch of the claimant. It shows the fork of
@@ -2057,6 +2093,11 @@ revokes a device, and writes the backups.
 - **The relays do not authenticate a revocation.** The relays learn nothing
   about device sets. The queue rotation is the operation that cuts off the
   device, and to a relay it looks like an ordinary rotation.
+- **A revoked device renews no channel in silence.** Step 2f gives each
+  contact a guard that the revoked device does not open. A bundle of that
+  device gets a question at the contact, and no handshake runs before the
+  user of the contact accepts (Part 3 `NET-355`). Part 15 §15.3 gives the
+  cases that stay.
 - **A revocation sends no `DEL`.** Step 2b and step 2c cut the revoked device. A
   `DEL` at that moment names a set of queues at one instant. Two colluding
   relays then link those queues to one person. Part 6 §6.4.3 rule 4 states this

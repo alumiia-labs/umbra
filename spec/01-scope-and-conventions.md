@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 1: Scope, Conventions, and Terminology
 
 **Status:** Draft
-**Version:** 0.17.1
+**Version:** 0.18.0
 **Date:** 2026-10-10
 
 ---
@@ -435,6 +435,7 @@ side channel that the user selects, such as a QR code scan.
 | `QueueAddress` | Part 6 §6.6.10 | The four carriers of Part 3 §3.2.6 | Client |
 | `KeyRequest`, `KeySupply` | Part 6 §6.6.11 | `AppMessage`, kinds `0x34` and `0x35` | Client |
 | `VerifyCommit`, `VerifyReveal` | Part 4 §4.5.2 | `AppMessage`, kinds `0x36` and `0x37` | Client |
+| `RenewalGuard` | Part 6 §6.6.12 | `AppMessage`, kind `0x38` | Client |
 | `RecoveryDigits` | Part 4 §4.7.7 | Out of band | Client |
 | `DeadChannelBlob` | Part 3 §3.2.6 | A handle-addressed chunk, Part 12 §12.4.2 | Client |
 | Public Address string | Part 4 §4.2.3 | Out of band | Client |
@@ -447,6 +448,7 @@ side channel that the user selects, such as a QR code scan.
 | `RecoveryShare` | Part 4 §4.7.3 | `AppMessage`, kind `0x0D` | Client |
 | Handshake flights 1 to 3 | Part 5 §5.4.2 | `HandshakeRecord`, an L6 record of kind `0x05`, Part 6 §6.4.2 | Client |
 | `HandshakeRecord` | Part 6 §6.4.2 | The L6 record of a queue | Client |
+| `RenewalRecord` | Part 6 §6.4.2 | The L6 record of a queue, kind `0x06` | Client |
 | `Roster`, `DeviceEntry`, `OwnerClaim`, `OwnerClaimRecord` | Part 7 §7.3.1 | `DeviceSetControl` type `0x02` and type `0x03`, Part 7 §7.5.3 | Client |
 | Link QR code and provisioning payload | Part 7 §7.4 | Out of band for the code, and the chunk path of Part 12 §12.3.3 for the provision | Client |
 | `MutableItem`, kind `0x20` sub-kind `0x01` | Part 7 §7.5.3 | `AppMessage` | Client |

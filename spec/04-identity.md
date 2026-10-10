@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 4: Identity
 
 **Status:** Draft
-**Version:** 0.17.1
+**Version:** 0.18.0
 **Date:** 2026-10-10
 
 ---
@@ -1174,6 +1174,13 @@ that table.
   put replaces the row, and a delete removes it. **[IDN-183]** A restore
   MUST mark the channel of each restored contact stale under Part 3 rule
   `NET-325`, and the renewal of Part 3 §3.2.6 gives each one a new session.
+  **[IDN-194]** A backup object MUST carry the renewal guard of each contact
+  in the row of that contact: the `guard_seq` and the secret `R` of Part 3
+  rule `NET-354`. The bundle of each renewal of a restored device carries
+  that secret (Part 3 `NET-326`). A backup that is older than the newest
+  guard of a contact holds an older secret. That contact then runs no
+  handshake by itself. It asks its user under Part 3 rule `NET-355`, and
+  each record of the restored device for that contact waits for the answer.
 - **[IDN-073]** A relay MUST hold a backup object for `BACKUP_TTL`. §4.8 sets
   that value to 180 days. **[IDN-074]** A revision MUST hold `BACKUP_LOOKBACK`
   weeks at or above `BACKUP_TTL`.

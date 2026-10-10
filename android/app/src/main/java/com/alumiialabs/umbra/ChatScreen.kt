@@ -217,6 +217,11 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
     LaunchedEffect(conversation, Core.revision) {
         if (!chat.isGroup) Core.keyChange(conversation) { keyChange = it }
     }
+    // Part 3 `NET-355`: a request for a new connection waits for the answer.
+    var asksRenewal by remember(conversation) { mutableStateOf(false) }
+    LaunchedEffect(conversation, Core.revision) {
+        if (!chat.isGroup) Core.renewalAsk(conversation) { asksRenewal = it }
+    }
     val revealed = remember(conversation) { mutableStateListOf<List<Byte>>() }
     LaunchedEffect(conversation, Core.revision) {
         if (chat.isGroup) {
@@ -735,6 +740,8 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
             KeyChangePanel(chat, pending)
             return@Column
         }
+        // NET-355: the question blocks nothing, and the composer stays.
+        if (asksRenewal) RenewalPanel(chat)
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
             // The send button stays beside the line of the text.

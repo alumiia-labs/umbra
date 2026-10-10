@@ -415,3 +415,25 @@ fun KeyChangePanel(chat: Chat, pending: uniffi.umbra_ffi.FfiKeyChange) {
         SecondaryButton("Accept the new key") { Core.acceptKeyChange(chat.conversation) }
     }
 }
+
+/**
+ * The question of a renewal that came with no proof of the renewal guard
+ * (Part 3 `NET-355`). It states what an acceptance gives away, and the
+ * acceptance is no default action (`NET-359`). It answers for this contact
+ * alone.
+ */
+@Composable
+fun RenewalPanel(chat: Chat) {
+    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
+        Text("${chat.title} asks for a new connection", style = MaterialTheme.typography.titleMedium)
+        Spacer(Modifier.height(6.dp))
+        Text(
+            UiText.get(R.string.umbra_ui_net_359),
+            style = MaterialTheme.typography.bodyMedium,
+            color = Palette.TextSecondary,
+        )
+        Spacer(Modifier.height(12.dp))
+        SecondaryButton("Accept") { Core.answerRenewal(chat.conversation, true) }
+        QuietButton("Refuse") { Core.answerRenewal(chat.conversation, false) }
+    }
+}

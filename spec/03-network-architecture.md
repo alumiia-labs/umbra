@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 3: Network Architecture
 
 **Status:** Draft
-**Version:** 0.17.1
+**Version:** 0.18.0
 **Date:** 2026-10-10
 
 ---
@@ -721,7 +721,9 @@ the derivation.
 > other way back. Thus it alone offers the bundle and takes the address of
 > the peer from the end of that handshake. A revoked device can still
 > answer the bundle of a stale channel, and Part 15 §15.3 records that
-> residual.
+> residual. A revoked device that offers a bundle of its own does not open
+> the renewal guard of `NET-354`. The contact then runs no handshake by
+> itself, and it asks its user under `NET-355`.
 >
 > A fetch of a missing chunk costs one `B0` command and one `B0` `NACK`. Thus
 > the weekly fetch of `NET-187` costs about 1.1 KB for each silent contact.
@@ -742,6 +744,9 @@ make a new session over the pairwise identities, which a restore keeps.
   bundle of Part 5 §5.4.1 as the responder, under the pairwise identity of
   that contact, with a fresh one-time prekey. It MUST send the bundle to the
   newest queue of the peer as an L6 record of kind `0x06` of Part 6 §6.4.2.
+  That record MUST carry the `guard_seq` and the secret `R` of the newest
+  renewal guard that the client holds for that contact under `NET-354`. A
+  client that holds no guard for that contact sends the form with no proof.
   It MUST keep the bundle and its prekey until the handshake ends, across a
   restart, as it keeps an invitation. It MUST send the bundle again at the
   start of each run until a relay acknowledges it. A run that finds the bundle
@@ -752,9 +757,11 @@ make a new session over the pairwise identities, which a restore keeps.
   `INVITE_TTL` the client MUST also end that offer and make a new one.
 - **[NET-327]** A client that gets such a record MUST drop it unless
   `responder_static_x25519` equals the pairwise key of the peer that the
-  contact holds. Otherwise it MUST run the handshake of Part 5 §5.4 as the
-  initiator under its own pairwise identity of that contact, from a new
-  queue. It MUST NOT run a second one for the same contact while one runs.
+  contact holds. Otherwise it MUST apply `NET-355` to the record. When that
+  rule permits the handshake, the client MUST run the handshake of Part 5
+  §5.4 as the initiator under its own pairwise identity of that contact,
+  from a new queue. It MUST NOT run a second one for the same contact while
+  one runs.
   One runs from the `NEW` of its queue on, thus a second bundle that comes
   before the `IDS` starts none.
 - **[NET-328]** If the channels of both parties are stale, the party whose
@@ -776,10 +783,12 @@ make a new session over the pairwise identities, which a restore keeps.
 > two records that share a key. A restore that drops the ratchet with no
 > renewal breaks each conversation for good. The pairwise
 > identities outlive the ratchet, and the handshake of Part 5 §5.4 already
-> authenticates them, thus a renewal reuses that handshake with no new
-> cryptography. The bundle travels under the queue end-to-end layer of the
-> peer, whose key only the contact holds, and the static check of `NET-327`
-> refuses a bundle of any other party.
+> authenticates them, thus a renewal reuses that handshake. The bundle
+> travels under the queue end-to-end layer of the queue of the peer, which
+> no relay opens. The static check of `NET-327` refuses a bundle of each
+> party that does not hold the pairwise identity. A device that left the
+> device set of the user holds that identity. The renewal guard below is
+> the check against such a device.
 
 - **[NET-330]** A client with a stale channel that holds a candidate
   address of the peer under rule 9 MUST send its bundle again to that
@@ -798,6 +807,111 @@ make a new session over the pairwise identities, which a restore keeps.
 > contact that reads and never writes. The handle names no party, and it
 > changes each week. The fetch travels on a chain as each chunk fetch does.
 > Thus the relay learns that some pair is quiet and not which pair.
+
+**The renewal guard.** A device that a revocation of Part 7 §7.7 removed
+holds the pairwise identity of its user. It also holds the writer side of the
+queue of each contact (Part 7 `DEV-319`). A revocation rotates the queues of
+the user, and it does not rotate the queue of a contact. Thus a bundle of
+such a device reaches the contact, and it passes the static check of
+`NET-327`. Each party therefore gives its contact a **renewal guard**: a
+hash commitment that only the devices of its current set open.
+
+```
+R            <- 32 bytes from the CSPRNG of the device that owns the channel
+commitment    = SHA3-256( "umbra/v1/renewal-guard" || R )
+```
+
+- **[NET-354]** A client MUST hold, for each contact, one secret `R` and one
+  counter `guard_seq`. The counter is a `u32`, and the first guard of a
+  contact has the value 1. The client MUST send `guard_seq` and `commitment`
+  to the contact in a record of kind `0x38` of Part 6 §6.6.12, under the
+  ratchet. That record is no record of the user, and no view shows it. The
+  client MUST send it under the ARQ of §3.7, and again at each run until a
+  relay acknowledges it. A receiver MUST keep the `guard_seq` and the
+  `commitment` of the record with the highest `guard_seq` for that contact.
+  It MUST drop a record whose `guard_seq` is not above the one that it
+  holds, and `NET-356` gives the one exception. Each party sets its own
+  guard, and each party holds the commitment of the other. The two guards
+  of one channel are independent. A sync channel of Part 7 §7.5.1 carries
+  no guard.
+- **[NET-355]** A client that holds a guard of a contact MUST NOT run the
+  handshake of `NET-327` for a bundle of that contact by itself, unless the
+  record of the bundle carries an `R` whose commitment equals the commitment
+  that the client holds. A record with no proof, and a record with another
+  `R`, give no handshake. The client MUST keep the bundle of such a record,
+  and it MUST show the user one question in the conversation of that
+  contact. It MUST run the handshake of that bundle only after the user
+  accepts. A later bundle of that kind MUST take the place of the kept one,
+  and the client MUST NOT show a second question for it. The kept bundle
+  ends `INVITE_TTL` after its arrival, as the offer of `NET-326` does, and
+  the question ends with it. A refusal of the user erases the kept bundle.
+  A bundle whose record carries the correct `R` runs its handshake with no
+  question, also while another bundle waits. The client keeps the bundle
+  and the answer of the user in its store, thus a new run loses neither.
+  While a bundle waits, the channel carries each record as before, and the
+  client MUST NOT block the conversation. Under `NET-328` the party that
+  answers applies this rule. A client that holds no guard of a contact runs
+  the handshake as `NET-327` gives it.
+- **[NET-356]** A client MUST set a new guard for a contact when a handshake
+  with that contact ends. That holds for the first handshake and for each
+  renewal under `NET-329`, because the bundle of a renewal shows `R`. The
+  new guard has a new `R` and the next `guard_seq`. A device that renews a
+  channel from the item of Part 7 rule `DEV-319` counts from the
+  `guard_seq` of that item. A client whose handshake with a contact ended
+  MUST take the first guard of that contact that arrives under the new
+  ratchet, whatever its `guard_seq`. From that guard on, the order of
+  `NET-354` holds again.
+- **[NET-357]** A client MUST set a new guard for each contact when a device
+  leaves its device set under Part 7 §7.7 step 2. The record of that guard
+  goes at the delay that `NET-180` gives the rotation of that contact. The
+  new `R` MUST reach no device that left the set, and Part 7 rule `DEV-319`
+  carries it to each device that stays.
+- **[NET-358]** A client MUST set the first guard of a channel that holds no
+  guard of this client and whose handshake ended. The record of that guard
+  goes after a delay that the client draws for that contact under `NET-181`.
+- **[NET-359]** The question of `NET-355` MUST state that an acceptance
+  gives the conversation to the device that sent the request. It MUST offer
+  a refusal. The acceptance MUST NOT be a default action, and it MUST answer
+  for that one contact alone.
+
+> *Cause of the renewal guard.* A signature of a device key would prove the
+> same fact, and it would show the contact the device set of the user,
+> which Part 7 §7.6 forbids. A hash commitment shows nothing. The contact
+> learns one random value at a renewal, and `NET-356` ends the use of that
+> value at once. `R` leaves the device in the record of a bundle alone. That
+> record travels under the queue end-to-end layer of the queue of the peer,
+> which no relay opens. Under `NET-330` the record can reach a party that
+> wrote a dead-channel blob. That party then holds `R`, and it holds no
+> pairwise identity of the sender. Thus it makes no bundle that passes
+> `NET-327`. The counter gives two guard records of one ratchet an order
+> that does not depend on the order of their arrival.
+>
+> *Cause of the question.* A proof that fails is not always an attack. A
+> restore from a backup that is older than the newest guard holds an older
+> `R` (Part 4 `IDN-194`). A guard record that the contact did not read yet
+> names a newer one. A silent drop ends such a channel for good, and a
+> silent accept is the fault that the guard closes. Thus the client asks
+> its user. The user of the device that offered the bundle sees each record
+> wait, as a record waits until each renewal ends.
+>
+> *Cause of `NET-356`.* A device that comes back from a backup counts from
+> the `guard_seq` of that backup, which can be below the one that the
+> contact holds. A handshake that ended has a new ratchet, and no record of
+> the ratchet before it arrives under the new one. Thus the first guard
+> under the new ratchet is the guard of the party that ended the handshake.
+>
+> *Residual.* The guard binds the party that offers a bundle, and not the
+> party that answers one. Thus the residual of the stale-channel condition
+> above stays. Four more cases stay, and Part 15 §15.3 records each one. A
+> user that accepts the question gives the channel to the device that sent
+> the bundle. A contact that holds no guard of the user answers each bundle
+> that passes `NET-327`. From a revocation until the record of `NET-357`
+> reaches a contact, a bundle of the removed device still opens the guard
+> that this contact holds. A removed device that works with the relay of
+> the queue of a contact reads `R` from the bundle of a renewal that runs,
+> because it holds the key of the queue end-to-end layer. It then puts a
+> bundle of its own in the place of that bundle. A linked device that the
+> user did not revoke yet holds the newest `R`.
 
 ### 3.2.7 Group queues
 

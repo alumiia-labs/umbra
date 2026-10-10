@@ -680,10 +680,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     }
 
     /// Publishes what a renewal needs of the channel of a contact: the
-    /// pairwise key of the peer and the writer side of its queue
-    /// (`DEV-319`). A device that takes the set over renews the channel
-    /// from it. The item holds no ratchet and no queue of this device. A
-    /// device that owns no channel publishes none.
+    /// pairwise key of the peer, the writer side of its queue, and the
+    /// renewal guard (`DEV-319`). A device that takes the set over renews
+    /// the channel from it. The item holds no ratchet and no queue of this
+    /// device. A device that owns no channel publishes none.
     pub fn publish_channel_entry<R: CryptoRng + ?Sized>(
         &mut self,
         conversation: ConversationId,
@@ -702,7 +702,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .ok_or(Error::NotFound)?,
         );
         let state = row.get(32..).ok_or(Error::Integrity)?;
-        let Some((peer_static, outbound)) = Self::channel_end_of(state) else {
+        let Some(end) = Self::channel_end_of(state) else {
             return Ok(());
         };
         let entry = ChannelEntry {
@@ -711,14 +711,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .get(..32)
                 .and_then(|key| key.try_into().ok())
                 .ok_or(Error::Integrity)?,
-            peer_static,
-            outbound,
+            peer_static: end.peer_static,
+            outbound: end.outbound,
+            guard_seq: end.guard_seq,
+            guard_secret: end.guard_secret,
         };
         self.publish_mutable(ITEM_CHANNEL, &subject, &entry.encode(), rng)
     }
 
-    /// The pairwise key of the peer and the writer side of its queue in a
-    /// stored contact, or none for a form that holds none.
+    /// The pairwise key of the peer, the writer side of its queue, and the
+    /// renewal guard in a stored contact, or none for a form that holds
+    /// none.
     pub(super) fn channel_end_of(state: &[u8]) -> Option<umbra_core::session::node::ChannelEnd> {
         umbra_core::session::node::stored_channel_end(state)
             .ok()
@@ -752,12 +755,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if named != subject || peers.contains(&ConversationId(row)) {
             return Err(Error::Integrity);
         }
-        let state = umbra_core::session::node::bare_contact_state(
-            &entry.salt,
-            &entry.peer_static,
-            &entry.conversation,
-            &entry.outbound,
-        )?;
+        let end = umbra_core::session::node::ChannelEnd {
+            peer_static: entry.peer_static,
+            outbound: entry.outbound,
+            guard_seq: entry.guard_seq,
+            guard_secret: entry.guard_secret,
+        };
+        let state =
+            umbra_core::session::node::bare_contact_state(&entry.salt, &entry.conversation, &end)?;
         let is_new = open.store.get(TableId::CONTACT, &row)?.is_none();
         let plain = Zeroizing::new([entry.conversation.as_slice(), &state].concat());
         let mut batch = open.store.begin();

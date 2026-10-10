@@ -307,6 +307,13 @@ pub enum Event {
         /// The message.
         message: MsgRef,
     },
+    /// A renewal bundle of a contact started or ended its wait for the
+    /// answer of the user (Part 3 `NET-355`). [`Client::renewal_ask`]
+    /// gives the state.
+    RenewalAsk {
+        /// The conversation.
+        conversation: ConversationId,
+    },
     /// An edit or a deletion of this device reached no relay (`DEV-114`).
     ChangeFailed {
         /// The conversation.
@@ -2750,6 +2757,111 @@ mod tests {
     }
 
     #[test]
+    fn a_backup_carries_the_renewal_guard_of_each_contact() {
+        use crate::client::{BackupUpload, RestoredBackup};
+        use umbra_core::{
+            attach::{
+                transfer::{ChunkCredential, Uploaded},
+                CHUNK_SIZE,
+            },
+            devset::sync::CHANNEL_END_LEN,
+            session::node::{
+                bare_contact_state, stored_channel_end, ChannelEnd, ContactId, StateChange,
+            },
+        };
+        use umbra_crypto::{secret::Secret, zeroize::Zeroizing};
+        use umbra_wire::descriptor::{ChunkRef, FileDescriptor, Level};
+
+        let uploaded = || Uploaded {
+            descriptor: FileDescriptor {
+                level: Level::Data,
+                file_key: Secret::new([1; 32]),
+                file_nonce: [2; 24],
+                commit: [3; 32],
+                digest: [4; 32],
+                media_seconds: 0,
+                padded_size: CHUNK_SIZE as u32,
+                mime_class: 0,
+                pixel_w: 0,
+                pixel_h: 0,
+                refs: vec![ChunkRef {
+                    relay_id: [5; 32],
+                    chunk_id: [6; 32],
+                    cred_pk: [7; 32],
+                    replicas: [[0; 12]; 2],
+                }],
+            },
+            credentials: vec![ChunkCredential {
+                chunk_id: [6; 32],
+                cred: Secret::new([8; 32]),
+                relays: vec![[5; 32], [9; 32]],
+            }],
+        };
+        let mut rng = Rng(171);
+        let mut alice = new_client(&mut rng);
+        let contact = ContactId([9; 32]);
+        let state = |guard: u8| StateChange::Contact {
+            contact,
+            state: bare_contact_state(
+                &[4; 16],
+                &contact.0,
+                &ChannelEnd {
+                    peer_static: [5; 32],
+                    outbound: Zeroizing::new(vec![7; CHANNEL_END_LEN]),
+                    guard_seq: u32::from(guard),
+                    guard_secret: Zeroizing::new([0xA0 + guard; 32]),
+                },
+            )
+            .unwrap(),
+        };
+        let now = 1_800_000_000;
+        alice
+            .commit_network(&[state(1)], &[], now * 1_000, &mut rng)
+            .unwrap();
+        let conversation = alice.conversation_for(&contact.0).unwrap();
+        let BackupUpload {
+            plain: full,
+            pending,
+        } = alice.backup_due(now + 10, true).unwrap().unwrap();
+        alice
+            .backup_uploaded(pending, &uploaded(), 168 * 3_000, &mut rng)
+            .unwrap();
+        // The node sets a new guard, and the next delta holds the row.
+        alice
+            .commit_network(&[state(2)], &[], (now + 100) * 1_000, &mut rng)
+            .unwrap();
+        let BackupUpload { plain: delta, .. } =
+            alice.backup_due(now + 2 * 86_400, true).unwrap().unwrap();
+
+        let guard_of = |objects: &[Zeroizing<Vec<u8>>], seed: u64| {
+            let restored = RestoredBackup::assemble(objects).unwrap();
+            let mut device = Client::create_with_seed(
+                MemoryBackend::default(),
+                Element([2; 32]),
+                &units("a new phrase"),
+                CHEAP,
+                now + 3 * 86_400,
+                restored.seed(),
+                &mut Rng(seed),
+            )
+            .unwrap();
+            device.apply_restore(&restored, &mut Rng(seed + 1)).unwrap();
+            let stored = device.stored_network().unwrap();
+            let (_, held) = stored
+                .contacts
+                .iter()
+                .find(|(held, _)| *held == conversation)
+                .unwrap();
+            let end = stored_channel_end(held).unwrap().unwrap();
+            (end.guard_seq, *end.guard_secret)
+        };
+        // IDN-194: a restore holds the guard of its backup. The full
+        // object alone is a backup from before the second guard.
+        assert_eq!(guard_of(std::slice::from_ref(&full), 172), (1, [0xA1; 32]));
+        assert_eq!(guard_of(&[full, delta], 174), (2, [0xA2; 32]));
+    }
+
+    #[test]
     fn a_handle_group_rotates_after_seven_days_and_its_old_handle_leaves() {
         use umbra_core::notify::{ndr::Ndr, ROTATE_INTERVAL};
         use umbra_crypto::secret::Secret;
@@ -5173,7 +5285,7 @@ mod tests {
     fn a_contact_made_after_the_link_renews_at_a_take_over() {
         use umbra_core::{
             devset::{sync::CHANNEL_END_LEN, OWNER_ABSENCE},
-            session::node::{bare_contact_state, stored_channel_end, StateChange},
+            session::node::{bare_contact_state, stored_channel_end, ChannelEnd, StateChange},
         };
 
         let (mut phone, mut laptop, identity, contact, _, mut rng) = phone_and_laptop(361);
@@ -5210,8 +5322,17 @@ mod tests {
         let carol = ContactId([0x66; 32]);
         let state = |end: u8| StateChange::Contact {
             contact: carol,
-            state: bare_contact_state(&[4; 16], &[5; 32], &carol.0, &[end; CHANNEL_END_LEN])
-                .unwrap(),
+            state: bare_contact_state(
+                &[4; 16],
+                &carol.0,
+                &ChannelEnd {
+                    peer_static: [5; 32],
+                    outbound: zeroize::Zeroizing::new(vec![end; CHANNEL_END_LEN]),
+                    guard_seq: 1,
+                    guard_secret: zeroize::Zeroizing::new([0x51; 32]),
+                },
+            )
+            .unwrap(),
         };
         phone
             .commit_network(&[state(7)], &[], HEARD * 1_000, &mut rng)
@@ -5224,7 +5345,7 @@ mod tests {
             .unwrap();
         phone.publish_channel_entry(conversation, &mut rng).unwrap();
         // DEV-319: the item holds what the renewal needs and no more. The
-        // stored form of the phone is that of a test, and the item is 209
+        // stored form of the phone is that of a test, and the item is 245
         // bytes for each form.
         assert_eq!(sync(&mut phone, &mut laptop, &mut rng), 2);
         let end_of = |client: &Client<MemoryBackend, Element>| {
@@ -5234,8 +5355,8 @@ mod tests {
                 .iter()
                 .find(|(held, _)| *held == conversation)
                 .unwrap();
-            let (peer, end) = stored_channel_end(state).unwrap().unwrap();
-            (peer, end.to_vec())
+            let end = stored_channel_end(state).unwrap().unwrap();
+            (end.peer_static, end.outbound.to_vec())
         };
         // DEV-320: the laptop holds the contact as one that a node
         // restores, and no contact is out of its reach.

@@ -16,15 +16,18 @@ default = ["precis"]
 # (Part 9 §9.3.2). The tables need std, which each v1 platform has; a
 # consumer without std turns the feature off and supplies the profile.
 precis = ["dep:precis-profiles"]
+# The hooks of a test over real sockets, which end a delay that such a test
+# cannot wait for. No build of an app turns it on.
+sockets-test = []
 
 [dependencies]
 precis-profiles = { version = "0.2.0", default-features = false, optional = true }
-umbra-crypto = { version = "0.17.1", path = "../umbra-crypto" }
-umbra-wire = { version = "0.17.1", path = "../umbra-wire" }
-umbra-onion = { version = "0.17.1", path = "../umbra-onion" }
-umbra-queue = { version = "0.17.1", path = "../umbra-queue" }
-umbra-transport = { version = "0.17.1", path = "../umbra-transport" }
+umbra-crypto = { version = "0.18.0", path = "../umbra-crypto" }
+umbra-wire = { version = "0.18.0", path = "../umbra-wire" }
+umbra-onion = { version = "0.18.0", path = "../umbra-onion" }
+umbra-queue = { version = "0.18.0", path = "../umbra-queue" }
+umbra-transport = { version = "0.18.0", path = "../umbra-transport" }
 
 [dev-dependencies]
 # The tests of an issuer of cross-relay tokens generate its RSA keys.
-umbra-crypto = { version = "0.17.1", path = "../umbra-crypto", features = ["keygen"] }
+umbra-crypto = { version = "0.18.0", path = "../umbra-crypto", features = ["keygen"] }

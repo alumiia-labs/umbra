@@ -118,6 +118,7 @@ labels! {
     CLIENT_RNG = "umbra/v1/client-rng";
     QUOTA_HOLDER = "umbra/v1/quota-holder";
     NDR_REMOVAL = "umbra/v1/ndr-removal";
+    RENEWAL_GUARD = "umbra/v1/renewal-guard";
 }
 
 #[cfg(test)]

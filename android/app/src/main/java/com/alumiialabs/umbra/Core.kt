@@ -1351,6 +1351,8 @@ object Core {
             // A reaction, an edit, and a deletion are no arrival, thus they
             // raise no alert.
             is FfiEvent.Reacted -> revision++
+            // NET-355: the question of an open conversation shows or goes.
+            is FfiEvent.RenewalAsk -> revision++
             is FfiEvent.Voted -> revision++
             is FfiEvent.Typing -> if (typingEnabled) {
                 val key = event.conversation.toList()
@@ -1655,6 +1657,18 @@ object Core {
         client.acceptKeyChange(conversation.id)
         main.post { revision++ }
         refreshChats()
+    }
+
+    /** Whether a request of the contact for a new connection waits (Part 3 `NET-355`). */
+    fun renewalAsk(conversation: Conversation, onLoaded: (Boolean) -> Unit) = call { client ->
+        val waits = client.renewalAsk(conversation.id) != null
+        main.post { onLoaded(waits) }
+    }
+
+    /** Answers the request of one contact for a new connection (`NET-355`). */
+    fun answerRenewal(conversation: Conversation, accept: Boolean) = call { client ->
+        client.answerRenewal(conversation.id, accept)
+        main.post { revision++ }
     }
 
     /** Sends a failed message again (`IMP-075`). */

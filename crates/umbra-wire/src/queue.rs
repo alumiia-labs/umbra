@@ -157,6 +157,68 @@ pub fn split_msg(payload: &[u8], bucket: Bucket) -> Result<(u32, &[u8]), Error> 
     Ok((seq, r.rest()))
 }
 
+/// The prefix of a renewal record: the counter of the guard and its secret.
+pub const RENEWAL_PROOF_LEN: usize = 4 + 32;
+
+/// The content of an L6 record of kind `0x06`: the proof of the renewal
+/// guard of Part 3 §3.2.6, and the bundle of Part 5 §5.4.1.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct RenewalRecord<'a> {
+    /// The counter of the newest guard of the sender and the secret that
+    /// opens it, or none for a sender that holds no guard.
+    pub proof: Option<(u32, &'a [u8; 32])>,
+    /// The bundle.
+    pub bundle: &'a [u8],
+}
+
+impl<'a> RenewalRecord<'a> {
+    /// The encoded length.
+    pub fn len(&self) -> usize {
+        RENEWAL_PROOF_LEN.saturating_add(self.bundle.len())
+    }
+
+    /// Whether the record holds no bundle. Clippy asks for this beside
+    /// `len`.
+    pub fn is_empty(&self) -> bool {
+        self.bundle.is_empty()
+    }
+
+    /// Writes the record. A proof with a counter of zero is no proof.
+    pub fn encode(&self, out: &mut [u8]) -> Result<usize, Error> {
+        let mut w = Writer::new(out);
+        match self.proof {
+            Some((guard_seq, secret)) if guard_seq != 0 => {
+                w.u32(guard_seq)?;
+                w.put(secret)?;
+            }
+            Some(_) => return Err(Error::Malformed),
+            None => w.zeros(RENEWAL_PROOF_LEN)?,
+        }
+        w.put(self.bundle)?;
+        Ok(w.position())
+    }
+
+    /// Reads a record. The form with no proof is 36 zero bytes, and no
+    /// other form has a counter of zero (`WIR-552`).
+    pub fn parse(bytes: &'a [u8]) -> Result<Self, Error> {
+        let mut r = Reader::new(bytes);
+        let guard_seq = r.u32()?;
+        let secret: &[u8; 32] = r.take(32)?.try_into().map_err(|_| Error::Malformed)?;
+        let proof = if guard_seq == 0 {
+            if secret != &[0u8; 32] {
+                return Err(Error::Malformed);
+            }
+            None
+        } else {
+            Some((guard_seq, secret))
+        };
+        Ok(RenewalRecord {
+            proof,
+            bundle: r.rest(),
+        })
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::expect_used,
@@ -168,6 +230,34 @@ mod tests {
     use super::*;
     use alloc::vec;
     use umbra_crypto::secret::Secret;
+
+    #[test]
+    fn a_renewal_record_has_one_form_with_a_proof_and_one_with_none() {
+        let secret = [7u8; 32];
+        let with = RenewalRecord {
+            proof: Some((3, &secret)),
+            bundle: b"bundle",
+        };
+        let mut out = vec![0u8; with.len()];
+        assert_eq!(with.encode(&mut out).unwrap(), 42);
+        assert!(RenewalRecord::parse(&out).unwrap() == with);
+        let none = RenewalRecord {
+            proof: None,
+            bundle: b"bundle",
+        };
+        none.encode(&mut out).unwrap();
+        assert_eq!(&out[..RENEWAL_PROOF_LEN], &[0u8; RENEWAL_PROOF_LEN]);
+        assert!(RenewalRecord::parse(&out).unwrap() == none);
+        // WIR-552: a counter of zero with a secret is no form.
+        out[10] = 1;
+        assert!(RenewalRecord::parse(&out).is_err());
+        assert!(RenewalRecord::parse(&out[..35]).is_err());
+        let zero = RenewalRecord {
+            proof: Some((0, &secret)),
+            bundle: b"bundle",
+        };
+        assert!(zero.encode(&mut out).is_err());
+    }
 
     #[test]
     fn a_send_becomes_a_msg_and_opens_at_each_bucket() {
