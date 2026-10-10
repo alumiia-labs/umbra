@@ -358,6 +358,7 @@ async fn run_once(
         runtime_commands,
         runtime_updates,
         store,
+        None,
     ));
     let report_pk = seal::public_of(report_sk);
     let mut clock = tokio::time::interval(EVALUATE_EVERY);

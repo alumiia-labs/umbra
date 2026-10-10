@@ -65,16 +65,21 @@ impl CommandAuthKey {
     }
 }
 
-/// The `auth` of a `SessionResume` (Part 6 §6.2.3).
+/// The `auth` of a `SessionResume` (Part 6 §6.2.3). `sent` and `received`
+/// are the two frame counts of the record.
 pub fn session_resume_auth(
     session_secret: &Secret<32>,
     session_id: &[u8; 8],
     resume_count: u32,
+    sent: u32,
+    received: u32,
 ) -> [u8; RESUME_AUTH_LEN] {
     let mut mac = keyed(session_secret.expose());
     mac.update(labels::SESSION_RESUME);
     mac.update(session_id);
     mac.update(&resume_count.to_be_bytes());
+    mac.update(&sent.to_be_bytes());
+    mac.update(&received.to_be_bytes());
     let full = mac.finalize().into_bytes();
     let mut out = [0u8; RESUME_AUTH_LEN];
     if let Some(head) = full.get(..RESUME_AUTH_LEN) {
@@ -88,9 +93,11 @@ pub fn verify_session_resume(
     session_secret: &Secret<32>,
     session_id: &[u8; 8],
     resume_count: u32,
+    sent: u32,
+    received: u32,
     auth: &[u8],
 ) -> Result<(), Error> {
-    let expected = session_resume_auth(session_secret, session_id, resume_count);
+    let expected = session_resume_auth(session_secret, session_id, resume_count, sent, received);
     if auth.len() == RESUME_AUTH_LEN && bool::from(expected.ct_eq(auth)) {
         Ok(())
     } else {
@@ -140,14 +147,16 @@ mod tests {
     }
 
     #[test]
-    fn the_resume_auth_binds_the_count() {
+    fn the_resume_auth_binds_the_count_and_the_two_frame_counts() {
         let secret = Secret::new([9u8; 32]);
         let id = [1u8; 8];
-        let auth = session_resume_auth(&secret, &id, 1);
-        verify_session_resume(&secret, &id, 1, &auth).unwrap();
-        assert!(verify_session_resume(&secret, &id, 2, &auth).is_err());
+        let auth = session_resume_auth(&secret, &id, 1, 7, 9);
+        verify_session_resume(&secret, &id, 1, 7, 9, &auth).unwrap();
+        assert!(verify_session_resume(&secret, &id, 2, 7, 9, &auth).is_err());
+        assert!(verify_session_resume(&secret, &id, 1, 8, 9, &auth).is_err());
+        assert!(verify_session_resume(&secret, &id, 1, 7, 8, &auth).is_err());
         let mut bad = auth;
         bad[0] ^= 1;
-        assert!(verify_session_resume(&secret, &id, 1, &bad).is_err());
+        assert!(verify_session_resume(&secret, &id, 1, 7, 9, &bad).is_err());
     }
 }

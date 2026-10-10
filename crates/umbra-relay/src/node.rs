@@ -43,7 +43,7 @@ use umbra_crypto::{
 };
 use umbra_onion::CIRCUIT_BUILD_TIMEOUT;
 use umbra_queue::{relay::session::Session, Reject};
-use umbra_transport::link::{ClientLink, RelayLink};
+use umbra_transport::link::{ClientLink, RelayLink, ResumeFault};
 use umbra_wire::{
     address::QueueAddress,
     bucket::Bucket,
@@ -137,6 +137,17 @@ pub enum Output {
         /// The link.
         link: LinkId,
     },
+    /// A resume bound the session of `as_link` to the connection of `link`
+    /// (`WIR-241`). From now on the runtime serves that connection under
+    /// the identifier `as_link`, and it closes the connection that held
+    /// that identifier before, if one is open (`WIR-242`). The node names
+    /// `link` no more.
+    Adopt {
+        /// The connection that sent the resume.
+        link: LinkId,
+        /// The identifier of the session that it continues.
+        as_link: LinkId,
+    },
 }
 
 /// One capsule of `kind` for `link`.
@@ -158,6 +169,16 @@ fn destroy_output(link: LinkId, circ_id: [u8; 16]) -> Option<Output> {
     let used = capsule::encode(CapsuleType::Session, control.get(..used)?, &mut capsule).ok()?;
     capsule.truncate(used);
     Some(Output::Send { link, capsule })
+}
+
+/// The session capsule that tells the next hop that the client of the
+/// circuit of `circ_id` on their link paused its session (`WIR-545`).
+fn pause_output(link: LinkId, circ_id: [u8; 16]) -> Option<Output> {
+    let mut control = [0u8; 17];
+    let used = SessionControl::CircuitPause { circ_id }
+        .encode(&mut control)
+        .ok()?;
+    capsule_output(link, CapsuleType::Session, control.get(..used)?)
 }
 
 /// The byte of a `CRPUT` (Part 12 §12.3.3).
@@ -222,6 +243,10 @@ struct Endpoint {
     /// holds no record.
     drains: Drains,
     loops: u32,
+    /// The client of the circuit paused its session (`WIR-546`). The
+    /// pacing clock of the circuit stops until the next forward cell of
+    /// that client.
+    paused: bool,
 }
 
 /// The signature checks of challenges and relay hellos that one link may
@@ -420,6 +445,15 @@ pub struct RelayNode {
     /// (Part 13 §13.5).
     issuer_keys: BTreeMap<u32, PublicKey2048>,
     links: BTreeMap<LinkId, Framing>,
+    /// The accepted link of each session, by `session_id` (`WIR-233`). A
+    /// `SessionResume` finds its session here.
+    sessions: BTreeMap<[u8; 8], LinkId>,
+    /// The client links of an ingress relay that hold no connection: their
+    /// client paused the session, or the connection closed with no
+    /// `SessionClose` (`WIR-541`, `WIR-542`). Each one holds the `circ_id`
+    /// of each circuit that ended since, for the `CircuitDestroy` after
+    /// the resume (`WIR-543`).
+    parked: BTreeMap<LinkId, Vec<[u8; 16]>>,
     next_hops: BTreeMap<[u8; 32], LinkId>,
     /// The `EXTEND` bodies that wait for a link to their next relay
     /// (`NET-319`).
@@ -492,6 +526,8 @@ pub struct RelayNode {
     /// The last circuit whose drain took a step. The next tick starts after
     /// it, thus the drains of one link take its room in turns.
     drain_turn: Option<CircuitKey>,
+    /// The count of the chains that this relay opened, for a test.
+    builds_seen: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 }
 
 impl RelayNode {
@@ -511,6 +547,8 @@ impl RelayNode {
         RelayNode {
             issuer_keys: BTreeMap::new(),
             links: BTreeMap::new(),
+            sessions: BTreeMap::new(),
+            parked: BTreeMap::new(),
             next_hops: BTreeMap::new(),
             extending: BTreeMap::new(),
             delayed: BTreeMap::new(),
@@ -543,6 +581,7 @@ impl RelayNode {
             waits: BTreeMap::new(),
             draining: BTreeSet::new(),
             drain_turn: None,
+            builds_seen: None,
         }
     }
 
@@ -580,7 +619,7 @@ impl RelayNode {
             .collect();
         let mut outputs = Vec::new();
         for link in strangers {
-            outputs.extend(self.link_closed(link, now));
+            outputs.extend(self.drop_link(link, now));
         }
         outputs
     }
@@ -929,11 +968,14 @@ impl RelayNode {
             .map(|(link, _)| *link)
             .collect();
         for link in late {
-            outputs.extend(self.link_closed(link, now));
+            outputs.extend(self.drop_link(link, now));
         }
         // REL-074, REL-176: the windows of an ended epoch close, and an old
         // receipt goes.
         let built = self.circuits.take_builds();
+        if let Some(seen) = &self.builds_seen {
+            seen.fetch_add(built, std::sync::atomic::Ordering::Relaxed);
+        }
         self.receipts.count_chains(built, now, rng);
         if let Some(key) = self.pow_key.as_ref() {
             let own = self.relay.relay_id;
@@ -1025,7 +1067,24 @@ impl RelayNode {
     /// The circuits that end here, each of which holds a pacing clock
     /// (`NET-035`).
     pub fn paced_circuits(&self) -> impl Iterator<Item = &CircuitKey> {
-        self.endpoints.keys()
+        // WIR-546: the clock of a paused circuit stops.
+        self.endpoints
+            .iter()
+            .filter(|(_, endpoint)| !endpoint.paused)
+            .map(|(circuit, _)| circuit)
+    }
+
+    /// Adds each chain that this relay opens to `counter` at each
+    /// [`RelayNode::push_tick`], for a test.
+    #[doc(hidden)]
+    pub fn count_builds_into(&mut self, counter: std::sync::Arc<std::sync::atomic::AtomicU64>) {
+        self.builds_seen = Some(counter);
+    }
+
+    /// The parked sessions that this relay holds, for a test.
+    #[doc(hidden)]
+    pub fn sessions_parked(&self) -> usize {
+        self.parked.len()
     }
 
     /// The runtime dialed a relay of the next layer on `link`. The result
@@ -1235,37 +1294,176 @@ impl RelayNode {
         let Ok(control) = SessionControl::parse(value) else {
             return vec![Output::Close { link }];
         };
-        match (&control, self.links.remove(&link)) {
-            (SessionControl::Open { .. }, None) => match RelayLink::open(control) {
-                Ok(framing) => {
-                    self.links.insert(link, Framing::Accepted(framing));
-                    // NET-335: at a relay of layer 2 or 3 that holds a relay
-                    // set, the link has until its hello.
-                    if self.layer == 1 || !self.knows_relays() {
-                        self.fresh.remove(&link);
-                    }
-                    Vec::new()
+        let held = self.links.contains_key(&link);
+        match &control {
+            // WIR-233: a session identifier that a session of this relay
+            // holds opens no second one.
+            SessionControl::Open { session_id, .. } if !held => {
+                let session_id = *session_id;
+                if self.sessions.contains_key(&session_id) {
+                    return self.drop_link(link, now);
                 }
-                Err(_) => vec![Output::Close { link }],
-            },
+                match RelayLink::open(control) {
+                    Ok(framing) => {
+                        self.links.insert(link, Framing::Accepted(framing));
+                        self.sessions.insert(session_id, link);
+                        // NET-335: at a relay of layer 2 or 3 that holds a
+                        // relay set, the link has until its hello.
+                        if self.layer == 1 || !self.knows_relays() {
+                            self.fresh.remove(&link);
+                        }
+                        Vec::new()
+                    }
+                    Err(_) => vec![Output::Close { link }],
+                }
+            }
+            SessionControl::Resume { session_id, .. } if !held => {
+                let session_id = *session_id;
+                self.on_resume(link, session_id, &control, now)
+            }
             // NET-322: a neighbor ended a circuit on this link.
-            (SessionControl::Destroy { circ_id }, Some(framing)) => {
-                let circ_id = *circ_id;
-                self.links.insert(link, framing);
+            SessionControl::Destroy { circ_id } if held => {
                 self.circuits.set_clock_ms(clock_ms());
-                let actions = self.circuits.on_destroy(link, circ_id);
+                let actions = self.circuits.on_destroy(link, *circ_id);
                 self.finish(actions, now)
             }
-            (SessionControl::Resume { .. }, Some(Framing::Accepted(mut framing))) => {
-                let resumed = framing.resume(&control, now).is_ok();
-                self.links.insert(link, Framing::Accepted(framing));
-                if resumed {
-                    Vec::new()
-                } else {
-                    vec![Output::Close { link }]
+            // WIR-545: the client of a circuit on this link paused.
+            SessionControl::CircuitPause { circ_id } if held => {
+                self.circuits.set_clock_ms(clock_ms());
+                let actions = self.circuits.on_pause(link, *circ_id);
+                self.run_pause(actions, now)
+            }
+            SessionControl::Pause { .. } if held && self.layer == 1 => {
+                self.on_pause(link, &control, now)
+            }
+            _ => self.drop_link(link, now),
+        }
+    }
+
+    /// Takes the `SessionPause` of a client (`WIR-541`): each circuit of
+    /// the link gets its `CircuitPause`, the client gets the
+    /// `SessionPaused`, and the link takes no further frame.
+    fn on_pause(&mut self, link: LinkId, control: &SessionControl, now: u64) -> Vec<Output> {
+        let mut paused = vec![0u8; 32];
+        let answered = match self.links.get_mut(&link) {
+            Some(Framing::Accepted(framing)) => framing.pause(control, now, &mut paused),
+            _ => return self.drop_link(link, now),
+        };
+        let Ok(used) = answered else {
+            return self.drop_link(link, now);
+        };
+        paused.truncate(used);
+        let answer = Output::Send {
+            link,
+            capsule: paused,
+        };
+        // A session with no circuit has nothing to keep, and a relay
+        // that parked each such session would hold them with no bound.
+        if self.circuits.circuits_on(link) == 0 {
+            let mut outputs = vec![answer];
+            outputs.extend(self.drop_link(link, now));
+            return outputs;
+        }
+        let mut outputs = self.park(link, now);
+        outputs.push(answer);
+        outputs
+    }
+
+    /// Parks the session of a client link (`WIR-541`, `WIR-542`): the
+    /// link, its circuits, and each count of it stay under its identifier,
+    /// and each circuit gets its `CircuitPause`.
+    fn park(&mut self, link: LinkId, now: u64) -> Vec<Output> {
+        self.parked.entry(link).or_default();
+        self.quiet.remove(&link);
+        self.framed.remove(&link);
+        self.waits.remove(&link);
+        self.circuits.set_clock_ms(clock_ms());
+        let actions = self.circuits.pause_link(link);
+        self.run_pause(actions, now)
+    }
+
+    /// Takes a `SessionResume` as the first capsule of the connection of
+    /// `link` (`WIR-237` to `WIR-242`, `WIR-544`).
+    fn on_resume(
+        &mut self,
+        link: LinkId,
+        session_id: [u8; 8],
+        control: &SessionControl,
+        now: u64,
+    ) -> Vec<Output> {
+        // WIR-548: a session between two relays does not resume.
+        let target = self
+            .sessions
+            .get(&session_id)
+            .copied()
+            .filter(|_| self.layer == 1);
+        let resumed = match target.and_then(|target| self.links.get_mut(&target)) {
+            Some(Framing::Accepted(framing)) => framing.resume(control, now),
+            _ => Err(ResumeFault::Refused),
+        };
+        let mut outputs = self.drop_link(link, now);
+        match (resumed, target) {
+            (Ok(()), Some(target)) => {
+                // The node holds nothing under the identifier of the new
+                // connection, thus the close above goes nowhere.
+                outputs.clear();
+                outputs.push(Output::Adopt {
+                    link,
+                    as_link: target,
+                });
+                // WIR-543: each circuit that ended while no connection
+                // held the session.
+                for circ_id in self.parked.remove(&target).unwrap_or_default() {
+                    outputs.extend(destroy_output(target, circ_id));
                 }
             }
-            _ => self.link_closed(link, now),
+            // WIR-544: a frame is lost, thus each circuit is broken.
+            (Err(ResumeFault::Lost), Some(target)) => {
+                outputs.extend(self.drop_link(target, now));
+            }
+            // WIR-239, WIR-240: the connection closes with no cause.
+            _ => {}
+        }
+        outputs
+    }
+
+    /// Runs the actions of a pause. None of them builds a circuit or
+    /// serves a command, thus the call takes no random source.
+    fn run_pause(&mut self, actions: Vec<Action>, now: u64) -> Vec<Output> {
+        let mut outputs = Vec::new();
+        let mut work: VecDeque<Action> = actions.into();
+        while let Some(action) = work.pop_front() {
+            match action {
+                Action::Pause { key } => work.extend(self.circuits.pause_now(key)),
+                Action::PauseNext { link, circ_id } => {
+                    outputs.extend(pause_output(link, circ_id));
+                }
+                Action::Paused { circuit } => self.endpoint_paused(&circuit, now),
+                Action::Delayed {
+                    at_ms,
+                    circuit,
+                    action,
+                } => {
+                    self.delayed_seq = self.delayed_seq.wrapping_add(1);
+                    self.delayed
+                        .insert((at_ms, self.delayed_seq), (circuit, *action));
+                }
+                _ => {}
+            }
+        }
+        outputs
+    }
+
+    /// The client of a circuit that ends here paused its session
+    /// (`WIR-546`). The subscriptions of the circuit end, thus a new record
+    /// of its queues takes its push. The circuit and its session stay.
+    fn endpoint_paused(&mut self, circuit: &CircuitKey, now: u64) {
+        self.queues.circuit_paused(circuit, now);
+        self.groups.circuit_paused(circuit);
+        self.draining.remove(circuit);
+        if let Some(endpoint) = self.endpoints.get_mut(circuit) {
+            endpoint.paused = true;
+            endpoint.drains.end_all();
         }
     }
 
@@ -1273,13 +1471,7 @@ impl RelayNode {
         let mut capsule = vec![0u8; cell.len().saturating_add(32)];
         let sent = match self.links.get_mut(&link)? {
             Framing::Accepted(framing) => framing.send(cell, &mut capsule),
-            Framing::Dialed(framing) => {
-                let sent = framing.send(cell, &mut capsule);
-                // The relay keeps no resend window toward the next hop: a
-                // lost link ends its circuits, and each client builds again.
-                framing.drained(framing.next_seq().saturating_sub(1));
-                sent
-            }
+            Framing::Dialed(framing) => framing.send(cell, &mut capsule),
         };
         // WIR-139: a session whose `seq` ran out closes, and a cell that
         // it cannot carry ends its link rather than going nowhere.
@@ -1362,6 +1554,14 @@ impl RelayNode {
         let mut work: VecDeque<Action> = actions.into();
         while let Some(action) = work.pop_front() {
             match action {
+                // WIR-543: a parked link carries no cell, and each onion
+                // layer chains on the cell before it. The circuit of the
+                // cell thus ends, and each other circuit of the link stays.
+                Action::Send { link, cell } if self.parked.contains_key(&link) => {
+                    if let Some(circ_id) = cell.first_chunk::<16>() {
+                        work.extend(self.circuits.shed(link, *circ_id));
+                    }
+                }
                 Action::Send { link, cell } => {
                     // NET-349: a link near its bound loses the circuit that
                     // filled it, and each other circuit on it stays.
@@ -1415,6 +1615,7 @@ impl RelayNode {
                     bucket,
                     content,
                 } => {
+                    self.wake_endpoint(&circuit);
                     let (paced, digests) = self.serve(circuit, bucket, &content, now, rng);
                     outputs.extend(self.deliver_digests(digests, now, rng));
                     // ATT-102: one copy for each target of a `CREP`.
@@ -1433,16 +1634,22 @@ impl RelayNode {
                 }
                 Action::Loop { circuit } => {
                     self.ensure_endpoint(circuit);
+                    self.wake_endpoint(&circuit);
                     if let Some(endpoint) = self.endpoints.get_mut(&circuit) {
                         endpoint.loops = endpoint.loops.saturating_add(1);
                     }
                 }
-                Action::Destroy { link, circ_id } => outputs.extend(destroy_output(link, circ_id)),
+                Action::Destroy { link, circ_id } => outputs.extend(self.destroy(link, circ_id)),
                 Action::Closed { circuit } => {
                     self.endpoints.remove(&circuit);
                     self.queues.circuit_closed(&circuit, now);
                     self.groups.circuit_closed(&circuit);
                 }
+                Action::Pause { key } => work.extend(self.circuits.pause_now(key)),
+                Action::PauseNext { link, circ_id } => {
+                    outputs.extend(pause_output(link, circ_id));
+                }
+                Action::Paused { circuit } => self.endpoint_paused(&circuit, now),
                 // NET-339: the end of a circuit after its delayed cells.
                 Action::End { key, from } => work.extend(self.circuits.end_now(key, from)),
                 // Part 3 §3.9: the cell waits for the per-hop delay of its
@@ -1459,6 +1666,26 @@ impl RelayNode {
             }
         }
         outputs
+    }
+
+    /// The `CircuitDestroy` for `link`, or none for a parked link, which
+    /// keeps the `circ_id` until its session resumes (`WIR-543`).
+    fn destroy(&mut self, link: LinkId, circ_id: [u8; 16]) -> Option<Output> {
+        match self.parked.get_mut(&link) {
+            Some(ended) => {
+                ended.push(circ_id);
+                None
+            }
+            None => destroy_output(link, circ_id),
+        }
+    }
+
+    /// The endpoint serves a forward cell of the client of `circuit`, thus
+    /// the pacing clock of a paused circuit starts again (`WIR-546`).
+    fn wake_endpoint(&mut self, circuit: &CircuitKey) {
+        if let Some(endpoint) = self.endpoints.get_mut(circuit) {
+            endpoint.paused = false;
+        }
     }
 
     /// Takes the key of the cross-relay issuer of `epoch` from the log.
@@ -1515,6 +1742,7 @@ impl RelayNode {
                 outbox: VecDeque::new(),
                 drains: Drains::default(),
                 loops: 0,
+                paused: false,
             },
         );
         true
@@ -1632,7 +1860,11 @@ impl RelayNode {
         now: u64,
         rng: &mut R,
     ) -> Vec<Output> {
-        let Some(endpoint) = self.endpoints.get_mut(circuit) else {
+        let Some(endpoint) = self
+            .endpoints
+            .get_mut(circuit)
+            .filter(|endpoint| !endpoint.paused)
+        else {
             return Vec::new();
         };
         let action = if let Some(outbound) = endpoint.outbox.pop_front() {
@@ -1806,9 +2038,34 @@ impl RelayNode {
             .is_none_or(|held| held.0 != now / 60 || held.1 < VERIFIES_PER_MINUTE)
     }
 
-    /// A link closed. Each circuit on it ends.
+    /// The connection of a link closed. A client link of an ingress relay
+    /// that holds a circuit parks its session (`WIR-542`): the client can
+    /// resume it on a new connection. On each other link each circuit ends.
     pub fn link_closed(&mut self, link: LinkId, now: u64) -> Vec<Output> {
-        self.links.remove(&link);
+        // The connection of a session that its client paused.
+        if self.parked.contains_key(&link) {
+            return Vec::new();
+        }
+        let parks = self.layer == 1 && self.circuits.circuits_on(link) > 0;
+        match self.links.get_mut(&link) {
+            Some(Framing::Accepted(framing)) if parks => {
+                framing.connection_lost(now);
+                self.park(link, now)
+            }
+            _ => self.drop_link(link, now),
+        }
+    }
+
+    /// Ends a link and its session: each circuit on it ends, and each
+    /// neighbor of each one gets its `CircuitDestroy` (`NET-322`).
+    fn drop_link(&mut self, link: LinkId, now: u64) -> Vec<Output> {
+        if let Some(Framing::Accepted(framing)) = self.links.remove(&link) {
+            let session_id = framing.id();
+            if self.sessions.get(&session_id) == Some(&link) {
+                self.sessions.remove(&session_id);
+            }
+        }
+        self.parked.remove(&link);
         self.verifies.remove(&link);
         self.deposits.remove(&link);
         self.fresh.remove(&link);
@@ -1836,7 +2093,7 @@ impl RelayNode {
                     self.groups.circuit_closed(&circuit);
                 }
                 Action::Destroy { link, circ_id } => {
-                    outputs.extend(destroy_output(link, circ_id));
+                    outputs.extend(self.destroy(link, circ_id));
                 }
                 // NET-339: an end that waits for the delayed cells of its
                 // circuit.
@@ -1873,11 +2130,30 @@ impl RelayNode {
         // gives its place back. A client of ordinary use holds a circuit
         // while it holds its link.
         if self.layer == 1 {
+            // WIR-244: a parked session ends with its window. One whose
+            // last circuit ended has nothing to resume, and it ends too.
+            let over: Vec<LinkId> = self
+                .parked
+                .keys()
+                .filter(|link| {
+                    self.circuits.circuits_on(**link) == 0
+                        || !matches!(
+                            self.links.get(*link),
+                            Some(Framing::Accepted(framing)) if !framing.expired(now)
+                        )
+                })
+                .copied()
+                .collect();
+            for link in over {
+                ended.extend(self.drop_link(link, now));
+            }
+            // A parked link holds no connection, thus it is not idle.
             let idle: Vec<LinkId> = self
                 .links
                 .iter()
                 .filter(|(link, framing)| {
                     matches!(framing, Framing::Accepted(_))
+                        && !self.parked.contains_key(*link)
                         && self.circuits.circuits_on(**link) == 0
                 })
                 .map(|(link, _)| *link)
@@ -1887,7 +2163,7 @@ impl RelayNode {
             for link in idle {
                 let since = *self.quiet.entry(link).or_insert(now);
                 if now.saturating_sub(since) >= LINK_IDLE_TIMEOUT {
-                    ended.extend(self.link_closed(link, now));
+                    ended.extend(self.drop_link(link, now));
                 }
             }
         }
@@ -1997,28 +2273,38 @@ mod tests {
     }
 
     #[test]
-    fn a_resume_as_the_first_capsule_closes_and_a_closed_link_leaves_no_session() {
+    fn a_resume_that_names_no_session_closes_and_a_relay_link_parks_none() {
         let mut node = RelayNode::new(relay_config(7));
         let secret = Secret::new([0x61; 32]);
-        let resume = session_capsule(&SessionControl::resume(&secret, [0x62; 8], 1));
+        let resume = session_capsule(&SessionControl::resume(&secret, [0x62; 8], 1, 0, 0));
 
-        // WIR-233: v1 serves no resume, thus a connection that
-        // starts with one closes, and the close names no cause.
+        // WIR-239, WIR-240: a resume that names no session of this relay
+        // closes its connection, and the close names no cause.
         let outputs = node.on_capsule(2, &resume, 1_000, &mut Rng);
         assert!(matches!(outputs[..], [Output::Close { link: 2 }]));
         assert!(node.links.is_empty());
 
-        // WIR-244: the state of a session ends with its connection. A
-        // resume with the correct `auth` on a new connection finds no
-        // session to bind, and that connection closes too.
+        // WIR-548: a relay of layer 2 or 3 parks no session, thus the state
+        // of a session ends with its connection there. A resume with the
+        // correct `auth` on a new connection finds no session to bind.
         let open = session_capsule(&SessionControl::Open {
             session_id: [0x62; 8],
             session_secret: Secret::new([0x61; 32]),
         });
         assert!(node.on_capsule(3, &open, 1_000, &mut Rng).is_empty());
         assert_eq!(node.links.len(), 1);
+        // WIR-233: a second open of that identifier closes its connection,
+        // and the first session stays.
+        let outputs = node.on_capsule(5, &open, 1_000, &mut Rng);
+        assert!(matches!(outputs[..], [Output::Close { link: 5 }]));
+        assert_eq!(node.sessions.get(&[0x62; 8]), Some(&3));
+        // A live session at such a relay binds no resume either.
+        let outputs = node.on_capsule(6, &resume, 1_000, &mut Rng);
+        assert!(matches!(outputs[..], [Output::Close { link: 6 }]));
+        assert_eq!(node.links.len(), 1);
         node.link_closed(3, 1_001);
-        assert!(node.links.is_empty());
+        assert!(node.links.is_empty() && node.sessions.is_empty());
+        assert_eq!(node.sessions_parked(), 0);
         let outputs = node.on_capsule(4, &resume, 1_002, &mut Rng);
         assert!(matches!(outputs[..], [Output::Close { link: 4 }]));
         assert!(node.links.is_empty());

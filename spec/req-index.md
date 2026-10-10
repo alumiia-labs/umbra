@@ -71,7 +71,7 @@ column when a crate implements the requirement and a test covers it.
 | `NET` | 250 | 89 | 1 | 0 | 9 | **349** |
 | `IDN` | 134 | 46 | 1 | 0 | 5 | **186** |
 | `CRY` | 120 | 27 | 0 | 0 | 1 | **148** |
-| `WIR` | 398 | 85 | 0 | 0 | 7 | **490** |
+| `WIR` | 409 | 86 | 0 | 0 | 7 | **502** |
 | `DEV` | 205 | 90 | 0 | 0 | 8 | **303** |
 | `NTF` | 77 | 28 | 0 | 0 | 3 | **108** |
 | `DIS` | 130 | 35 | 0 | 0 | 3 | **168** |
@@ -81,7 +81,7 @@ column when a crate implements the requirement and a test covers it.
 | `ABU` | 71 | 29 | 1 | 0 | 0 | **101** |
 | `IMP` | 115 | 41 | 0 | 0 | 2 | **158** |
 | `SEC` | 4 | 3 | 0 | 0 | 1 | **8** |
-| **All** | 2067 | 626 | 6 | 0 | 55 | **2754** |
+| **All** | 2078 | 627 | 6 | 0 | 55 | **2766** |
 
 ## SCP — Scope and Conventions
 
@@ -458,7 +458,7 @@ Source: `spec/03-network-architecture.md`
 | `NET-319` | §3.4.3 | MUST | A relay that holds no session to the relay of `relay_id` | A relay that holds no session to the relay of `relay_id` MUST open one and hold the body until it opens, and one dial MUST serve each body that waits for that relay. |  |  |
 | `NET-320` | §3.4.3 | MUST | A relay | A relay MUST end a circuit at `CIRCUIT_MAX_AGE` from the arrival of its first cell at that relay, and it sends no cell for it. |  |  |
 | `NET-321` | §3.4.3 | MUST | A relay | A relay MUST count the cells of a circuit in each direction, the build cells included, and MUST end the circuit when one count passes `CIRCUIT_MAX_CELLS`. |  |  |
-| `NET-322` | §3.4.3 | MUST | A relay that ends a circuit | A relay that ends a circuit MUST tell each neighbor of it with the `CircuitDestroy` of Part 6 §6.2.3, on each link of the circuit but the one that ended it: a closed link, a `CircuitDestroy`, or a `DESTROY` cell of the client. |  |  |
+| `NET-322` | §3.4.3 | MUST | A relay that ends a circuit | A relay that ends a circuit MUST tell each neighbor of it with the `CircuitDestroy` of Part 6 §6.2.3, on each link of the circuit but the one that ended it: a link that closed for good, a `CircuitDestroy`, or a `DESTROY` cell of the client. |  |  |
 | `NET-323` | §3.2.4 | MUST | A client | A client MUST draw the jitter of a queue from a value that no relay holds. |  |  |
 | `NET-324` | §3.2.6 | MUST | (unstated) | A client whose `SUB` of the current inbound queue of a contact gets a `NACK` with reason `REJECTED` MUST make a new queue for that contact, as at a rotation. |  |  |
 | `NET-325` | §3.2.6 | MUST | A client | A client MUST mark the channel of each contact of a restore stale. |  |  |
@@ -966,7 +966,7 @@ Source: `spec/06-wire-format.md`
 | `WIR-137` | §6.2.2 | MUST NOT | A client | A client MUST NOT reuse a `session_id` across two sessions to one relay. |  |  |
 | `WIR-138` | §6.2.2 | MUST | A sender | A sender MUST increase `seq` by one for each frame, and it MUST start at zero. |  |  |
 | `WIR-139` | §6.2.2 | MUST | A sender | A sender MUST close the session before `seq` wraps. |  |  |
-| `WIR-140` | §6.2.2 | MUST | A sender | A sender MUST set bit 0 of `flags` on a resend, and it MUST keep `seq` at the value of the first transmission. |  |  |
+| `WIR-140` | §6.2.2 | MUST | A sender | A sender MUST send each frame one time, and it MUST set bit 0 of `flags` to zero. |  |  |
 | `WIR-141` | §6.2.2 | MUST | A receiver | A receiver MUST ignore a frame whose `seq` it already accepted. |  |  |
 | `WIR-142` | §6.2.2 | MUST | A receiver | A receiver MUST reject a frame whose `flags` holds a non-zero value above bit 0. |  |  |
 | `WIR-143` | §6.3 | MUST | A measurer | A measurer MUST send a `MEAS_OPEN` cell in bucket `B3`. |  |  |
@@ -1055,17 +1055,17 @@ Source: `spec/06-wire-format.md`
 | `WIR-230` | §6.2.3 | MUST | A relay | A relay MUST close a connection whose first capsule is not one of those two records. |  |  |
 | `WIR-231` | §6.2.3 | MUST | A client | A client MUST draw `session_secret` from the device CSPRNG at each open. |  |  |
 | `WIR-232` | §6.2.3 | MUST | A relay | A relay MUST hold `session_id`, `session_secret`, the next `seq`, and the accepted `seq` values for the life of the session. |  |  |
-| `WIR-233` | §6.2.3 | MUST | A relay | A relay MUST close a connection whose `SessionOpen` names a `session_id` that a live session of that relay holds. |  |  |
+| `WIR-233` | §6.2.3 | MUST | A relay | A relay MUST close a connection whose `SessionOpen` names a `session_id` that a session of that relay holds, live or parked. |  |  |
 | `WIR-234` | §6.2.3 | MUST | A client | A client MUST set `resume_count` to 1 at the first resume of a session. |  |  |
 | `WIR-235` | §6.2.3 | MUST | A client | A client MUST increase `resume_count` by one at each later resume of that session. |  |  |
 | `WIR-236` | §6.2.3 | MUST | A client | A client MUST compute `auth` with the derivation above. |  |  |
 | `WIR-237` | §6.2.3 | MUST | A relay | A relay MUST verify `auth` before it binds the connection to the session. |  |  |
 | `WIR-238` | §6.2.3 | MUST | A relay | A relay MUST reject a `SessionResume` whose `resume_count` is not above the last value that it accepted. |  |  |
-| `WIR-239` | §6.2.3 | MUST | (unstated) | If the verification fails, the relay MUST close the connection. |  |  |
+| `WIR-239` | §6.2.3 | MUST | (unstated) | If the verification fails, or the record names no session of the relay, the relay MUST close the connection. |  |  |
 | `WIR-240` | §6.2.3 | MUST NOT | A relay | A relay MUST NOT report the cause of that close. |  |  |
 | `WIR-241` | §6.2.3 | MUST | (unstated) | When a relay accepts a `SessionResume`, it MUST bind the session to the new connection. |  |  |
 | `WIR-242` | §6.2.3 | MUST | (unstated) | If the previous connection of that session is open, the relay MUST close it. |  |  |
-| `WIR-243` | §6.2.3 | MUST | A relay | A relay MUST hold the state of a session for `SESSION_RESUME_WINDOW` after it observes the close of the connection. |  |  |
+| `WIR-243` | §6.2.3 | MUST | A relay | A relay MUST hold the state of a parked session for `SESSION_RESUME_WINDOW`. |  |  |
 | `WIR-244` | §6.2.3 | MUST | (unstated) | If the window ends with no accepted resume, the relay MUST discard that state. |  |  |
 | `WIR-245` | §6.2.3 | MUST | (unstated) | If a client observed the close more than `SESSION_RESUME_WINDOW` before, it MUST open a new session. |  |  |
 | `WIR-246` | §6.2.3 | MUST | (unstated) | If a client ends a session by its own choice, it MUST send a `SessionClose` before it closes the connection. |  |  |
@@ -1116,8 +1116,8 @@ Source: `spec/06-wire-format.md`
 | `WIR-293` | §6.6.9 | MUST | A receiver | A receiver MUST resolve each target under the rules of `WIR-171` and `WIR-172`. |  |  |
 | `WIR-294` | §6.8 | MUST | The vectors | The vectors MUST cover one `UMBRA_CELL` capsule at each bucket and one `UMBRA_SESSION` capsule at each op. |  |  |
 | `WIR-295` | §6.8 | MUST | The parser | The parser MUST reject each case below. |  |  |
-| `WIR-296` | §6.8 | MUST | The vectors | The vectors MUST cover an open, a resume with a correct `auth`, a close, and a circuit destroy. |  |  |
-| `WIR-297` | §6.8 | MUST | The relay | The relay MUST reject the two cases below. |  |  |
+| `WIR-296` | §6.8 | MUST | The vectors | The vectors MUST cover an open, a resume with a correct `auth`, a close, a circuit destroy, a session pause, a session paused, and a circuit pause. |  |  |
+| `WIR-297` | §6.8 | MUST | The relay | The relay MUST reject the three cases below. |  |  |
 | `WIR-298` | §6.8 | MUST | The vectors | The vectors MUST cover the three cases below. |  |  |
 | `WIR-299` | §6.8 | MUST | The parser | The parser MUST reject the three cases that follow them. |  |  |
 | `WIR-302` | §6.8 | MUST | The vectors | The vectors MUST cover the three cases below. |  |  |
@@ -1163,8 +1163,8 @@ Source: `spec/06-wire-format.md`
 | `WIR-356` | §6.8 | MUST | The test | The test MUST run three steps on one stated plaintext record. |  |  |
 | `WIR-357` | §6.8 | MUST | The test | After each step, the test MUST assert that the three files hold no 16-byte window of that plaintext. |  |  |
 | `WIR-358` | §6.6.7 | MUST | A client | A client MUST show an `offer` of type `0x03`, and it MUST NOT accept it without a user action. |  |  |
-| `WIR-360` | §6.2.3 | MUST | (unstated) | At the end of a push wake, a client MUST close the connection without a `SessionClose`. |  |  |
-| `WIR-361` | §6.2.3 | MUST | (unstated) | If the next wake to that ingress starts inside `SESSION_RESUME_WINDOW`, the client MUST send a `SessionResume`. |  |  |
+| `WIR-360` | §6.2.3 | MUST | (unstated) | At the end of a push wake, a client MUST pause its session under `WIR-539`, and it MUST close the connection without a `SessionClose`. |  |  |
+| `WIR-361` | §6.2.3 | MUST | (unstated) | If the next connection to that ingress starts inside `SESSION_RESUME_WINDOW` and the client holds the session, the client MUST send a `SessionResume`. |  |  |
 | `WIR-362` | §6.6 | MUST | A parser | A parser MUST reject a body of kind `0x36` whose length is not 64, and a body of kind `0x37` whose length is not 32. |  |  |
 | `WIR-363` | §6.4 | MUST | A group-queue command | A group-queue command MUST travel on a transport session that carries no command of another range. |  |  |
 | `WIR-364` | §6.4 | MUST NOT | A client | A client MUST NOT batch a group-queue command with a command of another range. |  |  |
@@ -1320,7 +1320,7 @@ Source: `spec/06-wire-format.md`
 | `WIR-522` | §6.4.5 | MUST | It | It MUST replace `own_pk` with the third value, and it MUST keep no previous `own_pk`: a command under the owner key that the `GKEY` replaced is refused at once. |  |  |
 | `WIR-523` | §6.6.11 | MUST | A request of scope `0x02` on a pairwise channel | A request of scope `0x02` on a pairwise channel MUST carry 1 plus the member index of the requester in `index`, and one that another member posts on the group queue for it keeps that value; the tag of a group record names its poster and not the member that lacks the epoch. |  |  |
 | `WIR-524` | §6.2.3 | MUST | A relay | A relay MUST send a `CircuitDestroy` under `NET-322` on the link of each neighbor of a circuit that it ends, with the `circ_id` that the circuit carries on that link. |  |  |
-| `WIR-525` | §6.2.2 | MUST | A sender | In a version that serves the resume, a sender MUST keep the last `RESEND_WINDOW` frames of a session for a resume, 1 000 frames. |  |  |
+| `WIR-525` | §6.2.2 | MUST | A sender | v1 keeps no resend window. |  |  |
 | `WIR-526` | §6.4 | MUST | (unstated) | A relay that writes a digest of Part 8 §8.5 into a queue at another relay MUST send it as the value of one `UMBRA_DEPOSIT` capsule, on a connection of §6.2.1 that it opens for deposits. |  |  |
 | `WIR-527` | §6.4 | MUST | A relay | A relay MUST hold the `corr_id` of each of the last 4 096 deposits that it took, and it MUST drop a deposit that repeats one. |  |  |
 | `WIR-528` | §6.4.2 | MUST | A receiver | A receiver MUST take the content of a renewal record as a bundle in the layout of Part 5 §5.4.1, and it MUST read it on the queue of a contact whose handshake is complete. |  |  |
@@ -1333,6 +1333,18 @@ Source: `spec/06-wire-format.md`
 | `WIR-536` | §6.4.2 | MUST | A receiver | A receiver MUST read a link-fault report on the report queue of a directory authority alone, and it MUST reject one on each other queue. |  |  |
 | `WIR-537` | §6.2.1 | MUST | A receiver | A receiver MUST reject an `UMBRA_RECEIPT` capsule whose `length` is not 3 422, and an `UMBRA_RELAY_HELLO` capsule whose `length` is not 3 342. |  |  |
 | `WIR-538` | §6.2.1 | MUST | A relay | A relay MUST reject each of the two on a client link, and a client MUST reject each of the two. |  |  |
+| `WIR-539` | §6.2.3 | MUST | A client that ends a connection and keeps its session | A client that ends a connection and keeps its session MUST send a `SessionPause` first. |  |  |
+| `WIR-540` | §6.2.3 | MUST | The client | The client MUST read the connection until the `SessionPaused` arrives, or until `SESSION_PAUSE_WAIT` ends. |  |  |
+| `WIR-541` | §6.2.3 | MUST | (unstated) | An ingress relay that receives a `SessionPause` on a client link MUST park the session. |  |  |
+| `WIR-542` | §6.2.3 | MUST | An ingress relay | An ingress relay MUST park the session of a client link that closes with no `SessionClose` and no `SessionPause`, when that link holds one circuit or more. |  |  |
+| `WIR-543` | §6.2.3 | MUST | An ingress relay | An ingress relay MUST keep the circuits and the counts of a parked session. |  |  |
+| `WIR-544` | §6.2.3 | MUST | A relay that verified a `SessionResume` | A relay that verified a `SessionResume` MUST compare `sent` with the highest `seq` that it accepted plus one, or with zero when it accepted no frame. |  |  |
+| `WIR-545` | §6.2.3 | MUST | (unstated) | A relay that receives a `CircuitPause` from the side of the client of a circuit MUST send a `CircuitPause` on the link to the next hop of that circuit, with the `circ_id` of that link. |  |  |
+| `WIR-546` | §6.2.3 | MUST | (unstated) | A queue relay that receives a `CircuitPause` for a circuit that ends at it MUST end each subscription of that circuit, as the end of a circuit ends it. |  |  |
+| `WIR-547` | §6.2.3 | MUST | (unstated) | A client sends its frames at once after a `SessionResume`, and it waits for no answer. |  |  |
+| `WIR-548` | §6.2.3 | MUST NOT | A session between two relays | A session between two relays MUST NOT park, and it MUST NOT resume: a lost link between two relays ends each circuit on it. |  |  |
+| `WIR-549` | §6.2.3 | MUST | A client | A client MUST hold the state of a session that it can resume in the memory of its process alone. |  |  |
+| `WIR-550` | §6.2.3 | MUST | A client | A client MUST set `sent` to its next `seq`, and `received` to the count of the frames of the relay that it accepted. |  |  |
 
 ## DEV — Device Sets
 
@@ -1694,7 +1706,7 @@ Source: `spec/08-notifications.md`
 | `NTF-065` | §8.4.3 | MUST | A queue relay | A queue relay MUST set the push expiry to `PUSH_TTL_MESSAGE` for a message push. |  |  |
 | `NTF-066` | §8.4.3 | MUST | (unstated) | If no drain of a handle follows a push inside `REPUSH_INTERVAL`, the queue relay MUST hand one more push. |  |  |
 | `NTF-067` | §8.4.3 | MUST NOT | A queue relay | A queue relay MUST NOT hand more than `REPUSH_MAX` re-pushes for one message. |  |  |
-| `NTF-068` | §8.4.3 | MUST | (unstated) | At each session open, and at each session resume in a revision that serves one, a client MUST run the peek of Part 3 §3.7 item 4 on each queue of that session. |  |  |
+| `NTF-068` | §8.4.3 | MUST | (unstated) | At each session open, and at each session resume, a client MUST run the peek of Part 3 §3.7 item 4 on each queue of that session. |  |  |
 | `NTF-075` | §8.2.3 | MUST | A receiver | A receiver MUST accept a blob whose `epoch` is inside the window. |  |  |
 | `NTF-076` | §8.2.3 | MUST | A receiver | A receiver MUST reject a blob outside that window without an AEAD open. |  |  |
 | `NTF-077` | §8.2.3 | MUST | A receiver | A receiver MUST count the consecutive failed opens of blobs inside the window. |  |  |

@@ -128,6 +128,12 @@ impl Drains {
         self.held.retain(|drain| drain.queue_id != *queue_id);
     }
 
+    /// Ends each drain: the client of the circuit paused its session, and
+    /// its subscriptions ended with it.
+    pub fn end_all(&mut self) {
+        self.held.clear();
+    }
+
     /// Ends the drain that took the last step.
     pub fn end_first(&mut self) {
         if !self.held.is_empty() {

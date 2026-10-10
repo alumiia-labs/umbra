@@ -165,9 +165,14 @@ fn framing() -> Value {
         session_id: id,
         session_secret: Secret::new([0x33; 32]),
     };
-    let resume = SessionControl::resume(&secret, id, 1);
+    let resume = SessionControl::resume(&secret, id, 1, 5, 7);
     let close = SessionControl::Close { session_id: id };
     let destroy = SessionControl::Destroy {
+        circ_id: [0x44; 16],
+    };
+    let pause = SessionControl::Pause { session_id: id };
+    let paused = SessionControl::Paused { session_id: id };
+    let circuit_pause = SessionControl::CircuitPause {
         circ_id: [0x44; 16],
     };
     for (name, op) in [
@@ -175,6 +180,9 @@ fn framing() -> Value {
         ("resume", resume),
         ("close", close),
         ("destroy", destroy),
+        ("pause", pause),
+        ("paused", paused),
+        ("circuit_pause", circuit_pause),
     ] {
         let mut buf = [0u8; 41];
         let n = op.encode(&mut buf).unwrap();
@@ -183,14 +191,14 @@ fn framing() -> Value {
         ops.push(json!({ "op": name, "capsule": hex(&caps) }));
     }
     let parsed = SessionControl::parse(&{
-        let mut b = [0u8; 29];
-        SessionControl::resume(&secret, id, 1)
+        let mut b = [0u8; 37];
+        SessionControl::resume(&secret, id, 1, 5, 7)
             .encode(&mut b)
             .unwrap();
         b
     })
     .unwrap();
-    assert_eq!(parsed.verify_resume(&secret, &id, 0).unwrap(), 1);
+    assert_eq!(parsed.verify_resume(&secret, &id, 0).unwrap(), (1, 5, 7));
     assert!(parsed.verify_resume(&secret, &id, 1).is_err());
     json!({ "cells": cells, "session_ops": ops, "session_secret": hex(&[0x33; 32]) })
 }

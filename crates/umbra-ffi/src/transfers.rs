@@ -705,6 +705,11 @@ pub async fn run_transfers(
             }
         }
     }
+    // WIR-246: no run continues this session, thus it ends at the relay
+    // now, and the relay holds no circuit for it.
+    if let Some(capsule) = node.close() {
+        let _ = tokio::time::timeout(Duration::from_secs(1), link.send(&capsule)).await;
+    }
     crate::devlog::line(format!(
         "transfers: the run ended with {} open and {} waiting",
         active.len(),

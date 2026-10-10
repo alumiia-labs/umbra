@@ -77,7 +77,7 @@ impl Session {
 
     /// Binds a resume to this session (`WIR-237` to `WIR-241`).
     pub fn resume(&mut self, control: &SessionControl) -> Result<(), Reject> {
-        let count = control
+        let (count, _, _) = control
             .verify_resume(&self.secret, &self.id, self.resume_count)
             .map_err(|_| Reject::Rejected)?;
         self.resume_count = count;
@@ -197,7 +197,7 @@ mod tests {
         session.unbind_queue(&[1; 32]);
         session.bind_queue([0xFF; 32]).unwrap();
 
-        let resume = SessionControl::resume(&Secret::new([3; 32]), [2; 8], 1);
+        let resume = SessionControl::resume(&Secret::new([3; 32]), [2; 8], 1, 0, 0);
         session.resume(&resume).unwrap();
         assert_eq!(session.resume(&resume), Err(Reject::Rejected));
         assert!(Session::open(resume, StaticSecret::from([1u8; 32])).is_err());

@@ -824,6 +824,14 @@ impl QueueService {
         }
     }
 
+    /// The client of a circuit paused its session (`WIR-546`): each
+    /// subscription of the circuit ends as at the end of the circuit. A
+    /// record that arrives after it finds no subscription, and it takes
+    /// its push.
+    pub fn circuit_paused(&mut self, circuit: &CircuitKey, now: u64) {
+        self.circuit_closed(circuit, now);
+    }
+
     /// Expires each record past `MSG_TTL`, and erases each idle queue.
     pub fn sweep(&mut self, now: u64) {
         let past_lifetime = |held: &Invitation| {

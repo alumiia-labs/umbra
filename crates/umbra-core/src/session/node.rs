@@ -555,6 +555,44 @@ pub const CIRCUIT_AGE_MARGIN: u64 = 60;
 /// client, and the client ticks once each second.
 pub const CIRCUIT_CELL_MARGIN: u32 = 64;
 
+/// One circuit of a parked session, with the queues that it served.
+struct ParkedCircuit {
+    session: Box<CircuitSession>,
+    queues: BTreeSet<[u8; 32]>,
+    exit: Option<[u8; 32]>,
+    chain: [[u8; 32]; HOPS],
+    /// The time from which the age of the circuit counts.
+    born: u64,
+    rendezvous: bool,
+    class: DelayClass,
+}
+
+/// A session that holds no connection, with each circuit that held its
+/// three hops (Part 6 §6.2.3). A later run of the same process continues
+/// it with [`ClientNode::resumed`]. The value has no stored form and no
+/// copy: it lives in the memory of the process alone (`WIR-549`), and each
+/// key of it overwrites itself at its drop.
+pub struct ParkedSession {
+    link: ClientLink,
+    /// The ingress relay that holds the other end.
+    ingress: [u8; 32],
+    range: Range,
+    circuits: Vec<ParkedCircuit>,
+}
+
+impl ParkedSession {
+    /// The count of the circuits that the session keeps.
+    pub fn circuits(&self) -> usize {
+        self.circuits.len()
+    }
+
+    /// Whether the relay answered the pause of the session, thus no frame
+    /// is lost and the resume holds.
+    pub fn is_clean(&self) -> bool {
+        self.link.is_paused()
+    }
+}
+
 /// A relay that a client can put into a chain: the facts that the
 /// invariants of Part 3 §3.4.6 test, and the static key of the handshake.
 pub struct RelayInfo {
@@ -1355,6 +1393,10 @@ pub struct ClientNode {
     relays: Vec<RelayInfo>,
     root: RootIdentity,
     link: Option<ClientLink>,
+    /// The node sent a `SessionResume`, and no capsule of the relay
+    /// arrived since. A relay that refuses a resume closes the connection
+    /// and sends nothing (`WIR-240`), thus the first capsule confirms it.
+    resuming: bool,
     slots: Vec<Slot>,
     /// The circuit of the call that runs. Each command of that call goes
     /// to it, under its `RelaySession_pk`.
@@ -1576,6 +1618,7 @@ impl ClientNode {
             relays,
             root,
             link: None,
+            resuming: false,
             slots: Vec::new(),
             current: 0,
             deferred: VecDeque::new(),
@@ -3853,9 +3896,263 @@ impl ClientNode {
         self.capsules.drain(..).collect()
     }
 
-    /// Whether a circuit holds its three hops.
+    /// Whether a circuit holds its three hops. The circuits of a resume
+    /// that the relay did not confirm yet do not count.
     pub fn is_ready(&self) -> bool {
-        self.slots.iter().any(Slot::is_ready)
+        !self.resuming && self.slots.iter().any(Slot::is_ready)
+    }
+
+    /// Whether the node sent a `SessionResume` that no capsule of the
+    /// relay confirmed yet. A connection that closes in this state is a
+    /// failed resume (`WIR-547`).
+    pub fn is_resuming(&self) -> bool {
+        self.resuming
+    }
+
+    /// Whether the node sent its `SessionPause` on this connection.
+    pub fn is_pausing(&self) -> bool {
+        self.link.as_ref().is_some_and(ClientLink::is_pausing)
+    }
+
+    /// Whether the relay answered the pause: each frame of the relay on
+    /// this connection arrived (`WIR-541`).
+    pub fn is_paused(&self) -> bool {
+        self.link.as_ref().is_some_and(ClientLink::is_paused)
+    }
+
+    /// Pauses the session at the end of a run that keeps it (`WIR-539`):
+    /// the `SessionPause` goes out, and no frame follows it on this
+    /// connection. A circuit under build ends first, because the relay
+    /// would hold its part with no client for it. The caller reads until
+    /// [`ClientNode::is_paused`], and then it takes the session with
+    /// [`ClientNode::park`].
+    pub fn pause(&mut self) -> Result<(), Error> {
+        if !self.link.as_ref().is_some_and(ClientLink::sends) {
+            return Err(Error::NoPath);
+        }
+        let mut destroys = Vec::new();
+        for slot in &mut self.slots {
+            if !matches!(slot.circuit, Circuit::Building { .. }) {
+                continue;
+            }
+            if let Circuit::Building { mut build, .. } =
+                core::mem::replace(&mut slot.circuit, Circuit::None)
+            {
+                destroys.extend(destroy_cell(&mut build));
+            }
+            slot.building_since = None;
+        }
+        for cell in destroys {
+            self.send_cell(&cell)?;
+        }
+        let link = self.link.as_mut().ok_or(Error::NoPath)?;
+        let mut capsule = alloc::vec![0u8; 32];
+        let used = link.pause(&mut capsule).map_err(|_| Error::NoPath)?;
+        capsule.truncate(used);
+        self.capsules.push_back(capsule);
+        Ok(())
+    }
+
+    /// Takes the session and each circuit that holds its three hops out
+    /// of the node at the end of a run, at `now`. The result is none when
+    /// the node holds no such circuit, or when the relay did not confirm
+    /// the resume of this run. Each command that waited for an answer is
+    /// forgotten: the next run sends what the store holds.
+    pub fn park(&mut self, now: u64) -> Option<ParkedSession> {
+        let keeps = |slot: &Slot| slot.is_ready() && slot.chain.is_some();
+        if self.resuming || !self.slots.iter().any(keeps) {
+            return None;
+        }
+        let mut link = self.link.take()?;
+        link.connection_lost(now);
+        let mut circuits = Vec::new();
+        for slot in &mut self.slots {
+            let Some(chain) = slot.chain.filter(|_| slot.is_ready()) else {
+                continue;
+            };
+            let Circuit::Ready(mut session) = core::mem::replace(&mut slot.circuit, Circuit::None)
+            else {
+                continue;
+            };
+            session.forget_commands();
+            circuits.push(ParkedCircuit {
+                session,
+                queues: slot.queues.clone(),
+                exit: slot.exit,
+                chain,
+                born: slot.born.unwrap_or(now),
+                rendezvous: slot.rendezvous,
+                class: slot.class,
+            });
+        }
+        Some(ParkedSession {
+            link,
+            ingress: self.ingress.key.relay_id,
+            range: self.range,
+            circuits,
+        })
+    }
+
+    /// Ends the session by the choice of the client (`WIR-246`): the result
+    /// is the `SessionClose` capsule, which the caller sends before it
+    /// closes the connection. The relay then ends each circuit of the
+    /// session at once, and it holds nothing for a resume.
+    pub fn close(&mut self) -> Option<Vec<u8>> {
+        let link = self.link.take()?;
+        self.resuming = false;
+        let mut capsule = alloc::vec![0u8; 32];
+        let used = link.close(&mut capsule).ok()?;
+        capsule.truncate(used);
+        Some(capsule)
+    }
+
+    /// Whether `parked` continues at this node at `now`: the same ingress
+    /// relay inside `SESSION_RESUME_WINDOW`, each relay of each chain in
+    /// the relay set, and each circuit inside its age and its cells with
+    /// the margins of `NET-320` and `NET-321`. One circuit or more must
+    /// serve a queue of this node: its `SUB` brings the frame of the relay
+    /// that confirms the resume.
+    fn fits(&self, parked: &ParkedSession, now: u64) -> bool {
+        let old = CIRCUIT_MAX_AGE.saturating_sub(CIRCUIT_AGE_MARGIN);
+        let full = CIRCUIT_MAX_CELLS.saturating_sub(CIRCUIT_CELL_MARGIN);
+        let is_young = |circuit: &ParkedCircuit| {
+            let (sent, received) = circuit.session.cells();
+            now.saturating_sub(circuit.born) < old
+                && sent < full
+                && received < full
+                && circuit.chain.iter().all(|hop| self.key_of(hop).is_some())
+        };
+        let serves = |circuit: &ParkedCircuit| {
+            self.slots.iter().any(|slot| {
+                slot.rendezvous == circuit.rendezvous && !slot.queues.is_disjoint(&circuit.queues)
+            })
+        };
+        parked.ingress == self.ingress.key.relay_id
+            && parked.range == self.range
+            && parked.link.may_resume(now)
+            && parked.circuits.iter().all(is_young)
+            && parked.circuits.iter().any(serves)
+    }
+
+    /// The connection to the guard opened, and an earlier run of this
+    /// process parked a session. The node continues that session when it
+    /// fits (`WIR-361`): the `SessionResume` goes first, each kept circuit
+    /// takes the `SUB` of each of its queues again, and each queue that no
+    /// kept circuit serves takes a new circuit. Otherwise the node opens a
+    /// new session as [`ClientNode::connected`] does. The result says
+    /// whether the node resumed.
+    pub fn resumed<R: CryptoRng + ?Sized>(
+        &mut self,
+        parked: ParkedSession,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<bool, Error> {
+        if !self.fits(&parked, now) {
+            drop(parked);
+            self.connected(rng)?;
+            return Ok(false);
+        }
+        let ParkedSession {
+            mut link, circuits, ..
+        } = parked;
+        let mut capsule = alloc::vec![0u8; 64];
+        let used = link.resume(now, &mut capsule).map_err(|_| Error::NoPath)?;
+        capsule.truncate(used);
+        self.capsules.push_back(capsule);
+        self.link = Some(link);
+        self.clock = now;
+        // The division of the queues of this run gives way to the one
+        // that the kept circuits hold. A queue stays on the circuit that
+        // served it, thus its relay learns nothing new about it.
+        let mut kept = Vec::with_capacity(circuits.len());
+        for circuit in circuits {
+            let mut queues = BTreeSet::new();
+            for slot in &mut self.slots {
+                if slot.rendezvous != circuit.rendezvous {
+                    continue;
+                }
+                let moved: Vec<[u8; 32]> =
+                    slot.queues.intersection(&circuit.queues).copied().collect();
+                for queue in moved {
+                    slot.queues.remove(&queue);
+                    queues.insert(queue);
+                }
+            }
+            // The queues live at the relay where the chain ends. A build
+            // that takes the place of this circuit thus ends there too.
+            let exit = match circuit.chain.last() {
+                Some(relay) if !queues.is_empty() => Some(*relay),
+                _ => circuit.exit,
+            };
+            kept.push(Slot {
+                circuit: Circuit::Ready(circuit.session),
+                queues,
+                reserved: 0,
+                exit,
+                chain: Some(circuit.chain),
+                building_since: None,
+                born: Some(circuit.born),
+                rendezvous: circuit.rendezvous,
+                class: circuit.class,
+            });
+        }
+        let resumed = kept.len();
+        // A circuit of this run whose queues all went to a kept circuit
+        // has nothing to serve, and it builds nothing.
+        kept.extend(
+            core::mem::take(&mut self.slots)
+                .into_iter()
+                .filter(|slot| !slot.queues.is_empty()),
+        );
+        self.slots = kept;
+        self.resuming = true;
+        self.start_run(rng)?;
+        for slot in 0..resumed {
+            self.current = slot;
+            self.subscribe_stored(now, rng)?;
+        }
+        Ok(true)
+    }
+
+    /// The connection closed before a capsule of the relay confirmed the
+    /// resume (`WIR-547`). The node drops the session and each circuit of
+    /// it. The caller opens a new connection and calls
+    /// [`ClientNode::connected`].
+    pub fn resume_failed(&mut self) {
+        self.resuming = false;
+        self.link = None;
+        self.capsules.clear();
+        self.waiting.clear();
+        self.watched_waits.clear();
+        self.held_records.clear();
+        self.rebuilds.clear();
+        for slot in &mut self.slots {
+            slot.circuit = Circuit::None;
+            slot.building_since = None;
+            slot.born = None;
+        }
+    }
+
+    /// The first capsule of the relay after a resume arrived: each kept
+    /// circuit serves, and what waited for it leaves.
+    fn resume_confirmed<R: CryptoRng + ?Sized>(
+        &mut self,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<Vec<ClientEvent>, Error> {
+        self.resuming = false;
+        let mut events = Vec::new();
+        for slot in 0..self.slots.len() {
+            if !self.slots.get(slot).is_some_and(Slot::is_ready) {
+                continue;
+            }
+            self.current = slot;
+            self.circuit_serves(now, rng)?;
+            if events.is_empty() {
+                events.push(ClientEvent::CircuitReady);
+            }
+        }
+        Ok(events)
     }
 
     fn slot(&self) -> Result<&Slot, Error> {
@@ -3922,6 +4219,19 @@ impl ClientNode {
         capsule.truncate(used);
         self.capsules.push_back(capsule);
         self.link = Some(link);
+        self.resuming = false;
+        // A new session holds no circuit, thus a circuit of the session
+        // before serves nothing.
+        for slot in &mut self.slots {
+            slot.circuit = Circuit::None;
+        }
+        self.start_run(rng)
+    }
+
+    /// Starts the work of a run on a link that holds a session: each
+    /// handshake record goes again, and each circuit that holds no hop
+    /// builds. A circuit that a resume kept stays as it is.
+    fn start_run<R: CryptoRng + ?Sized>(&mut self, rng: &mut R) -> Result<(), Error> {
         if !self.slots.iter().any(Slot::is_general) {
             self.slots.push(Slot::empty(None));
         }
@@ -3981,19 +4291,31 @@ impl ClientNode {
         // A circuit to each of those relays builds with each other one
         // below.
         for relay in relays {
-            let ends_there = |slot: &Slot| slot.is_general() && slot.exit == Some(relay);
+            let ends_there = |slot: &Slot| {
+                let kept = slot.is_ready() && slot.class == self.delay_class;
+                slot.is_general()
+                    && (slot.exit == Some(relay)
+                        || (kept && slot.chain.is_some_and(|c| c.last() == Some(&relay))))
+            };
             if !self.slots.iter().any(ends_there) {
                 self.slots.push(Slot::empty(Some(relay)));
             }
         }
-        // A new run builds each chain again (`NET-024`). The builds run side
-        // by side, and the `circ_id` of a cell names its circuit.
+        // A new run builds each chain again (`NET-024`), but for a circuit
+        // that a resume kept. The builds run side by side, and the
+        // `circ_id` of a cell names its circuit.
         for slot in &mut self.slots {
-            slot.chain = None;
+            if !slot.is_ready() {
+                slot.chain = None;
+            }
         }
-        let mut built = 0usize;
+        let mut built = self.slots.iter().filter(|slot| slot.is_ready()).count();
         for slot in 0..self.slots.len() {
-            if self.slots.get(slot).is_some_and(|slot| slot.rendezvous) {
+            if self
+                .slots
+                .get(slot)
+                .is_some_and(|slot| slot.rendezvous || slot.is_ready())
+            {
                 continue;
             }
             self.current = slot;
@@ -4242,6 +4564,10 @@ impl ClientNode {
     /// Chooses a chain for the current circuit and sends its first
     /// `EXTEND`.
     fn build_current<R: CryptoRng + ?Sized>(&mut self, rng: &mut R) -> Result<(), Error> {
+        // WIR-539: no frame follows the pause of the session.
+        if self.is_pausing() {
+            return Ok(());
+        }
         self.slot_mut()?.chain = None;
         // With no conformant chain the circuit stays with no build, and
         // what waits for it waits (`NET-033`). The slot stays, thus a later
@@ -4454,6 +4780,11 @@ impl ClientNode {
 
     /// Moves each ready command of each circuit into a cell.
     fn pump(&mut self) -> Result<(), Error> {
+        // WIR-539: no frame follows the pause of the session. A command
+        // stays with its circuit, and the park forgets it.
+        if self.is_pausing() {
+            return Ok(());
+        }
         for slot in 0..self.slots.len() {
             while let Some(cell) = self.next_cell_of(slot)? {
                 self.send_cell(&cell)?;
@@ -6201,8 +6532,60 @@ impl ClientNode {
         self.clock = now;
         self.settle_del();
         let (kind, value, _) = capsule::parse(bytes)?;
+        if !self.resuming {
+            return self.on_relay_capsule(bytes, now, rng);
+        }
+        // WIR-543: the relay names each circuit that ended while the
+        // session was parked, before each cell. Such a circuit builds again
+        // in its place, and the run goes on with each other one.
         if kind == capsule::CapsuleType::Session {
-            return Ok(self.on_destroy(value));
+            if let Ok(SessionControl::Destroy { circ_id }) = SessionControl::parse(value) {
+                self.build_again(circ_id, rng)?;
+                return Ok(Vec::new());
+            }
+        }
+        // WIR-547: the first other capsule of the relay confirms the resume.
+        let mut events = self.resume_confirmed(now, rng)?;
+        events.extend(self.on_relay_capsule(bytes, now, rng)?);
+        Ok(events)
+    }
+
+    /// A circuit that a resume kept ended at its relays while the session
+    /// was parked. One that serves a queue builds again, to the relay of
+    /// its queues. One that serves none ends, and a later record builds it.
+    fn build_again<R: CryptoRng + ?Sized>(
+        &mut self,
+        circ_id: [u8; 16],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let of_circuit = |slot: &Slot| slot.circ_id() == Some(circ_id);
+        let Some(index) = self.slots.iter().position(of_circuit) else {
+            return Ok(());
+        };
+        let Some(slot) = self.slots.get_mut(index) else {
+            return Ok(());
+        };
+        slot.circuit = Circuit::None;
+        slot.born = None;
+        if slot.queues.is_empty() {
+            return Ok(());
+        }
+        if let Some(relay) = slot.chain.and_then(|chain| chain.last().copied()) {
+            slot.exit = Some(relay);
+        }
+        self.current = index;
+        self.build_current(rng)
+    }
+
+    fn on_relay_capsule<R: CryptoRng + ?Sized>(
+        &mut self,
+        bytes: &[u8],
+        now: u64,
+        rng: &mut R,
+    ) -> Result<Vec<ClientEvent>, Error> {
+        let (kind, value, _) = capsule::parse(bytes)?;
+        if kind == capsule::CapsuleType::Session {
+            return Ok(self.on_control(value));
         }
         let link = self.link.as_mut().ok_or(Error::NoPath)?;
         let Some(cell) = link.receive(value).map_err(|_| Error::Unverified)? else {
@@ -6361,9 +6744,17 @@ impl ClientNode {
     /// its chain lost a link, or aged it out. The node holds it no more,
     /// and the runtime builds again. Any other session control from a
     /// relay names nothing that a client does.
-    fn on_destroy(&mut self, value: &[u8]) -> Vec<ClientEvent> {
-        let Ok(SessionControl::Destroy { circ_id }) = SessionControl::parse(value) else {
-            return Vec::new();
+    fn on_control(&mut self, value: &[u8]) -> Vec<ClientEvent> {
+        let circ_id = match SessionControl::parse(value) {
+            Ok(SessionControl::Destroy { circ_id }) => circ_id,
+            // WIR-541: the relay parked the session.
+            Ok(paused @ SessionControl::Paused { .. }) => {
+                if let Some(link) = self.link.as_mut() {
+                    let _ = link.on_paused(&paused);
+                }
+                return Vec::new();
+            }
+            _ => return Vec::new(),
         };
         let of_circuit = |slot: &Slot| slot.circ_id() == Some(circ_id);
         let Some(slot) = self.slots.iter_mut().find(|slot| of_circuit(slot)) else {
@@ -6428,8 +6819,18 @@ impl ClientNode {
         now: u64,
         rng: &mut R,
     ) -> Result<Vec<ClientEvent>, Error> {
-        let ready = self.current;
         self.subscribe_stored(now, rng)?;
+        self.circuit_serves(now, rng)
+    }
+
+    /// The part of [`ClientNode::circuit_ready`] after the `SUB` commands
+    /// of the stored queues.
+    fn circuit_serves<R: CryptoRng + ?Sized>(
+        &mut self,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<Vec<ClientEvent>, Error> {
+        let ready = self.current;
         // Each queue that waited for room goes to a circuit of its kind.
         let rendezvous = self.slot()?.rendezvous;
         let of_kind = |purpose: &Purpose| matches!(purpose, Purpose::Rendezvous) == rendezvous;

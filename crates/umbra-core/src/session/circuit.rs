@@ -109,6 +109,15 @@ impl CircuitSession {
         }
     }
 
+    /// Forgets each command that waits for a cell or for an answer. The
+    /// session of the circuit parks, and the run that continues it holds
+    /// no handle of this one.
+    pub fn forget_commands(&mut self) {
+        self.batcher.clear();
+        self.pending.clear();
+        self.watched.clear();
+    }
+
     /// The cells sent and received, against `CIRCUIT_MAX_CELLS`.
     pub fn cells(&self) -> (u32, u32) {
         self.circuit.cells()

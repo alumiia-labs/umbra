@@ -352,7 +352,13 @@ impl Mesh {
         for state in self.stored[client].values() {
             node.restore_contact(state).unwrap();
         }
-        node.connected(&mut Rng(300 + u64::from(seed))).unwrap();
+        // A session identifier comes from the CSPRNG (`WIR-136`), thus each
+        // run takes a new one. The ingress relay parked the session of the
+        // run before, and it refuses a second open of that identifier
+        // (`WIR-233`).
+        let run = old_link / 10_000;
+        node.connected(&mut Rng(300 + u64::from(seed) + run * 1_000))
+            .unwrap();
         self.clients[client] = node;
         // The links of a relay to the next layer take 800 and 900 and
         // above, thus a new run of a client takes a link far from them.

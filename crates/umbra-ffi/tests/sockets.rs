@@ -1,6 +1,7 @@
 //! Three relay servers and two client runtimes on localhost, over TCP, TLS
 //! 1.3, and the WebSocket framing: one client invites, the other accepts,
-//! and text travels both ways.
+//! and text travels both ways. A second run of one client resumes the
+//! session of its first run.
 
 #![cfg(feature = "sockets-test")]
 #![allow(
@@ -11,7 +12,14 @@
     missing_docs
 )]
 
-use std::{collections::BTreeMap, time::Duration};
+use std::{
+    collections::BTreeMap,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
+    time::Duration,
+};
 
 use tokio::{
     net::TcpListener,
@@ -25,7 +33,7 @@ use umbra_crypto::{
     secret::Secret,
     x25519::{PublicKey as XPublic, StaticSecret},
 };
-use umbra_ffi::runtime::{run_client, Command, Persist, Update};
+use umbra_ffi::runtime::{run_client, Command, Ended, Persist, ResumeSlot, Update};
 use umbra_relay::{
     node::{Config, RelayNode},
     server::{run_relay, tls_acceptor, Carried},
@@ -199,6 +207,7 @@ async fn two_clients_meet_and_talk_over_real_sockets() {
             runtime_commands,
             runtime_updates,
             Box::new(Kept(keeps)),
+            None,
         ));
         clients.push((commands, updates, kept));
     }
@@ -288,4 +297,209 @@ async fn two_clients_meet_and_talk_over_real_sockets() {
         (update == Update::Unsent(73)).then_some(())
     })
     .await;
+}
+
+/// The mean of the pacing clock in the resume test: the value of a
+/// deployment. A cell of the queue relay that is on its way when the
+/// session parks ends its circuit (`WIR-543`), and a clock of 20 ms would
+/// put one there in many runs.
+const DEPLOYED_PACING_MS: u64 = 1_000;
+
+/// The store of a client that lives through two runs: it keeps the state
+/// of each contact, and it gives each record to the test.
+#[derive(Clone)]
+struct Lasting {
+    contacts: Arc<Mutex<BTreeMap<ContactId, Vec<u8>>>>,
+    records: mpsc::UnboundedSender<(ContactId, Vec<u8>)>,
+}
+
+impl Persist for Lasting {
+    fn commit(&mut self, changes: Vec<StateChange>, received: &[(ContactId, Vec<u8>)]) -> bool {
+        let mut contacts = self.contacts.lock().unwrap();
+        for change in changes {
+            if let StateChange::Contact { contact, state } = change {
+                contacts.insert(contact, state.to_vec());
+            }
+        }
+        for record in received {
+            let _ = self.records.send(record.clone());
+        }
+        true
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_second_run_resumes_the_session_and_reads_with_no_circuit_build() {
+    let client_tls = native::tls_config_with_root_file(CA).unwrap();
+    let mut listeners = Vec::new();
+    let mut ports = Vec::new();
+    for _ in 0..3 {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        ports.push(listener.local_addr().unwrap().port());
+        listeners.push(listener);
+    }
+    // The chains that each relay opened, which its node counts at each
+    // second.
+    let builds: Vec<Arc<AtomicU64>> = (0..3).map(|_| Arc::default()).collect();
+    for (index, listener) in listeners.into_iter().enumerate() {
+        let layer = index as u8 + 1;
+        let (relay, static_secret) = relay_static(layer);
+        let mut node = RelayNode::new(Config {
+            relay,
+            static_secret,
+            layer,
+            chunk_capacity: 1 << 26,
+        });
+        node.count_builds_into(builds[index].clone());
+        let mut next_hops = BTreeMap::new();
+        if layer < 3 {
+            next_hops.insert(
+                relay_static(layer + 1).0.relay_id,
+                localhost(ports[index + 1]),
+            );
+        }
+        tokio::spawn(run_relay(
+            node,
+            listener,
+            tls_acceptor(LEAF, LEAF_KEY).unwrap(),
+            next_hops,
+            BTreeMap::new(),
+            client_tls.clone(),
+            DEPLOYED_PACING_MS,
+            Box::new(MemoryStore::default()),
+            Carried::default(),
+        ));
+    }
+    let built = || -> Vec<u64> {
+        builds
+            .iter()
+            .map(|count| count.load(Ordering::Relaxed))
+            .collect()
+    };
+    let path = || [relay_static(1).0, relay_static(2).0, relay_static(3).0];
+
+    // Bob runs for the whole test with a store that keeps nothing. Alice
+    // has a store that lasts, and the place of her parked session.
+    let (bob, runtime_commands) = mpsc::unbounded_channel();
+    let (runtime_updates, mut bob_updates) = mpsc::unbounded_channel();
+    let (keeps, _bob_kept) = mpsc::unbounded_channel();
+    tokio::spawn(run_client(
+        ClientNode::new(path(), RootIdentity::new(Secret::new([0x41; 32]))),
+        localhost(ports[0]),
+        client_tls.clone(),
+        runtime_commands,
+        runtime_updates,
+        Box::new(Kept(keeps)),
+        None,
+    ));
+    let (records, mut alice_kept) = mpsc::unbounded_channel();
+    let store = Lasting {
+        contacts: Arc::default(),
+        records,
+    };
+    let slot = ResumeSlot::default();
+    let (alice, runtime_commands) = mpsc::unbounded_channel();
+    let (runtime_updates, mut alice_updates) = mpsc::unbounded_channel();
+    tokio::spawn(run_client(
+        ClientNode::new(path(), RootIdentity::new(Secret::new([0x40; 32]))),
+        localhost(ports[0]),
+        client_tls.clone(),
+        runtime_commands,
+        runtime_updates,
+        Box::new(store.clone()),
+        Some(slot.clone()),
+    ));
+
+    alice.send(Command::Invite).unwrap();
+    let bundle = wait_for(&mut alice_updates, |update| match update {
+        Update::Invitation(bundle) => Some(bundle),
+        _ => None,
+    })
+    .await;
+    bob.send(Command::Accept(bundle)).unwrap();
+    let alice_contact = wait_for_contact(&mut alice_updates).await;
+    let bob_contact = wait_for_contact(&mut bob_updates).await;
+
+    // Alice receives a record in her first run.
+    let send = Command::Send {
+        contact: bob_contact,
+        app: text(1, "the first run"),
+        tag: 81,
+    };
+    bob.send(send).unwrap();
+    let (from, app) = wait_for_message(&mut alice_updates, &mut alice_kept).await;
+    assert_eq!(from, alice_contact);
+    let parsed = AppMessage::parse(&app, Channel::Pairwise).unwrap();
+    assert_eq!(parsed.body, b"the first run");
+    wait_for(&mut bob_updates, |update| {
+        (update == Update::Sent(81)).then_some(())
+    })
+    .await;
+
+    // NET-100, WIR-360: the run of Alice ends as a push wake does. It
+    // pauses its session, and it leaves the session for the next run.
+    alice.send(Command::Wake).unwrap();
+    let ended = timeout(STEP, async {
+        loop {
+            match alice_updates.recv().await.expect("the runtime stopped") {
+                Update::Offline(ended) => return ended,
+                _ => continue,
+            }
+        }
+    })
+    .await
+    .expect("the wake did not end");
+    assert_eq!(ended, Ended::WakeDone);
+    assert!(slot.holds());
+    drop(alice);
+    // Each relay counted each build of the two first runs by now.
+    tokio::time::sleep(Duration::from_millis(2_500)).await;
+    let before = built();
+    assert!(before.iter().all(|count| *count >= 2), "{before:?}");
+
+    // A record arrives between the two runs, and the relay takes it.
+    let send = Command::Send {
+        contact: bob_contact,
+        app: text(2, "between the runs"),
+        tag: 82,
+    };
+    bob.send(send).unwrap();
+    wait_for(&mut bob_updates, |update| {
+        (update == Update::Sent(82)).then_some(())
+    })
+    .await;
+
+    // WIR-361: the second run of Alice starts from her store, and it
+    // resumes the session on a new connection.
+    let mut node = ClientNode::new(path(), RootIdentity::new(Secret::new([0x40; 32])));
+    for state in store.contacts.lock().unwrap().values() {
+        node.restore_contact(state).unwrap();
+    }
+    let (_alice, runtime_commands) = mpsc::unbounded_channel();
+    let (runtime_updates, mut alice_updates) = mpsc::unbounded_channel();
+    tokio::spawn(run_client(
+        node,
+        localhost(ports[0]),
+        client_tls.clone(),
+        runtime_commands,
+        runtime_updates,
+        Box::new(store.clone()),
+        Some(slot.clone()),
+    ));
+    assert!(
+        !slot.holds() || {
+            // The run takes the session at its start.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            !slot.holds()
+        }
+    );
+    let (from, app) = wait_for_message(&mut alice_updates, &mut alice_kept).await;
+    assert_eq!(from, alice_contact);
+    let parsed = AppMessage::parse(&app, Channel::Pairwise).unwrap();
+    assert_eq!(parsed.body, b"between the runs");
+
+    // The record reached Alice, and no relay opened a chain for it: each
+    // circuit of the second run is a circuit of the first one.
+    tokio::time::sleep(Duration::from_millis(2_500)).await;
+    assert_eq!(built(), before);
 }

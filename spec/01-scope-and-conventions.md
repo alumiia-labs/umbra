@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 1: Scope, Conventions, and Terminology
 
 **Status:** Draft
-**Version:** 0.12.0
+**Version:** 0.13.0
 **Date:** 2026-10-09
 
 ---
@@ -42,8 +42,8 @@ because each one binds a relay or forbids a form: `THR-015`, `NET-276`, and
 platform-neutral, thus the deferral changes the scope of this text and not
 the design.
 
-**Transport scope of v1.** Part 3 §3.8 defers QUIC, the session resume of
-Part 6 §6.2.3, and with them the transport race. Part 10 §10.3.1 defers the
+**Transport scope of v1.** Part 3 §3.8 defers QUIC, and with it the
+transport race. Part 10 §10.3.1 defers the
 measurement session. Each such section names the rules that bind the later
 version, and it keeps the wire layouts.
 
@@ -305,7 +305,8 @@ examples. Without the table below a maintainer finds the dependents by hand.
 | `MAX_QUEUES_PER_SESSION` | Part 3 §3.2.5 | Part 2 §2.7, Part 3 §3.11, Part 8 §8.2.1, Part 15 §15.3 |
 | The bucket ladder | Part 3 §3.3 | Part 5 §5.6, Part 6 §6.9, Part 3 §3.12, Part 11 §11.3.3 |
 | `CIRCUIT_MAX_AGE`, `CIRCUIT_MAX_CELLS`, `CIRCUIT_AGE_MARGIN`, `CIRCUIT_CELL_MARGIN` | Part 3 §3.4.3 | Part 2 §2.4, Part 3 §3.4.4, Part 3 §3.11.1, Part 3 §3.12, Part 6 §6.2.2, Part 6 §6.2.3, Part 6 §6.8, Part 15 §15.3 |
-| `SESSION_RESUME_WINDOW` | Part 6 §6.2.3 | Part 3 §3.4.3, Part 3 §3.12, Part 15 §15.3 |
+| `SESSION_RESUME_WINDOW` | Part 6 §6.2.3 | Part 3 §3.4.3, Part 3 §3.8, Part 3 §3.12, Part 15 §15.3 |
+| `SESSION_PAUSE_WAIT` | Part 6 §6.2.3 | — |
 | `PACING_MEAN` | Part 3 §3.9 | Part 3 §3.12, Part 8 §8.8, Part 10 §10.9.1 |
 | `RECEIPT_BATCH_MAX` | Part 3 §3.5.4 | Part 6 §6.6, Part 6 §6.6.9, Part 6 §6.8 |
 | The tier A cover rate | Part 3 §3.6.2 | Part 3 §3.12, Part 4 §4.7.2, Part 7 §7.5.1, Part 9 §9.5.3, Part 10 §10.4.2 |
@@ -411,7 +412,8 @@ side channel that the user selects, such as a QR code scan.
 | --- | --- | --- | --- |
 | `Capsule` | Part 6 §6.2.1 | The WebSocket frame or the QUIC stream of Part 3 §3.8 | Client and relay |
 | `SessionFrame` | Part 6 §6.2.2 | `Capsule` | Client |
-| `SessionOpen`, `SessionResume`, `SessionClose` | Part 6 §6.2.3 | `Capsule` | Client |
+| `SessionOpen`, `SessionPause`, `SessionResume`, `SessionClose` | Part 6 §6.2.3 | `Capsule` | Client |
+| `SessionPaused`, `CircuitPause` | Part 6 §6.2.3 | `Capsule` | Relay |
 | `Cell` | Part 6 §6.3 and Part 3 §3.4.3 | `SessionFrame` | Client |
 | `HopHello`, `HopReply` | Part 3 §3.4.3 | `EXTEND` and `EXTENDED`, Part 6 §6.3 | Client and relay |
 | Queue `Command` | Part 6 §6.4 | `Cell` | Client and relay |

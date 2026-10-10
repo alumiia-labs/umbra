@@ -32,6 +32,13 @@ pub struct HopKeys {
     chain: [u8; BLOCK],
 }
 
+impl Drop for HopKeys {
+    fn drop(&mut self) {
+        self.tweak.zeroize();
+        self.chain.zeroize();
+    }
+}
+
 /// The two key sets of one hop.
 pub struct KeySet {
     /// Client to relay.

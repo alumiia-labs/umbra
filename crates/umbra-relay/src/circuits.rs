@@ -190,6 +190,27 @@ pub enum Action {
         /// `Destroy`.
         from: Option<LinkId>,
     },
+    /// The pause of a circuit that waited for its delayed cells: the node
+    /// hands it to [`CircuitTable::pause_now`].
+    Pause {
+        /// The circuit.
+        key: CircuitKey,
+    },
+    /// Tell the next hop on `link` that the client of the circuit of
+    /// `circ_id` reads no cell until it resumes (`WIR-545`).
+    PauseNext {
+        /// The link to the next hop.
+        link: LinkId,
+        /// The circuit on that link.
+        circ_id: [u8; 16],
+    },
+    /// The client of a circuit that ends here reads no cell until it
+    /// resumes: the services end its subscriptions, and its pacing clock
+    /// stops (`WIR-546`).
+    Paused {
+        /// The circuit.
+        circuit: CircuitKey,
+    },
     /// An action of a forward cell that waits for the per-hop delay of its
     /// circuit (Part 3 §3.9). The time never goes below the one of an
     /// earlier cell of the circuit, thus the delay keeps the order.
@@ -828,6 +849,66 @@ impl CircuitTable {
             Some(client_side) => self.end(client_side, None),
             None => Vec::new(),
         }
+    }
+
+    /// The client of the circuit of `circ_id` on `link` paused its session
+    /// (`WIR-545`, `WIR-546`). `link` is the side of the client. A record
+    /// that names no circuit of that side drops, thus a next hop pauses
+    /// nothing. The pause goes behind each forward cell of the circuit that
+    /// waits for its delay here. A cell that arrived at the endpoint after
+    /// the pause would start the pacing again, and the cells of that pacing
+    /// would end the circuit at the ingress relay.
+    pub fn on_pause(&mut self, link: LinkId, circ_id: [u8; 16]) -> Vec<Action> {
+        let key = CircuitKey { link, circ_id };
+        let Some(held) = self.held.get_mut(&key) else {
+            return Vec::new();
+        };
+        if held.ending {
+            return Vec::new();
+        }
+        if held.delayed_out > 0 {
+            held.delayed_out = held.delayed_out.saturating_add(1);
+            return vec![Action::Delayed {
+                at_ms: held.released_at_ms,
+                circuit: key,
+                action: Box::new(Action::Pause { key }),
+            }];
+        }
+        self.pause_now(key)
+    }
+
+    /// Moves the pause of a circuit on: to the next hop, or to the
+    /// services of a circuit that ends here. The node runs it for an
+    /// [`Action::Pause`].
+    pub fn pause_now(&mut self, key: CircuitKey) -> Vec<Action> {
+        let Some(held) = self.held.get(&key) else {
+            return Vec::new();
+        };
+        match held.next {
+            Some(next) => vec![Action::PauseNext {
+                link: next.link,
+                circ_id: next.circ_id,
+            }],
+            None if self.layer == 3 => vec![Action::Paused { circuit: key }],
+            None => Vec::new(),
+        }
+    }
+
+    /// Pauses each circuit that `link` built here: its client parks its
+    /// session (`WIR-541`, `WIR-542`).
+    pub fn pause_link(&mut self, link: LinkId) -> Vec<Action> {
+        let of_link = CircuitKey {
+            link,
+            circ_id: [0; 16],
+        }..=CircuitKey {
+            link,
+            circ_id: [0xFF; 16],
+        };
+        let on_link: Vec<CircuitKey> = self.held.range(of_link).map(|(key, _)| *key).collect();
+        on_link
+            .into_iter()
+            .flat_map(|key| self.on_pause(key.link, key.circ_id))
+            .collect()
     }
 
     /// Gives one circuit of a link back to its budget.

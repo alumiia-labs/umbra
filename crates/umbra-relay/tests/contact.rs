@@ -10,9 +10,11 @@
     missing_docs
 )]
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use umbra_core::session::node::{ClientEvent, ClientNode, ContactId, CoverSlot, StateChange};
+use umbra_core::session::node::{
+    ClientEvent, ClientNode, ContactId, CoverSlot, ParkedSession, StateChange,
+};
 use umbra_crypto::{
     handshake::nk::RelayStatic,
     hierarchy::RootIdentity,
@@ -23,7 +25,7 @@ use umbra_crypto::{
 };
 use umbra_queue::params::RECEIPT_MIN_DELAY;
 use umbra_relay::{
-    circuits::LinkId,
+    circuits::{CircuitKey, LinkId},
     node::{Config, Output, QueryAnswer, RelayNode},
     service::queue::NdrPush,
     store::{MemoryStore, RelayStore},
@@ -219,6 +221,22 @@ impl Network {
                     self.pushes.push(push);
                     continue;
                 }
+                // WIR-241: the connection that resumed serves the
+                // identifier of the session from now on.
+                Output::Adopt { link, as_link } => {
+                    self.peers[at].retain(|(held, _)| *held != as_link);
+                    for (held, _) in &mut self.peers[at] {
+                        if *held == link {
+                            *held = as_link;
+                        }
+                    }
+                    for held in &mut self.links {
+                        if *held == link {
+                            *held = as_link;
+                        }
+                    }
+                    continue;
+                }
                 other => panic!("an unexpected output: {other:?}"),
             };
             let Some(peer) = self.peers[at].iter().find(|(l, _)| *l == link) else {
@@ -355,10 +373,70 @@ impl Network {
         for state in self.stored[client].rendezvous.values() {
             node.restore_rendezvous_queue(state).unwrap();
         }
-        node.connected(&mut Rng(300 + u64::from(seed))).unwrap();
+        // A session identifier comes from the CSPRNG (`WIR-136`), thus each
+        // run takes a new one. The ingress relay parked the session of the
+        // run before, and it refuses a second open of that identifier
+        // (`WIR-233`).
+        let run = old_link / 100;
+        node.connected(&mut Rng(300 + u64::from(seed) + run * 1_000))
+            .unwrap();
         self.clients[client] = node;
         self.links[client] = old_link + 100;
         self.peers[0].push((self.links[client], Peer::Client(client)));
+    }
+
+    /// Ends the run of a client with a pause of its session (`WIR-539`):
+    /// the guard answers, the connection closes, and the result is the
+    /// parked session.
+    fn pause(&mut self, client: usize) -> ParkedSession {
+        self.commit(client);
+        self.clients[client].pause().unwrap();
+        let link = self.links[client];
+        for capsule in self.clients[client].take_capsules() {
+            let outputs = self.relays[0].on_capsule(link, &capsule, self.now, &mut self.rng);
+            self.route(0, outputs);
+        }
+        self.flush_delayed();
+        while let Some(capsule) = self.inboxes[client].pop_front() {
+            let events = self.clients[client]
+                .on_capsule(&capsule, self.now, &mut self.rng)
+                .unwrap();
+            self.events[client].extend(events);
+        }
+        self.commit(client);
+        assert!(self.clients[client].is_paused());
+        let parked = self.clients[client].park(self.now).unwrap();
+        let closed = self.relays[0].link_closed(link, self.now);
+        assert!(closed.is_empty());
+        self.peers[0].retain(|(held, _)| *held != link);
+        parked
+    }
+
+    /// Starts a new run of a client from its store on a new connection,
+    /// with the session that the run before parked. The result says
+    /// whether the node resumed that session.
+    fn resume(&mut self, client: usize, seed: u8, parked: ParkedSession) -> bool {
+        let mut node = ClientNode::new(
+            [relay_static(1).0, relay_static(2).0, relay_static(3).0],
+            RootIdentity::new(Secret::new([seed; 32])),
+        );
+        for state in self.stored[client].contacts.values() {
+            node.restore_contact(state).unwrap();
+        }
+        for state in self.stored[client].invitations.values() {
+            node.restore_invitation(state).unwrap();
+        }
+        for state in self.stored[client].rendezvous.values() {
+            node.restore_rendezvous_queue(state).unwrap();
+        }
+        let resumed = node
+            .resumed(parked, self.now, &mut Rng(500 + self.now))
+            .unwrap();
+        self.inboxes[client].clear();
+        self.clients[client] = node;
+        self.links[client] += 100;
+        self.peers[0].push((self.links[client], Peer::Client(client)));
+        resumed
     }
 
     /// Connects one more client to the guard, and returns its index.
@@ -1025,7 +1103,7 @@ fn a_queue_takes_its_binding_and_a_live_arrival_wakes_nobody() {
 }
 
 #[test]
-fn a_lost_link_ends_the_circuit_at_each_hop_and_the_next_arrival_is_pushed() {
+fn a_lost_client_link_parks_its_circuits_and_the_next_arrival_is_pushed() {
     use umbra_core::notify::{binding::Binding, blob::Receiver};
     use umbra_crypto::kem::PublicKey;
     use umbra_wire::ndr::NdrRequest;
@@ -1059,8 +1137,10 @@ fn a_lost_link_ends_the_circuit_at_each_hop_and_the_next_arrival_is_pushed() {
         .unwrap();
     network.settle();
 
-    // NET-322: the link of Alice at the guard closes, and each relay of her
-    // chain ends its part of the circuit. The exit drops her subscription.
+    // WIR-542, WIR-546: the link of Alice at the guard closes with no
+    // `SessionClose`, thus the guard parks her session and each relay of
+    // her chain takes a `CircuitPause`. The exit ends her subscription, and
+    // the pacing clock of her circuit stops.
     let exits = network.relays[2].paced_circuits().count();
     let now = network.now;
     let closed = network.relays[0].link_closed(network.links[0], now);
@@ -1963,4 +2043,390 @@ fn a_relay_under_load_makes_a_queue_for_a_cross_relay_token_once() {
             reason: Reject::Admission,
         }]
     );
+}
+
+/// The paced circuits of the queue relay.
+fn paced(network: &Network) -> BTreeSet<CircuitKey> {
+    network.relays[2].paced_circuits().copied().collect()
+}
+
+/// The circuits that each relay holds.
+fn held(network: &Network) -> [usize; 3] {
+    [0, 1, 2].map(|relay| network.relays[relay].circuits_held())
+}
+
+/// Binds the first inbound queue of a client, thus a record that no
+/// subscription takes gives a push.
+fn bind_first_queue(network: &mut Network, client: usize) {
+    use umbra_core::notify::binding::Binding;
+    use umbra_crypto::kem::PublicKey;
+    let (queue, _) = network.clients[client].inbound_queues()[0];
+    network.clients[client]
+        .notify_queue(&queue, &mut Rng(5))
+        .unwrap();
+    network.settle();
+    let events = network.take_events(client);
+    let [ClientEvent::NotifyKey { relay_ntf_pk, .. }] = &events[..] else {
+        panic!("{events:?}");
+    };
+    let binding = Binding {
+        root: Secret::new([0x41; 32]),
+        handle: [0x42; 16],
+        k_tok: Secret::new([0x43; 32]),
+        queue_alias: [0x44; 16],
+        relay_idx: 2,
+    };
+    let sealed = binding
+        .seal(
+            &PublicKey::from_bytes(relay_ntf_pk).unwrap(),
+            &queue,
+            &mut Rng(6),
+        )
+        .unwrap();
+    network.clients[client]
+        .bind_queue(&queue, &sealed, &mut Rng(7))
+        .unwrap();
+    network.settle();
+}
+
+fn bodies(events: &[ClientEvent]) -> Vec<Vec<u8>> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            ClientEvent::Message { app, .. } => Some(
+                AppMessage::parse(app, Channel::Pairwise)
+                    .unwrap()
+                    .body
+                    .to_vec(),
+            ),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_paused_session_resumes_on_a_new_link_and_its_circuits_carry_on() {
+    const ALICE: usize = 0;
+    const BOB: usize = 1;
+    let mut network = Network::new();
+    let (alice_contact, bob_contact) = contacts(&mut network);
+    bind_first_queue(&mut network, ALICE);
+    let circuits = held(&network);
+    let clocks = paced(&network);
+    let first_link = network.links[ALICE];
+
+    // WIR-539, WIR-541: Alice pauses her session, and the guard parks it.
+    // Each relay keeps each circuit.
+    let parked = network.pause(ALICE);
+    assert!(parked.is_clean());
+    assert_eq!(network.relays[0].sessions_parked(), 1);
+    assert_eq!(held(&network), circuits);
+    // WIR-546: the pacing clock of each circuit of Alice stops.
+    let stopped: Vec<CircuitKey> = clocks.difference(&paced(&network)).copied().collect();
+    assert_eq!(stopped.len(), parked.circuits());
+    for circuit in &stopped {
+        let now = network.now;
+        let outputs = network.relays[2].pacing_tick(circuit, now, &mut Rng(9));
+        assert!(outputs.is_empty());
+    }
+
+    // WIR-546, NET-322: the subscription of Alice ended with the pause.
+    // Thus a record that arrives for her paused circuit takes its push.
+    let now = network.now;
+    network.clients[BOB]
+        .send(
+            &bob_contact,
+            &text(1, "while she is away"),
+            now,
+            &mut Rng(8),
+        )
+        .unwrap();
+    network.settle();
+    assert_eq!(network.pushes.len(), 1);
+    assert_eq!(held(&network), circuits);
+    assert_eq!(paced(&network).len(), clocks.len() - stopped.len());
+
+    // WIR-361, WIR-241: the next run resumes on a new connection, which
+    // takes the place of the first one. No relay builds a circuit, and the
+    // record comes on the circuit that Alice held before.
+    assert!(network.resume(ALICE, 0x40, parked));
+    assert!(!network.clients[ALICE].is_ready());
+    network.settle();
+    assert_eq!(network.links[ALICE], first_link);
+    assert_eq!(network.relays[0].sessions_parked(), 0);
+    assert_eq!(held(&network), circuits);
+    assert_eq!(paced(&network), clocks);
+    let events = network.take_events(ALICE);
+    assert_eq!(events.first(), Some(&ClientEvent::CircuitReady));
+    assert!(!events.contains(&ClientEvent::CircuitLost));
+    assert_eq!(bodies(&events), [b"while she is away".to_vec()]);
+
+    // A cell flows on the old circuit in each direction after the resume.
+    let now = network.now;
+    network.clients[ALICE]
+        .send(&alice_contact, &text(2, "back again"), now, &mut Rng(10))
+        .unwrap();
+    network.clients[BOB]
+        .send(&bob_contact, &text(3, "welcome"), now, &mut Rng(11))
+        .unwrap();
+    network.settle();
+    assert_eq!(bodies(&network.take_events(BOB)), [b"back again".to_vec()]);
+    assert_eq!(bodies(&network.take_events(ALICE)), [b"welcome".to_vec()]);
+    assert_eq!(held(&network), circuits);
+    // Her subscription takes the record, thus no second push goes.
+    assert_eq!(network.pushes.len(), 1);
+
+    // WIR-234, WIR-235: a second pause and a second resume of the session.
+    let parked = network.pause(ALICE);
+    assert!(network.resume(ALICE, 0x40, parked));
+    network.settle();
+    assert_eq!(held(&network), circuits);
+    assert!(network
+        .take_events(ALICE)
+        .contains(&ClientEvent::CircuitReady));
+}
+
+#[test]
+fn a_resume_with_a_lost_frame_closes_and_the_relay_discards_the_session() {
+    const ALICE: usize = 0;
+    const BOB: usize = 1;
+    let mut network = Network::new();
+    let (alice_contact, bob_contact) = contacts(&mut network);
+    let circuits = held(&network);
+
+    // A frame of Alice is lost with her connection: the client counts it,
+    // and the relay did not take it.
+    let now = network.now;
+    network.clients[ALICE]
+        .send(&alice_contact, &text(1, "lost"), now, &mut Rng(8))
+        .unwrap();
+    network.commit(ALICE);
+    assert!(!network.clients[ALICE].take_capsules().is_empty());
+    let parked = network.clients[ALICE].park(now).unwrap();
+    assert!(!parked.is_clean());
+    // WIR-542: the link closes with no `SessionClose`, and the guard parks
+    // the session with its circuits.
+    let link = network.links[ALICE];
+    let closed = network.relays[0].link_closed(link, now);
+    network.route(0, closed);
+    network.peers[0].retain(|(held, _)| *held != link);
+    assert_eq!(network.relays[0].sessions_parked(), 1);
+    assert_eq!(held(&network), circuits);
+
+    // WIR-544: the two counts of the resume differ from the counts of the
+    // relay. The new connection closes with no cause, and the relay ends
+    // each circuit of the session at each hop.
+    assert!(network.resume(ALICE, 0x40, parked));
+    let new_link = network.links[ALICE];
+    let capsules = network.clients[ALICE].take_capsules();
+    let outputs = network.relays[0].on_capsule(new_link, &capsules[0], now, &mut Rng(9));
+    assert!(outputs.contains(&Output::Close { link: new_link }));
+    assert!(!outputs
+        .iter()
+        .any(|output| matches!(output, Output::Adopt { .. })));
+    network.route(0, outputs);
+    assert_eq!(network.relays[0].sessions_parked(), 0);
+    let left = held(&network);
+    assert!(left.iter().zip(circuits).all(|(now, before)| *now < before));
+    assert_eq!(left[0], left[2]);
+
+    // WIR-547: the client drops the session, and it opens a new one with
+    // new circuits. The session of the same identifier opens no more.
+    assert!(network.clients[ALICE].is_resuming());
+    network.clients[ALICE].resume_failed();
+    network.clients[ALICE].connected(&mut Rng(77)).unwrap();
+    network.settle();
+    assert!(network
+        .take_events(ALICE)
+        .contains(&ClientEvent::CircuitReady));
+    assert_eq!(held(&network), circuits);
+    let now = network.now;
+    network.clients[BOB]
+        .send(&bob_contact, &text(2, "still here"), now, &mut Rng(10))
+        .unwrap();
+    network.settle();
+    assert_eq!(
+        bodies(&network.take_events(ALICE)),
+        [b"still here".to_vec()]
+    );
+}
+
+#[test]
+fn a_resume_that_does_not_verify_leaves_the_parked_session() {
+    const ALICE: usize = 0;
+    let mut network = Network::new();
+    contacts(&mut network);
+    let circuits = held(&network);
+    let parked = network.pause(ALICE);
+
+    // WIR-237, WIR-239: a party that knows the session identifier and not
+    // the secret closes its own connection alone.
+    // The random source of the first run of Alice gives her session
+    // identifier again.
+    let mut probe = ClientNode::new(
+        [relay_static(1).0, relay_static(2).0, relay_static(3).0],
+        RootIdentity::new(Secret::new([0x66; 32])),
+    );
+    probe.connected(&mut Rng(100)).unwrap();
+    let open = probe.take_capsules().remove(0);
+    let session_id: [u8; 8] = open[7..15].try_into().unwrap();
+    let forged =
+        umbra_wire::session::SessionControl::resume(&Secret::new([0x99; 32]), session_id, 1, 0, 0);
+    let mut record = [0u8; 37];
+    forged.encode(&mut record).unwrap();
+    let mut capsule = vec![0u8; 43];
+    umbra_wire::capsule::encode(
+        umbra_wire::capsule::CapsuleType::Session,
+        &record,
+        &mut capsule,
+    )
+    .unwrap();
+    let now = network.now;
+    let outputs = network.relays[0].on_capsule(7_000, &capsule, now, &mut Rng(9));
+    assert_eq!(outputs, [Output::Close { link: 7_000 }]);
+    assert_eq!(network.relays[0].sessions_parked(), 1);
+    assert_eq!(held(&network), circuits);
+
+    // The session still takes the resume of its client.
+    assert!(network.resume(ALICE, 0x40, parked));
+    network.settle();
+    assert_eq!(network.relays[0].sessions_parked(), 0);
+    assert!(network
+        .take_events(ALICE)
+        .contains(&ClientEvent::CircuitReady));
+}
+
+#[test]
+fn a_parked_session_ends_at_its_window() {
+    use umbra_transport::link::RESUME_WINDOW;
+    const ALICE: usize = 0;
+    let mut network = Network::new();
+    contacts(&mut network);
+    let circuits = held(&network);
+    let parked = network.pause(ALICE);
+    let paused_at = network.now;
+
+    // NET-335: a parked link holds no connection, and it is not idle.
+    let now = paused_at + 3_600;
+    let swept = network.relays[0].sweep(now, &mut Rng(9));
+    network.route(0, swept);
+    assert_eq!(network.relays[0].sessions_parked(), 1);
+    assert_eq!(held(&network), circuits);
+
+    // WIR-244: the window ends, and the relay closes the session as it
+    // closes a link: each circuit of it ends at each hop.
+    network.now = paused_at + RESUME_WINDOW;
+    let now = network.now;
+    let swept = network.relays[0].sweep(now, &mut Rng(9));
+    network.route(0, swept);
+    assert_eq!(network.relays[0].sessions_parked(), 0);
+    assert!(held(&network)
+        .iter()
+        .zip(circuits)
+        .all(|(now, before)| *now < before));
+
+    // WIR-245: the client opens a new session after its own window.
+    assert!(!network.resume(ALICE, 0x40, parked));
+    assert!(!network.clients[ALICE].is_resuming());
+}
+
+#[test]
+fn a_backward_cell_for_a_parked_link_ends_its_circuit_alone() {
+    const ALICE: usize = 0;
+    let mut network = Network::new();
+    contacts(&mut network);
+    // More queues than one circuit serves give Alice a second circuit.
+    for n in 0..10u64 {
+        network.clients[ALICE].invite(&mut Rng(40 + n)).unwrap();
+    }
+    network.settle();
+    network.settle();
+    network.take_events(ALICE);
+    let circuits = held(&network);
+
+    // A pause and a resume show which circuits of the queue relay are the
+    // circuits of Alice.
+    let clocks = paced(&network);
+    let parked = network.pause(ALICE);
+    let of_alice: Vec<CircuitKey> = clocks.difference(&paced(&network)).copied().collect();
+    assert_eq!(of_alice.len(), 2);
+    assert!(network.resume(ALICE, 0x40, parked));
+    network.settle();
+    network.take_events(ALICE);
+    assert_eq!(paced(&network), clocks);
+
+    // A cell of one of the two circuits is on its way when the session
+    // parks. WIR-543: the guard cannot send it, thus that circuit ends at
+    // each hop, and the other circuit stays.
+    let now = network.now;
+    let late = network.relays[2].pacing_tick(&of_alice[0], now, &mut Rng(9));
+    assert!(!late.is_empty());
+    let parked = network.pause(ALICE);
+    network.route(2, late);
+    assert_eq!(network.relays[0].sessions_parked(), 1);
+    assert_eq!(held(&network), circuits.map(|count| count - 1));
+
+    // The client learns of the lost circuit after the resume, with a
+    // `CircuitDestroy`. The other circuit serves, and the lost one builds
+    // again inside the run.
+    assert!(network.resume(ALICE, 0x40, parked));
+    let new_link = network.links[ALICE];
+    let now = network.now;
+    let capsules = network.clients[ALICE].take_capsules();
+    let outputs = network.relays[0].on_capsule(new_link, &capsules[0], now, &mut Rng(9));
+    let destroys = outputs
+        .iter()
+        .filter(|output| matches!(output, Output::Send { .. }))
+        .count();
+    assert!(matches!(outputs.first(), Some(Output::Adopt { .. })));
+    assert_eq!(destroys, 1);
+    network.route(0, outputs);
+    let link = network.links[ALICE];
+    for capsule in &capsules[1..] {
+        let outputs = network.relays[0].on_capsule(link, capsule, now, &mut Rng(9));
+        network.route(0, outputs);
+    }
+    network.step();
+    assert_eq!(held(&network), circuits.map(|count| count - 1));
+    network.settle();
+    let events = network.take_events(ALICE);
+    assert!(events.contains(&ClientEvent::CircuitReady));
+    assert!(!events.contains(&ClientEvent::CircuitLost));
+    assert_eq!(held(&network), circuits);
+    assert_eq!(paced(&network).len(), clocks.len());
+}
+
+#[test]
+fn a_circuit_pause_waits_behind_the_forward_cells_of_its_circuit() {
+    const ALICE: usize = 0;
+    const BOB: usize = 1;
+    let mut network = Network::new();
+    let (alice_contact, _) = contacts(&mut network);
+    let clocks = paced(&network);
+
+    // A record of Alice leaves, and her pause follows it at once. Part 3
+    // §3.9: each hop holds a forward cell for the delay of its circuit,
+    // thus the record waits at the guard.
+    let now = network.now;
+    network.clients[ALICE]
+        .send(&alice_contact, &text(1, "then away"), now, &mut Rng(8))
+        .unwrap();
+    network.commit(ALICE);
+    network.clients[ALICE].pause().unwrap();
+    let link = network.links[ALICE];
+    for capsule in network.clients[ALICE].take_capsules() {
+        let outputs = network.relays[0].on_capsule(link, &capsule, now, &mut Rng(9));
+        network.route(0, outputs);
+    }
+    assert!(network.relays[0].has_delayed());
+    // WIR-545: the `CircuitPause` goes behind the record at each hop. The
+    // record thus starts no pacing clock after the pause.
+    assert_eq!(paced(&network), clocks);
+    network.flush_delayed();
+    let left = paced(&network).len();
+    assert!(left < clocks.len());
+    network.settle();
+    assert_eq!(bodies(&network.take_events(BOB)), [b"then away".to_vec()]);
+    assert_eq!(paced(&network).len(), left);
+    assert_eq!(network.relays[0].sessions_parked(), 1);
 }

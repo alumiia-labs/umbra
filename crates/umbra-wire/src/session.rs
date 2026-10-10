@@ -1,8 +1,9 @@
 //! The session frame (L2) and the session control records of Part 6 §6.2.2
 //! and §6.2.3.
 //!
-//! The frame is not a reliability layer. It carries the resend marker that
-//! lets a relay drop a duplicate without a decryption of the cell.
+//! The frame is not a reliability layer. It gives each direction of a
+//! session one count, and the two ends of a resume compare those counts:
+//! a resume holds only when no frame is lost.
 
 use umbra_crypto::{auth, secret::Secret};
 
@@ -14,8 +15,8 @@ use crate::{
 
 /// The frame overhead: `session_id`, `seq`, and `flags`.
 pub const SESSION_FRAME_OVERHEAD: usize = 12;
-/// The lengths of the four control records, by op.
-pub const CONTROL_LENS: [usize; 4] = [41, 29, 9, 17];
+/// The lengths of the control records, by op from `0x01` to `0x07`.
+pub const CONTROL_LENS: [usize; 7] = [41, 37, 9, 17, 9, 9, 17];
 /// The highest `seq` a frame carries.
 pub const SEQ_MAX: u32 = 0x00FF_FFFF;
 
@@ -25,7 +26,7 @@ pub struct SessionFrame<'a> {
     pub session_id: [u8; 8],
     /// The frame index in this session.
     pub seq: u32,
-    /// Bit 0 of `flags`: this frame is a resend.
+    /// Bit 0 of `flags`, which v1 reserves and sends as zero (`WIR-140`).
     pub resend: bool,
     /// The cell, of one bucket.
     pub cell: &'a [u8],
@@ -76,12 +77,16 @@ pub enum SessionControl {
         /// The secret that authenticates each later resume.
         session_secret: Secret<32>,
     },
-    /// Op `0x02`, 29 bytes.
+    /// Op `0x02`, 37 bytes.
     Resume {
         /// The session to bind to this connection.
         session_id: [u8; 8],
         /// 1 at the first resume, then increasing.
         resume_count: u32,
+        /// The next frame sequence of the client.
+        sent: u32,
+        /// The count of the relay frames that the client accepted.
+        received: u32,
         /// The authenticator of §6.2.3.
         auth: [u8; auth::RESUME_AUTH_LEN],
     },
@@ -96,15 +101,47 @@ pub enum SessionControl {
         /// The circuit on this link.
         circ_id: [u8; 16],
     },
+    /// Op `0x05`, 9 bytes: the client sends no further frame on this
+    /// connection, and the relay parks the session.
+    Pause {
+        /// The session that pauses.
+        session_id: [u8; 8],
+    },
+    /// Op `0x06`, 9 bytes: the relay parked the session, and it sends no
+    /// further frame on this connection.
+    Paused {
+        /// The session that the relay parked.
+        session_id: [u8; 8],
+    },
+    /// Op `0x07`, 17 bytes: the client of the circuit of this `circ_id` on
+    /// this link reads no cell until it resumes its session.
+    CircuitPause {
+        /// The circuit on this link.
+        circ_id: [u8; 16],
+    },
 }
 
 impl SessionControl {
     /// A resume with its `auth` computed from the session secret.
-    pub fn resume(session_secret: &Secret<32>, session_id: [u8; 8], resume_count: u32) -> Self {
+    pub fn resume(
+        session_secret: &Secret<32>,
+        session_id: [u8; 8],
+        resume_count: u32,
+        sent: u32,
+        received: u32,
+    ) -> Self {
         SessionControl::Resume {
             session_id,
             resume_count,
-            auth: auth::session_resume_auth(session_secret, &session_id, resume_count),
+            sent,
+            received,
+            auth: auth::session_resume_auth(
+                session_secret,
+                &session_id,
+                resume_count,
+                sent,
+                received,
+            ),
         }
     }
 
@@ -123,11 +160,15 @@ impl SessionControl {
             SessionControl::Resume {
                 session_id,
                 resume_count,
+                sent,
+                received,
                 auth,
             } => {
                 w.u8(0x02)?;
                 w.put(session_id)?;
                 w.u32(*resume_count)?;
+                w.u32(*sent)?;
+                w.u32(*received)?;
                 w.put(auth)?;
             }
             SessionControl::Close { session_id } => {
@@ -136,6 +177,18 @@ impl SessionControl {
             }
             SessionControl::Destroy { circ_id } => {
                 w.u8(0x04)?;
+                w.put(circ_id)?;
+            }
+            SessionControl::Pause { session_id } => {
+                w.u8(0x05)?;
+                w.put(session_id)?;
+            }
+            SessionControl::Paused { session_id } => {
+                w.u8(0x06)?;
+                w.put(session_id)?;
+            }
+            SessionControl::CircuitPause { circ_id } => {
+                w.u8(0x07)?;
                 w.put(circ_id)?;
             }
         }
@@ -153,12 +206,23 @@ impl SessionControl {
             0x02 => SessionControl::Resume {
                 session_id: r.array()?,
                 resume_count: r.u32()?,
+                sent: r.u32()?,
+                received: r.u32()?,
                 auth: r.array()?,
             },
             0x03 => SessionControl::Close {
                 session_id: r.array()?,
             },
             0x04 => SessionControl::Destroy {
+                circ_id: r.array()?,
+            },
+            0x05 => SessionControl::Pause {
+                session_id: r.array()?,
+            },
+            0x06 => SessionControl::Paused {
+                session_id: r.array()?,
+            },
+            0x07 => SessionControl::CircuitPause {
                 circ_id: r.array()?,
             },
             _ => return Err(Error::Malformed),
@@ -168,21 +232,31 @@ impl SessionControl {
     }
 
     /// Verifies a resume against the secret and the last accepted count
-    /// (`WIR-237`, `WIR-238`).
+    /// (`WIR-237`, `WIR-238`). The result is the count and the two frame
+    /// counts of the record, which the caller compares with its own.
     pub fn verify_resume(
         &self,
         session_secret: &Secret<32>,
         expected_id: &[u8; 8],
         last_accepted: u32,
-    ) -> Result<u32, Error> {
+    ) -> Result<(u32, u32, u32), Error> {
         match self {
             SessionControl::Resume {
                 session_id,
                 resume_count,
+                sent,
+                received,
                 auth: given,
             } if session_id == expected_id && *resume_count > last_accepted => {
-                auth::verify_session_resume(session_secret, session_id, *resume_count, given)?;
-                Ok(*resume_count)
+                auth::verify_session_resume(
+                    session_secret,
+                    session_id,
+                    *resume_count,
+                    *sent,
+                    *received,
+                    given,
+                )?;
+                Ok((*resume_count, *sent, *received))
             }
             _ => Err(Error::Malformed),
         }
@@ -234,16 +308,22 @@ mod tests {
         assert!(SessionControl::parse(&buf).is_ok());
         assert!(SessionControl::parse(&buf[..40]).is_err());
 
-        let resume = SessionControl::resume(&secret, id, 1);
+        let resume = SessionControl::resume(&secret, id, 1, 5, 6);
         let n = resume.encode(&mut buf).unwrap();
-        assert_eq!(n, 29);
-        let parsed = SessionControl::parse(&buf[..29]).unwrap();
-        assert_eq!(parsed.verify_resume(&secret, &id, 0).unwrap(), 1);
+        assert_eq!(n, 37);
+        let parsed = SessionControl::parse(&buf[..37]).unwrap();
+        assert_eq!(parsed.verify_resume(&secret, &id, 0).unwrap(), (1, 5, 6));
         // A repeated count and a changed auth bit both fail (WIR-297).
         assert!(parsed.verify_resume(&secret, &id, 1).is_err());
-        buf[28] ^= 1;
-        let bad = SessionControl::parse(&buf[..29]).unwrap();
+        buf[36] ^= 1;
+        let bad = SessionControl::parse(&buf[..37]).unwrap();
         assert!(bad.verify_resume(&secret, &id, 0).is_err());
+        // The `auth` covers the two frame counts.
+        buf[36] ^= 1;
+        buf[16] ^= 1;
+        let moved = SessionControl::parse(&buf[..37]).unwrap();
+        assert!(moved.verify_resume(&secret, &id, 0).is_err());
+        assert!(SessionControl::parse(&buf[..29]).is_err());
 
         let close = SessionControl::Close { session_id: id };
         assert_eq!(close.encode(&mut buf).unwrap(), 9);
@@ -251,5 +331,38 @@ mod tests {
         assert!(SessionControl::parse(&buf[..10]).is_err());
         buf[0] = 0x04;
         assert!(SessionControl::parse(&buf[..9]).is_err());
+    }
+
+    #[test]
+    fn the_pause_records_hold_their_ops_and_their_lengths() {
+        let mut buf = [0u8; 17];
+        let pause = SessionControl::Pause { session_id: [4; 8] };
+        assert_eq!(pause.encode(&mut buf).unwrap(), 9);
+        assert_eq!(buf[0], 0x05);
+        assert!(matches!(
+            SessionControl::parse(&buf[..9]),
+            Ok(SessionControl::Pause { session_id }) if session_id == [4; 8]
+        ));
+        assert!(SessionControl::parse(&buf[..17]).is_err());
+
+        let paused = SessionControl::Paused { session_id: [5; 8] };
+        assert_eq!(paused.encode(&mut buf).unwrap(), 9);
+        assert_eq!(buf[0], 0x06);
+        assert!(matches!(
+            SessionControl::parse(&buf[..9]),
+            Ok(SessionControl::Paused { session_id }) if session_id == [5; 8]
+        ));
+        assert!(SessionControl::parse(&buf[..8]).is_err());
+
+        let circuit = SessionControl::CircuitPause { circ_id: [6; 16] };
+        assert_eq!(circuit.encode(&mut buf).unwrap(), 17);
+        assert_eq!(buf[0], 0x07);
+        assert!(matches!(
+            SessionControl::parse(&buf),
+            Ok(SessionControl::CircuitPause { circ_id }) if circ_id == [6; 16]
+        ));
+        assert!(SessionControl::parse(&buf[..9]).is_err());
+        buf[0] = 0x08;
+        assert!(SessionControl::parse(&buf).is_err());
     }
 }

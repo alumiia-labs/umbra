@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 2: Threat Model and Security Goals
 
 **Status:** Draft
-**Version:** 0.12.0
+**Version:** 0.13.0
 **Date:** 2026-10-09
 
 ---
@@ -244,7 +244,7 @@ implementation to them in the same manner.
 | U1 | **Time to first message** — from the first launch to the first message that a relay accepts, on a mid-tier Android device on 4G. The channel comes from an invitation that the same session scanned | p50 ≤ 90 s, p95 ≤ 180 s, ≤ 6 taps, and **no security decision before the inbox is reachable**. No account screen, no phone number, no email address, and no server picker. |
 | U2 | Message delivery latency, Balanced mode, the two parties online, and the sender holds the ratchet ownership of Part 7 §7.5.4 | **p50 ≤ 2.0 s, p95 ≤ 4.5 s.** Part 3 §3.12 models 1.6 s and 3.9 s against a measured propagation budget, thus the margin is 0.4 s and 0.6 s. **A send from a device that does not own the ratchet** adds the wake latency of the owner device (Part 8 §8.3). The target for that path is p50 ≤ 6 s and p95 ≤ 20 s in Instant mode, **while the owner device is unlocked**. A locked owner sends nothing, and the note below gives that case, which has no target |
 | U3 | **Notification latency, Instant notifications and Balanced mode** — from the moment the sender taps send to the moment a locked and idle device shows the notification | p50 ≤ 3 s, p95 ≤ 15 s, p99 ≤ 60 s. **Hard invariant:** no message stays invisible for more than 15 min while the device has network. The device of this row is locked by the platform, and the client on it is unlocked or holds the wake table of Part 8 rule `NTF-135`. **Private notifications:** the fixed cadence of Part 8 §8.3 gives the latency while the client is unlocked. That latency is 20 min at the 20 min cadence and 30 min at the 30 min cadence, and more when the platform defers the timer. A locked client in Private mode shows nothing until the unlock |
-| U4 | Idle background data consumption, Balanced mode with Instant notifications, on the model day of Part 3 §3.12 | ≤ 100 MB/month. Part 3 §3.12 models 77.99 MB with the session resume of Part 6 §6.2.3. v1 defers the resume, and the note below gives what follows |
+| U4 | Idle background data consumption, Balanced mode with Instant notifications, on the model day of Part 3 §3.12 | ≤ 100 MB/month. Part 3 §3.12 models 77.99 MB with the session resume of Part 6 §6.2.3, and the note below gives the condition |
 | U4b | Idle background data consumption, Balanced mode with Private notifications | **No target in v1.** Part 3 §3.12 models 149.22 MB at the 30 min cadence and 196.68 MB at the 20 min cadence of Part 8 §8.3. That section states the cause |
 | U5 | Idle battery, Instant notifications on, application in the background | **Two terms.** With no background arrival, ≤ 2 % of a 4000 mAh battery in 24 h (≈ 80 mAh/day). The measured 1 % of Signal over 18 h 59 min is about 1.3 % in 24 h. Thus this target is about 1.6 times that figure. For each background arrival, ≤ 10 mWh. Part 3 §3.12 models 0 % and 9.1 mWh, which is 10.9 % on its model day of 184 arrivals. **Conformance test: a 24 h idle run with no arrival, and a run with a scripted arrival count, each on stock Android *and* on GrapheneOS.** |
 | U6 | Delivery reliability, the recipient returns in the retention window | ≥ 99.9 % delivered in 60 s after the recipient comes online. **No message is permanently undeliverable** in the window. The window of a message is `MSG_TTL`. The file of an attachment has a shorter window, `CHUNK_TTL` of Part 12 §12.7.1, and the trade table gives that row |
@@ -288,14 +288,15 @@ implementation to them in the same manner.
 > Part 3 §3.2.5 gives each queue relay its own session. The idle background
 > is 77.99 MB each month, and the U4 target is 100 MB.
 >
-> **U4 rests on the session resume, and v1 defers it.** Part 3
-> §3.8 defers the resume of Part 6 §6.2.3, thus a circuit of a v1 client
-> ends with its connection. A client that closes its connection after each
-> wake then pays a circuit build for each session of each wake. Part 3
-> §3.12 puts that client at about 183 MB each month. A client that holds
-> one connection open pays no such build. Thus v1 does not show U4 for each
-> client. The test of §2.4.1 measures the figure that a build reaches. The
-> resume returns before a version claims U4 without that condition.
+> **U4 rests on the session resume.** A client pauses its session at the end
+> of each wake, and it resumes that session at the next wake (Part 6
+> §6.2.3). A circuit thus lives from one wake to the next. A resume sends no
+> frame again. Thus a connection that drops with a frame in flight loses its
+> session, and so does a client process that ends and a relay that starts
+> again. The next wake then pays a circuit build for each session, which
+> Part 3 §3.12 prices at 12 576 bytes. A client that paid a build at each
+> session of each wake would use about 183 MB each month. The test of
+> §2.4.1 measures the figure that a build reaches.
 >
 > **U2 and U3 with a locked client.** Part 14 rule `IMP-119` locks the client
 > after 15 minutes with no action of the user, and a locked client holds no
@@ -371,7 +372,7 @@ adds a trade MUST add a row to this table.
 | The client locks after 15 minutes and a locked client holds no key. Thus a locked owner device sends nothing for a linked device, reads no queue, and carries no sync record, until the unlock. v1 builds no ownership claim, thus the unlock is the one bound | Part 7 §7.5.4, Part 8 §8.4.1, Part 14 §14.6.4 |
 | A provisional network runs on the relays of one operator. A client then builds a chain of one operator, and that operator joins the address of the client to its queues. Thus G6, G7 and G8 do not hold against that operator until the directory reaches the authority floor | Part 3 §3.4.6 |
 | The file of an attachment lives `CHUNK_TTL` of 14 days at a relay, and a message lives `MSG_TTL` of 45 days. Thus a recipient that returns after 14 days gets the message and not its file, and the uploader pays less storage | Part 12 §12.7.1 |
-| v1 ships the session without its resume and TLS over TCP alone. Thus a lost connection costs each circuit again, and U4 holds only for a client that keeps its connection. Thus a network with no TCP/443 carries no client | Part 3 §3.8, Part 3 §3.12 |
+| A resume sends no frame again, thus a connection that drops with a frame in flight costs each circuit of its session again. v1 ships TLS over TCP alone, thus a network with no TCP/443 carries no client | Part 3 §3.8, Part 3 §3.12, Part 6 §6.2.3 |
 | The U2 p50 target is 2.0 s, because Part 3 §3.12 models 1.6 s against a measured propagation budget and `PACING_MEAN` holds at 1 s | Part 3 §3.12 |
 | A link preview is a statement by the sender, because the receiver MUST NOT fetch the URL | Part 3 §3.3.2 |
 | A disappearing message does not enter a backup, thus a restore does not recover it | Part 4 §4.7.2 |

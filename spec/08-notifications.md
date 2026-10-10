@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 8: Notifications and Mobile Delivery
 
 **Status:** Draft
-**Version:** 0.12.0
+**Version:** 0.13.0
 **Date:** 2026-10-09
 
 ---
@@ -744,7 +744,7 @@ platform.
   `NTF-049` hands at the end of a window. The interval runs from that
   push. A re-push carries no `digest` flag. **[NTF-067]** A
   queue relay MUST NOT hand more than `REPUSH_MAX` re-pushes for one message.
-- **[NTF-068]** At each session open, and at each session resume in a revision that serves one, a client MUST
+- **[NTF-068]** At each session open, and at each session resume, a client MUST
   run the peek of Part 3 §3.7 item 4 on each queue of that session. Thus a
   push that expired at the provider loses no message.
 

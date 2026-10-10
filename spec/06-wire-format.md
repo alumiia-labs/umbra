@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 6: Wire Format and Encoding
 
 **Status:** Draft
-**Version:** 0.12.0
+**Version:** 0.13.0
 **Date:** 2026-10-09
 
 ---
@@ -83,7 +83,7 @@ intended incentive.
 │ L1  Transport          TLS 1.3 record or QUIC stream,        │
 │                        WebSocket frame, RFC 9297 capsule     │
 ├──────────────────────────────────────────────────────────────┤
-│ L2  Session frame      session id, sequence, resend window   │
+│ L2  Session frame      session id, sequence, frame count     │
 ├──────────────────────────────────────────────────────────────┤
 │ L3  Cell               fixed bucket: B0 512 / B1 2K / B2 8K  │
 │                        / B3 32K, post-onion padded           │
@@ -193,13 +193,14 @@ budget of this specification uses the TCP figure.
 ### 6.2.2 The session frame (L2)
 
 L2 sits between the capsule of L1 and the cell of L3. It carries one cell, and
-it gives the resend window of Part 3 §3.7 item 4 its cursor.
+it gives each direction of a session the frame count that a resume compares
+(§6.2.3).
 
 ```
 SessionFrame {
     session_id   [8]u8    // CSPRNG, one value for each session (§6.2.3)
     seq          [3]u8    // big-endian, the frame index in this session
-    flags        u8       // bit 0: this frame is a resend. bits 1-7: zero
+    flags        u8       // bit 0: reserved for a resend, zero in v1. bits 1-7: zero
     cell         [L]u8    // the L3 cell, 512 / 2048 / 8192 / 32768
 }
 ```
@@ -217,22 +218,20 @@ across two sessions to one relay.
 frames each cell that it sends with its own `seq`, and a client applies
 `WIR-141` to it.
 
-**[WIR-525]** In a version that serves the resume, a sender MUST keep the
-last `RESEND_WINDOW` frames of a session for a resume, 1 000 frames. In such
-a version, the sender MUST drop the oldest frame when a new frame comes to a
-full window. In each version,
-a sender MUST NOT refuse a frame for a full window. A frame that left the
-window is older than each frame in flight, and the end-to-end ARQ of Part 3
-§3.7 covers its record.
+**[WIR-525]** v1 keeps no resend window. A sender MUST NOT keep a frame of a
+session for a second transmission, and it MUST NOT refuse a frame for the
+count of the frames before it. A resume of §6.2.3 sends no frame again. A
+frame that is lost ends each circuit of its session under `WIR-544`, and the
+end-to-end ARQ of Part 3 §3.7 covers its record.
 
-v1 does not serve the resume (§6.2.3 and Part 3 §3.8). Thus a v1 client
-keeps no frame of a session. After a lost connection
-it opens a new session, and the ARQ of Part 3 §3.7 sends each record again.
-
-> *Cause of `WIR-525`.* No signal releases the window. A sender that refuses
-> a frame for a full window thus stops after the first 1 000 frames of one
-> session. An upload of 270 chunks crosses that bound and fails with no relay
-> at fault.
+> *Cause of `WIR-525`.* Each onion layer of Part 3 §3.4.5 chains on the cell
+> before it (`NET-116`), and the hop 3 layer updates its key at each cell.
+> A frame that goes a second time thus restores no circuit, unless each hop
+> also restores the state of its layer. A window also needs a signal that
+> releases it, and L2 has none. A sender that refuses a frame for a full
+> window of 1 000 frames stops after the first 1 000 frames of one session.
+> An upload of 270 chunks crosses that bound and fails with no relay at
+> fault.
 
 **[WIR-138]** A sender MUST increase `seq` by one for each frame, and it MUST
 start at zero. **[WIR-139]** A sender MUST close the session before `seq` wraps.
@@ -240,27 +239,28 @@ A `u24` gives 16 777 216 frames. A session between two relays carries many
 circuits, thus `CIRCUIT_MAX_CELLS` of Part 3 §3.4.3 does not bound it, and
 the sender closes the link at the last value and opens a new session.
 
-**[WIR-140]** A sender MUST set bit 0 of `flags` on a resend, and it MUST keep
-`seq` at the value of the first transmission. **[WIR-141]** A receiver MUST
+**[WIR-140]** A sender MUST send each frame one time, and it MUST set bit 0
+of `flags` to zero. **[WIR-141]** A receiver MUST
 ignore a frame whose `seq` it already accepted. **[WIR-142]** A receiver MUST
 reject a frame whose `flags` holds a non-zero value above bit 0.
 
-> *Cause.* Part 3 §3.7 item 4 gives the client an in-flight window of 1 000 and
-> one cursor for each queue, and neither value has a carrier below L5 without
-> this frame. The frame is **not** a reliability layer of its own. TLS and QUIC
+> *Cause.* The frame is **not** a reliability layer of its own. TLS and QUIC
 > give the ordering and the retransmission of L1, and the ARQ of Part 3 §3.7
-> gives the end-to-end recovery. This frame gives the resend marker that lets a
-> relay drop a duplicate without a decryption of the cell.
+> gives the end-to-end recovery. This frame gives each direction of a session
+> one count. With the two counts a relay sees at a resume that a frame is
+> lost, without a decryption of a cell, and it drops a frame that it accepted
+> before.
 >
 > `session_id` is not a client identifier. It lives for one session, which
 > §6.2.3 ends, and `NET-022` already caps a session at 8 queues.
 
-### 6.2.3 Session open, resume, and close
+### 6.2.3 Session open, pause, resume, and close
 
-Part 3 §3.8 makes the session independent of the connection. A connection drop
-rotates the connection, and the session continues. Three control records in an
-`UMBRA_SESSION` capsule give that behavior a wire form, and a fourth ends one
-circuit of the link (Part 3 rule `NET-322`).
+Part 3 §3.8 makes the session independent of the connection. A client that
+closes its connection keeps its session and each circuit of it, and it
+continues them on a new connection. Six control records in an `UMBRA_SESSION`
+capsule give that behavior a wire form, and a seventh ends one circuit of the
+link (Part 3 rule `NET-322`).
 
 ```
 SessionOpen {                     // op 0x01, 41 bytes
@@ -269,10 +269,12 @@ SessionOpen {                     // op 0x01, 41 bytes
     session_secret  [32]u8        // from the device CSPRNG
 }
 
-SessionResume {                   // op 0x02, 29 bytes
+SessionResume {                   // op 0x02, 37 bytes
     op              u8
     session_id      [8]u8
     resume_count    u32           // 1 at the first resume of the session
+    sent            u32           // the next `seq` of the client
+    received        u32           // the count of the relay frames that the client accepted
     auth            [16]u8
 }
 
@@ -286,28 +288,43 @@ CircuitDestroy {                  // op 0x04, 17 bytes
     circ_id         [16]u8        // the circuit on this link
 }
 
+SessionPause {                    // op 0x05, 9 bytes, client to ingress relay
+    op              u8
+    session_id      [8]u8
+}
+
+SessionPaused {                   // op 0x06, 9 bytes, ingress relay to client
+    op              u8
+    session_id      [8]u8
+}
+
+CircuitPause {                    // op 0x07, 17 bytes, relay to the next relay
+    op              u8
+    circ_id         [16]u8        // the circuit on this link
+}
+
 auth = HMAC-SHA3-256( session_secret,
-                      "umbra/v1/session-resume" || session_id || BE32(resume_count) )[0..16]
+                      "umbra/v1/session-resume" || session_id || BE32(resume_count)
+                      || BE32(sent) || BE32(received) )[0..16]
 ```
 
 | Parameter | Value |
 | --- | --- |
-| `SESSION_RESUME_WINDOW` | 4 hours. The relay measures it from the moment that it observes the close of the connection. The client measures it from the moment that it observes the same close |
+| `SESSION_RESUME_WINDOW` | 4 hours. The relay measures it from the moment that it parks the session: the `SessionPause`, or the close of the connection with no pause. The client measures it from the moment that it observes the close of the connection |
+| `SESSION_PAUSE_WAIT` | 2 s. The time that a client waits for the `SessionPaused` |
 
-**v1 does not serve the resume** (Part 3 §3.8). The layouts above
-and the rules below keep their numbers, and the three statements below take
-precedence over them until a later version serves the resume.
+**A resume sends no frame again.** Each onion layer chains on the cell before
+it (Part 3 `NET-116`), thus one lost cell in either direction ends its
+circuit. A resume thus holds only when the two ends agree that no frame is
+lost. The pause below makes that certain. A resume after a connection that
+closed with no pause holds when no frame was in flight at the close, and it
+fails closed in each other case.
 
-- A v1 client opens a new session with a `SessionOpen` after each lost
-  connection, and it builds its circuits again. It sends no `SessionResume`,
-  and it keeps no frame and no cell for one.
-- A v1 relay closes a connection whose first capsule is a `SessionResume`,
-  as it closes one with a failed `auth` under `WIR-239` and `WIR-240`. It
-  holds no state of a session after the connection of that session closed.
-- `WIR-234` to `WIR-238`, `WIR-241` to `WIR-245` and `WIR-361` bind the
-  version that serves the resume, and they bind no v1 conformance claim. The
-  vectors of `WIR-296` and `WIR-297` stay, because a parser reads the record
-  in each version.
+**A parked session** is a session that holds no connection. The ingress relay
+keeps the session, each circuit of its link, and each count of that link, and
+the client keeps its half. Each relay of each chain keeps its part of each
+circuit. The queue relay holds no subscription for a parked session, thus a
+record that arrives takes its push (Part 8 rule `NTF-128`).
 
 - **[WIR-229]** A client MUST send a `SessionOpen` or a `SessionResume` as the
   first capsule of each transport connection. **[WIR-230]** A relay MUST close a
@@ -318,37 +335,101 @@ precedence over them until a later version serves the resume.
   each open. **[WIR-232]** A relay MUST hold `session_id`, `session_secret`, the
   next `seq`, and the accepted `seq` values for the life of the session.
   **[WIR-233]** A relay MUST close a connection whose `SessionOpen` names a
-  `session_id` that a live session of that relay holds. In v1 a
-  relay MUST also close a connection whose first capsule is a
-  `SessionResume`, with no cause in the close.
+  `session_id` that a session of that relay holds, live or parked.
+- **[WIR-539]** A client that ends a connection and keeps its session MUST
+  send a `SessionPause` first. It MUST end each circuit that it still builds
+  before that record, and it MUST NOT send a frame after that record on that
+  connection. **[WIR-540]** The client MUST read the connection until the
+  `SessionPaused` arrives, or until `SESSION_PAUSE_WAIT` ends. It MUST take
+  each frame that arrives in that time. It then MUST close the connection
+  without a `SessionClose`.
+- **[WIR-541]** An ingress relay that receives a `SessionPause` on a client
+  link MUST park the session. It MUST send a `CircuitPause` for each circuit
+  of that link, on the link to the next hop of that circuit. It MUST answer
+  with a `SessionPaused`, and it MUST NOT send a frame on that connection
+  after the answer. TLS keeps the order, thus each frame of the relay reaches
+  the client before the `SessionPaused`. A link that holds no circuit has
+  nothing to keep: the relay answers, and it discards the session.
+- **[WIR-542]** An ingress relay MUST park the session of a client link that
+  closes with no `SessionClose` and no `SessionPause`, when that link holds
+  one circuit or more. It MUST send the `CircuitPause` records at that close.
+  It MUST discard the session of a link that holds no circuit.
+- **[WIR-543]** An ingress relay MUST keep the circuits and the counts of a
+  parked session. It cannot send a backward cell that arrives for a parked
+  link. It MUST end the circuit of that cell as `NET-349` of Part 3 ends one,
+  and it MUST keep each other circuit of the link. It MUST keep the `circ_id`
+  of each circuit of a parked session that ends, and it MUST send a
+  `CircuitDestroy` for each one after an accepted resume. It MUST NOT count a
+  parked link as an idle link under `NET-335` of Part 3. It MAY discard a
+  parked session whose last circuit ended.
+- **[WIR-545]** A relay that receives a `CircuitPause` from the side of the
+  client of a circuit MUST send a `CircuitPause` on the link to the next hop
+  of that circuit, with the `circ_id` of that link. The circuit stays. A
+  relay MUST send the `CircuitPause` of a circuit after each forward cell of
+  that circuit that it holds for the per-hop delay of Part 3 §3.9. A relay
+  MUST drop a `CircuitPause` that names no circuit of its link, and one that
+  arrives from the side of the next hop, and it MUST NOT close the connection
+  for it.
+- **[WIR-546]** A queue relay that receives a `CircuitPause` for a circuit
+  that ends at it MUST end each subscription of that circuit, as the end of a
+  circuit ends it. It MUST stop the pacing clock of that circuit, and it MUST
+  NOT send a cell on it. It MUST keep the circuit, the `RelaySession` key of
+  it, and the state of its commands. The first forward cell of the client
+  that the relay serves on the circuit starts the pacing clock again.
 - **[WIR-234]** A client MUST set `resume_count` to 1 at the first resume of a
   session. **[WIR-235]** A client MUST increase `resume_count` by one at each
   later resume of that session. **[WIR-236]** A client MUST compute `auth` with
-  the derivation above.
+  the derivation above. **[WIR-550]** A client MUST set `sent` to its next
+  `seq`, and `received` to the count of the frames of the relay that it
+  accepted.
 - **[WIR-237]** A relay MUST verify `auth` before it binds the connection to
   the session. **[WIR-238]** A relay MUST reject a `SessionResume` whose
   `resume_count` is not above the last value that it accepted. **[WIR-239]** If
-  the verification fails, the relay MUST close the connection. **[WIR-240]** A
-  relay MUST NOT report the cause of that close.
-- In a version that serves the resume: **[WIR-241]** When a relay accepts a `SessionResume`, it MUST bind the session
+  the verification fails, or the record names no session of the relay, the
+  relay MUST close the connection. **[WIR-240]** A
+  relay MUST NOT report the cause of that close. A `SessionResume` that fails
+  `WIR-237` or `WIR-238` MUST NOT change the session that it names.
+- **[WIR-544]** A relay that verified a `SessionResume` MUST compare `sent`
+  with the highest `seq` that it accepted plus one, or with zero when it
+  accepted no frame. It MUST compare `received` with its own next `seq`. If
+  one of the two differs, the relay MUST close the connection with no cause,
+  MUST discard the session, and MUST end each circuit of it under `NET-322`.
+- **[WIR-241]** When a relay accepts a `SessionResume`, it MUST bind the session
   to the new connection. **[WIR-242]** If the previous connection of that
   session is open, the relay MUST close it.
-- In a version that serves the resume: **[WIR-243]** A relay MUST hold the state of a session for
-  `SESSION_RESUME_WINDOW` after it observes the close of the connection.
+- **[WIR-547]** A client sends its frames at once after a `SessionResume`, and
+  it waits for no answer. It MUST send the `SUB` of each queue of each circuit
+  that it kept again, as after a build. A connection that closes before the
+  first capsule of the relay arrives is a failed resume. The client then MUST
+  discard the session and each circuit of it, and it MUST open a new session
+  with a `SessionOpen` on a new connection.
+- **[WIR-243]** A relay MUST hold the state of a parked session for
+  `SESSION_RESUME_WINDOW`.
   **[WIR-244]** If the window ends with no accepted resume, the relay MUST
-  discard that state. A v1 relay discards that state at the close. **[WIR-245]** If a client observed the close more than
+  discard that state, and it MUST end each circuit of the session under
+  `NET-322`. **[WIR-245]** If a client observed the close more than
   `SESSION_RESUME_WINDOW` before, it MUST open a new session.
+- **[WIR-548]** A session between two relays MUST NOT park, and it MUST NOT
+  resume: a lost link between two relays ends each circuit on it. A relay MUST
+  NOT write a parked session to its store. A relay that starts again holds no
+  parked session, and a resume fails there.
+- **[WIR-549]** A client MUST hold the state of a session that it can resume
+  in the memory of its process alone. It MUST NOT write that state to its
+  store, and it MUST erase it at a lock (Part 14 rule `IMP-127`). A client
+  process that ends loses the session.
 - **[WIR-246]** If a client ends a session by its own choice, it MUST send a
   `SessionClose` before it closes the connection. **[WIR-247]** A relay MUST
-  discard the session state when it receives a `SessionClose`. **[WIR-248]**
+  discard the session state when it receives a `SessionClose`, and it MUST end
+  each circuit of that session under `NET-322`. **[WIR-248]**
   Each party MUST erase `session_secret` when the session ends.
-- **[WIR-360]** At the end of a push wake, a client MUST close the connection
-  without a `SessionClose`. **[WIR-361]** If the next wake to that ingress
-  starts inside `SESSION_RESUME_WINDOW`, the client MUST send a
-  `SessionResume` in a version that serves the resume. In v1 the
+- **[WIR-360]** At the end of a push wake, a client MUST pause its session
+  under `WIR-539`, and it MUST close the connection
+  without a `SessionClose`. **[WIR-361]** If the next connection to that
+  ingress starts inside `SESSION_RESUME_WINDOW` and the client holds the
+  session, the client MUST send a `SessionResume`. In each other case the
   client MUST send a `SessionOpen` with a new `session_id` and a new
-  `session_secret`. Rule `WIR-246` does not apply to that close, because the
-  client does not end the session.
+  `session_secret`. Rule `WIR-246` does not apply to the close of `WIR-360`,
+  because the client does not end the session.
 - **[WIR-524]** A relay MUST send a `CircuitDestroy` under `NET-322` on the
   link of each neighbor of a circuit that it ends, with the `circ_id` that the
   circuit carries on that link. A receiver MUST drop a `CircuitDestroy` that
@@ -356,8 +437,32 @@ precedence over them until a later version serves the resume.
   it.
 
 Part 5 §5.11 holds the label. A late resume fails at the relay, and the client
-then opens a new session at the cost of one round trip. The two parties measure
-two separate durations from one event, and no rule compares their clocks.
+then opens a new session at the cost of one more connection. The two parties
+measure two separate durations, and no rule compares their clocks.
+
+> *Cause of the pause.* A relay paces one cell each second toward the client
+> on each circuit (Part 3 §3.5.2), thus a frame is in flight at almost each
+> moment of a live connection. A client that closes with no pause thus loses
+> a frame in most cases, and its resume fails under `WIR-544`. The
+> `SessionPause` stops the frames of the client, and the `SessionPaused`
+> comes after the last frame of the relay. The two ends then hold equal
+> counts. The `CircuitPause` stops the pacing clock at the queue relay. A
+> cell that left that relay before the `CircuitPause` arrived finds a parked
+> link, and it costs that one circuit under `WIR-543`.
+>
+> *Cause of the order in `WIR-545`.* A forward cell that reached the queue
+> relay after the `CircuitPause` of its circuit would start the pacing clock
+> again under `WIR-546`. Each cell of that clock would then end the circuit
+> at the ingress relay.
+>
+> *Cause of the two failures.* A `SessionResume` that does not verify comes
+> from a party that does not hold `session_secret`. It ends no session,
+> because such a party could otherwise end the session of each client whose
+> `session_id` it saw. A `SessionResume` that verifies with a count that
+> differs comes from the client, and it shows a lost frame. No circuit of
+> that session can carry a cell again, thus the relay ends each one at once.
+> The `auth` covers the two counts, thus no party on the path makes a
+> verified record show a lost frame.
 
 > *Cause.* Part 10 §10.9.1 sizes a held session at about 566 bytes each
 > second. Thus a relay with 1 Gbit/s of egress carries about 220 000 sessions.
@@ -367,18 +472,21 @@ two separate durations from one event, and no rule compares their clocks.
 > `NET-073` forbids TLS resumption and 0-RTT. This section resumes the L2
 > session over a full TLS handshake, thus it takes nothing from that rule. The
 > authenticator binds the resume to a secret that the open carried inside TLS,
-> thus a party that guesses a `session_id` cannot take a session. Part 3 §3.7
-> item 4 recovers the frames that were in flight at the drop, and this section
-> adds no acknowledgment at L2.
+> thus a party that guesses a `session_id` cannot take a session. This
+> section adds no acknowledgment at L2: the two counts of the resume serve in
+> its place, and the ARQ of Part 3 §3.7 recovers each record of a session
+> that did not resume.
 
 > *Cause of the 4 hours.* With a `SESSION_RESUME_WINDOW` of 60 s, a push wake
 > of Part 8 §8.4.1 opens a new session at each wake, and each new session
 > pays a circuit build. Part 3 §3.4.3 sets `CIRCUIT_MAX_AGE` to 4
 > hours, and a circuit does not outlive its session, thus the window is the same
 > 4 hours. Part 3 §3.12 gives the builds that the resume saves. The cost has two
-> parts. A relay holds the session state for 4 hours, which is about 1 KB. A
+> parts. An ingress relay holds a parked session and its circuits for up to 4
+> hours with no connection, and each relay of each chain holds its part of
+> each circuit for that time. A
 > resume links two wakes of one client across a network change. Part 15 §15.3
-> records that residual.
+> records those residuals.
 
 ## 6.3 Cell
 
@@ -687,7 +795,7 @@ exactly as to a queue session.
 
 > *Cause of the capsule.* A `SessionFrame` holds a cell of
 > one bucket, and `WIR-213` puts a `CRPUT` in no cell. The session adds a
-> resend window, and a copy needs none: rule `ATT-113` of Part 12 makes the
+> sequence and a resume, and a copy needs neither: rule `ATT-113` of Part 12 makes the
 > uploader find a copy that did not arrive. A token holder that is no relay
 > can send the capsule, and it then stores the chunk that it registered,
 > which a `CPUT` gives it too.
@@ -2630,10 +2738,12 @@ cover these cases:
   - An `UMBRA_CELL` capsule of `length` 525.
   - A `SessionResume` of `length` 41.
 - The session control records of §6.2.3. **[WIR-296]** The vectors MUST cover
-  an open, a resume with a correct `auth`, a close, and a circuit destroy.
+  an open, a resume with a correct `auth`, a close, a circuit destroy, a
+  session pause, a session paused, and a circuit pause.
   **[WIR-297]** The relay
-  MUST reject the two cases below.
+  MUST reject the three cases below.
   - A resume with one changed bit of `auth`.
+  - A resume with one changed bit of `sent`.
   - A resume whose `resume_count` repeats the last accepted value.
 - The `RatchetRecord` and the `PqFrame` of §6.5. **[WIR-298]** The vectors MUST
   cover the three cases below. **[WIR-299]** The parser MUST reject the three

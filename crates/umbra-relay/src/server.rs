@@ -291,6 +291,63 @@ pub enum Request {
     Challenges(Vec<u8>),
 }
 
+/// The connections that serve a session under the identifier of an
+/// earlier connection (`WIR-241`). The node keeps the state of a session
+/// under the identifier of its first connection. A connection that resumes
+/// the session takes that identifier here, and its own one names nothing
+/// in the node.
+#[derive(Default)]
+struct Adopted {
+    /// The connections that sent an `Opened` and no `Closed` yet.
+    open: BTreeSet<LinkId>,
+    /// The identifier in the node of each connection that resumed.
+    names: BTreeMap<LinkId, LinkId>,
+    /// The connection that serves each identifier that a resume took.
+    serves: BTreeMap<LinkId, LinkId>,
+    /// The connections that a resume replaced and that did not close yet.
+    /// What they still send names no link (`WIR-242`).
+    replaced: BTreeSet<LinkId>,
+}
+
+impl Adopted {
+    /// The identifier in the node of what `connection` sent, or none for
+    /// a connection that a resume replaced.
+    fn name_of(&self, connection: LinkId) -> Option<LinkId> {
+        if self.replaced.contains(&connection) {
+            return None;
+        }
+        Some(self.names.get(&connection).copied().unwrap_or(connection))
+    }
+
+    /// `connection` closed. The result is its identifier in the node, or
+    /// none for a connection that a resume replaced.
+    fn closed(&mut self, connection: LinkId) -> Option<LinkId> {
+        self.open.remove(&connection);
+        if self.replaced.remove(&connection) {
+            return None;
+        }
+        match self.names.remove(&connection) {
+            Some(name) => {
+                self.serves.remove(&name);
+                Some(name)
+            }
+            None => Some(connection),
+        }
+    }
+
+    /// `connection` serves the identifier `name` from now on. The
+    /// connection that served it before sends nothing more to the node.
+    fn adopt(&mut self, connection: LinkId, name: LinkId) {
+        let before = self.serves.get(&name).copied().unwrap_or(name);
+        if before != connection && self.open.contains(&before) {
+            self.names.remove(&before);
+            self.replaced.insert(before);
+        }
+        self.names.insert(connection, name);
+        self.serves.insert(name, connection);
+    }
+}
+
 fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -313,6 +370,7 @@ pub async fn run_node(
     // NET-349: the node reads the backlog of a link before it frames a cell.
     let gauges = Gauges::default();
     node.set_backlog(Box::new(gauges.clone()));
+    let mut adopted = Adopted::default();
     let mut next_tick: BTreeMap<CircuitKey, tokio::time::Instant> = BTreeMap::new();
     let mut clock =
         tokio::time::interval(Duration::from_millis((pacing_mean_ms / 20).clamp(1, 50)));
@@ -328,6 +386,7 @@ pub async fn run_node(
             input = inputs.recv() => match input {
                 None => return,
                 Some(Input::Opened { link, writer, source }) => {
+                    adopted.open.insert(link);
                     gauges.insert(link, &writer);
                     writers.insert(link, writer);
                     node.opened(link, unix_now());
@@ -367,14 +426,18 @@ pub async fn run_node(
                     let _ = rng.try_fill_bytes(&mut secret);
                     node.dialed(link, relay_id, session_id, Secret::new(secret), unix_now(), &mut rng)
                 }
-                Some(Input::Capsule { link, bytes }) => {
-                    node.on_capsule(link, &bytes, unix_now(), &mut rng)
-                }
-                Some(Input::Closed { link }) => {
-                    writers.remove(&link);
-                    gauges.remove(link);
-                    node.link_closed(link, unix_now())
-                }
+                Some(Input::Capsule { link, bytes }) => match adopted.name_of(link) {
+                    Some(link) => node.on_capsule(link, &bytes, unix_now(), &mut rng),
+                    None => Vec::new(),
+                },
+                Some(Input::Closed { link }) => match adopted.closed(link) {
+                    Some(link) => {
+                        writers.remove(&link);
+                        gauges.remove(link);
+                        node.link_closed(link, unix_now())
+                    }
+                    None => Vec::new(),
+                },
                 Some(Input::NdrGone { handle }) => {
                     node.ndr_gone(&handle);
                     Vec::new()
@@ -475,6 +538,16 @@ pub async fn run_node(
                 Output::Close { link } => {
                     writers.remove(&link);
                     gauges.remove(link);
+                }
+                // WIR-241, WIR-242: the writer of the new connection takes
+                // the place of the old one, which closes when it drops.
+                Output::Adopt { link, as_link } => {
+                    adopted.adopt(link, as_link);
+                    gauges.remove(link);
+                    if let Some(writer) = writers.remove(&link) {
+                        gauges.insert(as_link, &writer);
+                        writers.insert(as_link, writer);
+                    }
                 }
                 Output::Dial { relay_id } => {
                     let _ = requests.send(Request::Dial(relay_id));

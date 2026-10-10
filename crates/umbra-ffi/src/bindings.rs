@@ -18,7 +18,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use umbra_core::{
     attach::{place::AttachmentRelay, transfer::Shape},
     directory::{
@@ -56,7 +56,7 @@ use crate::{
     client::Client,
     draft::{Draft, DRAFT_FILE_MAX},
     groups::{run_groups, GroupCommand, GroupUpdate},
-    runtime::{run_client, Ended, OsRng, Persist, Update},
+    runtime::{run_client, Ended, OsRng, Persist, ResumeSlot, Update},
     sqlite::SqliteBackend,
     transfers::{run_transfers, TransferCommand, TransferUpdate},
     ConversationId, Delivery, Error, Event, MsgRef, Sink,
@@ -1529,6 +1529,10 @@ struct Inner {
     client: Client<SqliteBackend, ForeignElement>,
     /// The bridge of one run of the network, or none when no run is active.
     bridge: Option<Bridge>,
+    /// The session that the last run of the queues parked, for the next
+    /// run of this process (Part 6 `WIR-549`). It holds the keys of each
+    /// kept circuit, thus a lock erases it.
+    resume: ResumeSlot,
     net_events: VecDeque<NetEvent>,
     /// The ingress relay that the run dials, for the confirmation of its pin.
     guard: Option<[u8; 32]>,
@@ -3808,6 +3812,9 @@ impl Inner {
         self.progress_events.clear();
         // IMP-093, IMP-127: the hardening key is a key of the store too.
         crate::runtime::harden_clear();
+        // WIR-549: the parked session holds the keys of its circuits. A run
+        // that still ends leaves none here after this.
+        self.resume.clear();
         self.idle_watch = None;
         let runs = self.spawner.is_some()
             || self.bridge.is_some()
@@ -3861,6 +3868,9 @@ pub struct Handle {
     /// Signals each change of the event stream to [`Handle::wait_event`].
     changed: Condvar,
     runtime: Mutex<Option<tokio::runtime::Runtime>>,
+    /// The end of the run of the queues on that runtime, which a
+    /// disconnect waits for.
+    run_done: Mutex<Option<oneshot::Receiver<()>>>,
 }
 
 struct NoElement;
@@ -3907,6 +3917,36 @@ pub fn measure_argon2_floor_ms() -> u64 {
 /// How long a lock waits for the tasks of the runtime to end. A task ends
 /// at its next wait, and a write to the store in a task takes the longest.
 const LOCK_STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How long a disconnect waits for the run of the queues to pause its
+/// session: `SESSION_PAUSE_WAIT` of Part 6 §6.2.3, and the time of the
+/// writes around it.
+const PARK_WAIT: std::time::Duration =
+    std::time::Duration::from_secs(umbra_transport::link::PAUSE_WAIT + 1);
+
+/// Stops a runtime after the run of the queues parked its session
+/// (`WIR-539`). The run ends by itself when its bridge is gone. It asks its
+/// relay to keep each circuit, and it leaves the session for the next run.
+/// A stop before that would cost the next run each circuit build.
+fn stop_after_park(runtime: tokio::runtime::Runtime, done: Option<oneshot::Receiver<()>>) {
+    let Some(done) = done else {
+        runtime.shutdown_background();
+        return;
+    };
+    let parks = move |runtime: tokio::runtime::Runtime| {
+        runtime.block_on(async {
+            let _ = tokio::time::timeout(PARK_WAIT, done).await;
+        });
+        runtime.shutdown_background();
+    };
+    // A thread of a runtime cannot wait for a runtime, thus another thread
+    // waits in its place.
+    if tokio::runtime::Handle::try_current().is_ok() {
+        let _ = std::thread::Builder::new().spawn(move || parks(runtime));
+    } else {
+        parks(runtime);
+    }
+}
 
 impl Handle {
     /// Stops the runtime of a client that a lock took the keys from
@@ -4145,6 +4185,7 @@ fn handle_of(database_path: String, client: Client<SqliteBackend, ForeignElement
             invitation_host: String::new(),
             client,
             bridge: None,
+            resume: ResumeSlot::default(),
             net_events: VecDeque::new(),
             guard: None,
             bootstrap: false,
@@ -4208,6 +4249,7 @@ fn handle_of(database_path: String, client: Client<SqliteBackend, ForeignElement
         }),
         changed: Condvar::new(),
         runtime: Mutex::new(None),
+        run_done: Mutex::new(None),
     })
 }
 
@@ -5288,18 +5330,27 @@ impl Handle {
                 }
             }
             *bridge = Some(running);
-            runtime.spawn(run_client(
-                node,
-                dial,
-                tls,
-                runtime_commands,
-                runtime_updates,
-                Box::new(HandleStore {
-                    handle: Arc::downgrade(&self),
-                    run,
-                    given: None,
-                }),
-            ));
+            let store = Box::new(HandleStore {
+                handle: Arc::downgrade(&self),
+                run,
+                given: None,
+            });
+            let resume = Some(inner.resume.clone());
+            let (ended, done) = oneshot::channel();
+            runtime.spawn(async move {
+                run_client(
+                    node,
+                    dial,
+                    tls,
+                    runtime_commands,
+                    runtime_updates,
+                    store,
+                    resume,
+                )
+                .await;
+                let _ = ended.send(());
+            });
+            *locked(&self.run_done) = Some(done);
         }
         // The task holds a weak reference, thus a handle that the platform
         // drops ends the runtime.
@@ -5426,7 +5477,10 @@ impl Handle {
     }
 
     /// Ends the network. Each contact stays in the store, and the next
-    /// [`Handle::connect`] continues it.
+    /// [`Handle::connect`] continues it. The run pauses its session first
+    /// (Part 6 `WIR-539`), thus the next run of this process continues
+    /// each circuit inside `SESSION_RESUME_WINDOW`. The call returns when
+    /// the session is parked, after `SESSION_PAUSE_WAIT` at the latest.
     pub fn disconnect(&self) {
         {
             let mut inner = locked(&self.inner);
@@ -5437,8 +5491,10 @@ impl Handle {
             inner.group_reading.clear();
             inner.spawner = None;
         }
-        if let Some(runtime) = locked(&self.runtime).take() {
-            runtime.shutdown_background();
+        let runtime = locked(&self.runtime).take();
+        let done = locked(&self.run_done).take();
+        if let Some(runtime) = runtime {
+            stop_after_park(runtime, done);
         }
     }
 
@@ -6009,6 +6065,9 @@ impl Handle {
     pub fn reset_identity(self: Arc<Self>) -> Result<ResetCounts, FfiError> {
         let mut inner = locked(&self.inner);
         let summary = inner.client.reset_identity(unix_now_ms(), &mut OsRng)?;
+        // A circuit of the old identity carries no queue of the new one: a
+        // queue relay would see the two on one circuit.
+        inner.resume.clear();
         // DEV-263: the re-key of each group goes to the run at once.
         inner.pump_groups();
         drop(inner);

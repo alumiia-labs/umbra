@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 5: Cryptographic Core
 
 **Status:** Draft
-**Version:** 0.12.0
+**Version:** 0.13.0
 **Date:** 2026-10-09
 
 ---
@@ -1698,7 +1698,9 @@ primitive register in the same manner.
 > *The cause of the two wire labels.* Part 6 §6.5 derives the session tag of
 > a ratchet record from the initial root key under `"umbra/v1/session-tag"`.
 > Part 6 §6.2.3 computes the authenticator of a session resume under
-> `"umbra/v1/session-resume"`. Each one names one object type.
+> `"umbra/v1/session-resume"`. Its input is the label, the session
+> identifier, the resume count, and the two frame counts of the record.
+> Each label names one object type.
 
 > *The cause of the four storage labels.* Part 3 §3.2.6 extracts the
 > dead-channel secret under `"umbra/v1/dead-channel"`, and its three expansions

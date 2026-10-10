@@ -655,6 +655,15 @@ impl GroupService {
         }
     }
 
+    /// The client of a circuit paused its session (`WIR-546`): each
+    /// subscription of the circuit ends. The circuit stays, and with it the
+    /// count of its registrations.
+    pub fn circuit_paused(&mut self, circuit: &CircuitKey) {
+        for served in self.served.values_mut() {
+            served.subscribers.retain(|held| held != circuit);
+        }
+    }
+
     /// The periodic work: the retention of each queue, the digests that the
     /// gap held back, and each queue past `GROUP_IDLE_TTL`.
     pub fn sweep(&mut self, now: u64) -> Vec<DigestDue> {

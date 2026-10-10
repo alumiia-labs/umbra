@@ -99,6 +99,7 @@ async fn probe(
         runtime_commands,
         runtime_updates,
         Box::new(NoStore),
+        None,
     ));
     let _ = commands.send(Command::OpenCircuit(*third));
     let deadline = tokio::time::Instant::now() + PROBE_WAIT;

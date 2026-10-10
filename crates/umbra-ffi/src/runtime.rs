@@ -14,7 +14,7 @@ use umbra_core::{
     identity::invitation::FRAGMENT_LEN,
     session::{
         faults::LinkFaults,
-        node::{ClientEvent, ClientNode, ContactId, CoverSlot, StateChange},
+        node::{ClientEvent, ClientNode, ContactId, CoverSlot, ParkedSession, StateChange},
     },
 };
 use umbra_crypto::{
@@ -23,6 +23,7 @@ use umbra_crypto::{
     secret::Secret,
 };
 use umbra_transport::{
+    link::PAUSE_WAIT,
     native::{self, ClientConfig},
     race::{Plan, Wire},
     Dial,
@@ -846,6 +847,86 @@ pub(crate) fn unix_now() -> u64 {
         .map_or(0, |elapsed| elapsed.as_secs())
 }
 
+/// The session that one run parked, for the next run of this process
+/// (Part 6 §6.2.3). It lives in the memory of the process alone
+/// (`WIR-549`): no store takes it, and a lock erases it with each other
+/// key. Each run takes a turn at its start. A run that is not the newest
+/// one any more leaves nothing here, thus the session of a run that a lock
+/// or a later run ended comes back in no later one.
+#[derive(Clone, Default)]
+pub struct ResumeSlot(Arc<std::sync::Mutex<(u64, Option<ParkedSession>)>>);
+
+impl ResumeSlot {
+    fn held(&self) -> std::sync::MutexGuard<'_, (u64, Option<ParkedSession>)> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The turn of a run that starts, and the session that the run before
+    /// parked.
+    fn take(&self) -> (u64, Option<ParkedSession>) {
+        let mut held = self.held();
+        held.0 = held.0.wrapping_add(1);
+        (held.0, held.1.take())
+    }
+
+    /// Keeps the session that the run of `turn` parked.
+    fn put(&self, turn: u64, parked: Option<ParkedSession>) {
+        let mut held = self.held();
+        if held.0 == turn {
+            held.1 = parked;
+        }
+    }
+
+    /// Erases the parked session, and takes the turn of each run that
+    /// lives: at a lock, and at a change of the identity.
+    pub fn clear(&self) {
+        let mut held = self.held();
+        held.0 = held.0.wrapping_add(1);
+        held.1 = None;
+    }
+
+    /// Whether a parked session waits for the next run.
+    pub fn holds(&self) -> bool {
+        self.held().1.is_some()
+    }
+}
+
+/// The time that a run waits for the first capsule of the relay after a
+/// `SessionResume`. A relay that binds the resume sends a cell on each kept
+/// circuit that took a `SUB`, about one hop delay later.
+const RESUME_CONFIRM_WAIT: Duration = Duration::from_secs(10);
+
+/// The time that the `SessionClose` of a run that ends has to leave.
+const CLOSE_WAIT: Duration = Duration::from_secs(1);
+
+/// Opens a connection to the guard.
+async fn dial(guard: &Dial, tls: &Arc<ClientConfig>, rng: &mut OsRng) -> Option<native::Link> {
+    let mut key = [0u8; 16];
+    let mut mask = [0u8; 4];
+    let _ = rng.try_fill_bytes(&mut key);
+    let _ = rng.try_fill_bytes(&mut mask);
+    let plan = Plan::Only(Wire::Tcp);
+    native::connect(guard, tls.clone(), plan, key, mask, Duration::from_secs(10))
+        .await
+        .ok()
+}
+
+/// The resume of a session failed (`WIR-547`): the node drops it, and it
+/// opens a new session with new circuits on a new connection.
+async fn open_again(
+    node: &mut ClientNode,
+    guard: &Dial,
+    tls: &Arc<ClientConfig>,
+    rng: &mut OsRng,
+) -> Result<native::Link, Ended> {
+    node.resume_failed();
+    let link = dial(guard, tls, rng).await.ok_or(Ended::DialFailed)?;
+    node.connected(rng).map_err(|_| Ended::NodeFault)?;
+    Ok(link)
+}
+
 /// Runs one client until the connection ends or each sender of `commands`
 /// closes. A command that arrives before the circuit is ready waits. The
 /// channel has no bound, because the caller is a thread of the platform
@@ -853,6 +934,12 @@ pub(crate) fn unix_now() -> u64 {
 ///
 /// `node` holds the contacts and the invitations of the earlier runs, and
 /// `persist` takes each change of them.
+///
+/// `resume` holds the session that an earlier run of this process parked.
+/// The run continues it on its connection (`WIR-361`). A run that ends at
+/// the word of the client, or with its link, parks its session there for
+/// the next run (`WIR-360`). A run with no such place keeps no session: it
+/// ends each one with a `SessionClose` (`WIR-246`).
 pub async fn run_client(
     mut node: ClientNode,
     guard: Dial,
@@ -860,25 +947,35 @@ pub async fn run_client(
     mut commands: mpsc::UnboundedReceiver<Command>,
     updates: mpsc::UnboundedSender<Update>,
     mut persist: Box<dyn Persist>,
+    resume: Option<ResumeSlot>,
 ) {
     let mut rng = OsRng;
-    let mut key = [0u8; 16];
-    let mut mask = [0u8; 4];
-    let _ = rng.try_fill_bytes(&mut key);
-    let _ = rng.try_fill_bytes(&mut mask);
-    let plan = Plan::Only(Wire::Tcp);
-    let Ok(mut link) = native::connect(&guard, tls, plan, key, mask, Duration::from_secs(10)).await
-    else {
+    let (turn, parked) = resume.as_ref().map_or((0, None), ResumeSlot::take);
+    let Some(mut link) = dial(&guard, &tls, &mut rng).await else {
+        // The session is as good as before, and the next run tries it.
+        if let Some(slot) = &resume {
+            slot.put(turn, parked);
+        }
         let _ = updates.send(Update::Faults(Box::new(node.take_faults())));
         let _ = updates.send(Update::Offline(Ended::DialFailed));
         return;
     };
-    if node.connected(&mut rng).is_err() {
+    let started = match parked {
+        Some(parked) => node.resumed(parked, unix_now(), &mut rng).map(|_| ()),
+        None => node.connected(&mut rng),
+    };
+    if started.is_err() {
         // REL-172: the counts go to the next run.
         let _ = updates.send(Update::Faults(Box::new(node.take_faults())));
         let _ = updates.send(Update::Offline(Ended::NodeFault));
         return;
     }
+    // WIR-547: the time at which a resume with no capsule of the relay
+    // counts as failed.
+    let resume_end = tokio::time::Instant::now() + RESUME_CONFIRM_WAIT;
+    // WIR-539, WIR-540: the cause of the end of a run that pauses its
+    // session, and the time at which it waits for the relay no more.
+    let mut pausing: Option<(Ended, tokio::time::Instant)> = None;
 
     let mut early: VecDeque<Command> = VecDeque::new();
     let mut shown_chains: Vec<[[u8; 32]; 3]> = Vec::new();
@@ -933,21 +1030,83 @@ pub async fn run_client(
         for (contact, index) in node.take_lost() {
             let _ = updates.send(Update::Lost { contact, index });
         }
+        // WIR-540: the relay answered the pause, thus each of its frames
+        // arrived, and the connection closes.
+        if let Some((cause, _)) = pausing.filter(|_| node.is_paused()) {
+            break 'run cause;
+        }
+        let mut is_closed = false;
         for capsule in node.take_capsules() {
             if link.send(&capsule).await.is_err() {
+                is_closed = true;
+                break;
+            }
+        }
+        if is_closed {
+            if let Some((cause, _)) = pausing {
+                break 'run cause;
+            }
+            if !node.is_resuming() {
                 break 'run Ended::LinkClosed;
             }
+            match open_again(&mut node, &guard, &tls, &mut rng).await {
+                Ok(opened) => link = opened,
+                Err(ended) => break 'run ended,
+            }
+            continue 'run;
         }
         let events = tokio::select! {
             received = link.recv() => match received {
                 Ok(bytes) => match node.on_capsule(&bytes, unix_now(), &mut rng) {
                     Ok(events) => events,
+                    // The link and the circuit took the cell. A step after
+                    // them that sends finds no way while the session
+                    // pauses, and the next run does it.
+                    Err(_) if pausing.is_some() => Vec::new(),
                     Err(_) => break 'run Ended::NodeFault,
                 },
-                Err(_) => break 'run Ended::LinkClosed,
+                Err(_) => match pausing {
+                    Some((cause, _)) => break 'run cause,
+                    None if node.is_resuming() => {
+                        match open_again(&mut node, &guard, &tls, &mut rng).await {
+                            Ok(opened) => link = opened,
+                            Err(ended) => break 'run ended,
+                        }
+                        Vec::new()
+                    }
+                    None => break 'run Ended::LinkClosed,
+                },
             },
-            command = commands.recv() => match command {
-                None => break 'run Ended::Stopped,
+            // WIR-540: a relay that gives no `SessionPaused` in time holds
+            // no run open.
+            () = async {
+                match pausing {
+                    Some((_, end)) => tokio::time::sleep_until(end).await,
+                    None => core::future::pending().await,
+                }
+            } => match pausing {
+                Some((cause, _)) => break 'run cause,
+                None => Vec::new(),
+            },
+            // WIR-547: a relay that bound the resume sends a cell soon.
+            () = tokio::time::sleep_until(resume_end), if node.is_resuming() => {
+                match open_again(&mut node, &guard, &tls, &mut rng).await {
+                    Ok(opened) => link = opened,
+                    Err(ended) => break 'run ended,
+                }
+                Vec::new()
+            }
+            command = commands.recv(), if pausing.is_none() => match command {
+                // WIR-539: the run ends at the word of the client, and the
+                // session pauses for the next run.
+                None => {
+                    if resume.is_none() || node.pause().is_err() {
+                        break 'run Ended::Stopped;
+                    }
+                    let end = tokio::time::Instant::now() + Duration::from_secs(PAUSE_WAIT);
+                    pausing = Some((Ended::Stopped, end));
+                    Vec::new()
+                }
                 Some(Command::Foreground(now_foreground)) => {
                     is_foreground = now_foreground;
                     if now_foreground {
@@ -971,15 +1130,23 @@ pub async fn run_client(
                     Vec::new()
                 }
             },
+            // WIR-360: a push wake ends with a pause of its session.
             () = async {
                 match wake_end {
                     Some(end) => tokio::time::sleep_until(end).await,
                     None => core::future::pending().await,
                 }
-            } => break 'run Ended::WakeDone,
+            }, if pausing.is_none() => {
+                if node.pause().is_err() {
+                    break 'run Ended::WakeDone;
+                }
+                let end = tokio::time::Instant::now() + Duration::from_secs(PAUSE_WAIT);
+                pausing = Some((Ended::WakeDone, end));
+                Vec::new()
+            }
             // The clock is memoryless, and it fires whether or not a cell
             // waits (`NET-049`). A fault of one slot ends no run.
-            () = tokio::time::sleep_until(next_slot) => {
+            () = tokio::time::sleep_until(next_slot), if pausing.is_none() => {
                 next_slot = tokio::time::Instant::now() + cover_delay(&mut rng);
                 let now = unix_now();
                 // NET-071, NET-065: a record of the user that a relay
@@ -1042,7 +1209,7 @@ pub async fn run_client(
             }
             // NET-169: a build that no relay answers ends, and the run
             // ends with its last circuit.
-            _ = tick.tick() => {
+            _ = tick.tick(), if pausing.is_none() => {
                 let now = unix_now();
                 // SCP-019: a step of the device clock of more than
                 // CLOCK_SKEW against the monotonic source interrupts each
@@ -1094,6 +1261,9 @@ pub async fn run_client(
             })
             .collect();
         for handle in asked {
+            if pausing.is_some() {
+                break;
+            }
             let token = persist.admission_token(unix_now());
             match node.admit_queue(handle, token.as_deref(), &mut rng) {
                 Ok(more) => events.extend(more),
@@ -1106,6 +1276,10 @@ pub async fn run_client(
             stores_hellos,
         } = match settle(&mut node, persist.as_mut(), &events, &asked) {
             Ok(settled) => settled,
+            // The store of a run that the client ended takes no batch. The
+            // relay holds each record with no `ACK`, and the next run reads
+            // it again.
+            Err(_) if pausing.is_some() => continue 'run,
             Err(ended) => break 'run ended,
         };
         for event in events {
@@ -1275,6 +1449,10 @@ pub async fn run_client(
                     continue;
                 }
                 ClientEvent::ChannelRenewed { contact } => Update::ChannelRenewed(contact),
+                // A run that pauses reads on to the `SessionPaused`.
+                ClientEvent::CircuitLost | ClientEvent::CircuitAged if pausing.is_some() => {
+                    continue
+                }
                 ClientEvent::CircuitLost => break 'run Ended::CircuitLost,
                 ClientEvent::CircuitAged => break 'run Ended::Aged,
             };
@@ -1290,7 +1468,7 @@ pub async fn run_client(
             shown_queues.clone_from(&queues);
             let _ = updates.send(Update::Queues(queues));
         }
-        while node.is_ready() {
+        while node.is_ready() && pausing.is_none() {
             let Some(command) = early.pop_front() else {
                 break;
             };
@@ -1451,6 +1629,25 @@ pub async fn run_client(
             }
         }
     };
+    // WIR-360, WIR-542: the session of a run that ended at the word of the
+    // client or with its link stays for the next run. A link that closed
+    // with no pause resumes only when no frame was in flight.
+    let parked = match ended {
+        Ended::WakeDone | Ended::Stopped | Ended::LinkClosed if resume.is_some() => {
+            node.park(unix_now())
+        }
+        _ => None,
+    };
+    // WIR-246: a session that no run continues ends at the relay now, and
+    // the relay holds no circuit for it.
+    if parked.is_none() {
+        if let Some(capsule) = node.close() {
+            let _ = tokio::time::timeout(CLOSE_WAIT, link.send(&capsule)).await;
+        }
+    }
+    if let Some(slot) = &resume {
+        slot.put(turn, parked);
+    }
     // REL-172: the counts go to the next run.
     let _ = updates.send(Update::Faults(Box::new(node.take_faults())));
     let _ = updates.send(Update::Offline(ended));

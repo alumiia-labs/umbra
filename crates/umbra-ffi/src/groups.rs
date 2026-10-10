@@ -807,6 +807,11 @@ async fn session(
             }
         }
     };
+    // WIR-246: no run continues this session, thus it ends at the relay
+    // now, and the relay holds no circuit for it.
+    if let Some(capsule) = node.close() {
+        let _ = tokio::time::timeout(Duration::from_secs(1), link.send(&capsule)).await;
+    }
     // Each command that left and took no answer goes again in a later
     // session, under the tag the caller gave it.
     for held in pending.values() {

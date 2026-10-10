@@ -69,6 +69,11 @@ impl Batcher {
         self.ready.is_empty()
     }
 
+    /// Drops each ready command.
+    pub fn clear(&mut self) {
+        self.ready.clear();
+    }
+
     /// Adds an encoded command. A command of another range is rejected.
     pub fn push(&mut self, cmd: Cmd, encoded: Vec<u8>) -> Result<(), Error> {
         let largest = Bucket::B3.command_area();

@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 3: Network Architecture
 
 **Status:** Draft
-**Version:** 0.12.0
+**Version:** 0.13.0
 **Date:** 2026-10-09
 
 ---
@@ -1180,8 +1180,9 @@ forward cell on that circuit. §3.4.4 rule `NET-114` gives it the check.
      cell for the same cause.
    - **[NET-290]** A relay reaches a relay of the next layer as a client of
      the session of Part 6 §6.2.3. It MAY hold one session for each such
-     relay and put each circuit on it. It holds no resend window there: a
-     lost link ends its circuits, and each client builds again.
+     relay and put each circuit on it. That session does not park and does
+     not resume (Part 6 rule `WIR-548`): a lost link between two relays ends
+     its circuits, and each client builds again.
 
 > *Cause of `NET-319`.* A relay opens its links to the next layer at the first
 > need. A relay that dials the next relay and drops the body makes the first
@@ -1271,10 +1272,16 @@ causes does not occur.
   after about 2 hours 16 minutes, before `CIRCUIT_MAX_AGE`.
 - **[NET-322]** A relay that ends a circuit MUST tell each neighbor of it
   with the `CircuitDestroy` of Part 6 §6.2.3, on each link of the circuit
-  but the one that ended it: a closed link, a `CircuitDestroy`, or a
-  `DESTROY` cell of the client. A relay that gets one MUST end its part of
+  but the one that ended it: a link that closed for good, a `CircuitDestroy`,
+  or a `DESTROY` cell of the client. A relay that gets one MUST end its part of
   that circuit and tell the neighbor on the other side. A client that gets
-  one from its guard MUST take the circuit as lost and build again.
+  one from its guard MUST take the circuit as lost and build again. A client
+  link that parks its session ends no circuit: the ingress relay sends the
+  `CircuitPause` of Part 6 rules `WIR-541` and `WIR-542` for each circuit of
+  that link, and each relay keeps its part. A client link closes for good at
+  a `SessionClose`, at the end of `SESSION_RESUME_WINDOW`, at a failed count
+  check of `WIR-544`, and when it holds no circuit. A link between two relays
+  closes for good at each close.
 
 > *Cause of `NET-322`.* Assume that a relay ends a circuit at a closed link
 > and tells no neighbor. A client whose link to the guard drops then leaves
@@ -1283,6 +1290,12 @@ causes does not occur.
 > delivered and sends no push under Part 8 rule `NTF-128`, for up to 4 hours.
 > A client whose chain loses a link between two relays learns nothing either,
 > and it sends into a circuit that no exit holds.
+>
+> A parked session keeps each circuit for up to 4 hours by design, and the
+> `CircuitPause` keeps the property of this rule for it. The queue relay ends
+> each subscription of a paused circuit (`WIR-546`). Thus a record that
+> arrives for that circuit finds no subscription, and it takes its push at
+> once.
 
 > *Cause of `NET-320`.* The relay ends an aged circuit with no cell, and the
 > link to the guard stays up. A client that holds no age then sends into a
@@ -2297,7 +2310,7 @@ independently:
 | Layer | Content |
 | --- | --- |
 | **L1 Wire** | TLS 1.3 over TCP/443 by default. The ClientHello is the ClientHello of the rustls stack that Part 14 §14.2.8 names, with an `X25519MLKEM768` (RFC 10024) key share first and GREASE ECH. Each client sends the same ClientHello. The frame is an HTTP/1.1 Upgrade to a WebSocket-shaped stream, co-tenant with a real website behind a reverse proxy. The stream carries RFC 9297 capsules, used identically over TCP and QUIC, thus one parser serves the two transports (Part 6 §6.2.1). **TLS over TCP is the one transport of v1, and QUIC is deferred.** The deferred web client of Part 14 §14.7 sends the same stream through the WebSocket API of its browser, and §3.8.1 states what that changes |
-| **L2 Session** | A session with a 64-bit session ID and a monotonic sequence. The design makes it independent of the connection. A TCP RST, a middlebox timeout, or a Wi-Fi-to-cellular handover rotates the connection without a drop of the session. **v1 defers the resume**: after a lost connection a v1 client opens a new session and builds its circuits again. Part 6 §6.2.3 gives the open, the close, and the wire form of the resume |
+| **L2 Session** | A session with a 64-bit session ID and a monotonic sequence. The design makes it independent of the connection. A client that closes its connection pauses the session first, and it resumes the session and each circuit of it on a new connection inside `SESSION_RESUME_WINDOW`. A resume sends no frame again, thus a TCP RST, a middlebox timeout, or a Wi-Fi-to-cellular handover keeps the session only when no frame was in flight. Part 6 §6.2.3 gives the open, the pause, the resume, and the close |
 | **L3 Cell** | Fixed-size cells (§3.3) over the 3-hop chain into queues |
 
 Part 6 §6.2 numbers the same three layers L1 to L3 and continues the count to
@@ -2319,17 +2332,24 @@ also uses.
 > names the stack, and the ClientHello is the one that the stack sends. Part 2
 > §2.5 gives undetectable use as a non-goal, thus the design loses no claim.
 
-L2 has the highest value for robustness on unstable mobile networks, and the
-design keeps it. v1 ships the session without its resume.
+L2 lets a client close its connection between two push wakes and keep each
+circuit. Part 6 §6.2.3 holds the rules.
 
-- A v1 client that loses its connection opens a new session with a
-  `SessionOpen` on a new connection, and it builds each circuit again. It
-  keeps no cell for a resume, and the ARQ of §3.7 sends again each record
-  that held no relay acknowledgment.
-- A v1 relay closes a connection whose first capsule is a `SessionResume`,
-  and it holds no session state after the connection of that session closed.
-  Part 6 §6.2.3 holds those two rules beside the wire form, which stays.
-- §3.12 models the resume, and it states what a client without it pays.
+- A client that ends a connection by its own choice sends a `SessionPause`
+  and reads until the `SessionPaused` of its ingress relay. The relay parks
+  the session, and each relay of each chain keeps its part of each circuit.
+  On the next connection the client sends a `SessionResume`, and each
+  circuit carries on. That client pays no circuit build.
+- A connection that drops with no pause leaves a parked session too. Its
+  resume holds only when no frame was in flight at the drop. A relay paces
+  one cell each second on each circuit (§3.5.2), thus a frame is in flight
+  at most drops. The resume then fails, the client opens a new session with
+  a `SessionOpen` on a new connection, and it builds each circuit again.
+  **An unclean drop thus pays a build for each circuit.** The ARQ of §3.7
+  sends again each record that held no relay acknowledgment.
+- A parked session holds no subscription at a queue relay, thus a record
+  that arrives for it takes its push (`NET-322`). §3.12 gives the builds that
+  the resume saves.
 
 **Transport requirements:**
 
@@ -2786,7 +2806,10 @@ that session, and it resumes the session under Part 6 §6.2.3 rule `WIR-361`.
 The connection costs one TCP handshake, one TLS 1.3 handshake, and one HTTP
 Upgrade under §3.8. The model prices that handshake at 6 000 bytes, which is
 2 400 bytes up and 3 600 bytes down. The `X25519MLKEM768` key share and the
-certificate chain set most of that figure.
+certificate chain set most of that figure. The first capsule of the
+connection is the `SessionResume`, and the last two are the `SessionPause`
+and its `SessionPaused` under `WIR-360`. The three cost 71 + 43 + 39 = 153
+bytes on the wire, and the model counts them inside the 6 000 bytes.
 
 **A group wake opens two sessions.** The push of a group record names the
 notify session, and Part 8 §8.5.2 gives that path. The client resumes the
@@ -2809,20 +2832,16 @@ acknowledgment for the queue that it drained, and it closes the connection
 under rule `WIR-360`. A group queue takes no reader acknowledgment under
 `NET-235`. NET-100 below caps each session at 6 s.
 
-> **What the deferred resume costs.** The paragraphs above and the table
-> below model the session resume of Part 6 §6.2.3, and §3.8 defers it. In
-> v1 a circuit ends with its connection. A v1 client that closes
-> the connection at the end of each wake under `WIR-360` builds a circuit
-> for each session of the next wake. The build row of the Instant column is
-> then 289 × 12 576 = 3 634 464 bytes in the place of 125 760. The Instant day
-> is 2 599 785 − 125 760 + 3 634 464 = 6 108 489 bytes with no
-> other row changed. That is about **183.25 MB each month**, which is 1.8
-> times the U4 limit. A client that holds one connection open across its
-> arrivals pays no such build. It pays the pacing cover of a held
-> session in the place of it. **Thus v1 does not show U4 for a
-> client that closes its connection between wakes**, and Part 2 §2.4 says
-> so beside U4. The table below is the budget of the version that ships
-> the resume.
+> **A wake whose resume fails pays a build.** The table below is the budget
+> of a client whose resumes hold. A resume fails after a connection that
+> dropped with a frame in flight, after the end of the client process, after
+> a lock of the client, and after a restart of the ingress relay (Part 6
+> §6.2.3). The client then builds a circuit for each session of that wake,
+> at 12 576 bytes each. A client whose resume failed at each wake would pay
+> 289 × 12 576 = 3 634 464 bytes each day in the build row in the place of
+> 125 760, and its Instant day would be 2 599 785 − 125 760 + 3 634 464 =
+> 6 108 489 bytes. That is about **183.25 MB each month**, the upper bound of
+> that row.
 
 **A circuit lives from one wake to the next.** §3.4.3 sets `CIRCUIT_MAX_AGE` to
 4 hours, and Part 6 §6.2.3 sets `SESSION_RESUME_WINDOW` to the same value. Each

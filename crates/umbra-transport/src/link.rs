@@ -6,28 +6,42 @@
 //! connection and drops a frame whose sequence it accepted before. No type
 //! here waits, reads, or writes: the runtime moves the bytes.
 //!
-//! v1 defers the resume (Part 3 §3.8). After a lost connection
-//! a client opens a new session, and the ARQ of Part 3 §3.7 sends each
-//! record again. Thus a link keeps no cell unless its owner asks for the
-//! resend window with [`ClientLink::keep_for_resume`].
+//! A resume sends no frame again. Each onion layer chains on the cell
+//! before it, thus a circuit does not continue past a lost cell. The two
+//! ends compare their frame counts at the resume, and a resume holds only
+//! when no frame is lost in either direction. A client that pauses its
+//! session before it closes the connection makes that certain. A link thus
+//! keeps no cell.
 
-use alloc::{
-    collections::{BTreeSet, VecDeque},
-    vec::Vec,
-};
+use alloc::collections::BTreeSet;
 
 use umbra_crypto::secret::Secret;
 use umbra_wire::{
     capsule::{self, CapsuleType, HEADER_LEN},
-    session::{SessionControl, SessionFrame, SEQ_MAX, SESSION_FRAME_OVERHEAD},
+    session::{SessionControl, SessionFrame, SEQ_MAX},
 };
 
 use crate::Error;
 
 /// `SESSION_RESUME_WINDOW`, in seconds.
 pub const RESUME_WINDOW: u64 = 4 * 3_600;
-/// The in-flight window of Part 3 §3.7 item 4.
-pub const RESEND_WINDOW: usize = 1_000;
+/// The span of frame sequences below the highest one in which a relay
+/// remembers each sequence that it accepted (`WIR-141`).
+pub const ACCEPTED_SPAN: usize = 1_000;
+/// `SESSION_PAUSE_WAIT`: the time that a client waits for the
+/// `SessionPaused` of its relay, in seconds (`WIR-540`).
+pub const PAUSE_WAIT: u64 = 2;
+
+/// One `UMBRA_SESSION` capsule of `control`.
+fn control_capsule(control: &SessionControl, out: &mut [u8]) -> Result<usize, Error> {
+    let mut record = [0u8; 41];
+    let n = control.encode(&mut record)?;
+    Ok(capsule::encode(
+        CapsuleType::Session,
+        record.get(..n).ok_or(Error::Capacity)?,
+        out,
+    )?)
+}
 
 /// What the client keeps for a session.
 pub struct ClientLink {
@@ -36,14 +50,14 @@ pub struct ClientLink {
     next_seq: u32,
     resume_count: u32,
     connected: bool,
+    /// The client sent its `SessionPause`, and it sends no further frame
+    /// on this connection.
+    pausing: bool,
+    /// The relay answered with its `SessionPaused`.
+    paused: bool,
     closed_at: Option<u64>,
-    /// Whether the link keeps each cell for a resume. A link that never
-    /// resumes keeps none. Nothing would drain the window of a client, and
-    /// an upload would hold 1 000 cells of it for no use.
-    keeps: bool,
-    window: VecDeque<(u32, Vec<u8>)>,
-    /// The highest frame sequence of the relay that the client accepted.
-    relay_seq: Option<u32>,
+    /// The count of the frames of the relay that the client accepted.
+    received: u32,
 }
 
 impl ClientLink {
@@ -55,13 +69,7 @@ impl ClientLink {
             session_id: id,
             session_secret: Secret::new(*secret.expose()),
         };
-        let mut record = [0u8; 41];
-        let n = control.encode(&mut record)?;
-        let used = capsule::encode(
-            CapsuleType::Session,
-            record.get(..n).ok_or(Error::Capacity)?,
-            out,
-        )?;
+        let used = control_capsule(&control, out)?;
         Ok((
             ClientLink {
                 id,
@@ -69,20 +77,13 @@ impl ClientLink {
                 next_seq: 0,
                 resume_count: 0,
                 connected: true,
+                pausing: false,
+                paused: false,
                 closed_at: None,
-                keeps: false,
-                window: VecDeque::new(),
-                relay_seq: None,
+                received: 0,
             },
             used,
         ))
-    }
-
-    /// Keeps a copy of each later cell in the resend window, for a link
-    /// that resumes its session (`WIR-525`). The owner then names each
-    /// frame that the relay drained with [`ClientLink::drained`].
-    pub fn keep_for_resume(&mut self) {
-        self.keeps = true;
     }
 
     /// The session identifier.
@@ -95,67 +96,86 @@ impl ClientLink {
         self.next_seq
     }
 
+    /// The count of the frames of the relay that the client accepted.
+    pub fn received(&self) -> u32 {
+        self.received
+    }
+
+    /// Whether the link takes a cell now: it holds a connection, and the
+    /// client did not pause the session on it.
+    pub fn sends(&self) -> bool {
+        self.connected && !self.pausing
+    }
+
     /// Frames `cell` into a cell capsule (`WIR-138`) and returns the
-    /// capsule length. Fails when `seq` would wrap (`WIR-139`). A link
-    /// that resumes keeps a copy in the resend window, and a full window
-    /// drops its oldest frame (`WIR-525`). A link that does not resume
-    /// keeps no copy (Part 3 §3.8).
+    /// capsule length. Fails when `seq` would wrap (`WIR-139`), and after
+    /// a pause (`WIR-539`). The link keeps no copy of the cell (`WIR-525`).
     pub fn send(&mut self, cell: &[u8], out: &mut [u8]) -> Result<usize, Error> {
-        if !self.connected {
+        if !self.sends() || self.next_seq >= SEQ_MAX {
             return Err(Error::State);
         }
-        if self.next_seq >= SEQ_MAX {
-            return Err(Error::State);
-        }
-        let seq = self.next_seq;
-        let used = self.frame(seq, false, cell, out)?;
-        if self.keeps {
-            if self.window.len() >= RESEND_WINDOW {
-                self.window.pop_front();
-            }
-            self.window.push_back((seq, cell.to_vec()));
-        }
+        let frame = SessionFrame {
+            session_id: self.id,
+            seq: self.next_seq,
+            resend: false,
+            cell,
+        };
+        let used = frame_capsule(&frame, out)?;
         self.next_seq = self.next_seq.saturating_add(1);
         Ok(used)
     }
 
-    fn frame(&self, seq: u32, resend: bool, cell: &[u8], out: &mut [u8]) -> Result<usize, Error> {
-        let frame = SessionFrame {
-            session_id: self.id,
-            seq,
-            resend,
-            cell,
-        };
-        // The frame goes in place after the header, thus no second copy.
-        let (head, tail) = out.split_at_mut(HEADER_LEN.min(out.len()));
-        let n = frame.encode(tail)?;
-        let head: &mut [u8; HEADER_LEN] = head.try_into().map_err(|_| Error::Capacity)?;
-        encode_header(n, head)?;
-        Ok(HEADER_LEN.saturating_add(n))
-    }
-
     /// Takes a frame of the relay. Returns the cell, or `None` for a frame
     /// whose sequence the client accepted before (`WIR-141`). The relay
-    /// sends in order over TLS or QUIC, thus one high-water mark serves.
+    /// sends in order over TLS, thus one count serves.
     pub fn receive<'a>(&mut self, capsule_value: &'a [u8]) -> Result<Option<&'a [u8]>, Error> {
         let (frame, _) = SessionFrame::parse(capsule_value)?;
         if frame.session_id != self.id {
             return Err(Error::Refused);
         }
-        if self.relay_seq.is_some_and(|seen| frame.seq <= seen) {
+        if frame.seq < self.received {
             return Ok(None);
         }
-        self.relay_seq = Some(frame.seq);
+        self.received = frame.seq.saturating_add(1);
         Ok(Some(frame.cell))
     }
 
-    /// A frame the relay drained: everything at or below `seq` leaves the
-    /// window. The end-to-end ARQ of Part 3 §3.7 gives this signal; the
-    /// frame carries no acknowledgment of its own.
-    pub fn drained(&mut self, seq: u32) {
-        while self.window.front().is_some_and(|(s, _)| *s <= seq) {
-            self.window.pop_front();
+    /// The `SessionPause` capsule (`WIR-539`). The link frames no cell
+    /// after it on this connection.
+    pub fn pause(&mut self, out: &mut [u8]) -> Result<usize, Error> {
+        if !self.sends() {
+            return Err(Error::State);
         }
+        let used = control_capsule(
+            &SessionControl::Pause {
+                session_id: self.id,
+            },
+            out,
+        )?;
+        self.pausing = true;
+        Ok(used)
+    }
+
+    /// Takes the `SessionPaused` of the relay. Each frame of the relay on
+    /// this connection came before it (`WIR-541`).
+    pub fn on_paused(&mut self, control: &SessionControl) -> Result<(), Error> {
+        match control {
+            SessionControl::Paused { session_id } if *session_id == self.id && self.pausing => {
+                self.paused = true;
+                Ok(())
+            }
+            _ => Err(Error::Refused),
+        }
+    }
+
+    /// Whether the client sent its `SessionPause` on this connection.
+    pub fn is_pausing(&self) -> bool {
+        self.pausing
+    }
+
+    /// Whether the relay answered the pause of this connection.
+    pub fn is_paused(&self) -> bool {
+        self.paused
     }
 
     /// The connection dropped at `now`.
@@ -171,53 +191,45 @@ impl ClientLink {
     }
 
     /// The capsule that goes first on a new connection: a resume with the
-    /// next count (`WIR-234` to `WIR-236`), or an error when the window
-    /// passed and the client must open a new session.
+    /// next count and the two frame counts (`WIR-234` to `WIR-236`), or an
+    /// error when the window passed and the client must open a new session.
     pub fn resume(&mut self, now: u64, out: &mut [u8]) -> Result<usize, Error> {
         if !self.may_resume(now) {
             return Err(Error::State);
         }
-        self.resume_count = self.resume_count.saturating_add(1);
-        let control = SessionControl::resume(&self.secret, self.id, self.resume_count);
-        let mut record = [0u8; 29];
-        let n = control.encode(&mut record)?;
-        let used = capsule::encode(
-            CapsuleType::Session,
-            record.get(..n).ok_or(Error::Capacity)?,
-            out,
-        )?;
+        let count = self.resume_count.saturating_add(1);
+        let control =
+            SessionControl::resume(&self.secret, self.id, count, self.next_seq, self.received);
+        let used = control_capsule(&control, out)?;
+        self.resume_count = count;
         self.connected = true;
+        self.pausing = false;
+        self.paused = false;
         self.closed_at = None;
         Ok(used)
     }
 
-    /// The frames to send again after a resume, each with the resend bit
-    /// and its first sequence (`WIR-140`). The caller sends them in order.
-    pub fn resend_all(&self, out: &mut Vec<Vec<u8>>) -> Result<(), Error> {
-        for (seq, cell) in &self.window {
-            let mut buf = alloc::vec![0u8; cell.len() + SESSION_FRAME_OVERHEAD + HEADER_LEN];
-            let n = self.frame(*seq, true, cell, &mut buf)?;
-            buf.truncate(n);
-            out.push(buf);
-        }
-        Ok(())
-    }
-
     /// The close capsule that ends the session by the client's choice
-    /// (`WIR-246`). A push wake closes the connection without it
-    /// (`WIR-360`).
+    /// (`WIR-246`). A client that keeps its session pauses it in place of
+    /// this record (`WIR-360`).
     pub fn close(self, out: &mut [u8]) -> Result<usize, Error> {
-        let control = SessionControl::Close {
-            session_id: self.id,
-        };
-        let mut record = [0u8; 9];
-        let n = control.encode(&mut record)?;
-        Ok(capsule::encode(
-            CapsuleType::Session,
-            record.get(..n).ok_or(Error::Capacity)?,
+        control_capsule(
+            &SessionControl::Close {
+                session_id: self.id,
+            },
             out,
-        )?)
+        )
     }
+}
+
+/// One cell capsule around `frame`. The frame goes in place after the
+/// header, thus no second copy.
+fn frame_capsule(frame: &SessionFrame<'_>, out: &mut [u8]) -> Result<usize, Error> {
+    let (head, tail) = out.split_at_mut(HEADER_LEN.min(out.len()));
+    let n = frame.encode(tail)?;
+    let head: &mut [u8; HEADER_LEN] = head.try_into().map_err(|_| Error::Capacity)?;
+    encode_header(n, head)?;
+    Ok(HEADER_LEN.saturating_add(n))
 }
 
 fn encode_header(value_len: usize, out: &mut [u8; HEADER_LEN]) -> Result<(), Error> {
@@ -228,15 +240,27 @@ fn encode_header(value_len: usize, out: &mut [u8; HEADER_LEN]) -> Result<(), Err
     Ok(())
 }
 
+/// Why a relay did not bind a `SessionResume`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumeFault {
+    /// The record does not verify, repeats a count, or came after the
+    /// window (`WIR-237`, `WIR-238`, `WIR-244`). The session stays as it
+    /// is: a party without the secret ends no session.
+    Refused,
+    /// The record verifies, and its frame counts differ from the counts of
+    /// the relay (`WIR-544`). A frame is lost, thus each circuit of the
+    /// session is broken, and the relay discards the session.
+    Lost,
+}
+
 /// What the relay keeps for a session.
 pub struct RelayLink {
     id: [u8; 8],
     secret: Secret<32>,
     resume_count: u32,
-    /// The frame sequences that the relay accepted inside the window below
-    /// the highest one. A client resends inside `RESEND_WINDOW` only, thus
-    /// a sequence below that window is a duplicate, and the set stays
-    /// bounded whatever a peer sends.
+    /// The frame sequences that the relay accepted inside the span below
+    /// the highest one. A sequence below that span is a duplicate, and the
+    /// set stays bounded whatever a peer sends.
     accepted: BTreeSet<u32>,
     top: Option<u32>,
     bound: bool,
@@ -277,6 +301,11 @@ impl RelayLink {
         self.id
     }
 
+    /// Whether a connection holds the session now.
+    pub fn is_bound(&self) -> bool {
+        self.bound
+    }
+
     /// Takes a frame. Returns the cell, or `None` for a duplicate the relay
     /// already accepted (`WIR-141`).
     pub fn receive<'a>(&mut self, capsule_value: &'a [u8]) -> Result<Option<&'a [u8]>, Error> {
@@ -287,15 +316,15 @@ impl RelayLink {
         if frame.session_id != self.id {
             return Err(Error::Refused);
         }
-        let window = u32::try_from(RESEND_WINDOW).unwrap_or(u32::MAX);
-        let floor = self.top.map_or(0, |top| top.saturating_sub(window));
+        let span = u32::try_from(ACCEPTED_SPAN).unwrap_or(u32::MAX);
+        let floor = self.top.map_or(0, |top| top.saturating_sub(span));
         let is_below = self.top.is_some() && frame.seq < floor;
         if is_below || !self.accepted.insert(frame.seq) {
             return Ok(None);
         }
         if self.top.is_none_or(|top| frame.seq > top) {
             self.top = Some(frame.seq);
-            let floor = frame.seq.saturating_sub(window);
+            let floor = frame.seq.saturating_sub(span);
             self.accepted = self.accepted.split_off(&floor);
         }
         Ok(Some(frame.cell))
@@ -313,19 +342,43 @@ impl RelayLink {
             resend: false,
             cell,
         };
-        let (head, tail) = out.split_at_mut(HEADER_LEN.min(out.len()));
-        let n = frame.encode(tail)?;
-        let head: &mut [u8; HEADER_LEN] = head.try_into().map_err(|_| Error::Capacity)?;
-        encode_header(n, head)?;
+        let used = frame_capsule(&frame, out)?;
         self.next_seq = self.next_seq.saturating_add(1);
-        Ok(HEADER_LEN.saturating_add(n))
+        Ok(used)
+    }
+
+    /// Takes the `SessionPause` of the client at `now`, and gives the
+    /// `SessionPaused` capsule (`WIR-541`). The link frames no cell after
+    /// it until a resume binds it again.
+    pub fn pause(
+        &mut self,
+        control: &SessionControl,
+        now: u64,
+        out: &mut [u8],
+    ) -> Result<usize, Error> {
+        match control {
+            SessionControl::Pause { session_id } if *session_id == self.id && self.bound => {
+                let used = control_capsule(
+                    &SessionControl::Paused {
+                        session_id: self.id,
+                    },
+                    out,
+                )?;
+                self.bound = false;
+                self.closed_at = Some(now);
+                Ok(used)
+            }
+            _ => Err(Error::Refused),
+        }
     }
 
     /// The connection dropped at `now`; the state stays for the window
-    /// (`WIR-243`).
+    /// (`WIR-243`). The window of a paused session runs from its pause.
     pub fn connection_lost(&mut self, now: u64) {
-        self.bound = false;
-        self.closed_at = Some(now);
+        if self.bound {
+            self.bound = false;
+            self.closed_at = Some(now);
+        }
     }
 
     /// Whether the relay may discard the state at `now` (`WIR-244`).
@@ -334,16 +387,21 @@ impl RelayLink {
             .is_some_and(|at| now.saturating_sub(at) >= RESUME_WINDOW)
     }
 
-    /// Binds a resume to a new connection (`WIR-237` to `WIR-242`). The
-    /// caller closes the previous connection if it is open.
-    pub fn resume(&mut self, control: &SessionControl, now: u64) -> Result<(), Error> {
+    /// Binds a resume to a new connection (`WIR-237` to `WIR-242`,
+    /// `WIR-544`). The caller closes the previous connection if it is
+    /// open, and it discards the session after [`ResumeFault::Lost`].
+    pub fn resume(&mut self, control: &SessionControl, now: u64) -> Result<(), ResumeFault> {
         if self.expired(now) {
-            return Err(Error::Refused);
+            return Err(ResumeFault::Refused);
         }
-        let count = control
+        let (count, sent, received) = control
             .verify_resume(&self.secret, &self.id, self.resume_count)
-            .map_err(|_| Error::Refused)?;
+            .map_err(|_| ResumeFault::Refused)?;
         self.resume_count = count;
+        let taken = self.top.map_or(0, |top| top.saturating_add(1));
+        if sent != taken || received != self.next_seq {
+            return Err(ResumeFault::Lost);
+        }
         self.bound = true;
         self.closed_at = None;
         Ok(())
@@ -369,83 +427,196 @@ mod tests {
     use super::*;
     use alloc::vec;
 
-    #[test]
-    fn a_link_that_does_not_resume_keeps_no_cell() {
-        let mut buf = vec![0u8; 40_000];
-        let (mut client, _) = ClientLink::open([1; 8], Secret::new([2; 32]), &mut buf).unwrap();
-        let cell = vec![7u8; 512];
-        // Part 3 §3.8: a v1 client opens a new session after a lost
-        // connection, thus an upload leaves no cell behind.
-        for _ in 0..RESEND_WINDOW + 200 {
-            client.send(&cell, &mut buf).unwrap();
-        }
-        assert!(client.window.is_empty());
-        assert_eq!(client.next_seq(), 1_200);
-        // The signal of a drained frame changes nothing.
-        client.drained(5);
-        let mut none = Vec::new();
-        client.resend_all(&mut none).unwrap();
-        assert!(none.is_empty());
-    }
-
-    #[test]
-    fn a_full_window_drops_its_oldest_frame_and_refuses_no_send() {
-        let mut buf = vec![0u8; 40_000];
-        let (mut client, _) = ClientLink::open([1; 8], Secret::new([2; 32]), &mut buf).unwrap();
-        client.keep_for_resume();
-        let cell = vec![7u8; 512];
-        // WIR-525: a long upload sends past the window.
-        for _ in 0..RESEND_WINDOW + 200 {
-            client.send(&cell, &mut buf).unwrap();
-        }
-        assert_eq!(client.window.len(), RESEND_WINDOW);
-        assert_eq!(client.window.front().map(|(seq, _)| *seq), Some(200));
-    }
-
-    #[test]
-    fn a_session_survives_a_connection_and_drops_a_duplicate() {
-        let mut buf = vec![0u8; 40_000];
-        let (mut client, n) = ClientLink::open([1; 8], Secret::new([2; 32]), &mut buf).unwrap();
+    /// A client and a relay that hold one session.
+    fn pair(buf: &mut [u8]) -> (ClientLink, RelayLink) {
+        let (client, n) = ClientLink::open([1; 8], Secret::new([2; 32]), buf).unwrap();
         let (kind, value, _) = capsule::parse(&buf[..n]).unwrap();
         assert_eq!(kind, CapsuleType::Session);
-        let mut relay = RelayLink::open(SessionControl::parse(value).unwrap()).unwrap();
-        client.keep_for_resume();
+        let relay = RelayLink::open(SessionControl::parse(value).unwrap()).unwrap();
+        (client, relay)
+    }
 
+    fn control(buf: &[u8]) -> SessionControl {
+        let (kind, value, _) = capsule::parse(buf).unwrap();
+        assert_eq!(kind, CapsuleType::Session);
+        SessionControl::parse(value).unwrap()
+    }
+
+    /// Moves one cell in each direction.
+    fn exchange(client: &mut ClientLink, relay: &mut RelayLink, buf: &mut [u8]) {
+        let cell = vec![7u8; 512];
+        let n = client.send(&cell, buf).unwrap();
+        let (_, value, _) = capsule::parse(&buf[..n]).unwrap();
+        assert_eq!(relay.receive(value).unwrap(), Some(&cell[..]));
+        let n = relay.send(&cell, buf).unwrap();
+        let (_, value, _) = capsule::parse(&buf[..n]).unwrap();
+        assert_eq!(client.receive(value).unwrap(), Some(&cell[..]));
+    }
+
+    #[test]
+    fn a_frame_that_a_link_accepted_before_drops() {
+        let mut buf = vec![0u8; 40_000];
+        let (mut client, mut relay) = pair(&mut buf);
         let cell = vec![7u8; 512];
         let n = client.send(&cell, &mut buf).unwrap();
         let (kind, value, _) = capsule::parse(&buf[..n]).unwrap();
         assert_eq!(kind, CapsuleType::Cell);
         assert_eq!(relay.receive(value).unwrap(), Some(&cell[..]));
         assert_eq!(relay.receive(value).unwrap(), None);
+        let n = relay.send(&cell, &mut buf).unwrap();
+        let (_, value, _) = capsule::parse(&buf[..n]).unwrap();
+        assert_eq!(client.receive(value).unwrap(), Some(&cell[..]));
+        assert_eq!(client.receive(value).unwrap(), None);
+        assert_eq!((client.next_seq(), client.received()), (1, 1));
+    }
 
+    #[test]
+    fn a_paused_session_resumes_on_a_new_connection_with_equal_counts() {
+        let mut buf = vec![0u8; 40_000];
+        let (mut client, mut relay) = pair(&mut buf);
+        exchange(&mut client, &mut relay, &mut buf);
+        exchange(&mut client, &mut relay, &mut buf);
+
+        // WIR-539: the client frames no cell after its pause.
+        let n = client.pause(&mut buf).unwrap();
+        let pause = control(&buf[..n]);
+        assert!(client.is_pausing() && !client.is_paused());
+        assert!(client.send(&[7u8; 512], &mut buf).is_err());
+        assert!(client.pause(&mut buf).is_err());
+        // WIR-541: the relay answers, and it frames no cell after it.
+        let n = relay.pause(&pause, 1_000, &mut buf).unwrap();
+        let paused = control(&buf[..n]);
+        assert!(!relay.is_bound());
+        assert!(relay.send(&[7u8; 512], &mut buf).is_err());
+        client.on_paused(&paused).unwrap();
+        assert!(client.is_paused());
+        client.connection_lost(1_001);
+        // The window of the relay runs from the pause.
+        relay.connection_lost(1_500);
+        assert!(relay.expired(1_000 + RESUME_WINDOW));
+
+        let n = client.resume(2_000, &mut buf).unwrap();
+        let resume = control(&buf[..n]);
+        assert!(matches!(
+            resume,
+            SessionControl::Resume {
+                resume_count: 1,
+                sent: 2,
+                received: 2,
+                ..
+            }
+        ));
+        relay.resume(&resume, 2_000).unwrap();
+        assert!(relay.is_bound());
+        // WIR-238: the same record binds no second connection.
+        assert_eq!(relay.resume(&resume, 2_001), Err(ResumeFault::Refused));
+        exchange(&mut client, &mut relay, &mut buf);
+        assert_eq!((client.next_seq(), client.received()), (3, 3));
+    }
+
+    #[test]
+    fn a_resume_with_a_lost_frame_in_either_direction_is_lost() {
+        let mut buf = vec![0u8; 40_000];
+        let cell = vec![7u8; 512];
+
+        // A frame of the client that the relay did not take.
+        let (mut client, mut relay) = pair(&mut buf);
+        exchange(&mut client, &mut relay, &mut buf);
+        client.send(&cell, &mut buf).unwrap();
         client.connection_lost(1_000);
         relay.connection_lost(1_000);
-        assert!(client.send(&cell, &mut buf).is_err());
-        let n = client.resume(1_500, &mut buf).unwrap();
-        let (_, value, _) = capsule::parse(&buf[..n]).unwrap();
-        relay
-            .resume(&SessionControl::parse(value).unwrap(), 1_500)
-            .unwrap();
-        let mut again = Vec::new();
-        client.resend_all(&mut again).unwrap();
-        assert_eq!(again.len(), 1);
-        let (_, value, _) = capsule::parse(&again[0]).unwrap();
-        let (frame, _) = SessionFrame::parse(value).unwrap();
-        assert!(frame.resend);
-        assert_eq!(frame.seq, 0);
-        assert_eq!(relay.receive(value).unwrap(), None);
-        client.drained(0);
-        let mut none = Vec::new();
-        client.resend_all(&mut none).unwrap();
-        assert!(none.is_empty());
+        let n = client.resume(1_010, &mut buf).unwrap();
+        assert_eq!(
+            relay.resume(&control(&buf[..n]), 1_010),
+            Err(ResumeFault::Lost)
+        );
+        assert!(!relay.is_bound());
 
+        // A frame of the relay that the client did not take.
+        let (mut client, mut relay) = pair(&mut buf);
+        exchange(&mut client, &mut relay, &mut buf);
+        relay.send(&cell, &mut buf).unwrap();
+        client.connection_lost(1_000);
+        relay.connection_lost(1_000);
+        let n = client.resume(1_010, &mut buf).unwrap();
+        assert_eq!(
+            relay.resume(&control(&buf[..n]), 1_010),
+            Err(ResumeFault::Lost)
+        );
+
+        // A session that carried no frame resumes with two counts of zero.
+        let (mut client, mut relay) = pair(&mut buf);
+        client.connection_lost(1_000);
+        relay.connection_lost(1_000);
+        let n = client.resume(1_010, &mut buf).unwrap();
+        relay.resume(&control(&buf[..n]), 1_010).unwrap();
+    }
+
+    #[test]
+    fn a_resume_that_does_not_verify_leaves_the_session_as_it_is() {
+        let mut buf = vec![0u8; 40_000];
+        let (mut client, mut relay) = pair(&mut buf);
+        exchange(&mut client, &mut relay, &mut buf);
+        client.connection_lost(1_000);
+        relay.connection_lost(1_000);
+
+        // WIR-237: a party without the secret names the right counts.
+        let forged = SessionControl::resume(&Secret::new([9; 32]), [1; 8], 1, 1, 1);
+        assert_eq!(relay.resume(&forged, 1_010), Err(ResumeFault::Refused));
+        // The `auth` covers the two counts. A record with a count that its
+        // `auth` does not cover is thus no proof of a lost frame.
+        let SessionControl::Resume {
+            session_id,
+            resume_count,
+            auth,
+            ..
+        } = SessionControl::resume(&Secret::new([2; 32]), [1; 8], 1, 1, 1)
+        else {
+            panic!("no resume");
+        };
+        let moved = SessionControl::Resume {
+            session_id,
+            resume_count,
+            sent: 2,
+            received: 1,
+            auth,
+        };
+        assert_eq!(relay.resume(&moved, 1_010), Err(ResumeFault::Refused));
+        // The session still takes the resume of its client.
+        let n = client.resume(1_020, &mut buf).unwrap();
+        relay.resume(&control(&buf[..n]), 1_020).unwrap();
+    }
+
+    #[test]
+    fn the_window_ends_a_resume_at_both_ends() {
+        let mut buf = vec![0u8; 40_000];
+        let (mut client, mut relay) = pair(&mut buf);
         client.connection_lost(2_000);
         relay.connection_lost(2_000);
+        assert!(client.may_resume(2_000 + RESUME_WINDOW - 1));
+        let late = SessionControl::resume(&Secret::new([2; 32]), [1; 8], 1, 0, 0);
+        // WIR-244, WIR-245.
         assert!(!client.may_resume(2_000 + RESUME_WINDOW));
         assert!(client.resume(2_000 + RESUME_WINDOW, &mut buf).is_err());
         assert!(relay.expired(2_000 + RESUME_WINDOW));
+        assert_eq!(
+            relay.resume(&late, 2_000 + RESUME_WINDOW),
+            Err(ResumeFault::Refused)
+        );
         let n = client.close(&mut buf).unwrap();
-        let (_, value, _) = capsule::parse(&buf[..n]).unwrap();
-        relay.close(&SessionControl::parse(value).unwrap()).unwrap();
+        relay.close(&control(&buf[..n])).unwrap();
+    }
+
+    #[test]
+    fn a_pause_record_of_another_session_changes_nothing() {
+        let mut buf = vec![0u8; 40_000];
+        let (mut client, mut relay) = pair(&mut buf);
+        let other = SessionControl::Pause { session_id: [9; 8] };
+        assert!(relay.pause(&other, 1_000, &mut buf).is_err());
+        assert!(relay.is_bound());
+        // A `SessionPaused` that the client did not ask for binds nothing.
+        let early = SessionControl::Paused { session_id: [1; 8] };
+        assert!(client.on_paused(&early).is_err());
+        assert!(!client.is_paused());
     }
 }
