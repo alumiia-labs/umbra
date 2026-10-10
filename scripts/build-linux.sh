@@ -23,8 +23,13 @@ docker run --rm \
         set -euo pipefail
         CARGO_TARGET_DIR=/src/target/deploy/cargo cargo build --release --locked \
             -p umbra-relay --features native \
-            --bin umbra-relay --bin umbra-ndr --bin umbra-directory --bin umbra-signer
-        for bin in umbra-relay umbra-ndr umbra-directory umbra-signer; do
+            --bin umbra-relay --bin umbra-ndr --bin umbra-directory --bin umbra-signer \
+            --bin umbra-measurer
+        # The authority tool is a queue client, thus it is of the client crate.
+        CARGO_TARGET_DIR=/src/target/deploy/cargo cargo build --release --locked \
+            -p umbra-ffi --features runtime --bin umbra-authority
+        for bin in umbra-relay umbra-ndr umbra-directory umbra-signer umbra-measurer \
+            umbra-authority; do
             install -m 0755 "/src/target/deploy/cargo/release/$bin" "/src/target/deploy/bin/$bin"
         done
     '

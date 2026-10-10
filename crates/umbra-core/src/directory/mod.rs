@@ -8,6 +8,7 @@ pub mod family;
 pub mod keychain;
 pub mod layer;
 pub mod manifest;
+pub mod measure;
 pub mod path;
 pub mod receipt;
 pub mod removal;

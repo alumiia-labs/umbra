@@ -45,5 +45,7 @@ UMask=0022
 LimitCORE=0
 MemoryHigh={{ umbra_signer_memory_high }}
 MemoryMax={{ umbra_signer_memory_max }}
-ReadWritePaths=/var/www/umbra/.well-known/umbra
+# The state directory holds the listed class of each relay. It is the one
+# writable part of the directory of the signer.
+ReadWritePaths=/var/www/umbra/.well-known/umbra /var/lib/umbra-signer/state
 ReadOnlyPaths=/var/lib/umbra-signer

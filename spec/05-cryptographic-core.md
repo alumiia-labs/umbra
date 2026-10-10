@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 5: Cryptographic Core
 
 **Status:** Draft
-**Version:** 0.16.0
+**Version:** 0.17.0
 **Date:** 2026-10-10
 
 ---
@@ -1529,6 +1529,7 @@ names the object type and its lifetime:
 "umbra/v1/stat-query"
 "umbra/v1/link-removal"
 "umbra/v1/measurer-cert"
+"umbra/v1/measurer-open"
 "umbra/v1/device-roster"
 "umbra/v1/device-claim"
 "umbra/v1/group-grant"
@@ -1694,6 +1695,11 @@ primitive register in the same manner.
 > claim record under `"umbra/v1/device-claim"`. Part 9 §9.9.1 derives a
 > renewal challenge under `"umbra/v1/handle-renew"`. Each one names one object
 > type, and CRY-031 keeps them apart.
+>
+> *The cause of the measurer-open label.* Part 10 §10.3.1 signs the open of
+> a measurement session under `"umbra/v1/measurer-open"`, with the key of the
+> measurer. The certificate of that key is another object under another key,
+> thus `CRY-031` gives the open a label of its own.
 >
 > *The cause of the two wire labels.* Part 6 §6.5 derives the session tag of
 > a ratchet record from the initial root key under `"umbra/v1/session-tag"`.

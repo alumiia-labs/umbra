@@ -14,7 +14,7 @@ use umbra_core::{
 };
 use umbra_crypto::{hierarchy::RootIdentity, secret::Secret, sign::SigningKey};
 use umbra_ffi::runtime::{run_client, Command, NoStore, OsRng, Update};
-use umbra_transport::{https, native, Dial};
+use umbra_transport::{https, Dial};
 
 use super::{dial_of, info, relay_set, to_hex, unix_now, Settings};
 
@@ -82,8 +82,7 @@ async fn probe(
         vec![info(b), info(c)],
         RootIdentity::new(Secret::new(seed)),
     );
-    let tls =
-        native::tls_config_with_root_file(&settings.ca).map_err(|_| "the root does not read")?;
+    let tls = super::tls_of(settings)?;
     let wait = guard_wait(unix_now());
     if wait > 0 {
         println!("the probe waits {wait} s for the turn of the epoch");
@@ -134,7 +133,7 @@ async fn ask(settings: &Settings, relay: &ListedRelay, body: &[u8]) -> Option<Re
         path: "/receipt".into(),
         address: Some(std::net::IpAddr::from(relay.addr_v4)),
     };
-    let tls = native::tls_config_with_root_file(&settings.ca).ok()?;
+    let tls = super::tls_of(settings).ok()?;
     let (status, answer) = https::post(
         &url,
         "application/octet-stream",

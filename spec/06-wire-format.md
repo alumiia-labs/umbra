@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 6: Wire Format and Encoding
 
 **Status:** Draft
-**Version:** 0.16.0
+**Version:** 0.17.0
 **Date:** 2026-10-10
 
 ---
@@ -524,18 +524,41 @@ In `body`, the first byte after the decryption is a command:
 **[WIR-135]** A relay MUST reject a cell whose command byte is above `0x08`. The
 list above is closed, and §6.1.1 rule 4 permits one canonical form only.
 
-`MEAS_OPEN` carries the `MeasurerCert` of Part 10 §10.3.1. Requirement
+`MEAS_OPEN` and `MEAS_ECHO` travel on a **measurement circuit**: a circuit of
+one hop from a measurer to the relay under test (Part 3 rule `NET-353`, Part
+10 §10.3.1). Each cell of that circuit, in each direction, carries the one
+layer of that hop in the form of a build cell: `X_L` is 16 zero bytes, the
+relay or the measurer checks it under Part 3 rule `NET-114`, and no key
+update runs. The hop index of the key schedule of Part 3 §3.4.4 is the layer
+of the relay.
+
+The content of a `MEAS_OPEN` cell, after the command byte, is:
+
+```
+MeasOpen {
+    cert        MeasurerCert   // Part 10 §10.3.1, 8 598 to 25 148 bytes
+    sig         [3309]u8       // ML-DSA-65 under mldsa_pk of cert, label
+                               // "umbra/v1/measurer-open"
+}
+```
+
+Part 10 rule `REL-203` gives the preimage of `sig`. Requirement
 `REL-068` makes a relay reject a `MEAS_ECHO` cell outside a measurement session
 that a `MEAS_OPEN` cell opened. **[WIR-143]** A measurer MUST send a
 `MEAS_OPEN` cell in bucket `B3`. §10.3.1 gives the certificate 8 598 bytes at
 two signatures, and `REL-065` adds a 3 309-byte session signature. Thus the
-payload exceeds the 8 074-byte `B2` payload of §6.9.
+payload exceeds the 8 074-byte `B2` payload of §6.9. A relay sends no cell in
+answer to a `MEAS_OPEN`.
 
 `MEAS_ECHO` carries the saturating echo of Part 10 §10.3 over the `B0` cell.
-Requirement `REL-002` makes a relay decrypt each `MEAS_ECHO` cell that a
-measurer sends to it, and `REL-003` gives the response rule. §10.4.1 makes the
-cell indistinguishable from a loop cover cell to each party but the two
-endpoints of the measurement.
+The content of the cell, after the command byte, is 0 to 478 bytes that the
+measurer selects, and the padding of `WIR-011` follows it. A relay reads no
+meaning in that content. Requirement `REL-002` makes a relay decrypt each
+`MEAS_ECHO` cell that a measurer sends to it. Requirements `REL-003` and
+`REL-204` give the response: a `MEAS_ECHO` cell of bucket `B0` with the same
+content, on the same circuit. The relay under test knows each cell of a
+measurement, and Part 10 §10.3 gives the cause that this knowledge does not
+weaken the test.
 
 > **These byte values are cell commands.** The value `0x01` is `RELAY` here,
 > `NEW` in §6.4, an L6 ratchet record in §6.4.2, `hdr` in §6.5, and Text in

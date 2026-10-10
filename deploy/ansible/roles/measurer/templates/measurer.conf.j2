@@ -1,0 +1,21 @@
+# Written by Ansible (deploy/ansible/roles/measurer). The file holds no
+# secret.
+key=/var/lib/umbra-measurer/keys/measurer.seed
+cert=/var/lib/umbra-measurer/cert/measurer.cert
+manifest=/var/www/umbra/.well-known/umbra/manifest
+keyset=/var/www/umbra/.well-known/umbra/keyset.bin
+results=/var/lib/umbra-measurer/results
+# The rate that this server sends, in Mbit/s. A test of a class needs 2.25
+# times the rate of the class (Part 10 §10.3). 500 Mbit/s hold two tests of
+# C0 (225 Mbit/s each) in one slot, and no test of C1 (562.5 Mbit/s).
+capacity={{ umbra_measurer_capacity }}
+slot=30
+sockets=4
+# A relay that failed the test of C0 is in no manifest. The measurer tests
+# it all the same, thus a later pass lists it again.
+{% for host in groups['relays'] %}
+{% for relay in hostvars[host]['relays'] %}
+{% set place = 'ingress' if relay.role == 'entry' else relay.role %}
+unlisted=/etc/umbra-signer/descriptors/{{ relay.name }}.desc,{{ place }}
+{% endfor %}
+{% endfor %}

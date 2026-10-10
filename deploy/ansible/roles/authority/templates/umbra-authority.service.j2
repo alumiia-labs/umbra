@@ -1,0 +1,55 @@
+[Unit]
+Description=UMBRA directory authority: report queue and verdicts (Part 10)
+# The tool verifies the manifest under its clock, and a wrong clock rejects
+# it (Part 10 §10.5.2). Thus the service starts after chrony sets the clock.
+After=network-online.target time-sync.target
+Wants=network-online.target time-sync.target
+
+[Service]
+# The seed files of the authorities belong to the user of the signer, and
+# the tool refuses a seed file that a second user can read.
+User=umbra-signer
+Group=umbra-signer
+ExecStart=/usr/local/bin/umbra-authority /etc/umbra-authority/authority.conf
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictSUIDSGID=true
+RestrictRealtime=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+UMask=0077
+LimitCORE=0
+CapabilityBoundingSet=
+ReadWritePaths=/var/lib/umbra-authority
+ReadOnlyPaths=/var/lib/umbra-signer
+# The tool signs as authority 0 and as the aggregators 0 and 1. This
+# service reaches the network, thus it sees those two seeds alone. Two keys
+# sign no root, and the signer issues a MeasurerCert under two other keys.
+{% for index in range(2, 7) %}
+InaccessiblePaths=-{{ umbra_signer_keys }}/authority-{{ index }}.seed
+{% endfor %}
+LimitNOFILE=4096
+# One service never takes the memory of the others on this server.
+MemoryHigh={{ umbra_service_memory_high }}
+MemoryMax={{ umbra_service_memory_max }}
+
+[Install]
+WantedBy=multi-user.target

@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 3: Network Architecture
 
 **Status:** Draft
-**Version:** 0.16.0
+**Version:** 0.17.0
 **Date:** 2026-10-10
 
 ---
@@ -1273,7 +1273,9 @@ causes does not occur.
   counts reaches `CIRCUIT_MAX_CELLS` less `CIRCUIT_CELL_MARGIN`, and it
   builds a new circuit as under `NET-320`. The relay pacing sends about one
   cell each second toward the client (`PACING_MEAN`, §3.9), thus that count reaches the limit
-  after about 2 hours 16 minutes, before `CIRCUIT_MAX_AGE`.
+  after about 2 hours 16 minutes, before `CIRCUIT_MAX_AGE`. Part 10 rule
+  `REL-201` takes a circuit with an open measurement session out of this
+  count, and it ends that circuit at the end of the session.
 - **[NET-322]** A relay that ends a circuit MUST tell each neighbor of it
   with the `CircuitDestroy` of Part 6 §6.2.3, on each link of the circuit
   but the one that ended it: a link that closed for good, a `CircuitDestroy`,
@@ -1393,7 +1395,8 @@ limits, as the rules below state.
   `LINK_BUILD_RATE`. The relay MUST check this before the key agreement of
   the build. A relay of layer 2 or 3 MUST answer a build cell only on a link
   whose `RelayHello` verified (Part 10 rule `REL-174`) and names a relay of
-  the layer before its own in the relay set that it holds. One such link
+  the layer before its own in the relay set that it holds, or as the build
+  of a measurement candidate under `NET-353`. One such link
   carries the circuits of many clients. Thus the relay MUST give a build cell
   on it no answer when the link spent `RELAY_LINK_BUILD_BURST` builds
   and got none back at `RELAY_LINK_BUILD_RATE`. `LINK_CIRCUITS_MAX` does not
@@ -1401,6 +1404,31 @@ limits, as the rules below state.
   that it dialed. A relay that holds no relay set, as in a test network,
   cannot tell a relay link from another link. It gives each link the
   limits of a relay link.
+- **[NET-353]** A relay of layer 2 or 3 that holds a `DirectoryRoot` MUST
+  answer a build cell on a link with no `RelayHello` as the build of a
+  **measurement candidate**, under the limits of a client link and under
+  Part 10 rule `REL-205`. A candidate is a circuit of one hop that ends at
+  that relay. The relay MUST serve one cell on a candidate: a `MEAS_OPEN` of
+  Part 10 §10.3.1 in bucket `B3`. It MUST end the candidate at each other
+  cell, at a `MEAS_OPEN` that does not verify, and at
+  `CIRCUIT_BUILD_TIMEOUT` after the build when no `MEAS_OPEN` verified. It
+  MUST send no cell and no `CircuitDestroy` for such an end. A candidate
+  takes no per-hop delay of `NET-338`, and it is no chain in the count of
+  Part 10 rule `REL-189`. An ingress relay answers the build cell of each
+  client link, thus it holds no candidate: a measurer opens its session
+  there on a circuit of one hop that holds no next hop. The link of a
+  measurer holds its place under `NET-335` while its measurement session is
+  open, and for `LINK_OPEN_TIMEOUT` after it.
+
+> *Cause of `NET-353`.* Part 10 §10.3 makes a measurer open its connections
+> to the relay under test, and `REL-002` makes that relay decrypt each echo.
+> The key of that step comes from a build cell, and before this rule a relay
+> of layer 2 or 3 answered a build cell of a relay of the layer before alone.
+> A candidate serves no `EXTEND`, no `DATA`, and no `LOOP`, thus no client
+> enters a chain at layer 2 or 3 through it. The handshake of Part 5 §5.4.9
+> answers a party that holds the static key of the relay alone, thus the
+> answer names no relay that the manifest does not name. The cost is one key
+> agreement for each build, and `REL-205` bounds the builds of one address.
 - **[NET-333]** A relay MUST close a new connection at once when it holds
   `RELAY_CONN_MAX` connections. An accept that fails MUST NOT end the relay.
   The relay accepts again after a short wait, and it writes no line for it.
@@ -1442,7 +1470,7 @@ limits, as the rules below state.
   agreement. After the upgrade, a relay MUST close a link that
   sent no `Open` in `LINK_OPEN_TIMEOUT`. A relay of layer 2 or 3 that holds a
   relay set MUST also close a link with no `RelayHello` of `NET-332` in that
-  time. Each other connection there is one push that ends at
+  time, but for the link of a measurer under `NET-353`. Each other connection there is one push that ends at
   once. An ingress relay MUST close a client link that held no circuit for
   `LINK_IDLE_TIMEOUT`.
 

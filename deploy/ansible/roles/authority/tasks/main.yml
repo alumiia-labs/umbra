@@ -1,0 +1,50 @@
+# The tool of a directory authority (Part 10 §10.4.2): the report queue of
+# authority 0, the fault rate of each relay, the isolation query, and the
+# verdicts that the signer reads. It runs on the server of the signer, as
+# the user of the signer, because it reads the seed files of that user. Its
+# unit hides each seed that it does not need.
+- name: The directories of the authority tool are there
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.owner }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: /etc/umbra-authority, owner: root, mode: "0755" }
+    - { path: /var/lib/umbra-authority, owner: umbra-signer, mode: "0750" }
+    # The tool makes the two secrets of the report queue here at its first
+    # start, each readable by its owner alone.
+    - { path: /var/lib/umbra-authority/secrets, owner: umbra-signer, mode: "0700" }
+
+- name: The binary of the authority tool is there
+  ansible.builtin.copy:
+    src: "{{ umbra_bin_dir }}/umbra-authority"
+    dest: /usr/local/bin/umbra-authority
+    mode: "0755"
+  notify: Restart umbra-authority
+
+# The file holds no secret: it names the key directory of the signer and
+# the secret directory above.
+- name: The settings of the authority tool are there
+  ansible.builtin.template:
+    src: authority.conf.j2
+    dest: /etc/umbra-authority/authority.conf
+    mode: "0644"
+  notify: Restart umbra-authority
+
+- name: The service of the authority tool is there
+  ansible.builtin.template:
+    src: umbra-authority.service.j2
+    dest: /etc/systemd/system/umbra-authority.service
+    mode: "0644"
+  notify: Restart umbra-authority
+
+# Before the first relay runs the tool finds no ingress relay. It tries
+# again each 5 seconds, and it makes its queue when a relay answers.
+- name: The authority tool runs
+  ansible.builtin.systemd:
+    name: umbra-authority
+    enabled: true
+    state: started
+    daemon_reload: true

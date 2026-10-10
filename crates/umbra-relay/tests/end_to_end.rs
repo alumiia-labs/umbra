@@ -527,12 +527,13 @@ fn a_record_travels_between_two_clients_over_three_relays() {
 }
 
 #[test]
-fn a_relay_endpoint_drops_a_measurement_cell_and_gives_no_answer() {
+fn a_circuit_of_three_hops_opens_no_measurement_session() {
     let mut network = Network::new();
     let (mut link, mut circuit, relay_session_pk) = Client::build(&mut network, 0);
-    // Part 10 §10.3.1: no v1 relay answers a `MEAS_OPEN` or a `MEAS_ECHO`.
-    // Each one passes the three hops and ends at relay 3. A close of a
-    // link would stop the route of this network.
+    // Part 10 §10.3.1: a measurement circuit has one hop. A `MEAS_OPEN`
+    // and a `MEAS_ECHO` that pass three hops end at relay 3, which drops
+    // each one (`REL-068`). A close of a link would stop the route of this
+    // network.
     let mut buffer = vec![0u8; 40_000];
     for (command, bucket) in [
         (CellCommand::MeasOpen, Bucket::B3),
@@ -1230,4 +1231,618 @@ fn the_drains_of_one_link_take_its_room_in_turns() {
         tick(&mut network, &mut alice, &mut bob);
     }
     assert_eq!(taken, [QUEUE_QUOTA; 2]);
+}
+
+// The measurement session of Part 10 §10.3.1.
+
+use umbra_core::directory::{
+    authority::keyset_bytes,
+    measure::{
+        issue_cert, open_content, MeasurerTrust, MEAS_ATTEMPT_BURST, MEAS_ATTEMPT_PERIOD,
+        MEAS_CIRCUITS_MAX, MEAS_SESSIONS_MAX, MEAS_SESSION_MAX,
+    },
+};
+use umbra_crypto::sign::SigningKey;
+use umbra_onion::{circuit::MeasureCircuit, CIRCUIT_MAX_CELLS};
+
+/// The time of each measurement test, in consensus epoch 0.
+const T: u64 = 100;
+
+/// The seven authorities, a measurer key, and a certificate of two
+/// authorities for it.
+struct Fleet {
+    authorities: Vec<SigningKey>,
+    key: SigningKey,
+    cert: Vec<u8>,
+}
+
+impl Fleet {
+    fn new() -> Self {
+        let authorities: Vec<SigningKey> = (0..7u8).map(|index| identity(0x60 + index)).collect();
+        let key = identity(0x70);
+        let cert = Fleet::cert_for(&authorities, &key, [0x4D; 16], &[1, 4]);
+        Fleet {
+            authorities,
+            key,
+            cert,
+        }
+    }
+
+    fn cert_for(
+        authorities: &[SigningKey],
+        key: &SigningKey,
+        measurer_id: [u8; 16],
+        signers: &[u8],
+    ) -> Vec<u8> {
+        let signers: Vec<(u8, &SigningKey)> = signers
+            .iter()
+            .map(|index| (*index, &authorities[usize::from(*index)]))
+            .collect();
+        issue_cert(
+            measurer_id,
+            &key.verifying_key().to_bytes(),
+            0,
+            10,
+            &signers,
+            &mut Rng(31),
+        )
+        .unwrap()
+    }
+
+    fn trust(&self, revoked: &[[u8; 16]]) -> MeasurerTrust {
+        MeasurerTrust {
+            keyset: keyset_bytes(&self.authorities, 1).unwrap(),
+            revoked: revoked.to_vec(),
+        }
+    }
+
+    /// A relay of `layer` that holds the key set of the fleet. A relay of
+    /// layer 2 or 3 holds a relay set, thus it tells a relay link from
+    /// each other link.
+    fn relay(&self, layer: u8) -> (RelayNode, RelayStatic) {
+        let (mut node, held) = lone_relay(layer);
+        node.set_measurer_trust(self.trust(&[]));
+        if layer > 1 {
+            node.set_relay_identities([([0x99; 32], vec![0u8; 4])].into());
+            node.set_previous_layer([[0x99; 32]].into());
+        }
+        (node, held)
+    }
+}
+
+impl Direct {
+    /// Builds a circuit of one hop at `node`, a relay of `layer`.
+    fn one_hop(
+        &mut self,
+        node: &mut RelayNode,
+        relay: &RelayStatic,
+        layer: u8,
+        circ: u8,
+        now: u64,
+    ) -> Option<MeasureCircuit> {
+        let mut build = CircuitBuild::new([circ; 16]);
+        let (outputs, pending) = self.extend(node, &mut build, relay, now);
+        let cell = self.cells(&outputs).into_iter().next()?;
+        let (parsed, _) = Cell::parse(&cell).unwrap();
+        let (command, reply) = read_cell_body(parsed.body).unwrap();
+        assert_eq!(command, CellCommand::Extended);
+        let ss_hop = pending.finish(reply).unwrap();
+        Some(MeasureCircuit::new(&ss_hop, u32::from(layer), [circ; 16]))
+    }
+
+    /// The cells for this link among `outputs`.
+    fn cells(&mut self, outputs: &[Output]) -> Vec<Vec<u8>> {
+        let mut cells = Vec::new();
+        for output in outputs {
+            let Output::Send { link, capsule } = output else {
+                continue;
+            };
+            if *link != self.at {
+                continue;
+            }
+            if let (capsule::CapsuleType::Cell, value, _) = capsule::parse(capsule).unwrap() {
+                cells.push(self.link.receive(value).unwrap().unwrap().to_vec());
+            }
+        }
+        cells
+    }
+
+    /// Sends one cell on `circuit`, and returns what the relay does.
+    fn cell(
+        &mut self,
+        node: &mut RelayNode,
+        circuit: &mut MeasureCircuit,
+        command: CellCommand,
+        bucket: Bucket,
+        content: &[u8],
+        now: u64,
+    ) -> Vec<Output> {
+        let mut body = vec![0u8; bucket.body_len()];
+        pad_body(bucket, command, content, &mut body).unwrap();
+        let tag = circuit.seal(&mut body).unwrap();
+        let cell = [circuit.circ_id().as_slice(), &tag, &body].concat();
+        let mut buffer = vec![0u8; 40_000];
+        let used = self.link.send(&cell, &mut buffer).unwrap();
+        node.on_capsule(self.at, &buffer[..used], now, &mut self.rng)
+    }
+
+    /// Sends the `MEAS_OPEN` of `fleet` for `relay` on `circuit`.
+    fn meas_open(
+        &mut self,
+        node: &mut RelayNode,
+        circuit: &mut MeasureCircuit,
+        fleet: &Fleet,
+        relay: &RelayStatic,
+        now: u64,
+    ) -> Vec<Output> {
+        let content = open_content(
+            &fleet.cert,
+            &fleet.key,
+            &relay.relay_id,
+            &circuit.circ_id(),
+            &mut Rng(41),
+        )
+        .unwrap();
+        self.cell(
+            node,
+            circuit,
+            CellCommand::MeasOpen,
+            Bucket::B3,
+            &content,
+            now,
+        )
+    }
+
+    /// Sends one `MEAS_ECHO` with `content`, and returns the content of
+    /// each echo that comes back.
+    fn echo(
+        &mut self,
+        node: &mut RelayNode,
+        circuit: &mut MeasureCircuit,
+        content: &[u8],
+        now: u64,
+    ) -> Vec<Vec<u8>> {
+        let outputs = self.cell(
+            node,
+            circuit,
+            CellCommand::MeasEcho,
+            Bucket::B0,
+            content,
+            now,
+        );
+        self.cells(&outputs)
+            .iter()
+            .map(|cell| {
+                let (parsed, bucket) = Cell::parse(cell).unwrap();
+                assert_eq!(bucket, Bucket::B0);
+                assert_eq!(parsed.circ_id, &circuit.circ_id());
+                let mut body = parsed.body.to_vec();
+                circuit.open(parsed.tag, &mut body).unwrap();
+                let (command, content) = umbra_wire::cell::unpad_body(&body).unwrap();
+                assert_eq!(command, CellCommand::MeasEcho);
+                content.to_vec()
+            })
+            .collect()
+    }
+}
+
+#[test]
+fn a_session_opens_with_a_certificate_and_each_echo_comes_back() {
+    let fleet = Fleet::new();
+    for layer in 1..=3u8 {
+        let (mut node, relay) = fleet.relay(layer);
+        let mut measurer = Direct::open(&mut node, 5, T);
+        let mut circuit = measurer.one_hop(&mut node, &relay, layer, 0xA1, T).unwrap();
+        // REL-064: the relay gives the `MEAS_OPEN` no answer.
+        assert!(measurer
+            .meas_open(&mut node, &mut circuit, &fleet, &relay, T)
+            .is_empty());
+        assert_eq!(node.measure_sessions(), 1);
+        // REL-002, REL-003: each echo comes back at once, with its content.
+        for count in 0..3u32 {
+            let content = [&count.to_be_bytes()[..], &[0x5A; 40]].concat();
+            assert_eq!(
+                measurer.echo(&mut node, &mut circuit, &content, T + 1),
+                vec![content]
+            );
+        }
+        // NET-335: the link of a measurer holds its place for the session.
+        let outputs = node.push_tick(T + LINK_OPEN_TIMEOUT, &mut Rng(3));
+        assert!(!closes(&outputs, 5));
+        // REL-189: a measurement circuit of a relay of layer 2 or 3 is no
+        // chain. The session ends with its circuit.
+        measurer.cell(
+            &mut node,
+            &mut circuit,
+            CellCommand::Destroy,
+            Bucket::B0,
+            &[],
+            T + 2,
+        );
+        assert_eq!(node.circuits_held(), 0);
+        assert_eq!(node.measure_sessions(), 0);
+    }
+}
+
+#[test]
+fn a_session_passes_the_cells_of_a_circuit_and_ends_at_its_time() {
+    let fleet = Fleet::new();
+    let (mut node, relay) = fleet.relay(1);
+    let mut measurer = Direct::open(&mut node, 5, T);
+    let mut circuit = measurer.one_hop(&mut node, &relay, 1, 0xA1, T).unwrap();
+    measurer.meas_open(&mut node, &mut circuit, &fleet, &relay, T);
+    // REL-201: `CIRCUIT_MAX_CELLS` does not end the circuit of a session.
+    let mut back = 0u32;
+    for count in 0..CIRCUIT_MAX_CELLS + 64 {
+        back += measurer
+            .echo(&mut node, &mut circuit, &count.to_be_bytes(), T + 1)
+            .len() as u32;
+    }
+    assert_eq!(back, CIRCUIT_MAX_CELLS + 64);
+    node.sweep(T + 2, &mut Rng(3));
+    assert_eq!(node.circuits_held(), 1);
+    // The session ends `MEAS_SESSION_MAX` after its open: the echo at
+    // that time gets no answer, and the circuit is gone.
+    let last = T + MEAS_SESSION_MAX - 1;
+    assert_eq!(measurer.echo(&mut node, &mut circuit, b"in", last).len(), 1);
+    let late = measurer.cell(
+        &mut node,
+        &mut circuit,
+        CellCommand::MeasEcho,
+        Bucket::B0,
+        b"late",
+        T + MEAS_SESSION_MAX,
+    );
+    assert!(measurer.cells(&late).is_empty());
+    assert_eq!(node.circuits_held(), 0);
+    assert_eq!(node.measure_sessions(), 0);
+}
+
+#[test]
+fn an_echo_outside_a_session_gets_no_answer() {
+    let fleet = Fleet::new();
+    // REL-068: at an ingress relay the circuit is one of a client, and the
+    // echo drops.
+    let (mut node, relay) = fleet.relay(1);
+    let mut stranger = Direct::open(&mut node, 5, T);
+    let mut circuit = stranger.one_hop(&mut node, &relay, 1, 0xA1, T).unwrap();
+    for _ in 0..3 {
+        assert!(stranger
+            .cell(
+                &mut node,
+                &mut circuit,
+                CellCommand::MeasEcho,
+                Bucket::B0,
+                b"echo",
+                T
+            )
+            .is_empty());
+    }
+    assert_eq!(node.measure_sessions(), 0);
+    // NET-353: at a relay of layer 2 or 3 the circuit is a candidate. It
+    // ends at the echo, and the relay sends nothing.
+    for layer in 2..=3u8 {
+        let (mut node, relay) = fleet.relay(layer);
+        let mut stranger = Direct::open(&mut node, 5, T);
+        let mut circuit = stranger.one_hop(&mut node, &relay, layer, 0xA1, T).unwrap();
+        assert_eq!(node.circuits_held(), 1);
+        assert!(stranger
+            .cell(
+                &mut node,
+                &mut circuit,
+                CellCommand::MeasEcho,
+                Bucket::B0,
+                b"echo",
+                T
+            )
+            .is_empty());
+        assert_eq!(node.circuits_held(), 0);
+    }
+}
+
+#[test]
+fn an_echo_of_another_bucket_gets_no_answer() {
+    let fleet = Fleet::new();
+    let (mut node, relay) = fleet.relay(3);
+    let mut measurer = Direct::open(&mut node, 5, T);
+    let mut circuit = measurer.one_hop(&mut node, &relay, 3, 0xA1, T).unwrap();
+    measurer.meas_open(&mut node, &mut circuit, &fleet, &relay, T);
+    // REL-041: a larger bucket would make the echo an amplifier.
+    for bucket in [Bucket::B1, Bucket::B2, Bucket::B3] {
+        assert!(measurer
+            .cell(
+                &mut node,
+                &mut circuit,
+                CellCommand::MeasEcho,
+                bucket,
+                b"large",
+                T
+            )
+            .is_empty());
+    }
+    // The session stays, and it serves no other command.
+    assert!(measurer
+        .cell(
+            &mut node,
+            &mut circuit,
+            CellCommand::Loop,
+            Bucket::B0,
+            &[],
+            T
+        )
+        .is_empty());
+    assert_eq!(measurer.echo(&mut node, &mut circuit, b"b0", T).len(), 1);
+}
+
+#[test]
+fn a_certificate_that_does_not_verify_opens_no_session() {
+    let fleet = Fleet::new();
+    let (_, relay) = fleet.relay(3);
+    // The open of `cert` under `key` for the relay `named` at `now`, at a
+    // relay that holds `trust`.
+    let opens = |cert: &[u8], key: &SigningKey, named: [u8; 32], now: u64, trust: MeasurerTrust| {
+        let (mut node, _) = fleet.relay(3);
+        node.set_measurer_trust(trust);
+        let mut measurer = Direct::open(&mut node, 5, now);
+        let mut circuit = measurer.one_hop(&mut node, &relay, 3, 0xA1, now).unwrap();
+        let content = open_content(cert, key, &named, &[0xA1; 16], &mut Rng(41)).unwrap();
+        let outputs = measurer.cell(
+            &mut node,
+            &mut circuit,
+            CellCommand::MeasOpen,
+            Bucket::B3,
+            &content,
+            now,
+        );
+        // A relay gives a rejected attempt no sign (`REL-069`).
+        assert!(outputs.is_empty());
+        let opened = node.measure_sessions() == 1;
+        assert_eq!(node.circuits_held(), usize::from(opened));
+        opened
+    };
+    let own = relay.relay_id;
+    assert!(opens(&fleet.cert, &fleet.key, own, T, fleet.trust(&[])));
+    // REL-104: the root revoked the measurer.
+    assert!(!opens(
+        &fleet.cert,
+        &fleet.key,
+        own,
+        T,
+        fleet.trust(&[[0x4D; 16]])
+    ));
+    // REL-067: the certificate is void after epoch 10.
+    assert!(!opens(
+        &fleet.cert,
+        &fleet.key,
+        own,
+        11 * 3_600,
+        fleet.trust(&[])
+    ));
+    // REL-066: the signatures of keys outside the key set.
+    let others: Vec<SigningKey> = (0..7u8).map(|index| identity(0x20 + index)).collect();
+    let forged = Fleet::cert_for(&others, &fleet.key, [0x4D; 16], &[1, 4]);
+    assert!(!opens(&forged, &fleet.key, own, T, fleet.trust(&[])));
+    // REL-065: the signature names another relay, or comes from another
+    // key than the one of the certificate.
+    assert!(!opens(
+        &fleet.cert,
+        &fleet.key,
+        [0x12; 32],
+        T,
+        fleet.trust(&[])
+    ));
+    assert!(!opens(
+        &fleet.cert,
+        &identity(0x71),
+        own,
+        T,
+        fleet.trust(&[])
+    ));
+}
+
+#[test]
+fn a_relay_with_no_root_opens_no_session() {
+    let fleet = Fleet::new();
+    let (mut node, relay) = lone_relay(1);
+    let mut measurer = Direct::open(&mut node, 5, T);
+    let mut circuit = measurer.one_hop(&mut node, &relay, 1, 0xA1, T).unwrap();
+    measurer.meas_open(&mut node, &mut circuit, &fleet, &relay, T);
+    assert_eq!(node.measure_sessions(), 0);
+    assert!(measurer
+        .echo(&mut node, &mut circuit, b"echo", T)
+        .is_empty());
+}
+
+#[test]
+fn the_rate_of_rejected_attempts_holds_at_an_ingress_relay() {
+    let fleet = Fleet::new();
+    let (mut node, relay) = fleet.relay(1);
+    node.set_source(5, [9; 16]);
+    node.set_source(6, [9; 16]);
+    node.set_source(7, [8; 16]);
+    let mut attacker = Direct::open(&mut node, 5, T);
+    // REL-069: each `MEAS_OPEN` that does not verify spends one attempt of
+    // its address.
+    for circ in 0..MEAS_ATTEMPT_BURST as u8 {
+        let mut circuit = attacker.one_hop(&mut node, &relay, 1, circ, T).unwrap();
+        let outputs = attacker.cell(
+            &mut node,
+            &mut circuit,
+            CellCommand::MeasOpen,
+            Bucket::B3,
+            &[0x5A; 9_000],
+            T,
+        );
+        assert!(outputs.is_empty());
+    }
+    assert_eq!(node.circuits_held(), 0);
+    // Above the rate the relay verifies nothing: a certificate that
+    // verifies opens no session from that address, on each of its links.
+    let mut same = Direct::open(&mut node, 6, T);
+    let mut circuit = same.one_hop(&mut node, &relay, 1, 0xA1, T).unwrap();
+    assert!(same
+        .meas_open(&mut node, &mut circuit, &fleet, &relay, T + 1)
+        .is_empty());
+    assert_eq!(node.measure_sessions(), 0);
+    assert!(same
+        .echo(&mut node, &mut circuit, b"echo", T + 1)
+        .is_empty());
+    // Another address holds its own attempts.
+    let mut other = Direct::open(&mut node, 7, T);
+    let mut circuit = other.one_hop(&mut node, &relay, 1, 0xA2, T).unwrap();
+    other.meas_open(&mut node, &mut circuit, &fleet, &relay, T + 1);
+    assert_eq!(node.measure_sessions(), 1);
+    // One attempt comes back after `MEAS_ATTEMPT_PERIOD`.
+    let later = T + MEAS_ATTEMPT_PERIOD;
+    let mut circuit = same.one_hop(&mut node, &relay, 1, 0xA3, later).unwrap();
+    same.meas_open(&mut node, &mut circuit, &fleet, &relay, later);
+    assert_eq!(same.echo(&mut node, &mut circuit, b"echo", later).len(), 1);
+}
+
+#[test]
+fn the_rate_of_rejected_attempts_holds_at_a_relay_of_layer_3() {
+    let fleet = Fleet::new();
+    let (mut node, relay) = fleet.relay(3);
+    node.set_source(5, [9; 16]);
+    node.set_source(6, [9; 16]);
+    let mut attacker = Direct::open(&mut node, 5, T);
+    // NET-353: a candidate spends one attempt at its build, and one with
+    // no `MEAS_OPEN` gives none back.
+    for circ in 0..MEAS_ATTEMPT_BURST as u8 {
+        assert!(attacker.one_hop(&mut node, &relay, 3, circ, T).is_some());
+    }
+    // REL-069: above the rate a build cell gets no answer and costs no
+    // key agreement, on each link of that address.
+    assert!(attacker.one_hop(&mut node, &relay, 3, 0xF0, T).is_none());
+    let mut same = Direct::open(&mut node, 6, T);
+    assert!(same.one_hop(&mut node, &relay, 3, 0xF1, T).is_none());
+    assert_eq!(node.circuits_held(), MEAS_ATTEMPT_BURST as usize);
+    // A candidate with no `MEAS_OPEN` ends at `CIRCUIT_BUILD_TIMEOUT`.
+    node.sweep(T + CIRCUIT_BUILD_TIMEOUT, &mut Rng(3));
+    assert_eq!(node.circuits_held(), 0);
+    assert!(same
+        .one_hop(&mut node, &relay, 3, 0xF2, T + CIRCUIT_BUILD_TIMEOUT)
+        .is_none());
+    // One attempt comes back after `MEAS_ATTEMPT_PERIOD`, and an open
+    // that verifies gives its attempt back at once.
+    let later = T + MEAS_ATTEMPT_PERIOD;
+    for circ in 0xA0..0xA4u8 {
+        let mut circuit = same.one_hop(&mut node, &relay, 3, circ, later).unwrap();
+        same.meas_open(&mut node, &mut circuit, &fleet, &relay, later);
+        assert_eq!(same.echo(&mut node, &mut circuit, b"echo", later).len(), 1);
+    }
+    assert_eq!(node.measure_sessions(), 1);
+}
+
+#[test]
+fn a_candidate_serves_no_other_cell() {
+    let fleet = Fleet::new();
+    let (mut node, relay) = fleet.relay(2);
+    node.set_next_layer([[0x13; 32]].into());
+    let mut stranger = Direct::open(&mut node, 5, T);
+    // NET-353: an `EXTEND` on a candidate ends it, and the relay dials no
+    // relay for it. A client thus enters no chain at layer 2.
+    let mut circuit = stranger.one_hop(&mut node, &relay, 2, 0xA1, T).unwrap();
+    let (_, next) = lone_relay(3);
+    let mut hello = [0u8; HELLO_LEN];
+    Pending::hello(&next, DelayClass::Fast, &mut Rng(8), &mut hello).unwrap();
+    let outputs = stranger.cell(
+        &mut node,
+        &mut circuit,
+        CellCommand::Extend,
+        BUILD_BUCKET,
+        &hello,
+        T,
+    );
+    assert!(outputs.is_empty());
+    assert_eq!(node.circuits_held(), 0);
+    // A `MEAS_OPEN` after `CIRCUIT_BUILD_TIMEOUT` opens no session.
+    let mut circuit = stranger.one_hop(&mut node, &relay, 2, 0xA2, T).unwrap();
+    let late = T + CIRCUIT_BUILD_TIMEOUT;
+    assert!(stranger
+        .meas_open(&mut node, &mut circuit, &fleet, &relay, late)
+        .is_empty());
+    assert_eq!(node.measure_sessions(), 0);
+    assert_eq!(node.circuits_held(), 0);
+    // An open session extends no circuit.
+    let mut circuit = stranger.one_hop(&mut node, &relay, 2, 0xA3, T).unwrap();
+    stranger.meas_open(&mut node, &mut circuit, &fleet, &relay, T);
+    let outputs = stranger.cell(
+        &mut node,
+        &mut circuit,
+        CellCommand::Extend,
+        BUILD_BUCKET,
+        &hello,
+        T,
+    );
+    assert_eq!(dials(&outputs), 0);
+    assert_eq!(node.measure_sessions(), 1);
+}
+
+#[test]
+fn one_measurer_holds_one_session_and_a_relay_holds_a_small_count() {
+    let fleet = Fleet::new();
+    let (mut node, relay) = fleet.relay(1);
+    let mut measurer = Direct::open(&mut node, 5, T);
+    // REL-202: each circuit of one measurer is of one session, up to
+    // `MEAS_CIRCUITS_MAX`.
+    for circ in 0..MEAS_CIRCUITS_MAX as u8 {
+        let mut circuit = measurer.one_hop(&mut node, &relay, 1, circ, T).unwrap();
+        measurer.meas_open(&mut node, &mut circuit, &fleet, &relay, T);
+        assert_eq!(node.measure_sessions(), 1);
+    }
+    assert_eq!(node.circuits_held(), MEAS_CIRCUITS_MAX);
+    let mut circuit = measurer.one_hop(&mut node, &relay, 1, 0xEE, T).unwrap();
+    measurer.meas_open(&mut node, &mut circuit, &fleet, &relay, T);
+    assert_eq!(node.circuits_held(), MEAS_CIRCUITS_MAX);
+    assert!(measurer
+        .echo(&mut node, &mut circuit, b"echo", T)
+        .is_empty());
+    // A relay holds `MEAS_SESSIONS_MAX` sessions, each of one measurer.
+    for index in 1..=MEAS_SESSIONS_MAX as u8 {
+        let other = Fleet {
+            authorities: (0..7u8).map(|index| identity(0x60 + index)).collect(),
+            key: identity(0x70),
+            cert: Fleet::cert_for(&fleet.authorities, &fleet.key, [index; 16], &[0, 6]),
+        };
+        let mut link = Direct::open(&mut node, 10 + LinkId::from(index), T);
+        let mut circuit = link.one_hop(&mut node, &relay, 1, 0xB0, T).unwrap();
+        link.meas_open(&mut node, &mut circuit, &other, &relay, T);
+        let opened = link.echo(&mut node, &mut circuit, b"echo", T).len() == 1;
+        assert_eq!(opened, usize::from(index) < MEAS_SESSIONS_MAX);
+    }
+    assert_eq!(node.measure_sessions(), MEAS_SESSIONS_MAX);
+}
+
+#[test]
+fn an_echo_with_no_room_on_its_link_drops_and_the_circuit_stays() {
+    let fleet = Fleet::new();
+    let (mut node, relay) = fleet.relay(1);
+    let waiting = Arc::new(AtomicUsize::new(0));
+    node.set_backlog(Box::new(Counted {
+        link: 5,
+        waiting: waiting.clone(),
+        limit: 1 << 20,
+    }));
+    let mut measurer = Direct::open(&mut node, 5, T);
+    let mut circuit = measurer.one_hop(&mut node, &relay, 1, 0xA1, T).unwrap();
+    measurer.meas_open(&mut node, &mut circuit, &fleet, &relay, T);
+    assert_eq!(measurer.echo(&mut node, &mut circuit, b"one", T).len(), 1);
+    // REL-204: the echoes fill half of the bound of their link at most.
+    // An echo above it drops, and it ends no circuit (`NET-349`).
+    waiting.store(1 << 19, Ordering::Relaxed);
+    for _ in 0..4 {
+        assert!(measurer
+            .echo(&mut node, &mut circuit, b"lost", T)
+            .is_empty());
+    }
+    assert_eq!(node.circuits_held(), 1);
+    // The echo after the room came back opens at the measurer: a dropped
+    // echo moved no chaining value.
+    waiting.store(0, Ordering::Relaxed);
+    node.flushed();
+    assert_eq!(
+        measurer.echo(&mut node, &mut circuit, b"two", T),
+        vec![b"two".to_vec()]
+    );
 }

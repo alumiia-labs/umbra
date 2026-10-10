@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 10: Relay Directory, Measurement, and Selection
 
 **Status:** Draft
-**Version:** 0.16.0
+**Version:** 0.17.0
 **Date:** 2026-10-10
 
 ---
@@ -53,9 +53,18 @@ takes in.
   before a class test verifies C0 or above for it, and it MUST remove a relay
   whose class test verifies below C0. A relay of UMBRA is a server of a data
   center or of equal quality, and a slow relay slows each circuit that
-  crosses it. Before the fleet of §10.3 runs, an authority takes the class
-  that its own operator states for a relay of that operator, under the
-  provisional directory of Part 3 `NET-340`.
+  crosses it.
+- **The class under a provisional directory.** The directory of `REL-126`
+  holds the relays of one operator, and the measurers of that operator test
+  them. **[REL-206]** Under that directory, an authority MUST list a relay
+  of its own operator at the class that the operator declares, with three
+  exceptions. A class test of that relay that failed at a class lists the
+  relay below that class, until a newer test at that class or above passes.
+  A class test that failed at C0 removes the relay under `REL-197`, until
+  such a newer test passes. A class rises under `REL-001` alone. A relay
+  with no test thus keeps the declared class. The first clause of `REL-197`
+  and the removal of `REL-098` bind a directory at `AUTHORITY_FLOOR`, which
+  lists no class that no test verified.
 - **The selection is weighted by class.** **[REL-196]** A client MUST order
   the relays of a draw at random in proportion to the rate of their class,
   with the weights 2, 5, 10, and 20 for C0 to C3. The draws are the hops of
@@ -112,6 +121,28 @@ with aggregate measurer capacity >= 2.25x the class ceiling being claimed
 **[REL-002]** A relay MUST decrypt each `MEAS_ECHO` cell that a measurer sends to it. **[REL-003]** That
 relay MUST then re-emit that cell to the measurer.
 
+**The echo.** The cells of a measurement travel on a measurement circuit of
+§10.3.1, and Part 6 §6.3 gives their layouts. **[REL-204]** A relay MUST
+answer a `MEAS_ECHO` cell of an open measurement session with one
+`MEAS_ECHO` cell of bucket `B0` that carries the same content, on the same
+circuit. It MUST send that cell at once: the pacing clock of Part 3 §3.5.2
+and the per-hop delay of Part 3 `NET-338` do not hold it. A relay MUST drop
+the echo when the cells that wait on the link of the measurer fill half of
+the bound of that link (Part 3 `NET-349`), and it MUST NOT end the circuit
+for it. A relay tests that room before it adds the layer of the echo, thus
+a dropped echo moves no chaining value.
+
+**The class test.** A measurer sends `MEAS_ECHO` cells to one relay for one
+slot at 2.25 times the rate of the class. It counts each echo that arrives
+inside the slot and that passes the check of its layer, at 512 bytes for
+each cell. The relay **passes** the test of the class when that count over
+the slot gives the rate of the class or more, and it **fails** the test in
+each other case. **[REL-207]** A measurer MUST give a result for a relay
+only when that relay opened the measurement session. A measurer learns that
+from the echo of one cell before the slot. A relay that opened no session
+gets no result, because `REL-069` gives a refused measurer no sign, and a
+measurer with a void certificate would then fail each relay.
+
 **The wire value is `0x07`**, and Part 6 §6.3 holds the closed cell-command
 table that carries it. `MEAS_ECHO` is a cell command and it is not a queue
 command, thus Part 6 §6.4 gives it no entry. **[REL-040]** A measurer MUST send a
@@ -138,16 +169,32 @@ is measured in samples.
 - **[REL-099]** If a cluster holds `CLUSTER_FULL` relays or fewer, the directory
   MUST measure the full cluster in one slot.
 - **[REL-100]** If a cluster holds more than `CLUSTER_FULL` relays, the
-  directory MUST select `CLUSTER_SAMPLE` relays of it for each slot. The
-  selection uses the VRF of §10.4.1. **[REL-101]** The directory MUST measure
+  measurer MUST select `CLUSTER_SAMPLE` relays of it for each slot. The
+  measurer MUST draw the selection from its CSPRNG. **[REL-101]** The
+  directory MUST measure
   each relay of such a cluster inside `ceil(n / CLUSTER_SAMPLE)` slots. The
-  value `n` is the cluster size. **[REL-102]** The directory MUST show the
-  selection of a slot only after the epoch closes.
+  value `n` is the cluster size. **[REL-102]** A measurer MUST NOT show the
+  selection of a slot before that slot ends.
 
 A sampled cluster keeps a residual. A relay outside the sample of a slot can
-lend capacity to a relay inside it. The VRF selection is not predictable, thus
-the cluster does not know which relays to feed. Part 15 §15.3 records that
-residual.
+lend capacity to a relay inside it. The selection is not predictable, thus
+the cluster does not know which relays to feed. v1 holds no proof of that
+selection: no party but the measurer can verify that the draw was random.
+Part 15 §15.3 records the two residuals.
+
+**The capacity of a measurer bounds its tests.** A test needs 225 Mbit/s of
+measurer capacity for C0, 562.5 Mbit/s for C1, 1 125 Mbit/s for C2, and
+2 250 Mbit/s for C3. A measurer tests no class above its capacity, and one
+slot holds the tests that its capacity holds together. A cluster that needs
+a larger slot goes in more slots than `REL-099` and `REL-101` give, and the
+measurer tells its operator of it. The relays of that cluster outside a
+slot can then lend capacity to those inside it. The launch network of Part 3
+rule `NET-340` is such a case. Each of its servers has 500 Mbit/s. One
+measurer on one server tests C0 alone, at two relays in one slot, and it
+cannot test C1, C2, or C3. The relays of that network share one ASN, thus
+they are one cluster above `CLUSTER_FULL`, and a slot of two holds a part
+of the sample of four. `REL-206` gives the class of a relay above the
+class that a measurer can test.
 
 A class test proves a **threshold** only, which is the question "does this relay
 hold 500 Mbit/s?". A class test does not estimate a value. Thus the measurer
@@ -164,19 +211,18 @@ it cannot tell the two apart.
 
 ### 10.3.1 A measurement session needs authorization
 
-**v1 defers the measurement session to the version that deploys the
-measurer.** No v1 relay answers a `MEAS_OPEN` or a `MEAS_ECHO`. A v1 relay
-drops each of the two, as it drops a command that it does not serve. It opens
-no measurement session. The rules `REL-066`, `REL-067`, `REL-069`, `REL-103`
-and `REL-104` of this section bind a relay of that later version, and they
-bind no v1 conformance claim. The layouts of this section and of Part 6 §6.3
-keep their bytes. Until then a relay holds the class that its operator declares
-and that the authorities list. The staging of §10.2 and the ceilings of §10.6
-are the bounds on a false class.
-
 `MEAS_ECHO` makes a relay decrypt and re-emit a cell. Without an authorization
 that primitive is a reflector that each party reaches, and it also answers the
 question "is this address an UMBRA relay?".
+
+**The measurement circuit.** A measurer opens each of its `k` connections
+to the relay under test, and it opens a session of Part 6 §6.2.3 on each
+one. On each connection it builds a circuit of one hop to that relay, with
+the build cell of Part 3 §3.4.3 and the `delay_class` of no delay. A relay
+of layer 2 or 3 answers that build cell under Part 3 rule `NET-353`. The
+measurer takes the layer of the relay from its entry (§10.5.4), because the
+key schedule of the hop takes that layer. The first cell of the measurer on
+that circuit is the `MEAS_OPEN`.
 
 A measurer opens a session with a `MEAS_OPEN` cell of Part 6 §6.3, and that cell
 carries the certificate below.
@@ -202,14 +248,33 @@ holds the label. Each signature covers this preimage:
 "umbra/v1/measurer-cert" || version || measurer_id || mldsa_pk || not_after
 ```
 
+The `sigs` list is in ascending order of `authority_index`, with no index
+two times, as rule 3 of §10.5.2 orders the list of a root. The signature of
+`REL-065` is an ML-DSA-65 signature under `mldsa_pk`, and Part 5 §5.11 holds
+its label. It covers this preimage:
+
+```
+"umbra/v1/measurer-open" || relay_id || circ_id
+```
+
+`relay_id` is the 32-byte `relay_id` of the relay under test, and `circ_id`
+is the 16-byte circuit identifier of the measurement circuit on the link of
+the measurer.
+
 - **[REL-064]** A measurer MUST open a measurement session with a `MEAS_OPEN`
   cell. **[REL-065]** A measurer MUST carry a `MeasurerCert` and a signature
   over the circuit identifier in that cell.
+- **[REL-203]** A measurer MUST sign the preimage above with the key of its
+  certificate, with the `relay_id` of the relay that it measures. A relay
+  MUST verify that signature under `mldsa_pk` of the certificate, with its
+  own `relay_id` and the `circ_id` of the cell, before it accepts the
+  certificate. A relay MUST send no cell in answer to a `MEAS_OPEN`.
 - **[REL-066]** A relay MUST verify each signature of the certificate against
   the key set of the current `DirectoryRoot`. **[REL-103]** A relay MUST count
   2 or more valid signatures under different `authority_index` values before
   it accepts a `MeasurerCert`. **[REL-067]** A relay MUST reject a certificate
-  whose `not_after` is below the current consensus epoch.
+  whose `not_after` is below the current consensus epoch. A relay takes that
+  epoch from its own clock, as it does for a receipt (§10.4.2).
 - **[REL-104]** A relay MUST reject a `MeasurerCert` whose `measurer_id` the
   `revoked` list of the current `DirectoryRoot` names. **[REL-105]** If a
   measurer key is lost or compromised, a directory authority MUST put its
@@ -220,6 +285,29 @@ holds the label. Each signature covers this preimage:
 - **[REL-068]** A relay MUST reject a `MEAS_ECHO` cell that arrives outside an
   open measurement session. **[REL-069]** A relay MUST rate-limit a rejected
   measurement attempt, and it MUST NOT answer above that rate.
+- **[REL-205]** A relay MUST count the measurement attempts of each address.
+  An address is an IPv4 address or the first 64 bits of an IPv6 address. A
+  measurement candidate of Part 3 rule `NET-353` spends one attempt at its
+  build, and a `MEAS_OPEN` on another circuit spends one when it arrives. A
+  `MEAS_OPEN` that opens a session or joins one gives its attempt back. One
+  spent attempt comes back each `MEAS_ATTEMPT_PERIOD`. While an address
+  holds `MEAS_ATTEMPT_BURST` spent attempts, a relay MUST verify no
+  `MEAS_OPEN` of that address, and a relay of layer 2 or 3 MUST give a build
+  cell of that address on a link with no `RelayHello` no answer. A relay
+  MUST give a rejected measurement attempt no cell and no `CircuitDestroy`.
+- **[REL-201]** A measurement session ends `MEAS_SESSION_MAX` after the
+  `MEAS_OPEN` that opened it. A relay MUST end each circuit of a session at
+  that time, and it MUST drop each cell of an open session but a
+  `MEAS_ECHO` of bucket `B0` and a `DESTROY`. `CIRCUIT_MAX_CELLS` of Part 3
+  rule `NET-321` does not end a circuit of an open session: a class test of
+  C0 sends about 1.6 million cells in one slot.
+- **[REL-202]** A relay MUST hold at most one measurement session for each
+  `measurer_id`, with at most `MEAS_CIRCUITS_MAX` circuits, and at most
+  `MEAS_SESSIONS_MAX` sessions at once. A `MEAS_OPEN` that verifies under a
+  `measurer_id` with an open session adds its circuit to that session, and
+  it moves the end of that session by nothing. A `MEAS_OPEN` above one of
+  the two bounds is a rejected attempt. A session ends when its last circuit
+  ends.
 - **[REL-070]** A directory authority MUST issue a `MeasurerCert` with a
   lifetime of `MEASURER_CERT_TTL` or less. §10.11 gives that value.
 
@@ -236,6 +324,24 @@ holds the label. Each signature covers this preimage:
 > back the reflector that this section removes. Two signatures make a
 > certificate a decision of two authorities. The `revoked` list closes the
 > window of a leak at the next consensus.
+>
+> *Cause of `relay_id` in the preimage.* The measurer selects `circ_id`. A
+> signature over `circ_id` alone verifies at each relay. The relay under
+> test reads the `MEAS_OPEN` in the clear, and it can send that cell to
+> another relay on a circuit of the same `circ_id`. That relay then opens a
+> session for a party that holds no measurer key, for the life of the
+> certificate. A signature that names its relay opens no session at another
+> one. `RelayHello` of §10.4.2 names the dialed relay for the same cause.
+>
+> *Cause of the bounds.* `REL-201` takes away the one bound that a circuit
+> has on its cells, thus the time, the count of the circuits, and the count
+> of the sessions bound a measurement in its place. A party with one valid
+> certificate makes a relay echo for `MEAS_SESSION_MAX`, on
+> `MEAS_CIRCUITS_MAX` circuits, and it can open the next session after it.
+> The `revoked` list ends that. A party with no certificate costs a relay
+> one key agreement and at most eight signature checks for each attempt:
+> one for the signature of `REL-065` and one for each entry of `sigs`.
+> `REL-205` bounds the attempts of one address.
 
 ## 10.4 The primary reputation signal is negative and behavioral
 
@@ -487,13 +593,13 @@ field. The **fault rate** of that relay is that report count divided by the
 count of chains that the relay carried in the epoch. The chain count is a
 statistic of §10.8, thus the authority reads the noised value.
 
-- **A fact of the launch network.** One tool reads the report queues, counts
-  the reports, runs the isolation query, and makes a verdict. The launch
-  network of Part 3 rule `NET-340` does not deploy that tool. A client of that
-  network draws a `ReportQueue` only when the manifest carries one, and a
-  report that no authority reads removes no link. `REL-166` and `REL-080` bind
-  the authorities of a directory at `AUTHORITY_FLOOR`, and a provisional
-  directory states this gap beside its state.
+- **A fact of the provisional directory.** One operator holds each
+  authority key of the directory of `REL-126`. One tool of that operator
+  reads the report queue of one authority, counts the reports, runs the
+  isolation query, and makes each verdict. That tool is both aggregators of
+  §10.8, thus the two shares of a chain count hide that count from no party
+  of that directory. A manifest of that directory carries one
+  `ReportQueue`.
 - **[REL-080]** A directory authority MUST run an isolation query on a relay
   whose fault rate reaches `RELAY_FAULT_RATE` in one epoch. **[REL-112]** A
   directory authority MUST NOT run that query from fewer than
@@ -792,6 +898,12 @@ independence is a requirement, and it is not a description.
 A measurement report is a signed tuple `(relay_id, class_claimed,
 class_verified, slot_id, measurer_id)`. An authority accepts a class only after
 **3 or more independent measurer reports from 2 or more different ASes**.
+That rule binds a directory at `AUTHORITY_FLOOR`. v1 defines no layout, no
+label, and no carrier for the signed report, thus no v1 measurer signs one.
+A v1 measurer gives each result to the authority of its own operator, on
+the machine of that operator: the relay, the class of the test, pass or
+fail, and the consensus epoch of the slot. A provisional directory takes
+the results of the measurers of its own operator under `REL-206`.
 
 > This rule is the operational lesson from the live consensus of Tor. Only 5 of
 > the 9 authorities give a bandwidth value, because the combination of the two
@@ -1839,8 +1951,13 @@ relay with the notification role, and this section then applies to it.
 | `MEASURE_INTERVAL` | 7 d between two class tests of one relay (§10.2) |
 | `MEASURE_STALE` | 21 d without a verifying report, then no listing until a test verifies the relay again (§10.2) |
 | Measurement duration | 30 s saturating echo |
-| Measurer capacity | ≥ 2.25× the class ceiling claimed |
-| Reports for each class | ≥ 3 measurers from ≥ 2 ASes |
+| Measurer capacity | ≥ 2.25× the class ceiling claimed: 225, 562.5, 1 125, and 2 250 Mbit/s for C0 to C3 (§10.3) |
+| Reports for each class | ≥ 3 measurers from ≥ 2 ASes, in a directory at `AUTHORITY_FLOOR` (§10.5.1) |
+| `MEAS_SESSION_MAX` | 45 s from the `MEAS_OPEN` to the end of a measurement session: the slot and a margin of 15 s (§10.3.1) |
+| `MEAS_SESSIONS_MAX` | 4 measurement sessions at one relay (§10.3.1) |
+| `MEAS_CIRCUITS_MAX` | 16 circuits in one measurement session (§10.3.1) |
+| `MEAS_ATTEMPT_BURST` | 16 spent measurement attempts of one address (§10.3.1) |
+| `MEAS_ATTEMPT_PERIOD` | 60 s, after which one spent attempt comes back (§10.3.1) |
 | `CLUSTER_FULL` | 4 relays, the largest cluster that one slot measures in full (§10.3); 4 relays at C3 need 9 Gbit/s of measurer capacity |
 | `CLUSTER_SAMPLE` | 4 relays of a larger cluster in each slot (§10.3) |
 | `MeasurerCert` size | 8 598 B at 2 signatures, 25 148 B at 7, in bucket `B3` (§10.3.1) |

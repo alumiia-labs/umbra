@@ -1,0 +1,12 @@
+[Unit]
+Description=UMBRA measurer, one time in each 7 days (Part 10 REL-097)
+
+[Timer]
+# A day and an hour that no relay learns from this file: the run starts at
+# a random time inside the 12 hours after it.
+OnCalendar=Mon *-*-* 02:20:00
+RandomizedDelaySec=12h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

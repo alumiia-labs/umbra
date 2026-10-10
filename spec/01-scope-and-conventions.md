@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 1: Scope, Conventions, and Terminology
 
 **Status:** Draft
-**Version:** 0.16.0
+**Version:** 0.17.0
 **Date:** 2026-10-10
 
 ---
@@ -43,8 +43,7 @@ platform-neutral, thus the deferral changes the scope of this text and not
 the design.
 
 **Transport scope of v1.** Part 3 §3.8 defers QUIC, and with it the
-transport race. Part 10 §10.3.1 defers the
-measurement session. Each such section names the rules that bind the later
+transport race. That section names the rules that bind the later
 version, and it keeps the wire layouts.
 
 ## 1.2 What this document is not

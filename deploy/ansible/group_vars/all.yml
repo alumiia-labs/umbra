@@ -67,6 +67,22 @@ umbra_ssh_from: []
 # (README, "Rotating the directory keys") moves it to a new directory.
 umbra_signer_keys: /var/lib/umbra-signer/keys
 
+# The rate that the measurer on the signer server sends, in Mbit/s: the
+# rate of its plan. A test of a class needs 2.25 times the rate of the class
+# (Part 10 §10.3): 225 for C0, 562.5 for C1, 1 125 for C2, 2 250 for C3.
+# A plan of 500 Mbit/s thus tests C0 alone, two relays in one slot.
+umbra_measurer_capacity: 500
+
+# The life of the certificate that each run of the measurer takes, in
+# hours. Part 10 `REL-070` permits 168 at most.
+umbra_measurer_cert_epochs: 24
+
+# The revoked measurer certificates (Part 10 `REL-105`). The log of
+# umbra-measurer-cert gives the two values of each certificate:
+#   - { id: "<32 hex characters>", not_after: <epoch> }
+# The signer drops an entry from the root when its epoch passed.
+umbra_revoked_measurers: []
+
 # An hour takes one manifest (Part 10 `REL-160`). A run that changes the
 # relay set in an hour that has a manifest waits for the next hour, then
 # signs. `true` signs a second manifest for the hour at once. Each client

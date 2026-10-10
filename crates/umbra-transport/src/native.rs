@@ -434,6 +434,93 @@ impl TcpLink {
     }
 }
 
+impl TcpLink {
+    /// The two halves of the link, for a party that sends and receives at
+    /// the same time: the measurer of Part 10 §10.3 sends at its rate
+    /// while the echoes come back.
+    pub fn split(self) -> (TcpReader, TcpWriter) {
+        let (read, write) = tokio::io::split(self.stream);
+        (
+            TcpReader {
+                stream: read,
+                inbound: self.inbound,
+                scratch: vec![0u8; MAX_CAPSULE],
+            },
+            TcpWriter {
+                stream: write,
+                mask: self.mask,
+                counter: self.counter,
+            },
+        )
+    }
+}
+
+/// The receiving half of a [`TcpLink`].
+pub struct TcpReader {
+    stream: tokio::io::ReadHalf<tokio_rustls::client::TlsStream<TcpStream>>,
+    inbound: Vec<u8>,
+    scratch: Vec<u8>,
+}
+
+impl TcpReader {
+    /// Receives one capsule.
+    pub async fn recv(&mut self) -> Result<Vec<u8>, NativeError> {
+        let mut consumed = 0usize;
+        loop {
+            let rest = self.inbound.get(consumed..).unwrap_or(&[]);
+            if let Some((len, used)) = websocket::decode(rest, false, &mut self.scratch)? {
+                self.inbound.drain(..consumed.saturating_add(used));
+                return Ok(self.scratch.get(..len).unwrap_or(&[]).to_vec());
+            }
+            self.inbound.drain(..consumed);
+            consumed = 0;
+            let mut chunk = [0u8; 16_384];
+            let n = self.stream.read(&mut chunk).await?;
+            if n == 0 {
+                return Err(Error::Refused.into());
+            }
+            self.inbound
+                .extend_from_slice(chunk.get(..n).unwrap_or(&[]));
+        }
+    }
+}
+
+/// The sending half of a [`TcpLink`].
+pub struct TcpWriter {
+    stream: tokio::io::WriteHalf<tokio_rustls::client::TlsStream<TcpStream>>,
+    mask: [u8; 4],
+    counter: u64,
+}
+
+impl TcpWriter {
+    /// Sends each capsule of `capsules`, one frame for each, in one write.
+    pub async fn send_all(&mut self, capsules: &[Vec<u8>]) -> Result<(), NativeError> {
+        let mut frames = Vec::new();
+        for capsule in capsules {
+            self.counter = self.counter.wrapping_add(1);
+            let c = self.counter.to_le_bytes();
+            let mask = [
+                self.mask[0] ^ c[0],
+                self.mask[1] ^ c[1],
+                self.mask[2] ^ c[2],
+                self.mask[3] ^ c[3],
+            ];
+            let start = frames.len();
+            let len = websocket::frame_len(capsule.len(), true);
+            frames.resize(start.saturating_add(len), 0);
+            let n = websocket::encode(
+                capsule,
+                Some(&mask),
+                frames.get_mut(start..).unwrap_or(&mut []),
+            )?;
+            frames.truncate(start.saturating_add(n));
+        }
+        self.stream.write_all(&frames).await?;
+        self.stream.flush().await?;
+        Ok(())
+    }
+}
+
 /// A QUIC connection with one bidirectional stream that carries capsules
 /// back to back.
 pub struct QuicLink {

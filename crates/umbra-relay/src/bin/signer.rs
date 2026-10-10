@@ -9,6 +9,7 @@
 //! umbra-signer keygen <key directory> [<keyset epoch>]
 //! umbra-signer rotate <old key directory> <new key directory> <key chain file> [<manifest file>]
 //! umbra-signer sign [--force] <settings file>
+//! umbra-signer measurer-cert <key directory> <measurer key file> <certificate file> [<epochs>]
 //! ```
 //!
 //! `keygen` writes seven fresh seeds, `authority-0.seed` to
@@ -39,7 +40,33 @@
 //! relay=<descriptor file>,<operator name>,<class 0 to 3>,<ingress|middle|exit>
 //! report_queue=<authority index>,<queue file>
 //! verdicts=<file of verdicts>
+//! results=<file of class test results>
+//! class_state=<file of the listed classes>
+//! revoked=<measurer_id in hex>,<not_after epoch>
 //! ```
+//!
+//! `measurer-cert` issues the `MeasurerCert` of the public key in the
+//! measurer key file (`umbra-measurer keygen` writes it), under the keys
+//! of authority 5 and authority 6 (`REL-103`). The authority tool holds the
+//! keys of authority 0 and authority 1 while it runs, thus the keys of
+//! that tool issue no certificate. The certificate is void
+//! after the count of epochs, 24 when the command names none and
+//! `MEASURER_CERT_TTL` at most (`REL-070`). The command prints the
+//! `measurer_id` and the `not_after` of the certificate: a `revoked` line
+//! with the two values revokes it (`REL-105`), and the signer drops the
+//! line from the root when `not_after` passed (`REL-106`).
+//!
+//! The `results` file holds one line for each class test of the measurer:
+//! `<relay_id in hex> <class> <pass|fail> <epoch>`. With that line the
+//! signer lists a relay at the class that the results verify, at or below
+//! the class of its `relay` line. A failed test at a class takes the relay
+//! below that class at the next manifest (`REL-095`), until a newer test
+//! at that class or above passes. A failed test at C0 takes the relay out
+//! of the listing (`REL-197`). A class rises by one step in each 168
+//! epochs at most (`REL-001`), and the `class_state` file holds the listed
+//! class of each relay and the epoch of its last step for that rule. A
+//! relay with no result keeps the class of its `relay` line: this signer
+//! signs a provisional directory alone (Part 10 §10.2).
 //!
 //! The `relay` line repeats. Its last field is the place of the relay: the
 //! ingress role, layer 2, or layer 3. Under a provisional directory each
@@ -79,15 +106,16 @@ use std::{
 };
 
 use umbra_core::directory::{
-    authority::{entry_of, keyset_bytes_with, sign_manifest_under, Admission, Listing},
+    authority::{entry_of, keyset_bytes_with, sign_manifest_revoking, Admission, Listing},
     bloc::BlocList,
-    descriptor::RelayEntry,
+    descriptor::{RelayDescriptor, RelayEntry},
     manifest::{RelayManifest, RelaySet},
+    measure::{issue_cert, staged_class, verified_class, ClassResult, Staged},
     path::{select, Candidate},
     removal::{peel, LinkRemoval, LINK_REMOVALS_MAX, LINK_REMOVAL_EPOCHS},
     report::{ReportQueue, QUEUE_ADDRESS_LEN},
     root::{Consensus, DirectoryKeySet, DirectoryRoot},
-    AUTHORITY_COUNT, AUTHORITY_FLOOR, EPOCH_SECONDS,
+    AUTHORITY_COUNT, AUTHORITY_FLOOR, EPOCH_SECONDS, MEASURER_REVOKE_MAX,
 };
 use umbra_crypto::{
     hash::sha3_256, rand_core::TryRng, secret::Secret, sign::SigningKey, zeroize::Zeroizing,
@@ -104,6 +132,17 @@ fn hex32(text: &str) -> Option<[u8; 32]> {
         return None;
     }
     let mut out = [0u8; 32];
+    for (index, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(text.get(index * 2..index * 2 + 2)?, 16).ok()?;
+    }
+    Some(out)
+}
+
+fn hex16(text: &str) -> Option<[u8; 16]> {
+    if text.len() != 32 {
+        return None;
+    }
+    let mut out = [0u8; 16];
     for (index, byte) in out.iter_mut().enumerate() {
         *byte = u8::from_str_radix(text.get(index * 2..index * 2 + 2)?, 16).ok()?;
     }
@@ -391,6 +430,110 @@ fn read_relay(value: &str) -> Option<Admitted> {
     })
 }
 
+/// The life of a certificate that `measurer-cert` issues when the command
+/// names none, in consensus epochs. A run of the measurer takes minutes.
+const CERT_EPOCHS: u64 = 24;
+
+/// Issues the `MeasurerCert` of the key in `key_file` under two authority
+/// keys of `dir`, and writes it to `out` (`REL-070`, `REL-103`).
+fn measurer_cert(
+    dir: &Path,
+    key_file: &Path,
+    out: &Path,
+    lifetime: u64,
+) -> Result<(), &'static str> {
+    let (keys, _) = read_keys(dir)?;
+    let text =
+        std::fs::read_to_string(key_file).map_err(|_| "the measurer key file does not read")?;
+    let text = text.trim();
+    let mut public = Vec::with_capacity(text.len() / 2);
+    for index in (0..text.len()).step_by(2) {
+        let pair = text
+            .get(index..index + 2)
+            .ok_or("the measurer key file does not parse")?;
+        public.push(
+            u8::from_str_radix(pair, 16).map_err(|_| "the measurer key file does not parse")?,
+        );
+    }
+    let mut measurer_id = [0u8; 16];
+    OsRng
+        .try_fill_bytes(&mut measurer_id)
+        .map_err(|_| "no random value")?;
+    let epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| "the clock is before 1970")?
+        .as_secs()
+        / EPOCH_SECONDS;
+    let signers: Vec<(u8, &SigningKey)> = (0u8..).zip(keys.iter()).skip(5).collect();
+    let cert = issue_cert(measurer_id, &public, epoch, lifetime, &signers, &mut OsRng).map_err(
+        |_| "the certificate does not issue: the key is no ML-DSA-65 key, or the life is above MEASURER_CERT_TTL",
+    )?;
+    write_whole(out, &cert, false)?;
+    println!(
+        "measurer_id={} not_after={}",
+        to_hex(&measurer_id),
+        epoch.saturating_add(lifetime)
+    );
+    Ok(())
+}
+
+/// The listed class of each relay and the epoch of its last step, as the
+/// `class_state` file holds them: `<relay_id in hex> <class> <epoch>`.
+type ClassState = std::collections::BTreeMap<[u8; 32], Staged>;
+
+fn read_class_state(text: &str) -> ClassState {
+    text.lines()
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            let relay = hex32(words.next()?)?;
+            let class = words.next()?.parse().ok()?;
+            let stepped_at = words.next()?.parse().ok()?;
+            Some((relay, Staged { class, stepped_at }))
+        })
+        .collect()
+}
+
+fn class_state_text(state: &ClassState) -> String {
+    state
+        .iter()
+        .map(|(relay, staged)| {
+            format!("{} {} {}\n", to_hex(relay), staged.class, staged.stepped_at)
+        })
+        .collect()
+}
+
+/// The class that a manifest of `epoch` lists for the relay `relay_id` of
+/// the declared class `declared`, or none for a relay that the results
+/// take out of the listing (`REL-197`). The state takes the listed class
+/// and the epoch of its last step (`REL-001`, `REL-095`).
+fn listed_class(
+    relay_id: &[u8; 32],
+    declared: u8,
+    results: &[ClassResult],
+    state: &mut ClassState,
+    epoch: u64,
+) -> Option<u8> {
+    let before = state.get(relay_id).copied();
+    match verified_class(relay_id, declared, results) {
+        Some(verified) => {
+            let staged = staged_class(before, verified, epoch);
+            state.insert(*relay_id, staged);
+            Some(staged.class)
+        }
+        None => {
+            // The relay comes back at C0, and it rises from there.
+            state.insert(
+                *relay_id,
+                Staged {
+                    class: 0,
+                    stepped_at: before.map_or(epoch, |before| before.stepped_at),
+                },
+            );
+            None
+        }
+    }
+}
+
 /// Whether the verdict `removal` is inside its life at `epoch`
 /// (`REL-183`). A verdict of a later epoch is not, and an epoch near the end
 /// of its range wraps nothing.
@@ -486,6 +629,9 @@ fn sign(settings: &str, force: bool) -> Result<(), &'static str> {
     let mut report_queues = Vec::new();
     let mut expelled: Vec<[u8; 32]> = Vec::new();
     let mut removed: Vec<LinkRemoval> = Vec::new();
+    let mut results: Option<Vec<ClassResult>> = None;
+    let mut class_state_file: Option<PathBuf> = None;
+    let mut revoked: Vec<([u8; 16], u64)> = Vec::new();
     for line in text
         .lines()
         .map(str::trim)
@@ -512,6 +658,25 @@ fn sign(settings: &str, force: bool) -> Result<(), &'static str> {
                     let epoch = words.next()?.parse().ok()?;
                     Some(LinkRemoval::of(epoch, one, other))
                 }));
+            }
+            Some(("results", value)) => {
+                // A file that does not exist yet holds no result. A line
+                // that the measurer did not end yet parses as none.
+                let held = std::fs::read_to_string(value).unwrap_or_default();
+                results
+                    .get_or_insert_with(Vec::new)
+                    .extend(held.lines().filter_map(ClassResult::parse));
+            }
+            Some(("class_state", value)) => class_state_file = Some(PathBuf::from(value)),
+            Some(("revoked", value)) => {
+                let (id, not_after) = value
+                    .split_once(',')
+                    .ok_or("a revoked line does not parse")?;
+                let id = hex16(id).ok_or("a revoked line does not parse")?;
+                let not_after = not_after
+                    .parse()
+                    .map_err(|_| "a revoked line does not parse")?;
+                revoked.push((id, not_after));
             }
             Some(("report_queue", value)) => {
                 let (index, file) = value
@@ -568,6 +733,26 @@ fn sign(settings: &str, force: bool) -> Result<(), &'static str> {
         .map_err(|_| "the clock is before 1970")?
         .as_secs();
     let epoch = now / EPOCH_SECONDS;
+    // REL-106: a revoked measurer stays in the root until the `not_after`
+    // of its certificate passed.
+    let mut revoked: Vec<[u8; 16]> = revoked
+        .into_iter()
+        .filter(|(_, not_after)| *not_after >= epoch)
+        .map(|(id, _)| id)
+        .collect();
+    revoked.sort_unstable();
+    revoked.dedup();
+    if revoked.len() > MEASURER_REVOKE_MAX {
+        return Err("the settings revoke more measurers than MEASURER_REVOKE_MAX");
+    }
+    // REL-001: the step rule needs the class of the last listing.
+    let mut class_state = match (&results, &class_state_file) {
+        (Some(_), None) => {
+            return Err("a results line needs a line: class_state=<file of the listed classes>")
+        }
+        (_, Some(path)) => read_class_state(&std::fs::read_to_string(path).unwrap_or_default()),
+        (None, None) => ClassState::new(),
+    };
     // REL-188: the dense-subgraph search over the removed links of their
     // life expels each relay that it peels.
     let live: Vec<LinkRemoval> = removed
@@ -594,10 +779,29 @@ fn sign(settings: &str, force: bool) -> Result<(), &'static str> {
 
     let mut entries = Vec::with_capacity(relays.len());
     for relay in &relays {
+        // §10.2: the class that the results verify, at or below the class
+        // that the operator declares.
+        let class = match &results {
+            Some(results) => {
+                let relay_id = RelayDescriptor::parse(&relay.descriptor)
+                    .map_err(|_| "a descriptor does not parse")?
+                    .relay_id;
+                let listed = listed_class(&relay_id, relay.class, results, &mut class_state, epoch);
+                let Some(listed) = listed else {
+                    println!(
+                        "relay {} failed the class test of C0 and is not listed",
+                        to_hex(&relay_id)
+                    );
+                    continue;
+                };
+                listed
+            }
+            None => relay.class,
+        };
         let listing = Listing {
             descriptor: &relay.descriptor,
             operator_id: relay.operator_id,
-            class: relay.class,
+            class,
             is_ingress: matches!(relay.place, Place::Ingress),
         };
         let admission = match relay.place {
@@ -612,7 +816,15 @@ fn sign(settings: &str, force: bool) -> Result<(), &'static str> {
             continue;
         }
         if matches!(relay.place, Place::Ingress) && !read.ingress() {
-            return Err("an ingress relay is below class 1 or offers no ingress role");
+            // §10.6.1: an ingress relay that a class test took below C1
+            // keeps its listing and loses the flag.
+            if class >= relay.class {
+                return Err("an ingress relay is below class 1 or offers no ingress role");
+            }
+            println!(
+                "relay {} is below class 1 after a class test, and it is no ingress relay",
+                to_hex(&read.descriptor.relay_id)
+            );
         }
         if matches!(relay.place, Place::Exit) && read.layer() != 3 {
             return Err("an exit relay offers no queue role and no chain role");
@@ -635,13 +847,14 @@ fn sign(settings: &str, force: bool) -> Result<(), &'static str> {
         entries.push(entry);
     }
     let signers: Vec<u8> = (0u8..).take(AUTHORITY_COUNT).collect();
-    let manifest = sign_manifest_under(
+    let manifest = sign_manifest_revoking(
         &keys,
         &keyset,
         &signers,
         epoch,
         entries,
         &BlocList::v1(),
+        &revoked,
         &mut OsRng,
     )
     .map_err(|_| "the manifest does not build")?;
@@ -739,6 +952,11 @@ fn sign(settings: &str, force: bool) -> Result<(), &'static str> {
     if let Some(chain) = keychain.as_ref().and_then(|path| std::fs::read(path).ok()) {
         write_whole(&out.join("keychain"), &chain, false)?;
     }
+    // The state follows the manifest that went out: a run that kept the
+    // root of its epoch moved no class.
+    if let Some(path) = &class_state_file {
+        write_whole(path, class_state_text(&class_state).as_bytes(), false)?;
+    }
     println!(
         "epoch={epoch} relays={} manifest={} bytes report_queues={} removed_links={}",
         relays.len(),
@@ -785,12 +1003,26 @@ fn main() -> ExitCode {
             let settings = settings.clone();
             Box::new(move || sign(&settings, true))
         }
+        [command, dir, key, out, rest @ ..] if command == "measurer-cert" && rest.len() <= 1 => {
+            let lifetime = match rest.first().map(|epochs| epochs.parse::<u64>()) {
+                None => CERT_EPOCHS,
+                Some(Ok(epochs)) => epochs,
+                Some(Err(_)) => {
+                    eprintln!("the life of a certificate is a count of epochs");
+                    return ExitCode::from(2);
+                }
+            };
+            let (dir, key, out) = (PathBuf::from(dir), PathBuf::from(key), PathBuf::from(out));
+            Box::new(move || measurer_cert(&dir, &key, &out, lifetime))
+        }
         _ => {
             eprintln!(
                 "usage: umbra-signer keygen <key directory> [<keyset epoch>]\n       \
                  umbra-signer rotate <old key directory> <new key directory> <key chain file> \
                  [<manifest file>]\n       \
-                 umbra-signer sign [--force] <settings file>"
+                 umbra-signer sign [--force] <settings file>\n       \
+                 umbra-signer measurer-cert <key directory> <measurer key file> \
+                 <certificate file> [<epochs>]"
             );
             return ExitCode::from(2);
         }
@@ -817,7 +1049,7 @@ fn main() -> ExitCode {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use umbra_core::directory::descriptor::{roles, RelayDescriptor};
+    use umbra_core::directory::{authority::sign_manifest_under, descriptor::roles};
 
     fn keys(tag: u8) -> Vec<SigningKey> {
         (0u8..)
@@ -983,6 +1215,106 @@ mod tests {
             rotate(&root.join("first"), &root.join("next"), &chain, None).unwrap();
             assert!(chain.exists());
             std::fs::remove_dir_all(&root).unwrap();
+        });
+    }
+
+    #[test]
+    fn a_result_moves_a_class_one_step_in_one_epoch() {
+        let relay = [7u8; 32];
+        let result = |class, passed, epoch| ClassResult {
+            relay_id: relay,
+            class,
+            passed,
+            epoch,
+        };
+        let mut state = ClassState::new();
+        // No result: the relay takes the class that its operator declares
+        // (§10.2, the provisional directory).
+        assert_eq!(listed_class(&relay, 2, &[], &mut state, 1_000), Some(2));
+        // REL-095, REL-096: a failed test at C1 lists the relay at C0 in
+        // the next manifest, two steps at once.
+        let mut results = vec![result(1, false, 1_001)];
+        assert_eq!(
+            listed_class(&relay, 2, &results, &mut state, 1_002),
+            Some(0)
+        );
+        // REL-001: a newer pass verifies the declared class again, and the
+        // listing rises one step in each 168 epochs. The first step comes
+        // 168 epochs after the first listing.
+        results.push(result(1, true, 1_003));
+        assert_eq!(
+            listed_class(&relay, 2, &results, &mut state, 1_004),
+            Some(0)
+        );
+        assert_eq!(
+            listed_class(&relay, 2, &results, &mut state, 1_168),
+            Some(1)
+        );
+        assert_eq!(
+            listed_class(&relay, 2, &results, &mut state, 1_169),
+            Some(1)
+        );
+        assert_eq!(
+            listed_class(&relay, 2, &results, &mut state, 1_335),
+            Some(1)
+        );
+        assert_eq!(
+            listed_class(&relay, 2, &results, &mut state, 1_336),
+            Some(2)
+        );
+        // The state file holds the class and the epoch of the last step.
+        let read = read_class_state(&class_state_text(&state));
+        assert_eq!(read, state);
+        assert_eq!(
+            read.get(&relay),
+            Some(&Staged {
+                class: 2,
+                stepped_at: 1_336
+            })
+        );
+        // REL-197: a failed test at C0 takes the relay out of the listing,
+        // and a newer pass lists it at C0 first.
+        results.push(result(0, false, 1_400));
+        assert_eq!(listed_class(&relay, 2, &results, &mut state, 1_401), None);
+        results.push(result(0, true, 1_402));
+        assert_eq!(
+            listed_class(&relay, 2, &results, &mut state, 1_403),
+            Some(0)
+        );
+        assert_eq!(
+            listed_class(&relay, 2, &results, &mut state, 1_504),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn a_revoked_measurer_is_in_the_root_of_the_manifest() {
+        on_a_signing_stack(|| {
+            let keys = keys(0x30);
+            let keyset = keyset_bytes_with(&keys, FIRST_KEYSET_EPOCH, INDEPENDENT_COUNT).unwrap();
+            let signers: Vec<u8> = (0u8..).take(AUTHORITY_COUNT).collect();
+            // REL-105: the root names the measurer.
+            let manifest = sign_manifest_revoking(
+                &keys,
+                &keyset,
+                &signers,
+                700,
+                vec![entry(3)],
+                &BlocList::v1(),
+                &[[0x4D; 16]],
+                &mut OsRng,
+            )
+            .unwrap();
+            let parsed = RelayManifest::parse(&manifest).unwrap();
+            let root = DirectoryRoot::parse(parsed.root).unwrap();
+            assert_eq!(root.revoked, vec![[0x4D; 16]]);
+            let (keyset, _) = DirectoryKeySet::parse(&keyset).unwrap();
+            let mut consensus = Consensus::new(keyset, 0).unwrap();
+            assert!(
+                RelaySet::accept(&mut consensus, &parsed, &BlocList::v1(), 700 * 3_600).is_ok()
+            );
+            assert_eq!(hex16(&to_hex(&[0x4D; 16])), Some([0x4D; 16]));
+            assert_eq!(hex16("4d"), None);
         });
     }
 

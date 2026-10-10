@@ -190,6 +190,45 @@ impl CircuitBuild {
     }
 }
 
+/// The measurer end of a measurement circuit (Part 10 §10.3.1): one hop to
+/// the relay under test. Each cell travels under the layer of that hop in
+/// the form of a build cell, with no key update.
+pub struct MeasureCircuit {
+    keys: KeySet,
+    circ_id: [u8; 16],
+}
+
+impl MeasureCircuit {
+    /// The circuit to a relay of `layer` that answered with `ss_hop`. The
+    /// relay derives its keys with its layer as the hop index.
+    pub fn new(ss_hop: &Secret<32>, layer: u32, circ_id: [u8; 16]) -> Self {
+        MeasureCircuit {
+            keys: KeySet::derive(ss_hop, layer),
+            circ_id,
+        }
+    }
+
+    /// The circuit identifier on the link to the relay.
+    pub fn circ_id(&self) -> [u8; 16] {
+        self.circ_id
+    }
+
+    /// Wraps a body for the relay and returns the `tag`.
+    pub fn seal(&mut self, body: &mut [u8]) -> Result<[u8; BLOCK], Error> {
+        self.keys.forward.encipher(&[0u8; BLOCK], body)
+    }
+
+    /// Removes the backward layer and makes the check of `NET-114`.
+    pub fn open(&mut self, tag: &[u8; BLOCK], body: &mut [u8]) -> Result<(), Error> {
+        let left = self.keys.backward.decipher(tag, body)?;
+        if bool::from(left.ct_eq(&[0u8; BLOCK])) {
+            Ok(())
+        } else {
+            Err(Error::Rejected)
+        }
+    }
+}
+
 /// The position of a relay on a circuit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Position {

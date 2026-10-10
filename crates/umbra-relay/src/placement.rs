@@ -9,6 +9,7 @@ use std::{
 use umbra_core::directory::{
     bloc::BlocList,
     manifest::{ListedRelay, RelayManifest, RelaySet},
+    measure::MeasurerTrust,
     root::{Consensus, DirectoryKeySet, DirectoryRoot},
     CLOCK_SKEW, CONSENSUS_VALIDITY,
 };
@@ -59,6 +60,9 @@ pub struct Placement {
     pub has_attachment_role: bool,
     /// The epoch of the root.
     pub epoch: u64,
+    /// The key set and the revoked list of the root, under which this
+    /// relay accepts a `MeasurerCert` (`REL-066`, `REL-104`).
+    pub measurer_trust: MeasurerTrust,
 }
 
 fn layer_of(relay: &ListedRelay) -> u8 {
@@ -102,16 +106,23 @@ pub fn placement(
     device_clock: u64,
 ) -> Result<Placement, PlacementError> {
     let unverified = |_| PlacementError::Unverified;
+    let keyset_bytes = keyset;
     let (keyset, _) = DirectoryKeySet::parse(keyset).map_err(unverified)?;
     // The operator of a relay gives it the manifest from its own disk, thus
     // no shipped epoch bounds the age of it.
     let mut consensus = Consensus::new(keyset, 0).map_err(unverified)?;
     let manifest = RelayManifest::parse(manifest).map_err(unverified)?;
-    let valid_until = DirectoryRoot::parse(manifest.root)
-        .map_err(unverified)?
+    let root = DirectoryRoot::parse(manifest.root).map_err(unverified)?;
+    let valid_until = root
         .epoch_start_unix
         .saturating_add(CONSENSUS_VALIDITY)
         .saturating_add(CLOCK_SKEW);
+    // The signatures of the root cover the list, and `RelaySet::accept`
+    // below verifies them.
+    let measurer_trust = MeasurerTrust {
+        keyset: keyset_bytes.to_vec(),
+        revoked: root.revoked,
+    };
     let set = RelaySet::accept(&mut consensus, &manifest, &BlocList::v1(), device_clock)
         .map_err(unverified)?;
     // REL-147: a part of the set passes each proof. It would give this
@@ -185,6 +196,7 @@ pub fn placement(
         identities,
         has_attachment_role: own.has_attachment_role,
         epoch: set.epoch,
+        measurer_trust,
     })
 }
 
@@ -315,6 +327,10 @@ mod tests {
             // NET-334: the set gives the address of each of its relays.
             assert_eq!(place.addresses.len(), relays.len());
             assert!(place.valid_until > 700 * 3_600);
+            // REL-066: a `MeasurerCert` verifies under the key set of the
+            // root, with its revoked list.
+            assert_eq!(place.measurer_trust.keyset, keyset);
+            assert!(place.measurer_trust.revoked.is_empty());
         }
         let of_layer_2 = placed.iter().position(|p| p.layer == 2).unwrap();
         let (_, id_of_2, _) = &relays[of_layer_2];

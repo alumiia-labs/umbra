@@ -4,7 +4,8 @@
 #   2. the notification server and the directory, whose public keys the
 #      relays pin;
 #   3. each relay: its identity and its signed descriptor;
-#   4. the signer: the authority keys and the first manifest;
+#   4. the signer: the authority keys and the first manifest, then the
+#      authority tool and the measurer on the same server;
 #   5. each relay: the key set, the manifest, and the service.
 #
 # A second run changes nothing that is there already: no key is made again.
@@ -57,6 +58,8 @@
   become: true
   roles:
     - signer
+    - authority
+    - measurer
 
 - name: Phase 2 of each relay
   hosts: relays

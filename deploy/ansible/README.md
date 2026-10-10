@@ -9,7 +9,7 @@ lists the relays of each server.
 | `east-1` | Vint Hill, Virginia | Entry relay `entry-east` (port 443), exit relay `exit-1` (port 9443), and the notification server (`umbra-ndr`, port 8443) |
 | `east-2` | Vint Hill, Virginia | Middle relay (port 443) and exit relay `exit-3` (port 9443) |
 | `west-1` | Hillsboro, Oregon | Entry relay `entry-west` (port 443), exit relay `exit-2` (port 9443), and the directory (`umbra-directory`, port 8443) |
-| `signer-west-1` | Hillsboro, Oregon | The directory signer; it signs the relay list each hour, and nginx serves it |
+| `signer-west-1` | Hillsboro, Oregon | The directory signer; it signs the relay list each hour, and nginx serves it. The authority tool (`umbra-authority`) and the measurer (`umbra-measurer`) run beside it |
 
 Three exit relays hold the two replicas of a group and the three copies of
 a file. An entry relay takes port 443, since phones reach it. Each relay
@@ -39,6 +39,9 @@ operator, one provider, and one country carry the traffic.
 - Four Debian 12 or 13 servers. OVH's VPS-1 (500 Mbit/s) serves each.
   - A server with two relays states the share of each: class 1 (250 Mbit/s)
     for each on a 500 Mbit/s plan. An entry relay needs class 1 or more.
+  - The measurer on the signer tests class 0 alone on a 500 Mbit/s plan
+    ("Measurement" below). The class of each relay above class 0 stays the
+    one that the inventory states.
   - A relay server needs 4 GB of memory or more. An exit relay holds the
     bytes of each file chunk in memory, thus `umbra_chunk_capacity` is 1 GiB
     and not a part of the disk. See "Memory" below before you raise it.
@@ -98,7 +101,8 @@ The first run does this, in order:
 2. The notification server and the directory start. Their public keys come back to `build/`.
 3. Each relay signs its descriptor. It comes back to `build/descriptors/`.
 4. The signer makes the seven authority keys and signs the first manifest.
-   The key set and the manifest come back to `build/`.
+   The key set and the manifest come back to `build/`. The authority tool
+   starts on the same server, and the measurer gets its key and its timer.
 5. Each relay takes the key set and the manifest, then starts.
 
 A later run changes nothing that is already in place. It makes no key again,
@@ -191,8 +195,8 @@ manifest of an hour rejects a second one for it. Thus:
   |---|---|---|
   | Entry or middle relay | `umbra_relay_memory_high`, 1200M | `umbra_relay_memory_max`, 1400M |
   | Exit relay | `umbra_exit_memory_high`, 2300M | `umbra_exit_memory_max`, 2500M |
-  | Notification server, directory | `umbra_service_memory_high`, 448M | `umbra_service_memory_max`, 512M |
-  | Signer, one run | `umbra_signer_memory_high`, 448M | `umbra_signer_memory_max`, 512M |
+  | Notification server, directory, authority tool, one run of the measurer | `umbra_service_memory_high`, 448M | `umbra_service_memory_max`, 512M |
+  | Signer, one run; one measurer certificate | `umbra_signer_memory_high`, 448M | `umbra_signer_memory_max`, 512M |
 
   An exit relay holds the bytes of each file chunk in memory, and it reads
   them two times at its start. Its limit is thus two times
@@ -212,6 +216,63 @@ manifest of an hour rejects a second one for it. Thus:
   minutes. It replaces its copy only with a manifest that verifies and still
   lists it. nginx on the signer keeps no log of a request, neither of one
   that it served nor of one that failed.
+- **The authority tool.** `umbra-authority` holds the report queue of
+  authority 0 at an exit relay, as an app holds a queue. The manifest names
+  that queue, and each app sends its link-fault reports there (Part 10
+  `REL-166`). The tool counts the reports of each hour. For a relay above
+  the fault rate it runs the isolation query (`REL-080`), and it writes
+  each verdict to `/var/lib/umbra-authority/verdicts`. The signer reads
+  that file each hour: a relay with an `expel` line leaves the manifest,
+  and a link with a `link` line takes a removal for 7 days.
+  - The tool runs as the user `umbra-signer`, because it reads the seed
+    files of that user. Its unit hides the seeds of the authorities 2 to 6.
+    Its settings file, `/etc/umbra-authority/authority.conf`, holds no
+    secret.
+  - The tool makes the two secrets of its report queue in
+    `/var/lib/umbra-authority/secrets` at its first start, each readable by
+    its owner alone. It refuses a seed file or a secret file that a group
+    or each other user can read.
+  - One operator holds each key, thus the tool is both aggregators of the
+    chain count (Part 10 §10.8).
+- **Measurement.** `umbra-measurer` runs the class test of each relay one
+  time in each 7 days (Part 10 `REL-097`): the timer starts it at a random
+  time in the 12 hours after Monday 02:20. A test sends echo cells to one
+  relay for 30 seconds at 2.25 times the rate of the class, and the relay
+  passes when the echoes reach the rate of the class.
+  - Each run takes a new certificate first (`umbra-measurer-cert`). The
+    signer issues it under the keys of the authorities 5 and 6, for
+    `umbra_measurer_cert_epochs` hours. The measurer runs as its own user
+    and reads no authority key.
+  - Each test is one line of `/var/lib/umbra-measurer/results`:
+    `<relay_id> <class> <pass|fail> <epoch>`. The signer reads the file
+    each hour. A failed test at a class lists the relay below that class
+    in the next manifest. A failed test at class 0 takes the relay out of
+    the manifest. A later pass lists it again, and its class then rises by
+    one step in each 7 days at most (`REL-001`);
+    `/var/lib/umbra-signer/state/class_state` holds the class and the
+    epoch of the last step of each relay. An entry relay below class 1
+    stays in the manifest as a middle relay, and it takes no phone.
+  - **What this measurer cannot test.** A test needs 225 Mbit/s for
+    class 0, 562.5 for class 1, 1 125 for class 2, and 2 250 for class 3.
+    The signer server has 500 Mbit/s (`umbra_measurer_capacity`). It thus
+    tests class 0 alone, two relays in one slot. No test of this
+    deployment verifies class 1 or above, and each relay keeps the class
+    of the inventory above class 0. Part 10 §10.2 permits that under the
+    provisional directory alone.
+  - The six relays share one network (one ASN), thus they are one cluster
+    of Part 10 §10.3. The rule puts 4 relays of such a cluster in one
+    slot. The capacity holds 2, thus a run takes 3 slots, and the measurer
+    says so in its log. Which relays share a slot comes from the random
+    generator of the server at each run.
+  - A relay gives a measurer that it refuses no sign. A relay that opened
+    no session thus gets no result line, the run ends with a failure, and
+    `umbra-alert@umbra-measurer` tells you. Such a relay keeps its class.
+  - To revoke a certificate, take its `measurer_id` and its `not_after`
+    from `journalctl -u umbra-measurer-cert`, add them to
+    `umbra_revoked_measurers`, and run the playbook. The root of the next
+    manifest names the measurer, and each relay then refuses it
+    (`REL-104`, `REL-105`). Delete the two files of
+    `/var/lib/umbra-measurer/keys` before that run, and it makes a new key.
 - **A failed signer run** leaves the old manifest in place, and the network
   stops when that one ends. The unit `umbra-alert@umbra-signer` then writes a
   line of the highest priority to the journal and to each open terminal.
@@ -278,14 +339,12 @@ app.
   opens the browser and not the app. The folder `site/` of this repository
   holds those files and the way to deploy them.
 
-- **Measurement and verdicts.** These playbooks install no tool of a
-  directory authority that measures the relays. The settings of the signer
-  hold no `report_queue=` line and no `verdicts=` line. Thus the manifest
-  names no report queue (Part 10 `REL-166`), and no client report reaches an
-  authority. No authority runs the isolation query of `REL-080`, and
-  nothing expels a relay or removes a link on a verdict. The operator takes
-  a faulty relay out of the inventory by hand. The signer reads the two
-  lines when a later change writes them.
+- **One measurer, class 0 alone.** Part 10 §10.5.1 accepts a class from 3
+  measurers in 2 networks. This deployment has one measurer on one server
+  of 500 Mbit/s, which tests class 0 alone ("Measurement" above).
+- **The keys of the authority tool.** The tool holds the keys of the
+  authorities 0 and 1 while it runs, on a server that reaches the network.
+  The signer run and the certificate run hold each key with no network.
 - **A user for each relay.** The relays of one server share one user
   ("How it runs").
 - **The key chain before a rotation.** The signer publishes no key chain
@@ -299,8 +358,26 @@ ansible all -m command -a 'systemctl --failed'
 ansible relays -m command -a "journalctl -u 'umbra-relay@*' -n 20 --no-pager"
 ansible signer -m command -a 'journalctl -u umbra-signer -n 20 --no-pager'
 curl -sI https://signer-west-1.<domain>/.well-known/umbra/manifest
+ansible signer -m command -a 'journalctl -u umbra-authority -n 20 --no-pager'
+ansible signer -m command -a 'systemctl list-timers umbra-measurer.timer --no-pager'
+ansible signer -m command -a 'journalctl -u umbra-measurer -u umbra-measurer-cert -n 40 --no-pager'
+ansible signer -m command -a 'tail -n 12 /var/lib/umbra-measurer/results'
 ```
 
 The log of the signer shows one line for each run. A new manifest gives
-`epoch=<hour>` with the count of the relays. An hour that had a manifest
-already gives `kept=same` or `kept=other`.
+`epoch=<hour>` with the count of the relays and `report_queues=1` once the
+authority tool made its queue. An hour that had a manifest already gives
+`kept=same` or `kept=other`. Each relay has a line with its `class=`.
+
+The log of the authority tool shows `authority online` and, one time,
+`report queue made`. Each report of an app is one line.
+
+To run the measurer now, and not at its timer:
+
+```sh
+ansible signer -b -m command -a 'systemctl start umbra-measurer'
+```
+
+The run takes about two minutes for six relays. Its log holds one result
+line for each relay and the rate of the echoes. A line `gave no result`
+names a relay that opened no measurement session.

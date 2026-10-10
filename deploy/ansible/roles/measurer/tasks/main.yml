@@ -1,0 +1,66 @@
+# The measurer of Part 10 §10.3, on the server of the signer: it runs the
+# class test of each relay one time in each 7 days (`REL-097`), and the
+# signer reads its results. It runs as a user of its own, which reads no
+# key of an authority (Part 10 §10.5.1).
+- name: The user of the measurer is there
+  ansible.builtin.user:
+    name: umbra-measurer
+    system: true
+    shell: /usr/sbin/nologin
+    home: /var/lib/umbra-measurer
+    create_home: false
+
+# The signer reads the results and the public key, and the measurer reads
+# its certificate, thus each directory is open to a read. The seed file is
+# readable by its owner alone.
+- name: The directories of the measurer are there
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.owner }}"
+    mode: "0755"
+  loop:
+    - { path: /etc/umbra-measurer, owner: root }
+    - { path: /var/lib/umbra-measurer, owner: umbra-measurer }
+    - { path: /var/lib/umbra-measurer/keys, owner: umbra-measurer }
+    # The signer writes the certificate of each run here.
+    - { path: /var/lib/umbra-measurer/cert, owner: umbra-signer }
+
+- name: The binary of the measurer is there
+  ansible.builtin.copy:
+    src: "{{ umbra_bin_dir }}/umbra-measurer"
+    dest: /usr/local/bin/umbra-measurer
+    mode: "0755"
+
+# The seed is made here one time and never leaves this server. A lost seed
+# costs nothing: delete the two files, and the next run makes a new key.
+- name: The key of the measurer is made one time
+  become: true
+  become_user: umbra-measurer
+  ansible.builtin.command:
+    cmd: /usr/local/bin/umbra-measurer keygen /var/lib/umbra-measurer/keys
+    creates: /var/lib/umbra-measurer/keys/measurer.seed
+
+- name: The settings of the measurer are there
+  ansible.builtin.template:
+    src: measurer.conf.j2
+    dest: /etc/umbra-measurer/measurer.conf
+    mode: "0644"
+
+- name: The units of the measurer are there
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
+    mode: "0644"
+  loop:
+    - umbra-measurer-cert.service
+    - umbra-measurer.service
+    - umbra-measurer.timer
+
+- name: The timer measures each relay one time in each 7 days
+  ansible.builtin.systemd:
+    name: umbra-measurer.timer
+    enabled: true
+    state: started
+    daemon_reload: true

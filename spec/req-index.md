@@ -68,20 +68,20 @@ column when a crate implements the requirement and a test covers it.
 | --- | --- | --- | --- | --- | --- | --- |
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
-| `NET` | 251 | 89 | 1 | 0 | 9 | **350** |
+| `NET` | 252 | 89 | 1 | 0 | 9 | **351** |
 | `IDN` | 134 | 46 | 1 | 0 | 5 | **186** |
 | `CRY` | 120 | 27 | 0 | 0 | 1 | **148** |
 | `WIR` | 409 | 86 | 0 | 0 | 7 | **502** |
 | `DEV` | 211 | 91 | 0 | 0 | 8 | **310** |
 | `NTF` | 77 | 28 | 0 | 0 | 3 | **108** |
 | `DIS` | 130 | 35 | 0 | 0 | 3 | **168** |
-| `REL` | 162 | 34 | 1 | 0 | 3 | **200** |
+| `REL` | 169 | 34 | 1 | 0 | 3 | **207** |
 | `GRP` | 233 | 65 | 0 | 0 | 5 | **303** |
 | `ATT` | 143 | 45 | 2 | 0 | 3 | **193** |
 | `ABU` | 71 | 29 | 1 | 0 | 0 | **101** |
 | `IMP` | 115 | 41 | 0 | 0 | 2 | **158** |
 | `SEC` | 4 | 3 | 0 | 0 | 1 | **8** |
-| **All** | 2083 | 628 | 6 | 0 | 54 | **2771** |
+| **All** | 2091 | 628 | 6 | 0 | 54 | **2779** |
 
 ## SCP — Scope and Conventions
 
@@ -489,6 +489,7 @@ Source: `spec/03-network-architecture.md`
 | `NET-350` | §3.4.6 | MUST | (unstated) | Under the same state, a client MAY put hop 1 and hop 3 in one bloc, and after that it MAY put two hops in one autonomous system or one prefix, each only when no chain holds without it, in that order. |  |  |
 | `NET-351` | §3.4.6 | MUST NOT | A client | A client MUST NOT put hop 1 and hop 3 on one IPv4 address while a chain holds without it, after each relaxation of `NET-350`. |  |  |
 | `NET-352` | §3.4.3 | MUST | A queue relay | A queue relay MUST hold at most one subscription for a queue. |  |  |
+| `NET-353` | §3.4.3 | MUST | A relay of layer 2 or 3 that holds a `DirectoryRoot` | A relay of layer 2 or 3 that holds a `DirectoryRoot` MUST answer a build cell on a link with no `RelayHello` as the build of a **measurement candidate**, under the limits of a client link and under Part 10 rule `REL-205`. |  |  |
 
 ## IDN — Identity
 
@@ -2059,9 +2060,9 @@ Source: `spec/10-relay-directory.md`
 | `REL-097` | §10.2 | SHOULD | A directory authority | A directory authority SHOULD measure each relay, C0 included, one time in each `MEASURE_INTERVAL`. |  |  |
 | `REL-098` | §10.2 | MUST | (unstated) | If a relay has no verifying report inside `MEASURE_STALE`, a directory authority MUST remove it from the listing until a class test verifies it again. |  |  |
 | `REL-099` | §10.3 | MUST | (unstated) | If a cluster holds `CLUSTER_FULL` relays or fewer, the directory MUST measure the full cluster in one slot. |  |  |
-| `REL-100` | §10.3 | MUST | (unstated) | If a cluster holds more than `CLUSTER_FULL` relays, the directory MUST select `CLUSTER_SAMPLE` relays of it for each slot. |  |  |
+| `REL-100` | §10.3 | MUST | (unstated) | If a cluster holds more than `CLUSTER_FULL` relays, the measurer MUST select `CLUSTER_SAMPLE` relays of it for each slot. |  |  |
 | `REL-101` | §10.3 | MUST | The directory | The directory MUST measure each relay of such a cluster inside `ceil(n / CLUSTER_SAMPLE)` slots. |  |  |
-| `REL-102` | §10.3 | MUST | The directory | The directory MUST show the selection of a slot only after the epoch closes. |  |  |
+| `REL-102` | §10.3 | MUST | The directory | A measurer MUST NOT show the selection of a slot before that slot ends. |  |  |
 | `REL-103` | §10.3.1 | MUST | A relay | A relay MUST count 2 or more valid signatures under different `authority_index` values before it accepts a `MeasurerCert`. |  |  |
 | `REL-104` | §10.3.1 | MUST | A relay | A relay MUST reject a `MeasurerCert` whose `measurer_id` the `revoked` list of the current `DirectoryRoot` names. |  |  |
 | `REL-105` | §10.3.1 | MUST | (unstated) | If a measurer key is lost or compromised, a directory authority MUST put its `measurer_id` in `revoked`. |  |  |
@@ -2160,6 +2161,13 @@ Source: `spec/10-relay-directory.md`
 | `REL-198` | §10.5.4 | MAY | Under the provisional directory of `REL-126`, an authority | Under the provisional directory of `REL-126`, an authority MAY set the layer of each relay of its own operator in the place of the function above, and it MAY list such a relay placed at once. |  |  |
 | `REL-199` | §10.5.2 | MUST | A carrier of Part 3 §3.10 that serves the manifest | A carrier of Part 3 §3.10 that serves the manifest MUST serve the `KeyChain` of each rotation since the genesis key set at `/.well-known/umbra/keychain`, under the rules of Part 3 `NET-316` and `NET-317`, with a body of 1 MiB at most. |  |  |
 | `REL-200` | §10.5.2 | MUST | (unstated) | A client or a relay that holds a key set under which a manifest does not verify MUST fetch the `KeyChain` and walk it from the set it holds: it passes over each link at or below the held `keyset_epoch`, and it accepts each later link under `REL-036` and `REL-037` in order. |  |  |
+| `REL-201` | §10.3.1 | MUST | (unstated) | A measurement session ends `MEAS_SESSION_MAX` after the `MEAS_OPEN` that opened it. |  |  |
+| `REL-202` | §10.3.1 | MUST | A relay | A relay MUST hold at most one measurement session for each `measurer_id`, with at most `MEAS_CIRCUITS_MAX` circuits, and at most `MEAS_SESSIONS_MAX` sessions at once. |  |  |
+| `REL-203` | §10.3.1 | MUST | A measurer | A measurer MUST sign the preimage above with the key of its certificate, with the `relay_id` of the relay that it measures. |  |  |
+| `REL-204` | §10.3 | MUST | A relay | A relay MUST answer a `MEAS_ECHO` cell of an open measurement session with one `MEAS_ECHO` cell of bucket `B0` that carries the same content, on the same circuit. |  |  |
+| `REL-205` | §10.3.1 | MUST | A relay | A relay MUST count the measurement attempts of each address. |  |  |
+| `REL-206` | §10.2 | MUST | Under that directory, an authority | Under that directory, an authority MUST list a relay of its own operator at the class that the operator declares, with three exceptions. |  |  |
+| `REL-207` | §10.3 | MUST | A measurer | A measurer MUST give a result for a relay only when that relay opened the measurement session. |  |  |
 
 ## GRP — Private Groups
 

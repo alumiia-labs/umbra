@@ -253,6 +253,8 @@ pub struct Placed {
     pub identities: BTreeMap<[u8; 32], Vec<u8>>,
     /// The carriers of the manifest (`ABU-102`).
     pub carriers: Vec<[u8; 32]>,
+    /// The key set and the revoked list of the root (`REL-066`).
+    pub measurer_trust: umbra_core::directory::measure::MeasurerTrust,
 }
 
 impl Placed {
@@ -269,6 +271,7 @@ impl Placed {
                 .collect(),
             identities: placement.identities.clone(),
             carriers: placement.carriers.keys().copied().collect(),
+            measurer_trust: placement.measurer_trust.clone(),
         }
     }
 }
@@ -413,6 +416,7 @@ pub async fn run_node(
                     node.set_queue_relays(placed.queue_relays);
                     node.set_relay_identities(placed.identities);
                     node.set_carriers(placed.carriers);
+                    node.set_measurer_trust(placed.measurer_trust);
                     // REL-174: the link of a relay that left the layer
                     // before closes.
                     node.close_strangers(unix_now())

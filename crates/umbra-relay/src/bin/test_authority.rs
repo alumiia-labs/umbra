@@ -8,6 +8,7 @@
 //!
 //! ```text
 //! umbra-test-authority <settings file> <output directory>
+//! umbra-test-authority measurer-cert <settings file> <measurer key file> <certificate file>
 //! ```
 //!
 //! The settings file holds one `key=value` pair on each line:
@@ -17,6 +18,7 @@
 //! relay=<descriptor file>,<operator name>,<class 0 to 3>,<ingress|chain>
 //! report_queue=<authority index>,<queue file>
 //! verdicts=<file of verdicts>
+//! results=<file of class test results>
 //! ```
 //!
 //! The `relay` line repeats. Each relay is of the first root of its network,
@@ -35,6 +37,16 @@
 //! `LINK_REMOVAL_EPOCHS` after that epoch (`REL-183`). The dense-subgraph
 //! search peels the removed links of their life, and each relay that it
 //! peels leaves the manifest too (`REL-188`).
+//!
+//! A `results` line names the file of the class tests of `umbra-measurer`
+//! (§10.3). The manifest lists each relay at the class that the results
+//! verify, and a relay that failed the test of C0 leaves it (`REL-197`).
+//! This program keeps no class of the last manifest, thus it applies no
+//! step rule (`REL-001`); `umbra-signer` does.
+//!
+//! `measurer-cert` issues the `MeasurerCert` of the key in the measurer key
+//! file under the keys of authority 0 and authority 1, void after 24
+//! epochs (`REL-070`, `REL-103`).
 
 #![forbid(unsafe_code)]
 
@@ -43,13 +55,14 @@ use std::{path::Path, process::ExitCode};
 use umbra_core::directory::{
     authority::{entry_of, keyset_bytes, sign_manifest, Admission, Listing, GENESIS_ROOT},
     bloc::BlocList,
-    descriptor::RelayEntry,
+    descriptor::{RelayDescriptor, RelayEntry},
     manifest::RelayManifest,
+    measure::{issue_cert, verified_class, ClassResult},
     removal::{peel, LinkRemoval, LINK_REMOVAL_EPOCHS},
     report::{ReportQueue, QUEUE_ADDRESS_LEN},
     AUTHORITY_COUNT, EPOCH_SECONDS,
 };
-use umbra_crypto::{hash::sha3_256, secret::Secret, sign::SigningKey};
+use umbra_crypto::{hash::sha3_256, rand_core::TryRng, secret::Secret, sign::SigningKey};
 use umbra_relay::server::OsRng;
 
 /// The epoch of the key set of a test network.
@@ -94,9 +107,75 @@ fn read_relay(value: &str) -> Option<Admitted> {
     })
 }
 
+/// The seven keys of the seed of a test network.
+fn keys_of(seed: &[u8; 32]) -> Vec<SigningKey> {
+    (0..AUTHORITY_COUNT)
+        .map(|index| {
+            let index = u8::try_from(index).unwrap_or(u8::MAX);
+            SigningKey::from_seed(Secret::new(sha3_256(&[
+                b"umbra/test/authority",
+                seed,
+                &[index],
+            ])))
+        })
+        .collect()
+}
+
+/// The life of a certificate of a test network, in consensus epochs.
+const CERT_EPOCHS: u64 = 24;
+
+fn measurer_cert(settings: &str, key_file: &Path, out: &Path) -> Result<(), &'static str> {
+    let text = std::fs::read_to_string(settings).map_err(|_| "the settings file does not read")?;
+    let seed = text
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("seed="))
+        .and_then(hex32)
+        .ok_or("the settings file needs a line: seed=<64 hex characters>")?;
+    let keys = keys_of(&seed);
+    let text =
+        std::fs::read_to_string(key_file).map_err(|_| "the measurer key file does not read")?;
+    let text = text.trim();
+    let mut public = Vec::with_capacity(text.len() / 2);
+    for index in (0..text.len()).step_by(2) {
+        let pair = text
+            .get(index..index + 2)
+            .ok_or("the measurer key file does not parse")?;
+        public.push(
+            u8::from_str_radix(pair, 16).map_err(|_| "the measurer key file does not parse")?,
+        );
+    }
+    let mut measurer_id = [0u8; 16];
+    OsRng
+        .try_fill_bytes(&mut measurer_id)
+        .map_err(|_| "no random value")?;
+    let epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| "the clock is before 1970")?
+        .as_secs()
+        / EPOCH_SECONDS;
+    let signers: Vec<(u8, &SigningKey)> = (0u8..).zip(keys.iter()).take(2).collect();
+    let cert = issue_cert(
+        measurer_id,
+        &public,
+        epoch,
+        CERT_EPOCHS,
+        &signers,
+        &mut OsRng,
+    )
+    .map_err(|_| "the certificate does not issue")?;
+    std::fs::write(out, &cert).map_err(|_| "the certificate file does not write")?;
+    println!(
+        "measurer_id={} not_after={}",
+        to_hex(&measurer_id),
+        epoch.saturating_add(CERT_EPOCHS)
+    );
+    Ok(())
+}
+
 fn run(settings: &str, out: &Path) -> Result<(), &'static str> {
     let text = std::fs::read_to_string(settings).map_err(|_| "the settings file does not read")?;
     let mut seed = None;
+    let mut results: Vec<ClassResult> = Vec::new();
     let mut relays = Vec::new();
     let mut report_queues = Vec::new();
     let mut expelled: Vec<[u8; 32]> = Vec::new();
@@ -122,6 +201,11 @@ fn run(settings: &str, out: &Path) -> Result<(), &'static str> {
                     Some(LinkRemoval::of(epoch, one, other))
                 }));
             }
+            Some(("results", value)) => {
+                // A file that does not exist yet holds no result.
+                let held = std::fs::read_to_string(value).unwrap_or_default();
+                results.extend(held.lines().filter_map(ClassResult::parse));
+            }
             Some(("report_queue", value)) => {
                 let (index, file) = value
                     .split_once(',')
@@ -135,16 +219,7 @@ fn run(settings: &str, out: &Path) -> Result<(), &'static str> {
         }
     }
     let seed = seed.ok_or("the settings file needs a line: seed=<64 hex characters>")?;
-    let keys: Vec<SigningKey> = (0..AUTHORITY_COUNT)
-        .map(|index| {
-            let index = u8::try_from(index).unwrap_or(u8::MAX);
-            SigningKey::from_seed(Secret::new(sha3_256(&[
-                b"umbra/test/authority",
-                &seed,
-                &[index],
-            ])))
-        })
-        .collect();
+    let keys = keys_of(&seed);
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -165,10 +240,22 @@ fn run(settings: &str, out: &Path) -> Result<(), &'static str> {
 
     let mut entries = Vec::with_capacity(relays.len());
     for relay in &relays {
+        // §10.2: the class that the results verify, at or below the class
+        // of the `relay` line.
+        let relay_id = RelayDescriptor::parse(&relay.descriptor)
+            .map_err(|_| "a descriptor does not parse")?
+            .relay_id;
+        let Some(class) = verified_class(&relay_id, relay.class, &results) else {
+            println!(
+                "relay {} failed the class test of C0 and is not listed",
+                to_hex(&relay_id)
+            );
+            continue;
+        };
         let listing = Listing {
             descriptor: &relay.descriptor,
             operator_id: relay.operator_id,
-            class: relay.class,
+            class,
             is_ingress: relay.is_ingress,
         };
         let entry = entry_of(
@@ -185,9 +272,10 @@ fn run(settings: &str, out: &Path) -> Result<(), &'static str> {
             continue;
         }
         println!(
-            "relay {} layer={} host={}",
+            "relay {} layer={} class={} host={}",
             to_hex(&read.descriptor.relay_id),
             read.layer(),
+            read.class,
             read.descriptor.host_str(),
         );
         entries.push(entry);
@@ -277,12 +365,24 @@ const STACK_BYTES: usize = 16 << 20;
 
 fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
-    let [settings, out] = arguments.as_slice() else {
-        eprintln!("usage: umbra-test-authority <settings file> <output directory>");
-        return ExitCode::from(2);
+    let work: Box<dyn FnOnce() -> Result<(), &'static str> + Send> = match arguments.as_slice() {
+        [command, settings, key, out] if command == "measurer-cert" => {
+            let (settings, key, out) = (settings.clone(), key.clone(), out.clone());
+            Box::new(move || measurer_cert(&settings, Path::new(&key), Path::new(&out)))
+        }
+        [settings, out] => {
+            let (settings, out) = (settings.clone(), out.clone());
+            Box::new(move || run(&settings, Path::new(&out)))
+        }
+        _ => {
+            eprintln!(
+                "usage: umbra-test-authority <settings file> <output directory>\n       \
+                 umbra-test-authority measurer-cert <settings file> <measurer key file> \
+                 <certificate file>"
+            );
+            return ExitCode::from(2);
+        }
     };
-    let (settings, out) = (settings.clone(), out.clone());
-    let work = move || run(&settings, Path::new(&out));
     let done = std::thread::Builder::new()
         .stack_size(STACK_BYTES)
         .spawn(work)

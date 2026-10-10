@@ -28,8 +28,13 @@ use umbra_core::{
     },
     attach::command::{CrputPayload, CRPUT_LEN},
     directory::{
+        measure::{
+            verify_open, MeasurerTrust, MEAS_ATTEMPT_BURST, MEAS_ATTEMPT_PERIOD, MEAS_CIRCUITS_MAX,
+            MEAS_SESSIONS_MAX, MEAS_SESSION_MAX,
+        },
         receipt,
         stat::{StatAnswer, StatQuery},
+        EPOCH_SECONDS,
     },
     notify::digest::NotifyDigest,
     session::{
@@ -424,6 +429,43 @@ fn fits(
     held.saturating_add(waiting).saturating_add(len) <= limit / part.max(1)
 }
 
+/// The addresses whose measurement attempts a relay counts at once. An
+/// address above this count holds no attempt.
+const MEAS_ATTEMPT_SOURCES_MAX: usize = 4_096;
+/// The part of the bound of a link that the echoes of a measurement
+/// session fill at most: one part in this many. An echo above it drops
+/// (`REL-204`).
+const ECHO_PART: usize = 2;
+
+/// One measurement session: the circuits of one measurer (`REL-202`).
+struct MeasureSession {
+    until: u64,
+    circuits: BTreeSet<CircuitKey>,
+}
+
+/// The measurement attempts that one address spent (`REL-069`).
+#[derive(Clone, Copy)]
+struct Attempts {
+    spent: u32,
+    since: u64,
+}
+
+impl Attempts {
+    /// Gives back one attempt for each `MEAS_ATTEMPT_PERIOD` since the
+    /// last one came back.
+    fn refill(&mut self, now: u64) {
+        let back = now.saturating_sub(self.since) / MEAS_ATTEMPT_PERIOD;
+        if back > 0 {
+            self.spent = self
+                .spent
+                .saturating_sub(u32::try_from(back).unwrap_or(u32::MAX));
+            self.since = self
+                .since
+                .saturating_add(back.saturating_mul(MEAS_ATTEMPT_PERIOD));
+        }
+    }
+}
+
 /// One `EXTEND` body that waits for a link to its next relay.
 struct Waiting {
     /// The held circuit that the body extends.
@@ -528,6 +570,16 @@ pub struct RelayNode {
     drain_turn: Option<CircuitKey>,
     /// The count of the chains that this relay opened, for a test.
     builds_seen: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+    /// The key set and the revoked list of the current root, under which
+    /// a `MeasurerCert` verifies (`REL-066`). A relay that holds none opens
+    /// no measurement session.
+    measure_trust: Option<MeasurerTrust>,
+    /// The open measurement sessions, by `measurer_id` (`REL-202`).
+    measure_sessions: BTreeMap<[u8; 16], MeasureSession>,
+    /// The measurement attempts of each address (`REL-069`).
+    measure_attempts: BTreeMap<Holder, Attempts>,
+    /// The address of each link, as the runtime cut it.
+    sources: BTreeMap<LinkId, [u8; 16]>,
 }
 
 impl RelayNode {
@@ -582,7 +634,175 @@ impl RelayNode {
             draining: BTreeSet::new(),
             drain_turn: None,
             builds_seen: None,
+            measure_trust: None,
+            measure_sessions: BTreeMap::new(),
+            measure_attempts: BTreeMap::new(),
+            sources: BTreeMap::new(),
         }
+    }
+
+    /// The key set and the revoked list of the root that this relay holds
+    /// (`REL-066`, `REL-104`). The runtime gives them at each relay set.
+    pub fn set_measurer_trust(&mut self, trust: MeasurerTrust) {
+        self.measure_trust = Some(trust);
+    }
+
+    /// The open measurement sessions, for a test.
+    #[doc(hidden)]
+    pub fn measure_sessions(&self) -> usize {
+        self.measure_sessions.len()
+    }
+
+    /// The party whose measurement attempts `link` spends: its address, or
+    /// the link for a stream with no address.
+    fn attempt_holder(&self, link: LinkId) -> Holder {
+        self.sources
+            .get(&link)
+            .map_or(Holder::Link(link), |source| Holder::Source(*source))
+    }
+
+    /// Whether the party of `link` holds a measurement attempt at `now`
+    /// (`REL-069`).
+    fn attempt_left(&mut self, link: LinkId, now: u64) -> bool {
+        let holder = self.attempt_holder(link);
+        match self.measure_attempts.get_mut(&holder) {
+            Some(attempts) => {
+                attempts.refill(now);
+                attempts.spent < MEAS_ATTEMPT_BURST
+            }
+            None => self.measure_attempts.len() < MEAS_ATTEMPT_SOURCES_MAX,
+        }
+    }
+
+    /// Spends one measurement attempt of the party of `link`.
+    fn attempt_take(&mut self, link: LinkId, now: u64) {
+        let holder = self.attempt_holder(link);
+        let attempts = self.measure_attempts.entry(holder).or_insert(Attempts {
+            spent: 0,
+            since: now,
+        });
+        if attempts.spent == 0 {
+            attempts.since = now;
+        }
+        attempts.spent = attempts.spent.saturating_add(1);
+    }
+
+    /// Gives one measurement attempt back: its `MEAS_OPEN` verified.
+    fn attempt_give(&mut self, link: LinkId) {
+        let holder = self.attempt_holder(link);
+        if let Some(attempts) = self.measure_attempts.get_mut(&holder) {
+            attempts.spent = attempts.spent.saturating_sub(1);
+            if attempts.spent == 0 {
+                self.measure_attempts.remove(&holder);
+            }
+        }
+    }
+
+    /// Takes the content of a `MEAS_OPEN` cell on `circuit` (§10.3.1). A
+    /// content that verifies opens the session of its measurer on that
+    /// circuit, or adds the circuit to it. Each other content ends the
+    /// circuit, and its attempt stays spent (`REL-069`).
+    fn on_meas_open(&mut self, circuit: CircuitKey, content: &[u8], now: u64) -> Vec<Action> {
+        // A candidate spent its attempt at its build.
+        if !self.circuits.is_candidate(&circuit) {
+            // REL-069: above the rate the relay verifies nothing and gives
+            // no sign.
+            if !self.attempt_left(circuit.link, now) {
+                return Vec::new();
+            }
+            self.attempt_take(circuit.link, now);
+        }
+        let own = self.relay.relay_id;
+        let measurer_id = self.measure_trust.as_ref().and_then(|trust| {
+            verify_open(content, trust, now / EPOCH_SECONDS, &own, &circuit.circ_id).ok()
+        });
+        let Some(measurer_id) = measurer_id else {
+            return self.circuits.end_now(circuit, Some(circuit.link));
+        };
+        // REL-202: one session for each measurer, and a small count of
+        // each.
+        self.measure_sessions
+            .retain(|_, session| session.until > now);
+        let count = self.measure_sessions.len();
+        let until = match self.measure_sessions.get_mut(&measurer_id) {
+            Some(session) if session.circuits.len() < MEAS_CIRCUITS_MAX => {
+                session.circuits.insert(circuit);
+                Some(session.until)
+            }
+            Some(_) => None,
+            None if count < MEAS_SESSIONS_MAX => {
+                let until = now.saturating_add(MEAS_SESSION_MAX);
+                self.measure_sessions.insert(
+                    measurer_id,
+                    MeasureSession {
+                        until,
+                        circuits: [circuit].into(),
+                    },
+                );
+                Some(until)
+            }
+            None => None,
+        };
+        match until {
+            Some(until) if self.circuits.open_measure(&circuit, until) => {
+                self.attempt_give(circuit.link);
+                // NET-335: the link of a measurer holds its place for the
+                // session.
+                self.fresh.remove(&circuit.link);
+                Vec::new()
+            }
+            _ => {
+                self.measure_closed(&circuit, now);
+                self.circuits.end_now(circuit, Some(circuit.link))
+            }
+        }
+    }
+
+    /// A circuit ended: the measurement session that held it holds it no
+    /// more, and a session with no circuit ends.
+    fn measure_closed(&mut self, circuit: &CircuitKey, now: u64) {
+        if self.measure_sessions.is_empty() {
+            return;
+        }
+        let mut was_measured = false;
+        self.measure_sessions.retain(|_, session| {
+            was_measured |= session.circuits.remove(circuit);
+            !session.circuits.is_empty()
+        });
+        // NET-335: at a relay of layer 2 or 3, the link of a measurer
+        // whose session ended holds its place for `LINK_OPEN_TIMEOUT`.
+        if was_measured
+            && self.layer != 1
+            && self.knows_relays()
+            && self.receipts.peer(circuit.link).is_none()
+            && self.links.contains_key(&circuit.link)
+        {
+            self.fresh.entry(circuit.link).or_insert(now);
+        }
+    }
+
+    /// The echo of one `MEAS_ECHO` cell, when its link holds room for it
+    /// (`REL-204`). The room is tested before the backward layer runs,
+    /// thus an echo that drops moves no chaining value.
+    fn echo(&mut self, circuit: CircuitKey, content: &[u8]) -> Option<Output> {
+        let len = Bucket::B0.cell_len().saturating_add(FRAME_ROOM);
+        if self.parked.contains_key(&circuit.link)
+            || !fits(
+                self.backlog.as_deref(),
+                &self.framed,
+                circuit.link,
+                len,
+                ECHO_PART,
+            )
+        {
+            return None;
+        }
+        let Action::Send { link, cell } = self.circuits.echo(&circuit, content)? else {
+            return None;
+        };
+        let framed = self.framed.entry(link).or_insert(0);
+        *framed = framed.saturating_add(len);
+        self.frame(link, &cell)
     }
 
     /// The layer of this relay.
@@ -652,6 +872,7 @@ impl RelayNode {
     /// another layer takes its circuits from relays, and it names them by
     /// their hello.
     pub fn set_source(&mut self, link: LinkId, source: [u8; 16]) {
+        self.sources.insert(link, source);
         if self.layer == 1 {
             self.circuits.set_holder(link, Holder::Source(source));
         }
@@ -680,7 +901,9 @@ impl RelayNode {
     /// client link. A relay of layer 2 or 3 takes the builds of a relay of
     /// the layer before alone. One that holds no relay set, as in a test
     /// network, cannot tell. It gives each link the budget of a relay.
-    fn origin(&self, link: LinkId) -> Origin {
+    /// A link that named no relay builds a measurement candidate while its
+    /// address holds a measurement attempt (`NET-353`, `REL-069`).
+    fn origin(&mut self, link: LinkId, now: u64) -> Origin {
         if !matches!(self.links.get(&link), Some(Framing::Accepted(_))) {
             return Origin::Barred;
         }
@@ -689,6 +912,8 @@ impl RelayNode {
         }
         if self.receipts.peer(link).is_some() || !self.knows_relays() {
             Origin::Relay
+        } else if self.measure_trust.is_some() && self.attempt_left(link, now) {
+            Origin::Measurer
         } else {
             Origin::Barred
         }
@@ -1277,7 +1502,7 @@ impl RelayNode {
                             }
                         }
                         self.circuits.set_clock_ms(clock_ms());
-                        let origin = self.origin(link);
+                        let origin = self.origin(link, now);
                         let actions = self.circuits.on_cell(link, &cell, origin, now, rng);
                         outputs.extend(self.run(actions, now, rng));
                         outputs
@@ -1639,8 +1864,16 @@ impl RelayNode {
                         endpoint.loops = endpoint.loops.saturating_add(1);
                     }
                 }
+                Action::Candidate { circuit } => self.attempt_take(circuit.link, now),
+                Action::MeasOpen { circuit, content } => {
+                    work.extend(self.on_meas_open(circuit, &content, now));
+                }
+                Action::Echo { circuit, content } => {
+                    outputs.extend(self.echo(circuit, &content));
+                }
                 Action::Destroy { link, circ_id } => outputs.extend(self.destroy(link, circ_id)),
                 Action::Closed { circuit } => {
+                    self.measure_closed(&circuit, now);
                     self.endpoints.remove(&circuit);
                     self.queues.circuit_closed(&circuit, now);
                     self.groups.circuit_closed(&circuit);
@@ -2072,6 +2305,7 @@ impl RelayNode {
         self.quiet.remove(&link);
         self.framed.remove(&link);
         self.waits.remove(&link);
+        self.sources.remove(&link);
         self.receipts.link_closed(link);
         self.next_hops.retain(|_, held| *held != link);
         self.circuits.set_clock_ms(clock_ms());
@@ -2088,6 +2322,7 @@ impl RelayNode {
         for action in actions {
             match action {
                 Action::Closed { circuit } => {
+                    self.measure_closed(&circuit, now);
                     self.endpoints.remove(&circuit);
                     self.queues.circuit_closed(&circuit, now);
                     self.groups.circuit_closed(&circuit);
@@ -2126,6 +2361,14 @@ impl RelayNode {
         self.circuits.set_clock_ms(clock_ms());
         let aged = self.circuits.expire(now);
         let mut ended = self.finish(aged, now);
+        // REL-069: an address whose attempts each came back leaves the
+        // count.
+        self.measure_attempts.retain(|_, attempts| {
+            attempts.refill(now);
+            attempts.spent > 0
+        });
+        self.measure_sessions
+            .retain(|_, session| session.until > now);
         // NET-335: a client link that held no circuit for LINK_IDLE_TIMEOUT
         // gives its place back. A client of ordinary use holds a circuit
         // while it holds its link.

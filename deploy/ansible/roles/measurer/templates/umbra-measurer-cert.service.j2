@@ -1,0 +1,43 @@
+[Unit]
+Description=UMBRA measurer certificate: one MeasurerCert (Part 10 §10.3.1)
+After=time-sync.target
+Wants=time-sync.target
+
+[Service]
+Type=oneshot
+# Two authority keys sign the certificate (Part 10 REL-103), thus this unit
+# runs as the user of the signer, with no network. Its log holds the
+# measurer_id and the not_after of each certificate, for a revocation.
+User=umbra-signer
+Group=umbra-signer
+ExecStart=/usr/local/bin/umbra-signer measurer-cert {{ umbra_signer_keys }} /var/lib/umbra-measurer/keys/measurer.pub /var/lib/umbra-measurer/cert/measurer.cert {{ umbra_measurer_cert_epochs }}
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+PrivateNetwork=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictSUIDSGID=true
+RestrictRealtime=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+# The measurer reads the certificate that this unit writes.
+UMask=0022
+LimitCORE=0
+MemoryHigh={{ umbra_signer_memory_high }}
+MemoryMax={{ umbra_signer_memory_max }}
+ReadWritePaths=/var/lib/umbra-measurer/cert
+ReadOnlyPaths=/var/lib/umbra-signer

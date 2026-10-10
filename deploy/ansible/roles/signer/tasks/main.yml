@@ -25,6 +25,8 @@
     - { path: /etc/umbra-signer, owner: root, mode: "0755" }
     - { path: /etc/umbra-signer/descriptors, owner: root, mode: "0755" }
     - { path: /var/www/umbra/.well-known/umbra, owner: umbra-signer, mode: "0755" }
+    # The listed class of each relay, which the signer writes (REL-001).
+    - { path: /var/lib/umbra-signer/state, owner: umbra-signer, mode: "0755" }
 
 - name: The binary of the signer is there
   ansible.builtin.copy:

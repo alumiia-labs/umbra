@@ -1,0 +1,14 @@
+# Written by Ansible (deploy/ansible/roles/authority). The file holds no
+# secret. The keys are the seed files of the signer, and the tool makes the
+# two secrets of its report queue in the `secrets` directory.
+keys={{ umbra_signer_keys }}
+secrets=/var/lib/umbra-authority/secrets
+index=0
+verdicts=/var/lib/umbra-authority/verdicts
+manifest=/var/www/umbra/.well-known/umbra/manifest
+keyset=/var/www/umbra/.well-known/umbra/keyset.bin
+state=/var/lib/umbra-authority/report-queue.state
+queue=/var/lib/umbra-authority/report-queue.bin
+# One operator holds each key, thus this tool is both aggregators of
+# Part 10 §10.8.
+aggregators=0,1

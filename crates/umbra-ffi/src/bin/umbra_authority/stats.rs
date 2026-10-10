@@ -14,23 +14,14 @@ use umbra_core::directory::{
     manifest::ListedRelay,
     stat::{self, StatAnswer, StatQuery, AGGREGATORS, CHAIN_NOISE_SCALE},
 };
-use umbra_crypto::{hash::sha3_256, rand_core::TryRng, secret::Secret, sign::SigningKey};
+use umbra_crypto::rand_core::TryRng;
 use umbra_ffi::runtime::OsRng;
-use umbra_transport::{https, native};
+use umbra_transport::https;
 
 use super::Settings;
 
 /// The wait for the answer of one relay.
 const ASK_WAIT: Duration = Duration::from_secs(15);
-
-/// The key of aggregator `index`, from the seed of the test authorities.
-fn aggregator_key(settings: &Settings, index: u8) -> SigningKey {
-    SigningKey::from_seed(Secret::new(sha3_256(&[
-        b"umbra/test/authority",
-        &settings.seed,
-        &[index],
-    ])))
-}
 
 /// A sample of Laplace(`b`), rounded to an integer: the inverse of its
 /// distribution at a uniform point of (−½, ½).
@@ -61,7 +52,7 @@ async fn noised_share(
         epoch,
     };
     let body = query
-        .sign(&aggregator_key(settings, index), &mut OsRng)
+        .sign(&super::authority_key(settings, index)?, &mut OsRng)
         .ok()?;
     let url = https::Url {
         host: relay.host.clone(),
@@ -69,7 +60,7 @@ async fn noised_share(
         path: "/stat".into(),
         address: Some(std::net::IpAddr::from(relay.addr_v4)),
     };
-    let tls = native::tls_config_with_root_file(&settings.ca).ok()?;
+    let tls = super::tls_of(settings).ok()?;
     let (status, answer) = https::post(
         &url,
         "application/octet-stream",

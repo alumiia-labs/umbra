@@ -52,6 +52,7 @@ labels! {
     STAT_QUERY = "umbra/v1/stat-query";
     LINK_REMOVAL = "umbra/v1/link-removal";
     MEASURER_CERT = "umbra/v1/measurer-cert";
+    MEASURER_OPEN = "umbra/v1/measurer-open";
     DEVICE_ROSTER = "umbra/v1/device-roster";
     DEVICE_CLAIM = "umbra/v1/device-claim";
     GROUP_GRANT = "umbra/v1/group-grant";

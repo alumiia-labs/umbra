@@ -9,3 +9,14 @@ keychain=/var/lib/umbra-signer/keychain
 relay=/etc/umbra-signer/descriptors/{{ relay.name }}.desc,{{ umbra_operator }},{{ relay.class }},{{ place }}
 {% endfor %}
 {% endfor %}
+# The report queue and the verdicts of the authority tool
+# (roles/authority). A file that is not there yet gives none.
+report_queue=0,/var/lib/umbra-authority/report-queue.bin
+verdicts=/var/lib/umbra-authority/verdicts
+# The class tests of the measurer (roles/measurer), and the listed class of
+# each relay with the epoch of its last step up (Part 10 REL-001).
+results=/var/lib/umbra-measurer/results
+class_state=/var/lib/umbra-signer/state/class_state
+{% for measurer in umbra_revoked_measurers %}
+revoked={{ measurer.id }},{{ measurer.not_after }}
+{% endfor %}

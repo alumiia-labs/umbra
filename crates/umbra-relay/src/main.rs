@@ -176,6 +176,9 @@ struct Settings {
     /// The identity key of each relay, for a challenge that this relay
     /// carries (`ABU-103`).
     identities: BTreeMap<[u8; 32], Vec<u8>>,
+    /// The key set and the revoked list of the root of the manifest, for
+    /// a `MeasurerCert` (Part 10 `REL-066`).
+    measurer_trust: Option<umbra_core::directory::measure::MeasurerTrust>,
     /// The key that signs the descriptor of this relay.
     identity: Option<SigningKey>,
     /// The manifest that gave this relay its place. The relay serves it to
@@ -411,6 +414,7 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
     if is_placed && identity.is_none() && layer < 3 {
         eprintln!("no identity_seed line: the next layer takes no circuit of this relay");
     }
+    let measurer_trust = placed.as_ref().map(|placed| placed.measurer_trust.clone());
     let (previous, addresses) = match &placed {
         Some(placed) => (Some(placed.previous.clone()), placed.addresses.clone()),
         None => (None, std::collections::BTreeSet::new()),
@@ -474,6 +478,7 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
         queue_keys,
         carriers,
         identities,
+        measurer_trust,
         identity,
         manifest,
         manifest_source,
@@ -801,6 +806,9 @@ async fn run() -> ExitCode {
                 node.set_challenge_signer(identity, settings.carriers);
             }
             node.set_relay_identities(settings.identities);
+            if let Some(trust) = settings.measurer_trust {
+                node.set_measurer_trust(trust);
+            }
             // REL-174: a relay outside the layer before names no peer.
             if let Some(previous) = settings.previous {
                 node.set_previous_layer(previous);

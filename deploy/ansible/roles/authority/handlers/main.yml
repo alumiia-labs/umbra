@@ -1,0 +1,5 @@
+- name: Restart umbra-authority
+  ansible.builtin.systemd:
+    name: umbra-authority
+    state: restarted
+    daemon_reload: true

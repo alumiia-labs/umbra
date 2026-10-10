@@ -167,8 +167,24 @@ pub fn sign_manifest_under<R: TryCryptoRng + ?Sized>(
     keyset: &[u8],
     signers: &[u8],
     epoch: u64,
+    entries: Vec<Vec<u8>>,
+    blocs: &BlocList,
+    rng: &mut R,
+) -> Result<Vec<u8>, Error> {
+    sign_manifest_revoking(keys, keyset, signers, epoch, entries, blocs, &[], rng)
+}
+
+/// As [`sign_manifest_under`], with the `measurer_id` of each revoked
+/// `MeasurerCert` in the root (`REL-105`).
+#[allow(clippy::too_many_arguments)]
+pub fn sign_manifest_revoking<R: TryCryptoRng + ?Sized>(
+    keys: &[SigningKey],
+    keyset: &[u8],
+    signers: &[u8],
+    epoch: u64,
     mut entries: Vec<Vec<u8>>,
     blocs: &BlocList,
+    revoked: &[[u8; 16]],
     rng: &mut R,
 ) -> Result<Vec<u8>, Error> {
     // REL-054 and REL-055: ascending `relay_id`, each one time.
@@ -188,7 +204,7 @@ pub fn sign_manifest_under<R: TryCryptoRng + ?Sized>(
         root: tree::root(&leaves).ok_or(Error::Malformed)?,
         keyset_hash: keyset.hash()?,
         bloc_hash: blocs.hash()?,
-        revoked: Vec::new(),
+        revoked: revoked.to_vec(),
         sigs: Vec::new(),
     };
     let preimage = root.preimage();

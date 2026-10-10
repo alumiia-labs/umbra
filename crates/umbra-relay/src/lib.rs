@@ -29,6 +29,8 @@ pub mod directory_server;
 #[cfg(feature = "native")]
 pub mod fcm;
 #[cfg(feature = "native")]
+pub mod measurer;
+#[cfg(feature = "native")]
 pub mod ndr_server;
 pub mod node;
 pub mod placement;

@@ -1,32 +1,51 @@
-//! The report queue of one directory authority of a test network (Part 10
-//! §10.4.2): the authority holds a queue at a queue relay, as a client
-//! holds one, and each link-fault report of a client arrives there sealed
-//! to its key.
+//! The report queue of one directory authority (Part 10 §10.4.2): the
+//! authority holds a queue at a queue relay, as a client holds one, and
+//! each link-fault report of a client arrives there sealed to its key.
 //!
 //! ```text
 //! umbra-authority <settings file>
 //! ```
 //!
-//! The settings file holds one `key=value` pair on each line:
+//! The settings file holds one `key=value` pair on each line. A deployment
+//! names two directories, and the file holds no secret:
 //!
 //! ```text
-//! seed=<64 hex characters>                # the seed of the test authorities
+//! keys=/etc/umbra-signer/keys             # the key directory of the signer
+//! secrets=/var/lib/umbra-authority/secrets
 //! index=0                                 # this authority in the key set
-//! verdicts=target/devnet/verdicts.txt     # the verdicts, for the signer
-//! manifest=target/devnet/manifest.bin     # the relays, which the key set verifies
-//! keyset=tests/fixtures/devnet/keyset.bin
-//! ca=tests/fixtures/tls/ca.pem            # the root that the relays chain to
-//! root_seed=<64 hex characters>           # the identity of the queue client
-//! report_seed=<64 hex characters>         # the X25519 key of the reports
-//! state=target/devnet/report-queue.state  # the queue, across a restart
-//! queue=target/devnet/report-queue.bin    # the address and the key, for the signer
+//! verdicts=/var/lib/umbra-authority/verdicts
+//! manifest=/var/www/umbra/.well-known/umbra/manifest
+//! keyset=/var/www/umbra/.well-known/umbra/keyset.bin
+//! state=/var/lib/umbra-authority/report-queue.state
+//! queue=/var/lib/umbra-authority/report-queue.bin
 //! aggregators=0,1                         # the aggregators of §10.8 that it plays
 //! ```
 //!
-//! The seeds are in the settings file, thus this program protects nothing.
-//! It writes `queue` once the relay made the queue, and `umbra-test-authority`
-//! signs that file into the next manifest (`REL-167`). Each report that
-//! opens is one line on the standard output.
+//! `keys` is the directory that `umbra-signer keygen` made. The key of the
+//! authority `index` is the file `authority-<index>.seed` there, and the
+//! key of an aggregator is the file of its index. `secrets` holds the two
+//! secrets of the report queue: `queue-client.seed`, the identity of the
+//! queue client, and `report.seed`, the X25519 key of the reports. The
+//! program makes each one at its first start, readable by its owner alone.
+//! On a Unix system it refuses a key file or a secret file that a group or
+//! each other user can read.
+//!
+//! A test network gives the seeds in the settings file in the place of the
+//! two directories, and it names the root that its relays chain to:
+//!
+//! ```text
+//! seed=<64 hex characters>                # the seed of the test authorities
+//! root_seed=<64 hex characters>           # the identity of the queue client
+//! report_seed=<64 hex characters>         # the X25519 key of the reports
+//! ca=tests/fixtures/tls/ca.pem            # the root that the relays chain to
+//! ```
+//!
+//! A settings file with those seeds protects nothing. A file that holds a
+//! `keys` line and a `seed` line does not parse.
+//!
+//! The program writes `queue` once the relay made the queue, and the
+//! signer signs that file into the next manifest (`REL-167`). Each report
+//! that opens is one line on the standard output.
 //!
 //! After the end of each epoch the authority reads the noised chain count
 //! of each relay that `FAULT_MIN_REPORTS` reports of that epoch name, from
@@ -86,13 +105,23 @@ const SHARE_SETTLE: u64 = 120;
 /// The period of the check for an ended epoch.
 const EVALUATE_EVERY: Duration = Duration::from_secs(60);
 
+/// Where the keys of the authorities come from.
+enum KeySource {
+    /// The seed of the test authorities, in the settings file.
+    TestSeed([u8; 32]),
+    /// The key directory of the signer: one seed file for each authority,
+    /// readable by its owner alone.
+    Directory(PathBuf),
+}
+
 struct Settings {
-    seed: [u8; 32],
+    keys: KeySource,
     index: u8,
     verdicts: PathBuf,
     manifest: PathBuf,
     keyset: PathBuf,
-    ca: String,
+    /// The root that the relays chain to, or none for the public roots.
+    ca: Option<String>,
     root_seed: [u8; 32],
     report_seed: [u8; 32],
     state: PathBuf,
@@ -116,6 +145,45 @@ fn to_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+/// Reads a secret of 32 bytes from its file in hex. On a Unix system a
+/// file that a group or each other user can read gives none.
+fn read_secret(path: &std::path::Path) -> Option<[u8; 32]> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(path).ok()?.permissions().mode();
+        if mode & 0o077 != 0 {
+            eprintln!("{} is open to more than its owner", path.display());
+            return None;
+        }
+    }
+    let text = zeroize::Zeroizing::new(std::fs::read_to_string(path).ok()?);
+    hex32(text.trim())
+}
+
+/// Reads the secret at `path`, or makes it from the generator of the
+/// operating system, readable by its owner alone.
+fn secret_at(path: &std::path::Path) -> Option<[u8; 32]> {
+    if path.exists() {
+        return read_secret(path);
+    }
+    let mut secret = [0u8; 32];
+    umbra_crypto::rand_core::TryRng::try_fill_bytes(&mut umbra_ffi::runtime::OsRng, &mut secret)
+        .ok()?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let text = zeroize::Zeroizing::new(to_hex(&secret));
+    let mut file = options.open(path).ok()?;
+    std::io::Write::write_all(&mut file, text.as_bytes()).ok()?;
+    file.sync_all().ok()?;
+    Some(secret)
+}
+
 fn read_settings(path: &str) -> Option<Settings> {
     let text = std::fs::read_to_string(path).ok()?;
     let values: BTreeMap<&str, &str> = text
@@ -125,15 +193,38 @@ fn read_settings(path: &str) -> Option<Settings> {
         .filter_map(|line| line.split_once('='))
         .map(|(key, value)| (key.trim(), value.trim()))
         .collect();
+    // A deployment names the key directory and the secret directory. A
+    // test network gives each seed in the file.
+    let (keys, root_seed, report_seed) = match (values.get("keys"), values.get("seed")) {
+        (Some(dir), None) => {
+            if values.contains_key("root_seed") || values.contains_key("report_seed") {
+                eprintln!("a settings file with a keys line holds no seed");
+                return None;
+            }
+            let secrets = PathBuf::from(values.get("secrets")?);
+            std::fs::create_dir_all(&secrets).ok()?;
+            (
+                KeySource::Directory(PathBuf::from(dir)),
+                secret_at(&secrets.join("queue-client.seed"))?,
+                secret_at(&secrets.join("report.seed"))?,
+            )
+        }
+        (None, Some(seed)) => (
+            KeySource::TestSeed(hex32(seed)?),
+            hex32(values.get("root_seed")?)?,
+            hex32(values.get("report_seed")?)?,
+        ),
+        _ => return None,
+    };
     Some(Settings {
-        seed: hex32(values.get("seed")?)?,
+        keys,
         index: values.get("index")?.parse().ok()?,
         verdicts: values.get("verdicts")?.into(),
         manifest: values.get("manifest")?.into(),
         keyset: values.get("keyset")?.into(),
-        ca: (*values.get("ca")?).to_owned(),
-        root_seed: hex32(values.get("root_seed")?)?,
-        report_seed: hex32(values.get("report_seed")?)?,
+        ca: values.get("ca").map(|ca| (*ca).to_owned()),
+        root_seed,
+        report_seed,
         state: values.get("state")?.into(),
         queue: values.get("queue")?.into(),
         aggregators: values
@@ -172,14 +263,25 @@ fn unix_now() -> u64 {
         .map_or(0, |elapsed| elapsed.as_secs())
 }
 
-/// The key of this authority, from the seed of the test authorities as
-/// `umbra-test-authority` derives it.
-fn authority_key(settings: &Settings) -> SigningKey {
-    SigningKey::from_seed(Secret::new(sha3_256(&[
-        b"umbra/test/authority",
-        &settings.seed,
-        &[settings.index],
-    ])))
+/// The key of the authority `index`: from the seed of the test authorities
+/// as `umbra-test-authority` derives it, or from its seed file in the key
+/// directory of the signer.
+fn authority_key(settings: &Settings, index: u8) -> Option<SigningKey> {
+    let seed = match &settings.keys {
+        KeySource::TestSeed(seed) => sha3_256(&[b"umbra/test/authority", seed, &[index]]),
+        KeySource::Directory(dir) => read_secret(&dir.join(format!("authority-{index}.seed")))?,
+    };
+    Some(SigningKey::from_seed(Secret::new(seed)))
+}
+
+/// The TLS configuration of each dial: the root of a test network, or the
+/// public roots.
+fn tls_of(settings: &Settings) -> Result<Arc<native::ClientConfig>, &'static str> {
+    match &settings.ca {
+        Some(ca) => native::tls_config_with_root_file(ca),
+        None => native::tls_config(),
+    }
+    .map_err(|_| "the root does not read")
 }
 
 fn info(relay: &ListedRelay) -> RelayInfo {
@@ -330,8 +432,7 @@ async fn run_once(
     report_sk: &Secret<32>,
 ) -> Result<(), &'static str> {
     let (guard, dial, chain) = relays_of(settings)?;
-    let tls =
-        native::tls_config_with_root_file(&settings.ca).map_err(|_| "the root does not read")?;
+    let tls = tls_of(settings)?;
     let mut node = ClientNode::with_relays(
         guard,
         chain,
@@ -462,7 +563,23 @@ fn print_count(path: &str, relay: &str, epoch: &str) -> ExitCode {
     })
 }
 
+/// The stack of the thread that reads a key. An ML-DSA-65 key needs more
+/// than the 1 MiB that the main thread of Windows has.
+const STACK_BYTES: usize = 16 << 20;
+
 fn main() -> ExitCode {
+    let done = std::thread::Builder::new()
+        .stack_size(STACK_BYTES)
+        .spawn(run_main)
+        .ok()
+        .and_then(|thread| thread.join().ok());
+    done.unwrap_or_else(|| {
+        eprintln!("the main thread stopped");
+        ExitCode::from(1)
+    })
+}
+
+fn run_main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let (path, probe) = match arguments.as_slice() {
         [path] => (path, None),
@@ -486,7 +603,11 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     };
     let settings = Arc::new(settings);
-    let key = Arc::new(authority_key(&settings));
+    let Some(key) = authority_key(&settings, settings.index) else {
+        eprintln!("the key of the authority does not read");
+        return ExitCode::from(1);
+    };
+    let key = Arc::new(key);
     let Ok(runtime) = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .thread_stack_size(16 << 20)

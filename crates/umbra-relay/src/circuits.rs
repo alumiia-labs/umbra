@@ -74,6 +74,23 @@ pub enum Origin {
     /// A link that builds no circuit here. This relay dialed it, or it
     /// named no relay of the layer before at a relay of layer 2 or 3.
     Barred,
+    /// A link that named no relay at a relay of layer 2 or 3. It builds a
+    /// measurement candidate alone, under the budget of a client link
+    /// (`NET-353`).
+    Measurer,
+}
+
+/// The measurement state of a circuit (Part 10 §10.3.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Measure {
+    /// A circuit of a client or of a relay.
+    No,
+    /// A circuit that a link with no `RelayHello` built at a relay of
+    /// layer 2 or 3. It serves a `MEAS_OPEN` and nothing else (`NET-353`).
+    Candidate,
+    /// A circuit with an open measurement session, which ends at this
+    /// time (`REL-201`).
+    Open { until: u64 },
 }
 
 /// What one link spent of its circuits and its builds.
@@ -92,7 +109,7 @@ impl LinkBudget {
     const fn new(origin: Origin, now: u64) -> Self {
         let (circuits_max, burst, rate) = match origin {
             Origin::Relay => (u32::MAX, RELAY_LINK_BUILD_BURST, RELAY_LINK_BUILD_RATE),
-            Origin::Client | Origin::Barred => {
+            Origin::Client | Origin::Barred | Origin::Measurer => {
                 (LINK_CIRCUITS_MAX, LINK_BUILD_BURST, LINK_BUILD_RATE)
             }
         };
@@ -167,6 +184,30 @@ pub enum Action {
     Loop {
         /// The circuit.
         circuit: CircuitKey,
+    },
+    /// A link with no `RelayHello` built a measurement candidate
+    /// (`NET-353`). The node counts it as one measurement attempt.
+    Candidate {
+        /// The circuit.
+        circuit: CircuitKey,
+    },
+    /// The relay recovered the content of a `MEAS_OPEN` cell. The node
+    /// verifies it and calls [`CircuitTable::open_measure`], or it ends the
+    /// circuit.
+    MeasOpen {
+        /// The circuit.
+        circuit: CircuitKey,
+        /// The certificate and the signature.
+        content: Vec<u8>,
+    },
+    /// The relay recovered the content of a `MEAS_ECHO` cell of an open
+    /// measurement session. The node calls [`CircuitTable::echo`] when the
+    /// link holds room for the cell (`REL-003`).
+    Echo {
+        /// The circuit.
+        circuit: CircuitKey,
+        /// The content, which goes back as it came.
+        content: Vec<u8>,
     },
     /// The circuit ended, and the services drop what they hold for it.
     Closed {
@@ -251,6 +292,7 @@ struct Held {
     /// The place of the circuit among those of its holder, by the time of
     /// its last forward cell.
     seat: u64,
+    measure: Measure,
 }
 
 impl Held {
@@ -478,7 +520,7 @@ impl CircuitTable {
             return self.backward(client_side, parsed.tag, body);
         }
         if self.held.contains_key(&key) {
-            let actions = self.forward(key, bucket, parsed.tag, &mut body);
+            let actions = self.forward(key, bucket, parsed.tag, &mut body, now);
             return self.delay(key, actions, rng);
         }
         self.build(key, parsed.tag, &body, origin, now, rng)
@@ -523,8 +565,13 @@ impl CircuitTable {
         if !budget.take(now) {
             return Vec::new();
         }
+        let is_candidate = origin == Origin::Measurer;
         let mut reply = [0u8; REPLY_LEN];
-        let answered: Result<(Secret<32>, Option<StaticSecret>), _> = if self.layer == 3 {
+        // A candidate ends at this relay in each layer, and it serves no
+        // command, thus it takes no session key.
+        let answered: Result<(Secret<32>, Option<StaticSecret>), _> = if self.layer == 3
+            && !is_candidate
+        {
             answer_at_queue_relay(&self.relay, &self.static_secret, hello, rng, &mut reply)
                 .map(|(ss, session)| (ss, Some(session)))
         } else {
@@ -540,7 +587,7 @@ impl CircuitTable {
         // gets no answer ends no circuit.
         let holder = self.holder_of(key.link);
         let mut actions = self.make_room(holder);
-        let position = if self.layer == 3 {
+        let position = if self.layer == 3 && !is_candidate {
             Position::Endpoint
         } else {
             Position::Middle
@@ -564,9 +611,19 @@ impl CircuitTable {
                 delayed_out: 0,
                 holder,
                 seat: self.seat_seq,
+                measure: if is_candidate {
+                    Measure::Candidate
+                } else {
+                    Measure::No
+                },
             },
         );
-        self.builds = self.builds.saturating_add(1);
+        if is_candidate {
+            actions.push(Action::Candidate { circuit: key });
+        } else {
+            // REL-189: a measurement circuit is no chain.
+            self.builds = self.builds.saturating_add(1);
+        }
         let mut out = vec![0u8; BUILD_BUCKET.body_len()];
         if build_cell_body(CellCommand::Extended, &reply, &mut out).is_err() {
             return actions;
@@ -592,7 +649,8 @@ impl CircuitTable {
         let Some(held) = self.held.get_mut(&key) else {
             return actions;
         };
-        if held.delay_mean_ms == 0 {
+        // A measurement circuit holds no cell: its relay is the one hop.
+        if held.delay_mean_ms == 0 || held.measure != Measure::No {
             return actions;
         }
         actions
@@ -621,13 +679,26 @@ impl CircuitTable {
         bucket: Bucket,
         tag: &[u8; 16],
         body: &mut [u8],
+        now: u64,
     ) -> Vec<Action> {
         let Some(held) = self.held.get_mut(&key) else {
             return Vec::new();
         };
-        if !held.count(true) {
+        let measure = held.measure;
+        let over = match measure {
+            // REL-201: the end of the session bounds the circuit, and
+            // `CIRCUIT_MAX_CELLS` does not.
+            Measure::Open { until } => now >= until,
+            Measure::Candidate => {
+                !held.count(true) || now.saturating_sub(held.created_at) >= CIRCUIT_BUILD_TIMEOUT
+            }
+            Measure::No => !held.count(true),
+        };
+        if over {
             return self.close(key);
         }
+        // A candidate ends at each cell but a `MEAS_OPEN` that the node
+        // verifies, and [`CircuitTable::close`] gives that end no sign.
         // NET-331: a forward cell moves the circuit behind each other one of
         // its holder. A build thus ends a circuit that carries cells last.
         self.seat_seq = self.seat_seq.wrapping_add(1);
@@ -644,7 +715,8 @@ impl CircuitTable {
                 Err(_) => self.close(key),
             };
         }
-        let recovered = if self.layer == 3 {
+        let is_extending = held.extending;
+        let recovered = if self.layer == 3 && measure == Measure::No {
             held.hop.forward(tag, body).map(|_| ())
         } else {
             held.hop.forward_build(tag, body)
@@ -656,10 +728,41 @@ impl CircuitTable {
         let Ok((command, content)) = unpad_body(body) else {
             return self.close(key);
         };
-        match (command, self.layer) {
+        match (measure, command) {
             // NET-169: the client ended its build here, and the relays
             // after this one learn it by the link (`NET-322`).
-            (CellCommand::Destroy, _) => self.end(key, Some(key.link)),
+            (_, CellCommand::Destroy) => return self.end(key, Some(key.link)),
+            // REL-002: the echo of an open session, in bucket `B0` alone
+            // (`REL-041`). Each other cell of that circuit drops.
+            (Measure::Open { .. }, CellCommand::MeasEcho) if bucket == Bucket::B0 => {
+                return vec![Action::Echo {
+                    circuit: key,
+                    content: content.to_vec(),
+                }];
+            }
+            (Measure::Open { .. }, _) => return Vec::new(),
+            // NET-353: a candidate serves a `MEAS_OPEN` and ends at each
+            // other cell.
+            (Measure::Candidate, CellCommand::MeasOpen) if bucket == Bucket::B3 => {
+                return vec![Action::MeasOpen {
+                    circuit: key,
+                    content: content.to_vec(),
+                }];
+            }
+            (Measure::Candidate, _) => return self.close(key),
+            // An ingress relay takes each client link, thus a measurer
+            // opens its session on a circuit of one hop there.
+            (Measure::No, CellCommand::MeasOpen)
+                if self.layer == 1 && !is_extending && bucket == Bucket::B3 =>
+            {
+                return vec![Action::MeasOpen {
+                    circuit: key,
+                    content: content.to_vec(),
+                }];
+            }
+            (Measure::No, _) => {}
+        }
+        match (command, self.layer) {
             (CellCommand::Data, 3) => vec![Action::Serve {
                 circuit: key,
                 bucket,
@@ -762,8 +865,49 @@ impl CircuitTable {
         })
     }
 
+    /// Whether `circuit` is a measurement candidate (`NET-353`).
+    pub fn is_candidate(&self, circuit: &CircuitKey) -> bool {
+        self.held
+            .get(circuit)
+            .is_some_and(|held| held.measure == Measure::Candidate)
+    }
+
+    /// Opens the measurement session of `circuit`, which ends at `until`.
+    /// False for a circuit that the table does not hold, that holds a next
+    /// hop, or that holds a session already.
+    pub fn open_measure(&mut self, circuit: &CircuitKey, until: u64) -> bool {
+        match self.held.get_mut(circuit) {
+            Some(held) if held.next.is_none() && !matches!(held.measure, Measure::Open { .. }) => {
+                held.measure = Measure::Open { until };
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The echo of one `MEAS_ECHO` cell: the same content under the
+    /// backward layer of this relay, in the form of a build cell
+    /// (`REL-003`).
+    pub fn echo(&mut self, circuit: &CircuitKey, content: &[u8]) -> Option<Action> {
+        let held = self.held.get_mut(circuit)?;
+        if !matches!(held.measure, Measure::Open { .. }) {
+            return None;
+        }
+        let mut body = vec![0u8; Bucket::B0.body_len()];
+        pad_body(Bucket::B0, CellCommand::MeasEcho, content, &mut body).ok()?;
+        let tag = held.hop.backward_build(&mut body).ok()?;
+        Some(Action::Send {
+            link: circuit.link,
+            cell: cell_bytes(&circuit.circ_id, &tag, &body),
+        })
+    }
+
+    /// Ends a circuit for a cause of this relay. A measurement candidate
+    /// ends with no `Destroy` to its link: a rejected measurement attempt
+    /// gets no sign (`NET-353`, `REL-205`).
     fn close(&mut self, key: CircuitKey) -> Vec<Action> {
-        self.end(key, None)
+        let from = self.is_candidate(&key).then_some(key.link);
+        self.end(key, from)
     }
 
     /// Ends a circuit, and tells each neighbor on a link other than
@@ -961,7 +1105,16 @@ impl CircuitTable {
             .held
             .iter()
             .filter(|(_, held)| {
-                now.saturating_sub(held.created_at) >= CIRCUIT_MAX_AGE
+                let age = now.saturating_sub(held.created_at);
+                let measured = match held.measure {
+                    Measure::No => false,
+                    // NET-353: a candidate with no `MEAS_OPEN` in its time.
+                    Measure::Candidate => age >= CIRCUIT_BUILD_TIMEOUT,
+                    // REL-201: the end of the session.
+                    Measure::Open { until } => now >= until,
+                };
+                measured
+                    || age >= CIRCUIT_MAX_AGE
                     || (held.extending
                         && now.saturating_sub(held.extended_at) >= CIRCUIT_BUILD_TIMEOUT)
                     || held.cells.0 > CIRCUIT_MAX_CELLS
