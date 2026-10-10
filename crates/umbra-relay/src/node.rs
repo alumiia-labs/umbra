@@ -1784,6 +1784,13 @@ impl RelayNode {
                 // cell thus ends, and each other circuit of the link stays.
                 Action::Send { link, cell } if self.parked.contains_key(&link) => {
                     if let Some(circ_id) = cell.first_chunk::<16>() {
+                        // NET-339: the end of the circuit can wait behind a
+                        // forward cell, and a resume can come before that
+                        // end. The session thus keeps the `circ_id` now, and
+                        // that resume names the circuit.
+                        if self.circuits.holds(link, *circ_id) {
+                            self.keep_ended(link, *circ_id);
+                        }
                         work.extend(self.circuits.shed(link, *circ_id));
                     }
                 }
@@ -1904,13 +1911,24 @@ impl RelayNode {
     /// The `CircuitDestroy` for `link`, or none for a parked link, which
     /// keeps the `circ_id` until its session resumes (`WIR-543`).
     fn destroy(&mut self, link: LinkId, circ_id: [u8; 16]) -> Option<Output> {
-        match self.parked.get_mut(&link) {
-            Some(ended) => {
-                ended.push(circ_id);
-                None
-            }
-            None => destroy_output(link, circ_id),
+        if self.keep_ended(link, circ_id) {
+            None
+        } else {
+            destroy_output(link, circ_id)
         }
+    }
+
+    /// Keeps the `circ_id` of a circuit of a parked link that ended, one
+    /// time, for the `CircuitDestroy` after the resume (`WIR-543`). False
+    /// for a link that is not parked.
+    fn keep_ended(&mut self, link: LinkId, circ_id: [u8; 16]) -> bool {
+        let Some(ended) = self.parked.get_mut(&link) else {
+            return false;
+        };
+        if !ended.contains(&circ_id) {
+            ended.push(circ_id);
+        }
+        true
     }
 
     /// The endpoint serves a forward cell of the client of `circuit`, thus

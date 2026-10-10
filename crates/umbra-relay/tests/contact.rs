@@ -2431,6 +2431,84 @@ fn a_circuit_pause_waits_behind_the_forward_cells_of_its_circuit() {
     assert_eq!(network.relays[0].sessions_parked(), 1);
 }
 
+#[test]
+fn a_resume_names_a_circuit_whose_end_waits_behind_a_forward_cell() {
+    const ALICE: usize = 0;
+    let mut network = Network::new();
+    let (alice_contact, _) = contacts(&mut network);
+    let circuits = held(&network);
+
+    // A pause and a resume show which circuit of the queue relay is the
+    // circuit of Alice.
+    let clocks = paced(&network);
+    let parked = network.pause(ALICE);
+    let of_alice: Vec<CircuitKey> = clocks.difference(&paced(&network)).copied().collect();
+    assert_eq!(of_alice.len(), 1);
+    assert!(network.resume(ALICE, 0x40, parked));
+    network.settle();
+    network.take_events(ALICE);
+
+    // A cell of the queue relay is on its way. A record of Alice leaves,
+    // and her pause follows it at once: the record waits at the guard for
+    // its per-hop delay (Part 3 §3.9).
+    let now = network.now;
+    let late = network.relays[2].pacing_tick(&of_alice[0], now, &mut Rng(9));
+    assert!(!late.is_empty());
+    network.clients[ALICE]
+        .send(&alice_contact, &text(1, "then away"), now, &mut Rng(8))
+        .unwrap();
+    network.commit(ALICE);
+    network.clients[ALICE].pause().unwrap();
+    let link = network.links[ALICE];
+    for capsule in network.clients[ALICE].take_capsules() {
+        let outputs = network.relays[0].on_capsule(link, &capsule, now, &mut Rng(9));
+        network.route(0, outputs);
+    }
+    assert!(network.relays[0].has_delayed());
+    // WIR-543: the guard cannot send the cell on the parked link, thus the
+    // circuit ends. NET-339: its end waits behind the record.
+    network.route(2, late);
+    assert_eq!(held(&network), circuits);
+    while let Some(capsule) = network.inboxes[ALICE].pop_front() {
+        network.clients[ALICE]
+            .on_capsule(&capsule, now, &mut Rng(9))
+            .unwrap();
+    }
+    assert!(network.clients[ALICE].is_paused());
+    let parked = network.clients[ALICE].park(now).unwrap();
+    assert!(network.relays[0].link_closed(link, now).is_empty());
+    network.peers[0].retain(|(held, _)| *held != link);
+
+    // The resume comes before that end. The guard names the circuit all
+    // the same, before each cell.
+    assert!(network.resume(ALICE, 0x40, parked));
+    let new_link = network.links[ALICE];
+    let capsules = network.clients[ALICE].take_capsules();
+    let outputs = network.relays[0].on_capsule(new_link, &capsules[0], now, &mut Rng(9));
+    assert!(matches!(outputs.first(), Some(Output::Adopt { .. })));
+    let destroys = outputs
+        .iter()
+        .filter(|output| matches!(output, Output::Send { .. }))
+        .count();
+    assert_eq!(destroys, 1);
+    network.route(0, outputs);
+    let link = network.links[ALICE];
+    for capsule in &capsules[1..] {
+        let outputs = network.relays[0].on_capsule(link, capsule, now, &mut Rng(9));
+        network.route(0, outputs);
+    }
+    // The queue relay did not read the pause of the circuit yet, and one
+    // more cell of its clock reaches the client behind the hole. The
+    // client holds that circuit no more, thus the cell ends no run.
+    let stale = network.relays[2].pacing_tick(&of_alice[0], now, &mut Rng(9));
+    network.route(2, stale);
+    network.settle();
+    let events = network.take_events(ALICE);
+    assert!(events.contains(&ClientEvent::CircuitReady));
+    assert!(!events.contains(&ClientEvent::CircuitLost), "{events:?}");
+    assert_eq!(held(&network), circuits);
+}
+
 /// Part 3 `NET-065`: a later retransmission of a record of the user comes
 /// after an acknowledgment and before a link-fault report. The runtime
 /// holds the record, and it asks the node for the slot of an

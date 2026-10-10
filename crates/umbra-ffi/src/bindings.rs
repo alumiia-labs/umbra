@@ -4028,12 +4028,7 @@ pub fn init(
             // The rows of that launch sit under a key that no header wraps,
             // thus they open no more, and the files go before the new store.
             drop(backend);
-            for suffix in ["", "-wal", "-shm"] {
-                let path = format!("{}{suffix}", config.database_path);
-                if std::path::Path::new(&path).exists() {
-                    std::fs::remove_file(&path).map_err(|_| FfiError::Storage)?;
-                }
-            }
+            remove_store_files(&config.database_path)?;
             let backend =
                 SqliteBackend::open(&config.database_path).map_err(|_| FfiError::Storage)?;
             // The header goes into the same file as the records, thus the
@@ -4054,8 +4049,9 @@ pub fn init(
 /// Makes the store of a restored device (Part 4 §4.7.2): the files of the
 /// database go, a new store comes from the root seed of the backup under
 /// `passphrase`, and it takes each row of the backup. The platform drops
-/// the handle of the restore before this call, thus no connection holds
-/// the file. Each contact is stale until its renewal (`IDN-183`).
+/// the handle of the restore before this call, and the call waits until
+/// the connection of that handle closed. Each contact is stale until its
+/// renewal (`IDN-183`).
 #[uniffi::export]
 pub fn init_restored(
     config: Config,
@@ -4069,6 +4065,31 @@ pub fn init_restored(
     })
 }
 
+/// How long the removal of the files of a store waits for the connections
+/// of an earlier handle to close. A task ends its step with the handle
+/// first, and a write to the store in that step takes the longest.
+const STORE_CLOSE_WAIT: Duration = Duration::from_secs(10);
+
+/// Removes each file of the store at `database_path`, after each connection
+/// of this process to it closed. The last reference of a handle that the
+/// platform dropped can end a moment later, on a worker of its runtime that
+/// gives an update to the handle. Its connection holds the file until then.
+/// Windows refuses the removal of such a file. Linux removes it, and the
+/// close of that connection then works on the files of the new store. A
+/// connection that stays past `STORE_CLOSE_WAIT` gives `Storage`.
+fn remove_store_files(database_path: &str) -> Result<(), FfiError> {
+    if !SqliteBackend::await_closed(database_path, STORE_CLOSE_WAIT) {
+        return Err(FfiError::Storage);
+    }
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let path = format!("{database_path}{suffix}");
+        if std::path::Path::new(&path).exists() {
+            std::fs::remove_file(&path).map_err(|_| FfiError::Storage)?;
+        }
+    }
+    Ok(())
+}
+
 /// Makes a new store under the root seed of `restored`, in the place of
 /// the files of the database, and runs `fill` on it before the handle.
 fn init_store_from(
@@ -4079,12 +4100,7 @@ fn init_store_from(
     fill: impl FnOnce(&mut Client<SqliteBackend, ForeignElement>) -> Result<(), FfiError>,
 ) -> Result<Arc<Handle>, FfiError> {
     let passphrase = Zeroizing::new(passphrase);
-    for suffix in ["", "-wal", "-shm", "-journal"] {
-        let path = format!("{}{suffix}", config.database_path);
-        if std::path::Path::new(&path).exists() {
-            std::fs::remove_file(&path).map_err(|_| FfiError::Storage)?;
-        }
-    }
+    remove_store_files(&config.database_path)?;
     let backend = SqliteBackend::open(&config.database_path).map_err(|_| FfiError::Storage)?;
     let headers = SqliteBackend::open(&config.database_path).map_err(|_| FfiError::Storage)?;
     let cost = Cost::calibrate(config.argon2_floor_ms);
@@ -4133,12 +4149,7 @@ pub fn init_from_root_seed(
     let is_leftover = std::path::Path::new(&config.database_path).exists()
         && !SqliteBackend::holds_header(&config.database_path).unwrap_or(true);
     if is_leftover {
-        for suffix in ["", "-wal", "-shm", "-journal"] {
-            let path = format!("{}{suffix}", config.database_path);
-            if std::path::Path::new(&path).exists() {
-                std::fs::remove_file(&path).map_err(|_| FfiError::Storage)?;
-            }
-        }
+        remove_store_files(&config.database_path)?;
     }
     let backend = SqliteBackend::open(&config.database_path).map_err(|_| FfiError::Storage)?;
     let headers = SqliteBackend::open(&config.database_path).map_err(|_| FfiError::Storage)?;
@@ -7344,6 +7355,33 @@ guard relay1.example.org"
         );
         drop(inner);
         drop(handle);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn the_files_of_a_store_go_after_the_last_connection_of_its_handle_closed() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (handle, directory) = open("store-close");
+        let path = handle.database_path.clone();
+        // The platform drops its handle. The last reference ends a moment
+        // later on another thread, as on a worker of the runtime that gives
+        // an update to the handle.
+        let late = Arc::clone(&handle);
+        drop(handle);
+        let ends = Arc::new(AtomicBool::new(false));
+        let ends_late = Arc::clone(&ends);
+        let worker = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            ends_late.store(true, Ordering::SeqCst);
+            drop(late);
+        });
+        remove_store_files(&path).unwrap();
+        assert!(
+            ends.load(Ordering::SeqCst),
+            "the files went while a connection held them"
+        );
+        assert!(!std::path::Path::new(&path).exists());
+        worker.join().unwrap();
         let _ = std::fs::remove_dir_all(&directory);
     }
 }

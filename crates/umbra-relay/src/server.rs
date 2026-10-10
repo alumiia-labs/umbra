@@ -1587,43 +1587,55 @@ pub async fn serve_connection_until<S>(
         return;
     }
     let mut capsule = vec![0u8; MAX_CAPSULE];
-    'connection: loop {
-        // Each complete frame in the buffer is one capsule.
+    // The two directions run side by side. A peer writes its capsules
+    // before it reads, as a client run does. A write of this relay that
+    // stopped each read would then wait for that peer while the peer waits
+    // for this relay, and the link would end at `LINK_WRITE_TIMEOUT`.
+    let (mut reader, mut writer) = tokio::io::split(stream);
+    let reads = async {
         loop {
-            match websocket::decode(&inbound, true, &mut capsule) {
-                Ok(Some((len, used))) => {
-                    inbound.drain(..used);
-                    let bytes = capsule.get(..len).unwrap_or(&[]).to_vec();
-                    if node.send(Input::Capsule { link, bytes }).await.is_err() {
-                        break 'connection;
+            // Each complete frame in the buffer is one capsule.
+            loop {
+                match websocket::decode(&inbound, true, &mut capsule) {
+                    Ok(Some((len, used))) => {
+                        inbound.drain(..used);
+                        let bytes = capsule.get(..len).unwrap_or(&[]).to_vec();
+                        if node.send(Input::Capsule { link, bytes }).await.is_err() {
+                            return;
+                        }
                     }
+                    Ok(None) => break,
+                    Err(_) => return,
                 }
-                Ok(None) => break,
-                Err(_) => break 'connection,
             }
-        }
-        tokio::select! {
-            read = stream.read(&mut chunk) => match read {
+            match reader.read(&mut chunk).await {
                 Ok(n) if n > 0 => inbound.extend_from_slice(chunk.get(..n).unwrap_or(&[])),
-                _ => break 'connection,
-            },
-            next = outbound.recv() => {
-                let Some(bytes) = next else {
-                    break 'connection;
-                };
-                let mut frame = vec![0u8; websocket::frame_len(bytes.len(), false)];
-                let Ok(used) = websocket::encode(&bytes, None, &mut frame) else {
-                    break 'connection;
-                };
-                // A peer that reads nothing holds no task: the write ends at
-                // its bound, and the link closes.
-                let write = stream.write_all(frame.get(..used).unwrap_or(&[]));
-                if !matches!(tokio::time::timeout(LINK_WRITE_TIMEOUT, write).await, Ok(Ok(()))) {
-                    break 'connection;
-                }
-                queued.fetch_sub(bytes.len(), Ordering::Relaxed);
+                _ => return,
             }
         }
+    };
+    let writes = async {
+        while let Some(bytes) = outbound.recv().await {
+            let mut frame = vec![0u8; websocket::frame_len(bytes.len(), false)];
+            let Ok(used) = websocket::encode(&bytes, None, &mut frame) else {
+                return;
+            };
+            // A peer that reads nothing holds no task: the write ends at
+            // its bound, and the link closes.
+            let write = writer.write_all(frame.get(..used).unwrap_or(&[]));
+            if !matches!(
+                tokio::time::timeout(LINK_WRITE_TIMEOUT, write).await,
+                Ok(Ok(()))
+            ) {
+                return;
+            }
+            queued.fetch_sub(bytes.len(), Ordering::Relaxed);
+        }
+    };
+    // The end of one direction ends the connection.
+    tokio::select! {
+        () = reads => {}
+        () = writes => {}
     }
     let _ = node.send(Input::Closed { link }).await;
 }
@@ -2150,5 +2162,87 @@ mod tests {
         assert!(given.starts_with("HTTP/1.1 200 "));
         assert!(given.ends_with("\r\n\r\nab"));
         assert!(sent(None).starts_with("HTTP/1.1 503 "));
+    }
+
+    /// One capsule of a peer, as one masked frame.
+    fn peer_frame(capsule: &[u8]) -> Vec<u8> {
+        let mut frame = vec![0u8; websocket::frame_len(capsule.len(), true)];
+        let used = websocket::encode(capsule, Some(&[9, 8, 7, 6]), &mut frame).unwrap();
+        frame.truncate(used);
+        frame
+    }
+
+    #[tokio::test]
+    async fn a_write_that_waits_for_the_peer_stops_no_read() {
+        const CAPSULES: usize = 64;
+        const CAPSULE_LEN: usize = 1_024;
+        let (inputs, mut node) = mpsc::channel(8);
+        // The stream holds four capsules in each direction.
+        let (mut peer, server) = tokio::io::duplex(4 * CAPSULE_LEN);
+        tokio::spawn(serve_connection(server, 7, inputs, Arc::default()));
+        let key = [5u8; 16];
+        peer.write_all(upgrade::request("relay.example", &key).as_bytes())
+            .await
+            .unwrap();
+        let mut inbound = Vec::new();
+        loop {
+            let mut chunk = [0u8; 1_024];
+            let n = peer.read(&mut chunk).await.unwrap();
+            inbound.extend_from_slice(&chunk[..n]);
+            if let Some(used) = upgrade::parse_response(&inbound, &key).unwrap() {
+                inbound.drain(..used);
+                break;
+            }
+        }
+        let Some(Input::Opened { writer, .. }) = node.recv().await else {
+            panic!("the connection did not open");
+        };
+
+        // The relay holds more for the peer than the stream takes, and the
+        // peer reads nothing, thus the write of the relay waits.
+        for _ in 0..CAPSULES {
+            assert!(writer.queue(vec![2u8; CAPSULE_LEN]));
+        }
+        // The peer sends more than the stream takes before it reads. The
+        // relay reads each capsule while its own write waits.
+        let sends = async {
+            for _ in 0..CAPSULES {
+                peer.write_all(&peer_frame(&[1u8; CAPSULE_LEN]))
+                    .await
+                    .unwrap();
+            }
+        };
+        let takes = async {
+            let mut taken = 0;
+            while taken < CAPSULES {
+                match node.recv().await {
+                    Some(Input::Capsule { link: 7, bytes }) => {
+                        assert_eq!(bytes, vec![1u8; CAPSULE_LEN]);
+                        taken += 1;
+                    }
+                    _ => panic!("the connection closed"),
+                }
+            }
+        };
+        let both = async { tokio::join!(sends, takes) };
+        tokio::time::timeout(Duration::from_secs(5), both)
+            .await
+            .expect("the relay read nothing while its write waited");
+
+        // The peer reads then, and it gets each capsule of the relay.
+        let mut out = vec![0u8; 2 * CAPSULE_LEN];
+        for _ in 0..CAPSULES {
+            let len = loop {
+                if let Some((len, used)) = websocket::decode(&inbound, false, &mut out).unwrap() {
+                    inbound.drain(..used);
+                    break len;
+                }
+                let mut chunk = [0u8; 4_096];
+                let n = peer.read(&mut chunk).await.unwrap();
+                assert!(n > 0, "the relay closed the stream");
+                inbound.extend_from_slice(&chunk[..n]);
+            };
+            assert_eq!(out[..len], [2u8; CAPSULE_LEN]);
+        }
     }
 }

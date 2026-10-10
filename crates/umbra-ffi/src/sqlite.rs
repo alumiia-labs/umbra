@@ -3,6 +3,12 @@
 //! indexes on the keyed surrogates only, runs under `secure_delete`, and
 //! truncates its write-ahead log after a deletion batch.
 
+use std::{
+    collections::BTreeMap,
+    sync::{Condvar, Mutex, MutexGuard},
+    time::Duration,
+};
+
 use rusqlite::{params, Connection, OptionalExtension};
 use umbra_core::{
     store::{
@@ -47,9 +53,50 @@ fn array<const N: usize>(bytes: Vec<u8>) -> Result<[u8; N], Error> {
     bytes.try_into().map_err(|_| Error::Storage)
 }
 
+/// The count of the connections of this process that hold each database
+/// file, by the path that opened it.
+static OPEN: Mutex<BTreeMap<String, usize>> = Mutex::new(BTreeMap::new());
+/// Signals each connection that closed to [`SqliteBackend::await_closed`].
+static CLOSED: Condvar = Condvar::new();
+
+fn open_files() -> MutexGuard<'static, BTreeMap<String, usize>> {
+    OPEN.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// One connection in the count of its file, until its drop.
+struct Counted(String);
+
+impl Counted {
+    fn new(path: &str) -> Self {
+        let mut open = open_files();
+        let count = open.entry(path.to_owned()).or_insert(0);
+        *count = count.saturating_add(1);
+        Counted(path.to_owned())
+    }
+}
+
+impl Drop for Counted {
+    fn drop(&mut self) {
+        let mut open = open_files();
+        if let Some(count) = open.get_mut(&self.0) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                open.remove(&self.0);
+            }
+        }
+        drop(open);
+        CLOSED.notify_all();
+    }
+}
+
 /// A store in one SQLite file.
 pub struct SqliteBackend {
     connection: Connection,
+    /// The place of this connection in the count of its file. The fields
+    /// drop in their order, thus the count falls after the connection
+    /// closed.
+    _counted: Option<Counted>,
     /// A checkpoint of a deletion that did not truncate the log, which the
     /// next batch runs again (`IMP-043`).
     checkpoint_due: bool,
@@ -62,26 +109,42 @@ impl SqliteBackend {
     /// Opens the database at `path`, and makes the schema at the first
     /// launch (`IMP-042`).
     pub fn open(path: &str) -> Result<Self, Error> {
-        Self::prepare(storage(Connection::open(path))?)
+        let counted = Counted::new(path);
+        Self::prepare(storage(Connection::open(path))?, Some(counted))
     }
 
     /// A database in memory, for a test.
     pub fn in_memory() -> Result<Self, Error> {
-        Self::prepare(storage(Connection::open_in_memory())?)
+        Self::prepare(storage(Connection::open_in_memory())?, None)
     }
 
-    fn prepare(connection: Connection) -> Result<Self, Error> {
+    /// Waits until no connection of this process holds the database that
+    /// `path` opened, for `wait` at most. The result is false when one
+    /// still holds it. The path is the text that [`SqliteBackend::open`]
+    /// took: another spelling of one file names another count.
+    pub fn await_closed(path: &str, wait: Duration) -> bool {
+        let (open, _) = CLOSED
+            .wait_timeout_while(open_files(), wait, |open| open.contains_key(path))
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        !open.contains_key(path)
+    }
+
+    fn prepare(connection: Connection, counted: Option<Counted>) -> Result<Self, Error> {
+        // The backend holds the two from here, thus a fault below closes
+        // the connection before the count falls too.
+        let mut backend = SqliteBackend {
+            connection,
+            _counted: counted,
+            checkpoint_due: true,
+            #[cfg(test)]
+            checkpoints: 0,
+        };
+        let connection = &backend.connection;
         storage(connection.pragma_update(None, "secure_delete", "ON"))?;
         storage(connection.pragma_update(None, "journal_mode", "WAL"))?;
         storage(connection.execute_batch(SCHEMA))?;
         // IMP-043: a checkpoint that an earlier run left undone runs now,
         // and at the next batch when a reader keeps it from its end.
-        let mut backend = SqliteBackend {
-            connection,
-            checkpoint_due: true,
-            #[cfg(test)]
-            checkpoints: 0,
-        };
         backend.checkpoint();
         Ok(backend)
     }
@@ -329,6 +392,34 @@ mod tests {
     use umbra_crypto::secret::Secret;
 
     use super::*;
+
+    #[test]
+    fn a_file_counts_as_closed_after_its_last_connection_closed() {
+        let directory = std::env::temp_dir().join(format!("umbra-ffi-c-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("count.db");
+        let _ = std::fs::remove_file(&path);
+        let path_text = path.to_str().unwrap().to_owned();
+        assert!(SqliteBackend::await_closed(&path_text, Duration::ZERO));
+        let first = SqliteBackend::open(&path_text).unwrap();
+        let second = SqliteBackend::open(&path_text).unwrap();
+        assert!(!SqliteBackend::await_closed(&path_text, Duration::ZERO));
+        drop(first);
+        assert!(!SqliteBackend::await_closed(
+            &path_text,
+            Duration::from_millis(50)
+        ));
+        // The wait ends at the close on another thread, before its bound.
+        let closes = std::thread::spawn(move || drop(second));
+        assert!(SqliteBackend::await_closed(
+            &path_text,
+            Duration::from_secs(60)
+        ));
+        closes.join().unwrap();
+        // A file that is closed takes its removal on each platform.
+        std::fs::remove_file(&path).unwrap();
+        let _ = std::fs::remove_dir_all(&directory);
+    }
 
     #[test]
     fn a_file_with_no_header_is_no_store() {
