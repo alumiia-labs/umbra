@@ -68,7 +68,7 @@ column when a crate implements the requirement and a test covers it.
 | --- | --- | --- | --- | --- | --- | --- |
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
-| `NET` | 250 | 89 | 1 | 0 | 9 | **349** |
+| `NET` | 251 | 89 | 1 | 0 | 9 | **350** |
 | `IDN` | 134 | 46 | 1 | 0 | 5 | **186** |
 | `CRY` | 120 | 27 | 0 | 0 | 1 | **148** |
 | `WIR` | 409 | 86 | 0 | 0 | 7 | **502** |
@@ -76,12 +76,12 @@ column when a crate implements the requirement and a test covers it.
 | `NTF` | 77 | 28 | 0 | 0 | 3 | **108** |
 | `DIS` | 130 | 35 | 0 | 0 | 3 | **168** |
 | `REL` | 162 | 34 | 1 | 0 | 3 | **200** |
-| `GRP` | 235 | 65 | 0 | 0 | 6 | **306** |
+| `GRP` | 233 | 65 | 0 | 0 | 5 | **303** |
 | `ATT` | 143 | 45 | 2 | 0 | 3 | **193** |
 | `ABU` | 71 | 29 | 1 | 0 | 0 | **101** |
 | `IMP` | 115 | 41 | 0 | 0 | 2 | **158** |
 | `SEC` | 4 | 3 | 0 | 0 | 1 | **8** |
-| **All** | 2078 | 627 | 6 | 0 | 55 | **2766** |
+| **All** | 2077 | 627 | 6 | 0 | 54 | **2764** |
 
 ## SCP — Scope and Conventions
 
@@ -488,6 +488,7 @@ Source: `spec/03-network-architecture.md`
 | `NET-349` | §3.5.2 | MUST | The relay | The relay MUST send such a drain in steps of at most 256 KiB for each circuit at each tick of its own fixed clock. |  |  |
 | `NET-350` | §3.4.6 | MUST | (unstated) | Under the same state, a client MAY put hop 1 and hop 3 in one bloc, and after that it MAY put two hops in one autonomous system or one prefix, each only when no chain holds without it, in that order. |  |  |
 | `NET-351` | §3.4.6 | MUST NOT | A client | A client MUST NOT put hop 1 and hop 3 on one IPv4 address while a chain holds without it, after each relaxation of `NET-350`. |  |  |
+| `NET-352` | §3.4.3 | MUST | A queue relay | A queue relay MUST hold at most one subscription for a queue. |  |  |
 
 ## IDN — Identity
 
@@ -2169,7 +2170,6 @@ Source: `spec/11-private-groups.md`
 | `GRP-043` | §11.7 | MUST NOT | A client | A client MUST NOT use `sent_at` for the order. |  |  |
 | `GRP-044` | §11.7 | MUST NOT | The interface | The interface MUST NOT show the order as an agreed order. |  |  |
 | `GRP-045` | §11.7 | MAY | A member | A member MAY compare a rolling transcript digest out of band. |  |  |
-| `GRP-049` | §11.3.2 | MAY | An admin | An admin MAY turn on a limited history window by an explicit action. |  |  |
 | `GRP-050` | §11.8 | MUST | The UI | The UI MUST show this eviction. |  |  |
 | `GRP-051` | §11.9 | MUST | A group | A group MUST have two or more members with the `owner` role. |  |  |
 | `GRP-052` | §11.9.1 | MUST | A member | A member MUST make `GroupRosterSeed_g` from the device CSPRNG at the join. |  |  |
@@ -2291,8 +2291,6 @@ Source: `spec/11-private-groups.md`
 | `GRP-230` | §11.3.2 | MUST | After a rotation to `e + 1`, a receiver | After a rotation to `e + 1`, a receiver MUST keep the state of epoch `e` for `GROUP_EPOCH_GRACE`. |  |  |
 | `GRP-231` | §11.3.2 | MUST | A receiver | A receiver MUST zeroize that state at the end of the grace. |  |  |
 | `GRP-232` | §11.3.2 | MUST | Inside that grace a receiver | Inside that grace a receiver MUST accept a record of epoch `e` only from a member that its current roster holds. |  |  |
-| `GRP-233` | §11.3.2 | MUST | An admin that turned on `HISTORY_WINDOW` = W | An admin that turned on `HISTORY_WINDOW` = W MUST hand the joiner `K_{e,t_join − W}` in the admit stage of §11.9.1 in the place of `K_{e,t_join}`. |  |  |
-| `GRP-234` | §11.3.2 | MUST | If that window crosses an epoch boundary, the admin | If that window crosses an epoch boundary, the admin MUST hand the slot key at the start of the current epoch and no key of an earlier epoch. |  |  |
 | `GRP-235` | §11.3.3 | MUST | A member | A member MUST derive `GroupPairKey_g` and `GroupKemKey_g` with the calls above. |  |  |
 | `GRP-236` | §11.3.3 | MUST | A member | A member MUST take `pair_pk` and `kem_pk` of another member from that member's roster entry (§11.9.1). |  |  |
 | `GRP-237` | §11.3.3 | MUST | A member | A member MUST abort the pair-key derivation on an all-zero `ss_ij`, as Part 5 rule `CRY-040` does for a decapsulation. |  |  |
@@ -2463,7 +2461,7 @@ Source: `spec/11-private-groups.md`
 | `GRP-420` | §11.9.4 | MUST | An admin | An admin MUST keep the joiner of each admit that it sent while the add stays the head of its roster, thus an epoch that displaces the add after the admit puts the joiner in the list of joiners again. |  |  |
 | `GRP-421` | §11.9.4 | MUST | A joiner | A joiner MUST take a second admit of the admin that admitted it while its own add is the head of its roster, and the group of that admit MUST take the place of the group that it holds, as an exception to `GRP-153`. |  |  |
 | `GRP-422` | §11.4.1 | MUST | (unstated) | A member that holds a trigger since the `roster_epoch` of its current epoch, and that the trigger does not exclude, MUST rotate before it posts a record other than a roster object. |  |  |
-| `GRP-423` | §11.3.2 | MUST | (unstated) | An admin that joined inside the current epoch, and thus holds no `K_e` under `GRP-384`, MUST derive the key of the admit from its own slot chain, and it MUST hand no slot key before the oldest slot that the chain holds; the window then ends at that slot. |  |  |
+| `GRP-423` | §11.3.2 | MUST | (unstated) | An admin that joined inside the current epoch, and thus holds no `K_e` under `GRP-384`, MUST derive the key of the admit from its own slot chain, and it MUST hand no slot key before the oldest slot that the chain holds. |  |  |
 | `GRP-424` | §11.9.1 | MUST | The admin | The admin MUST then send the admit with a `seq_of_add` of 0 for that replica, and for a replica that the group took after the add, and the joiner reads it from its start. |  |  |
 
 ## ATT — Attachments and Large Objects

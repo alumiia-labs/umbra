@@ -2863,7 +2863,7 @@ mod tests {
         else {
             panic!("the add added nobody");
         };
-        let admit = group.admit_for(index, 0, b"", now).unwrap();
+        let admit = group.admit_for(index, b"", now).unwrap();
         let admit_control = GroupControl::parse(&admit).unwrap();
         let invitation = GroupInvitation::parse(admit_control.payload).unwrap();
         let path = client.authority_path(conversation, &group).unwrap();
@@ -7293,6 +7293,56 @@ mod tests {
             .set_pending_peer([7; 16], &[0; umbra_core::devset::link::LABEL_LEN], &mut rng)
             .unwrap();
         assert!(client.holds_pending_peer().unwrap());
+    }
+
+    #[test]
+    fn the_list_of_the_sync_invitations_lives_in_the_store_and_on_this_device_alone() {
+        use umbra_core::session::node::StateChange;
+        let mut rng = Rng(173);
+        let mut client = new_client(&mut rng);
+        assert!(client.device_invitations().unwrap().is_empty());
+        // DEV-290: the store takes the queue of each sync invitation, one
+        // time each.
+        client
+            .note_device_invitation(&[0x61; 32], &mut rng)
+            .unwrap();
+        client
+            .note_device_invitation(&[0x62; 32], &mut rng)
+            .unwrap();
+        client
+            .note_device_invitation(&[0x61; 32], &mut rng)
+            .unwrap();
+        // A lock ends the link and its run. The list is there after it,
+        // thus the next run retires each invitation.
+        client.lock();
+        assert!(client.device_invitations().is_err());
+        client.unlock(&units("correct horse"), 5_000).unwrap();
+        assert_eq!(
+            client.device_invitations().unwrap(),
+            [[0x61; 32], [0x62; 32]]
+        );
+        // The list belongs to this device: no backup and no snapshot of a
+        // link carries it. A setting of the user goes.
+        client.set_auto_lock(600, &mut rng).unwrap();
+        let carried = |client: &Client<MemoryBackend, Element>| {
+            let rows = client.backup_rows_for_test(5_000);
+            (rows.0, rows.1)
+        };
+        let (has_list, has_settings) = carried(&client);
+        assert!(!has_list);
+        assert!(has_settings);
+        // The node ended one invitation: its handshake finished, or the
+        // node retired it and its `DEL` left. The list names it no more.
+        let ended = StateChange::InvitationEnded { queue: [0x61; 32] };
+        client
+            .commit_network(&[ended], &[], 1_000_000, &mut rng)
+            .unwrap();
+        assert_eq!(client.device_invitations().unwrap(), [[0x62; 32]]);
+        let ended = StateChange::InvitationEnded { queue: [0x62; 32] };
+        client
+            .commit_network(&[ended], &[], 1_000_000, &mut rng)
+            .unwrap();
+        assert!(client.device_invitations().unwrap().is_empty());
     }
 
     #[test]

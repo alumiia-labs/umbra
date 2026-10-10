@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 3: Network Architecture
 
 **Status:** Draft
-**Version:** 0.13.0
-**Date:** 2026-10-09
+**Version:** 0.14.0
+**Date:** 2026-10-10
 
 ---
 
@@ -1245,7 +1245,9 @@ causes does not occur.
 | `CIRCUIT_AGE_MARGIN` | 60 s. A client stops using a circuit this long before `CIRCUIT_MAX_AGE` (`NET-320`) |
 | `CIRCUIT_CELL_MARGIN` | 64 cells. A client stops using a circuit this many cells before `CIRCUIT_MAX_CELLS` in one direction (`NET-321`) |
 | `CIRCUIT_BUILD_TIMEOUT` | 5 s from the first `EXTEND` cell. Three round trips over a 200 ms path take about 0.6 s, thus the value has a wide margin |
-| Preemptive build | keep 2 spare circuits in the foreground, thus a rotation does not block a send. §3.12 forbids a spare circuit in a push-wake session |
+| `CIRCUIT_SPARE_LEAD` | 120 s before the age margin of `NET-320`, and 512 cells before the cell margin of `NET-321`. A client starts the spare of a circuit at that point |
+| `CIRCUIT_RETIRE_WAIT` | 30 s. A client reads a replaced circuit this long after the spare took its place |
+| Preemptive build | A client builds a spare circuit for each circuit at `CIRCUIT_SPARE_LEAD`, at most 2 at one time, and the spare takes the place of that circuit. Thus a rotation does not block a send. §3.12 forbids a spare circuit in a push-wake session |
 
 > *Cause of the 4 hours.* At a `CIRCUIT_MAX_AGE` of 10 minutes, each push wake
 > pays a fresh build. §3.12 puts the background
@@ -1300,9 +1302,40 @@ causes does not occur.
 > *Cause of `NET-320`.* The relay ends an aged circuit with no cell, and the
 > link to the guard stays up. A client that holds no age then sends into a
 > circuit that no relay holds and reads no record, and nothing shows
-> it. The reference client ends its run at the margin and starts a new one at
-> once, and each unsent record goes again from its store. A preemptive build
-> with a spare circuit would avoid the gap of one build.
+> it. The spare circuit below takes the place of the circuit before the
+> margin, thus the session goes on and no build stands between a record and
+> its send.
+
+**The spare circuit.** A client builds the new circuit of `NET-320` and
+`NET-321` before the margin, in a session that carries queue commands.
+
+- At `CIRCUIT_SPARE_LEAD` before a margin the client builds a spare circuit
+  on a fresh chain, to the queue relay of the old circuit and in its privacy
+  mode. The oldest circuit comes first, and at most 2 spares build at one
+  time. A spare build that fails starts again after `CIRCUIT_BUILD_TIMEOUT`,
+  and after twice the time before at each later failure.
+- When the spare holds its three hops, the client sends on it the `SUB` of
+  each queue that the old circuit served, and each later command. It sends
+  no new command on the old circuit.
+- **[NET-352]** A queue relay MUST hold at most one subscription for a
+  queue. A `SUB` on a second circuit MUST move the subscription to that
+  circuit. The relay MUST then emit each record that no `ACK` covers on
+  that circuit (Part 6 rule `WIR-110`). It MUST emit each later record on
+  that circuit alone. Thus the move loses no record. A record that the two
+  circuits carried holds one sequence number, and Part 14 rule `IMP-135`
+  drops the second copy.
+- The client reads the old circuit for `CIRCUIT_RETIRE_WAIT`, for each answer
+  that is on its way. It then ends the old circuit with a `DESTROY` cell.
+  The subscription of each queue is on the spare at that time, thus the end
+  of the old circuit ends no subscription and causes no push of Part 8 rule
+  `NTF-128`.
+- A circuit that reaches its margin with no spare in its place ends its
+  session, and the client opens a new session at once. Each record with no
+  relay acknowledgment goes again from the store (§3.7). A push-wake
+  session takes this path, because it builds no spare (`NET-099`). A session
+  that carries group-queue commands (§3.2.7) and a session that carries
+  chunk commands (Part 12 §12.8) take it too: each one opens a new session
+  at the margin.
 
 #### Limits of an ingress relay
 
@@ -2220,61 +2253,59 @@ record that no relay accepts needs a user and not a timer.
   a `failed` record again without a user action.
 
 **What a refusal does to a record of the user.** The three reasons of
-`NET-218` take two paths.
+`NET-218` take two paths, and a send with no answer takes the first one.
 
 - A record that a relay refuses with `BUSY` or `ADMISSION` goes again in a
   slot of the cover clock (`NET-071`), the oldest refusal first. Its first
   retransmission takes the slot before each other item (`NET-065`, item 1).
-  A later retransmission takes a slot only when the client holds no
-  acknowledgment for it (item 3). The record fails under `NET-221` when a
-  relay refuses its sixteenth send (`SEND_MAX_ATTEMPTS`), or 7 days after
-  its first send (`SEND_GIVE_UP`), whichever comes first.
+  A later retransmission takes the slot after an acknowledgment that is
+  due, and before each other item (item 3).
+- A record whose `SEND` took no `QUOTA` and no `NACK` goes again in the
+  same manner, inside the session that sent it.
+  The wait for the answer is 30 s after the first send of the record. After
+  each later send it is twice the wait before it, up to 12 hours. Part 11
+  rule `GRP-198` gives a group post the same wait. No timer fires at the
+  end of the wait: the first slot of the cover clock after it carries the
+  record.
 - A record that a relay refuses with `LIMIT` holds a full queue of the peer
   (§3.2.4, `NET-016`). It stays `queued` under Part 14 rule `IMP-082`, and it
   goes again after a wait. The first wait is `HOLD_RETRY` of 15 minutes from
   the refusal, and each later wait is twice the wait before it. The waits are
-  15 minutes, 30 minutes, 1 hour, and then longer in the same ratio. A `QUOTA`
-  that names room in that queue
-  ends each wait for that contact, and the held records go at once. The
-  record fails at its sixteenth `LIMIT`, or at a `LIMIT` that comes 7 days
-  or more after its first one. The interface names the full queue as the
-  cause. A record that waits MUST NOT go before the end of its wait because a
+  15 minutes, 30 minutes, 1 hour, and then longer in the same ratio. A wait
+  that ends inside a session gives the record to a slot of the cover clock,
+  as a retransmission of `NET-065`. A `QUOTA` that names room in that queue
+  ends each wait for that contact, and the held records go at once. A
+  record that waits MUST NOT go before the end of its wait because a
   new run started. The full queue would refuse it again, and each such
-  `LIMIT` would count. The client keeps the time of the next send, the time
-  of the first `LIMIT`, and the count in its store. Thus a new connection,
-  an unlock, and a new process send no held record early, and the two
-  bounds count across them. An edit and a deletion request of Part 7 rules
-  `DEV-113` and `DEV-114` take no such wait: each fails at its first
-  `LIMIT`.
+  `LIMIT` would count. The client keeps the time of the next send and the
+  count of the `LIMIT` answers in its store. Thus a new connection, an
+  unlock, and a new process send no held record early. An edit and a
+  deletion request of Part 7 rules `DEV-113` and `DEV-114` take no such
+  wait: each fails at its first `LIMIT`.
+
+**One count for one record.** A client counts each send of a record in one
+count: the first send, and each send after a `BUSY`, an `ADMISSION`, a
+`LIMIT`, or no answer. `SEND_GIVE_UP` runs from the first send of the
+record. The client keeps the count and the time of the first send in its
+store. Thus the two bounds of `NET-219` and `NET-220` hold across a new
+connection, an unlock, and a new process. The record fails under `NET-221`
+at `SEND_MAX_ATTEMPTS`: its sixteenth send takes a refusal, or no answer in
+its wait. It fails at `SEND_GIVE_UP` too, 7 days after its first send. The
+first of the two bounds ends the ARQ. A record in the wait after a `LIMIT`
+fails at the first end of a wait that comes 7 days or more after its first
+send. A record that fails at a `LIMIT`, or in the wait after one, names the
+full queue as its cause in the interface.
+
+**A new session.** A record that holds no relay acknowledgment at the end
+of its session goes again when the next session of the client is ready,
+beside each record that never left. That send counts as each other one.
+`NET-072` states this path for a client in the background. A record in the
+wait after a `LIMIT` is the exception that the list above states.
 
 > *Cause of the growing wait.* A queue stays full while its reader is away.
 > A fixed wait of 15 minutes spends 16 sends in four hours, and the record
 > then fails while `IMP-082` keeps it `queued`. With the growth the sends
 > reach to `SEND_GIVE_UP`, which ends them first.
->
-> **Limits of the v1 reference client.** The reference client does not meet
-> the rules above in four places, and this note states each one.
->
-> 1. The retry after a `LIMIT` leaves at the minute check of the run that
-> follows the end of its wait. It does not leave in a slot of the cover clock.
->    Thus `NET-071` does not hold for it: an ingress relay sees a send on a
->    minute boundary of the run. The waits differ for each record and each
->    refusal, thus the sends of many records make no single burst.
-> 2. The counts of `NET-219` and `NET-220` after a `BUSY` or an `ADMISSION`
->    are the memory of one run. A new run counts each such record from
->    zero, and it measures `SEND_GIVE_UP` from the first send of that run.
->    The count after a `LIMIT` and the time of the first `LIMIT` are in the
->    store, and they hold across runs. The two counts are two counts, and
->    the first one starts again at each `LIMIT`. Thus a record that takes
->    both reasons can leave more than `SEND_MAX_ATTEMPTS` times in one run.
-> 3. A record whose send took no answer in a run, neither a `QUOTA` nor a
-> `NACK`, goes again at the start of the next run. The cause is that the store
->    holds it as `queued`. Inside the run nothing sends it again.
-> 4. A later retransmission of a record of the user also waits behind a
->    link-fault report that is due, which `NET-065` puts after it.
->
-> A later version moves the `LIMIT` retry into the cover clock and keeps
-> the count after a `BUSY` or an `ADMISSION` in the store too.
 
 A `failed` record is a record that no relay accepted. U6 of Part 2 §2.4 counts a
 record from the moment a relay accepts it, thus a `failed` record is outside U6.
@@ -3316,8 +3347,8 @@ background receive at the next foreground session of the phone, and not sooner.
 A user who reads on the laptop while the phone is in the background sees that
 delay.
 
-**[NET-099]** **A client MUST NOT build a spare circuit in a push-wake session.** §3.4.3 keeps
-2 spare circuits for a rotation that would block a send. A push-wake session
+**[NET-099]** **A client MUST NOT build a spare circuit in a push-wake session.** §3.4.3 builds
+a spare circuit for a rotation that would block a send. A push-wake session
 carries a drain and an acknowledgment, and no interactive send waits on a
 rotation. Thus one circuit is sufficient for a wake.
 
@@ -3426,8 +3457,8 @@ the three p95 values, because the three terms do not reach their tails together.
 A cold start with no live circuit adds one 3-RTT telescoped build. This build
 costs about +810 ms of propagation and less than 2 ms of computation. The three
 round trips reach hop 1, then hop 2, then hop 3, which is 2 × 60 + 2 × 135 +
-2 × 210 ms against the leg model above. Two spare circuits (§3.4.3) keep this
-cost off the common path.
+2 × 210 ms against the leg model above. The spare circuit of §3.4.3 keeps this
+cost off the rotation of a circuit.
 
 With the propagation budget of 420 ms, the mean delay is 1.42 s in Fast mode,
 1.87 s in Balanced mode, and 3.52 s in Private mode; §3.9 gives the added delay

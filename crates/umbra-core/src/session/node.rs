@@ -243,9 +243,9 @@ pub enum ClientEvent {
         relay_ntf_pk: Vec<u8>,
     },
     /// A circuit came near `CIRCUIT_MAX_AGE` or `CIRCUIT_MAX_CELLS`, at
-    /// which each relay of it ends it with no cell (`NET-320`, `NET-321`).
-    /// The runtime ends the run and starts a new one at once, and nothing
-    /// failed.
+    /// which each relay of it ends it with no cell (`NET-320`, `NET-321`),
+    /// and no spare circuit took its place. The runtime ends the run and
+    /// starts a new one at once, and nothing failed.
     CircuitAged,
     /// A renewal replaced the channel of a contact (Part 3 §3.2.6). Each
     /// record with no delivery receipt goes again.
@@ -554,6 +554,57 @@ pub const CIRCUIT_AGE_MARGIN: u64 = 60;
 /// (`NET-321`). A relay paces about one cell each second toward the
 /// client, and the client ticks once each second.
 pub const CIRCUIT_CELL_MARGIN: u32 = 64;
+
+/// The time before the age margin of `NET-320` at which a client starts
+/// the build of the circuit that takes the place of an aged one (Part 3
+/// §3.4.3, the preemptive build). The time holds a build with its back-off
+/// and the wait of the replaced circuit.
+pub const CIRCUIT_SPARE_LEAD: u64 = 120;
+
+/// The cells before the cell margin of `NET-321` at which that build
+/// starts.
+pub const CIRCUIT_SPARE_CELLS: u32 = 512;
+
+/// The most spare circuits that a client builds at one time.
+pub const SPARE_CIRCUITS_MAX: usize = 2;
+
+/// The time for which a replaced circuit stays after the new one took its
+/// queues. Each `SUB` on the new circuit reaches the queue relay in that
+/// time, and each answer on the old circuit arrives. The `DESTROY` of the
+/// old circuit follows.
+pub const CIRCUIT_RETIRE_WAIT: u64 = 30;
+
+/// A circuit under build that takes the place of the circuit of one slot
+/// before that circuit reaches a margin. It is no circuit of the node
+/// until it holds its three hops: no queue and no record goes to it.
+struct Spare {
+    slot: Slot,
+    /// The slot whose circuit it replaces.
+    of: usize,
+    /// The time of its first `EXTEND`, from which its age counts.
+    since: u64,
+}
+
+/// A circuit that a spare replaced. The node sends nothing new on it, and
+/// it reads it until its `DESTROY` leaves.
+struct Retiring {
+    session: Box<CircuitSession>,
+    chain: [[u8; 32]; HOPS],
+    /// The slot that it served, which holds the new circuit.
+    slot: usize,
+    /// The time of its `DESTROY`.
+    until: u64,
+}
+
+/// What one build cell did to a circuit under build.
+enum BuildStep {
+    /// The build failed, and the circuit holds no hop.
+    Lost,
+    /// One more hop answered, and the next `EXTEND` left.
+    Extended,
+    /// The circuit holds its three hops.
+    Ready,
+}
 
 /// One circuit of a parked session, with the queues that it served.
 struct ParkedCircuit {
@@ -1398,6 +1449,16 @@ pub struct ClientNode {
     /// and sends nothing (`WIR-240`), thus the first capsule confirms it.
     resuming: bool,
     slots: Vec<Slot>,
+    /// The spare circuits under build (Part 3 §3.4.3).
+    spares: Vec<Spare>,
+    /// The circuits that a spare replaced, until their `DESTROY`.
+    retiring: Vec<Retiring>,
+    /// The spare builds of each slot that failed: the count, and the time
+    /// before which no next one starts.
+    spare_tries: BTreeMap<usize, (u32, u64)>,
+    /// Whether the run is a push-wake session, which builds no spare
+    /// circuit (`NET-099`).
+    wake: bool,
     /// The circuit of the call that runs. Each command of that call goes
     /// to it, under its `RelaySession_pk`.
     current: usize,
@@ -1627,6 +1688,10 @@ impl ClientNode {
             held_chunks: Vec::new(),
             chunk_admissions: crate::abuse::pow::ChunkAdmissions::default(),
             held_groups: Vec::new(),
+            spares: Vec::new(),
+            retiring: Vec::new(),
+            spare_tries: BTreeMap::new(),
+            wake: false,
             range: Range::Queue,
             capsules: VecDeque::new(),
             next_handle: 1,
@@ -3797,8 +3862,10 @@ impl ClientNode {
     /// other group. With none left the node gives `CircuitLost`, which the
     /// runtime reads as a build that failed.
     ///
-    /// A ready circuit near `CIRCUIT_MAX_AGE` gives `CircuitAged`
-    /// (`NET-320`).
+    /// A ready circuit at a margin of `NET-320` or `NET-321` gives
+    /// `CircuitAged`. A spare takes the place of a circuit before that
+    /// ([`ClientNode::replace_aging`]), thus the event comes only when no
+    /// spare did.
     pub fn on_tick(&mut self, now: u64) -> Vec<ClientEvent> {
         self.clock = now;
         self.settle_del();
@@ -3844,6 +3911,30 @@ impl ClientNode {
             // next run builds it again (`NET-024`).
             if let Some(relay) = slot.exit.filter(|_| is_group) {
                 unreachable.push(relay);
+            }
+        }
+        // NET-169: a spare build that no relay answers ends as each other
+        // build does, and a later tick starts the next one.
+        for mut spare in core::mem::take(&mut self.spares) {
+            if now.saturating_sub(spare.since) < CIRCUIT_BUILD_TIMEOUT {
+                self.spares.push(spare);
+                continue;
+            }
+            if let Circuit::Building { mut build, .. } =
+                core::mem::replace(&mut spare.slot.circuit, Circuit::None)
+            {
+                destroys.extend(destroy_cell(&mut build));
+            }
+            failed_chains.extend(spare.slot.chain);
+            self.spare_failed(spare.of, now);
+        }
+        // The circuit that a spare replaced ends with its `DESTROY`, after
+        // each `SUB` of the new circuit reached the queue relay.
+        for mut held in core::mem::take(&mut self.retiring) {
+            if now < held.until {
+                self.retiring.push(held);
+            } else {
+                destroys.extend(held.session.destroy_cell().ok());
             }
         }
         for cell in destroys {
@@ -3942,6 +4033,19 @@ impl ClientNode {
             }
             slot.building_since = None;
         }
+        // A spare under build and a replaced circuit end for the same
+        // cause: the parked session keeps neither.
+        for mut spare in core::mem::take(&mut self.spares) {
+            if let Circuit::Building { mut build, .. } =
+                core::mem::replace(&mut spare.slot.circuit, Circuit::None)
+            {
+                destroys.extend(destroy_cell(&mut build));
+            }
+        }
+        for mut held in core::mem::take(&mut self.retiring) {
+            destroys.extend(held.session.destroy_cell().ok());
+        }
+        self.spare_tries.clear();
         for cell in destroys {
             self.send_cell(&cell)?;
         }
@@ -3965,6 +4069,7 @@ impl ClientNode {
         }
         let mut link = self.link.take()?;
         link.connection_lost(now);
+        self.drop_spares();
         let mut circuits = Vec::new();
         for slot in &mut self.slots {
             let Some(chain) = slot.chain.filter(|_| slot.is_ready()) else {
@@ -4126,6 +4231,7 @@ impl ClientNode {
         self.watched_waits.clear();
         self.held_records.clear();
         self.rebuilds.clear();
+        self.drop_spares();
         for slot in &mut self.slots {
             slot.circuit = Circuit::None;
             slot.building_since = None;
@@ -4222,6 +4328,7 @@ impl ClientNode {
         self.resuming = false;
         // A new session holds no circuit, thus a circuit of the session
         // before serves nothing.
+        self.drop_spares();
         for slot in &mut self.slots {
             slot.circuit = Circuit::None;
         }
@@ -4417,6 +4524,271 @@ impl ClientNode {
         }
         self.current = current;
         Ok(())
+    }
+
+    /// Tells the node whether the run is a push-wake session. Such a run
+    /// builds no spare circuit (`NET-099`), and a circuit of it that
+    /// reaches a margin gives `CircuitAged`.
+    pub fn set_wake(&mut self, is_wake: bool) {
+        self.wake = is_wake;
+    }
+
+    /// Forgets each spare circuit and each replaced circuit: the session
+    /// that held them ended, or it parks with no frame left to send.
+    fn drop_spares(&mut self) {
+        self.spares.clear();
+        self.retiring.clear();
+        self.spare_tries.clear();
+    }
+
+    /// Counts one failed spare build for the slot `of` at `now`, and sets
+    /// the time before which no next one starts: from
+    /// `CIRCUIT_BUILD_TIMEOUT`, twice as long at each failure.
+    fn spare_failed(&mut self, of: usize, now: u64) {
+        let tries = self.spare_tries.get(&of).map_or(0, |(tries, _)| *tries);
+        let wait = CIRCUIT_BUILD_TIMEOUT.saturating_mul(1 << tries.min(6));
+        self.spare_tries
+            .insert(of, (tries.saturating_add(1), now.saturating_add(wait)));
+    }
+
+    /// Starts the build of a spare circuit for each circuit that comes
+    /// near a margin of `NET-320` or `NET-321` (Part 3 §3.4.3): the same
+    /// exit, the same mode, and a fresh chain. The oldest circuit comes
+    /// first, and `SPARE_CIRCUITS_MAX` spares build at one time. When a
+    /// spare holds its three hops it takes the place of its circuit
+    /// ([`ClientNode::replace_circuit`]), thus the rotation ends no run and
+    /// blocks no send. A push-wake session builds none (`NET-099`). A
+    /// session of the group range builds none either: its runtime sends
+    /// each `GSUB`, and it starts a new session at `CircuitAged`. The
+    /// runtime calls this at each tick.
+    pub fn replace_aging<R: CryptoRng + ?Sized>(
+        &mut self,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        if self.wake
+            || self.range != Range::Queue
+            || self.resuming
+            || self.link.is_none()
+            || self.is_pausing()
+        {
+            return Ok(());
+        }
+        let old = CIRCUIT_MAX_AGE
+            .saturating_sub(CIRCUIT_AGE_MARGIN)
+            .saturating_sub(CIRCUIT_SPARE_LEAD);
+        let full = CIRCUIT_MAX_CELLS
+            .saturating_sub(CIRCUIT_CELL_MARGIN)
+            .saturating_sub(CIRCUIT_SPARE_CELLS);
+        let mut due: Vec<(u64, usize)> = Vec::new();
+        for (index, slot) in self.slots.iter().enumerate() {
+            let (Circuit::Ready(session), Some(born), Some(_)) =
+                (&slot.circuit, slot.born, slot.chain)
+            else {
+                continue;
+            };
+            let (sent, received) = session.cells();
+            let is_aging = now.saturating_sub(born) >= old || sent >= full || received >= full;
+            let is_started = self.spares.iter().any(|spare| spare.of == index);
+            let waits = self
+                .spare_tries
+                .get(&index)
+                .is_some_and(|(_, at)| now < *at);
+            if is_aging && !is_started && !waits {
+                due.push((born, index));
+            }
+        }
+        due.sort_unstable();
+        let mut result = Ok(());
+        for (_, index) in due {
+            if self.spares.len() >= SPARE_CIRCUITS_MAX {
+                break;
+            }
+            let started = self.start_spare(index, now, rng);
+            if started.is_err() {
+                result = started;
+            }
+        }
+        result
+    }
+
+    /// Starts the build of the spare circuit of the slot `of`, to the
+    /// relay where the chain of that slot ends: its queues live there.
+    fn start_spare<R: CryptoRng + ?Sized>(
+        &mut self,
+        of: usize,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let Some(old) = self.slots.get(of) else {
+            return Ok(());
+        };
+        let Some(exit) = old.chain.and_then(|chain| chain.last().copied()) else {
+            return Ok(());
+        };
+        let spare = Slot {
+            class: old.class,
+            ..Slot::empty(Some(exit))
+        };
+        // The build works on a circuit of the node, thus the spare is one
+        // for the time of this call alone.
+        let current = self.current;
+        self.clock = now;
+        self.slots.push(spare);
+        self.current = self.slots.len().saturating_sub(1);
+        let started = self.build_current(rng);
+        let spare = self.slots.pop();
+        self.current = current;
+        match spare {
+            Some(slot) if matches!(slot.circuit, Circuit::Building { .. }) => {
+                self.spares.push(Spare {
+                    slot,
+                    of,
+                    since: now,
+                });
+            }
+            // NET-033: no conformant chain to that relay. The circuit ends
+            // at its margin with `CircuitAged`.
+            _ => self.spare_failed(of, now),
+        }
+        started
+    }
+
+    /// The spare `spare` holds its three hops, and it takes the place of
+    /// the circuit of the slot `of`. The steps follow how a subscription
+    /// moves at a queue relay. One circuit holds the subscription of a
+    /// queue, and a `SUB` on a second circuit moves it there at once. The
+    /// relay then sends each record that no `ACK` covers on the new
+    /// circuit (`WIR-110`), and each later record there alone. Thus the
+    /// node first puts the new circuit in the slot and sends the `SUB` of
+    /// each queue on it. A record that both circuits carry is one `seq`,
+    /// and the queue takes it once. The old circuit stays for
+    /// `CIRCUIT_RETIRE_WAIT` for the answers that are on their way, and
+    /// its `DESTROY` leaves then. At that time the subscription is on the
+    /// new circuit, and the end of the old one ends none.
+    fn replace_circuit<R: CryptoRng + ?Sized>(
+        &mut self,
+        of: usize,
+        spare: Slot,
+        since: u64,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        self.spare_tries.remove(&of);
+        let Slot { circuit, chain, .. } = spare;
+        let (Circuit::Ready(mut new), Some(new_chain)) = (circuit, chain) else {
+            return Ok(());
+        };
+        let is_served = self.slots.get(of).is_some_and(Slot::is_ready);
+        if !is_served {
+            // The circuit of the slot ended first, and its own build
+            // serves it. The spare ends.
+            if let Ok(cell) = new.destroy_cell() {
+                self.send_cell(&cell)?;
+            }
+            return Ok(());
+        }
+        let slot = self.slots.get_mut(of).ok_or(Error::NoPath)?;
+        let old = core::mem::replace(&mut slot.circuit, Circuit::Ready(new));
+        let old_chain = slot.chain.replace(new_chain);
+        slot.born = Some(since);
+        slot.building_since = None;
+        if let (Circuit::Ready(mut session), Some(chain)) = (old, old_chain) {
+            // A command that waited for a cell of the old circuit leaves
+            // on it, and its answer comes back on it.
+            while let Some(cell) = session.next_cell()? {
+                self.send_cell(&cell)?;
+            }
+            self.retiring.push(Retiring {
+                session,
+                chain,
+                slot: of,
+                until: now.saturating_add(CIRCUIT_RETIRE_WAIT),
+            });
+        }
+        let current = self.current;
+        self.current = of;
+        let subscribed = self.subscribe_stored(now, rng);
+        self.current = current;
+        subscribed
+    }
+
+    /// A cell of a circuit that is no circuit of a slot: a spare under
+    /// build, or a circuit that a spare replaced. A cell of no circuit of
+    /// this node drops.
+    fn on_spare_cell<R: CryptoRng + ?Sized>(
+        &mut self,
+        cell: &[u8],
+        now: u64,
+        rng: &mut R,
+    ) -> Result<Vec<ClientEvent>, Error> {
+        let circ_id = cell.get(..16);
+        let names = |id: [u8; 16]| Some(id.as_slice()) == circ_id;
+        let building = self
+            .spares
+            .iter()
+            .position(|spare| spare.slot.circ_id().is_some_and(names));
+        if let Some(at) = building {
+            let Spare {
+                mut slot,
+                of,
+                since,
+            } = self.spares.remove(at);
+            let Circuit::Building { build, pending } =
+                core::mem::replace(&mut slot.circuit, Circuit::None)
+            else {
+                return Ok(Vec::new());
+            };
+            let chain = slot.chain;
+            let current = self.current;
+            self.slots.push(slot);
+            self.current = self.slots.len().saturating_sub(1);
+            let step = self.on_build_step(*build, *pending, cell, rng);
+            let slot = self.slots.pop();
+            self.current = current;
+            let slot = slot.ok_or(Error::NoPath)?;
+            match step {
+                Ok(BuildStep::Extended) => self.spares.push(Spare { slot, of, since }),
+                Ok(BuildStep::Ready) => self.replace_circuit(of, slot, since, now, rng)?,
+                // A fault of a spare build ends no run: the circuit of
+                // the slot serves on, and a later tick builds again.
+                Ok(BuildStep::Lost) | Err(_) => {
+                    // REL-171: a build that a hop failed is a forced
+                    // replacement.
+                    if let Some(chain) = chain {
+                        self.faults.forced_replacement(&chain, now);
+                    }
+                    self.spare_failed(of, now);
+                }
+            }
+            return Ok(Vec::new());
+        }
+        let Some(at) = self
+            .retiring
+            .iter()
+            .position(|held| names(held.session.circ_id()))
+        else {
+            return Ok(Vec::new());
+        };
+        let Some(held) = self.retiring.get_mut(at) else {
+            return Ok(Vec::new());
+        };
+        let Ok(events) = held.session.receive_cell(cell) else {
+            // NET-115: a failed check ends the circuit.
+            self.retiring.remove(at);
+            return Ok(Vec::new());
+        };
+        let (chain, slot) = (held.chain, held.slot);
+        // REL-163: a loop that left on the old chain counts for that chain.
+        let (loops, events): (Vec<CircuitEvent>, Vec<CircuitEvent>) = events
+            .into_iter()
+            .partition(|event| matches!(event, CircuitEvent::LoopReturned));
+        for _ in loops {
+            self.faults.loop_back(&chain, now);
+        }
+        // Each answer and each record belongs to the slot of the queues.
+        self.current = slot;
+        self.on_events(events, now, rng)
     }
 
     /// Builds again a circuit to the relay of a waiting record whose build
@@ -6021,27 +6393,8 @@ impl ClientNode {
         now: u64,
         rng: &mut R,
     ) -> Result<CoverSlot, Error> {
-        self.clock = now;
-        let contacts: Vec<[u8; 32]> = self.contacts.keys().copied().collect();
-        for contact in contacts {
-            let is_served = self
-                .queues_of(&contact)
-                .iter()
-                .any(|queue| self.slot_of(queue).is_some());
-            if is_served && self.acknowledge(&ContactId(contact), now, rng)? {
-                return Ok(CoverSlot::Acknowledgment);
-            }
-        }
-        let notify: Vec<[u8; 32]> = self
-            .notify
-            .keys()
-            .chain(self.rendezvous.keys())
-            .copied()
-            .collect();
-        for queue in notify {
-            if self.slot_of(&queue).is_some() && self.acknowledge_notify(&queue, now, rng)? {
-                return Ok(CoverSlot::Acknowledgment);
-            }
+        if self.on_ack_slot(now, rng)? {
+            return Ok(CoverSlot::Acknowledgment);
         }
         // NET-065, NET-071: a record of this node that a relay refused with
         // `LIMIT` or `BUSY` goes again in a slot, and at no timeout.
@@ -6108,6 +6461,41 @@ impl ClientNode {
         session.queue_cover(corr_id)?;
         self.pump()?;
         Ok(CoverSlot::Cover)
+    }
+
+    /// One slot of the cover clock that carries an acknowledgment or
+    /// nothing. The result says whether an `ACK` that was due took the
+    /// slot. The caller holds a later retransmission of a record of the
+    /// user, which comes after an acknowledgment and before each other
+    /// item (`NET-065`, item 3).
+    pub fn on_ack_slot<R: CryptoRng + ?Sized>(
+        &mut self,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<bool, Error> {
+        self.clock = now;
+        let contacts: Vec<[u8; 32]> = self.contacts.keys().copied().collect();
+        for contact in contacts {
+            let is_served = self
+                .queues_of(&contact)
+                .iter()
+                .any(|queue| self.slot_of(queue).is_some());
+            if is_served && self.acknowledge(&ContactId(contact), now, rng)? {
+                return Ok(true);
+            }
+        }
+        let notify: Vec<[u8; 32]> = self
+            .notify
+            .keys()
+            .chain(self.rendezvous.keys())
+            .copied()
+            .collect();
+        for queue in notify {
+            if self.slot_of(&queue).is_some() && self.acknowledge_notify(&queue, now, rng)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Sends again one record that a relay refused with `LIMIT` or `BUSY`.
@@ -6597,7 +6985,7 @@ impl ClientNode {
         let circ_id = cell.get(..16);
         let of_cell = |slot: &Slot| slot.circ_id().as_ref().map(<[u8; 16]>::as_slice) == circ_id;
         let Some(index) = self.slots.iter().position(of_cell) else {
-            return Ok(Vec::new());
+            return self.on_spare_cell(&cell, now, rng);
         };
         self.current = index;
         let circuit = core::mem::replace(&mut self.slot_mut()?.circuit, Circuit::None);
@@ -6756,6 +7144,29 @@ impl ClientNode {
             }
             _ => return Vec::new(),
         };
+        // A spare that a relay ended builds again at a later tick, and a
+        // replaced circuit that a relay ended first owes no `DESTROY`. Each
+        // circuit of a slot serves on.
+        if let Some(at) = self
+            .spares
+            .iter()
+            .position(|spare| spare.slot.circ_id() == Some(circ_id))
+        {
+            let spare = self.spares.remove(at);
+            if let Some(chain) = spare.slot.chain {
+                self.faults.forced_replacement(&chain, self.clock);
+            }
+            self.spare_failed(spare.of, self.clock);
+            return Vec::new();
+        }
+        if let Some(at) = self
+            .retiring
+            .iter()
+            .position(|held| held.session.circ_id() == circ_id)
+        {
+            self.retiring.remove(at);
+            return Vec::new();
+        }
         let of_circuit = |slot: &Slot| slot.circ_id() == Some(circ_id);
         let Some(slot) = self.slots.iter_mut().find(|slot| of_circuit(slot)) else {
             return Vec::new();
@@ -6770,13 +7181,29 @@ impl ClientNode {
 
     fn on_build_cell<R: CryptoRng + ?Sized>(
         &mut self,
-        mut build: CircuitBuild,
+        build: CircuitBuild,
         pending: Pending,
         cell: &[u8],
         now: u64,
         rng: &mut R,
     ) -> Result<Vec<ClientEvent>, Error> {
-        let lost = Ok(alloc::vec![ClientEvent::CircuitLost]);
+        match self.on_build_step(build, pending, cell, rng)? {
+            BuildStep::Lost => Ok(alloc::vec![ClientEvent::CircuitLost]),
+            BuildStep::Extended => Ok(Vec::new()),
+            BuildStep::Ready => self.circuit_ready(now, rng),
+        }
+    }
+
+    /// Takes one cell of the build of the current circuit: the next
+    /// `EXTEND` leaves, or the circuit holds its three hops.
+    fn on_build_step<R: CryptoRng + ?Sized>(
+        &mut self,
+        mut build: CircuitBuild,
+        pending: Pending,
+        cell: &[u8],
+        rng: &mut R,
+    ) -> Result<BuildStep, Error> {
+        let lost = Ok(BuildStep::Lost);
         let Ok((parsed, _)) = Cell::parse(cell) else {
             return lost;
         };
@@ -6794,7 +7221,7 @@ impl ClientNode {
             };
             build.push(&ss_hop).map_err(|_| Error::NoPath)?;
             self.extend(build, rng)?;
-            return Ok(Vec::new());
+            return Ok(BuildStep::Extended);
         }
         // NET-284: the session key of the circuit is the `er` of hop 3.
         let Ok((ss_hop, relay_session_pk)) = pending.finish_at_queue_relay(reply) else {
@@ -6808,7 +7235,7 @@ impl ClientNode {
             relay_session_pk,
             range,
         )));
-        self.circuit_ready(now, rng)
+        Ok(BuildStep::Ready)
     }
 
     /// The current circuit holds its three hops. Its stored queues take

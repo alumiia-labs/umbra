@@ -17,7 +17,7 @@ use zeroize::Zeroizing;
 
 use crate::{
     client::Client,
-    runtime::{Command, Ended, Update},
+    runtime::{Command, Ended, Prior, Update},
     ConversationId, Delivery, Error, MsgRef,
 };
 
@@ -203,10 +203,11 @@ impl Bridge {
         self.command(Command::InviteDevice)
     }
 
-    /// Ends each sync invitation that this run made for a device link
-    /// (Part 7 `DEV-290`): the link ended with no sync channel.
-    pub fn end_device_invitation(&self) -> Result<(), Error> {
-        self.command(Command::EndDeviceInvitation)
+    /// Ends each sync invitation of a device link that ended with no sync
+    /// channel (Part 7 `DEV-290`): the ones on `queues`, which the store
+    /// lists, and each one that this run asked for.
+    pub fn end_device_invitation(&self, queues: Vec<[u8; 32]>) -> Result<(), Error> {
+        self.command(Command::EndDeviceInvitation(queues))
     }
 
     /// Accepts the sync bundle of a provision. A [`NetEvent::DeviceLinked`]
@@ -309,6 +310,7 @@ impl Bridge {
                         contact: *contact,
                         app,
                         tag,
+                        prior: Prior::default(),
                     });
                 }
                 continue;
@@ -319,11 +321,23 @@ impl Bridge {
             if client.waits_for_room(&message, now)? {
                 continue;
             }
+            // NET-219 to NET-221: the store counts each send of the record
+            // across the runs, and a record at a bound fails with no send.
+            if client.fail_stopped(&message, now, rng)? {
+                continue;
+            }
+            let (sends, first) = client.send_counts(&message)?;
+            let prior = Prior {
+                sends,
+                first,
+                in_slot: client.takes_slot(&message),
+            };
             let taken = self.contacts.get(&conversation).map(|contact| {
                 let send = Command::Send {
                     contact: *contact,
                     app: app.clone(),
                     tag,
+                    prior,
                 };
                 self.commands.send(send).is_ok()
             });
@@ -367,6 +381,7 @@ impl Bridge {
                 contact,
                 app: Zeroizing::new(send.app),
                 tag,
+                prior: Prior::default(),
             };
             if self.commands.send(command).is_ok() {
                 self.sync_sent.insert(tag, send.peer);
@@ -501,6 +516,13 @@ impl Bridge {
                 // A message that the user deleted since takes no index.
                 if let Some(message) = self.sent.get(&tag) {
                     let _ = client.note_send_index(message, index, rng);
+                    // NET-219, NET-220: each seal is one send of the
+                    // record to its contact, and the store counts it. A
+                    // record that goes to the owner of the channels on a
+                    // sync channel has the ARQ of that channel (`DEV-073`).
+                    if !self.sync_sent.contains_key(&tag) {
+                        let _ = client.note_send(message, now_ms / 1_000, rng);
+                    }
                 }
                 None
             }
@@ -538,7 +560,8 @@ impl Bridge {
                 client.clock_check(now_ms, rng);
                 None
             }
-            // NET-218: a record that a full queue refused goes again.
+            // NET-218: a record that a full queue refused goes again, in a
+            // slot of the cover clock (`NET-071`).
             Update::Tick => {
                 if client.resend_held(now_ms / 1_000)? {
                     self.flush(client, rng)?;

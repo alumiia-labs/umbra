@@ -2361,23 +2361,9 @@ impl Group {
     }
 
     /// The admit for the member at `index`, with the slot key of its join
-    /// and the two replicas (`GRP-312`, `GRP-233`), at the roster epoch
-    /// that stands.
-    pub fn admit_for(
-        &self,
-        index: u16,
-        history_window_seconds: u64,
-        descriptor: &[u8],
-        now: u64,
-    ) -> Result<Vec<u8>, Error> {
-        self.admit_at(
-            index,
-            self.roster.epoch_index(),
-            history_window_seconds,
-            descriptor,
-            [0; 2],
-            now,
-        )
+    /// and the two replicas (`GRP-312`), at the roster epoch that stands.
+    pub fn admit_for(&self, index: u16, descriptor: &[u8], now: u64) -> Result<Vec<u8>, Error> {
+        self.admit_at(index, self.roster.epoch_index(), descriptor, [0; 2], now)
     }
 
     /// The admit at `roster_epoch`, the roster epoch of the add and of its
@@ -2385,12 +2371,10 @@ impl Group {
     /// admit, and the joiner checks the two against each other. `seqs` is
     /// the `seq` of the add at each replica, from its `GSEQ` (`GRP-311`),
     /// and the joiner subscribes from there.
-    #[allow(clippy::too_many_arguments)]
     pub fn admit_at(
         &self,
         index: u16,
         roster_epoch: u32,
-        history_window_seconds: u64,
         descriptor: &[u8],
         seqs: [u32; 2],
         now: u64,
@@ -2404,10 +2388,9 @@ impl Group {
         for (reference, seq) in refs.iter_mut().zip(seqs) {
             reference.seq_of_add = seq;
         }
-        let slot = admit_slot(slot_of(now), current.start_slot(), history_window_seconds);
+        let slot = admit_slot(slot_of(now), current.start_slot());
         // GRP-423: an admin that joined inside the epoch holds no `K_e`,
-        // thus it derives from its own chain, and the history window ends
-        // at the oldest slot of that chain.
+        // thus it derives from its own chain.
         let started;
         let (chain, slot) = if current.holds_secret() {
             started = current.secret().start(
@@ -2540,7 +2523,7 @@ mod tests {
             Applied::Added(1)
         );
 
-        let admit_bytes = creator.admit_for(1, 0, b"", now).unwrap();
+        let admit_bytes = creator.admit_for(1, b"", now).unwrap();
         let admit_control = GroupControl::parse(&admit_bytes).unwrap();
         assert_eq!(admit_control.control_type, ControlType::Invitation);
         let invitation =
@@ -2711,7 +2694,7 @@ mod tests {
             Applied::Added(2)
         );
         member.apply_control(&control, 0, now).unwrap();
-        let admit_bytes = creator.admit_for(2, 0, b"", now).unwrap();
+        let admit_bytes = creator.admit_for(2, b"", now).unwrap();
         let admit_control = GroupControl::parse(&admit_bytes).unwrap();
         let invitation =
             umbra_wire::group::control::GroupInvitation::parse(admit_control.payload).unwrap();
@@ -2726,12 +2709,44 @@ mod tests {
     }
 
     #[test]
+    fn the_admit_hands_the_key_of_the_join_slot_and_of_no_slot_before_it() {
+        // GRP-312: a joiner reads no record from before its add. The admit
+        // two days into the epoch names the slot of the admit, and its key
+        // is the key of that slot.
+        let created = 1_700_000_000;
+        let now = created + 2 * 86_400;
+        let (creator, _, _) = pair_at(created, now);
+        let admit_bytes = creator.admit_for(2, b"", now).unwrap();
+        let control = GroupControl::parse(&admit_bytes).unwrap();
+        let invitation =
+            umbra_wire::group::control::GroupInvitation::parse(control.payload).unwrap();
+        let umbra_wire::group::control::InvitationStage::Admit(admit) = invitation.stage else {
+            panic!("the record is no admit");
+        };
+        assert_eq!(admit.t_join, slot_of(now));
+        assert!(admit.t_e < admit.t_join);
+        let current = creator.epochs.current().unwrap();
+        let chain =
+            current
+                .secret()
+                .start(creator.group_id(), current.epoch(), current.start_slot());
+        assert_eq!(
+            chain.slot_key(admit.t_join).unwrap().expose(),
+            &admit.slot_key
+        );
+        assert_ne!(
+            chain.slot_key(admit.t_join - 1).unwrap().expose(),
+            &admit.slot_key
+        );
+    }
+
+    #[test]
     fn an_admin_that_joined_inside_the_epoch_admits_a_member_that_reads() {
         // GRP-423: the member of index 1 joined inside the epoch and holds
         // no `K_e`; its admit comes from its own chain, and the third member
         // reads the records of the creator after it.
         // The member joins two days into the epoch, thus its chain starts
-        // after `t_e`, and the history window stops at its join.
+        // after `t_e`.
         let created = 1_700_000_000;
         let now = created + 2 * 86_400;
         let (mut creator, mut member, _) = pair_at(created, now);
@@ -2751,8 +2766,7 @@ mod tests {
         let add_hash = control.epoch_hash();
         creator.apply_control(&control, 0, later).unwrap();
         member.apply_control(&control, 0, later).unwrap();
-        // A history window reaches no slot before the chain of the member.
-        let admit_bytes = member.admit_for(2, 7 * 86_400, b"", later).unwrap();
+        let admit_bytes = member.admit_for(2, b"", later).unwrap();
         let invitation = umbra_wire::group::control::GroupInvitation::parse(
             GroupControl::parse(&admit_bytes).unwrap().payload,
         )
@@ -3363,7 +3377,7 @@ mod tests {
             creator.apply_control(&control, 0, now).unwrap(),
             Applied::Added(2)
         );
-        let admit_bytes = creator.admit_for(2, 0, b"", now).unwrap();
+        let admit_bytes = creator.admit_for(2, b"", now).unwrap();
         let invitation = umbra_wire::group::control::GroupInvitation::parse(
             GroupControl::parse(&admit_bytes).unwrap().payload,
         )
@@ -3577,7 +3591,7 @@ mod tests {
         let control = GroupControl::parse(&add).unwrap();
         let add_hash = control.epoch_hash();
         creator.apply_control(&control, 0, now).unwrap();
-        let admit = creator.admit_for(3, 0, b"", now).unwrap();
+        let admit = creator.admit_for(3, b"", now).unwrap();
         let invitation = umbra_wire::group::control::GroupInvitation::parse(
             GroupControl::parse(&admit).unwrap().payload,
         )
@@ -3702,7 +3716,7 @@ mod tests {
             last = Some((index, add_hash, keys));
         }
         let (index, add_hash, keys) = last.unwrap();
-        let admit = creator.admit_for(index, 0, b"", now).unwrap();
+        let admit = creator.admit_for(index, b"", now).unwrap();
         let invitation = umbra_wire::group::control::GroupInvitation::parse(
             GroupControl::parse(&admit).unwrap().payload,
         )

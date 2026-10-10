@@ -59,6 +59,17 @@ impl Arq {
         }
     }
 
+    /// A record that an earlier run sent `attempts` times, the first time
+    /// at `first_send`. The two bounds count across the runs (`NET-219`,
+    /// `NET-220`).
+    pub const fn resumed(attempts: u32, first_send: Option<u64>) -> Self {
+        Arq {
+            first_send,
+            attempts,
+            state: Delivery::Queued,
+        }
+    }
+
     /// The state.
     pub fn state(&self) -> Delivery {
         self.state
@@ -198,6 +209,26 @@ mod tests {
         c.read();
         assert_eq!(c.state(), Delivery::Read);
         assert!(!c.may_send(1));
+    }
+
+    #[test]
+    fn the_two_bounds_count_from_the_sends_of_an_earlier_run() {
+        // NET-219: 15 sends of an earlier run leave one send.
+        let mut a = Arq::resumed(SEND_MAX_ATTEMPTS - 1, Some(100));
+        assert!(a.may_send(200));
+        a.sent(200);
+        assert!(!a.may_send(201));
+        assert_eq!(a.state(), Delivery::Failed(FailCause::Attempts));
+        // NET-220: the 7 days run from the first send of the record, and
+        // not from the first send of this run.
+        let mut b = Arq::resumed(1, Some(100));
+        assert!(b.may_send(100 + SEND_GIVE_UP - 1));
+        b.sent(100 + SEND_GIVE_UP - 1);
+        assert!(!b.may_send(100 + SEND_GIVE_UP));
+        assert_eq!(b.state(), Delivery::Failed(FailCause::GiveUp));
+        // A record that no run sent starts as a new one.
+        let mut c = Arq::resumed(0, None);
+        assert!(c.may_send(u64::MAX));
     }
 
     #[test]

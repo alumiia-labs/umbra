@@ -80,6 +80,9 @@ pub(super) const SYNC_BUNDLE_SETTING: &[u8] = b"device-sync-bundle";
 /// The existing device of a link and its causal counter at the snapshot
 /// (`DEV-311`).
 pub(super) const LINK_FLOOR_SETTING: &[u8] = b"device-link-floor";
+/// The queue of each sync invitation of this device that waits for its
+/// flight 1 (`DEV-290`), 32 bytes each. The setting stays on the device.
+pub(super) const DEVICE_INVITES_SETTING: &[u8] = b"device-invites";
 
 /// One device of the set, as a view shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -932,6 +935,52 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 added_epoch: entry.added_epoch,
             })
             .collect())
+    }
+
+    /// The queue of each sync invitation that waits for its flight 1
+    /// (`DEV-290`). The store holds the list, thus a link that ended with
+    /// its run, or under a lock, leaves its invitation to the next run.
+    pub fn device_invitations(&self) -> Result<Vec<[u8; 32]>, Error> {
+        let held = self.setting(DEVICE_INVITES_SETTING)?.unwrap_or_default();
+        Ok(held.as_chunks::<32>().0.to_vec())
+    }
+
+    /// A relay made the queue of a sync invitation. The runtime calls this
+    /// before the batch that stores the invitation, thus no stored
+    /// invitation of a device is outside the list.
+    pub fn note_device_invitation<R: CryptoRng + ?Sized>(
+        &mut self,
+        queue: &[u8; 32],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let mut held = self.device_invitations()?;
+        if held.contains(queue) {
+            return Ok(());
+        }
+        held.push(*queue);
+        self.put_setting(DEVICE_INVITES_SETTING, &held.concat(), rng)
+    }
+
+    /// The invitations on `ended` are gone from the node: their handshake
+    /// finished, or the node retired them. The list names them no more.
+    pub(super) fn forget_device_invitations<R: CryptoRng + ?Sized>(
+        &mut self,
+        ended: &[[u8; 32]],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let held = self.device_invitations()?;
+        let kept: Vec<[u8; 32]> = held
+            .iter()
+            .filter(|queue| !ended.contains(queue))
+            .copied()
+            .collect();
+        if kept.len() == held.len() {
+            return Ok(());
+        }
+        if kept.is_empty() {
+            return self.remove_setting(DEVICE_INVITES_SETTING);
+        }
+        self.put_setting(DEVICE_INVITES_SETTING, &kept.concat(), rng)
     }
 
     /// The device whose sync channel opens next: the next handshake that

@@ -4310,6 +4310,18 @@ impl Persist for HandleStore {
         committed
     }
 
+    fn device_invitation(&mut self, queue: &[u8; 32]) -> bool {
+        let Some(handle) = self.handle.upgrade() else {
+            return false;
+        };
+        let mut inner = locked(&handle.inner);
+        inner.run == self.run
+            && inner
+                .client
+                .note_device_invitation(queue, &mut OsRng)
+                .is_ok()
+    }
+
     fn commit_hello(&mut self, queue: &[u8; 32], envelope: &[u8]) -> Option<bool> {
         let Some(handle) = self.handle.upgrade() else {
             return Some(false);
@@ -5184,6 +5196,7 @@ impl Handle {
                 faults: inner_faults,
                 pending_faults,
                 wake_next,
+                link,
                 ..
             } = &mut *inner;
             // The node continues each contact and each invitation of the
@@ -5290,6 +5303,12 @@ impl Handle {
             // flush of its bridge.
             if core::mem::take(wake_next) {
                 running.wake()?;
+            }
+            // DEV-290: the sync invitation of a link that ended with its
+            // run, or under a lock, retires in this run.
+            let stale = link::stale_invitations(client, link.as_ref());
+            if !stale.is_empty() {
+                running.end_device_invitation(stale)?;
             }
             client.requeue_waiting()?;
             // Each transfer that an earlier run left open starts again.

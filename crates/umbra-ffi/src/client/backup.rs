@@ -378,6 +378,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 super::devices::PENDING_PEER_SETTING,
                 super::devices::SYNC_BUNDLE_SETTING,
                 super::devices::LINK_FLOOR_SETTING,
+                super::devices::DEVICE_INVITES_SETTING,
                 RESTORE_STALE_SETTING,
             ];
             return Ok(local
@@ -424,6 +425,26 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
         }
         Ok(false)
+    }
+
+    /// Whether a backup and the snapshot of a link carry the list of the
+    /// sync invitations at `now`, and whether they carry another setting.
+    #[cfg(test)]
+    pub(crate) fn backup_rows_for_test(&self, now: u64) -> (bool, bool) {
+        let Ok(open) = self.open_ref() else {
+            return (false, false);
+        };
+        let list = open
+            .store
+            .row_id(super::SETTINGS, super::devices::DEVICE_INVITES_SETTING);
+        let rows = self
+            .carried_rows(now, &[super::SETTINGS])
+            .unwrap_or_default();
+        let is_list = |row: &BackupRow| matches!(row, BackupRow::Put { row, .. } if *row == list);
+        (
+            rows.iter().any(is_list),
+            rows.iter().any(|row| !is_list(row)),
+        )
     }
 
     /// Each row of `tables` that a backup carries at `now`.

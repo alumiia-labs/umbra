@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 7: Device Sets, History Sync, and Revocation
 
 **Status:** Draft
-**Version:** 0.13.0
-**Date:** 2026-10-09
+**Version:** 0.14.0
+**Date:** 2026-10-10
 
 ---
 
@@ -549,13 +549,14 @@ Provision {                      // sealed under the seal key, XChaCha20-Poly130
   device holds no pending device. The channel of that contact ends as the
   channel of a revoked device ends. No
   view shows it, no record goes on it, and no later run reads its queue.
-  **Limit of v1.** The existing device holds the list of its
-  sync invitations in the memory of one run. The existing device does not
-  retire an invitation of a link that ended with its run, or while the
-  client was locked. That invitation
-  stays until `INVITE_TTL` of Part 4 ends it (`IDN-127`). The refusal above
-  covers that time, because the pending device leaves the store at the end
-  of the link, or at the next unlock. **[DEV-297]** From the confirmation of
+  The existing device MUST hold the list of its sync invitations in its
+  store, from the moment a relay makes the queue of one. A backup of Part 4
+  §4.7.2 and the snapshot of a link carry no row of that list. A link that
+  ends with its run, or while the client is locked, sends no `DEL` at that
+  time. The existing device MUST retire each invitation of such a link at
+  the start of its next run, and at an unlock when a run is up. The
+  refusal above covers the time between, because the pending device leaves
+  the store at the end of the link, or at the next unlock. **[DEV-297]** From the confirmation of
   `DEV-283`, the existing device MUST retain each record that it publishes
   for the new device, and it MUST send each one when that sync channel
   opens, under the pacing of §7.5.5. A record between the snapshot and the
@@ -1523,8 +1524,7 @@ signals the quota, the client MUST show a delivery failure to the user.
 2. **[DEV-115]** A history transfer MUST carry the tombstone set for the same window. A
    history transfer happens at a device link, at a scope change, and at a backup
    restore. It also happens at the re-establishment of a sync channel that a
-   relay deleted under `QUEUE_IDLE_TTL`. The history window of Part 11 §11.8
-   that an admin turns on is also a history transfer.
+   relay deleted under `QUEUE_IDLE_TTL`.
 3. **[DEV-116]** A restore MUST apply the tombstone set that the backup or the archive
    carries. Part 4 §4.7.2 gives the backup, and §7.6.1 gives the archive. The
    client can hold tombstones that postdate that epoch. **[DEV-117]** In that case the client
@@ -1663,7 +1663,7 @@ A conversation timer removes a message from each device after a period. Part 6
   other than the local database of the device. The backup of Part 4 §4.7.2, the
   archive of §7.6.1, and an export are such stores.
 - **[DEV-216]** A client MUST NOT put such a record in a history transfer of
-  §7.5.6 rule 2. The history window of Part 11 §11.8 is one such transfer.
+  §7.5.6 rule 2.
 
 > *Cause.* A backup that held a timed record would return that record at a
 > restore, after the period ended. Part 4 §4.7.2 holds a full object for

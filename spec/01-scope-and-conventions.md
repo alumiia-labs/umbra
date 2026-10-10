@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 1: Scope, Conventions, and Terminology
 
 **Status:** Draft
-**Version:** 0.13.0
-**Date:** 2026-10-09
+**Version:** 0.14.0
+**Date:** 2026-10-10
 
 ---
 
@@ -345,6 +345,7 @@ examples. Without the table below a maintainer finds the dependents by hand.
 | `EDIT_WINDOW`, `EDIT_MAX`, `DELETE_RATE_LIMIT` | Part 7 §7.5.6 | Part 14 §14.6.1 |
 | `VOICE_MAX_SECONDS` | Part 12 §12.7 | Part 14 §14.6.4 |
 | `CIRCUIT_BUILD_TIMEOUT` | Part 3 §3.4.3 | Part 11 §11.2.2 |
+| `CIRCUIT_SPARE_LEAD`, `CIRCUIT_RETIRE_WAIT` | Part 3 §3.4.3 | — |
 | `SWEEP_SPREAD` | Part 7 §7.5.6 | Part 4 §4.5.1 |
 | `SYNC_MAX_AGE` | Part 7 §7.8 | Part 2 §2.4, Part 6 §6.6 |
 | `SYNC_ACK_BATCH`, `SYNC_ACK_MAX_DELAY`, `OWNER_CLAIM_MAX` | Part 7 §7.8 | Part 3 §3.12 |
@@ -359,7 +360,6 @@ examples. Without the table below a maintainer finds the dependents by hand.
 | `GROUP_INDEX_MAX`, `ROLE_HOLDER_MAX` | Part 11 §11.10 | Part 6 §6.6.3 |
 | `GROUP_ALL_NOTIFY_MAX` | Part 11 §11.10 | Part 2 §2.4, Part 7 §7.5.9, Part 8 §8.5 |
 | `GROUP_SILENT_EVICT`, `PRESENCE_INTERVAL` | Part 11 §11.10 | Part 3 §3.2.7, Part 3 §3.12 |
-| `HISTORY_WINDOW` | Part 11 §11.10 | Part 6 §6.6.3 |
 | `GROUP_RETENTION` | Part 3 §3.2.7 | Part 2 §2.4, Part 2 §2.7, Part 11 §11.2.3, Part 11 §11.8, Part 15 §15.1 |
 | `GROUP_QUEUE_QUOTA`, `GROUP_IDLE_TTL` | Part 3 §3.2.7 | Part 11 §11.2.3, Part 15 §15.1 |
 | `GROUP_POST_RATE` | Part 3 §3.2.7 | Part 6 §6.4.5, Part 11 §11.3.4, Part 13 §13.2 |

@@ -2374,7 +2374,7 @@ fn two_members_talk_in_a_group_over_the_relays_of_a_signed_network() {
         creator.apply_control(&add_control, 0, now).unwrap(),
         Applied::Added(1)
     );
-    let admit = creator.admit_for(1, 0, b"", now).unwrap();
+    let admit = creator.admit_for(1, b"", now).unwrap();
     let admit_control = umbra_wire::group::control::GroupControl::parse(&admit).unwrap();
     let invitation =
         umbra_wire::group::control::GroupInvitation::parse(admit_control.payload).unwrap();

@@ -1357,6 +1357,68 @@ mod tests {
     }
 
     #[test]
+    fn a_sub_on_a_second_circuit_moves_the_subscription_and_loses_no_record() {
+        let mut bench = Bench::new();
+        let (ids, qr, qs) = bound_queue(&mut bench);
+        let record = vec![0x55; Bucket::B0.l6_record()];
+        let of = |replies: &[Reply]| -> Vec<CircuitKey> {
+            replies.iter().map(|reply| reply.circuit).collect()
+        };
+        bench.send(Cmd::Sub, ids.recipient_id, &[], &qr).unwrap();
+        let replies = bench.send(Cmd::Send, ids.sender_id, &record, &qs).unwrap();
+        assert_eq!(of(&replies), [CIRCUIT, CIRCUIT]);
+
+        // NET-352: the client builds a spare circuit and sends the `SUB`
+        // of the queue on it. The subscription moves there, and the record
+        // that no `ACK` covers goes out on the new circuit (`WIR-110`).
+        let spare = CircuitKey {
+            link: 2,
+            circ_id: [8; 16],
+        };
+        let mut session = Session::for_circuit(&[8; 16], StaticSecret::from([10; 32]));
+        let mut command = Command {
+            cmd: Cmd::Sub,
+            corr_id: [0xC8; 16],
+            queue_id: ids.recipient_id,
+            auth: [0; 32],
+            payload: &[],
+        };
+        let key = CommandAuthKey::derive(&qr, &session.relay_session_pk()).unwrap();
+        command.sign(&key, b"").unwrap();
+        let accepts = Accepts::CrossRelay(&bench.issuer);
+        let replies = bench
+            .service
+            .handle(
+                spare,
+                &mut session,
+                &mut bench.drains,
+                &mut bench.gate,
+                &accepts,
+                &command,
+                NOW + 1,
+                &mut bench.rng,
+            )
+            .unwrap();
+        assert_eq!(of(&replies), [spare]);
+        assert_eq!(payloads(&replies)[0].0, Cmd::Msg);
+        assert_eq!(bench.service.subscribers[&ids.recipient_id], spare);
+
+        // A later record goes on the new circuit alone: one `MSG` there,
+        // and the `QUOTA` to the circuit of the sender.
+        let replies = bench.send(Cmd::Send, ids.sender_id, &record, &qs).unwrap();
+        assert_eq!(of(&replies).iter().filter(|to| **to == spare).count(), 1);
+        assert_eq!(replies.len(), 2);
+
+        // The old circuit ends with its `DESTROY`. The subscription stays,
+        // thus the next record takes no push (`NTF-128`).
+        bench.service.circuit_closed(&CIRCUIT, NOW + 2);
+        assert_eq!(bench.service.subscribers[&ids.recipient_id], spare);
+        bench.send(Cmd::Send, ids.sender_id, &record, &qs).unwrap();
+        bench.service.push_tick(NOW + 3, &mut Rng(10));
+        assert!(bench.service.take_ndr_pushes().is_empty());
+    }
+
+    #[test]
     fn a_subscription_that_ends_before_the_ack_gives_no_push() {
         let mut bench = Bench::new();
         let (ids, qr, qs) = bound_queue(&mut bench);

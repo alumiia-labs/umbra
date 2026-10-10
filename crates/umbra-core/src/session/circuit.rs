@@ -254,6 +254,13 @@ impl CircuitSession {
         self.seal_cell(bucket, CellCommand::Loop, &[])
     }
 
+    /// The `DESTROY` cell of this circuit, in the shape of a `B0` cell. The
+    /// relay at the end of the chain ends its part at it (Part 3
+    /// `NET-322`), and with it each subscription of the circuit.
+    pub fn destroy_cell(&mut self) -> Result<Vec<u8>, Error> {
+        self.seal_cell(Bucket::B0, CellCommand::Destroy, &[])
+    }
+
     /// The loop cell of a probe of an isolation query, and the tag that each
     /// hop reads, hop 1 first (Part 10 `REL-110`, `REL-111`). The cell is a
     /// loop of the common shape, thus no relay tells it from a cover cell.

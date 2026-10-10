@@ -2430,3 +2430,241 @@ fn a_circuit_pause_waits_behind_the_forward_cells_of_its_circuit() {
     assert_eq!(paced(&network).len(), left);
     assert_eq!(network.relays[0].sessions_parked(), 1);
 }
+
+/// Part 3 `NET-065`: a later retransmission of a record of the user comes
+/// after an acknowledgment and before a link-fault report. The runtime
+/// holds the record, and it asks the node for the slot of an
+/// acknowledgment alone.
+#[test]
+fn the_slot_of_a_later_retransmission_gives_way_to_an_acknowledgment_alone() {
+    use umbra_crypto::seal;
+    use umbra_queue::params::RECEIPT_MIN_DELAY;
+
+    const SENDER: usize = 0;
+    const CLIENT: usize = 1;
+    let mut network = Network::new();
+    let (peer_of_sender, _) = contacts(&mut network);
+    let authority = network.add_client(0x52);
+    network.settle();
+    network.clients[authority]
+        .make_report_queue(&mut Rng(1))
+        .unwrap();
+    network.settle();
+    let events = network.take_events(authority);
+    let Some(ClientEvent::ReportQueue { address, .. }) = events
+        .iter()
+        .find(|event| matches!(event, ClientEvent::ReportQueue { .. }))
+    else {
+        panic!("{events:?}");
+    };
+    let address: [u8; 129] = address.as_slice().try_into().unwrap();
+    let report_pk = seal::public_of(&Secret::new([0x5A; 32]));
+
+    // A link-fault report is due at the client, and no acknowledgment.
+    let chain = [[0x11; 32], [0x12; 32], [0x13; 32]];
+    let now = network.now;
+    let faults = network.clients[CLIENT].faults_mut();
+    faults.forced_replacement(&chain, now);
+    faults.forced_replacement(&chain, now);
+    network.clients[CLIENT].set_report_queues(vec![(address, report_pk)]);
+    // The acknowledgments of the handshake go first.
+    while network.clients[CLIENT]
+        .on_ack_slot(now, &mut Rng(2))
+        .unwrap()
+    {}
+    network.settle();
+    // The slot is free for the retransmission: the report waits behind it,
+    // and the call sends no cell.
+    let now = network.now;
+    let taken = network.clients[CLIENT].on_ack_slot(now, &mut Rng(2));
+    assert!(!taken.unwrap());
+    assert!(network.clients[CLIENT].take_capsules().is_empty());
+
+    // A record arrives, and its acknowledgment is due after the floor of
+    // `NET-050`. That acknowledgment takes the slot before the record.
+    network.clients[SENDER]
+        .send(&peer_of_sender, &text(1, "a record"), now, &mut Rng(3))
+        .unwrap();
+    network.settle();
+    let got = network.take_events(CLIENT);
+    assert!(got
+        .iter()
+        .any(|event| matches!(event, ClientEvent::Message { .. })));
+    let now = network.now;
+    let taken = network.clients[CLIENT].on_ack_slot(now, &mut Rng(4));
+    assert!(!taken.unwrap());
+    let due = now + RECEIPT_MIN_DELAY;
+    let taken = network.clients[CLIENT].on_ack_slot(due, &mut Rng(5));
+    assert!(taken.unwrap());
+    let taken = network.clients[CLIENT].on_ack_slot(due, &mut Rng(6));
+    assert!(!taken.unwrap());
+    // The report is still due, and a slot with no retransmission has it.
+    let slot = network.clients[CLIENT]
+        .on_cover_slot(true, None, None, due, &mut Rng(7))
+        .unwrap();
+    assert_eq!(slot, CoverSlot::Report);
+}
+
+/// One turn of the network with the tick of one client, as its runtime
+/// gives it: the build timeouts, and the spare of each circuit near a
+/// margin. The result is each event of the tick.
+fn step_with_tick(network: &mut Network, client: usize) -> Vec<ClientEvent> {
+    let now = network.now;
+    let events = network.clients[client].on_tick(now);
+    network.clients[client]
+        .replace_aging(now, &mut Rng(now))
+        .unwrap();
+    network.step();
+    events
+}
+
+/// Part 3 §3.4.3, `NET-320`: a spare takes the place of a circuit before
+/// its age margin. The run goes on, each queue moves to the new circuit
+/// with no time with no subscription, and no record is lost or doubled.
+#[test]
+fn a_spare_takes_the_place_of_a_circuit_near_its_age_and_the_run_goes_on() {
+    use umbra_core::session::node::{CIRCUIT_AGE_MARGIN, CIRCUIT_RETIRE_WAIT, CIRCUIT_SPARE_LEAD};
+    use umbra_onion::CIRCUIT_MAX_AGE;
+    const ALICE: usize = 0;
+    const BOB: usize = 1;
+    let mut network = Network::new();
+    let (_, alice_at_bob) = contacts(&mut network);
+    // A record that no subscription takes gives a push, thus a queue with
+    // no subscription shows.
+    bind_first_queue(&mut network, ALICE);
+    let start = network.now;
+    assert!(network.clients[ALICE].on_tick(start).is_empty());
+
+    // Alice holds one record with no `ACK` yet: no slot of the cover
+    // clock came. The relay holds it for the next subscription.
+    network.clients[BOB]
+        .send(&alice_at_bob, &text(1, "before"), start, &mut Rng(8))
+        .unwrap();
+    network.settle();
+    assert_eq!(bodies(&network.take_events(ALICE)), [b"before".to_vec()]);
+    let served = held(&network);
+    let exits = paced(&network);
+
+    // One second before the lead no spare builds.
+    let margin = start + CIRCUIT_MAX_AGE - CIRCUIT_AGE_MARGIN;
+    network.now = margin - CIRCUIT_SPARE_LEAD - 1;
+    assert!(step_with_tick(&mut network, ALICE).is_empty());
+    assert_eq!(held(&network), served);
+
+    // At the lead the spare of each circuit of Alice builds, and it takes
+    // the place of its circuit. No event ends the run.
+    let mut events = Vec::new();
+    for _ in 0..24 {
+        events.extend(step_with_tick(&mut network, ALICE));
+    }
+    assert!(events.is_empty(), "{events:?}");
+    assert!(held(&network)[2] > served[2]);
+    assert_ne!(paced(&network), exits);
+    // WIR-110: the relay sent the record with no `ACK` again on the new
+    // circuit. Its `seq` is the one that Alice holds, and no second record
+    // comes of it.
+    assert!(bodies(&network.take_events(ALICE)).is_empty());
+
+    // The old circuit still stands, and the queue reads on the new one: a
+    // record arrives one time, and no push leaves.
+    let now = network.now;
+    network.clients[BOB]
+        .send(&alice_at_bob, &text(2, "between"), now, &mut Rng(9))
+        .unwrap();
+    for _ in 0..12 {
+        events.extend(step_with_tick(&mut network, ALICE));
+    }
+    assert_eq!(bodies(&network.take_events(ALICE)), [b"between".to_vec()]);
+    assert!(network.pushes.is_empty());
+
+    // The old circuit ends with its `DESTROY` after the wait, and the
+    // exit holds the count of before. The end of it ends no subscription.
+    network.now += CIRCUIT_RETIRE_WAIT;
+    for _ in 0..12 {
+        events.extend(step_with_tick(&mut network, ALICE));
+    }
+    assert_eq!(held(&network)[2], served[2]);
+    let now = network.now;
+    network.clients[BOB]
+        .send(&alice_at_bob, &text(3, "after"), now, &mut Rng(10))
+        .unwrap();
+    for _ in 0..12 {
+        events.extend(step_with_tick(&mut network, ALICE));
+    }
+    assert_eq!(bodies(&network.take_events(ALICE)), [b"after".to_vec()]);
+    assert!(network.pushes.is_empty());
+
+    // NET-320: the margin of the first circuits passes, and no circuit of
+    // Alice is that old. The run did not end.
+    network.now = margin + 1;
+    events.extend(step_with_tick(&mut network, ALICE));
+    assert!(events.is_empty(), "{events:?}");
+    // The acknowledgment of the three records leaves on the new circuit.
+    let due = network.now + RECEIPT_MIN_DELAY;
+    assert!(network.clients[ALICE]
+        .on_ack_slot(due, &mut Rng(11))
+        .unwrap());
+}
+
+/// Part 3 `NET-099`: a push-wake session builds no spare circuit. Its
+/// circuit ends the run at the margin, as `NET-320` requires.
+#[test]
+fn a_push_wake_session_builds_no_spare_circuit() {
+    use umbra_core::session::node::{CIRCUIT_AGE_MARGIN, CIRCUIT_SPARE_LEAD};
+    use umbra_onion::CIRCUIT_MAX_AGE;
+    let mut network = Network::new();
+    network.settle();
+    network.take_events(0);
+    let start = network.now;
+    assert!(network.clients[0].on_tick(start).is_empty());
+    let served = held(&network);
+    network.clients[0].set_wake(true);
+    let margin = start + CIRCUIT_MAX_AGE - CIRCUIT_AGE_MARGIN;
+    network.now = margin - CIRCUIT_SPARE_LEAD;
+    for _ in 0..12 {
+        assert!(step_with_tick(&mut network, 0).is_empty());
+    }
+    assert_eq!(held(&network), served);
+    network.now = margin;
+    assert_eq!(step_with_tick(&mut network, 0), [ClientEvent::CircuitAged]);
+}
+
+/// Part 3 `NET-321`: a spare takes the place of a circuit before its cell
+/// margin. The pacing of the exit counts one cell each step toward the
+/// client, and no circuit of the client reaches the margin.
+#[test]
+fn a_spare_takes_the_place_of_a_circuit_near_its_cells() {
+    use umbra_onion::CIRCUIT_MAX_CELLS;
+    let mut network = Network::new();
+    let (_, alice_at_bob) = contacts(&mut network);
+    let now = network.now;
+    network.clients[0]
+        .on_cover_slot(true, None, None, now, &mut Rng(5))
+        .unwrap();
+    // The two clients tick, thus the circuits of each one take a spare.
+    let tick = |network: &mut Network| {
+        let now = network.now;
+        let events = network.clients[1].on_tick(now);
+        assert!(events.is_empty(), "{events:?}");
+        network.clients[1]
+            .replace_aging(now, &mut Rng(now + 1))
+            .unwrap();
+        let events = step_with_tick(network, 0);
+        assert!(events.is_empty(), "{events:?}");
+    };
+    for _ in 0..CIRCUIT_MAX_CELLS + 700 {
+        tick(&mut network);
+    }
+    for client in [0, 1] {
+        let events = network.take_events(client);
+        assert!(!events.contains(&ClientEvent::CircuitLost), "{events:?}");
+    }
+    let now = network.now;
+    network.clients[1]
+        .send(&alice_at_bob, &text(4, "still here"), now, &mut Rng(6))
+        .unwrap();
+    for _ in 0..12 {
+        tick(&mut network);
+    }
+    assert_eq!(bodies(&network.take_events(0)), [b"still here".to_vec()]);
+}

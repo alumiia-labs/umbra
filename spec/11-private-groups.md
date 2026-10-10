@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 11: Private Groups (2–500)
 
 **Status:** Draft
-**Version:** 0.13.0
-**Date:** 2026-10-09
+**Version:** 0.14.0
+**Date:** 2026-10-10
 
 ---
 
@@ -431,8 +431,7 @@ open the records before the join.
 > queue, and that set is the membership. A joiner is a member from its add
 > record, thus the two values tell it nothing that the roster does not. The
 > admin that admits it holds them already. The alternative, a `K_e` to the
-> joiner, would give it each slot key from `t_e` and break §11.3.2 and the
-> history window of `GRP-233`.
+> joiner, would give it each slot key from `t_e` and break §11.3.2.
 
 > *Cause.* Part 3 rules `NET-009` to `NET-014` make each queue key come from
 > the device CSPRNG and from no shared secret, so that a seized relay cannot
@@ -478,22 +477,18 @@ exposure, and a removal or a `RekeyRecord` ends it at once. This is the
 forward secrecy of a group, and Part 15 §15.3 records what a seized device
 plus the retained ciphertext of a replica gives.
 
-**The history window.** `HISTORY_WINDOW` is 0 by default and 7 days at most.
-**[GRP-049]** An admin MAY turn on a limited history window by an explicit
-action. **[GRP-233]** An admin that turned on `HISTORY_WINDOW` = W MUST hand
-the joiner `K_{e,t_join − W}` in the admit stage of §11.9.1 in the place of
-`K_{e,t_join}`. **[GRP-234]** If that window crosses an epoch boundary, the
-admin MUST hand the slot key at the start of the current epoch and no key of
-an earlier epoch. The older slot key opens the group layer of a retained
-record of that window and no more. A record that a member sealed before the add
-carries no tag for the joiner in its tag vector of §11.3.3. `GRP-228` refuses a
-record whose slot is below the slot window. Thus a joiner accepts no record
-from before its add in v1, and the history window gives it none. The
-rules keep their numbers for a later version that gives a joiner a way to
-authenticate such a record. **[GRP-423]** An admin that joined inside the
-current epoch, and thus holds no `K_e` under `GRP-384`, MUST derive the key of
-the admit from its own slot chain, and it MUST hand no slot key before the
-oldest slot that the chain holds; the window then ends at that slot.
+**A joiner and the records before its add.** A joiner reads no record from
+before its add. The admit stage of §11.9.1 hands the joiner `K_{e,t_join}`,
+the slot key of the join slot, and no key of an earlier slot. The slot chain
+is one-way, thus that key opens no earlier slot. A record that a member
+sealed before the add carries no tag for the joiner in its tag vector of
+§11.3.3. `GRP-228` refuses a record whose slot is below the slot window.
+**[GRP-423]** An admin that joined inside the current epoch, and thus holds no
+`K_e` under `GRP-384`, MUST derive the key of the admit from its own slot
+chain, and it MUST hand no slot key before the oldest slot that the chain
+holds.
+
+The rule numbers `GRP-049`, `GRP-233` and `GRP-234` are retired, and no rule uses them.
 
 > *Cause.* A design that holds three sender-key generations for each member
 > on a device for 7 days lets a seized device open every record of every
@@ -504,9 +499,7 @@ oldest slot that the chain holds; the window then ends at that slot.
 > epoch from `t_e`, at most `GROUP_EPOCH_MAX_AGE` of 30 days, as the paragraph
 > above states. The hourly step of `GRP-227` then bounds what a device holds
 > ready and not what it can derive. A shorter window makes a device that slept
-> through the night miss its morning records. The history window hands the
-> joiner an older slot key and no re-encryption, and the paragraph above states
-> its limit.
+> through the night miss its morning records.
 
 ### 11.3.3 The pair key and the tag vector
 
@@ -1355,12 +1348,10 @@ show a `delivered` or a `read` state for a group record; the states of Part 14
 
 ## 11.8 Offline members and history
 
-- **A new joiner receives no history by default.** The slot chain of §11.3.1
-  is one-way, thus a joiner that receives `K_{e,t_join}` opens no record
-  before its join slot. `GRP-049` lets an admin turn on a history window of
-  at most 7 days, and §11.3.2 gives the joiner the older slot key. §11.3.2 also
-  states that the joiner still accepts no record from before its add. No party
-  encrypts a backlog again for a joiner.
+- **A new joiner receives no history.** The slot chain of §11.3.1 is one-way,
+  thus a joiner that receives `K_{e,t_join}` opens no record before its join
+  slot. §11.3.2 gives the two other causes. No party encrypts a backlog again
+  for a joiner.
 - **A member that returns after an absence** reads from its cursor on a
   replica. It derives each slot key forward from its stored state, and it
   reads every retained record of its epochs. A member that was away longer
@@ -1499,7 +1490,7 @@ other member is needed or created. Part 6 §6.6.3 gives the layouts of
    the joiner reads it from its start.
 4. **[GRP-312]** The admin MUST then send a `GroupInvitation` of stage `0x02`
    (an admit) on the pairwise channel. It carries `group_id`, the `index`, the
-   epoch `e`, its `t_e`, `t_join`, `K_{e,t_join}` (or the history-window key of §11.3.2),
+   epoch `e`, its `t_e`, `t_join`, `K_{e,t_join}`,
    `read_sk_e` and `write_sk_e` (`GRP-384`), the `roster_epoch` of the add,
    and for each replica the `relay_id`, the
    `GroupQueueId`, and the `seq` of the add at that replica, and a
@@ -2093,7 +2084,6 @@ admission.
 | `GROUP_ALL_NOTIFY_MAX` | 50 members. Part 7 §7.5.9 defaults a group above it to `mentions`, and Part 8 §8.5 rule `NTF-018` uses it |
 | `GROUP_SILENT_EVICT` | 30 days (§11.9.7) |
 | `PRESENCE_INTERVAL` | 7 days (§11.9.7) |
-| `HISTORY_WINDOW` | 0 (off) by default, maximum 7 days (§11.3.2) |
 | `ROSTER_RATE_LIMIT` | 1 epoch for each member in each 60 s; a receiver counts 60 in one slot (§11.9.4) |
 | `GROUP_EPOCH_RATE` | 6 epochs for each group in each 60 s; a receiver counts 360 in one slot (§11.9.4) |
 | `GRANT_RATE` | 1 for each group in each 300 s, and 4 for each group in each 24 h; a receiver counts 4 in 24 slots (§11.9.4) |

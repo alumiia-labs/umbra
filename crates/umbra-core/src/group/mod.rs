@@ -49,8 +49,6 @@ pub const GROUP_ALL_NOTIFY_MAX: usize = 50;
 pub const GROUP_SILENT_EVICT: u64 = umbra_queue::params::GROUP_RETENTION;
 /// `PRESENCE_INTERVAL`, in seconds.
 pub const PRESENCE_INTERVAL: u64 = 7 * 86_400;
-/// The most `HISTORY_WINDOW` an admin may turn on, in seconds.
-pub const HISTORY_WINDOW_MAX: u64 = 7 * 86_400;
 /// `ROSTER_RATE_LIMIT`: one epoch for each member in this many seconds.
 pub const ROSTER_RATE_LIMIT: u64 = 60;
 /// `GROUP_EPOCH_RATE`: this many epochs for each group in 60 seconds.

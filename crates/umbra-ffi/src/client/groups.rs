@@ -2648,7 +2648,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             _ => group.roster().epoch_index(),
         };
         let body = group
-            .admit_at(index, roster_epoch, 0, descriptor, seqs, now_ms / 1_000)
+            .admit_at(index, roster_epoch, descriptor, seqs, now_ms / 1_000)
             .map_err(|_| Error::Malformed)?;
         self.send_pairwise_control(joiner.from, &body, now_ms, rng)?;
         // GRP-420: the row stays while the add is the head, thus an epoch

@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 10: Relay Directory, Measurement, and Selection
 
 **Status:** Draft
-**Version:** 0.13.0
-**Date:** 2026-10-09
+**Version:** 0.14.0
+**Date:** 2026-10-10
 
 ---
 
@@ -1383,9 +1383,10 @@ the root adds 17 KB to 24 KB.
   client MUST take a manifest whose computed root differs from the signed
   `root` as a partial manifest. A client MUST NOT take its relay set from a
   partial manifest. A client MUST NOT end or fill a pin under `REL-153` and
-  `REL-154` from a partial manifest. A partial manifest serves the first
-  circuits of a client that holds no relay set, and the reference client
-  rejects it.
+  `REL-154` from a partial manifest. A partial manifest is for the first
+  circuits of a client that holds no relay set, and no rule makes a client
+  use one. The HTTPS form of Part 3 §3.10 gives the whole relay set, thus a
+  v1 client rejects a partial manifest from that carrier.
 - **[REL-148]** A client MUST reject an entry whose `valid_after` is above
   the `epoch` of the root. That entry alone goes, and it still counts as a
   leaf in the root that `REL-147` computes; the manifest stays.

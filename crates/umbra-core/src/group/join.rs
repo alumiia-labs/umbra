@@ -1,5 +1,5 @@
-//! The join flow of Part 11 §11.9.1 at both ends, the history window of
-//! §11.3.2, the re-key of §11.12, and the key request rate of §11.4.3.
+//! The join flow of Part 11 §11.9.1 at both ends, the re-key of §11.12, and
+//! the key request rate of §11.4.3.
 
 use alloc::vec::Vec;
 
@@ -18,7 +18,7 @@ use umbra_wire::group::control::{
     RosterSnapshot, ADMIT_FIXED,
 };
 
-use super::{epoch::EpochState, roster::Roster, GROUP_SLOT, HISTORY_WINDOW_MAX, KEY_REQUEST_RATE};
+use super::{epoch::EpochState, roster::Roster, KEY_REQUEST_RATE};
 use crate::Error;
 
 /// The seed and the keys a member makes at a join (`GRP-052`).
@@ -101,21 +101,14 @@ pub fn add_epoch(roster: &Roster, join: &JoinRecord<'_>) -> Result<Vec<u8>, Erro
     )
 }
 
-/// The slot whose key the admit hands: `t_join`, or `t_join − W` under a
-/// history window, and never before the start of the epoch (`GRP-233`,
-/// `GRP-234`).
-pub const fn admit_slot(t_join: u32, start_slot: u32, history_window_seconds: u64) -> u32 {
-    let window = if history_window_seconds > HISTORY_WINDOW_MAX {
-        HISTORY_WINDOW_MAX
-    } else {
-        history_window_seconds
-    };
-    let back = (window / GROUP_SLOT) as u32;
-    let wanted = t_join.saturating_sub(back);
-    if wanted < start_slot {
+/// The slot whose key the admit hands: the join slot `t_join`, and never
+/// a slot before the start of the epoch (`GRP-312`). A joiner reads no
+/// record from before its add.
+pub const fn admit_slot(t_join: u32, start_slot: u32) -> u32 {
+    if t_join < start_slot {
         start_slot
     } else {
-        wanted
+        t_join
     }
 }
 
@@ -347,10 +340,9 @@ mod tests {
         // The admin's epoch chain gives the slot key.
         let secret = EpochSecret::generate(&mut rng).unwrap();
         let chain = secret.start(&group, 3, 100);
-        let slot = admit_slot(120, 100, 0);
+        let slot = admit_slot(120, 100);
         assert_eq!(slot, 120);
-        assert_eq!(admit_slot(120, 100, 5 * GROUP_SLOT), 115);
-        assert_eq!(admit_slot(120, 100, 40 * GROUP_SLOT), 100);
+        assert_eq!(admit_slot(90, 100), 100);
         let replicas = [
             ReplicaRef {
                 relay_id: [1; 32],

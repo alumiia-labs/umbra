@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 6: Wire Format and Encoding
 
 **Status:** Draft
-**Version:** 0.13.0
-**Date:** 2026-10-09
+**Version:** 0.14.0
+**Date:** 2026-10-10
 
 ---
 
@@ -1923,7 +1923,7 @@ InvitationAdmit {                 // 253 bytes and the descriptor
     epoch             u32         // the group epoch e at the admit
     t_e               u32         // the start slot of epoch e, from its epoch-key record
     t_join            u32         // the slot index at which the key of the joiner starts
-    slot_key          [32]u8      // K_{e,t_join}, or the history-window key of Part 11 §11.3.1
+    slot_key          [32]u8      // K_{e,t_join} of Part 11 §11.3.1
     read_sk           [32]u8      // read_sk_e of Part 11 §11.3.1
     write_sk          [32]u8      // write_sk_e of Part 11 §11.3.1
     roster_epoch      u32         // the roster epoch of the snapshot

@@ -176,11 +176,12 @@ pub enum Command {
     /// provision.
     AcceptDevice(Vec<u8>),
     /// The link of a device ended with no sync channel (Part 7 `DEV-290`):
-    /// each invitation that [`Command::InviteDevice`] asked for in this
-    /// run ends. Its prekey and its handshake state go, and its queue
-    /// takes a `DEL`. An invitation whose queue no relay made yet ends
-    /// when the relay made it, and no update names it.
-    EndDeviceInvitation,
+    /// each invitation on the list of the store ends, and each one that
+    /// [`Command::InviteDevice`] asked for in this run. Its prekey and its
+    /// handshake state go, and its queue takes a `DEL`. An invitation
+    /// whose queue no relay made yet ends when the relay made it, and no
+    /// update names it.
+    EndDeviceInvitation(Vec<[u8; 32]>),
     /// Send one application record. An [`Update::Sent`] with the same tag
     /// follows the acknowledgment of the relay.
     Send {
@@ -192,6 +193,8 @@ pub enum Command {
         app: Zeroizing<Vec<u8>>,
         /// A value of the caller, which comes back in the update.
         tag: u64,
+        /// The sends of the record before this command.
+        prior: Prior,
     },
     /// The app entered or left the screen. A client in the background
     /// makes no cover cell (Part 3 §3.6.2, tier C). A run that enters the
@@ -274,6 +277,20 @@ pub enum Command {
     },
 }
 
+/// The sends of one record before a [`Command::Send`], as the store counts
+/// them (Part 3 `NET-219`, `NET-220`). The default is a record that never
+/// left.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Prior {
+    /// The count of the sends, for each reason.
+    pub sends: u32,
+    /// The time of the first send, in seconds, or 0 with no send.
+    pub first: u64,
+    /// Whether the send waits for a slot of the cover clock (`NET-071`):
+    /// the wait of the record after a `LIMIT` ended inside the run.
+    pub in_slot: bool,
+}
+
 /// The store of the client, as the runtime sees it.
 pub trait Persist: Send {
     /// Commits the changes of the node state and the records that one call
@@ -321,6 +338,14 @@ pub trait Persist: Send {
     /// commit, as a batch that the store did not take does.
     fn commit_hello(&mut self, _queue: &[u8; 32], _envelope: &[u8]) -> Option<bool> {
         None
+    }
+
+    /// Takes the queue of a sync invitation of a device that a relay made
+    /// (`DEV-290`), before the batch that stores the invitation. Thus a
+    /// later run retires an invitation whose link ended with this run.
+    /// False ends the run with no commit.
+    fn device_invitation(&mut self, _queue: &[u8; 32]) -> bool {
+        true
     }
 }
 
@@ -527,8 +552,9 @@ pub enum Ended {
     /// The store did not take a batch, such as the store of a locked
     /// client.
     StoreFault = 5,
-    /// A circuit came near `CIRCUIT_MAX_AGE` (`NET-320`). The next run
-    /// starts at once, and the view shows no fault.
+    /// A circuit reached a margin of `NET-320` or `NET-321` with no spare
+    /// in its place: a push-wake session builds none, and a spare build
+    /// can fail. The next run starts at once, and the view shows no fault.
     Aged = 6,
     /// A push-wake session reached `WAKE_SESSION_MAX` (`NET-100`). No fault.
     WakeDone = 7,
@@ -592,6 +618,11 @@ fn settle(
         })
         .collect();
     let made = invitation_queues(&changes, &asked);
+    for (_, queue) in &made {
+        if !persist.device_invitation(queue) {
+            return Err(Ended::StoreFault);
+        }
+    }
     let mut received: Vec<(ContactId, Vec<u8>)> = events
         .iter()
         .filter_map(|event| match event {
@@ -630,14 +661,16 @@ struct Settled {
 
 /// The ARQ of the records of the user inside one run (Part 3 §3.7). A
 /// relay that answers a `SEND` with `BUSY` or `ADMISSION` refuses the
-/// moment and not the record, thus the record goes again (`NET-218`). It
-/// goes in a slot of the cover clock and at no timeout (`NET-071`). It goes
-/// `SEND_MAX_ATTEMPTS` times at most (`NET-219`), and for `SEND_GIVE_UP` at
-/// most (`NET-220`). A record whose ARQ stops fails (`NET-221`). The run
-/// holds the plaintext of each record that waits for its relay
-/// acknowledgment, and each copy overwrites itself at its drop (`IMP-126`).
-/// The store holds the record too, thus the next run sends one that this
-/// run lost.
+/// moment and not the record, thus the record goes again (`NET-218`). A
+/// record whose send took no answer in [`answer_wait`] goes again too. Each
+/// one goes in a slot of the cover clock and at no timeout (`NET-071`). A
+/// record goes `SEND_MAX_ATTEMPTS` times at most (`NET-219`), and for
+/// `SEND_GIVE_UP` from its first send at most (`NET-220`). The two bounds
+/// start from the count of the store, thus they hold across the runs. A
+/// record whose ARQ stops fails (`NET-221`). The run holds the plaintext
+/// of each record that waits for its relay acknowledgment, and each copy
+/// overwrites itself at its drop (`IMP-126`). The store holds the record
+/// too, thus the next run sends one that this run lost.
 #[derive(Default)]
 struct Resends {
     held: BTreeMap<u64, HeldSend>,
@@ -649,14 +682,70 @@ struct HeldSend {
     contact: ContactId,
     app: Zeroizing<Vec<u8>>,
     arq: umbra_queue::client::arq::Arq,
+    /// The time from which the record goes again with no answer, or none
+    /// while no send of it waits for one.
+    again_at: Option<u64>,
+}
+
+/// The first wait for the answer of a relay to a `SEND`, in seconds. The
+/// wait is the one of a group post (Part 11 `GRP-198`).
+const ANSWER_WAIT: u64 = 30;
+
+/// The longest wait for the answer of a relay to a `SEND`, in seconds.
+const ANSWER_WAIT_MAX: u64 = 12 * 3_600;
+
+/// The time that a record waits for the answer of a relay after its send
+/// of the number `sends`: [`ANSWER_WAIT`], and twice the time before at
+/// each later send, up to [`ANSWER_WAIT_MAX`]. No timer fires at its end
+/// (`NET-071`): the slot of the cover clock after it carries the record.
+fn answer_wait(sends: u32) -> u64 {
+    ANSWER_WAIT
+        .saturating_mul(1u64 << sends.saturating_sub(1).min(16))
+        .min(ANSWER_WAIT_MAX)
 }
 
 impl Resends {
-    /// The first send of the record of `tag` left at `now`.
-    fn sent(&mut self, tag: u64, contact: ContactId, app: Zeroizing<Vec<u8>>, now: u64) {
-        let mut arq = umbra_queue::client::arq::Arq::new();
-        arq.sent(now);
-        self.held.insert(tag, HeldSend { contact, app, arq });
+    /// Holds the record of `tag` for its ARQ, with the sends that the
+    /// store counts. The result says whether a send may happen at `now`.
+    /// False is the end of its ARQ, and the run holds nothing for it.
+    fn hold(
+        &mut self,
+        tag: u64,
+        contact: ContactId,
+        app: Zeroizing<Vec<u8>>,
+        prior: Prior,
+        now: u64,
+    ) -> bool {
+        let first = (prior.sends > 0 && prior.first != 0).then_some(prior.first);
+        let mut arq = umbra_queue::client::arq::Arq::resumed(prior.sends, first);
+        if !arq.may_send(now) {
+            return false;
+        }
+        let held = HeldSend {
+            contact,
+            app,
+            arq,
+            again_at: None,
+        };
+        self.held.insert(tag, held);
+        true
+    }
+
+    /// A send of the record of `tag` left at `now`: the node sealed it
+    /// and put it on a circuit. The send counts, and the wait for its
+    /// answer starts.
+    fn left(&mut self, tag: u64, now: u64) {
+        if let Some(held) = self.held.get_mut(&tag) {
+            held.arq.sent(now);
+            held.again_at = Some(now.saturating_add(answer_wait(held.arq.attempts())));
+        }
+    }
+
+    /// The record of `tag` waits for a slot.
+    fn wait(&mut self, tag: u64) {
+        if self.held.contains_key(&tag) && !self.due.contains(&tag) {
+            self.due.push_back(tag);
+        }
     }
 
     /// The ARQ of `tag` ended: a relay took the record, or the record
@@ -674,14 +763,30 @@ impl Resends {
             return false;
         };
         held.arq.rejected(reason);
+        held.again_at = None;
         if held.arq.may_send(now) {
-            if !self.due.contains(&tag) {
-                self.due.push_back(tag);
-            }
+            self.wait(tag);
             return true;
         }
         self.ended(tag);
         false
+    }
+
+    /// Each record whose send took no answer of a relay until `now`, neither
+    /// a `QUOTA` nor a `NACK`, waits for a slot, the oldest send first.
+    fn unanswered(&mut self, now: u64) {
+        let mut late: Vec<(u64, u64)> = self
+            .held
+            .iter()
+            .filter_map(|(tag, held)| Some((held.again_at.filter(|at| now >= *at)?, *tag)))
+            .collect();
+        late.sort_unstable();
+        for (_, tag) in late {
+            if let Some(held) = self.held.get_mut(&tag) {
+                held.again_at = None;
+            }
+            self.wait(tag);
+        }
     }
 
     /// The record that takes the next slot at `now`: its tag, and whether
@@ -702,12 +807,11 @@ impl Resends {
         None
     }
 
-    /// The record of `tag` takes this slot: its contact and its bytes, and
-    /// the send counts at `now`.
-    fn take(&mut self, tag: u64, now: u64) -> Option<(ContactId, Zeroizing<Vec<u8>>)> {
+    /// The record of `tag` takes this slot: its contact and its bytes.
+    /// The send counts when it leaves ([`Resends::left`]).
+    fn take(&mut self, tag: u64) -> Option<(ContactId, Zeroizing<Vec<u8>>)> {
         self.due.retain(|held| *held != tag);
-        let held = self.held.get_mut(&tag)?;
-        held.arq.sent(now);
+        let held = self.held.get(&tag)?;
         Some((held.contact, held.app.clone()))
     }
 }
@@ -987,10 +1091,9 @@ pub async fn run_client(
     // acknowledgment, for the ARQ of this run.
     let mut resends = Resends::default();
     let mut device_invites: BTreeSet<u64> = BTreeSet::new();
-    // DEV-290: the queue of each device invitation of this run that waits
-    // for its flight 1. The second set holds the handle of each one whose
-    // link ended before a relay made its queue.
-    let mut device_halves: Vec<[u8; 32]> = Vec::new();
+    // DEV-290: the handle of each device invitation whose link ended
+    // before a relay made its queue. The store holds the queue of each
+    // other one.
     let mut ended_invites: BTreeSet<u64> = BTreeSet::new();
     let mut is_foreground = true;
     let mut next_slot = tokio::time::Instant::now() + cover_delay(&mut rng);
@@ -1024,6 +1127,9 @@ pub async fn run_client(
         // holes of the records of the contacts.
         for (handle, index) in node.take_send_indices() {
             if let Some(tag) = tags.get(&handle) {
+                // NET-219: a seal is one send of the record, and the wait
+                // for its answer starts.
+                resends.left(*tag, unix_now());
                 let _ = updates.send(Update::SendIndex { tag: *tag, index });
             }
         }
@@ -1111,6 +1217,7 @@ pub async fn run_client(
                     is_foreground = now_foreground;
                     if now_foreground {
                         wake_end = None;
+                        node.set_wake(false);
                     }
                     Vec::new()
                 }
@@ -1123,6 +1230,8 @@ pub async fn run_client(
                         tokio::time::Instant::now()
                             + Duration::from_secs(umbra_core::notify::WAKE_SESSION_MAX),
                     );
+                    // NET-099: a push-wake session builds no spare circuit.
+                    node.set_wake(true);
                     Vec::new()
                 }
                 Some(command) => {
@@ -1149,31 +1258,32 @@ pub async fn run_client(
             () = tokio::time::sleep_until(next_slot), if pausing.is_none() => {
                 next_slot = tokio::time::Instant::now() + cover_delay(&mut rng);
                 let now = unix_now();
-                // NET-071, NET-065: a record of the user that a relay
-                // refused with `BUSY` or `ADMISSION` goes again in a slot.
-                // Its first retransmission comes before each other item. A
-                // later one comes after an acknowledgment. The node takes
-                // the slot first for what it holds, with no cover cell, and
-                // the record goes when the node left the slot free.
+                // NET-071, NET-065: a record of the user goes again in a
+                // slot: one that a relay refused with `BUSY` or
+                // `ADMISSION`, one whose send took no answer, and one whose
+                // wait after a `LIMIT` ended. Its first retransmission comes
+                // before each other item. A later one comes after an
+                // acknowledgment alone, thus before a receipt, a link-fault
+                // report, and a digest.
+                resends.unanswered(now);
                 let mut stopped = Vec::new();
                 let resend = resends.next(now, &mut stopped);
                 for tag in stopped {
+                    tags.retain(|_, held| *held != tag);
                     let _ = updates.send(Update::Failed(tag));
                 }
                 if let Some((tag, is_first)) = resend {
-                    let is_free = is_first
-                        || matches!(
-                            node.on_cover_slot(false, None, None, now, &mut rng),
-                            Ok(CoverSlot::Nothing)
-                        );
+                    let is_free =
+                        is_first || matches!(node.on_ack_slot(now, &mut rng), Ok(false));
                     if is_free {
-                        if let Some((contact, app)) = resends.take(tag, now) {
+                        if let Some((contact, app)) = resends.take(tag) {
                             match node.send(&contact, &app, now, &mut rng) {
                                 Ok(handle) => {
                                     tags.insert(handle, tag);
                                 }
                                 Err(_) => {
                                     resends.ended(tag);
+                                    tags.retain(|_, held| *held != tag);
                                     let _ = updates.send(Update::Unsent(tag));
                                 }
                             }
@@ -1230,6 +1340,9 @@ pub async fn run_client(
                 // NET-347: a record that waits takes a new build after one
                 // that ran out of time.
                 let _ = node.rebuild_lost(now, &mut rng);
+                // NET-320, NET-321: a circuit near a margin takes a spare,
+                // and the run goes on.
+                let _ = node.replace_aging(now, &mut rng);
                 // A `SUB` that a relay refused with `LIMIT` or `BUSY` goes
                 // again at the end of its wait.
                 let _ = node.subscribe_due(now, &mut rng);
@@ -1301,7 +1414,6 @@ pub async fn run_client(
                         continue;
                     }
                     if device_invites.remove(&handle) {
-                        device_halves.extend(queue);
                         Update::DeviceInvitation(bundle)
                     } else {
                         Update::Invitation(bundle)
@@ -1331,6 +1443,9 @@ pub async fn run_client(
                 ClientEvent::Accepted { handle } => match tags.remove(&handle) {
                     Some(tag) => {
                         resends.ended(tag);
+                        // An answer to an earlier send of this record
+                        // names no record of the run any more.
+                        tags.retain(|_, held| *held != tag);
                         Update::Sent(tag)
                     }
                     None => continue,
@@ -1351,6 +1466,7 @@ pub async fn run_client(
                     // queue, and it gives it to a later send (`IMP-082`).
                     Some(tag) => {
                         resends.ended(tag);
+                        tags.retain(|_, held| *held != tag);
                         Update::Held(tag)
                     }
                     None => continue,
@@ -1364,12 +1480,16 @@ pub async fn run_client(
                     Some(tag) if resends.refused(tag, reason, unix_now()) => continue,
                     // NET-219 to NET-221: the ARQ stopped, and the record
                     // fails.
-                    Some(tag) => Update::Failed(tag),
+                    Some(tag) => {
+                        tags.retain(|_, held| *held != tag);
+                        Update::Failed(tag)
+                    }
                     None => continue,
                 },
                 ClientEvent::Rejected { handle, .. } => match tags.remove(&handle) {
                     Some(tag) => {
                         resends.ended(tag);
+                        tags.retain(|_, held| *held != tag);
                         Update::Failed(tag)
                     }
                     // A relay refused the `NEW` of a rendezvous queue.
@@ -1500,9 +1620,9 @@ pub async fn run_client(
                 // DEV-290: a link that ended retires its sync invitation.
                 // A queue whose handshake finished holds no half, and the
                 // call changes nothing for it.
-                Command::EndDeviceInvitation => {
+                Command::EndDeviceInvitation(queues) => {
                     ended_invites.append(&mut device_invites);
-                    for queue in device_halves.drain(..) {
+                    for queue in queues {
                         let _ = node.end_invitation(&queue, &mut rng);
                     }
                 }
@@ -1531,14 +1651,28 @@ pub async fn run_client(
                     };
                     let _ = updates.send(update);
                 }
-                Command::Send { contact, app, tag } => {
-                    match node.send(&contact, &app, now, &mut rng) {
-                        Ok(handle) => {
-                            tags.insert(handle, tag);
-                            resends.sent(tag, contact, app, now);
-                        }
-                        Err(_) => {
-                            let _ = updates.send(Update::Unsent(tag));
+                Command::Send {
+                    contact,
+                    app,
+                    tag,
+                    prior,
+                } => {
+                    if !resends.hold(tag, contact, app.clone(), prior, now) {
+                        // NET-219 to NET-221: the ARQ of the record stopped
+                        // in an earlier run, and the record fails.
+                        let _ = updates.send(Update::Failed(tag));
+                    } else if prior.in_slot {
+                        // NET-071: the retry after a `LIMIT` takes a slot.
+                        resends.wait(tag);
+                    } else {
+                        match node.send(&contact, &app, now, &mut rng) {
+                            Ok(handle) => {
+                                tags.insert(handle, tag);
+                            }
+                            Err(_) => {
+                                resends.ended(tag);
+                                let _ = updates.send(Update::Unsent(tag));
+                            }
                         }
                     }
                 }
@@ -1665,22 +1799,26 @@ mod tests {
         };
         let contact = ContactId([3; 32]);
         let app = || Zeroizing::new(vec![1, 2, 3]);
+        let new = Prior::default();
         let mut resends = Resends::default();
         let mut stopped = Vec::new();
-        resends.sent(7, contact, app(), 100);
+        assert!(resends.hold(7, contact, app(), new, 100));
+        resends.left(7, 100);
         assert_eq!(resends.next(100, &mut stopped), None);
         // NET-218: a `BUSY` and an `ADMISSION` continue the ARQ, and the
         // record waits for a slot. NET-065: the flag names the first
         // retransmission alone.
         assert!(resends.refused(7, Reject::Busy, 101));
         assert_eq!(resends.next(101, &mut stopped), Some((7, true)));
-        assert_eq!(resends.take(7, 102).map(|(to, _)| to), Some(contact));
+        assert_eq!(resends.take(7).map(|(to, _)| to), Some(contact));
+        resends.left(7, 102);
         assert_eq!(resends.next(102, &mut stopped), None);
         assert!(resends.refused(7, Reject::Admission, 103));
         assert_eq!(resends.next(103, &mut stopped), Some((7, false)));
         // NET-219: the send of `SEND_MAX_ATTEMPTS` is the last one.
         for _ in 2..SEND_MAX_ATTEMPTS {
-            assert!(resends.take(7, 104).is_some());
+            assert!(resends.take(7).is_some());
+            resends.left(7, 104);
             let goes = resends.refused(7, Reject::Busy, 104);
             assert_eq!(goes, resends.held.contains_key(&7));
         }
@@ -1689,15 +1827,136 @@ mod tests {
 
         // NET-220: a record that waits for a slot past `SEND_GIVE_UP` of
         // its first send stops, and the caller fails it.
-        resends.sent(8, contact, app(), 1_000);
+        assert!(resends.hold(8, contact, app(), new, 1_000));
+        resends.left(8, 1_000);
         assert!(resends.refused(8, Reject::Busy, 1_001));
         assert_eq!(resends.next(1_000 + SEND_GIVE_UP, &mut stopped), None);
         assert_eq!(stopped, [8]);
         // A relay that took the record ends its ARQ, and a refusal of a
         // record that this run does not hold continues none.
-        resends.sent(9, contact, app(), 2_000);
+        assert!(resends.hold(9, contact, app(), new, 2_000));
+        resends.left(9, 2_000);
         resends.ended(9);
         assert!(!resends.refused(9, Reject::Busy, 2_001));
+    }
+
+    #[test]
+    fn the_bounds_of_a_record_count_from_the_sends_of_the_earlier_runs() {
+        use umbra_queue::{
+            params::{SEND_GIVE_UP, SEND_MAX_ATTEMPTS},
+            Reject,
+        };
+        let contact = ContactId([3; 32]);
+        let app = || Zeroizing::new(vec![1, 2, 3]);
+        let mut resends = Resends::default();
+        // NET-219: the store counts 14 sends of the record, for each
+        // reason. This run has two sends left, and not sixteen.
+        let prior = Prior {
+            sends: SEND_MAX_ATTEMPTS - 2,
+            first: 1_000,
+            in_slot: false,
+        };
+        assert!(resends.hold(5, contact, app(), prior, 2_000));
+        resends.left(5, 2_000);
+        assert!(resends.refused(5, Reject::Busy, 2_001));
+        assert!(resends.take(5).is_some());
+        resends.left(5, 2_002);
+        assert!(!resends.refused(5, Reject::Admission, 2_003));
+        assert!(!resends.held.contains_key(&5));
+        // A record at the count of an earlier run takes no send at all.
+        let spent = Prior {
+            sends: SEND_MAX_ATTEMPTS,
+            first: 1_000,
+            in_slot: false,
+        };
+        assert!(!resends.hold(6, contact, app(), spent, 2_000));
+        // NET-220: `SEND_GIVE_UP` runs from the first send of the record,
+        // which an earlier run made.
+        let old = Prior {
+            sends: 1,
+            first: 1_000,
+            in_slot: false,
+        };
+        assert!(resends.hold(7, contact, app(), old, 1_000 + SEND_GIVE_UP - 1));
+        assert!(!resends.hold(8, contact, app(), old, 1_000 + SEND_GIVE_UP));
+    }
+
+    #[test]
+    fn a_record_with_no_answer_goes_again_in_a_slot_after_its_wait() {
+        let contact = ContactId([3; 32]);
+        let app = || Zeroizing::new(vec![1, 2, 3]);
+        let mut resends = Resends::default();
+        let mut stopped = Vec::new();
+        assert!(resends.hold(1, contact, app(), Prior::default(), 100));
+        // A record that the node holds for a circuit left no send, and it
+        // waits for no answer.
+        resends.unanswered(100 + ANSWER_WAIT_MAX);
+        assert_eq!(resends.next(100 + ANSWER_WAIT_MAX, &mut stopped), None);
+        // NET-071: the wait ends with no send. The slot after it carries
+        // the record, as its first retransmission (`NET-065`).
+        resends.left(1, 100);
+        resends.unanswered(100 + ANSWER_WAIT - 1);
+        assert_eq!(resends.next(100 + ANSWER_WAIT - 1, &mut stopped), None);
+        resends.unanswered(100 + ANSWER_WAIT);
+        assert_eq!(
+            resends.next(100 + ANSWER_WAIT, &mut stopped),
+            Some((1, true))
+        );
+        assert!(resends.take(1).is_some());
+        resends.left(1, 200);
+        // The second wait is twice the first one, and the send after it is
+        // a later retransmission.
+        resends.unanswered(200 + 2 * ANSWER_WAIT - 1);
+        assert_eq!(resends.next(200 + 2 * ANSWER_WAIT - 1, &mut stopped), None);
+        resends.unanswered(200 + 2 * ANSWER_WAIT);
+        assert_eq!(
+            resends.next(200 + 2 * ANSWER_WAIT, &mut stopped),
+            Some((1, false))
+        );
+        // The oldest send goes first.
+        assert!(resends.hold(2, contact, app(), Prior::default(), 300));
+        assert!(resends.hold(3, contact, app(), Prior::default(), 300));
+        resends.left(3, 300);
+        resends.left(2, 301);
+        resends.ended(1);
+        resends.unanswered(1_000);
+        assert_eq!(resends.next(1_000, &mut stopped), Some((3, true)));
+        assert!(resends.take(3).is_some());
+        assert_eq!(resends.next(1_000, &mut stopped), Some((2, true)));
+        // A relay that answered ends the wait.
+        resends.ended(2);
+        resends.unanswered(u64::MAX);
+        assert_eq!(resends.next(1_000, &mut stopped), None);
+        assert!(stopped.is_empty());
+        assert_eq!(answer_wait(1), 30);
+        assert_eq!(answer_wait(2), 60);
+        assert_eq!(
+            answer_wait(umbra_queue::params::SEND_MAX_ATTEMPTS),
+            ANSWER_WAIT_MAX
+        );
+    }
+
+    #[test]
+    fn the_retry_after_a_limit_waits_for_a_slot_and_goes_as_a_later_retransmission() {
+        let contact = ContactId([3; 32]);
+        let mut resends = Resends::default();
+        let mut stopped = Vec::new();
+        // NET-071: the wait after a `LIMIT` ended inside the run. The
+        // record leaves at no minute check: it waits for a slot.
+        let held = Prior {
+            sends: 1,
+            first: 1_000,
+            in_slot: true,
+        };
+        assert!(resends.hold(4, contact, Zeroizing::new(vec![9]), held, 2_000));
+        resends.wait(4);
+        // NET-065: one send left before, thus this one is the first
+        // retransmission. After a second send it is a later one.
+        assert_eq!(resends.next(2_000, &mut stopped), Some((4, true)));
+        assert!(resends.take(4).is_some());
+        resends.left(4, 2_001);
+        assert!(resends.refused(4, umbra_queue::Reject::Busy, 2_002));
+        assert_eq!(resends.next(2_002, &mut stopped), Some((4, false)));
     }
 
     /// A store that counts what it takes, in the order of the calls.

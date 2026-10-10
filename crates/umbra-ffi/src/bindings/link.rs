@@ -187,6 +187,28 @@ enum Next {
     Read(LinkStep, Slot),
 }
 
+/// The sync invitations that the store lists and that no link waits for
+/// (`DEV-290`): their link ended with its run, or under a lock. A link
+/// that waits for its sync channel holds its own. A locked store gives
+/// none, and the next run after the unlock reads the list.
+pub(super) fn stale_invitations<B, E>(
+    client: &crate::client::Client<B, E>,
+    link: Option<&LinkState>,
+) -> Vec<[u8; 32]>
+where
+    B: umbra_core::store::engine::Backend,
+    E: umbra_core::store::wrap::SecureElement,
+{
+    let waits = link.is_some_and(|link| {
+        matches!(link.job, LinkJob::Offer(_))
+            && matches!(link.status, LinkStatus::Sending | LinkStatus::Waiting)
+    });
+    if waits {
+        return Vec::new();
+    }
+    client.device_invitations().unwrap_or_default()
+}
+
 fn is_over(status: &LinkStatus) -> bool {
     matches!(
         status,
@@ -365,10 +387,12 @@ impl Inner {
     }
 
     /// Retires the sync invitation of a link that ended with no sync
-    /// channel (`DEV-290`). A run that ended holds none.
+    /// channel (`DEV-290`). The store lists each one, thus with no run up
+    /// the next run retires it ([`stale_invitations`]).
     fn end_link_invitation(&self) {
         if let Some(running) = &self.bridge {
-            let _ = running.end_device_invitation();
+            let listed = self.client.device_invitations().unwrap_or_default();
+            let _ = running.end_device_invitation(listed);
         }
     }
 
@@ -464,6 +488,11 @@ impl Inner {
         // confirmed since holds its own.
         if self.peer_drop_due && self.client.is_unlocked() {
             self.drop_link_peer();
+            // The sync invitation of that link retires in the run that is
+            // up, and the start of the next run retires it otherwise.
+            if !stale_invitations(&self.client, self.link.as_ref()).is_empty() {
+                self.end_link_invitation();
+            }
         }
         self.pump_link_erasures();
         // Part 7 §7.7 step 2c: a removal of a device with no run up left
@@ -1308,6 +1337,41 @@ mod tests {
         inner.pump_link(unix_now());
         assert!(!inner.peer_drop_due);
         assert_eq!(inner.held_erasures.len(), 1);
+        drop(inner);
+        drop(handle);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_sync_invitation_of_a_link_that_ended_under_a_lock_is_stale_at_the_unlock() {
+        let (handle, directory) = open("link-stale");
+        let mut inner = locked(&handle.inner);
+        inner.start(offer());
+        if let Some(link) = inner.link.as_mut() {
+            link.status = LinkStatus::Waiting;
+        }
+        inner
+            .client
+            .note_device_invitation(&[0x71; 32], &mut OsRng)
+            .unwrap();
+        // The link waits for its sync channel, thus its invitation is not
+        // stale, and the start of a run retires nothing.
+        assert!(stale_invitations(&inner.client, inner.link.as_ref()).is_empty());
+
+        // DEV-290: a lock ends the link, and its run with it. A locked
+        // store gives no list.
+        inner.client.lock();
+        inner.pump_link(unix_now());
+        assert!(inner.link.is_none());
+        assert!(stale_invitations(&inner.client, inner.link.as_ref()).is_empty());
+
+        // The store kept the list. The run after the unlock retires the
+        // invitation, and it does not wait for `INVITE_TTL`.
+        inner.client.unlock(&passphrase(), unix_now()).unwrap();
+        assert_eq!(
+            stale_invitations(&inner.client, inner.link.as_ref()),
+            [[0x71; 32]]
+        );
         drop(inner);
         drop(handle);
         let _ = std::fs::remove_dir_all(&directory);

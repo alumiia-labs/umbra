@@ -445,6 +445,9 @@ pub struct Client<B: Backend, E: SecureElement> {
     /// the first refusal, in seconds. The two are the bounds of its ARQ
     /// (`NET-219`, `NET-220`).
     limit_sends: BTreeMap<MsgRef, (u32, u64)>,
+    /// The records whose wait after a `LIMIT` ended in this run. Each one
+    /// goes in a slot of the cover clock (`NET-071`).
+    slot_sends: BTreeSet<MsgRef>,
     /// The queues whose bind is on its way, each with whether a
     /// registration of its handle overtook it (`NTF-125`).
     binding: BTreeMap<[u8; 32], bool>,
@@ -479,10 +482,29 @@ fn passphrase_bytes(code_units: &[u16]) -> Result<Zeroizing<Vec<u8>>, Error> {
     Ok(bytes)
 }
 
-/// The row of a record that waits for the send path. It holds no value:
-/// the row of the message holds the record.
+/// The row of a record that waits for the send path, before its first
+/// send. The row of the message holds the record. After a send the row
+/// also holds the count of the sends and the time of the first one
+/// ([`outbox_sends`]).
 fn outbox_row() -> Vec<u8> {
     vec![0, 0]
+}
+
+/// The row of a record that left `sends` times, the first time at `first`,
+/// in seconds.
+fn outbox_sent(sends: u32, first: u64) -> Vec<u8> {
+    [&[0, 0][..], &sends.to_be_bytes(), &first.to_be_bytes()].concat()
+}
+
+/// The count of the sends of a waiting record and the time of the first
+/// one, from its row. A row of a record that never left holds neither.
+fn outbox_sends(row: &[u8]) -> (u32, u64) {
+    let sends = row.get(2..6).and_then(|bytes| bytes.try_into().ok());
+    let first = row.get(6..14).and_then(|bytes| bytes.try_into().ok());
+    match (sends, first) {
+        (Some(sends), Some(first)) => (u32::from_be_bytes(sends), u64::from_be_bytes(first)),
+        _ => (0, 0),
+    }
 }
 
 /// What a stored record of kind `0x05` is. A placeholder names its own
@@ -768,6 +790,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             full_queues: BTreeSet::new(),
             held_sends: BTreeMap::new(),
             limit_sends: BTreeMap::new(),
+            slot_sends: BTreeSet::new(),
             binding: BTreeMap::new(),
             rotation_asked: 0,
             roster_chain_sent: BTreeMap::new(),
@@ -797,6 +820,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             full_queues: BTreeSet::new(),
             held_sends: BTreeMap::new(),
             limit_sends: BTreeMap::new(),
+            slot_sends: BTreeSet::new(),
             binding: BTreeMap::new(),
             rotation_asked: 0,
             roster_chain_sent: BTreeMap::new(),
@@ -966,6 +990,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             self.typing_sent.clear();
             self.held_sends.clear();
             self.limit_sends.clear();
+            self.slot_sends.clear();
             self.roster_chain_sent.clear();
             // A file job holds the file in the clear, and a group job an
             // owner credential, thus both leave the memory with the key.
@@ -1046,6 +1071,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             kept.push(change);
         }
         self.commit_records(&kept, &records, now_ms, rng)?;
+        // DEV-290: an invitation that left the node waits for no retirement.
+        let ended: Vec<[u8; 32]> = changes
+            .iter()
+            .filter_map(|change| match change {
+                StateChange::InvitationEnded { queue } => Some(*queue),
+                _ => None,
+            })
+            .collect();
+        if !ended.is_empty() {
+            self.forget_device_invitations(&ended, rng)?;
+        }
         // Part 3 §3.2.6: each record here opened under the ratchet of its
         // contact. Thus it is a sign of the peer, and the silence of its
         // channel ends.
@@ -3555,6 +3591,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// accepted, and the next run sends them again under their `msg_id`.
     pub fn requeue_waiting(&mut self) -> Result<(), Error> {
         self.outgoing.clear();
+        // A new run sends each record that waits when it is ready, and
+        // no slot of a run that ended holds one back.
+        self.slot_sends.clear();
         let store = &self.open_ref()?.store;
         let mut waiting_records = Vec::new();
         for (row, _) in store.list(OUTBOX, None)? {
@@ -3980,6 +4019,43 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// The next record for the send path of the runtime.
     pub fn take_outgoing(&mut self) -> Option<Outgoing> {
         self.outgoing.pop_front()
+    }
+
+    /// The count of the sends of a record that waits for its relay, and
+    /// the time of the first one in seconds (`NET-219`, `NET-220`). The
+    /// store holds the two, thus they count across each run. A record that
+    /// never left gives zero for both.
+    pub fn send_counts(&self, message: &MsgRef) -> Result<(u32, u64), Error> {
+        let store = &self.open_ref()?.store;
+        Ok(store
+            .get(OUTBOX, &message.0)?
+            .map_or((0, 0), |row| outbox_sends(&row)))
+    }
+
+    /// One send of `message` left at `now`, in seconds, for each reason:
+    /// the first send, and each one after a refusal or after no answer. A
+    /// record that waits no more counts nothing.
+    pub fn note_send<R: CryptoRng + ?Sized>(
+        &mut self,
+        message: &MsgRef,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let open = self.open_mut()?;
+        let Some(row) = open.store.get(OUTBOX, &message.0)? else {
+            return Ok(());
+        };
+        let (sends, first) = outbox_sends(&row);
+        let first = if sends == 0 { now.max(1) } else { first };
+        let mut batch = open.store.begin();
+        batch.put(
+            OUTBOX,
+            message.0,
+            None,
+            &outbox_sent(sends.saturating_add(1), first),
+            rng,
+        )?;
+        Ok(batch.commit()?)
     }
 
     /// Fails a message of this device and keeps its cause (`IMP-074`).

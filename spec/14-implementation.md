@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 14: Implementation Requirements and Assurance
 
 **Status:** Draft
-**Version:** 0.13.0
-**Date:** 2026-10-09
+**Version:** 0.14.0
+**Date:** 2026-10-10
 
 ---
 
@@ -918,10 +918,10 @@ read flight 1 already drops the copy (Part 6 `WIR-503`).
 | `0x04` | Queues | Reserved for the queues of the path selection of Part 3 §3.4.6 |
 | `0x05` | Verifications | One verification of Part 4 §4.5 |
 | `0x06` | Local identity | The root seed, the Recovery Code, the seed of each group, and the mark of `IDN-193`. The row `discovery-roots` holds each identity root from before a reset that still gives the key of a published entry. For each root it holds its seed, a count, and the name of each entry that the root serves. A name leaves the row when the log shows a later rotation of its entry or when its entry goes. A root leaves the row with its last name (`DEV-306`). Part 4 calls these rows, the pairwise salts of the rows of `0x03`, and the rotation counters of the rows of `0x28` together the local identity table |
-| `0x07` | Send queue | One record that waits for the send path (`IMP-126`) |
+| `0x07` | Send queue | One record that waits for the send path (`IMP-126`). After a send the row holds the count of the sends of the record and the time of its first send, in seconds (Part 3 rules `NET-219` and `NET-220`). A relay that takes the record erases the row, and the failure of the record erases it too |
 | `0x08` | Invitations | One invitation that waits: the `RecipientId` of its queue, the fragment of its link or its bundle, the queue end, and the prekey seed. A handshake between two flights has its row here too, with its state (`IMP-169`). A queue end that owes its `DEL` has its row here too, in the form `0x08`. Such a queue is one that a rotation, a renewal, or an ended invitation left. The client keeps it until that `DEL` left under Part 3 rule `NET-178`. The form of a queue that a rotation replaced ends with the identifier of its contact. The client reads that queue under the ratchet of that contact until the `DEL` (Part 3 rule `NET-177`). A form with no such tail names a queue that the client reads no more |
 | `0x09` | Conversations | What this device alone knows of one conversation: the time up to which the user saw its messages, and the name that the user gave the contact |
-| `0x0A` | Settings | One setting of this device under its name, such as the idle time of the auto-lock, the receipts of one conversation, the highest directory epoch (`IMP-159`), or the ingress pins (`REL-153`). Six names hold protocol state. `unanswered/<conversation>` holds the time, in milliseconds, of the first relay acknowledgment of that conversation that no record of the peer followed yet (Part 3 §3.2.6). A record of the peer erases it. `rotation-owed` holds the conversation of each contact whose queue rotation a revocation still owes (Part 7 §7.7 step 2c). `leaving-channels` holds the sync channel and the `device_id` of each revoked device that still waits for the notice of `DEV-313`. `revocation-notice/<device_id>` holds the time of that revocation, in seconds, and the epoch that revokes the device. `key-served/<conversation>` holds the start of the 24 hours and the count of the key requests of that peer that this device answered (`WIR-338`). `held/<message>` holds the wait of one record that a full queue refused (`IMP-082`). It holds the time from which `HOLD_RETRY` counts to its next send and the time of its first `LIMIT`, both in seconds. It also holds the count of its `LIMIT` answers. A relay that takes the record erases it, and the failure of the record at a bound erases it too |
+| `0x0A` | Settings | One setting of this device under its name, such as the idle time of the auto-lock, the receipts of one conversation, the highest directory epoch (`IMP-159`), or the ingress pins (`REL-153`). Seven names hold protocol state. `unanswered/<conversation>` holds the time, in milliseconds, of the first relay acknowledgment of that conversation that no record of the peer followed yet (Part 3 §3.2.6). A record of the peer erases it. `rotation-owed` holds the conversation of each contact whose queue rotation a revocation still owes (Part 7 §7.7 step 2c). `leaving-channels` holds the sync channel and the `device_id` of each revoked device that still waits for the notice of `DEV-313`. `revocation-notice/<device_id>` holds the time of that revocation, in seconds, and the epoch that revokes the device. `key-served/<conversation>` holds the start of the 24 hours and the count of the key requests of that peer that this device answered (`WIR-338`). `held/<message>` holds the wait of one record that a full queue refused (`IMP-082`). It holds the time from which `HOLD_RETRY` counts to its next send and the time of its first `LIMIT`, both in seconds. It also holds the count of its `LIMIT` answers, which gives the length of the wait. A relay that takes the record erases it, and the failure of the record at a bound erases it too. `device-invites` holds the queue of each sync invitation of this device that waits for its handshake (Part 7 rule `DEV-290`). The end of an invitation takes its queue off the list, and no backup carries the list |
 | `0x0B` | Held receipts | One receipt that waits for a slot: the conversation, the kind, the `msg_id` of its target, and the time that it reports (Part 3 §3.5.4) |
 | `0x0C` | Pending references | One deletion or one edit whose target did not arrive yet: the conversation, the `msg_ref` of the target, the time of the record, and the new text of an edit. An entry with no text is a deletion (Part 7 §7.5.6). The key of a row is the conversation, the target, and the direction of the record that waits (`DEV-093`). A row of an earlier build has a key with no direction, and it came from the contact |
 | `0x0D` | Revisions | How many times the sender of a message changed its text, under the row of that message, in one byte. After a revision that a sync channel gave, the source device and its causal counter follow. They are the high-water mark of `DEV-034` for the copies of that source. A message with no row here shows no edited mark |
@@ -1524,10 +1524,10 @@ no control.
   goes to `failed` with the full queue as its cause, and the state of this
   rule ends for it. A `QUOTA` that names room ends the state, and each held
   record goes at once. The full state of a conversation is the memory of
-  one run. The wait of a held record and the two counts of its bounds are
-  in the store (table `0x0A`). Thus a new run, an unlock, and a new process
-  send no held record before its time. Part 3 §3.7 states the v1
-  limits beside `NET-222`.
+  one run. The wait of a held record is in the store (table `0x0A`), and
+  the count of its sends is in the row of its send queue (table `0x07`).
+  Thus a new run, an unlock, and a new process send no held record before
+  its time, and the two bounds count across them.
 
 > *Cause.* Part 9 names a degraded read, Part 10 names a provisional
 > directory, Part 8 names a missing carrier, and Part 13 names a progress
